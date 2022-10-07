@@ -4,7 +4,14 @@
 from pytorch_lightning.cli import LightningCLI
 
 # simple demo classes for your convenience
-from pytorch_lightning.demos.boring_classes import BoringDataModule, DemoModel
+from pytorch_lightning.demos.boring_classes import BoringDataModule
 
-cli = LightningCLI(DemoModel, BoringDataModule)
-# note: don't call fit!!
+from salt.lightning import MyModel
+
+
+def main():
+    LightningCLI(MyModel, BoringDataModule)
+
+
+if __name__ == "__main__":
+    main()

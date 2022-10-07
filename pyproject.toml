@@ -41,5 +41,6 @@ format.max-line-length = "88"
 reports.output-format = "colorized"
 messages_control.enable = ["useless-suppression"]
 
-[tool.pytest.ini.options]
+[tool.pytest.ini_options]
 log_cli_level = "debug"
+filterwarnings = ["ignore::DeprecationWarning"]

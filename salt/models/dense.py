@@ -62,7 +62,6 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                # activation first
                 layers.append(activation())
 
             # final layer: return logits by default, otherwise apply activation

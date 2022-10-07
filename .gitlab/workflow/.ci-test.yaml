@@ -2,7 +2,7 @@ pytest:
   stage: tests
   image: $CI_REGISTRY_IMAGE:latest
   script:
-    - coverage run --source salt -m pytest
+    - coverage run --source salt -m pytest -W ignore::DeprecationWarning
     - coverage report
     - coverage xml
   coverage: '/TOTAL.*\s+(\d+\%)/'
