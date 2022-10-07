@@ -1,7 +1,7 @@
 site_name: salt documentation
 site_description: Documentation for salt
 site_author: salt team
-site_url: https://salt.docs.cern.ch/
+site_url: http://ftag-salt.docs.cern.ch/
 
 repo_name: GitLab
 repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt
