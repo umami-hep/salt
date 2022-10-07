@@ -6,8 +6,8 @@ workflow:
 
 stages:
   - lint
-  - tests
   - builds
+  - tests
   - docs
 
 include:
