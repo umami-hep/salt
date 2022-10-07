@@ -4,7 +4,7 @@ You should have already generated configs as discussed [here](https://ftag-gnn.d
 
 Salt supports your preferred ML logging framework.
 
-#### Comet 
+#### Comet
 
 To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key). Save this key in an environment variable called `COMET_API_KEY` in your shell, along with a `COMET_WORKSPACE` variable with the name of the [comet workspace](https://www.comet.ml/docs/user-interface/#workspaces) you create through the comet website (consider adding these definitions to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux)).
 
