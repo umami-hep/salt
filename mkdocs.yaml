@@ -1,4 +1,4 @@
-site_name: salt documentation
+site_name: Salt documentation
 site_description: Documentation for salt
 site_author: salt team
 site_url: http://ftag-salt.docs.cern.ch/
@@ -12,6 +12,11 @@ theme:
 
 nav:
     - Introduction: 'index.md'
+    - Setup: setup.md
+    - Training: training.md
+    - Contributing: contributing.md
+
+
 
 plugins:
     - search
