@@ -2,7 +2,7 @@ variables:
   MKDOCS_VERSION: '1.2.3'
   MATERIAL_VERSION: '8.2.7'
 
-docs:
+pages:
   image: python:3.9.14
   stage: docs
   script:
