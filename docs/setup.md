@@ -42,9 +42,9 @@ pip3 install -e .
 ```
 
 
-### Conda 
+### Conda
 
-After cloning the repo, you can set up conda 
+After cloning the repo, you can set up conda
 
 Source the conda setup script (which will actually install [mamba](https://mamba.readthedocs.io/en/latest/index.html))
 ```bash
@@ -54,7 +54,7 @@ This script will install mamba, and also create an empty python environment name
 
 The script should activate the newly created file for you, if you want to activate it yourself, just run
 
-```bash 
+```bash
 conda activate gnn
 ```
 
@@ -65,7 +65,7 @@ pip3 install -e .
 ```
 
 
-### Venv 
+### Venv
 
 
 Create a fresh virtual environment and activate it using
