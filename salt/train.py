@@ -1,29 +1,11 @@
-"""Module docstring."""
+"""Top level training script, powered by the lightning CLI."""
 
-import numpy as np
+# main.py
+import torch
+from pytorch_lightning.cli import LightningCLI
 
+# simple demo classes for your convenience
+from pytorch_lightning.demos.boring_classes import DemoModel, BoringDataModule
 
-def test_docstring(x: float) -> float:
-    """_summary_
-
-    Parameters
-    ----------
-    x : float
-        _description_
-
-    Returns
-    -------
-    float
-        _description_
-    """
-    return np.array(x)
-
-
-def main():
-    """test."""
-
-    print(test_docstring(2))
-
-
-if __name__ == "__main__":
-    main()
+cli = LightningCLI(DemoModel, BoringDataModule)
+# note: don't call fit!!
