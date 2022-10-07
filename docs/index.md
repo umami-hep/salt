@@ -11,7 +11,7 @@ General discussions about GNNs take place on Mattermost [here](https://mattermos
 
 # Previous Frameworks
 
-This repository cherry pick the best bits of 
+This repository cherry pick the best bits of
 
 - https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger
 - https://gitlab.cern.ch/mleigh/flavour_tagging/-/blob/master/ftag/
