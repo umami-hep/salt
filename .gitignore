@@ -14,3 +14,4 @@ bin/
 *.h5
 *.egg-info/
 *.ipynb
+.coverage
