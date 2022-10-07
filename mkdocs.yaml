@@ -1,0 +1,35 @@
+site_name: salt documentation
+site_description: Documentation for salt
+site_author: salt team
+site_url: https://salt.docs.cern.ch/
+
+repo_name: GitLab
+repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt
+edit_uri: 'tree/main/docs'
+
+theme:
+    name: material
+
+nav:
+    - Introduction: 'index.md'
+
+plugins:
+    - search
+
+markdown_extensions:
+    - admonition
+    - codehilite
+    - pymdownx.arithmatex
+    - pymdownx.details
+    - pymdownx.inlinehilite
+    - pymdownx.smartsymbols
+    - pymdownx.superfences:
+        custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: "!!python/name:mermaid2.fence_mermaid"
+    - toc:
+        permalink: "#"
+
+extra_javascript:
+    - 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'

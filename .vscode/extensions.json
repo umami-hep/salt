@@ -1,0 +1,7 @@
+{
+    "recommendations": [
+        "njpwerner.autodocstring",
+        "elagil.pre-commit-helper",
+        "ms-python.black-formatter"
+    ]
+}

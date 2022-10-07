@@ -1,0 +1,8 @@
+{
+    "editor.stickyScroll.enabled": true,
+    "autoDocstring.docstringFormat": "numpy",
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
+    },
+    "editor.formatOnSave": true,
+}

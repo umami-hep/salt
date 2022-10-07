@@ -1,0 +1,10 @@
+build_docker:
+  stage: builds
+  variables:
+    TO: $CI_REGISTRY_IMAGE:latest
+    GIT_SSL_NO_VERIFY: "true"
+    DOCKER_FILE: .gitlab/Dockerfile
+  tags:
+    - docker-image-build
+  script:
+    - ignore

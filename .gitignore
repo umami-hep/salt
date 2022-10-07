@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__
+
+build/
+bin/
+
+# files produced in processing
+*.npy
+*.root
+*.log
+*.ckpt
+*.pdf
+*checkpoint.ipynb
+*.h5
+*.egg-info/
+*.ipynb

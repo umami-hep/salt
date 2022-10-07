@@ -1,0 +1,17 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - when: always
+
+stages:
+  - lint
+  - tests
+  - builds
+  - docs
+
+include:
+  - '.gitlab/workflow/.ci-pre-commit.yaml'
+  - '.gitlab/workflow/.ci-test.yaml'
+  - '.gitlab/workflow/.ci-build.yaml'
+  - '.gitlab/workflow/.ci-docs.yaml'
