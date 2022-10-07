@@ -1,17 +1,6 @@
 [![docs](https://img.shields.io/badge/info-documentation-informational)](https://ftag-salt.docs.cern.ch/)
 
-# salt
+# Salt
 
-## Setup
-
-You should install the package from a contained environment using `conda` or `venv`.
-
-```bash
-pip3 install -e .
-```
-
-## VS Code Setup
-
-Open the command palette and run `Extensions: Show Recommended Extensions`.
-This will open a list of recommended extensions that you can optionally install.
-By default, the black formatter will be run on file save, this can be configured in the `.vscode/settings.json`.
+This is the home of the salt framework, which is used to train state of the art jet flavour tagger in the style of GN1.
+Documentation is available [here](https://salt-gnn.docs.cern.ch/).
