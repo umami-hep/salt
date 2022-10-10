@@ -76,3 +76,10 @@ trainer:
     class_path: pytorch_lightning.strategies.DDPStrategy
     init_args:
       find_unused_parameters: false
+  log_every_n_steps: 50
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        save_top_k: -1
+        filename: "{epoch:03d}-{val_loss:.4f}"
