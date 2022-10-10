@@ -2,55 +2,67 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
+from salt.losses.jet import JetClassificationLoss
 
-class MyModel(pl.LightningModule):
-    def __init__(self, net: nn.Module):
-        """_summary_
+
+class LightningTagger(pl.LightningModule):
+    def __init__(self, net: nn.Module, loss_weights: dict):
+        """Lightning jet tagger model.
 
         Parameters
         ----------
         net : nn.Module
             Network to use
+        loss_weights : dict
+            Weights for the different losses
         """
 
         super().__init__()
         self.model = net
+        self.loss_weights = loss_weights
+        self.jet_loss = JetClassificationLoss()
 
     def forward(self, x):
-        """Forward only pass to be used for getting model predictions, not for
-        use during training."""
+        """Forward pass through the model.
 
-        # compute the model output given an input graph
+        Don't call this method directy.
+        """
+
         return self.model(x)
 
     def shared_step(self, batch, evaluation=False):
+        """Function used to unpack the batch, run the forward pass, and compute
+        losses, used by training, validation and test steps.
+
+        Parameters
+        ----------
+        batch : _type_
+            batch of inputs and labels
+
+        Returns
+        -------
+        y_true
+            True labels
+        y_preds
+            Model predictions
+        loss
+            Reduced loss over the input batch
+        """
+
         # separate graphs and true labels
-        x, y_true, y_aux_true = batch
+        x, y_true = batch
 
         # get the model prediction
-        y_pred, aux_pred = self(x)
+        y_pred = self(x)
 
         if evaluation:
             return y_true, y_pred, None
 
         # compute classification_loss
         loss = {"loss": 0}
-        if self.config["train_classifier"]:
-            jet_loss = self.jet_loss(y_pred, y_true)
-            loss["loss"] += jet_loss
-            loss["jet_loss"] = jet_loss.detach()
-
-        # track loss
-        if self.config["train_origins"]:
-            node_loss = 0
-            loss["loss"] += node_loss
-            loss["node_loss"] = node_loss.detach()
-
-        # vertexing loss
-        if self.config["train_vertexing"]:
-            edge_loss = 0
-            loss["loss"] += edge_loss
-            loss["edge_loss"] = edge_loss.detach()
+        jet_loss = self.jet_loss(y_pred, y_true)
+        loss["loss"] += jet_loss
+        loss["jet_loss"] = jet_loss.detach()
 
         return y_true, y_pred, loss
 
@@ -69,7 +81,7 @@ class MyModel(pl.LightningModule):
         y_true, y_pred, loss = self.shared_step(batch)
 
         # log losses
-        self.log_losses(loss, stage="train")
+        # self.log_losses(loss, stage="train")
 
         return loss["loss"]
 
@@ -84,7 +96,7 @@ class MyModel(pl.LightningModule):
         y_true, y_pred, loss = self.shared_step(batch)
 
         # log losses
-        self.log_losses(loss, stage="val")
+        # self.log_losses(loss, stage="val")
 
         # return loss (and maybe more stuff)
         return_dict = loss

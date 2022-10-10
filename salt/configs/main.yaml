@@ -1,0 +1,43 @@
+model:
+  loss_weights:
+    flavour: 1.0
+  net:
+    class_path: salt.models.tagger.JetTagger
+    init_args:
+      input_size: 21
+      output_size: 3
+      hidden_layers:
+      - 128
+      - 128
+      - 128
+      activation:
+        class_path: torch.nn.ReLU
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 1e-4
+
+data:
+  filename: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  batch_size: 1000
+  num_workers: 10
+  num_jets_train: 1_000_000
+  num_jets_val: 100_000
+  num_jets_test: 100_000
+  jet_class_dict: &jet_class_dict
+      0:
+        label: 0
+        weight: 1.0
+      4:
+        label: 1
+        weight: 1.0
+      5:
+        label: 2
+        weight: 1.0
+
+
+trainer:
+  precision: 16
+  max_epochs: 10
+  accelerator: gpu

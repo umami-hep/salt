@@ -10,7 +10,7 @@ class Dense(nn.Module):
         input_size: int,
         output_size: int,
         hidden_layers: list,
-        activation: nn.Module = nn.SiLU,
+        activation: nn.Module,
         final_activation: nn.Module = None,
         norm_layer: nn.Module = None,
         norm_final_layer: bool = False,
@@ -62,11 +62,11 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                layers.append(activation())
+                layers.append(activation)
 
             # final layer: return logits by default, otherwise apply activation
             elif final_activation:
-                layers.append(final_activation())
+                layers.append(final_activation)
 
         # build the net
         self.net = nn.Sequential(*layers)
