@@ -37,6 +37,6 @@ class SimpleJetDataset(Dataset):
         return int(self.num_jets)
 
     def __getitem__(self, jet_idx):
-        inputs = torch.tensor(self.inputs[jet_idx])
+        inputs = torch.FloatTensor(self.inputs[jet_idx])
         label = torch.tensor(self.jet_class_dict[self.labels[jet_idx]]["label"])
         return inputs, label

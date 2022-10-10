@@ -1,5 +1,4 @@
 import pytorch_lightning as pl
-import torch
 import torch.nn as nn
 
 from salt.losses.jet import JetClassificationLoss
@@ -103,9 +102,9 @@ class LightningTagger(pl.LightningModule):
 
         return return_dict
 
+    """
+    configure in CLI instead
     def configure_optimizers(self):
-        """Choose what optimizers and learning-rate schedulers to use in your
-        optimization."""
 
         # optimise the whole model
         opt = torch.optim.AdamW(
@@ -127,3 +126,4 @@ class LightningTagger(pl.LightningModule):
         sch = {"scheduler": sch, "interval": "step"}
 
         return [opt], [sch]
+    """

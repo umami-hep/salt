@@ -1,5 +1,7 @@
 import torch.nn as nn
 
+from salt.utils.module_from_string import get_module
+
 
 class Dense(nn.Module):
     """A simple multi-layer perceptron (fully connected feed forward neural
@@ -10,9 +12,9 @@ class Dense(nn.Module):
         input_size: int,
         output_size: int,
         hidden_layers: list,
-        activation: nn.Module,
-        final_activation: nn.Module = None,
-        norm_layer: nn.Module = None,
+        activation: str,
+        final_activation: str = None,
+        norm_layer: str = None,
         norm_final_layer: bool = False,
         dropout: float = 0.0,
     ):
@@ -39,6 +41,10 @@ class Dense(nn.Module):
         """
         super().__init__()
 
+        self.activation = get_module(activation)
+        self.final_activation = get_module(final_activation)
+        self.norm_layer = get_module(norm_layer)
+
         # build nodelist
         node_list = [input_size, *hidden_layers, output_size]
 
@@ -51,7 +57,7 @@ class Dense(nn.Module):
 
             # normalisation
             if norm_layer and (norm_final_layer or not is_final_layer):
-                layers.append(norm_layer(node_list[i], elementwise_affine=False))
+                layers.append(self.norm_layer(node_list[i], elementwise_affine=False))
 
             # then dropout
             if dropout and (norm_final_layer or not is_final_layer):
@@ -62,11 +68,11 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                layers.append(activation())
+                layers.append(self.activation())
 
             # final layer: return logits by default, otherwise apply activation
             elif final_activation:
-                layers.append(final_activation())
+                layers.append(self.final_activation())
 
         # build the net
         self.net = nn.Sequential(*layers)
