@@ -13,18 +13,20 @@ model:
           output_size: 128
           hidden_layers:
           - 128
-          activation: relu
-          norm_layer: layernorm
+          - 128
+          - 128
+          activation: ReLU
+          norm_layer: LayerNorm
       gnn:
         class_path: salt.models.transformer.Transformer
         init_args:
           embd_dim: 128
           num_heads: 4
-          num_layers: 6
-          residual: True
-          norm_layer: layernorm
+          num_layers: 4
+          residual: true
+          norm_layer: LayerNorm
           dropout: 0.1
-          activation: relu
+          activation: ReLU
       pool_net:
         class_path: salt.models.pooling.GlobalAttentionPooling
         init_args:
@@ -36,23 +38,26 @@ model:
           output_size: 3
           hidden_layers:
           - 128
-          activation: relu
-          norm_layer: layernorm
+          - 128
+          - 128
+          activation: ReLU
+          norm_layer: LayerNorm
           dropout: 0.1
 
 optimizer:
   class_path: torch.optim.AdamW
   init_args:
     lr: 1e-4
+    weight_decay: 1e-5
 
 data:
   filename: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
   batch_size: 1000
-  num_workers: 10
-  num_jets_train: 5_000_000
-  num_jets_val: 100_000
+  num_workers: 20
+  num_jets_train: 1_000_000
+  num_jets_val: 200_000
   num_jets_test: 100_000
-  jet_class_dict: &jet_class_dict
+  jet_class_dict:
       0:
         label: 0
         weight: 1.0
@@ -63,8 +68,11 @@ data:
         label: 2
         weight: 1.0
 
-
 trainer:
-  precision: 32
   max_epochs: 10
   accelerator: gpu
+  devices: 1
+  strategy:
+    class_path: pytorch_lightning.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: false

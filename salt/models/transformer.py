@@ -1,7 +1,7 @@
+import torch
 import torch.nn as nn
 
 from salt.models.dense import Dense
-from salt.utils.module_from_string import get_module
 
 
 class SelfAttentionBlock(nn.Module):
@@ -32,7 +32,9 @@ class SelfAttentionBlock(nn.Module):
         self.residual = residual
 
         if norm_layer:
-            self.norm = get_module(norm_layer)(embd_dim, elementwise_affine=False)
+            self.norm = getattr(torch.nn, norm_layer)(
+                embd_dim, elementwise_affine=False
+            )
         else:
             self.register_buffer("norm", None)
 
@@ -51,7 +53,13 @@ class SelfAttentionBlock(nn.Module):
         if self.norm:
             x = self.norm(x)
 
-        x_mha, _ = self.mha(x, x, x, key_padding_mask=mask, need_weights=False)
+        x_mha, _ = self.mha(
+            x,
+            x,
+            x,
+            key_padding_mask=mask,
+            need_weights=False,
+        )
 
         if self.residual:
             x_mha = x + x_mha
@@ -59,9 +67,9 @@ class SelfAttentionBlock(nn.Module):
         x_dense = self.dense(x_mha)
 
         if self.residual:
-            x = x_mha + x_dense
+            x_dense = x_mha + x_dense
 
-        return x
+        return x_dense
 
 
 class Transformer(nn.Module):

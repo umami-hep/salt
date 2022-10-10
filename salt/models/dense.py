@@ -1,6 +1,5 @@
+import torch
 import torch.nn as nn
-
-from salt.utils.module_from_string import get_module
 
 
 class Dense(nn.Module):
@@ -41,10 +40,6 @@ class Dense(nn.Module):
         """
         super().__init__()
 
-        self.activation = get_module(activation)
-        self.final_activation = get_module(final_activation)
-        self.norm_layer = get_module(norm_layer)
-
         # build nodelist
         node_list = [input_size, *hidden_layers, output_size]
 
@@ -55,9 +50,13 @@ class Dense(nn.Module):
         for i in range(num_layers):
             is_final_layer = i == num_layers - 1
 
-            # normalisation
+            # normalisation first
             if norm_layer and (norm_final_layer or not is_final_layer):
-                layers.append(self.norm_layer(node_list[i], elementwise_affine=False))
+                layers.append(
+                    getattr(torch.nn, norm_layer)(
+                        node_list[i], elementwise_affine=False
+                    )
+                )
 
             # then dropout
             if dropout and (norm_final_layer or not is_final_layer):
@@ -68,11 +67,11 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                layers.append(self.activation())
+                layers.append(getattr(torch.nn, activation)())
 
             # final layer: return logits by default, otherwise apply activation
             elif final_activation:
-                layers.append(self.final_activation())
+                layers.append(getattr(torch.nn, final_activation)())
 
         # build the net
         self.net = nn.Sequential(*layers)

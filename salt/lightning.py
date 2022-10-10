@@ -17,6 +17,9 @@ class LightningTagger(pl.LightningModule):
         """
 
         super().__init__()
+
+        self.save_hyperparameters(ignore=["net"])
+
         self.model = net
         self.loss_weights = loss_weights
         self.jet_loss = JetClassificationLoss()
@@ -26,7 +29,6 @@ class LightningTagger(pl.LightningModule):
 
         Don't call this method directy.
         """
-
         return self.model(x)
 
     def shared_step(self, batch, evaluation=False):
@@ -61,16 +63,16 @@ class LightningTagger(pl.LightningModule):
         loss = {"loss": 0}
         jet_loss = self.jet_loss(y_pred, y_true)
         loss["loss"] += jet_loss
-        loss["jet_loss"] = jet_loss.detach()
+        # loss["jet_loss"] = jet_loss.detach()
 
         return y_true, y_pred, loss
 
     def log_losses(self, loss, stage):
-        self.log(f"{stage}_loss", loss["loss"], sync_dist=True, batch_size=1)
-        for loss_type in self.config["logging_losses"]:
-            self.log(
-                f"{stage}_{loss_type}", loss[loss_type], sync_dist=True, batch_size=1
-            )
+        self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
+        # for loss_type in self.config["logging_losses"]:
+        #    self.log(
+        #        f"{stage}_{loss_type}", loss[loss_type], sync_dist=True, batch_size=1
+        #    )
 
     def training_step(self, batch, batch_idx):
         """Here you compute and return the training loss, compute additional
@@ -80,7 +82,7 @@ class LightningTagger(pl.LightningModule):
         y_true, y_pred, loss = self.shared_step(batch)
 
         # log losses
-        # self.log_losses(loss, stage="train")
+        self.log_losses(loss, stage="train")
 
         return loss["loss"]
 
@@ -95,7 +97,7 @@ class LightningTagger(pl.LightningModule):
         y_true, y_pred, loss = self.shared_step(batch)
 
         # log losses
-        # self.log_losses(loss, stage="val")
+        self.log_losses(loss, stage="val")
 
         # return loss (and maybe more stuff)
         return_dict = loss
