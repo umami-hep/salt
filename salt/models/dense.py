@@ -62,11 +62,11 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                layers.append(activation)
+                layers.append(activation())
 
             # final layer: return logits by default, otherwise apply activation
             elif final_activation:
-                layers.append(final_activation)
+                layers.append(final_activation())
 
         # build the net
         self.net = nn.Sequential(*layers)
