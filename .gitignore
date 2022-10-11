@@ -17,3 +17,4 @@ bin/
 *.ipynb
 .coverage
 lightning_logs/
+logs/

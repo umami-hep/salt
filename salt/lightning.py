@@ -1,5 +1,4 @@
 import pytorch_lightning as pl
-import torch
 import torch.nn as nn
 
 from salt.losses.classification import ClassificationLoss
@@ -39,7 +38,6 @@ class LightningTagger(pl.LightningModule):
 
     def on_train_start(self):
         self.logger.log_hyperparams(self.hparams)
-        self.logger.log_graph(self, input_array=torch.rand(10, 10, 21))
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute

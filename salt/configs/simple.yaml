@@ -20,8 +20,6 @@ model:
           output_size: 128
           hidden_layers:
           - 128
-          - 128
-          - 128
           activation: ReLU
           norm_layer: LayerNorm
       gnn:
@@ -45,8 +43,6 @@ model:
           output_size: 3
           hidden_layers:
           - 128
-          - 128
-          - 128
           activation: ReLU
           norm_layer: LayerNorm
           dropout: 0.1
@@ -56,8 +52,6 @@ model:
           input_size: 128
           output_size: 8
           hidden_layers:
-          - 128
-          - 128
           - 128
           activation: ReLU
           norm_layer: LayerNorm
@@ -112,3 +106,9 @@ trainer:
     - class_path: pytorch_lightning.callbacks.ModelSummary
       init_args:
         max_depth: 2
+  logger:
+    class_path: pytorch_lightning.loggers.CometLogger
+    init_args:
+      save_dir: logs
+      project_name: salt
+      experiment_name: salt_simple
