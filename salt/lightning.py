@@ -2,7 +2,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
-from salt.losses.jet import ClassificationLoss
+from salt.losses.classification import ClassificationLoss
 
 
 class LightningTagger(pl.LightningModule):
