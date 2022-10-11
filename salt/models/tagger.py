@@ -9,6 +9,8 @@ class JetTagger(nn.Module):
         gnn: nn.Module,
         pool_net: nn.Module,
         jet_net: nn.Module,
+        track_net: nn.Module,
+        tasks: dict,
     ):
         """Jet tagger model.
 
@@ -22,6 +24,10 @@ class JetTagger(nn.Module):
             Pooling network
         jet_net : nn.Module
             Jet classification network
+        track_net : nn.Module
+            Track classification network
+        tasks : dict
+            Dict of tasks to perform
         """
         super().__init__()
 
@@ -29,6 +35,8 @@ class JetTagger(nn.Module):
         self.gnn = gnn
         self.jet_net = jet_net
         self.pool_net = pool_net
+        self.track_net = track_net
+        self.tasks = tasks
 
     def get_track_mask(self, tracks: torch.Tensor):
         """The input track h5 dataset is filled for a fixed number of tracks
@@ -45,5 +53,11 @@ class JetTagger(nn.Module):
         embd_x = self.init_net(x)
         embd_x = self.gnn(embd_x, mask=mask)
         pooled = self.pool_net(embd_x, mask=mask)
-        preds = self.jet_net(pooled)
+
+        preds = {}
+        if "jet_classification" in self.tasks:
+            preds["jet_classification"] = self.jet_net(pooled)
+        if "track_classification" in self.tasks:
+            preds["track_classification"] = self.track_net(embd_x)
+
         return preds

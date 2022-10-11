@@ -2,12 +2,17 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
 from salt.data.datasets import SimpleJetDataset
+from salt.utils.collate import collate
 
 
 class JetDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        filename: str,
+        train_file: str,
+        val_file: str,
+        test_file: str,
+        tracks_name: str,
+        labels: dict,
         batch_size: int,
         num_workers: int,
         num_jets_train: int,
@@ -17,7 +22,11 @@ class JetDataModule(pl.LightningDataModule):
     ):
         super().__init__()
 
-        self.filename = filename
+        self.train_file = train_file
+        self.val_file = val_file
+        self.test_file = test_file
+        self.tracks_name = tracks_name
+        self.labels = labels
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_jets_train = num_jets_train
@@ -31,14 +40,18 @@ class JetDataModule(pl.LightningDataModule):
         # create training and validation datasets
         if stage == "fit":
             self.train_dset = SimpleJetDataset(
-                filename=self.filename,
+                filename=self.train_file,
+                tracks_name=self.tracks_name,
+                labels=self.labels,
                 num_jets=self.num_jets_train,
                 jet_class_dict=self.jet_class_dict,
             )
             print(f"Created training dataset with {len(self.train_dset):,} jets")
 
             self.val_dset = SimpleJetDataset(
-                filename=self.filename,
+                filename=self.val_file,
+                tracks_name=self.tracks_name,
+                labels=self.labels,
                 num_jets=self.num_jets_val,
                 jet_class_dict=self.jet_class_dict,
             )
@@ -59,6 +72,7 @@ class JetDataModule(pl.LightningDataModule):
             dataset=self.train_dset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            collate_fn=collate,
             shuffle=True,
             pin_memory=True,
         )
@@ -68,6 +82,7 @@ class JetDataModule(pl.LightningDataModule):
             dataset=self.val_dset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            collate_fn=collate,
             shuffle=False,
             pin_memory=True,
         )
@@ -77,6 +92,7 @@ class JetDataModule(pl.LightningDataModule):
             dataset=self.test_dset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            collate_fn=collate,
             shuffle=False,
             pin_memory=True,
         )

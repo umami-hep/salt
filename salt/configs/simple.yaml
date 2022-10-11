@@ -1,11 +1,16 @@
 seed_everything: 42
 
 model:
-  loss_weights:
-    flavour: 1.0
+  tasks: &tasks
+    jet_classification:
+      weight: 1.0
+    track_classification:
+      weight: 0.5
   net:
     class_path: salt.models.tagger.JetTagger
     init_args:
+      tasks:
+        <<: *tasks
       init_net:
         class_path: salt.models.dense.Dense
         init_args:
@@ -43,6 +48,18 @@ model:
           activation: ReLU
           norm_layer: LayerNorm
           dropout: 0.1
+      track_net:
+        class_path: salt.models.dense.Dense
+        init_args:
+          input_size: 128
+          output_size: 8
+          hidden_layers:
+          - 128
+          - 128
+          - 128
+          activation: ReLU
+          norm_layer: LayerNorm
+          dropout: 0.1
 
 optimizer:
   class_path: torch.optim.AdamW
@@ -51,7 +68,13 @@ optimizer:
     weight_decay: 1e-5
 
 data:
-  filename: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  train_file: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_train.h5
+  val_file: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_val.h5
+  test_file: test.h5
+  tracks_name: X_tracks_loose_train
+  labels:
+    jet_classification: flavour
+    track_classification: Y_tracks_loose_train
   batch_size: 1000
   num_workers: 20
   num_jets_train: 1_000_000
@@ -83,3 +106,6 @@ trainer:
       init_args:
         save_top_k: -1
         filename: "{epoch:03d}-{val_loss:.4f}"
+    - class_path: pytorch_lightning.callbacks.ModelSummary
+      init_args:
+        max_depth: 2

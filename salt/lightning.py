@@ -1,19 +1,20 @@
 import pytorch_lightning as pl
+import torch
 import torch.nn as nn
 
-from salt.losses.jet import JetClassificationLoss
+from salt.losses.jet import ClassificationLoss
 
 
 class LightningTagger(pl.LightningModule):
-    def __init__(self, net: nn.Module, loss_weights: dict):
+    def __init__(self, net: nn.Module, tasks: dict):
         """Lightning jet tagger model.
 
         Parameters
         ----------
         net : nn.Module
             Network to use
-        loss_weights : dict
-            Weights for the different losses
+        tasks : dict
+            Dict of tasks and weights
         """
 
         super().__init__()
@@ -21,8 +22,11 @@ class LightningTagger(pl.LightningModule):
         self.save_hyperparameters(ignore=["net"])
 
         self.model = net
-        self.loss_weights = loss_weights
-        self.jet_loss = JetClassificationLoss()
+        self.tasks = tasks
+
+        self.losses = {}
+        for task_name, opts in self.tasks.items():
+            self.losses[task_name] = ClassificationLoss(task_name, **opts)
 
     def forward(self, x):
         """Forward pass through the model.
@@ -30,6 +34,10 @@ class LightningTagger(pl.LightningModule):
         Don't call this method directy.
         """
         return self.model(x)
+
+    def on_train_start(self):
+        self.logger.log_hyperparams(self.hparams)
+        self.logger.log_graph(self, input_array=torch.rand(10, 10, 21))
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute
@@ -42,44 +50,47 @@ class LightningTagger(pl.LightningModule):
 
         Returns
         -------
-        y_true
-            True labels
-        y_preds
+        preds
             Model predictions
+        labels
+            True labels
         loss
             Reduced loss over the input batch
         """
 
         # separate graphs and true labels
-        x, y_true = batch
+        inputs, labels = batch
 
         # get the model prediction
-        y_pred = self(x)
+        preds = self(inputs)
 
         if evaluation:
-            return y_true, y_pred, None
+            return labels, preds, None
 
-        # compute classification_loss
+        # compute loss
         loss = {"loss": 0}
-        jet_loss = self.jet_loss(y_pred, y_true)
-        loss["loss"] += jet_loss
-        # loss["jet_loss"] = jet_loss.detach()
+        for task in self.tasks:
+            task_loss = self.losses[task](preds, labels)
+            loss["loss"] += task_loss
+            loss[f"{task}_loss"] = task_loss.detach()
 
-        return y_true, y_pred, loss
+        return preds, labels, loss
 
     def log_losses(self, loss, stage):
         self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
-        # for loss_type in self.config["logging_losses"]:
-        #    self.log(
-        #        f"{stage}_{loss_type}", loss[loss_type], sync_dist=True, batch_size=1
-        #    )
+        for task in self.tasks:
+            self.log(
+                f"{stage}_{task}_loss",
+                loss[f"{task}_loss"],
+                sync_dist=True,
+            )
 
     def training_step(self, batch, batch_idx):
         """Here you compute and return the training loss, compute additional
         metrics, and perform logging."""
 
         # foward pass
-        y_true, y_pred, loss = self.shared_step(batch)
+        preds, labels, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="train")
@@ -94,7 +105,7 @@ class LightningTagger(pl.LightningModule):
         """
 
         # foward pass
-        y_true, y_pred, loss = self.shared_step(batch)
+        preds, labels, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="val")

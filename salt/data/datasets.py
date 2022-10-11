@@ -6,7 +6,14 @@ from torch.utils.data import Dataset
 class SimpleJetDataset(Dataset):
     """A simple map-style dataset for loading jets."""
 
-    def __init__(self, filename: str, jet_class_dict: dict, num_jets: int = -1):
+    def __init__(
+        self,
+        filename: str,
+        tracks_name: str,
+        labels: dict,
+        jet_class_dict: dict,
+        num_jets: int = -1,
+    ):
         """_summary_
 
         Parameters
@@ -22,8 +29,9 @@ class SimpleJetDataset(Dataset):
 
         # get datasets
         self.file = h5py.File(filename, "r")
-        self.inputs = self.file["X_tracks_loose_train"]
-        self.labels = self.file["flavour"]
+        self.inputs = self.file[tracks_name]
+        self.jet_class_labels = self.file[labels["jet_classification"]]
+        self.track_class_labels = self.file[labels["track_classification"]]
 
         self.num_jets = num_jets
 
@@ -38,5 +46,13 @@ class SimpleJetDataset(Dataset):
 
     def __getitem__(self, jet_idx):
         inputs = torch.FloatTensor(self.inputs[jet_idx])
-        label = torch.tensor(self.jet_class_dict[self.labels[jet_idx]]["label"])
-        return inputs, label
+        jet_class_label = torch.tensor(
+            self.jet_class_dict[self.jet_class_labels[jet_idx]]["label"]
+        )
+        # TODO: update umami to allow for named label accessing
+        track_class_label = torch.tensor(self.track_class_labels[jet_idx][:, 0])
+        labels = {
+            "jet_classification": jet_class_label,
+            "track_classification": track_class_label,
+        }
+        return inputs, labels
