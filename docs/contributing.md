@@ -12,3 +12,12 @@ Remember to keep you fork [up to date](https://about.gitlab.com/blog/2016/12/01/
 It's good practice to document your code with module and function docstrings, and inline comments.
 It's also recommended to use [black](https://github.com/psf/black) to format your contributions.
 You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) for more guidelines on code style.
+
+#### Pre-commit Checks
+
+The `pre-commit` framework is used to validate changes.
+This is installed by default, so you can run run using
+
+```bash
+pre-commit run
+```

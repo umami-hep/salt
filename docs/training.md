@@ -16,19 +16,27 @@ To use the [comet](https://www.comet.ml/) logger, you need to make an account wi
 You can start a training with the `train.py` script, for example
 
 ```bash
-python train.py --config configs/classifier.yaml --gpus 0,1
+python train.py fit --config configs/simple.yaml
 ```
-In the first argument, specify the config file, training GPUs are specified in the second argument. In the example above, we train on the frist two GPUs accessible from the current machine. To run a quick test, use `--test_run`. Information about other arguments can be found by running `python train.py -h`.
+
+In the first argument, specify the config file.
+The CLI is powered by [pytorch lightning](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli.html#lightning-cli), allowing you control the training from the config files or directly via command line arguments.
+For a full list of available arguments run
+
+```bash
+python train.py fit --help
+```
 
 ???+ warning "Check GPU usage before starting training."
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
 
-Model checkpoints are saved under `saved_models/`.
+Model checkpoints are saved under `lightning_logs/`.
 
 
 ??? info "Restarting a previous training"
 
+    outdated
     It is possible to continue training from a model checkpoint. You should point the `--config` argument
     to the saved config file inside the previous training's output dir. You also need to specify which
     checkpoint to restart the training from using the `--ckpt_path` argument.
@@ -48,13 +56,7 @@ Some other tips to make training as fast as possible are listed below.
 
 **Worker counts**
 
-- If you have exclusive access to your machine, and you run with Just-In-Time graphs, you should set `num_workers` equal to the number of CPUs on your machine.
-- If using prebuilt graphs, it's better to choose `num_workers <= num_cpu/2`. This is due to each thread requiring another thread for memory pinning.
-- For prebuilt and preloaded graphs, you may have to experiment to find optimal number of workers. In some cases using too many results in a performance decrease. Optimal worker count appears to be in the region 6-9 workers per GPU.
-
-**Prebuilding Graphs**
-
-- If traning is too slow using Just-In-Time graphs, you should prebuild the graphs before starting training.
+If you have exclusive access to your machine, and you run with Just-In-Time graphs, you should set `num_workers` equal to the number of CPUs on your machine.
 
 **Moving data closer to the GPU**
 
@@ -64,7 +66,7 @@ Some other tips to make training as fast as possible are listed below.
 
 ### Slurm GPU Clusters
 
-Those at UCL or other institutions with Slurm managed GPU batch queues can submit training jobs using
+Those at institutions with Slurm managed GPU batch queues can submit training jobs using
 
 ```bash
 sbatch submit/submit_slurm.sh
