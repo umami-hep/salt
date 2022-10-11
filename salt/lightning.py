@@ -26,7 +26,9 @@ class LightningTagger(pl.LightningModule):
 
         self.losses = {}
         for task_name, opts in self.tasks.items():
-            self.losses[task_name] = ClassificationLoss(task_name, **opts)
+            self.losses[task_name] = ClassificationLoss(
+                task_name, weight=opts["weight"]
+            )
 
     def forward(self, x):
         """Forward pass through the model.

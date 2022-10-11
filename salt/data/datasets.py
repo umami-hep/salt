@@ -9,8 +9,8 @@ class SimpleJetDataset(Dataset):
     def __init__(
         self,
         filename: str,
-        tracks_name: str,
-        labels: dict,
+        inputs: dict,
+        tasks: dict,
         jet_class_dict: dict,
         num_jets: int = -1,
     ):
@@ -29,9 +29,9 @@ class SimpleJetDataset(Dataset):
 
         # get datasets
         self.file = h5py.File(filename, "r")
-        self.inputs = self.file[tracks_name]
-        self.jet_class_labels = self.file[labels["jet_classification"]]
-        self.track_class_labels = self.file[labels["track_classification"]]
+        self.inputs = {name: self.file[var] for name, var in inputs.items()}
+        self.jet_class_labels = self.file[tasks["jet_classification"]["label"]]
+        self.track_class_labels = self.file[tasks["track_classification"]["label"]]
 
         self.num_jets = num_jets
 
@@ -45,14 +45,23 @@ class SimpleJetDataset(Dataset):
         return int(self.num_jets)
 
     def __getitem__(self, jet_idx):
-        inputs = torch.FloatTensor(self.inputs[jet_idx])
+        # TODO: move concatenation to umami
+        jet_inputs = torch.FloatTensor(self.inputs["jet"][jet_idx])
+        track_inputs = torch.FloatTensor(self.inputs["track"][jet_idx])
+        repeat_jet_inputs = jet_inputs.repeat(len(track_inputs), 1)
+        repeat_jet_inputs[((track_inputs == 0) | (track_inputs == -1)).all(axis=-1)] = 0
+        inputs = torch.cat([track_inputs, repeat_jet_inputs], axis=1)
+
         jet_class_label = torch.tensor(
             self.jet_class_dict[self.jet_class_labels[jet_idx]]["label"]
         )
+
         # TODO: update umami to allow for named label accessing
         track_class_label = torch.tensor(self.track_class_labels[jet_idx][:, 0])
+
         labels = {
             "jet_classification": jet_class_label,
             "track_classification": track_class_label,
         }
+
         return inputs, labels

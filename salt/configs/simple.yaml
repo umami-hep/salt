@@ -4,8 +4,10 @@ model:
   tasks: &tasks
     jet_classification:
       weight: 1.0
+      label: flavour
     track_classification:
       weight: 0.5
+      label: Y_tracks_loose_train
   net:
     class_path: salt.models.tagger.JetTagger
     init_args:
@@ -14,7 +16,7 @@ model:
       init_net:
         class_path: salt.models.dense.Dense
         init_args:
-          input_size: 21
+          input_size: 23
           output_size: 128
           hidden_layers:
           - 128
@@ -71,10 +73,11 @@ data:
   train_file: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_train.h5
   val_file: /unix/atlastracking/samples/gnn_training/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_val.h5
   test_file: test.h5
-  tracks_name: X_tracks_loose_train
-  labels:
-    jet_classification: flavour
-    track_classification: Y_tracks_loose_train
+  inputs:
+    jet: X_train
+    track: X_tracks_loose_train
+  tasks:
+    <<: *tasks
   batch_size: 1000
   num_workers: 20
   num_jets_train: 1_000_000

@@ -11,8 +11,8 @@ class JetDataModule(pl.LightningDataModule):
         train_file: str,
         val_file: str,
         test_file: str,
-        tracks_name: str,
-        labels: dict,
+        inputs: dict,
+        tasks: dict,
         batch_size: int,
         num_workers: int,
         num_jets_train: int,
@@ -25,8 +25,8 @@ class JetDataModule(pl.LightningDataModule):
         self.train_file = train_file
         self.val_file = val_file
         self.test_file = test_file
-        self.tracks_name = tracks_name
-        self.labels = labels
+        self.inputs = inputs
+        self.tasks = tasks
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_jets_train = num_jets_train
@@ -41,8 +41,8 @@ class JetDataModule(pl.LightningDataModule):
         if stage == "fit":
             self.train_dset = SimpleJetDataset(
                 filename=self.train_file,
-                tracks_name=self.tracks_name,
-                labels=self.labels,
+                inputs=self.inputs,
+                tasks=self.tasks,
                 num_jets=self.num_jets_train,
                 jet_class_dict=self.jet_class_dict,
             )
@@ -50,8 +50,8 @@ class JetDataModule(pl.LightningDataModule):
 
             self.val_dset = SimpleJetDataset(
                 filename=self.val_file,
-                tracks_name=self.tracks_name,
-                labels=self.labels,
+                inputs=self.inputs,
+                tasks=self.tasks,
                 num_jets=self.num_jets_val,
                 jet_class_dict=self.jet_class_dict,
             )
