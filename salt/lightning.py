@@ -36,9 +36,6 @@ class LightningTagger(pl.LightningModule):
         """
         return self.model(x)
 
-    def on_train_start(self):
-        self.logger.log_hyperparams(self.hparams)
-
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute
         losses, used by training, validation and test steps.
