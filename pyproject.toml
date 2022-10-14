@@ -25,6 +25,9 @@ dependencies = [
 "Homepage" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt"
 "Issue Tracker" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues"
 
+[tool.setuptools]
+packages = ["salt"]
+
 [build-system]
 requires = ["setuptools>=62"]
 build-backend = "setuptools.build_meta"

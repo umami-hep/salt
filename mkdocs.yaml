@@ -16,8 +16,6 @@ nav:
     - Training: training.md
     - Contributing: contributing.md
 
-
-
 plugins:
     - search
 
@@ -33,6 +31,8 @@ markdown_extensions:
         - name: mermaid
           class: mermaid
           format: "!!python/name:mermaid2.fence_mermaid"
+    - pymdownx.tabbed:
+        alternate_style: true 
     - toc:
         permalink: "#"
 
