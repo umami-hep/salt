@@ -1,4 +1,4 @@
-INSTDIR=packages
+INSTDIR=python_install
 rm -rf ${INSTDIR}
 mkdir ${INSTDIR}
 export PYTHONPATH=${PWD}:${PWD}/${INSTDIR}:${PYTHONPATH}

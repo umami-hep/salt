@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get install -y git h5utils wget curl
 
 # install requirements
-#COPY setup/requirements.txt .
-COPY pyproject.toml .
 RUN python --version
+COPY pyproject.toml .
+RUN mkdir salt
 RUN pip install -e .
