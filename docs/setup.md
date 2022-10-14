@@ -45,7 +45,7 @@ If you prefer to work outside of a container, you can setup up the code with con
 === "conda"
 
     After cloning the repo, you will need to set up conda if you don't already have it installed.
-    A script is provided which will install [mamba](https://mamba.readthedocs.io/en/latest/index.html), 
+    A script is provided which will install [mamba](https://mamba.readthedocs.io/en/latest/index.html),
     and also create a fresh Python environment named `salt`.
     ```bash
     source ./setup/setup_conda.sh
@@ -80,5 +80,5 @@ pip3 install -e .
     then you may need to install the package using the setup script, rather than directly using `pip`.
 
     ```bash
-    source setup/install.py
+    source setup/install.sh
     ```
