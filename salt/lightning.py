@@ -1,4 +1,5 @@
 import pytorch_lightning as pl
+import torch
 import torch.nn as nn
 
 from salt.losses.classification import ClassificationLoss
@@ -112,13 +113,10 @@ class LightningTagger(pl.LightningModule):
 
         return return_dict
 
-    """
-    configure in CLI instead
     def configure_optimizers(self):
 
-        # optimise the whole model
         opt = torch.optim.AdamW(
-            self.parameters(), lr=(self.lr or self.learning_rate), weight_decay=1e-5
+            self.parameters(), lr=1e-4, weight_decay=1e-5
         )
 
         # cosine warm restarts
@@ -127,13 +125,12 @@ class LightningTagger(pl.LightningModule):
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(
             opt,
-            max_lr=2e-3,
+            max_lr=1e-3,
             total_steps=self.trainer.estimated_stepping_batches,
-            div_factor=4,
-            final_div_factor=10,
-            pct_start=0.05,
+            div_factor=1000,
+            final_div_factor=1000,
+            pct_start=0.1,
         )
         sch = {"scheduler": sch, "interval": "step"}
 
         return [opt], [sch]
-    """
