@@ -47,4 +47,3 @@ echo "Running train.py fit"
 python train.py fit \
     --config configs/simple.yaml \
     --trainer.devices 4 \
-

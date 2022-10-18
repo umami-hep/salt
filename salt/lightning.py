@@ -114,10 +114,7 @@ class LightningTagger(pl.LightningModule):
         return return_dict
 
     def configure_optimizers(self):
-
-        opt = torch.optim.AdamW(
-            self.parameters(), lr=1e-4, weight_decay=1e-5
-        )
+        opt = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-5)
 
         # cosine warm restarts
         # sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=2)

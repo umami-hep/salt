@@ -58,7 +58,7 @@ model:
           dropout: 0.1
 
 data:
-  train_file: /share/rcifdata/svanstroud/data/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_train.h5 
+  train_file: /share/rcifdata/svanstroud/data/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_train.h5
   val_file: /share/rcifdata/svanstroud/data/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_val.h5
   test_file: test.h5
   inputs:
