@@ -14,7 +14,7 @@ These are named in such a way to be automatically read by the framework (it's po
  (consider adding these definitions to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux)).
 
 ??? info "Add the environment variable to your bashrc"
-    
+
     To ensure the environment variables are defined every time you log in,
     you can add the definitions to your bashrc.
     Simply add the lines
@@ -23,7 +23,7 @@ These are named in such a way to be automatically read by the framework (it's po
     export PL_TRAINER__LOGGER__API_KEY="my_api_key"
     export PL_TRAINER__LOGGER_WORKSPACE="my_workspace_name"
     ```
-    
+
     to your `~/.bashrc` file.
     If no such file exists, create one in your home directory.
 
