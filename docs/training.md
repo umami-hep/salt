@@ -1,26 +1,51 @@
-You should have already generated configs as discussed [here](https://ftag-gnn.docs.cern.ch/preprocessing/#generating-configs).
+
 
 ### Setup Logging
 
-Salt supports your preferred ML logging framework.
+Salt has the potential to supports any logging framework also supported by PTL.
+At the moment only comet is supported.
 
 #### Comet
 
-To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key). Save this key in an environment variable called `COMET_API_KEY` in your shell, along with a `COMET_WORKSPACE` variable with the name of the [comet workspace](https://www.comet.ml/docs/user-interface/#workspaces) you create through the comet website (consider adding these definitions to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux)).
+To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key).
+You also need to create a [workspace](https://www.comet.ml/docs/user-interface/#workspaces).
+Next save the API key and the workspace name in environment variables called `PL_TRAINER__LOGGER__API_KEY` and `PL_TRAINER__LOGGER_WORKSPACE`.
+These are named in such a way to be automatically read by the framework (it's possible to configure other aspects of the training using environment variables if you wish).
+ (consider adding these definitions to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux)).
 
-#### WandB
+??? info "Add the environment variable to your bashrc"
+    
+    To ensure the environment variables are defined every time you log in,
+    you can add the definitions to your bashrc.
+    Simply add the lines
+
+    ```bash
+    export PL_TRAINER__LOGGER__API_KEY="my_api_key"
+    export PL_TRAINER__LOGGER_WORKSPACE="my_workspace_name"
+    ```
+    
+    to your `~/.bashrc` file.
+    If no such file exists, create one in your home directory.
 
 
-### Start Training
 
-You can start a training with the `train.py` script, for example
+### Training
+
+Training is fully configured via a YAML config file and a CLI powered by [pytorch lightning](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli.html#lightning-cli).
+This allows you control all aspects of the training from config or directly via command line arguments.
+
+A simple config file is provided [here]({{repo_url}}-/blob/main/salt/configs/simple.yaml)
+You can start a training using this config with the `train.py` script.
 
 ```bash
 python train.py fit --config configs/simple.yaml
 ```
 
-In the first argument, specify the config file.
-The CLI is powered by [pytorch lightning](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli.html#lightning-cli), allowing you control the training from the config files or directly via command line arguments.
+The first argument `fit` specifies you want to train the model, rather than run validation or inference.
+The `--config` argument specifies the config file to use.
+It's possible to specify more than one configuration file, the CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
+
+You can also configure the training directly through CLI arguments.
 For a full list of available arguments run
 
 ```bash
@@ -31,15 +56,7 @@ python train.py fit --help
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
 
-Model checkpoints are saved under `lightning_logs/`.
-
-
-??? info "Restarting a previous training"
-
-    outdated
-    It is possible to continue training from a model checkpoint. You should point the `--config` argument
-    to the saved config file inside the previous training's output dir. You also need to specify which
-    checkpoint to restart the training from using the `--ckpt_path` argument.
+Model checkpoints are saved under `logs/` (need to work on the dir names...).
 
 
 ### Training Tips
@@ -56,7 +73,7 @@ Some other tips to make training as fast as possible are listed below.
 
 **Worker counts**
 
-If you have exclusive access to your machine, and you run with Just-In-Time graphs, you should set `num_workers` equal to the number of CPUs on your machine.
+If you have exclusive access to your machine, you should set `num_workers` equal to the number of CPUs on your machine.
 
 **Moving data closer to the GPU**
 
@@ -69,7 +86,7 @@ If you have exclusive access to your machine, and you run with Just-In-Time grap
 Those at institutions with Slurm managed GPU batch queues can submit training jobs using
 
 ```bash
-sbatch submit/submit_slurm.sh
+sbatch submit_slurm.sh
 ```
 
 If training ends prematurely, you can be left with floating worker processes on the node which can clog things up for other users.
