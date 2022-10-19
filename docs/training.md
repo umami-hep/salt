@@ -52,6 +52,9 @@ For a full list of available arguments run
 python train.py fit --help
 ```
 
+You can specify which GPUs to use with the `--trainer.devices` flag.
+Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerators/gpu_basic.html#train-on-multiple-gpus) to learn more about specifying which GPUs to use when training.
+
 ???+ warning "Check GPU usage before starting training."
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
