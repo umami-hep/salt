@@ -61,6 +61,14 @@ Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerato
 
 Model checkpoints are saved under `logs/` (need to work on the dir names...).
 
+### Dataloading modes
+
+There are two types of dataloading modes available, configured by the `data.batched_read` config flag.
+When this flag is `False`, individual jets are loaded from the training file randomly, and pytorch handles the batching behind the scenes.
+This is inefficient as h5 files benefit from block reads.
+Setting `data.batched_read` to `True` will read a full batch at a time from the input file.
+This is much more efficient, but only implements "weak shuffling" in that while the different batches are shuffled, the same batches of jets are used epoch after epoch.
+In practice, this is unlikely to make much difference to the training.
 
 ### Training Tips
 

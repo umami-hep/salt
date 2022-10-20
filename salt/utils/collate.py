@@ -3,7 +3,8 @@ import torch
 
 def collate(batch):
     inputs = [sample[0] for sample in batch]
-    labels = [sample[1] for sample in batch]
+    valid = [sample[1] for sample in batch]
+    labels = [sample[2] for sample in batch]
 
     labels_dict = {}
     elem = labels[0]
@@ -23,4 +24,4 @@ def collate(batch):
             )
         labels_dict[key] = torch.stack([sample[key] for sample in labels], out=out)
 
-    return torch.stack(inputs), labels_dict
+    return torch.stack(inputs), torch.stack(valid), labels_dict

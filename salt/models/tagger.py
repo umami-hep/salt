@@ -48,8 +48,7 @@ class JetTagger(nn.Module):
         mask[:, 0] = False  # hack to make the MHA work
         return mask
 
-    def forward(self, x):
-        mask = self.get_track_mask(x)
+    def forward(self, x, mask):
         embd_x = self.init_net(x)
         embd_x = self.gnn(embd_x, mask=mask)
         pooled = self.pool_net(embd_x, mask=mask)
