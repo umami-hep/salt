@@ -30,12 +30,12 @@ class LightningTagger(pl.LightningModule):
                 task_name, weight=opts["weight"]
             )
 
-    def forward(self, x):
+    def forward(self, x, mask):
         """Forward pass through the model.
 
         Don't call this method directy.
         """
-        return self.model(x)
+        return self.model(x, mask)
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute
@@ -57,10 +57,10 @@ class LightningTagger(pl.LightningModule):
         """
 
         # separate graphs and true labels
-        inputs, labels = batch
+        inputs, mask, labels = batch
 
         # get the model prediction
-        preds = self(inputs)
+        preds = self(inputs, mask)
 
         if evaluation:
             return labels, preds, None

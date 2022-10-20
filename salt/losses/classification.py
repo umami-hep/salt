@@ -27,8 +27,8 @@ class ClassificationLoss(nn.Module):
             # for tracks, flatten across jets and compute loss on unmasked inputs
             preds = preds.flatten(end_dim=1)
             true = true.flatten(end_dim=1)
-            mask = true == -1
-            preds = preds[~mask]
-            true = true[~mask]
+            mask = true != -1  # TODO: pass in mask from the valid flag
+            preds = preds[mask]
+            true = true[mask]
 
         return self.loss(preds, true) * self.weight

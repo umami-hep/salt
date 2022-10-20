@@ -4,10 +4,8 @@ model:
   tasks: &tasks
     jet_classification:
       weight: 1.0
-      label: flavour
     track_classification:
       weight: 0.5
-      label: Y_tracks_loose_train
   net:
     class_path: salt.models.tagger.JetTagger
     init_args:
@@ -58,29 +56,20 @@ model:
           dropout: 0.1
 
 data:
-  train_file: /share/rcifdata/svanstroud/data/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_train.h5
-  val_file: /share/rcifdata/svanstroud/data/note/dips/preprocessed/PFlow-hybrid-resampled_scaled_shuffled_val.h5
+  train_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
+  val_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
   test_file: test.h5
   inputs:
-    jet: X_train
-    track: X_tracks_loose_train
+    jet: jets
+    track: tracks_loose
   tasks:
     <<: *tasks
+  batched_read: True
   batch_size: 1000
-  num_workers: 48
-  num_jets_train: 30_000_000
+  num_workers: 20
+  num_jets_train: 23_000_000
   num_jets_val: 500_000
   num_jets_test: 100_000
-  jet_class_dict:
-      0:
-        label: 0
-        weight: 1.0
-      4:
-        label: 1
-        weight: 1.0
-      5:
-        label: 2
-        weight: 1.0
 
 trainer:
   max_epochs: 100

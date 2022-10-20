@@ -15,9 +15,19 @@ You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/dev
 
 #### Pre-commit Checks
 
-The `pre-commit` framework is used to validate changes.
-This is installed by default, so you can run run using
+The `pre-commit` framework is used to ensure contributions follow good coding standards.
+It is installed as a package dependency.
+To set it up, just run
+
+```bash
+pre-commit install
+```
+
+The pre-commit checks with then be run every time you run `git commit`.
+You can run them manually over staged changes using
 
 ```bash
 pre-commit run
 ```
+
+Include the `--all-files` flag if you want to run the checks over all the files in the repository.
