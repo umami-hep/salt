@@ -18,6 +18,7 @@ nav:
 
 plugins:
     - search
+    - markdownextradata
 
 markdown_extensions:
     - admonition

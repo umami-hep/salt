@@ -45,6 +45,18 @@ The first argument `fit` specifies you want to train the model, rather than `tes
 The `--config` argument specifies the config file to use.
 It's possible to specify more than one configuration file, the CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
 
+??? info "Running a test training"
+
+    To test the training script you can run use the `--trainer.fast_dev_run` flag
+    which will run over a small number of training and validation batches and then
+    exit.
+
+    ```bash
+    python train.py fit --config configs/simple.yaml --trainer.fast_dev_run 5
+    ```
+
+    Logging and checkpoint are suppressed when using this falg.
+
 You can also configure the training directly through CLI arguments.
 For a full list of available arguments run
 
@@ -56,7 +68,7 @@ By default the config will try to use the first available GPU, but
 you can specify which ones to use with the `--trainer.devices` flag.
 Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerators/gpu_basic.html#train-on-multiple-gpus) to learn more about the different ways you can specify which GPUs to use.
 
-???+ warning "Check GPU usage before starting training."
+??? warning "Check GPU usage before starting training."
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
 

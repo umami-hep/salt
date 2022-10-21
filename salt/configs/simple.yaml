@@ -71,6 +71,7 @@ data:
   num_jets_val: 500_000
   num_jets_test: 100_000
 
+# TODO: configure learning rate
 trainer:
   max_epochs: 100
   accelerator: gpu
