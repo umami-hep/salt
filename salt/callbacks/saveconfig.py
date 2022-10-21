@@ -75,5 +75,8 @@ class SaveConfigCallback(Callback):
             )
             self.already_saved = True
 
+            # log the config file as an asset
+            pl_module.logger.experiment.log_asset(config_path)
+
         # broadcast so that all ranks are in sync on future calls to .setup()
         self.already_saved = trainer.strategy.broadcast(self.already_saved)

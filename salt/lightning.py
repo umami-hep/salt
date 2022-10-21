@@ -1,3 +1,6 @@
+import socket
+import subprocess
+
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -14,7 +17,7 @@ class LightningTagger(pl.LightningModule):
         net : nn.Module
             Network to use
         tasks : dict
-            Dict of tasks and weights
+            Dict of tasks and loss weights for each task
         """
 
         super().__init__()
@@ -43,8 +46,10 @@ class LightningTagger(pl.LightningModule):
 
         Parameters
         ----------
-        batch : _type_
-            batch of inputs and labels
+        batch : tuple
+            A single batch of inputs, masks and labels
+        evaluation : bool
+            If true, don't compute the losses and return early
 
         Returns
         -------
@@ -131,3 +136,35 @@ class LightningTagger(pl.LightningModule):
         sch = {"scheduler": sch, "interval": "step"}
 
         return [opt], [sch]
+
+    def on_train_start(self):
+        if not self.trainer.is_global_zero:
+            return
+
+        trainer = self.trainer
+        loader = trainer.datamodule.train_dataloader()
+        train_dset = trainer.datamodule.train_dset
+        val_dset = trainer.datamodule.val_dset
+        exp = self.logger.experiment
+
+        # inputs
+        exp.log_parameter("num_jets_train", len(train_dset))
+        exp.log_parameter("num_jets_val", len(val_dset))
+        exp.log_parameter("batch_size", loader.batch_size)
+        # TODO: log input variables from datasets
+
+        num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        exp.log_parameter("trainable_params", num_params)
+
+        # resources
+        exp.log_parameter("num_gpus", trainer.num_devices)
+        exp.log_parameter("gpu_ids", trainer.device_ids)
+        exp.log_parameter("num_workers", loader.num_workers)
+
+        # version info
+        git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
+        exp.log_parameter("git_hash", git_hash.decode("ascii").strip())
+        exp.log_parameter("torch_version", torch.__version__)
+        exp.log_parameter("lightning_version", pl.__version__)
+        exp.log_parameter("cuda_version", torch.version.cuda)
+        exp.log_parameter("hostname", socket.gethostname())
