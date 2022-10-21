@@ -6,7 +6,7 @@ pages:
   image: python:3.9.14
   stage: docs
   script:
-    - pip install mkdocs==${MKDOCS_VERSION} mkdocs-material==${MATERIAL_VERSION}
+    - pip install mkdocs==${MKDOCS_VERSION} mkdocs-material==${MATERIAL_VERSION} mkdocs-markdownextradata-plugin>=0.2.5
     - mkdocs build -d public
     - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
