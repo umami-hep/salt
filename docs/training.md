@@ -11,7 +11,7 @@ To use the [comet](https://www.comet.ml/) logger, you need to make an account wi
 You also need to create a [workspace](https://www.comet.ml/docs/user-interface/#workspaces).
 Next save the API key and the workspace name in environment variables called `PL_TRAINER__LOGGER__API_KEY` and `PL_TRAINER__LOGGER_WORKSPACE`.
 These are named in such a way to be automatically read by the framework (it's possible to configure other aspects of the training using environment variables if you wish).
- (consider adding these definitions to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux)).
+Consider adding these variables to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux).
 
 ??? info "Add the environment variable to your bashrc"
 
@@ -41,7 +41,7 @@ You can start a training using this config with the `train.py` script.
 python train.py fit --config configs/simple.yaml
 ```
 
-The first argument `fit` specifies you want to train the model, rather than run validation or inference.
+The first argument `fit` specifies you want to train the model, rather than `test` over some orthogonal dataset.
 The `--config` argument specifies the config file to use.
 It's possible to specify more than one configuration file, the CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
 
@@ -52,16 +52,15 @@ For a full list of available arguments run
 python train.py fit --help
 ```
 
-You can specify which GPUs to use with the `--trainer.devices` flag.
-Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerators/gpu_basic.html#train-on-multiple-gpus) to learn more about specifying which GPUs to use when training.
+By default the config will try to use the first available GPU, but
+you can specify which ones to use with the `--trainer.devices` flag.
+Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerators/gpu_basic.html#train-on-multiple-gpus) to learn more about the different ways you can specify which GPUs to use.
 
 ???+ warning "Check GPU usage before starting training."
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
 
-Model checkpoints are saved under `logs/` (need to work on the dir names...).
-
-### Dataloading modes
+### Dataloading
 
 There are two types of dataloading modes available, configured by the `data.batched_read` config flag.
 When this flag is `False`, individual jets are loaded from the training file randomly, and pytorch handles the batching behind the scenes.
@@ -70,29 +69,32 @@ Setting `data.batched_read` to `True` will read a full batch at a time from the 
 This is much more efficient, but only implements "weak shuffling" in that while the different batches are shuffled, the same batches of jets are used epoch after epoch.
 In practice, this is unlikely to make much difference to the training.
 
-### Training Tips
+#### Worker Counts
 
 During training, data is loaded using worker processes.
-The number of worker processes you use will be loosely related to number of CPUs available on your machine.
-You can find out the number of CPUs available on your machine by running
+The number of workers used is specified by `data.num_workers`.
+Increasing the worker count will speed up training until you max out your GPUs processing capabilities.
+Test different counts to find the optimal value, or just set this to the number of CPUs on your machine.
 
-```bash
-cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1
-```
+??? info "Maximum worker counts"
 
-Some other tips to make training as fast as possible are listed below.
+    You can find out the number of CPUs available on your machine by running
 
-**Worker counts**
+    ```bash
+    cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1
+    ```
 
-If you have exclusive access to your machine, you should set `num_workers` equal to the number of CPUs on your machine.
+    You should probably not use more workers than this.
+    If you use too few or too many workers, you will see a warning during training.
 
-**Moving data closer to the GPU**
+#### Fast Disk Access
 
-- Most HPC systems will have dedicated fast storage. Loading training data from these drives can significantly improve training times. To automatically copy files to a drive, you can use the `move_files_temp` config flag. The files will be removed after training, but if the training job crashes is cancelled this may not happen. You should make sure to clean up your files if you using this setting.
-- If you have enough RAM, you can load the training data into shared memory before starting training by setting `move_files_temp` to some path in `/dev/shm/`. Again, make sure to clean up your files in `/dev/shm/` after training as the script may fail to do this for you.
+Most HPC systems will have dedicated fast storage. Loading training data from these drives can significantly improve training times.
+
+If you have enough RAM, you can load the training data into shared memory before starting training copying the training files to a path in `/dev/shm/`. Make sure to clean up your files in when you are done.
 
 
-### Slurm GPU Clusters
+### Slurm Batch
 
 Those at institutions with Slurm managed GPU batch queues can submit training jobs using
 
@@ -112,4 +114,13 @@ and then kill your running processes using
 
 ```bash
 pkill -u <username> -f train.py -e
+```
+
+### Resuming Training
+
+Model checkpoints are saved under `logs/` (need to work on the dir names...).
+You can resume the full training state from a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
+
+```bash
+python train.py fit --config path/to/config.yaml --ckpt_path path/to/checkpoint.ckpt
 ```

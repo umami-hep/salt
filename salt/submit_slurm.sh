@@ -22,27 +22,20 @@
 # request enough memory
 #SBATCH --mem=200G
 
-# mail on failures
-#SBATCH --mail-user=sam.van.stroud@cerh.ch
-#SBATCH --mail-type=FAIL
-
-# Change log names; %j gives job id, %x gives job name
-#SBATCH --output=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.out
-# optional separate error output file
-# #SBATCH --error=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.err
-
 # speedup trick
 export OMP_NUM_THREADS=1
 
+# move to workdir
 cd /share/rcifdata/svanstroud/salt/salt
 echo "Moved dir, now in: ${PWD}"
 
-source /share/apps/anaconda/3-2019.03/etc/profile.d/conda.sh
+# activate environment
+source /share/apps/anaconda/3-2022.05/etc/profile.d/conda.sh
 conda activate salt
 echo "Activated environment ${CONDA_DEFAULT_ENV}"
-
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
+# run the training
 echo "Running train.py fit"
 python train.py fit \
     --config configs/simple.yaml \
