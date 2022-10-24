@@ -14,6 +14,7 @@ nav:
     - Introduction: 'index.md'
     - Setup: setup.md
     - Training: training.md
+    - Evaluation: evaluation.md
     - Contributing: contributing.md
 
 plugins:

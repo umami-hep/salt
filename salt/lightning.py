@@ -68,7 +68,7 @@ class LightningTagger(pl.LightningModule):
         preds = self(inputs, mask)
 
         if evaluation:
-            return labels, preds, None
+            return preds, labels, None
 
         # compute loss
         loss = {"loss": 0}
@@ -89,9 +89,6 @@ class LightningTagger(pl.LightningModule):
             )
 
     def training_step(self, batch, batch_idx):
-        """Here you compute and return the training loss, compute additional
-        metrics, and perform logging."""
-
         # foward pass
         preds, labels, loss = self.shared_step(batch)
 
@@ -101,12 +98,6 @@ class LightningTagger(pl.LightningModule):
         return loss["loss"]
 
     def validation_step(self, batch, batch_idx):
-        """Operates on a single batch of data from the validation set.
-
-        In this step you'd might generate examples or calculate anything
-        of interest like accuracy.
-        """
-
         # foward pass
         preds, labels, loss = self.shared_step(batch)
 
@@ -117,6 +108,10 @@ class LightningTagger(pl.LightningModule):
         return_dict = loss
 
         return return_dict
+
+    def test_step(self, batch, batch_idx):
+        preds, _, _ = self.shared_step(batch, evaluation=True)
+        return preds
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-5)
@@ -142,15 +137,16 @@ class LightningTagger(pl.LightningModule):
             return
 
         trainer = self.trainer
-        loader = trainer.datamodule.train_dataloader()
-        train_dset = trainer.datamodule.train_dset
-        val_dset = trainer.datamodule.val_dset
+        train_loader = trainer.datamodule.train_dataloader()
+        val_loader = trainer.datamodule.val_dataloader()
+        train_dset = train_loader.dataset
+        val_dset = val_loader.dataset
         exp = self.logger.experiment
 
         # inputs
         exp.log_parameter("num_jets_train", len(train_dset))
         exp.log_parameter("num_jets_val", len(val_dset))
-        exp.log_parameter("batch_size", loader.batch_size)
+        exp.log_parameter("batch_size", train_loader.batch_size)
         # TODO: log input variables from datasets
 
         num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -159,11 +155,12 @@ class LightningTagger(pl.LightningModule):
         # resources
         exp.log_parameter("num_gpus", trainer.num_devices)
         exp.log_parameter("gpu_ids", trainer.device_ids)
-        exp.log_parameter("num_workers", loader.num_workers)
+        exp.log_parameter("num_workers", train_loader.num_workers)
 
         # version info
         git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
         exp.log_parameter("git_hash", git_hash.decode("ascii").strip())
+        exp.log_parameter("timestamp", trainer.timestamp)
         exp.log_parameter("torch_version", torch.__version__)
         exp.log_parameter("lightning_version", pl.__version__)
         exp.log_parameter("cuda_version", torch.version.cuda)

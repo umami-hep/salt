@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from salt.data.datasets import SimpleJetDataset
+from salt.data.datasets import StructuredJetDataset, TrainJetDataset
 from salt.data.samplers import RandomBatchSampler
 from salt.utils.collate import collate
 
@@ -11,7 +11,6 @@ class JetDataModule(pl.LightningDataModule):
         self,
         train_file: str,
         val_file: str,
-        test_file: str,
         inputs: dict,
         tasks: dict,
         batched_read: bool,
@@ -20,6 +19,8 @@ class JetDataModule(pl.LightningDataModule):
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
+        scale_dict: str,
+        test_file: str = None,
     ):
         """h5 jet datamodule.
 
@@ -47,6 +48,8 @@ class JetDataModule(pl.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
+        scale_dict : str
+            Path to umami preprocessing scale dict file
         """
         super().__init__()
 
@@ -61,36 +64,39 @@ class JetDataModule(pl.LightningDataModule):
         self.num_jets_train = num_jets_train
         self.num_jets_val = num_jets_val
         self.num_jets_test = num_jets_test
+        self.scale_dict = scale_dict
 
     def setup(self, stage: str):
         print("-" * 100)
 
         # create training and validation datasets
-        if stage == "fit":
-            self.train_dset = SimpleJetDataset(
-                filename=self.train_file,
-                inputs=self.inputs,
-                tasks=self.tasks,
-                num_jets=self.num_jets_train,
-            )
-            print(f"Created training dataset with {len(self.train_dset):,} jets")
+        self.train_dset = TrainJetDataset(
+            filename=self.train_file,
+            inputs=self.inputs,
+            tasks=self.tasks,
+            num_jets=self.num_jets_train,
+        )
 
-            self.val_dset = SimpleJetDataset(
-                filename=self.val_file,
-                inputs=self.inputs,
-                tasks=self.tasks,
-                num_jets=self.num_jets_val,
-            )
+        self.val_dset = TrainJetDataset(
+            filename=self.val_file,
+            inputs=self.inputs,
+            tasks=self.tasks,
+            num_jets=self.num_jets_val,
+        )
+
+        if stage == "fit":
+            print(f"Created training dataset with {len(self.train_dset):,} jets")
             print(f"Created validation dataset with {len(self.val_dset):,} jets")
 
-            # log dataset sizes
-            if self.trainer.logger:
-                self.trainer.logger.experiment.log_parameter(
-                    "num_jets_train", len(self.train_dset)
-                )
-                self.trainer.logger.experiment.log_parameter(
-                    "num_jets_val", len(self.val_dset)
-                )
+        if stage == "test":
+            assert self.test_file is not None
+            self.test_dset = StructuredJetDataset(
+                filename=self.test_file,
+                inputs=self.inputs,
+                scale_dict=self.scale_dict,
+                num_jets=self.num_jets_test,
+            )
+            print(f"Created test dataset with {len(self.test_dset):,} jets")
 
         print("-" * 100, "\n")
 
