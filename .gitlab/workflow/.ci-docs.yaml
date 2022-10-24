@@ -1,12 +1,8 @@
-variables:
-  MKDOCS_VERSION: '1.2.3'
-  MATERIAL_VERSION: '8.2.7'
-
 pages:
   image: python:3.9.14
   stage: docs
   script:
-    - pip install mkdocs==${MKDOCS_VERSION} mkdocs-material==${MATERIAL_VERSION} mkdocs-markdownextradata-plugin>=0.2.5
+    - pip install mkdocs==1.4.1 mkdocs-material==8.5.7 mkdocs-markdownextradata-plugin>=0.2.5
     - mkdocs build -d public
     - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
