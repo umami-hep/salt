@@ -19,7 +19,7 @@ class JetDataModule(pl.LightningDataModule):
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
-        scale_dict: str,
+        scale_dict: str = None,
         test_file: str = None,
     ):
         """h5 jet datamodule.
@@ -90,6 +90,7 @@ class JetDataModule(pl.LightningDataModule):
 
         if stage == "test":
             assert self.test_file is not None
+            assert self.scale_dict is not None
             self.test_dset = StructuredJetDataset(
                 filename=self.test_file,
                 inputs=self.inputs,

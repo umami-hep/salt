@@ -1,4 +1,5 @@
 trainer:
+  devices: 1
   callbacks:
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
       init_args:
