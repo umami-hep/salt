@@ -58,7 +58,6 @@ model:
 data:
   train_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
   val_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
-  test_file: Null
   scale_dict: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-scale_dict-22M.json
   inputs:
     jet: jets

@@ -11,6 +11,7 @@ class Checkpoint(ModelCheckpoint):
         super().__init__(save_top_k=-1, filename=filename)
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        # dynamically set the output dirpath form the trainer timestamp
         if stage == "fit":
             self.dirpath = os.path.join(trainer.out_dir, "ckpts")
             self.timestamp = trainer.timestamp

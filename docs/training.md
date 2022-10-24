@@ -96,8 +96,8 @@ Test different counts to find the optimal value, or just set this to the number 
     cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1
     ```
 
-    You should probably not use more workers than this.
-    If you use too few or too many workers, you will see a warning during training.
+    You should not use more workers than this.
+    If you use too few or too many workers, you will see a warning at the start of training.
 
 #### Fast Disk Access
 
