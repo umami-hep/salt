@@ -15,7 +15,7 @@ model:
         class_path: salt.models.dense.Dense
         init_args:
           input_size: 23
-          output_size: 256
+          output_size: &embd_dim 256
           hidden_layers:
           - 256
           activation: ReLU
@@ -23,7 +23,7 @@ model:
       gnn:
         class_path: salt.models.transformer.Transformer
         init_args:
-          embd_dim: 256
+          embd_dim: *embd_dim
           num_heads: 4
           num_layers: 6
           residual: true
@@ -33,11 +33,11 @@ model:
       pool_net:
         class_path: salt.models.pooling.GlobalAttentionPooling
         init_args:
-          input_size: 256
+          input_size: *embd_dim
       jet_net:
         class_path: salt.models.dense.Dense
         init_args:
-          input_size: 256
+          input_size: *embd_dim
           output_size: 3
           hidden_layers:
           - 256
@@ -58,7 +58,8 @@ model:
 data:
   train_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
   val_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
-  test_file: test.h5
+  test_file: Null
+  scale_dict: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-scale_dict-22M.json
   inputs:
     jet: jets
     track: tracks_loose
@@ -66,10 +67,10 @@ data:
     <<: *tasks
   batched_read: True
   batch_size: 1000
-  num_workers: 20
+  num_workers: 10
   num_jets_train: 23_000_000
   num_jets_val: 500_000
-  num_jets_test: 100_000
+  num_jets_test: 1_000_000
 
 # TODO: configure learning rate
 trainer:
@@ -81,18 +82,7 @@ trainer:
     init_args:
       find_unused_parameters: false
   log_every_n_steps: 50
-  callbacks:
-    - class_path: pytorch_lightning.callbacks.TQDMProgressBar
-      init_args:
-        refresh_rate: 50
-    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
-    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
-      init_args:
-        save_top_k: -1
-        filename: "{epoch:03d}-{val_loss:.4f}"
-    - class_path: pytorch_lightning.callbacks.ModelSummary
-      init_args:
-        max_depth: 2
+
   logger:
     class_path: pytorch_lightning.loggers.CometLogger
     init_args:

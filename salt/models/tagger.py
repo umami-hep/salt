@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 
 
@@ -38,17 +37,8 @@ class JetTagger(nn.Module):
         self.track_net = track_net
         self.tasks = tasks
 
-    def get_track_mask(self, tracks: torch.Tensor):
-        """The input track h5 dataset is filled for a fixed number of tracks
-        per jet.
-
-        The inputs of padded tracks are all either 0 or -1.
-        """
-        mask = ((tracks == 0) | (tracks == -1)).all(axis=-1)
-        mask[:, 0] = False  # hack to make the MHA work
-        return mask
-
     def forward(self, x, mask):
+        mask[..., 0] = False  # hack to make the MHA work
         embd_x = self.init_net(x)
         embd_x = self.gnn(embd_x, mask=mask)
         pooled = self.pool_net(embd_x, mask=mask)

@@ -1,0 +1,11 @@
+trainer:
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 1
+    - class_path: pytorch_lightning.callbacks.ModelSummary
+      init_args:
+        max_depth: 2
+    - class_path: salt.callbacks.PredictionWriter
+
+  logger: False
