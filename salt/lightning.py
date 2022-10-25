@@ -68,7 +68,7 @@ class LightningTagger(pl.LightningModule):
         preds = self(inputs, mask)
 
         if evaluation:
-            return preds, labels, None
+            return preds, labels, mask, None
 
         # compute loss
         loss = {"loss": 0}
@@ -77,7 +77,7 @@ class LightningTagger(pl.LightningModule):
             loss["loss"] += task_loss
             loss[f"{task}_loss"] = task_loss.detach()
 
-        return preds, labels, loss
+        return preds, labels, mask, loss
 
     def log_losses(self, loss, stage):
         self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
@@ -90,7 +90,7 @@ class LightningTagger(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # foward pass
-        preds, labels, loss = self.shared_step(batch)
+        preds, labels, _, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="train")
@@ -99,7 +99,7 @@ class LightningTagger(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         # foward pass
-        preds, labels, loss = self.shared_step(batch)
+        preds, labels, _, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="val")
@@ -110,8 +110,8 @@ class LightningTagger(pl.LightningModule):
         return return_dict
 
     def test_step(self, batch, batch_idx):
-        preds, _, _ = self.shared_step(batch, evaluation=True)
-        return preds
+        preds, _, mask, _ = self.shared_step(batch, evaluation=True)
+        return preds, mask
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-5)
