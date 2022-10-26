@@ -35,13 +35,13 @@ Training is fully configured via a YAML config file and a CLI powered by [pytorc
 This allows you control all aspects of the training from config or directly via command line arguments.
 
 A simple config file is provided [here]({{repo_url}}-/blob/main/salt/configs/simple.yaml)
-You can start a training using this config with the `train.py` script.
+You can start a training using this config with the `main.py` python script, which is also exposed through the command `main`.
 
 ```bash
-python train.py fit --config configs/simple.yaml
+main fit --config configs/simple.yaml
 ```
 
-The first argument `fit` specifies you want to train the model, rather than `test` over some orthogonal dataset.
+The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
 The `--config` argument specifies the config file to use.
 It's possible to specify more than one configuration file, the CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
 
@@ -52,16 +52,16 @@ It's possible to specify more than one configuration file, the CLI will merge th
     exit.
 
     ```bash
-    python train.py fit --config configs/simple.yaml --trainer.fast_dev_run 5
+    main fit --config configs/simple.yaml --trainer.fast_dev_run 5
     ```
 
-    Logging and checkpoint are suppressed when using this falg.
+    Logging and checkpoint are suppressed when using this flag.
 
 You can also configure the training directly through CLI arguments.
 For a full list of available arguments run
 
 ```bash
-python train.py fit --help
+main fit --help
 ```
 
 By default the config will try to use the first available GPU, but
@@ -130,9 +130,12 @@ pkill -u <username> -f train.py -e
 
 ### Resuming Training
 
-Model checkpoints are saved under `logs/` (need to work on the dir names...).
+Model checkpoints are saved in timestamped directories under `logs/`.
 You can resume the full training state from a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
 
 ```bash
-python train.py fit --config path/to/config.yaml --ckpt_path path/to/checkpoint.ckpt
+main fit --config path/to/config.yaml --ckpt_path path/to/checkpoint.ckpt
 ```
+
+The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
+where it left off.

@@ -136,12 +136,15 @@ class LightningTagger(pl.LightningModule):
         if not self.trainer.is_global_zero:
             return
 
+        if not self.logger:
+            return
+
+        exp = self.logger.experiment
         trainer = self.trainer
         train_loader = trainer.datamodule.train_dataloader()
         val_loader = trainer.datamodule.val_dataloader()
         train_dset = train_loader.dataset
         val_dset = val_loader.dataset
-        exp = self.logger.experiment
 
         # inputs
         exp.log_parameter("num_jets_train", len(train_dset))

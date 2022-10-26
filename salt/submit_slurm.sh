@@ -36,7 +36,7 @@ echo "Activated environment ${CONDA_DEFAULT_ENV}"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 # run the training
-echo "Running train.py fit"
-python train.py fit \
+echo "Running training script..."
+train \
     --config configs/simple.yaml \
     --trainer.devices 4 \
