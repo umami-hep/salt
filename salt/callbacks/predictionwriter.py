@@ -2,7 +2,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import numpy.lib.recfunctions as rfn
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -10,7 +9,7 @@ from pytorch_lightning import Callback, LightningModule, Trainer
 
 
 class PredictionWriter(Callback):
-    def __init__(self) -> None:
+    def __init__(self, write_tracks: bool = False) -> None:
         """A callback to write test outputs to h5 file."""
         super().__init__()
 
@@ -23,6 +22,7 @@ class PredictionWriter(Callback):
             "n_truth_promptLepton",
         ]
 
+        self.write_tracks = write_tracks
         self.track_cols = [
             "Pileup",
             "Fake",
@@ -35,6 +35,9 @@ class PredictionWriter(Callback):
         ]
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        if stage != "test":
+            return
+
         # inputs names
         self.jet = trainer.datamodule.inputs["jet"]
         self.track = trainer.datamodule.inputs["track"]
@@ -78,20 +81,20 @@ class PredictionWriter(Callback):
         a = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jet_df = pd.concat([jet_df, pd.DataFrame(a)], axis="columns")
 
-        if "track_classification" in pl_module.tasks:
+        if self.write_tracks and "track_classification" in pl_module.tasks:
             # masked softmax
-            t = outputs["track_classification"]
-            mask = torch.cat(self.mask).unsqueeze(dim=-1)
-            t = F.softmax(t.masked_fill(mask, float("-inf")), dim=-1).cpu().numpy()
+            t = outputs["track_classification"].cpu()
+            mask = torch.cat(self.mask).unsqueeze(dim=-1).cpu()
+            t = F.softmax(t.masked_fill(mask, float("-inf")), dim=-1).numpy()
 
             # convert to structured array
-            tshape = t.shape
             t = t.view(dtype=np.dtype([(name, "f4") for name in self.track_cols]))
+            t = t.reshape(t.shape[0], t.shape[1])
 
             # add other other vars to the array
             track_vars = ["truthOriginLabel", "truthVertexIndex"]
             t2 = self.file[self.track].fields(track_vars)[: self.num_jets]
-            t = rfn.merge_arrays((t, t2), flatten=True).reshape(tshape[0], tshape[1])
+            t = self.join_arrays((t, t2))
 
         # write to h5 file
         print("\n" + "-" * 100)
@@ -101,7 +104,7 @@ class PredictionWriter(Callback):
         with h5py.File(self.out_path, "w") as f:
             self.create_dataset(f, jet_df, self.jet)
 
-            if "track_classification" in pl_module.tasks:
+            if self.write_tracks and "track_classification" in pl_module.tasks:
                 self.create_dataset_np(f, t, self.track)
 
         print("Created output file", self.out_path)
@@ -124,3 +127,12 @@ class PredictionWriter(Callback):
 
         # write
         f.create_dataset(name, data=a, compression="lzf")
+
+    def join_arrays(self, arrays):
+        # https://github.com/numpy/numpy/issues/7811
+        newdtype = sum((a.dtype.descr for a in arrays), [])
+        newrecarray = np.empty(arrays[0].shape, dtype=newdtype)
+        for a in arrays:
+            for name in a.dtype.names:
+                newrecarray[name] = a[name]
+        return newrecarray

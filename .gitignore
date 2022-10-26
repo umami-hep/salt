@@ -18,3 +18,4 @@ bin/
 .coverage
 lightning_logs/
 logs/
+tmp/

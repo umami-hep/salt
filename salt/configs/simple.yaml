@@ -7,53 +7,50 @@ model:
     track_classification:
       weight: 0.5
   net:
-    class_path: salt.models.tagger.JetTagger
+    class_path: salt.models.JetTagger
     init_args:
       tasks:
         <<: *tasks
       init_net:
-        class_path: salt.models.dense.Dense
+        class_path: salt.models.Dense
         init_args:
           input_size: 23
           output_size: &embd_dim 256
-          hidden_layers:
-          - 256
-          activation: ReLU
-          norm_layer: LayerNorm
+          hidden_layers: [256]
+          activation: &activation ReLU
+          norm_layer: &norm_layer LayerNorm
       gnn:
-        class_path: salt.models.transformer.Transformer
+        class_path: salt.models.Transformer
         init_args:
           embd_dim: *embd_dim
           num_heads: 4
           num_layers: 6
           residual: true
-          norm_layer: LayerNorm
-          dropout: 0.1
-          activation: ReLU
+          norm_layer: *norm_layer
+          activation: *activation
+          dropout: &dropout 0.1
       pool_net:
-        class_path: salt.models.pooling.GlobalAttentionPooling
+        class_path: salt.models.GlobalAttentionPooling
         init_args:
           input_size: *embd_dim
       jet_net:
-        class_path: salt.models.dense.Dense
+        class_path: salt.models.Dense
         init_args:
           input_size: *embd_dim
           output_size: 3
-          hidden_layers:
-          - 256
-          activation: ReLU
-          norm_layer: LayerNorm
-          dropout: 0.1
+          hidden_layers: [256]
+          activation: *activation
+          norm_layer: *norm_layer
+          dropout: *dropout
       track_net:
-        class_path: salt.models.dense.Dense
+        class_path: salt.models.Dense
         init_args:
           input_size: 256
           output_size: 8
-          hidden_layers:
-          - 256
-          activation: ReLU
-          norm_layer: LayerNorm
-          dropout: 0.1
+          hidden_layers: [256]
+          activation: *activation
+          norm_layer: *norm_layer
+          dropout: *dropout
 
 data:
   train_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5

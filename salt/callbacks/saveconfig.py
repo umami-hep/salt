@@ -32,7 +32,7 @@ class SaveConfigCallback(Callback):
         super().__init__()
         self.parser = parser
         self.config = config
-        self.config_filename = Path(self.config.config[0].rel_path).name
+        self.config_filename = Path(self.config.config[0].abs_path).name
         self.overwrite = overwrite
         self.multifile = multifile
         self.already_saved = False
@@ -66,15 +66,21 @@ class SaveConfigCallback(Callback):
                     " overwrite the config file."
                 )
 
-        # save the file on rank 0
+        # save only on rank zero to avoid race conditions.
         if trainer.is_global_zero:
-            # save only on rank zero to avoid race conditions.
             # the `log_dir` needs to be created as we rely on the logger
             # to do it usually but it hasn't logged anything at this point
             config_path.parent.mkdir(parents=True, exist_ok=True)
             print("-" * 100)
             print(f"Created output dir {trainer.out_dir}")
             print("-" * 100, "\n")
+
+            # copy the scale dict
+            sd_path = Path(config_path.parent / Path(self.config.data.scale_dict).name)
+            shutil.copyfile(self.config.data.scale_dict, sd_path)
+            self.config.data.scale_dict = str(sd_path.resolve())
+
+            # write config
             self.parser.save(
                 self.config,
                 str(config_path),
@@ -83,13 +89,10 @@ class SaveConfigCallback(Callback):
                 multifile=self.multifile,
             )
 
-            # copy the scale dict
-            sd_path = Path(config_path.parent / Path(self.config.data.scale_dict).name)
-            shutil.copyfile(self.config.data.scale_dict, sd_path)
-
             # log files as assets
-            pl_module.logger.experiment.log_asset(config_path)
-            pl_module.logger.experiment.log_asset(sd_path)
+            if pl_module.logger is not None:
+                pl_module.logger.experiment.log_asset(config_path)
+                pl_module.logger.experiment.log_asset(sd_path)
 
             self.already_saved = True
 
