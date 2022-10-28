@@ -51,6 +51,12 @@ def test_train_unbatched() -> None:
     train_template(args)
 
 
+@pytest.mark.filterwarnings(w)
+def test_train_movefilestemp() -> None:
+    args = ["fit", "--data.move_files_temp=/dev/shm/test_files"]
+    train_template(args)
+
+
 def setup_module():
     """setup any state specific to the execution of the given module."""
     # get test file

@@ -1,6 +1,8 @@
 import pytorch_lightning as pl
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
+import salt.utils.fileutils as fu
 from salt.data.datasets import StructuredJetDataset, TrainJetDataset
 from salt.data.samplers import RandomBatchSampler
 from salt.utils.collate import collate
@@ -19,6 +21,7 @@ class JetDataModule(pl.LightningDataModule):
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
+        move_files_temp: str = None,
         scale_dict: str = None,
         test_file: str = None,
     ):
@@ -48,6 +51,9 @@ class JetDataModule(pl.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
+        move_files_temp : str
+            Directory to move training files to, default is None,
+            which will result in no copying of files
         scale_dict : str
             Path to umami preprocessing scale dict file
         """
@@ -65,9 +71,19 @@ class JetDataModule(pl.LightningDataModule):
         self.num_jets_val = num_jets_val
         self.num_jets_test = num_jets_test
         self.scale_dict = scale_dict
+        self.move_files_temp = move_files_temp
+
+    def prepare_data(self):
+        if self.move_files_temp:
+            print(f"Moving train files to {self.move_files_temp} ")
+            fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
 
     def setup(self, stage: str):
         print("-" * 100)
+        if stage == "fit" and self.move_files_temp:
+            # Set the training/validation file to the temp path
+            self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
+            self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
 
         # create training and validation datasets
         self.train_dset = TrainJetDataset(
@@ -84,6 +100,7 @@ class JetDataModule(pl.LightningDataModule):
             num_jets=self.num_jets_val,
         )
 
+        # Only print train/val dataset details when actually training
         if stage == "fit":
             print(f"Created training dataset with {len(self.train_dset):,} jets")
             print(f"Created validation dataset with {len(self.val_dset):,} jets")
@@ -134,3 +151,11 @@ class JetDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return self.get_dataloader(dataset=self.test_dset, shuffle=False)
+
+    def teardown(self, stage: str = None):
+        # Remove temporary files
+        if stage == "fit" and self.move_files_temp and dist.get_rank() == 0:
+            print("-" * 100)
+            print(f"Removing training files: \n\t{self.train_file}\n\t{self.val_file}")
+            fu.remove_files_temp(self.train_file, self.val_file)
+            print("-" * 100)

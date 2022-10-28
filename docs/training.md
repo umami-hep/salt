@@ -1,5 +1,4 @@
 
-
 ### Setup Logging
 
 Salt has the potential to supports any logging framework also supported by PTL.
@@ -26,8 +25,6 @@ Consider adding these variables to your [bashrc](https://www.journaldev.com/4147
 
     to your `~/.bashrc` file.
     If no such file exists, create one in your home directory.
-
-
 
 ### Training
 
@@ -103,8 +100,17 @@ Test different counts to find the optimal value, or just set this to the number 
 
 Most HPC systems will have dedicated fast storage. Loading training data from these drives can significantly improve training times.
 
+To automatically copy training files into such a directory, add
+
+```yaml
+move_files_temp: /PATH/TO/MOVE
+```
+
+To the 'data' section of the training config. This will automatically move the training and validation file into this directory, and remove once training is complete.
 If you have enough RAM, you can load the training data into shared memory before starting training copying the training files to a path in `/dev/shm/`. Make sure to clean up your files in when you are done.
 
+???+ warning "Remove files manually if training is stopped"
+    Note, if training is force stopped somehow, then the files will remain in the temporary directory and must be manually removed.
 
 ### Slurm Batch
 
