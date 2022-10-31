@@ -13,6 +13,7 @@ theme:
 nav:
     - Introduction: 'index.md'
     - Setup: setup.md
+    - Preprocessing: preprocessing.md
     - Training: training.md
     - Evaluation: evaluation.md
     - Contributing: contributing.md

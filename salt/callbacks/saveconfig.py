@@ -1,5 +1,4 @@
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -32,24 +31,20 @@ class SaveConfigCallback(Callback):
         super().__init__()
         self.parser = parser
         self.config = config
-        self.config_filename = Path(self.config.config[0].abs_path).name
+        self.config_filename = config_filename
         self.overwrite = overwrite
         self.multifile = multifile
         self.already_saved = False
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        if self.already_saved:
-            return
-        if stage != "fit":
+        if self.already_saved or stage != "fit":
             return
 
-        trainer.timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
-
-        log_dir = trainer.log_dir  # this broadcasts the directory
+        log_dir = Path(trainer.log_dir)
         assert log_dir is not None
-
-        trainer.out_dir = Path(log_dir / Path(trainer.timestamp))
-        config_path = Path(trainer.out_dir / self.config_filename)
+        trainer.timestamp = log_dir.name
+        trainer.out_dir = log_dir
+        config_path = Path(log_dir / self.config_filename)
 
         if not self.overwrite:
             # check if the file exists on rank 0
@@ -72,7 +67,7 @@ class SaveConfigCallback(Callback):
             # to do it usually but it hasn't logged anything at this point
             config_path.parent.mkdir(parents=True, exist_ok=True)
             print("-" * 100)
-            print(f"Created output dir {trainer.out_dir}")
+            print(f"Created output dir {config_path.parent}")
             print("-" * 100, "\n")
 
             # copy the scale dict

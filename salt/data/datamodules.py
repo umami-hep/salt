@@ -79,7 +79,9 @@ class JetDataModule(pl.LightningDataModule):
             fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
 
     def setup(self, stage: str):
-        print("-" * 100)
+        if dist.get_rank() == 0:
+            print("-" * 100)
+
         if stage == "fit" and self.move_files_temp:
             # Set the training/validation file to the temp path
             self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
@@ -101,7 +103,7 @@ class JetDataModule(pl.LightningDataModule):
         )
 
         # Only print train/val dataset details when actually training
-        if stage == "fit":
+        if stage == "fit" and dist.get_rank() == 0:
             print(f"Created training dataset with {len(self.train_dset):,} jets")
             print(f"Created validation dataset with {len(self.val_dset):,} jets")
 
@@ -116,7 +118,8 @@ class JetDataModule(pl.LightningDataModule):
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 
-        print("-" * 100, "\n")
+        if dist.get_rank() == 0:
+            print("-" * 100, "\n")
 
     def get_dataloader(self, dataset, shuffle):
         # batched reads from h5 (weak shuffling)

@@ -21,12 +21,13 @@ def train_template(args=None) -> None:
         args = []
 
     # setup args
-    args += [f"--config={config_path}/simple.yaml"]
+    args += [f"--config={config_path}/base.yaml"]
+    args += [f"--config={config_path}/gnn.yaml"]
     args += [f"--data.scale_dict={sd_fname}"]
     args += [f"--data.train_file={h5_fname}"]
     args += [f"--data.val_file={h5_fname}"]
-    args += ["--data.num_jets_train=2500"]
-    args += ["--data.num_jets_val=2500"]
+    args += ["--data.num_jets_train=1000"]
+    args += ["--data.num_jets_val=1000"]
     args += ["--data.batch_size=100"]
     args += ["--data.num_workers=0"]
     args += ["--trainer.logger.offline=True"]
@@ -52,14 +53,27 @@ def test_train_unbatched() -> None:
 
 
 @pytest.mark.filterwarnings(w)
+def test_train_dev() -> None:
+    args = ["fit", "--trainer.fast_dev_run=5"]
+    train_template(args)
+
+
+@pytest.mark.filterwarnings(w)
 def test_train_movefilestemp() -> None:
-    args = ["fit", "--data.move_files_temp=/dev/shm/test_files"]
+    tmp_path = "/dev/shm/test_files"
+    args = ["fit", f"--data.move_files_temp={tmp_path}"]
+    train_template(args)
+    assert not Path(tmp_path).exists()
+
+
+@pytest.mark.filterwarnings(w)
+def test_train_distributed() -> None:
+    args = ["fit", "--trainer.devices=2"]
     train_template(args)
 
 
 def setup_module():
-    """setup any state specific to the execution of the given module."""
-    # get test file
+    """Setup test suite (runs once)."""
     generate_test_input(h5_fname)
 
 
@@ -73,7 +87,7 @@ def generate_test_input(fpath: Path) -> None:
     """
 
     # settings
-    n_jets = 2500
+    n_jets = 1000
     jet_features = 2
     n_tracks_per_jet = 40
     track_features = 23

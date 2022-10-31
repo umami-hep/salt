@@ -246,13 +246,7 @@ class StructuredJetDataset(Dataset):
         for i, tf in enumerate(self.sd["track"].values()):
             tracks[..., i] = torch.where(
                 mask,
-                tracks[..., i] - tf["shift"],
-                tracks[..., i],
-            )
-
-            tracks[..., i] = torch.where(
-                mask,
-                tracks[..., i] / tf["scale"],
+                (tracks[..., i] - tf["shift"]) / tf["scale"],
                 tracks[..., i],
             )
 
