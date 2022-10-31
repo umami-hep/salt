@@ -149,7 +149,9 @@ class LightningTagger(pl.LightningModule):
         # inputs
         exp.log_parameter("num_jets_train", len(train_dset))
         exp.log_parameter("num_jets_val", len(val_dset))
-        exp.log_parameter("batch_size", train_loader.batch_size)
+        batch_size = train_loader.batch_size
+        batch_size = train_loader.sampler.batch_size if not batch_size else batch_size
+        exp.log_parameter("batch_size", batch_size)
         # TODO: log input variables from datasets
 
         num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -163,7 +165,9 @@ class LightningTagger(pl.LightningModule):
         # version info
         git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
         exp.log_parameter("git_hash", git_hash.decode("ascii").strip())
-        exp.log_parameter("timestamp", trainer.timestamp)
+        exp.log_parameter("out_dir", self.logger.save_dir)
+        if hasattr(trainer, "timestamp"):
+            exp.log_parameter("timestamp", trainer.timestamp)
         exp.log_parameter("torch_version", torch.__version__)
         exp.log_parameter("lightning_version", pl.__version__)
         exp.log_parameter("cuda_version", torch.version.cuda)

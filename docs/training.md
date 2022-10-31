@@ -1,3 +1,4 @@
+Before getting started with this section, please make sure you have read the [preprocessing documentation](preprocessing.md) which describes how to produce training files for the framework.
 
 ### Setup Logging
 
@@ -31,16 +32,19 @@ Consider adding these variables to your [bashrc](https://www.journaldev.com/4147
 Training is fully configured via a YAML config file and a CLI powered by [pytorch lightning](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli.html#lightning-cli).
 This allows you control all aspects of the training from config or directly via command line arguments.
 
-A simple config file is provided [here]({{repo_url}}-/blob/main/salt/configs/simple.yaml)
-You can start a training using this config with the `main.py` python script, which is also exposed through the command `main`.
+The configuration is split into two parts.
+The [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
+This config is used by default for all trainings without you having to explicitly specify it.
+Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/salt/configs/gnn.yaml) contain a full description of a specific model.
+You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `main`.
 
 ```bash
-main fit --config configs/simple.yaml
+main fit --config configs/gnn.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
-The `--config` argument specifies the config file to use.
-It's possible to specify more than one configuration file, the CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
+It's possible to specify more than one configuration file, for example to override the values set in [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml).
+The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
 
 ??? info "Running a test training"
 
@@ -54,12 +58,17 @@ It's possible to specify more than one configuration file, the CLI will merge th
 
     Logging and checkpoint are suppressed when using this flag.
 
+
+#### Using the CLI
+
 You can also configure the training directly through CLI arguments.
 For a full list of available arguments run
 
 ```bash
 main fit --help
 ```
+
+#### Choosing GPUs
 
 By default the config will try to use the first available GPU, but
 you can specify which ones to use with the `--trainer.devices` flag.
@@ -68,6 +77,11 @@ Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerato
 ??? warning "Check GPU usage before starting training."
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
+
+#### Reproducibility
+
+Trainings are fully reproducible thanks to the `--seed_everything` flag.
+This flag is set in the [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config.
 
 ### Dataloading
 
@@ -98,19 +112,21 @@ Test different counts to find the optimal value, or just set this to the number 
 
 #### Fast Disk Access
 
-Most HPC systems will have dedicated fast storage. Loading training data from these drives can significantly improve training times.
-
-To automatically copy training files into such a directory, add
+Most HPC systems will have dedicated fast storage.
+Loading training data from these drives can significantly improve training times.
+To temporarily copy training files into a target directory before training, add
 
 ```yaml
-move_files_temp: /PATH/TO/MOVE
+move_files_temp: /temp/path/
 ```
 
-To the 'data' section of the training config. This will automatically move the training and validation file into this directory, and remove once training is complete.
-If you have enough RAM, you can load the training data into shared memory before starting training copying the training files to a path in `/dev/shm/`. Make sure to clean up your files in when you are done.
+to the `data` section of the training config.
+If you have enough RAM, you can load the training data into shared memory before starting training by setting `move_files_temp` to a path under `/dev/shm/`.
 
-???+ warning "Remove files manually if training is stopped"
-    Note, if training is force stopped somehow, then the files will remain in the temporary directory and must be manually removed.
+??? warning "Ensure temporary files are removed"
+
+    The code will try to remove the temporary files when the training is complete, but if the training is interrupted this may not happen.
+    You should double check whether you need to manually remove the temporary files or risk clogging up your system's RAM.
 
 ### Slurm Batch
 
@@ -120,28 +136,35 @@ Those at institutions with Slurm managed GPU batch queues can submit training jo
 sbatch submit_slurm.sh
 ```
 
-If training ends prematurely, you can be left with floating worker processes on the node which can clog things up for other users.
-You should check for this after running training jobs which are cancelled or fail.
-To do so, `srun` into the affected node using
+The submit script only supports running from a conda environment for now.
+There are several options in the script which need to be tailored to make sure to make a look inside.
 
-```bash
-srun --pty --cpus-per-task 2 -w compute-gpu-0-3 -p GPU bash
-```
+??? info "Cleaning up after interruption"
 
-and then kill your running processes using
+    If training is interrupted, you can be left with floating worker processes on the node which can clog things up for other users.
+    You should check for this after running training jobs which are cancelled or fail.
+    To do so, `srun` into the affected node using
 
-```bash
-pkill -u <username> -f train.py -e
-```
+    ```bash
+    srun --pty --cpus-per-task 2 -w compute-gpu-0-3 -p GPU bash
+    ```
+
+    and then kill any remaining running python processes using
+
+    ```bash
+    pkill -u <username> -f python -e
+    ```
 
 ### Resuming Training
 
 Model checkpoints are saved in timestamped directories under `logs/`.
-You can resume the full training state from a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
+These directories also get a copy of the fully merging training config (`config.yaml`), and a copy of the umami scale dict.
+To resume a training, point to a previously saved config and a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
 
 ```bash
-main fit --config path/to/config.yaml --ckpt_path path/to/checkpoint.ckpt
+main fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
 ```
 
+The full training state, including the state of the optimiser, is resumed.
 The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
 where it left off.

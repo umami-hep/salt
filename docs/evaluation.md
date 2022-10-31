@@ -16,14 +16,14 @@ The result is saved as an h5 file in the `ckpts/` dir.
 You can use `--data.num_jets_test` to set the number of training jets if you want to
 override the default in the training config.
 
-???+ warning "Only one GPU is supported for the test loop."
+??? warning "Only one GPU is supported for the test loop."
 
     When testing, only a single GPU is supported.
     This is enforced by the framework, so if you try to use more than one device you will see a message
     `Setting --trainer.devices=1`
 
 
-???+ warning "Output files are overwritten by default."
+??? warning "Output files are overwritten by default."
 
     Get in touch if this is a problem.
 

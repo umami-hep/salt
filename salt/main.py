@@ -10,7 +10,6 @@ from salt.utils.cli import SaltCLI
 
 
 def main(args: ArgsType = None) -> None:
-    # instantiate CI
     SaltCLI(
         model_class=LightningTagger,
         datamodule_class=JetDataModule,
@@ -18,8 +17,8 @@ def main(args: ArgsType = None) -> None:
         env_parse=True,
         args=args,
         parser_kwargs={
-            "fit": {"default_config_files": ["configs/defaults.yaml"]},
-            "test": {"default_config_files": ["configs/defaults.yaml"]},
+            "fit": {"default_config_files": ["configs/base.yaml"]},
+            "test": {"default_config_files": ["configs/base.yaml"]},
         },
     )
 

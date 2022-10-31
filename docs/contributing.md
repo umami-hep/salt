@@ -7,11 +7,11 @@ You should make changes inside a [feature branch](https://docs.gitlab.com/ee/git
 
 Remember to keep you fork [up to date](https://about.gitlab.com/blog/2016/12/01/how-to-keep-your-fork-up-to-date-with-its-origin/) with upstream.
 
-#### Code Formatting
+#### Code Style
 
 It's good practice to document your code with module and function docstrings, and inline comments.
-It's also recommended to use [black](https://github.com/psf/black) to format your contributions.
-You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) for more guidelines on code style.
+Using [black](https://github.com/psf/black) to format code is also enforced by the pre-commit checks.
+You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) or the coding style [tutorial](https://ftag.docs.cern.ch/software/tutorials/tutorial-coding/) for more guidance on code style.
 
 #### Pre-commit Checks
 
@@ -31,3 +31,12 @@ pre-commit run
 ```
 
 Include the `--all-files` flag if you want to run the checks over all the files in the repository.
+
+
+#### Test Suite
+
+From the top level directory of the repository, run
+
+```bash
+pytest
+```
