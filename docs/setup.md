@@ -4,6 +4,7 @@ To use the framework, you can either use the prebuilt docker containers, or crea
 You should set up the package from a powerful machine with access to a GPU.
 
 Start by cloning the repo. If you plan to contribute to the repo, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html), rather than cloning the below link.
+
 ```bash
 git clone https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt.git
 cd salt
@@ -19,23 +20,24 @@ The recommended workflow is to set the package up using conda.
     After cloning the repo, you will need to set up conda if you don't already have it installed.
     A script is provided which will install [mamba](https://mamba.readthedocs.io/en/latest/index.html),
     and also create a fresh Python environment named `salt`.
+
     ```bash
-    source ./setup/setup_conda.sh
+    source setup/setup_conda.sh
     ```
+
     The script should activate the newly created environment for you.
-    To activate it yourself, just run
 
-    ```bash
-    conda activate gnn
-    ```
-
-    If you already have conda installed, just run
+    If you already have conda installed, you can instead create a fresh python environment using
 
     ```bash
     conda create -n salt python
     ```
 
-    to create a fresh python environment.
+    To activate it, just run
+
+    ```bash
+    conda activate salt
+    ```
 
 === "venv"
 
@@ -64,7 +66,7 @@ The recommended workflow is to set the package up using conda.
         docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
     ```
 
-    Once you've pulled the image locally, you can run it with
+    Once you have the image locally, you can run it with
 
     ```bash
     singularity exec -ce --nv --bind $PWD \
