@@ -2,7 +2,7 @@ Before getting started with this section, please make sure you have read the [pr
 
 ### Setup Logging
 
-Salt has the potential to supports any logging framework also supported by PTL.
+Salt has the potential to supports any logging framework also supported by Lightning.
 At the moment only comet is supported.
 
 #### Comet

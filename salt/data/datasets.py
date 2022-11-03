@@ -246,7 +246,7 @@ class StructuredJetDataset(Dataset):
         # normalise track inputs
         for i, tf in enumerate(self.sd["track"].values()):
             tracks[..., i] = torch.where(
-                mask,
+                ~mask,
                 (tracks[..., i] - tf["shift"]) / tf["scale"],
                 tracks[..., i],
             )

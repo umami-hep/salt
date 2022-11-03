@@ -3,7 +3,7 @@
 Welcome to the Salt framework.
 Salt is a general-purpose framework to train state-of-the art jet flavour tagging algorithms such as GN1.
 
-The code is hosted on CERN GitLab:
+The code is hosted on the CERN GitLab:
 
 - [https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt)
 
