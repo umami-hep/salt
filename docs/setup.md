@@ -46,7 +46,7 @@ The recommended workflow is to set the package up using conda.
     source env/bin/activate
     ```
 
-=== "singularity
+=== "singularity"
 
     Prebuilt docker images are an easy way to use salt, but can also be a bit more cumbersome than other approaches.
     You can run the prebuilt docker images using [singulartiy](https://sylabs.io/guides/latest/user-guide/).
