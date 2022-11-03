@@ -9,38 +9,10 @@ git clone https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt.git
 cd salt
 ```
 
-### Prebuilt Image
+### Create Environment
 
-Prebuilt docker images are the recommended way to work with the GNN. You can run the prebuilt docker images using [singulartiy](https://sylabs.io/guides/latest/user-guide/).
-It is recommended to set `SINGULARITY_CACHEDIR` in your `~/.bashrc` to make sure images are pulled to a directory with enough free space.
-
-```bash
-export SINGULARITY_CACHEDIR=<some path>/.singularity/
-```
-
-Next, you can pull the image:
-
-```bash
-singularity pull --docker-login \
-    $SINGULARITY_CACHEDIR/salt.simg \
-    docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
-```
-
-As the repository is internal at the moment, you'll need to enter your CERN credentials when pulling.
-
-Once you've pulled the docker image locally, you can run it with:
-
-```bash
-singularity exec -ce --nv --bind $PWD \
-    --env-file ./setup/singularity_envs.sh \
-    $SINGULARITY_CACHEDIR/salt.simg bash
-```
-In order to mount a directory to the image when running `singularity exec`, use the `--bind <path>` argument
-
-
-### Local Environment
-
-If you prefer to work outside of a container, you can setup up the code with conda or Python's venv.
+You can install salt within an environment or docker image.
+The recommended workflow is to set the package up using conda.
 
 === "conda"
 
@@ -57,6 +29,14 @@ If you prefer to work outside of a container, you can setup up the code with con
     conda activate gnn
     ```
 
+    If you already have conda installed, just run
+
+    ```bash
+    conda create -n salt python
+    ```
+
+    to create a fresh python environment.
+
 === "venv"
 
     Create a fresh virtual environment and activate it using
@@ -66,12 +46,42 @@ If you prefer to work outside of a container, you can setup up the code with con
     source env/bin/activate
     ```
 
-## Install the salt package
+=== "singularity
+
+    Prebuilt docker images are an easy way to use salt, but can also be a bit more cumbersome than other approaches.
+    You can run the prebuilt docker images using [singulartiy](https://sylabs.io/guides/latest/user-guide/).
+    It is recommended to set `SINGULARITY_CACHEDIR` in your `~/.bashrc` to make sure images are pulled to a directory with enough free space.
+
+    ```bash
+    export SINGULARITY_CACHEDIR=<some path>/.singularity/
+    ```
+
+    Next, pull the image:
+
+    ```bash
+    singularity pull --docker-login \
+        $SINGULARITY_CACHEDIR/salt.simg \
+        docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
+    ```
+
+    Once you've pulled the image locally, you can run it with
+
+    ```bash
+    singularity exec -ce --nv --bind $PWD \
+        $SINGULARITY_CACHEDIR/salt.simg bash
+    ```
+    In order to mount a directory to the image when running `singularity exec`, use the `--bind <path>` argument
+
+
+### Install the salt package
 
 Once inside your container or virtual environment, you can install the `salt` package and it's dependencies via `pip` using
+
 ```bash
 pip3 install -e .
 ```
+
+To verify your installation, you can run the [test suite](contributing#test-suite).
 
 ???+ info "Installation problems"
 

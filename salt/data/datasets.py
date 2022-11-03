@@ -211,8 +211,9 @@ class StructuredJetDataset(Dataset):
         # concatenate
         jets_repeat = torch.repeat_interleave(jets[:, None, :], tracks.shape[1], dim=1)
         tracks = torch.cat([jets_repeat, tracks], dim=2)
+        tracks[mask] = 0
 
-        return torch.nan_to_num(tracks), mask, None
+        return tracks, mask, None
 
     def get_scale_dict(self, scale_dict_path: str, inputs: dict):
         # open scale dict

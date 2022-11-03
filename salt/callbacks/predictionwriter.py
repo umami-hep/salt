@@ -102,18 +102,15 @@ class PredictionWriter(Callback):
             print("Warning! Overwriting existing file.")
 
         with h5py.File(self.out_path, "w") as f:
-            self.create_dataset(f, jet_df, self.jet)
+            self.create_dataset_np(f, jet_df.to_records(index=False), self.jet)
 
             if self.write_tracks and "track_classification" in pl_module.tasks:
-                self.create_dataset_np(f, t, self.track)
+                self.create_dataset_np(f, t, self.track, half_precision=True)
 
         print("Created output file", self.out_path)
         print("-" * 100, "\n")
 
-    def create_dataset(self, f, df, name):
-        f.create_dataset(name, data=df.to_records(index=False), compression="lzf")
-
-    def create_dataset_np(self, f, a, name, half_precision=True):
+    def create_dataset_np(self, f, a, name, half_precision=False):
         # convert down to float16
         if half_precision:
 
