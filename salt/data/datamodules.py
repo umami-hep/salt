@@ -88,19 +88,21 @@ class JetDataModule(pl.LightningDataModule):
             self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
 
         # create training and validation datasets
-        self.train_dset = TrainJetDataset(
-            filename=self.train_file,
-            inputs=self.inputs,
-            tasks=self.tasks,
-            num_jets=self.num_jets_train,
-        )
+        if stage == "fit" or stage == "test":
+            self.train_dset = TrainJetDataset(
+                filename=self.train_file,
+                inputs=self.inputs,
+                tasks=self.tasks,
+                num_jets=self.num_jets_train,
+            )
 
-        self.val_dset = TrainJetDataset(
-            filename=self.val_file,
-            inputs=self.inputs,
-            tasks=self.tasks,
-            num_jets=self.num_jets_val,
-        )
+        if stage == "fit":
+            self.val_dset = TrainJetDataset(
+                filename=self.val_file,
+                inputs=self.inputs,
+                tasks=self.tasks,
+                num_jets=self.num_jets_val,
+            )
 
         # Only print train/val dataset details when actually training
         if stage == "fit" and dist.get_rank() == 0:
