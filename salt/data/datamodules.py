@@ -1,9 +1,8 @@
 import pytorch_lightning as pl
-import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 import salt.utils.fileutils as fu
-from salt.data.datasets import StructuredJetDataset, TrainJetDataset
+from salt.data.datasets import TestJetDataset, TrainJetDataset
 from salt.data.samplers import RandomBatchSampler
 from salt.utils.collate import collate
 
@@ -14,7 +13,7 @@ class JetDataModule(pl.LightningDataModule):
         train_file: str,
         val_file: str,
         inputs: dict,
-        tasks: dict,
+        tasks: list,
         batched_read: bool,
         batch_size: int,
         num_workers: int,
@@ -37,8 +36,8 @@ class JetDataModule(pl.LightningDataModule):
             Test file path
         inputs : dict
             Input dataset name for each input type
-        tasks : dict
-            Dict of tasks to perform
+        tasks : list
+            List of task names
         batched_read : bool
             If true, read from h5 in batches
         batch_size : int
@@ -79,7 +78,7 @@ class JetDataModule(pl.LightningDataModule):
             fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
 
     def setup(self, stage: str):
-        if dist.get_rank() == 0:
+        if self.trainer.is_global_zero:
             print("-" * 100)
 
         if stage == "fit" and self.move_files_temp:
@@ -105,14 +104,14 @@ class JetDataModule(pl.LightningDataModule):
             )
 
         # Only print train/val dataset details when actually training
-        if stage == "fit" and dist.get_rank() == 0:
+        if stage == "fit" and self.trainer.is_global_zero:
             print(f"Created training dataset with {len(self.train_dset):,} jets")
             print(f"Created validation dataset with {len(self.val_dset):,} jets")
 
         if stage == "test":
             assert self.test_file is not None
             assert self.scale_dict is not None
-            self.test_dset = StructuredJetDataset(
+            self.test_dset = TestJetDataset(
                 filename=self.test_file,
                 inputs=self.inputs,
                 scale_dict=self.scale_dict,
@@ -120,7 +119,7 @@ class JetDataModule(pl.LightningDataModule):
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 
-        if dist.get_rank() == 0:
+        if self.trainer.is_global_zero:
             print("-" * 100, "\n")
 
     def get_dataloader(self, dataset, shuffle):
@@ -158,8 +157,8 @@ class JetDataModule(pl.LightningDataModule):
         return self.get_dataloader(dataset=self.test_dset, shuffle=False)
 
     def teardown(self, stage: str = None):
-        # Remove temporary files
-        if stage == "fit" and self.move_files_temp and dist.get_rank() == 0:
+        """Remove temporary files."""
+        if stage == "fit" and self.move_files_temp and self.trainer.is_global_zero:
             print("-" * 100)
             print(f"Removing training files: \n\t{self.train_file}\n\t{self.val_file}")
             fu.remove_files_temp(self.train_file, self.val_file)

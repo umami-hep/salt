@@ -1,4 +1,4 @@
-### Contributing guidelines
+### Forking Workflow
 
 If you want to contribute to the development of the GNN, you should create a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html) of the repository.
 You can read about forking workflows [here](https://www.atlassian.com/git/tutorials/comparing-workflows/forking-workflow), or take a look at the contributing guidelines in the [training dataset dumper documentation](https://training-dataset-dumper.docs.cern.ch/development/#contributing-guidelines).
@@ -7,13 +7,15 @@ You should make changes inside a [feature branch](https://docs.gitlab.com/ee/git
 
 Remember to keep you fork [up to date](https://about.gitlab.com/blog/2016/12/01/how-to-keep-your-fork-up-to-date-with-its-origin/) with upstream.
 
-#### Code Style
+### Code Standards
 
-It's good practice to document your code with module and function docstrings, and inline comments.
-Using [black](https://github.com/psf/black) to format code is also enforced by the pre-commit checks.
-You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) or the coding style [tutorial](https://ftag.docs.cern.ch/software/tutorials/tutorial-coding/) for more guidance on code style.
+Good coding standards are highly encouraged.
+You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) or the coding style [tutorial](https://ftag.docs.cern.ch/software/tutorials/tutorial-coding/) for guidance on code style.
+In short, aim to write clean readible code with plenty of module and function docstrings, and inline comments.
+Code is formatted using [black](https://github.com/psf/black) (this is enforced by the pre-commit checks).
 
-#### Pre-commit Checks
+
+### Pre-commit Checks
 
 The `pre-commit` framework is used to ensure contributions follow good coding standards.
 It is installed as a package dependency.
@@ -23,7 +25,7 @@ To set it up, just run
 pre-commit install
 ```
 
-The pre-commit checks with then be run every time you run `git commit`.
+The pre-commit checks will then be run every time you run `git commit`.
 You can run them manually over staged changes using
 
 ```bash

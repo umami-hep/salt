@@ -94,3 +94,13 @@ To verify your installation, you can run the [test suite](contributing#test-suit
     ```bash
     source setup/install.sh
     ```
+
+??? info "Installing `h5ls`"
+
+    If you set up with conda, you can run
+
+    ```bash
+    mamba install h5utils
+    ```
+
+    to install the `h5ls` command.

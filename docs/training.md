@@ -114,19 +114,15 @@ Test different counts to find the optimal value, or just set this to the number 
 
 Most HPC systems will have dedicated fast storage.
 Loading training data from these drives can significantly improve training times.
-To temporarily copy training files into a target directory before training, add
+To temporarily copy training files into a target directory before training, use the
+`--data.move_files_tmp=/temp/path/` flag.
 
-```yaml
-move_files_temp: /temp/path/
-```
-
-to the `data` section of the training config.
-If you have enough RAM, you can load the training data into shared memory before starting training by setting `move_files_temp` to a path under `/dev/shm/`.
+If you have enough RAM, you can load the training data into shared memory before starting training by setting `move_files_temp` to a path under `/dev/shm/<username>`.
 
 ??? warning "Ensure temporary files are removed"
 
     The code will try to remove the temporary files when the training is complete, but if the training is interrupted this may not happen.
-    You should double check whether you need to manually remove the temporary files or risk clogging up your system's RAM.
+    You should double check whether you need to manually remove the temporary files to avoid clogging up your system's RAM.
 
 ### Slurm Batch
 

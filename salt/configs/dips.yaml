@@ -1,12 +1,9 @@
+name: dips
+
 model:
-  tasks: &tasks
-    jet_classification:
-      weight: 1.0
-  net:
+  model:
     class_path: salt.models.JetTagger
     init_args:
-      tasks:
-        <<: *tasks
 
       init_net:
         class_path: salt.models.Dense
@@ -17,21 +14,22 @@ model:
           activation: &activation ReLU
           norm_layer: &norm_layer LayerNorm
 
-      gnn: null
-
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
         init_args:
           input_size: *embd_dim
 
       jet_net:
-        class_path: salt.models.Dense
+        class_path: salt.models.Task
         init_args:
-          input_size: *embd_dim
-          output_size: 3
-          hidden_layers: [128, 64, 32]
-          activation: *activation
-          norm_layer: *norm_layer
-          dropout: 0.1
-
-      track_net: null
+          name: jet_classification
+          loss: salt.losses.ClassificationLoss
+          net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embd_dim
+              output_size: 3
+              hidden_layers: [128, 64, 32]
+              activation: *activation
+              norm_layer: *norm_layer
+              dropout: 0.1

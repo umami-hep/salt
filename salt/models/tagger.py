@@ -1,32 +1,36 @@
 import torch.nn as nn
 
+# these need to be directly imported from their modules
+from salt.models.dense import Dense
+from salt.models.pooling import Pooling
+from salt.models.task import Task
+
 
 class JetTagger(nn.Module):
     def __init__(
         self,
-        tasks: dict,
-        init_net: nn.Module = None,
+        init_net: Dense = None,
         gnn: nn.Module = None,
-        pool_net: nn.Module = None,
-        jet_net: nn.Module = None,
-        track_net: nn.Module = None,
+        pool_net: Pooling = None,
+        jet_net: Task = None,
+        track_net: Task = None,
     ):
-        """Jet tagger model.
+        """Jet constituent tagger model.
+
+        # TODO: add option to pool separately for each task
 
         Parameters
         ----------
-        tasks : dict
-            Dict of tasks to perform
-        init_net : nn.Module
+        init_net : Dense
             Initialisation network
         gnn : nn.Module
             Graph neural network
         pool_net : nn.Module
             Pooling network
-        jet_net : nn.Module
-            Jet classification network
-        track_net : nn.Module
-            Track classification network
+        jet_net : Task
+            Jet classification task
+        track_net : Task
+            Track classification task
         """
         super().__init__()
 
@@ -35,24 +39,36 @@ class JetTagger(nn.Module):
         self.jet_net = jet_net
         self.pool_net = pool_net
         self.track_net = track_net
-        self.tasks = tasks
 
-        if "jet_classification" in self.tasks and not jet_net:
-            raise ValueError("Can't run jet classification without a jet net.")
-        if "track_classification" in self.tasks and not track_net:
-            raise ValueError("Can't run track classification without a track net.")
-
-    def forward(self, x, mask):
+    def forward(self, x, mask, labels):
         mask[..., 0] = False  # hack to make the MHA work
         embd_x = self.init_net(x)
         if self.gnn:
             embd_x = self.gnn(embd_x, mask=mask)
         pooled = self.pool_net(embd_x, mask=mask)
 
-        preds = {}
-        if self.jet_net and "jet_classification" in self.tasks:
-            preds["jet_classification"] = self.jet_net(pooled)
-        if self.track_net and "track_classification" in self.tasks:
-            preds["track_classification"] = self.track_net(embd_x)
+        # run tasks
+        preds, loss = self.tasks(pooled, embd_x, mask, labels)
 
-        return preds
+        return preds, loss
+
+    def tasks(self, pooled, embd_x, mask, labels):
+        preds = {}
+        loss = {}
+
+        for task in self.get_tasks():
+            inputs = pooled if "jet" in task.name else embd_x  # TODO: make robust
+            p, subloss = task(inputs, labels[task.name] if labels is not None else None)
+            preds[task.name] = p
+            loss[task.name] = subloss
+
+        return preds, loss
+
+    def get_tasks(self):
+        tasks = []
+        for n in dir(self):
+            task = getattr(self, n)
+            if not isinstance(task, Task) or task is None:
+                continue
+            tasks.append(task)
+        return tasks
