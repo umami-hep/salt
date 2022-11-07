@@ -1,44 +1,33 @@
-import socket
-import subprocess
-
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
-from salt.losses.classification import ClassificationLoss
-
 
 class LightningTagger(pl.LightningModule):
-    def __init__(self, net: nn.Module, tasks: dict):
+    def __init__(self, model: nn.Module, lrs_config: dict):
         """Lightning jet tagger model.
 
         Parameters
         ----------
-        net : nn.Module
-            Network to use
-        tasks : dict
-            Dict of tasks and loss weights for each task
+        model : nn.Module
+            Network and loss function defintions
+        lrs_config: dict
+            LRS config which has to be set dynamically for now
         """
 
         super().__init__()
 
-        self.save_hyperparameters(ignore=["net"])
+        self.save_hyperparameters(ignore=["model"])
 
-        self.model = net
-        self.tasks = tasks
+        self.model = model
+        self.lrs_config = lrs_config
 
-        self.losses = {}
-        for task_name, opts in self.tasks.items():
-            self.losses[task_name] = ClassificationLoss(
-                task_name, weight=opts["weight"]
-            )
-
-    def forward(self, x, mask):
+    def forward(self, x, mask, labels):
         """Forward pass through the model.
 
         Don't call this method directy.
         """
-        return self.model(x, mask)
+        return self.model(x, mask, labels)
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute
@@ -61,32 +50,25 @@ class LightningTagger(pl.LightningModule):
             Reduced loss over the input batch
         """
 
-        # separate graphs and true labels
+        # unpack the batch
         inputs, mask, labels = batch
 
-        # get the model prediction
-        preds = self(inputs, mask)
+        # forward pass through model
+        preds, loss = self(inputs, mask, labels)
 
         if evaluation:
             return preds, labels, mask, None
 
-        # compute loss
-        loss = {"loss": 0}
-        for task in self.tasks:
-            task_loss = self.losses[task](preds, labels)
-            loss["loss"] += task_loss
-            loss[f"{task}_loss"] = task_loss.detach()
+        # compute total loss
+        loss["loss"] = sum(subloss for subloss in loss.values())
 
         return preds, labels, mask, loss
 
     def log_losses(self, loss, stage):
         self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
-        for task in self.tasks:
-            self.log(
-                f"{stage}_{task}_loss",
-                loss[f"{task}_loss"],
-                sync_dist=True,
-            )
+        for t, l in loss.items():
+            n = f"{stage}_{t}_loss" if "loss" not in t else f"{stage}_{t}"
+            self.log(n, l, sync_dist=True)
 
     def training_step(self, batch, batch_idx):
         # foward pass
@@ -114,61 +96,19 @@ class LightningTagger(pl.LightningModule):
         return preds, mask
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-5)
-
-        # cosine warm restarts
-        # sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=2)
+        opt = torch.optim.AdamW(
+            self.parameters(), lr=self.lrs_config["start"], weight_decay=1e-5
+        )
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(
             opt,
-            max_lr=1e-3,
+            max_lr=self.lrs_config["max"],
             total_steps=self.trainer.estimated_stepping_batches,
-            div_factor=1000,
-            final_div_factor=1000,
-            pct_start=0.1,
+            div_factor=self.lrs_config["max"] / self.lrs_config["start"],
+            final_div_factor=self.lrs_config["max"] / self.lrs_config["end"],
+            pct_start=0.2,
         )
         sch = {"scheduler": sch, "interval": "step"}
 
         return [opt], [sch]
-
-    def on_train_start(self):
-        if not self.trainer.is_global_zero:
-            return
-
-        if not self.logger:
-            return
-
-        exp = self.logger.experiment
-        trainer = self.trainer
-        train_loader = trainer.datamodule.train_dataloader()
-        val_loader = trainer.datamodule.val_dataloader()
-        train_dset = train_loader.dataset
-        val_dset = val_loader.dataset
-
-        # inputs
-        exp.log_parameter("num_jets_train", len(train_dset))
-        exp.log_parameter("num_jets_val", len(val_dset))
-        batch_size = train_loader.batch_size
-        batch_size = train_loader.sampler.batch_size if not batch_size else batch_size
-        exp.log_parameter("batch_size", batch_size)
-        # TODO: log input variables from datasets
-
-        num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        exp.log_parameter("trainable_params", num_params)
-
-        # resources
-        exp.log_parameter("num_gpus", trainer.num_devices)
-        exp.log_parameter("gpu_ids", trainer.device_ids)
-        exp.log_parameter("num_workers", train_loader.num_workers)
-
-        # version info
-        git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-        exp.log_parameter("git_hash", git_hash.decode("ascii").strip())
-        exp.log_parameter("out_dir", self.logger.save_dir)
-        if hasattr(trainer, "timestamp"):
-            exp.log_parameter("timestamp", trainer.timestamp)
-        exp.log_parameter("torch_version", torch.__version__)
-        exp.log_parameter("lightning_version", pl.__version__)
-        exp.log_parameter("cuda_version", torch.version.cuda)
-        exp.log_parameter("hostname", socket.gethostname())

@@ -9,6 +9,9 @@ edit_uri: 'tree/main/docs'
 
 theme:
     name: material
+    icon:
+        logo: ':salt:'
+        favicon: ':salt:'
 
 nav:
     - Introduction: 'index.md'

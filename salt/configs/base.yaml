@@ -7,11 +7,7 @@ data:
   inputs:
     jet: jets
     track: tracks_loose
-  tasks: &tasks
-    jet_classification:
-      weight: 1.0
-    track_classification:
-      weight: 0.5
+  tasks: [jet_classification, track_classification]
   batched_read: True
   batch_size: 1000
   num_workers: 20
@@ -19,7 +15,6 @@ data:
   num_jets_val: 1_000_000
   num_jets_test: 1_000_000
 
-# TODO: configure learning rate
 trainer:
   max_epochs: 100
   accelerator: gpu
@@ -36,7 +31,6 @@ trainer:
     init_args:
       save_dir: *default_root_dir
       project_name: salt
-      experiment_name: salt
 
   callbacks:
     - class_path: salt.callbacks.Checkpoint
@@ -48,3 +42,10 @@ trainer:
     - class_path: pytorch_lightning.callbacks.ModelSummary
       init_args:
         max_depth: 2
+
+# configure learning rate
+model:
+  lrs_config:
+    start: 1e-8
+    max: 2e-4
+    end: 1e-8

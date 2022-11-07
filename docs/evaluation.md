@@ -1,3 +1,10 @@
+You can evaluate models tried using salt over a test set.
+Test samples are loaded from structured numpy arrays stored in h5 files in the same format as those produced by the TDD,
+or the "preparation" stage of umami.
+After producing the evaluation file, you can make performance plots using [puma](https://github.com/umami-hep/puma).
+
+### Running the Test Loop
+
 To evaluated a trained model on a test file, the `test` subcommand is used.
 
 ```bash
@@ -31,4 +38,4 @@ override the default in the training config.
 ### Track evaluation
 
 By default, only the jet quantities are evaluated to save time and space.
-If you want to study the track aux task performance, you need to specify `write_tracks=True` when instantiating the callback.
+If you want to study the track aux task performance, you need to specify `--write_tracks=True` when instantiating the callback.

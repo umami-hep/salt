@@ -2,10 +2,12 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
+from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from pytorch_lightning import Callback, LightningModule, Trainer
+
+from salt.utils.arrays import join_structured_arrays
 
 
 class PredictionWriter(Callback):
@@ -43,7 +45,7 @@ class PredictionWriter(Callback):
         self.track = trainer.datamodule.inputs["track"]
 
         # place to store intermediate outputs
-        self.tasks = pl_module.tasks
+        self.tasks = [t.name for t in pl_module.model.get_tasks()]
         self.outputs: dict = {t: [] for t in self.tasks}
         self.mask: list = []
 
@@ -77,9 +79,10 @@ class PredictionWriter(Callback):
         jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)
 
         # create output jet dataframe
-        jet_df = pd.DataFrame(jet_class_preds.cpu().numpy(), columns=self.jet_cols)
-        a = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
-        jet_df = pd.concat([jet_df, pd.DataFrame(a)], axis="columns")
+        dtype = np.dtype([(n, "f2") for n in self.jet_cols])
+        jets = u2s(jet_class_preds.cpu().numpy(), dtype)
+        jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
+        jets = join_structured_arrays((jets, jets2))
 
         if self.write_tracks and "track_classification" in pl_module.tasks:
             # masked softmax
@@ -94,7 +97,7 @@ class PredictionWriter(Callback):
             # add other other vars to the array
             track_vars = ["truthOriginLabel", "truthVertexIndex"]
             t2 = self.file[self.track].fields(track_vars)[: self.num_jets]
-            t = self.join_arrays((t, t2))
+            t = join_structured_arrays((t, t2))
 
         # write to h5 file
         print("\n" + "-" * 100)
@@ -102,21 +105,21 @@ class PredictionWriter(Callback):
             print("Warning! Overwriting existing file.")
 
         with h5py.File(self.out_path, "w") as f:
-            self.create_dataset_np(f, jet_df.to_records(index=False), self.jet)
+            self.create_dataset(f, jets, self.jet)
 
             if self.write_tracks and "track_classification" in pl_module.tasks:
-                self.create_dataset_np(f, t, self.track, half_precision=True)
+                self.create_dataset(f, t, self.track)
 
         print("Created output file", self.out_path)
         print("-" * 100, "\n")
 
-    def create_dataset_np(self, f, a, name, half_precision=False):
+    def create_dataset(self, f, a, name, half_precision=True):
         # convert down to float16
         if half_precision:
 
             def half(t):
                 t = np.dtype(t)
-                if t.kind == "f" and t.itemsize == 4:
+                if t.kind == "f" and t.itemsize == 2:
                     return "f2"
                 return t
 
@@ -124,12 +127,3 @@ class PredictionWriter(Callback):
 
         # write
         f.create_dataset(name, data=a, compression="lzf")
-
-    def join_arrays(self, arrays):
-        # https://github.com/numpy/numpy/issues/7811
-        newdtype = sum((a.dtype.descr for a in arrays), [])
-        newrecarray = np.empty(arrays[0].shape, dtype=newdtype)
-        for a in arrays:
-            for name in a.dtype.names:
-                newrecarray[name] = a[name]
-        return newrecarray

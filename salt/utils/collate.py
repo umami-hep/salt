@@ -2,10 +2,24 @@ import torch
 
 
 def collate(batch):
+    """Custom batch collate function.
+
+    Parameters
+    ----------
+    batch : list
+        List of tuple of batch items
+
+    Returns
+    -------
+    tuple
+        Concated batch items
+    """
+
     inputs = [sample[0] for sample in batch]
     valid = [sample[1] for sample in batch]
     labels = [sample[2] for sample in batch]
 
+    # labels is a dict of tensor so need to stack each
     labels_dict = {}
     elem = labels[0]
     for key in elem.keys():

@@ -3,9 +3,6 @@ import torch.nn as nn
 
 
 class Dense(nn.Module):
-    """A simple multi-layer perceptron (fully connected feed forward neural
-    network)."""
-
     def __init__(
         self,
         input_size: int,
@@ -17,7 +14,7 @@ class Dense(nn.Module):
         norm_final_layer: bool = False,
         dropout: float = 0.0,
     ):
-        """_summary_
+        """A simple fully connected feed forward neural network)
 
         Parameters
         ----------

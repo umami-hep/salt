@@ -1,22 +1,16 @@
-model:
-  tasks: &tasks
-    jet_classification:
-      weight: 1.0
-    track_classification:
-      weight: 0.5
+name: gnn
 
-  net:
+model:
+  model:
     class_path: salt.models.JetTagger
     init_args:
-      tasks:
-        <<: *tasks
 
       init_net:
         class_path: salt.models.Dense
         init_args:
           input_size: 23
           output_size: &embd_dim 128
-          hidden_layers: [256]
+          hidden_layers: [128]
           activation: &activation ReLU
           norm_layer: &norm_layer LayerNorm
 
@@ -37,20 +31,31 @@ model:
           input_size: *embd_dim
 
       jet_net:
-        class_path: salt.models.Dense
+        class_path: salt.models.Task
         init_args:
-          input_size: *embd_dim
-          output_size: 3
-          hidden_layers: [128, 64, 32]
-          activation: *activation
-          norm_layer: *norm_layer
+          name: jet_classification
+          loss: salt.losses.ClassificationLoss
+          net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embd_dim
+              output_size: 3
+              hidden_layers: [128, 64, 32]
+              activation: *activation
+              norm_layer: *norm_layer
+              dropout: *dropout
 
       track_net:
-        class_path: salt.models.Dense
+        class_path: salt.models.Task
         init_args:
-          input_size: 128
-          output_size: 8
-          hidden_layers: [128, 64, 32]
-          activation: *activation
-          norm_layer: *norm_layer
-          dropout: *dropout
+          name: track_classification
+          loss: salt.losses.ClassificationLoss
+          net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embd_dim
+              output_size: 3
+              hidden_layers: [128, 64, 32]
+              activation: *activation
+              norm_layer: *norm_layer
+              dropout: *dropout

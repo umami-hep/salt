@@ -11,7 +11,7 @@ class TrainJetDataset(Dataset):
         self,
         filename: str,
         inputs: dict,
-        tasks: dict,
+        tasks: list,
         num_jets: int = -1,
     ):
         """A simple map-style dataset for loading jets from an umami-
@@ -23,9 +23,8 @@ class TrainJetDataset(Dataset):
             Input h5 filepath
         inputs : dict
             Names of the h5 group to access for each type of input
-        tasks : dict
-            Dict containing information about each aux task, used to
-            load the labels for each task
+        tasks : list
+            List of each task to perform, used to load the labels for each task
         num_jets : int, optional
             Number of jets to use, by default -1
         """
@@ -140,7 +139,7 @@ class TrainJetDataset(Dataset):
         [check_group(self.file[g]) for g in self.file]
 
 
-class StructuredJetDataset(Dataset):
+class TestJetDataset(Dataset):
     def __init__(
         self,
         filename: str,
@@ -172,6 +171,7 @@ class StructuredJetDataset(Dataset):
         self.check_file(inputs)
 
         # get scale dict and input variables
+        # TODO: track variables somewhere else?
         self.sd, self.vars = self.get_scale_dict(scale_dict, inputs)
 
         # get fields
