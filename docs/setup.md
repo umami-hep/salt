@@ -3,6 +3,8 @@
 To use the framework, you can either use the prebuilt docker containers, or create your own conda or venv environment.
 You should set up the package from a powerful machine with access to a GPU.
 
+### Get the Code
+
 Start by cloning the repo. If you plan to contribute to the repo, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html), rather than cloning the below link.
 
 ```bash
@@ -12,25 +14,33 @@ cd salt
 
 ### Create Environment
 
-You can install salt within an environment or docker image.
+You can install salt within a virtual environment or a docker image.
 The recommended workflow is to set the package up using conda.
 
 === "conda"
 
     After cloning the repo, you will need to set up conda if you don't already have it installed.
-    A script is provided which will install [mamba](https://mamba.readthedocs.io/en/latest/index.html),
-    and also create a fresh Python environment named `salt`.
+
+    ??? info "Check for an existing conda installation"
+
+        Your institute cluster may already have a managed conda installation present,
+        please consult any local experts or documentation to find out whether this is the case.
+
+        If already present you should skip the installation, and instead just create a new environment.
+
+    You can either perform a manual installation by following the
+    [conda](https://docs.conda.io/)/[mamba](https://mamba.readthedocs.io/) documentation,
+    or use the provided script is provided which will install mamba (a faster, drop-in replacement for conda).
+    You can run the script with
 
     ```bash
     source setup/setup_conda.sh
     ```
 
-    The script should activate the newly created environment for you.
+    Once you have conda installed, you can instead create a fresh python environment using
 
-    If you already have conda installed, you can instead create a fresh python environment using
-
-    ```bash
-    conda create -n salt python
+    ```
+    conda create -n salt python=3.10
     ```
 
     To activate it, just run
@@ -41,6 +51,7 @@ The recommended workflow is to set the package up using conda.
 
 === "venv"
 
+    [venv](https://docs.python.org/3/library/venv.html) is a lightweight solution for creating virtual python environments, however it is not as fully featured as a fully fledged package manager such as conda.
     Create a fresh virtual environment and activate it using
 
     ```bash
@@ -85,7 +96,7 @@ pip3 install -e .
 
 To verify your installation, you can run the [test suite](contributing#test-suite).
 
-???+ info "Installation problems"
+??? info "Installation problems"
 
     If you get an `error: can't create or remove files in install directory` when installing
     or get `ModuleNotFoundError: No module named 'salt'` when trying to run the code,
@@ -104,3 +115,4 @@ To verify your installation, you can run the [test suite](contributing#test-suit
     ```
 
     to install the `h5ls` command.
+    The `h5utils` is already present in the docker image.

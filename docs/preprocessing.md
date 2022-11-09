@@ -18,7 +18,7 @@ For more information, take a look at the umami [docs](https://umami-docs.web.cer
 
 #### Preprocessing Requirements
 
-1. Please ensure you run preprocessing with a recent version of umami that includes [!648](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/648) (i.e. versions >=0.15).
+1. Please ensure you run preprocessing with a recent version of umami that includes [!648](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/648) and [!665](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/665) (i.e. versions >=0.16).
 
 2. It is also recommend to set `concat_jet_tracks: True` in your preprocessing config. If you want to concatenate only a subset of jet variables to each track, just provide the variable names as a list. See the [here](https://umami-docs.web.cern.ch/preprocessing/write_train_sample/#config-file) for more info.
 
@@ -26,7 +26,7 @@ For more information, take a look at the umami [docs](https://umami-docs.web.cer
 
 #### Creating the Validation Sample
 
-Umami can create a validation sample for you.
+Umami can create a resampled validation file for you.
 See [here](https://umami-docs.web.cern.ch/preprocessing/resampling/#create-the-resampled-hybrid-validation-sample) and [here](https://umami-docs.web.cern.ch/preprocessing/write_train_sample/#writing-validation-samples).
 
 #### Directory Structure

@@ -38,4 +38,4 @@ override the default in the training config.
 ### Track evaluation
 
 By default, only the jet quantities are evaluated to save time and space.
-If you want to study the track aux task performance, you need to specify `--write_tracks=True` when instantiating the callback.
+If you want to study the track aux task performance, you need to specify `write_tracks: True` in the `PredictionWriter` callback configuration in the base configuration file.

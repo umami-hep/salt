@@ -35,11 +35,3 @@ fi
 
 # set up conda environment
 source ${CONDA_INSTALL}/bin/activate
-
-# create conda environment for gnn studies
-if [[ ! -d ${CONDA_INSTALL}/envs/gnn/ ]]; then
-  conda create -n salt python
-fi
-
-# activate environment
-conda activate salt
