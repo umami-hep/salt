@@ -42,3 +42,13 @@ From the top level directory of the repository, run
 ```bash
 pytest
 ```
+
+??? info "Checking code coverage"
+
+    If you want to check the coverage of the test suite, you can instead
+    run the tests using `coverage`.
+
+    ```bash
+    coverage run --source salt -m pytest
+    coverage report
+    ```
