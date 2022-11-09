@@ -94,7 +94,7 @@ Once inside your container or virtual environment, you can install the `salt` pa
 pip3 install -e .
 ```
 
-To verify your installation, you can run the [test suite](contributing#test-suite).
+To verify your installation, you can run the [test suite](contributing.md#test-suite).
 
 ??? info "Installation problems"
 
