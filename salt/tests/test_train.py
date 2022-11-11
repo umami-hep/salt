@@ -25,13 +25,13 @@ class TestTrain:
         """Setup tests (runs once)."""
         cls.generate_train_input(cls.h5_fname)
 
-    def train_template(self, args=None) -> None:
+    def train_template(self, args=None, model="gnn") -> None:
         if args is None:
             args = []
 
         # setup args
         args += [f"--config={self.config_path}/base.yaml"]
-        args += [f"--config={self.config_path}/gnn.yaml"]
+        args += [f"--config={self.config_path}/{model}.yaml"]
         args += [f"--data.scale_dict={self.sd_fname}"]
         args += [f"--data.train_file={self.h5_fname}"]
         args += [f"--data.val_file={self.h5_fname}"]
@@ -70,6 +70,14 @@ class TestTrain:
     def test_train_distributed(self) -> None:
         args = ["fit", "--trainer.devices=2", "--data.num_workers=2"]
         self.train_template(args)
+
+    def test_train_dips(self) -> None:
+        args = ["fit"]
+        self.train_template(args, model="dips")
+
+    def test_train_regression(self) -> None:
+        args = ["fit"]
+        self.train_template(args, model="regression")
 
     @classmethod
     def generate_train_input(cls, fpath: Path) -> None:
@@ -120,7 +128,7 @@ class TestTrain:
                     arr = arr.astype(bool)
                     arr[:, 10:] = False
                 if key == "labels":
-                    arr = rng.integers(-1, 2, shape)
+                    arr = rng.integers(0, 8, shape)
                 g_tracks.create_dataset(key, data=arr)
                 if key == "inputs":
                     g_tracks[key].attrs[f"{tracks}_variables"] = ["jet_eta", "pt"]

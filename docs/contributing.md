@@ -35,7 +35,7 @@ pre-commit run
 Include the `--all-files` flag if you want to run the checks over all the files in the repository.
 
 
-#### Test Suite
+### Test Suite
 
 From the top level directory of the repository, run
 

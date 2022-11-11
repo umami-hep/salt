@@ -12,9 +12,9 @@ Predumped h5 samples are available [here](https://umami-docs.web.cern.ch/preproc
 
 The h5 files produced by the TDD are processed by the [umami framework](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/tree/master/umami) to produce training files.
 The umami framework handles jet selection, kinematic resampling, normalisation and shuffling.
-Use [this preprocessing config](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami-config-tags/-/blob/master/offline/PFlow-Preprocessing-GNN.yaml) and [this variable config](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/blob/master/umami/configs/GNN_Variables.yaml) for the creation of train samples for salt.
+The [default preprocessing config](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/blob/master/examples/preprocessing/PFlow-Preprocessing.yaml) and [this variable config](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/blob/master/umami/configs/GNN_Variables.yaml) are good places to start for the creation of train samples for salt.
 
-For more information, take a look at the umami [docs](https://umami-docs.web.cern.ch/trainings/GNN-instructions/)
+For more information on how to configure the preprocessing, take a look at the umami [docs](https://umami-docs.web.cern.ch/preprocessing/ntuple_preparation/#config-file).
 
 #### Preprocessing Requirements
 

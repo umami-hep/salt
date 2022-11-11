@@ -31,10 +31,10 @@ model:
           input_size: *embd_dim
 
       jet_net:
-        class_path: salt.models.Task
+        class_path: salt.models.ClassificationTask
         init_args:
           name: jet_classification
-          loss: salt.losses.ClassificationLoss
+          loss: torch.nn.CrossEntropyLoss
           net:
             class_path: salt.models.Dense
             init_args:
@@ -46,15 +46,15 @@ model:
               dropout: *dropout
 
       track_net:
-        class_path: salt.models.Task
+        class_path: salt.models.ClassificationTask
         init_args:
           name: track_classification
-          loss: salt.losses.ClassificationLoss
+          loss: torch.nn.CrossEntropyLoss
           net:
             class_path: salt.models.Dense
             init_args:
               input_size: *embd_dim
-              output_size: 3
+              output_size: 8
               hidden_layers: [128, 64, 32]
               activation: *activation
               norm_layer: *norm_layer

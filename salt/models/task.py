@@ -33,9 +33,44 @@ class Task(nn.Module):
         self.net = net
         self.loss = loss
 
-    def forward(self, x, labels):
+
+class ClassificationTask(Task):
+    def forward(self, x, labels, mask=None):
         preds = self.net(x)
+        if mask is not None:
+            preds = preds[~mask]
+            if labels is not None:
+                labels = labels[~mask]
+
         loss = None
         if labels is not None:
             loss = self.loss(preds, labels) * self.weight
+
+        return preds, loss
+
+
+class RegressionTask(Task):
+    """Gaussian regression tasks.
+
+    Applies softplus activation to sigmas to ensure positivty.
+    """
+
+    def forward(self, x, labels, mask=None):
+        if x.ndim != 2 or mask is not None:
+            raise NotImplementedError(
+                "Regression tasks are currently only supported for jet-level"
+                " predictions."
+            )
+
+        preds = self.net(x)
+
+        # split outputs into means and sigmas
+        assert preds.shape[-1] % 2 == 0
+        means, sigmas = preds.tensor_split(2, -1)
+        sigmas = nn.functional.softplus(sigmas)  # enforce positive variance
+
+        loss = None
+        if labels is not None:
+            loss = self.loss(means, labels, var=sigmas) * self.weight
+
         return preds, loss

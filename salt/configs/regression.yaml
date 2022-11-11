@@ -20,15 +20,15 @@ model:
           input_size: *embd_dim
 
       jet_net:
-        class_path: salt.models.ClassificationTask
+        class_path: salt.models.RegressionTask
         init_args:
           name: jet_classification
-          loss: torch.nn.CrossEntropyLoss
+          loss: torch.nn.GaussianNLLLoss
           net:
             class_path: salt.models.Dense
             init_args:
               input_size: *embd_dim
-              output_size: 3
+              output_size: 2
               hidden_layers: [128, 64, 32]
               activation: *activation
               norm_layer: *norm_layer
