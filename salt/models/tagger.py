@@ -41,7 +41,7 @@ class JetTagger(nn.Module):
         self.track_net = track_net
 
     def forward(self, x, mask, labels):
-        mask[..., 0] = False  # hack to make the MHA work
+        mask[..., 0] = False  # TODO: hack to make the MHA work
         embd_x = self.init_net(x)
         if self.gnn:
             embd_x = self.gnn(embd_x, mask=mask)
@@ -57,10 +57,17 @@ class JetTagger(nn.Module):
         loss = {}
 
         for task in self.get_tasks():
-            inputs = pooled if "jet" in task.name else embd_x  # TODO: make robust
-            p, subloss = task(inputs, labels[task.name] if labels is not None else None)
-            preds[task.name] = p
-            loss[task.name] = subloss
+            # TODO: make robust with a flag to say what the task is on
+            if "jet" in task.name:
+                task_input = pooled
+                task_mask = None
+            else:
+                task_input = embd_x
+                task_mask = mask
+            task_labels = labels[task.name] if labels is not None else None
+            task_preds, task_loss = task(task_input, task_labels, task_mask)
+            preds[task.name] = task_preds
+            loss[task.name] = task_loss
 
         return preds, loss
 
