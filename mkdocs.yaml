@@ -18,6 +18,7 @@ nav:
     - Preprocessing: preprocessing.md
     - Training: training.md
     - Evaluation: evaluation.md
+    - ONNX Export: export.md
     - Contributing: contributing.md
 
 plugins:

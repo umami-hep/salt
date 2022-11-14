@@ -18,6 +18,8 @@ dependencies = [
     "tqdm==4.62.3",
     "rich==12.6.0",
     "pre-commit==2.20.0",
+    "onnx==1.12.0",
+    "onnxruntime==1.13.1",
 ]
 
 [project.urls]
@@ -26,6 +28,8 @@ dependencies = [
 
 [project.scripts]
 main = "salt.main:main"
+to_onnx = "salt.to_onnx:main"
+get_onnx_metadata = "salt.get_onnx_metadata:main"
 
 [tool.setuptools]
 packages = ["salt"]

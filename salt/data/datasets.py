@@ -5,6 +5,8 @@ import torch
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
+from salt.utils.inputs import concat_jet_track
+
 
 class TrainJetDataset(Dataset):
     def __init__(
@@ -209,11 +211,10 @@ class TestJetDataset(Dataset):
         jets, tracks = self.scale_inputs(jets, tracks, mask)
 
         # concatenate
-        jets_repeat = torch.repeat_interleave(jets[:, None, :], tracks.shape[1], dim=1)
-        tracks = torch.cat([jets_repeat, tracks], dim=2)
-        tracks[mask] = 0
+        inputs = concat_jet_track(jets, tracks)
+        inputs[mask] = 0
 
-        return tracks, mask, None
+        return inputs, mask, None
 
     def get_scale_dict(self, scale_dict_path: str, inputs: dict):
         # open scale dict
@@ -221,30 +222,27 @@ class TestJetDataset(Dataset):
             scale_dict = json.load(f)
 
         # reformat
-        sd: dict = {i: {} for i in inputs.keys()}
-        for tf in scale_dict[inputs["jet"]]:
-            sd["jet"][tf["name"]] = {
-                "scale": tf["scale"],
-                "shift": tf["shift"],
-            }
-
-        for name, tf in scale_dict[inputs["track"]].items():
-            sd["track"][name] = tf
+        if isinstance(scale_dict[inputs["jet"]], list):
+            for tf in scale_dict[inputs["jet"]]:
+                scale_dict["jets"][tf["name"]] = {
+                    "scale": tf["scale"],
+                    "shift": tf["shift"],
+                }
 
         variables = {
-            "jet": sd["jet"].keys(),
-            "track": sd["track"].keys(),
+            "jet": scale_dict[inputs["jet"]].keys(),
+            "track": scale_dict[inputs["track"]].keys(),
         }
 
-        return sd, variables
+        return scale_dict, variables
 
     def scale_inputs(self, jets, tracks, mask):
         # normalise jet inputs
-        for i, tf in enumerate(self.sd["jet"].values()):
+        for i, tf in enumerate(self.sd["jets"].values()):
             jets[:, i] = (jets[:, i] - tf["shift"]) / tf["scale"]
 
         # normalise track inputs
-        for i, tf in enumerate(self.sd["track"].values()):
+        for i, tf in enumerate(self.sd["tracks_loose"].values()):
             tracks[..., i] = torch.where(
                 ~mask,
                 (tracks[..., i] - tf["shift"]) / tf["scale"],

@@ -41,7 +41,6 @@ class JetTagger(nn.Module):
         self.track_net = track_net
 
     def forward(self, x, mask, labels):
-        mask[..., 0] = False  # TODO: hack to make the MHA work
         embd_x = self.init_net(x)
         if self.gnn:
             embd_x = self.gnn(embd_x, mask=mask)

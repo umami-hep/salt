@@ -18,7 +18,7 @@ class TestPredict:
     test_dir = Path(__file__).resolve().parent
     tmp_dir = Path("/tmp/salt_tests/")
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    h5_fname = Path(tmp_dir / "test_predict_ttbar_blah.h5")
+    h5_fname = tmp_dir / "test_predict_ttbar_blah.h5"
     config_path = None
     sd_path = None
 

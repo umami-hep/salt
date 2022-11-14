@@ -5,7 +5,7 @@ A series of preprocessing steps are required to extract information from xAOD fi
 Training samples are created using the [training dataset dumper](https://gitlab.cern.ch/atlas-flavor-tagging-tools/training-dataset-dumper/).
 The default config file [`EMPFlow.json`](https://gitlab.cern.ch/atlas-flavor-tagging-tools/training-dataset-dumper/-/blob/r22/configs/single-b-tag/EMPFlowGNN.json) has all the information required to train models with salt.
 
-Predumped h5 samples are available [here](https://umami-docs.web.cern.ch/preprocessing/mc-samples/).
+Predumped h5 samples are available [here](https://ftag.docs.cern.ch/software/samples/).
 
 
 ### Preprocessing with Umami
@@ -18,7 +18,7 @@ For more information on how to configure the preprocessing, take a look at the u
 
 #### Preprocessing Requirements
 
-1. Please ensure you run preprocessing with a recent version of umami that includes [!648](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/648) and [!665](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/665) (i.e. versions >=0.16).
+1. Please ensure you run preprocessing with a recent version of umami that includes [!648](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/648) and [!665](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/665) (i.e. versions >=0.17).
 
 2. It is also recommend to set `concat_jet_tracks: True` in your preprocessing config. If you want to concatenate only a subset of jet variables to each track, just provide the variable names as a list. See the [here](https://umami-docs.web.cern.ch/preprocessing/write_train_sample/#config-file) for more info.
 

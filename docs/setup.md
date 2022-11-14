@@ -1,5 +1,3 @@
-# Setup
-
 To use the framework, you can either use the prebuilt docker containers, or create your own conda or venv environment.
 You should set up the package from a powerful machine with access to a GPU.
 
