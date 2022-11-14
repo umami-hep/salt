@@ -6,7 +6,7 @@ import pytest
 from numpy.random import default_rng
 
 from salt.main import main
-from salt.utils.tests import get_scale_dict
+from salt.utils.inputs import generate_scale_dict
 
 w = "ignore::pytorch_lightning.utilities.warnings.PossibleUserWarning:"
 
@@ -140,4 +140,4 @@ class TestTrain:
 
             # create scale dict file
             with open(cls.sd_fname, "w") as f:
-                f.write(json.dumps(get_scale_dict(jet_features, track_features)))
+                f.write(json.dumps(generate_scale_dict(jet_features, track_features)))

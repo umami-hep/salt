@@ -38,7 +38,9 @@ class SelfAttentionBlock(nn.Module):
         else:
             self.register_buffer("norm", None)
 
-        self.mha = nn.MultiheadAttention(embd_dim, num_heads, batch_first=True)
+        self.mha = nn.MultiheadAttention(
+            embd_dim, num_heads, batch_first=True, add_zero_attn=True
+        )
 
         self.dense = Dense(
             embd_dim,

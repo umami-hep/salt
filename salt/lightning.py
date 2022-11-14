@@ -1,3 +1,5 @@
+import warnings
+
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -16,11 +18,14 @@ class LightningTagger(pl.LightningModule):
         """
 
         super().__init__()
-
-        self.save_hyperparameters(ignore=["model"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.save_hyperparameters(logger=False)
 
         self.model = model
         self.lrs_config = lrs_config
+
+        self.in_dim = list(self.model.init_net.parameters())[0].shape[1]
 
     def forward(self, x, mask, labels):
         """Forward pass through the model.
