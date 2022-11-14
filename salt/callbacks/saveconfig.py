@@ -43,7 +43,7 @@ class SaveConfigCallback(Callback):
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         # save only on rank zero to avoid race conditions.
-        if stage != "fit" or not trainer.is_global_zero or self.already_saved:
+        if stage != "fit" or self.already_saved:
             return
 
         self.trainer = trainer
@@ -53,7 +53,6 @@ class SaveConfigCallback(Callback):
         log_dir = Path(trainer.log_dir)
         assert log_dir is not None
         trainer.timestamp = log_dir.name
-        trainer.out_dir = log_dir
         config_path = Path(log_dir / self.config_filename)
 
         # broadcast whether to fail to all ranks
@@ -65,14 +64,16 @@ class SaveConfigCallback(Callback):
                 " Aborting to avoid overwriting results of a previous run."
             )
 
-        # save configs
-        self.save_config(config_path)
+        if trainer.is_global_zero:
+            # save configs
+            self.save_config(config_path)
 
-        # save metadata
-        self.get_metadata(config_path)
+            # save metadata
+            self.save_metadata(config_path)
 
-        # broadcast so that all ranks are in sync on future calls to .setup()
-        self.already_saved = True
+            # broadcast so that all ranks are in sync on future calls to .setup()
+            self.already_saved = True
+
         self.already_saved = trainer.strategy.broadcast(self.already_saved)
 
     def save_config(self, config_path):
@@ -102,7 +103,7 @@ class SaveConfigCallback(Callback):
             self.plm.logger.experiment.log_asset(config_path)
             self.plm.logger.experiment.log_asset(sd_path)
 
-    def get_metadata(self, config_path):
+    def save_metadata(self, config_path):
         # TODO: log input variables from datasets
 
         trainer = self.trainer
