@@ -12,7 +12,7 @@ dependencies = [
     "numpy==1.21.*",
     "ruamel.yaml==0.17.21",
     "torch==1.13.0",
-    "pytorch-lightning[extra]==1.8.0",
+    "pytorch-lightning[extra]==1.8.1",
     "torchmetrics==0.10.*",
     "comet_ml==3.31.*",
     "tqdm==4.62.3",

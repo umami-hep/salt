@@ -7,7 +7,7 @@
 #SBATCH -p GPU
 
 # requesting one node
-#SBATCH -nodes=1
+#SBATCH --nodes=1
 #SBATCH --exclusive
 
 # keep environment variables
@@ -15,7 +15,7 @@
 
 # requesting 4 V100 GPU
 # (remove the "v100:" if you don't care what GPU)
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 
 # note! this needs to match --trainer.devices!
 #SBATCH --ntasks-per-node=4

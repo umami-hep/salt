@@ -15,10 +15,12 @@ class Checkpoint(ModelCheckpoint):
             if trainer.fast_dev_run:
                 return
 
+            log_dir = Path(trainer.log_dir)
+
             # set the output dirpath form the trainer timestamp
-            self.dirpath = str(Path(Path(trainer.out_dir) / "ckpts"))
+            self.dirpath = str(Path(log_dir / "ckpts"))
 
             # could use this to add the timestamp to the filename
-            self.timestamp = trainer.timestamp
+            self.timestamp = log_dir.name
 
         super().setup(trainer=trainer, pl_module=pl_module, stage=stage)
