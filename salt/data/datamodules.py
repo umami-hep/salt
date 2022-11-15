@@ -125,9 +125,7 @@ class JetDataModule(pl.LightningDataModule):
     def get_dataloader(self, dataset, shuffle):
         # batched reads from h5 (weak shuffling)
         if self.batched_read:
-            sampler = RandomBatchSampler(
-                dataset, self.batch_size, shuffle, drop_last=True
-            )
+            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=True)
             batch_size = None
             collate_fn = None
             shuffle = False

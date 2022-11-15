@@ -1,4 +1,4 @@
-import torch.nn as nn
+from torch import Tensor, nn
 
 from salt.models import Dense
 
@@ -35,7 +35,7 @@ class Task(nn.Module):
 
 
 class ClassificationTask(Task):
-    def forward(self, x, labels, mask=None):
+    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None):
         preds = self.net(x)
         if mask is not None:
             preds = preds[~mask]
@@ -55,11 +55,10 @@ class RegressionTask(Task):
     Applies softplus activation to sigmas to ensure positivty.
     """
 
-    def forward(self, x, labels, mask=None):
+    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None):
         if x.ndim != 2 or mask is not None:
             raise NotImplementedError(
-                "Regression tasks are currently only supported for jet-level"
-                " predictions."
+                "Regression tasks are currently only supported for jet-level predictions."
             )
 
         preds = self.net(x)

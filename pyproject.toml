@@ -3,13 +3,13 @@ name = "salt"
 version = "0.1"
 description = "Jet flavour tagging Python package"
 license = {text = "MIT"}
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 dependencies = [
     "pytest>=7.1.3",
     "pytest-cov==4.0.0",
     "pytest-depends==1.0.1",
     "h5py==3.7.0",
-    "numpy==1.21.*",
+    "numpy==1.22.*",
     "ruamel.yaml==0.17.21",
     "torch==1.13.0",
     "pytorch-lightning[extra]==1.8.1",
@@ -39,14 +39,14 @@ requires = ["setuptools>=62"]
 build-backend = "setuptools.build_meta"
 
 [tool.black]
-line-length = 88
+line-length = 99
 preview = "True"
 
 [tool.isort]
 profile = "black"
 
 [tool.pylint]
-format.max-line-length = "88"
+format.max-line-length = 99
 reports.output-format = "colorized"
 messages_control.enable = ["useless-suppression"]
 

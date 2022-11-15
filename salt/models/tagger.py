@@ -1,17 +1,15 @@
-import torch.nn as nn
+from torch import Tensor, nn
 
-# these need to be directly imported from their modules
-from salt.models.dense import Dense
-from salt.models.pooling import Pooling
-from salt.models.task import Task
+from salt.models import Dense, Pooling
+from salt.models.task import Task  # import directly
 
 
 class JetTagger(nn.Module):
     def __init__(
         self,
-        init_net: Dense = None,
+        init_net: Dense,
+        pool_net: Pooling,
         gnn: nn.Module = None,
-        pool_net: Pooling = None,
         jet_net: Task = None,
         track_net: Task = None,
     ):
@@ -40,7 +38,7 @@ class JetTagger(nn.Module):
         self.pool_net = pool_net
         self.track_net = track_net
 
-    def forward(self, x, mask, labels):
+    def forward(self, x: Tensor, mask: Tensor, labels: Tensor):
         embd_x = self.init_net(x)
         if self.gnn:
             embd_x = self.gnn(embd_x, mask=mask)
@@ -51,7 +49,7 @@ class JetTagger(nn.Module):
 
         return preds, loss
 
-    def tasks(self, pooled, embd_x, mask, labels):
+    def tasks(self, pooled: Tensor, embd_x: Tensor, mask: Tensor, labels: Tensor):
         preds = {}
         loss = {}
 

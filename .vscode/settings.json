@@ -2,7 +2,14 @@
     "editor.stickyScroll.enabled": true,
     "autoDocstring.docstringFormat": "numpy",
     "[python]": {
-        "editor.defaultFormatter": "ms-python.black-formatter"
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": true
+        },
     },
     "editor.formatOnSave": true,
+    "isort.args": [
+        "--profile",
+        "black"
+    ],
 }
