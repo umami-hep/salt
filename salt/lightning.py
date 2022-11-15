@@ -101,9 +101,7 @@ class LightningTagger(pl.LightningModule):
         return preds, mask
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(
-            self.parameters(), lr=self.lrs_config["start"], weight_decay=1e-5
-        )
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lrs_config["start"], weight_decay=1e-5)
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(

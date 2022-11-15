@@ -32,9 +32,7 @@ def get_best_epoch(config_path: Path) -> Path:
 
 class SaltCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
-        parser.add_argument(
-            "--name", default="salt", help="Name for this training run."
-        )
+        parser.add_argument("--name", default="salt", help="Name for this training run.")
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]

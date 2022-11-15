@@ -32,15 +32,11 @@ class SelfAttentionBlock(nn.Module):
         self.residual = residual
 
         if norm_layer:
-            self.norm = getattr(torch.nn, norm_layer)(
-                embd_dim, elementwise_affine=False
-            )
+            self.norm = getattr(torch.nn, norm_layer)(embd_dim, elementwise_affine=False)
         else:
             self.register_buffer("norm", None)
 
-        self.mha = nn.MultiheadAttention(
-            embd_dim, num_heads, batch_first=True, add_zero_attn=True
-        )
+        self.mha = nn.MultiheadAttention(embd_dim, num_heads, batch_first=True, add_zero_attn=True)
 
         self.dense = Dense(
             embd_dim,
@@ -90,9 +86,7 @@ class Transformer(nn.Module):
         layers = []
         for i in range(num_layers):
             layers.append(
-                SelfAttentionBlock(
-                    embd_dim, num_heads, activation, residual, norm_layer, dropout
-                )
+                SelfAttentionBlock(embd_dim, num_heads, activation, residual, norm_layer, dropout)
             )
         self.net = nn.Sequential(*layers)
 

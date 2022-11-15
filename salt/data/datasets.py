@@ -274,11 +274,8 @@ class TestJetDataset(Dataset):
         for inp in inputs.values():
             if inp not in self.file:
                 raise KeyError(
-                    f"The input file '{self.filename}' does not a contain an object"
-                    f" named '{inp}'."
+                    f"The input file '{self.filename}' does not a contain an object named '{inp}'."
                 )
 
             if not isinstance(self.file[inp], h5py.Dataset):
-                raise KeyError(
-                    f"The object '{inp}' in file '{self.filename}' is not a dataset."
-                )
+                raise KeyError(f"The object '{inp}' in file '{self.filename}' is not a dataset.")

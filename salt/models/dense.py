@@ -1,5 +1,4 @@
-import torch
-import torch.nn as nn
+from torch import Tensor, nn
 
 
 class Dense(nn.Module):
@@ -49,11 +48,7 @@ class Dense(nn.Module):
 
             # normalisation first
             if norm_layer and (norm_final_layer or not is_final_layer):
-                layers.append(
-                    getattr(torch.nn, norm_layer)(
-                        node_list[i], elementwise_affine=False
-                    )
-                )
+                layers.append(getattr(nn, norm_layer)(node_list[i], elementwise_affine=False))
 
             # then dropout
             if dropout and (norm_final_layer or not is_final_layer):
@@ -64,14 +59,14 @@ class Dense(nn.Module):
 
             # activation
             if not is_final_layer:
-                layers.append(getattr(torch.nn, activation)())
+                layers.append(getattr(nn, activation)())
 
             # final layer: return logits by default, otherwise apply activation
             elif final_activation:
-                layers.append(getattr(torch.nn, final_activation)())
+                layers.append(getattr(nn, final_activation)())
 
         # build the net
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: Tensor):
         return self.net(x)
