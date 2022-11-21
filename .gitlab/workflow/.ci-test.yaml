@@ -1,5 +1,6 @@
 pytest:
   stage: tests
+  needs: ['build_docker']
   image: $CI_REGISTRY_IMAGE:latest
   script:
     - coverage run --source salt -m pytest

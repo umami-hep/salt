@@ -2,6 +2,7 @@
 # see https://stackoverflow.com/collectives/gitlab/articles/71270196/how-to-use-pre-commit-to-automatically-correct-commits-and-merge-requests-with-g
 pre-commit:
   stage: lint
+  needs: []
   rules:
     - if: '$PRE_COMMIT_SKIP_BRANCH_PIPELINE && $CI_COMMIT_BRANCH'
       when: never

@@ -23,6 +23,7 @@ model:
         class_path: salt.models.RegressionTask
         init_args:
           name: jet_classification
+          label: jets/labels
           loss: torch.nn.GaussianNLLLoss
           net:
             class_path: salt.models.Dense

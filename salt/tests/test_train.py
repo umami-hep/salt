@@ -105,7 +105,8 @@ class TestTrain:
         # setup tracks
         shapes_tracks = {
             "inputs": [n_jets, n_tracks_per_jet, jet_features + track_features],
-            "labels": [n_jets, n_tracks_per_jet, 2],
+            "labels/truthOriginLabel": [n_jets, n_tracks_per_jet],
+            "labels/truthVertexIndex": [n_jets, n_tracks_per_jet],
             "valid": [n_jets, n_tracks_per_jet],
         }
 
@@ -132,11 +133,6 @@ class TestTrain:
                 g_tracks.create_dataset(key, data=arr)
                 if key == "inputs":
                     g_tracks[key].attrs[f"{tracks}_variables"] = ["jet_eta", "pt"]
-                if key == "labels":
-                    g_tracks[key].attrs[f"{tracks}_truth_variables"] = [
-                        "truthOriginLabel",
-                        "truthVertexIndex",
-                    ]
 
             # create scale dict file
             with open(cls.sd_fname, "w") as f:

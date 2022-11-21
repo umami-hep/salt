@@ -7,6 +7,7 @@ class Task(nn.Module):
     def __init__(
         self,
         name: str,
+        label: str,
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
@@ -18,9 +19,11 @@ class Task(nn.Module):
         Parameters
         ----------
         Name : str
-            Name of this task
+            Name of the task
+        lbael : str
+            Label name for the task
         net : Dense
-            Dense network for performing this task
+            Dense network for performing the task
         loss : nn.Module
             Task loss
         weight : float
@@ -29,6 +32,7 @@ class Task(nn.Module):
         super().__init__()
 
         self.name = name
+        self.label = label
         self.weight = weight
         self.net = net
         self.loss = loss

@@ -15,8 +15,8 @@ For example
 
 ```bash
 to_onnx \
-    --config logs/timestamp/config.yaml \
-    --ckpt_path logs/timestamp/ckpts/checkpoint.ckpt \
+    --config logs/<timestamp>/config.yaml \
+    --ckpt_path logs/<timestamp>/ckpts/checkpoint.ckpt \
     --track_selection r22default
 ```
 
