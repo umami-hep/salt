@@ -1,6 +1,7 @@
 pages:
   image: python:3.9.14
   stage: docs
+  needs: []
   script:
     - pip install mkdocs==1.4.1 mkdocs-material==8.5.7 mkdocs-markdownextradata-plugin>=0.2.5
     - mkdocs build -d public

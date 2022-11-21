@@ -13,13 +13,13 @@ class JetDataModule(pl.LightningDataModule):
         train_file: str,
         val_file: str,
         inputs: dict,
-        tasks: list,
         batched_read: bool,
         batch_size: int,
         num_workers: int,
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
+        labels: dict = None,
         move_files_temp: str = None,
         scale_dict: str = None,
         test_file: str = None,
@@ -36,8 +36,6 @@ class JetDataModule(pl.LightningDataModule):
             Test file path
         inputs : dict
             Input dataset name for each input type
-        tasks : list
-            List of task names
         batched_read : bool
             If true, read from h5 in batches
         batch_size : int
@@ -50,6 +48,8 @@ class JetDataModule(pl.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
+        labels : dict
+            Mapping from task name to label name
         move_files_temp : str
             Directory to move training files to, default is None,
             which will result in no copying of files
@@ -62,7 +62,7 @@ class JetDataModule(pl.LightningDataModule):
         self.val_file = val_file
         self.test_file = test_file
         self.inputs = inputs
-        self.tasks = tasks
+        self.labels = labels
         self.batched_read = batched_read
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -91,7 +91,7 @@ class JetDataModule(pl.LightningDataModule):
             self.train_dset = TrainJetDataset(
                 filename=self.train_file,
                 inputs=self.inputs,
-                tasks=self.tasks,
+                labels=self.labels,
                 num_jets=self.num_jets_train,
             )
 
@@ -99,7 +99,7 @@ class JetDataModule(pl.LightningDataModule):
             self.val_dset = TrainJetDataset(
                 filename=self.val_file,
                 inputs=self.inputs,
-                tasks=self.tasks,
+                labels=self.labels,
                 num_jets=self.num_jets_val,
             )
 

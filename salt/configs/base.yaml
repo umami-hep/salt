@@ -1,13 +1,12 @@
 seed_everything: 42
 
 data:
-  train_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
-  val_file: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-hybrid-resampled_scaled_shuffled.h5
-  scale_dict: /unix/atlastracking/samples/salt_trainings/r22/regression_variable/PFlow-scale_dict-22M.json
+  train_file: umami_out/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  val_file: umami_out/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
+  scale_dict: umami_out/scale_dict.json
   inputs:
     jet: jets
     track: tracks_loose
-  tasks: [jet_classification, track_classification]
   batched_read: True
   batch_size: 1000
   num_workers: 20
@@ -31,6 +30,7 @@ trainer:
     init_args:
       save_dir: *default_root_dir
       project_name: salt
+      display_summary_level: 0
 
   callbacks:
     - class_path: salt.callbacks.Checkpoint

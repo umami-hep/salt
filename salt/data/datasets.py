@@ -13,7 +13,7 @@ class TrainJetDataset(Dataset):
         self,
         filename: str,
         inputs: dict,
-        tasks: list,
+        labels: dict = None,
         num_jets: int = -1,
     ):
         """A simple map-style dataset for loading jets from an umami-
@@ -25,8 +25,8 @@ class TrainJetDataset(Dataset):
             Input h5 filepath
         inputs : dict
             Names of the h5 group to access for each type of input
-        tasks : list
-            List of each task to perform, used to load the labels for each task
+        labels : dict
+            Mapping from task name to label name
         num_jets : int, optional
             Number of jets to use, by default -1
         """
@@ -38,11 +38,12 @@ class TrainJetDataset(Dataset):
 
         # make sure the input file looks okay
         self.check_file(inputs)
+        assert labels is not None
 
         # get datasets
         self.inputs = {n: self.file[f"{g}/inputs"] for n, g in inputs.items()}
         self.valid = {"track": self.file[f"{inputs['track']}/valid"]}
-        self.labels = {n: self.file[f"{g}/labels"] for n, g in inputs.items()}
+        self.labels = {n: self.file[l] for n, l in labels.items()}
 
         # set number of jets
         self.num_jets = self.get_num_jets(num_jets)
@@ -67,17 +68,11 @@ class TrainJetDataset(Dataset):
         """
 
         # read inputs (assume we have already concatenated jet features in umami)
-        inputs = torch.FloatTensor(self.inputs["track"][jet_idx])
-        mask = ~torch.tensor(self.valid["track"][jet_idx])
+        inputs = torch.as_tensor(self.inputs["track"][jet_idx], dtype=torch.float)
+        mask = ~torch.as_tensor(self.valid["track"][jet_idx], dtype=torch.bool)
 
         # read labels
-        jet_class_label = torch.tensor(self.labels["jet"][jet_idx]).long()
-        track_labels = torch.LongTensor(self.labels["track"][jet_idx])
-
-        labels = {
-            "jet_classification": jet_class_label,
-            "track_classification": track_labels[..., 0],
-        }
+        labels = {n: torch.as_tensor(l[jet_idx], dtype=torch.long) for n, l in self.labels.items()}
 
         return inputs, mask, labels
 
@@ -102,9 +97,9 @@ class TrainJetDataset(Dataset):
 
     def check_file(self, inputs):
         error_str = (
-            "Perhaps you have specified an old-style umami training file. Please make"
+            "Perhaps you have used an old umami training file. Please make"
             " sure you use an input file which is produced using a version of umami"
-            " which includes !648, i.e. versions >=0.15."
+            " which includes !648 and !665, i.e. versions >=0.17."
         )
 
         if inputs["track"] not in self.file:
@@ -126,6 +121,7 @@ class TrainJetDataset(Dataset):
                 raise KeyError(
                     f"The group '{g}' in file '{self.filename}' does not contain an"
                     " inputs dataset. This is unexpected."
+                    + error_str
                 )
 
             if inputs["track"] in g.name:
@@ -134,8 +130,7 @@ class TrainJetDataset(Dataset):
                     raise ValueError(
                         "Expected to find some variables called jet_* in the 'inputs'"
                         f" dataset for the group '{g}'. You should make sure to specify"
-                        " `concat_jet_tracks: True` in your umami preprocessing"
-                        " config."
+                        " `concat_jet_tracks: True` in your preprocessing config."
                     )
 
         [check_group(self.file[g]) for g in self.file]
@@ -173,7 +168,7 @@ class TestJetDataset(Dataset):
         self.check_file(inputs)
 
         # get scale dict and input variables
-        # TODO: track variables somewhere else?
+        # TODO: get track variables somewhere else?
         self.sd, self.vars = self.get_scale_dict(scale_dict, inputs)
 
         # get fields
@@ -217,17 +212,8 @@ class TestJetDataset(Dataset):
         return inputs, mask, None
 
     def get_scale_dict(self, scale_dict_path: str, inputs: dict):
-        # open scale dict
         with open(scale_dict_path) as f:
             scale_dict = json.load(f)
-
-        # reformat
-        if isinstance(scale_dict[inputs["jet"]], list):
-            for tf in scale_dict[inputs["jet"]]:
-                scale_dict["jets"][tf["name"]] = {
-                    "scale": tf["scale"],
-                    "shift": tf["shift"],
-                }
 
         variables = {
             "jet": scale_dict[inputs["jet"]].keys(),
