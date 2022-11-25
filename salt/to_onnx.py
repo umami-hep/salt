@@ -15,6 +15,17 @@ from torch.nn.functional import softmax
 from salt.lightning import LightningTagger
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
 
+# https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx
+TRACK_SELECTIONS = [
+    "all",
+    "ip3d",
+    "dipsLoose202102",
+    "r22default",
+    "r22loose",
+    "dipsTightUpgrade",
+    "dipsLooseUpgrade",
+]
+
 
 def parse_args(args):
     parser = argparse.ArgumentParser(
@@ -25,13 +36,13 @@ def parse_args(args):
     parser.add_argument(
         "-c",
         "--config",
-        type=str,
+        type=Path,
         help="Saved training config.",
         required=True,
     )
     parser.add_argument(
         "--ckpt_path",
-        type=str,
+        type=Path,
         help="Checkpoint path.",
         required=True,
     )
@@ -40,11 +51,12 @@ def parse_args(args):
         "--track_selection",
         type=str,
         help="Track selection, matches `trk_select_regexes` in 'DataPrepUtilities.cxx'",
+        choices=TRACK_SELECTIONS,
         required=True,
     )
     parser.add_argument(
         "--sd_path",
-        type=str,
+        type=Path,
         help="Scale dict path. Taken from the config if not provided",
     )
     parser.add_argument(
@@ -73,7 +85,7 @@ class ONNXModel(LightningTagger):
     def __init__(self, model: nn.Module) -> None:
         super().__init__(model=model, lrs_config={})
         jets, tracks = inputs_sep_no_pad(1, 40, self.in_dim)
-        self.example_input_array = jets, tracks.squeeze()
+        self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
         # in athena the jets have a batch dimension but the tracks do not
@@ -149,7 +161,7 @@ def compare_output(pt_model, onnx_session, n_track=40):
 
     ort_inputs = {
         "jet_features": jets.numpy(),
-        "track_features": tracks.squeeze().numpy(),
+        "track_features": tracks.squeeze(0).numpy(),
     }
     pred_onnx = onnx_session.run(None, ort_inputs)
 
@@ -166,7 +178,7 @@ def compare_outputs(pt_model, onnx_path):
     print("Validating ONNX model...")
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    for n_track in range(2, 40):
+    for n_track in range(1, 40):
         for _ in range(10):
             compare_output(pt_model, session, n_track)
 
@@ -201,7 +213,7 @@ def main(args=None):
     print("Converting model to ONNX...")
     print("-" * 100)
 
-    onnx_path = Path(args.ckpt_path).parent.parent / "model.onnx"
+    onnx_path = args.ckpt_path.parent.parent / "model.onnx"
     if onnx_path.exists() and not args.overwrite:
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
 
