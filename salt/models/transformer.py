@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from salt.models.attention import MultiheadAttention
 from salt.models.dense import Dense
 
 
@@ -9,24 +10,13 @@ class SelfAttentionBlock(nn.Module):
         self,
         embd_dim: int,
         num_heads: int,
+        attention: nn.Module,
         activation: str,
         residual: bool = True,
         norm_layer: str = None,
         dropout: float = 0.0,
     ):
-        """Transformer block.
-
-        Parameters
-        ----------
-        input_size : int
-            Number of input features per track
-        output_size : int
-            Number of output classes
-        hidden_layers : list
-            Number of nodes per hidden layer
-        activation : nn.Module
-            Activation function
-        """
+        """Self attention followed by a dense layer."""
         super().__init__()
 
         self.residual = residual
@@ -36,7 +26,7 @@ class SelfAttentionBlock(nn.Module):
         else:
             self.register_buffer("norm", None)
 
-        self.mha = nn.MultiheadAttention(embd_dim, num_heads, batch_first=True, add_zero_attn=True)
+        self.mha = MultiheadAttention(embd_dim, num_heads, attention=attention)
 
         self.dense = Dense(
             embd_dim,
@@ -51,13 +41,7 @@ class SelfAttentionBlock(nn.Module):
         if self.norm:
             x = self.norm(x)
 
-        x_mha, _ = self.mha(
-            x,
-            x,
-            x,
-            key_padding_mask=mask,
-            need_weights=False,
-        )
+        x_mha = self.mha(x, x, x, q_mask=mask, k_mask=mask)
 
         if self.residual:
             x_mha = x + x_mha
@@ -71,11 +55,17 @@ class SelfAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
+    """Stacked Self attention followed by a dense layer.
+
+    TODO: make general stacked. num, kwargs
+    """
+
     def __init__(
         self,
         embd_dim: int,
         num_heads: int,
         num_layers: int,
+        attention: nn.Module,
         activation: str,
         residual: bool = True,
         norm_layer: str = None,
@@ -86,7 +76,9 @@ class Transformer(nn.Module):
         layers = []
         for i in range(num_layers):
             layers.append(
-                SelfAttentionBlock(embd_dim, num_heads, activation, residual, norm_layer, dropout)
+                SelfAttentionBlock(
+                    embd_dim, num_heads, attention, activation, residual, norm_layer, dropout
+                )
             )
         self.net = nn.Sequential(*layers)
 
