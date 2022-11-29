@@ -4,7 +4,21 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import torch
+from jsonargparse.typing import register_type
 from pytorch_lightning.cli import LightningCLI
+
+
+# handle list -> tensor config
+def serializer(x):
+    return x.tolist()
+
+
+def deserializer(x):
+    return torch.tensor(x)
+
+
+register_type(torch.Tensor, serializer, deserializer)
 
 
 def get_best_epoch(config_path: Path) -> Path:
@@ -38,6 +52,7 @@ class SaltCLI(LightningCLI):
         sc = self.config[self.subcommand]
 
         if self.subcommand == "fit":
+            # get timestamp
             timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
             log = "trainer.logger"
             name = sc["name"]

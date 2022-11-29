@@ -24,7 +24,7 @@ model:
         init_args:
           name: jet_classification
           label: jets/labels
-          loss: torch.nn.GaussianNLLLoss
+          loss: GaussianNLLLoss
           net:
             class_path: salt.models.Dense
             init_args:

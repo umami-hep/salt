@@ -48,6 +48,26 @@ model:
             init_args:
               input_size: *embd_dim
               output_size: 3
+              hidden_layers: [128, 64, 32]
+              activation: *activation
+              norm_layer: *norm_layer
+              dropout: *dropout
+
+      track_net:
+        class_path: salt.models.ClassificationTask
+        init_args:
+          name: track_classification
+          label: tracks_loose/labels/truthOriginLabel
+          loss:
+            class_path: torch.nn.CrossEntropyLoss
+            init_args:
+              weight: [7.62, 104.91, 1.56, 20.65, 14.05, 14.06, 1.0, 36.07]
+          weight: 0.5
+          net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embd_dim
+              output_size: 8
               hidden_layers: [256, 128, 64]
               activation: *activation
               norm_layer: *norm_layer
