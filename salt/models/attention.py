@@ -27,6 +27,7 @@ class MultiheadAttention(nn.Module):
         attention: nn.Module,
         k_dim: int = None,
         v_dim: int = None,
+        out_proj: bool = True,
     ):
         """Generic multihead attention.
 
@@ -51,6 +52,7 @@ class MultiheadAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.attention = attention
+        self.out_proj = out_proj
 
         self.k_dim = k_dim if k_dim is not None else embed_dim
         self.v_dim = v_dim if v_dim is not None else embed_dim
@@ -61,7 +63,10 @@ class MultiheadAttention(nn.Module):
         self.linear_q = nn.Linear(self.embed_dim, self.embed_dim)
         self.linear_k = nn.Linear(self.k_dim, self.embed_dim)
         self.linear_v = nn.Linear(self.v_dim, self.embed_dim)
-        self.linear_out = nn.Linear(self.embed_dim, self.embed_dim)
+        if self.out_proj:
+            self.linear_out = nn.Linear(self.embed_dim, self.embed_dim)
+        else:
+            self.register_buffer("linear_out", None)
 
     def input_projection(self, q, k, v, B):
         """Linear input projections, allowing for varying sequence lengths."""
@@ -78,7 +83,7 @@ class MultiheadAttention(nn.Module):
         if q_mask is not None or k_mask is not None:
             k_mask = k_mask if k_mask is not None else torch.ones(k_shape[:-1], dtype=torch.bool)
             q_mask = q_mask if q_mask is not None else torch.ones(q_shape[:-1], dtype=torch.bool)
-            combined_mask = (q_mask.unsqueeze(-1) & k_mask.unsqueeze(-2)).unsqueeze(-3)
+            combined_mask = (q_mask.unsqueeze(-1) | k_mask.unsqueeze(-2)).unsqueeze(-3)
 
         return combined_mask
 
@@ -105,7 +110,8 @@ class MultiheadAttention(nn.Module):
         # outputs
         out = torch.matmul(attention, v).transpose(1, 2).contiguous()
         out = out.view(batch, -1, self.num_heads * self.head_dim)
-        out = self.linear_out(out)
+        if self.out_proj:
+            out = self.linear_out(out)
 
         return out
 
@@ -134,23 +140,22 @@ class GATv2Attention(nn.Module):
     https://arxiv.org/abs/2105.14491
     """
 
-    def __init__(self, num_heads, head_dim, activation=nn.SiLU):
+    def __init__(self, num_heads: int, head_dim: int, activation: nn.Module = nn.SiLU()):
         super().__init__()
         self.attention = nn.Parameter(torch.FloatTensor(size=(1, num_heads, 1, 1, head_dim)))
-        self.activation = activation()
+        self.activation = activation
         nn.init.xavier_uniform_(self.attention)
 
-    def forward(self, q, k, scale=None, mask=None):
-        # inputs are (B, H, L, D)
+    def forward(self, q: Tensor, k: Tensor, scale: Tensor = None, mask: BoolTensor = None):
+        # inputs are (B, H, Lq/k, D)
         B, H, Lq, D = q.shape
-        Lk = k.shape[2]
 
         # sum each pair of tracks within a batch
-        q = q.repeat(1, 1, Lq, 1)
-        k = k.repeat_interleave(Lk, dim=2)
-        summed = (q + k).view(B, H, Lq, Lk, D)
+        # shape: (B, H, Lq, Lk, D)
+        summed = q.unsqueeze(-2) + k.unsqueeze(-3)
 
         # after activation, dot product with learned vector
+        # shape: (B, H, Lq, Lk)
         scores = (self.activation(summed) * self.attention).sum(dim=-1)
 
         # softmax

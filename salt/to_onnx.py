@@ -11,6 +11,7 @@ import torch.nn as nn
 from ruamel.yaml import YAML
 from torch import Tensor
 from torch.nn.functional import softmax
+from tqdm import tqdm
 
 from salt.lightning import LightningTagger
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
@@ -178,15 +179,14 @@ def compare_outputs(pt_model, onnx_path):
     print("Validating ONNX model...")
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    for n_track in range(1, 40):
+    for n_track in tqdm(range(1, 40), leave=False):
         for _ in range(10):
             compare_output(pt_model, session, n_track)
 
-    msg = (
+    print(
         "Sucess! Pytorch and ONNX models are consistent.\nIt should be safe to ignore"
         " any above warnings, but you should still verify consistency in Athena."
     )
-    print(msg)
     print("-" * 100)
 
 

@@ -15,6 +15,7 @@ class SelfAttentionBlock(nn.Module):
         residual: bool = True,
         norm_layer: str = None,
         dropout: float = 0.0,
+        out_proj: bool = True,
     ):
         """Self attention followed by a dense layer."""
         super().__init__()
@@ -26,7 +27,7 @@ class SelfAttentionBlock(nn.Module):
         else:
             self.register_buffer("norm", None)
 
-        self.mha = MultiheadAttention(embd_dim, num_heads, attention=attention)
+        self.mha = MultiheadAttention(embd_dim, num_heads, attention=attention, out_proj=out_proj)
 
         self.dense = Dense(
             embd_dim,
@@ -70,6 +71,7 @@ class Transformer(nn.Module):
         residual: bool = True,
         norm_layer: str = None,
         dropout: float = 0.0,
+        out_proj: bool = True,
     ):
         super().__init__()
 
@@ -77,12 +79,22 @@ class Transformer(nn.Module):
         for i in range(num_layers):
             layers.append(
                 SelfAttentionBlock(
-                    embd_dim, num_heads, attention, activation, residual, norm_layer, dropout
+                    embd_dim,
+                    num_heads,
+                    attention,
+                    activation,
+                    residual,
+                    norm_layer,
+                    dropout,
+                    out_proj,
                 )
             )
         self.net = nn.Sequential(*layers)
 
+        self.final_dense = Dense(embd_dim, embd_dim, [embd_dim], activation, norm_layer=norm_layer)
+
     def forward(self, x, mask=None):
         for layer in self.net:
             x = layer(x, mask=mask)
-        return x
+
+        return self.final_dense(x)
