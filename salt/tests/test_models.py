@@ -43,14 +43,16 @@ def test_mha_mask():
 
 
 def test_gatv2():
-    n_batch = 2
-    n_trk = 3
-    n_head = 2
-    n_dim = 8
+    n_batch = 10
+    n_trk = 10
+    n_head = 4
+    n_dim = 16
     head_dim = n_dim // n_head
 
     net = MultiheadAttention(
-        attention=GATv2Attention(n_head, head_dim), embed_dim=n_dim, num_heads=n_head
+        attention=GATv2Attention(n_head, head_dim, activation=nn.SiLU()),
+        embed_dim=n_dim,
+        num_heads=n_head,
     )
 
     q = k = v = torch.rand((n_batch, n_trk, n_dim))
@@ -59,6 +61,13 @@ def test_gatv2():
     out_mask = net(q, k, v, q_mask=valid_mask, k_mask=valid_mask)
 
     assert torch.all(out_no_mask == out_mask)
+
+    q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
+    k_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
+    # TODO: function to generate a realistic padding mask
+    q_mask[:, 2:] = k_mask[:, 4:] = True  # set padding
+    q_mask[1, 3:] = k_mask[1, 5:] = True  # set padding
+    net(q, k, v, q_mask=q_mask, k_mask=k_mask)
 
 
 @pytest.mark.parametrize("attention", [ScaledDotProductAttention])
@@ -80,6 +89,7 @@ def test_mha_qkv_different_dims(attention):
 
     q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
     k_mask = torch.zeros((n_batch, n_trk + 1), dtype=torch.bool)  # all valid
+    q_mask[:, 2:] = k_mask[:, 3:] = True  # set padding
 
     net(q, k, v, q_mask=q_mask, k_mask=k_mask)
 

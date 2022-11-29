@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import h5py
@@ -16,6 +17,7 @@ class TestTrain:
     test_dir = Path(__file__).resolve().parent
     config_path = Path(test_dir.parent / "configs")
     tmp_dir = Path("/tmp/salt_tests/")
+    shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     h5_fname = Path(tmp_dir / "test_train.h5")
     sd_fname = Path(tmp_dir / "scale-dict.json")

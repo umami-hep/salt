@@ -1,4 +1,4 @@
-name: gn1p
+name: gnn_sdp
 
 model:
   model:
@@ -18,11 +18,7 @@ model:
         class_path: salt.models.Transformer
         init_args:
           attention:
-            class_path: salt.models.GATv2Attention
-            init_args:
-              num_heads: 8
-              head_dim: 16
-              activation: *activation
+            class_path: salt.models.ScaledDotProductAttention
           embd_dim: *embd_dim
           out_proj: False
           num_heads: 8

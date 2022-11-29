@@ -29,6 +29,7 @@ class TestONNX:
         """
         dirs = [x for x in cls.tmp_dir.iterdir() if x.is_dir()]
         test_dir = [x for x in dirs if (x / "config.yaml").exists()][0]
+        print(f"Using test_dir {test_dir}.")
         config_path = test_dir / "config.yaml"
         sd_path = [x for x in test_dir.iterdir() if x.suffix == ".json"][0]
         ckpt_path = list((test_dir / "ckpts").iterdir())[-1]

@@ -1,16 +1,16 @@
 seed_everything: 42
 
 data:
-  train_file: umami_out/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
-  val_file: umami_out/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: umami_out/scale_dict.json
+  train_file: /unix/atlastracking/samples/gnn_training/flow/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  val_file: /unix/atlastracking/samples/gnn_training/flow/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  scale_dict: /unix/atlastracking/samples/gnn_training/flow/scale_dict.json
   inputs:
     jet: jets
     track: tracks_loose
   batched_read: True
   batch_size: 1000
   num_workers: 20
-  num_jets_train: 22_000_000
+  num_jets_train: 30_000_000
   num_jets_val: 1_000_000
   num_jets_test: 1_000_000
 
@@ -47,5 +47,5 @@ trainer:
 model:
   lrs_config:
     start: 1e-8
-    max: 2e-4
+    max: 1e-3
     end: 1e-8
