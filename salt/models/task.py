@@ -33,14 +33,16 @@ class Task(nn.Module):
 
         self.name = name
         self.label = label
-        self.weight = weight
         self.net = net
         self.loss = loss
+        self.weight = weight
 
 
 class ClassificationTask(Task):
     def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None):
         preds = self.net(x)
+
+        # could use ignore_index instead of the mask here
         if mask is not None:
             preds = preds[~mask]
             if labels is not None:
@@ -54,7 +56,7 @@ class ClassificationTask(Task):
 
 
 class RegressionTask(Task):
-    """Gaussian regression tasks.
+    """Gaussian regression task.
 
     Applies softplus activation to sigmas to ensure positivty.
     """
