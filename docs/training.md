@@ -115,7 +115,7 @@ Test different counts to find the optimal value, or just set this to the number 
 Most HPC systems will have dedicated fast storage.
 Loading training data from these drives can significantly improve training times.
 To temporarily copy training files into a target directory before training, use the
-`--data.move_files_tmp=/temp/path/` flag.
+`--data.move_files_temp=/temp/path/` flag.
 
 If you have enough RAM, you can load the training data into shared memory before starting training by setting `move_files_temp` to a path under `/dev/shm/<username>`.
 
