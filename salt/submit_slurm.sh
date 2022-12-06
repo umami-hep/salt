@@ -20,6 +20,10 @@
 # note! this needs to match --trainer.devices!
 #SBATCH --ntasks-per-node=4
 
+# number of cpus per task
+# useful if you don't have exclusive access to the node
+# #SBATCH --cpus-per-task=10
+
 # request enough memory
 #SBATCH --mem=200G
 
@@ -29,7 +33,7 @@
 # #SBATCH --error=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.err
 
 # speedup
-export OMP_NUM_THREADS=16
+export OMP_NUM_THREADS=1
 
 echo "CPU count: $(cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1)"
 

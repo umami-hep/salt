@@ -94,7 +94,7 @@ class SaltCLI(LightningCLI):
 
             # ensure only one devices is used for testing
             n_devices = sc["trainer.devices"]
-            if isinstance(n_devices, str) and int(n_devices) > 1:
+            if (isinstance(n_devices, str) or isinstance(n_devices, int)) and int(n_devices) > 1:
                 print("Setting --trainer.devices=1")
                 sc["trainer.devices"] = "1"
             if isinstance(n_devices, list) and len(n_devices) > 1:

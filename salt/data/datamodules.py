@@ -73,15 +73,17 @@ class JetDataModule(pl.LightningDataModule):
         self.move_files_temp = move_files_temp
 
     def prepare_data(self):
-        if self.move_files_temp:
+        if self.move_files_temp and not self.trainer.fast_dev_run:
+            print("-" * 100)
             print(f"Moving train files to {self.move_files_temp} ")
+            print("-" * 100)
             fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
 
     def setup(self, stage: str):
         if self.trainer.is_global_zero:
             print("-" * 100)
 
-        if stage == "fit" and self.move_files_temp:
+        if stage == "fit" and self.move_files_temp and not self.trainer.fast_dev_run:
             # Set the training/validation file to the temp path
             self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
             self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
@@ -156,7 +158,12 @@ class JetDataModule(pl.LightningDataModule):
 
     def teardown(self, stage: str = None):
         """Remove temporary files."""
-        if stage == "fit" and self.move_files_temp and self.trainer.is_global_zero:
+        if (
+            stage == "fit"
+            and self.move_files_temp
+            and not self.trainer.fast_dev_run
+            and self.trainer.is_global_zero
+        ):
             print("-" * 100)
             print(f"Removing training files: \n\t{self.train_file}\n\t{self.val_file}")
             fu.remove_files_temp(self.train_file, self.val_file)
