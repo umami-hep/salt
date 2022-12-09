@@ -39,7 +39,7 @@ Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/sa
 You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `main`.
 
 ```bash
-main fit --config configs/gnn.yaml
+main fit --config configs/GN1.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
@@ -53,7 +53,7 @@ The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io
     exit.
 
     ```bash
-    main fit --config configs/simple.yaml --trainer.fast_dev_run 5
+    main fit --config configs/GN1.yaml --trainer.fast_dev_run 5
     ```
 
     Logging and checkpoint are suppressed when using this flag.

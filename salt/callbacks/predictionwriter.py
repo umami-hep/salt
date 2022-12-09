@@ -45,8 +45,8 @@ class PredictionWriter(Callback):
         self.track = trainer.datamodule.inputs["track"]
 
         # place to store intermediate outputs
-        self.tasks = [t.name for t in pl_module.model.get_tasks()]
-        self.outputs: dict = {t: [] for t in self.tasks}
+        self.task_names = [task.name for task in pl_module.model.tasks]
+        self.outputs: dict = {task: [] for task in self.task_names}
         self.mask: list = []
 
         # get test dataset
@@ -68,12 +68,12 @@ class PredictionWriter(Callback):
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dl_idx):
         # append test outputs
-        [self.outputs[t].append(outputs[0][t]) for t in self.tasks]
+        [self.outputs[task].append(outputs[0][task]) for task in self.task_names]
         self.mask.append(outputs[1])
 
     def on_test_end(self, trainer, pl_module):
         # concat test batches
-        outputs = {t: torch.cat(self.outputs[t]) for t in self.tasks}
+        outputs = {task: torch.cat(self.outputs[task]) for task in self.task_names}
 
         # softmax jet classification outputs
         jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)

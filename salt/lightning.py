@@ -1,4 +1,5 @@
 import warnings
+from typing import Mapping
 
 import pytorch_lightning as pl
 import torch
@@ -6,15 +7,16 @@ import torch.nn as nn
 
 
 class LightningTagger(pl.LightningModule):
-    def __init__(self, model: nn.Module, lrs_config: dict):
+    def __init__(self, model: nn.Module, lrs_config: Mapping):
         """Lightning jet tagger model.
 
         Parameters
         ----------
         model : nn.Module
             Network and loss function defintions
-        lrs_config: dict
-            LRS config which has to be set dynamically for now
+        lrs_config: Mapping
+            LRS config which has to be set manually for now
+            https://github.com/omni-us/jsonargparse/issues/170#issuecomment-1288167674
         """
 
         super().__init__()
@@ -25,7 +27,7 @@ class LightningTagger(pl.LightningModule):
         self.model = model
         self.lrs_config = lrs_config
 
-        self.in_dim = list(self.model.init_net.parameters())[0].shape[1]
+        self.in_dims = [list(net.parameters())[0].shape[1] for net in self.model.init_nets]
 
     def forward(self, x, mask, labels):
         """Forward pass through the model.
@@ -101,16 +103,18 @@ class LightningTagger(pl.LightningModule):
         return preds, mask
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lrs_config["start"], weight_decay=1e-5)
+        opt = torch.optim.AdamW(
+            self.parameters(), lr=self.lrs_config["initial"], weight_decay=1e-5
+        )
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=self.lrs_config["max"],
             total_steps=self.trainer.estimated_stepping_batches,
-            div_factor=self.lrs_config["max"] / self.lrs_config["start"],
+            div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
             final_div_factor=self.lrs_config["max"] / self.lrs_config["end"],
-            pct_start=0.2,
+            pct_start=self.lrs_config["pct_start"],
         )
         sch = {"scheduler": sch, "interval": "step"}
 

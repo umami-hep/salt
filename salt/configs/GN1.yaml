@@ -1,4 +1,4 @@
-name: dips
+name: GN1
 
 model:
   model:
@@ -20,6 +20,19 @@ model:
                     hidden_layers: [256]
                     activation: &activation SiLU
                     norm_layer: &norm_layer LayerNorm
+
+      gnn:
+        class_path: salt.models.Transformer
+        init_args:
+          attention: salt.models.ScaledDotProductAttention
+          embd_dim: *embd_dim
+          out_proj: False
+          num_heads: 8
+          num_layers: 8
+          residual: true
+          norm_layer: *norm_layer
+          activation: *activation
+          dropout: &dropout 0.1
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -43,4 +56,23 @@ model:
                     hidden_layers: [128, 64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
-                    dropout: 0.1
+                    dropout: *dropout
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_classification
+                label: tracks_loose/labels/truthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [7.62, 104.91, 1.56, 20.65, 14.05, 14.06, 1.0, 36.07]
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *embd_dim
+                    output_size: 8
+                    hidden_layers: [256, 128, 64]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout

@@ -1,4 +1,7 @@
 A series of preprocessing steps are required to extract information from xAOD files into a format conducive for training.
+If you want to get started running the code without producing your own samples, a training sample of 10M jets is available on EOS under
+
+- `/eos/user/u/umami/training-samples/gnn/test/`
 
 ### Dumping Training Samples
 
