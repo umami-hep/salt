@@ -67,12 +67,10 @@ class SaltCLI(LightningCLI):
             # add the labels from the model config to the data config
             labels = {}
             model_dict = vars(sc.model.model.init_args)
-            for name, submodel in model_dict.items():
-                if submodel is None:
-                    continue
-                if "Task" in submodel["class_path"]:
-                    task = submodel["init_args"]
-                    labels[task["name"]] = task["label"]
+            for submodel in model_dict["tasks"]["init_args"]["modules"]:
+                assert "Task" in submodel["class_path"]
+                task = submodel["init_args"]
+                labels[task["name"]] = task["label"]
             sc["data"]["labels"] = labels
 
         if self.subcommand == "test":

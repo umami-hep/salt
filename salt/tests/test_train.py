@@ -27,7 +27,7 @@ class TestTrain:
         """Setup tests (runs once)."""
         cls.generate_train_input(cls.h5_fname)
 
-    def train_template(self, args=None, model="gnn") -> None:
+    def train_template(self, args=None, model="GN1") -> None:
         if args is None:
             args = []
 

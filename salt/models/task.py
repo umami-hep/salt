@@ -20,7 +20,7 @@ class Task(nn.Module):
         ----------
         Name : str
             Name of the task
-        lbael : str
+        label : str
             Label name for the task
         net : Dense
             Dense network for performing the task

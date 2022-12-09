@@ -1,36 +1,46 @@
-name: dips
+name: reg
 
 model:
   model:
     class_path: salt.models.JetTagger
     init_args:
 
-      init_net:
-        class_path: salt.models.Dense
+      init_nets:
+        class_path: torch.nn.ModuleList
         init_args:
-          input_size: 23
-          output_size: &embd_dim 128
-          hidden_layers: [128, 128, 128]
-          activation: &activation ReLU
-          norm_layer: &norm_layer LayerNorm
+          modules:
+            - class_path: salt.models.InitNet
+              init_args:
+                name: track
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 23
+                    output_size: &embd_dim 128
+                    hidden_layers: [256]
+                    activation: &activation SiLU
+                    norm_layer: &norm_layer LayerNorm
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
         init_args:
           input_size: *embd_dim
 
-      jet_net:
-        class_path: salt.models.RegressionTask
+      tasks:
+        class_path: torch.nn.ModuleList
         init_args:
-          name: jet_classification
-          label: jets/labels
-          loss: GaussianNLLLoss
-          net:
-            class_path: salt.models.Dense
-            init_args:
-              input_size: *embd_dim
-              output_size: 2
-              hidden_layers: [128, 64, 32]
-              activation: *activation
-              norm_layer: *norm_layer
-              dropout: 0.1
+          modules:
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: jet_classification # wrong name for now to avoid ci test failure
+                label: jets/labels
+                loss: GaussianNLLLoss
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *embd_dim
+                    output_size: 2
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: 0.1

@@ -85,7 +85,8 @@ def get_probs(outputs: Tensor):
 class ONNXModel(LightningTagger):
     def __init__(self, model: nn.Module) -> None:
         super().__init__(model=model, lrs_config={})
-        jets, tracks = inputs_sep_no_pad(1, 40, self.in_dim)
+        assert len(self.in_dims) == 1, "Multi input ONNX models are not yet supported."
+        jets, tracks = inputs_sep_no_pad(1, 40, self.in_dims[0])
         self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
@@ -93,10 +94,10 @@ class ONNXModel(LightningTagger):
         tracks = tracks.unsqueeze(0)
 
         # concatenate jet and track inputs
-        inputs = concat_jet_track(jets, tracks)
+        inputs = {"track": concat_jet_track(jets, tracks)}
 
         # don't pass padded inputs, so all tracks are taken to be real
-        mask = torch.zeros(tracks.shape[:-1]).bool()
+        mask = {"track": torch.zeros(tracks.shape[:-1]).bool()}
 
         # get probabilities
         outputs = self.model(inputs, mask, None)[0]["jet_classification"]
@@ -152,10 +153,10 @@ def add_metadata(onnx_path, model_name, sd_path, track_selection, output_names):
 
 def compare_output(pt_model, onnx_session, n_track=40):
     n_batch = 1
-    n_feat = pt_model.in_dim
+    n_feat = pt_model.in_dims[0]
 
     jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat)
-    inputs = concat_jet_track(jets, tracks)
+    inputs = {"track": concat_jet_track(jets, tracks)}
 
     pred_pt = pt_model(inputs, mask, None)[0]["jet_classification"]
     pred_pt = [p.detach().numpy() for p in get_probs(pred_pt)]
