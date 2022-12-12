@@ -37,7 +37,7 @@ def get_best_epoch(config_path: Path) -> Path:
     ckpt_dir = Path(config_path.parent / "ckpts")
     print("No --ckpt_path specified, looking for best checkpoint in", ckpt_dir)
     ckpts = glob.glob(f"{ckpt_dir}/*.ckpt")
-    exp = r"(?<=val_loss=)(?:(?:\d+(?:\.\d*)?|\.\d+))"
+    exp = r"(?<=loss=)(?:(?:\d+(?:\.\d*)?|\.\d+))"
     losses = [float(re.findall(exp, Path(ckpt).name)[0]) for ckpt in ckpts]
     ckpt = ckpts[np.argmin(losses)]
     print("Using checkpoint", ckpt)
@@ -47,22 +47,38 @@ def get_best_epoch(config_path: Path) -> Path:
 class SaltCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
         parser.add_argument("--name", default="salt", help="Name for this training run.")
+        # TODO: link arguments
+        # parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
+        # parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
 
         if self.subcommand == "fit":
-            # get timestamp
+            # get timestamped output dir for this run
             timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
             log = "trainer.logger"
             name = sc["name"]
+
+            # handle cases depending on whether the logger is present
+            log_dir = sc["trainer.default_root_dir"]
             if sc[log]:
-                sc[f"{log}.init_args.experiment_name"] = name
-                key = f"{log}.init_args.save_dir"
-            else:
-                key = "trainer.default_root_dir"
-            log_dir = Path(sc[key])
-            sc[key] = str(Path(log_dir / f"{name}_{timestamp}").resolve())
+                sc[f"{log}.init_args.experiment_name"] = name  # TODO: link arguments
+                log_dir = sc[f"{log}.init_args.save_dir"]
+            log_dir = Path(log_dir)
+
+            # handle case where we re-use an existing config: use parent of timestampped dir
+            try:
+                datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")
+                log_dir = log_dir.parent
+            except ValueError:
+                ...
+
+            # set the timestampped dir
+            log_dir = str(Path(log_dir / f"{name}_{timestamp}").resolve())
+            sc["trainer.default_root_dir"] = log_dir
+            if sc[log]:
+                sc[f"{log}.init_args.save_dir"] = log_dir
 
             # add the labels from the model config to the data config
             labels = {}

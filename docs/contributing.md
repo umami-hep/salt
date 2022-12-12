@@ -14,6 +14,9 @@ You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/dev
 In short, aim to write clean readible code with plenty of module and function docstrings, and inline comments.
 Code is formatted using [black](https://github.com/psf/black) (this is enforced by the pre-commit checks).
 
+VS Code is the recommended editor when developing for salt.
+The package comes with some recommended extensions which you can review and install by running the `Extensions: Show Recommended Extensions` command.
+See also the [umami guide](https://umami-docs.web.cern.ch/setup/development/VS_code/) for development with VS Code.
 
 ### Pre-commit Checks
 
