@@ -60,7 +60,7 @@ class TestTrain:
         self.train_template(args)
 
     def test_train_dev(self) -> None:
-        args = ["fit", "--trainer.fast_dev_run=10"]
+        args = ["fit", "--trainer.fast_dev_run=2"]
         self.train_template(args)
 
     def test_train_movefilestemp(self) -> None:

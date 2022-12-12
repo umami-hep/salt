@@ -53,7 +53,7 @@ The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io
     exit.
 
     ```bash
-    main fit --config configs/GN1.yaml --trainer.fast_dev_run 5
+    main fit --config configs/GN1.yaml --trainer.fast_dev_run 2
     ```
 
     Logging and checkpoint are suppressed when using this flag.

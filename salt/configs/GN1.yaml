@@ -28,7 +28,7 @@ model:
           embd_dim: *embd_dim
           out_proj: False
           num_heads: 8
-          num_layers: 8
+          num_layers: 6
           residual: true
           norm_layer: *norm_layer
           activation: *activation
@@ -72,7 +72,7 @@ model:
                   init_args:
                     input_size: *embd_dim
                     output_size: 8
-                    hidden_layers: [256, 128, 64]
+                    hidden_layers: [128, 64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout

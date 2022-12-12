@@ -1,10 +1,10 @@
 seed_everything: 42
 
 data:
-  train_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
-  val_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: /share/rcifdata/svanstroud/data/flow/scale_dict.json
-  move_files_temp: null
+  train_file: /unix/atlastracking/samples/gnn_training/flow_tracks/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  val_file: /unix/atlastracking/samples/gnn_training/flow_tracks/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
+  scale_dict: /unix/atlastracking/samples/gnn_training/flow_tracks/scale_dict.json
+  #move_files_temp: null
   inputs:
     jet: jets
     track: tracks_loose
@@ -19,6 +19,7 @@ trainer:
   max_epochs: 100
   accelerator: gpu
   devices: 1
+  #precision: bf16
   strategy:
     class_path: pytorch_lightning.strategies.DDPStrategy
     init_args:
@@ -29,12 +30,14 @@ trainer:
   logger:
     class_path: pytorch_lightning.loggers.CometLogger
     init_args:
-      save_dir: *default_root_dir
+      save_dir: *default_root_dir # TODO: link arguments
       project_name: salt
       display_summary_level: 0
 
   callbacks:
     - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_jet_classification_loss
     - class_path: salt.callbacks.PredictionWriter
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
@@ -50,4 +53,4 @@ model:
     initial: 1e-8
     max: 1e-3
     end: 1e-8
-    pct_start: 0.2
+    pct_start: 0.1

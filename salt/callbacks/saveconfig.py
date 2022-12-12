@@ -132,7 +132,8 @@ class SaveConfigCallback(Callback):
 
         git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
         meta["git_hash"] = git_hash.decode("ascii").strip()
-        meta["out_dir"] = logger.save_dir
+        if logger:
+            meta["out_dir"] = logger.save_dir
         if hasattr(self.trainer, "timestamp"):
             meta["timestamp"] = trainer.timestamp
         meta["torch_version"] = str(torch.__version__)
@@ -140,7 +141,8 @@ class SaveConfigCallback(Callback):
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 
-        logger.log_hyperparams(meta)
+        if logger:
+            logger.log_hyperparams(meta)
 
         meta_path = Path(config_path.parent / "metadata.yaml")
         with open(meta_path, "w") as f:

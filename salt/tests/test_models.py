@@ -139,7 +139,7 @@ def test_mha_vs_torch_timing():
         " regressions."
     )
     np.testing.assert_allclose(
-        torch_out.cpu().detach().numpy(), out.cpu().detach().numpy(), rtol=1e-4, atol=1e-4
+        torch_out.cpu().detach().numpy(), out.cpu().detach().numpy(), rtol=1e-3, atol=1e-3
     )
 
 
