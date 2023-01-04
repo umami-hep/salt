@@ -123,7 +123,7 @@ def add_metadata(onnx_path, model_name, sd_path, track_selection, output_names):
             "name": f"tracks_{track_selection}_sd0sort",
             "variables": [
                 {"name": k, "offset": v["shift"], "scale": v["scale"]}
-                for k, v in scale_dict["tracks_loose"].items()
+                for k, v in scale_dict["tracks"].items()
             ],
         }
     ]

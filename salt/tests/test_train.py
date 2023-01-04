@@ -96,7 +96,7 @@ class TestTrain:
         jet_features = 2
         n_tracks_per_jet = 40
         track_features = 21
-        tracks = "tracks_loose"
+        tracks = "tracks"
 
         # setup jets
         shapes_jets = {

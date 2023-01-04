@@ -34,8 +34,28 @@ override the default in the training config.
 
     Get in touch if this is a problem.
 
+### Extra Evaluation Variables
+When evaluating a model, the jet and track variables included in the output file can be configured.
+The variables can be configured as follows within the `PredictionWriter` callback configuration in the base configuration file.
 
-### Track evaluation
+```yaml
+callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_jet_classification_loss
+    - class_path: salt.callbacks.PredictionWriter
+      init_args:
+        write_tracks: False
+        jet_variables:
+          - pt_btagJes
+          - eta_btagJes
+          - HadronConeExclTruthLabelID
+          - n_tracks
+          - n_truth_promptLepton
+        track_variables:
+          - truthOriginLabel
+          - truthVertexIndex
+```
 
 By default, only the jet quantities are evaluated to save time and space.
-If you want to study the track aux task performance, you need to specify `write_tracks: True` in the `PredictionWriter` callback configuration in the base configuration file.
+If you want to study the track aux task performance, you need to specify `write_tracks: True` in the `PredictionWriter` callback configuration.

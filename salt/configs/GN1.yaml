@@ -61,7 +61,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_classification
-                label: tracks_loose/labels/truthOriginLabel
+                label: tracks/labels/truthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss

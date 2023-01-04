@@ -11,18 +11,24 @@ from salt.utils.arrays import join_structured_arrays
 
 
 class PredictionWriter(Callback):
-    def __init__(self, write_tracks: bool = False) -> None:
-        """A callback to write test outputs to h5 file."""
+    def __init__(
+        self, jet_variables: list, track_variables: list, write_tracks: bool = False
+    ) -> None:
+        """A callback to write test outputs to h5 file.
+
+        Parameters
+        ----------
+        jet_variables : list
+            List of jet variables to copy from test file
+        track_variables : list
+            List of track variables to copy from test file
+        write_tracks : bool
+            If true, write track outputs to file
+        """
         super().__init__()
 
-        # list of variables to copy from test file
-        self.jet_variables = [
-            "pt",
-            "eta",
-            "HadronConeExclTruthLabelID",
-            "n_tracks_loose",
-            "n_truth_promptLepton",
-        ]
+        self.jet_variables = jet_variables
+        self.track_variables = track_variables
 
         self.write_tracks = write_tracks
         self.track_cols = [
@@ -57,7 +63,7 @@ class PredictionWriter(Callback):
         # get jet class prediction column names
         train_file = trainer.datamodule.train_dataloader().dataset.file
         jet_classes = list(train_file[f"{self.jet}/labels"].attrs.values())[0]
-        self.jet_cols = [f"salt_p{c[0]}" for c in jet_classes]
+        self.jet_cols = [f"salt_p{c.split('jets')[0]}" for c in jet_classes]
 
         # get output path
         out_dir = Path(trainer._ckpt_path).parent
@@ -94,9 +100,7 @@ class PredictionWriter(Callback):
             t = t.view(dtype=np.dtype([(name, "f4") for name in self.track_cols]))
             t = t.reshape(t.shape[0], t.shape[1])
 
-            # add other other vars to the array
-            track_vars = ["truthOriginLabel", "truthVertexIndex"]
-            t2 = self.file[self.track].fields(track_vars)[: self.num_jets]
+            t2 = self.file[self.track].fields(self.track_vars)[: self.num_jets]
             t = join_structured_arrays((t, t2))
 
         # write to h5 file
