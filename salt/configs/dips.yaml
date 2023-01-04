@@ -16,7 +16,7 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: 23
-                    output_size: &embd_dim 128
+                    output_size: &embed_dim 128
                     hidden_layers: [256]
                     activation: &activation SiLU
                     norm_layer: &norm_layer LayerNorm
@@ -24,7 +24,7 @@ model:
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
         init_args:
-          input_size: *embd_dim
+          input_size: *embed_dim
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -38,7 +38,7 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args:
-                    input_size: *embd_dim
+                    input_size: *embed_dim
                     output_size: 3
                     hidden_layers: [128, 64, 32]
                     activation: *activation

@@ -242,6 +242,10 @@ class TestJetDataset(Dataset):
             "track": scale_dict[inputs["track"]].keys(),
         }
 
+        # hacky atm
+        if "flow" in inputs and inputs["flow"] in scale_dict:
+            variables["flow"] = scale_dict[inputs["flow"]].keys()
+
         return scale_dict, variables
 
     def scale_inputs(self, inputs: dict, masks: dict):

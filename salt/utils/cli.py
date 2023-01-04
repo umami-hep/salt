@@ -9,12 +9,12 @@ from jsonargparse.typing import register_type
 from pytorch_lightning.cli import LightningCLI
 
 
-# handle list -> tensor config
-def serializer(x):
+# add support for converting yaml lists to tensors
+def serializer(x: torch.Tensor) -> list:
     return x.tolist()
 
 
-def deserializer(x):
+def deserializer(x: list) -> torch.Tensor:
     return torch.tensor(x)
 
 
@@ -47,9 +47,8 @@ def get_best_epoch(config_path: Path) -> Path:
 class SaltCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
         parser.add_argument("--name", default="salt", help="Name for this training run.")
-        # TODO: link arguments
-        # parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
-        # parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
+        parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
+        parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
@@ -59,26 +58,20 @@ class SaltCLI(LightningCLI):
             timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
             log = "trainer.logger"
             name = sc["name"]
-
-            # handle cases depending on whether the logger is present
-            log_dir = sc["trainer.default_root_dir"]
-            if sc[log]:
-                sc[f"{log}.init_args.experiment_name"] = name  # TODO: link arguments
-                log_dir = sc[f"{log}.init_args.save_dir"]
-            log_dir = Path(log_dir)
+            log_dir = Path(sc["trainer.default_root_dir"])
 
             # handle case where we re-use an existing config: use parent of timestampped dir
             try:
                 datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")
                 log_dir = log_dir.parent
             except ValueError:
-                ...
+                pass
 
             # set the timestampped dir
-            log_dir = str(Path(log_dir / f"{name}_{timestamp}").resolve())
-            sc["trainer.default_root_dir"] = log_dir
+            log_dir_timestamp = str(Path(log_dir / f"{name}_{timestamp}").resolve())
+            sc["trainer.default_root_dir"] = log_dir_timestamp
             if sc[log]:
-                sc[f"{log}.init_args.save_dir"] = log_dir
+                sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
 
             # add the labels from the model config to the data config
             labels = {}
@@ -106,12 +99,15 @@ class SaltCLI(LightningCLI):
                 best_epoch_path = get_best_epoch(Path(config[0].rel_path))
                 sc["ckpt_path"] = best_epoch_path
 
-            # ensure only one devices is used for testing
+            # ensure only one device is used for testing
             n_devices = sc["trainer.devices"]
             if (isinstance(n_devices, str) or isinstance(n_devices, int)) and int(n_devices) > 1:
                 print("Setting --trainer.devices=1")
                 sc["trainer.devices"] = "1"
             if isinstance(n_devices, list) and len(n_devices) > 1:
                 raise ValueError("Testing requires --trainer.devices=1")
+
+            # disable move_files_temp
+            sc["data.move_files_temp"] = None
 
             print("-" * 100 + "\n")

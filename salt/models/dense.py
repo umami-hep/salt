@@ -23,11 +23,11 @@ class Dense(nn.Module):
             Output size
         hidden_layers : list
             Number of nodes per layer
-        activation : nn.Module, optional
-            Activation function, by default nn.SiLU
-        final_activation : nn.Module, optional
-            Activation function on the output layer, by default None
-        norm_layer : nn.Module, optional
+        activation : str
+            Activation function for hidden layers
+        final_activation : str, optional
+            Activation function for the output layer, by default None
+        norm_layer : str, optional
             Normalisation layer, by default None
         norm_final_layer : bool, optional
             Whether to use normalisation on the final layer, by default False

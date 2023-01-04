@@ -50,7 +50,7 @@ def test_gatv2():
     head_dim = n_dim // n_head
 
     net = MultiheadAttention(
-        attention=GATv2Attention(n_head, head_dim, activation=nn.SiLU()),
+        attention=GATv2Attention(n_head, head_dim, activation="SiLU"),
         embed_dim=n_dim,
         num_heads=n_head,
     )

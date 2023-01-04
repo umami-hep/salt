@@ -1,0 +1,13 @@
+model:
+    model:
+      class_path: salt.models.JetTagger
+      init_args:
+
+        gnn:
+          class_path: salt.models.Transformer
+          init_args:
+            attention:
+              class_path: salt.models.GATv2Attention
+              init_args:
+                num_heads: 8
+                head_dim: 16
