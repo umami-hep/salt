@@ -100,7 +100,7 @@ class TestPredict:
         jets = u2s(jets, jets_dtype)
 
         # setup tracks
-        tracks_dtype = np.dtype([(n, "f4") for n in sd["tracks_loose"]])
+        tracks_dtype = np.dtype([(n, "f4") for n in sd["tracks"]])
         tracks = rng.random(shapes_tracks["inputs"])
         tracks = u2s(tracks, tracks_dtype)
         valid = rng.random(shapes_tracks["valid"])
@@ -109,4 +109,4 @@ class TestPredict:
 
         with h5py.File(fpath, "w") as f:
             f.create_dataset("jets", data=jets)
-            f.create_dataset("tracks_loose", data=tracks)
+            f.create_dataset("tracks", data=tracks)

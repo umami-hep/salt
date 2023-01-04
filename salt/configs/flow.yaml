@@ -7,7 +7,7 @@ data:
   move_files_temp: /dev/shm/svanstro/salt/
   inputs:
     jet: jets
-    track: tracks_loose
+    track: tracks
     flow: flow
 
 model:

@@ -124,10 +124,12 @@ class JetDataModule(pl.LightningDataModule):
         if self.trainer.is_global_zero:
             print("-" * 100, "\n")
 
-    def get_dataloader(self, dataset, shuffle):
+    def get_dataloader(self, stage: str, dataset: TrainJetDataset, shuffle: bool):
+        drop_last = True if stage == "fit" else False
+
         # batched reads from h5 (weak shuffling)
         if self.batched_read:
-            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=True)
+            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
             batch_size = None
             collate_fn = None
             shuffle = False
@@ -148,13 +150,13 @@ class JetDataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
-        return self.get_dataloader(dataset=self.train_dset, shuffle=True)
+        return self.get_dataloader(dataset=self.train_dset, stage="fit", shuffle=True)
 
     def val_dataloader(self):
-        return self.get_dataloader(dataset=self.val_dset, shuffle=False)
+        return self.get_dataloader(dataset=self.val_dset, stage="test", shuffle=False)
 
     def test_dataloader(self):
-        return self.get_dataloader(dataset=self.test_dset, shuffle=False)
+        return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
 
     def teardown(self, stage: str = None):
         """Remove temporary files."""

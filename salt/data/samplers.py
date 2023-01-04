@@ -43,13 +43,13 @@ class RandomBatchSampler(Sampler):
         return int(self.n_batches) + int(not self.drop_last and self.nonzero_last_batch)
 
     def __iter__(self):
-        # yeild full batches from the dataset
+        # yield full batches from the dataset
         for batch_id in self.batch_ids:
             start, stop = batch_id * self.batch_size, (batch_id + 1) * self.batch_size
             yield np.s_[int(start) : int(stop)]
 
         # in case the batch size is not a perfect multiple of the number of samples,
-        # yeild the remaining samples
+        # yield the remaining samples
         if not self.drop_last and self.nonzero_last_batch:
             start, stop = int(self.n_batches) * self.batch_size, self.dataset_length
             yield np.s_[int(start) : int(stop)]

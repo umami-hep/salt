@@ -1,17 +1,17 @@
 seed_everything: 42
 
 data:
-  train_file: /unix/atlastracking/samples/gnn_training/flow_tracks/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
-  val_file: /unix/atlastracking/samples/gnn_training/flow_tracks/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: /unix/atlastracking/samples/gnn_training/flow_tracks/scale_dict.json
+  train_file: <Umami base dir>/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
+  val_file: <Umami base dir>/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
+  scale_dict: <Umami base dir>/scale_dict.json
   #move_files_temp: null
   inputs:
     jet: jets
-    track: tracks_loose
+    track: tracks
   batched_read: True
   batch_size: 1000
   num_workers: 20
-  num_jets_train: 30_000_000
+  num_jets_train: 23_000_000
   num_jets_val: 1_000_000
   num_jets_test: 1_000_000
 
@@ -39,6 +39,17 @@ trainer:
       init_args:
         monitor_loss: val_jet_classification_loss
     - class_path: salt.callbacks.PredictionWriter
+      init_args:
+        write_tracks: False
+        jet_variables:
+          - pt
+          - eta
+          - HadronConeExclTruthLabelID
+          - n_tracks_loose
+          - n_truth_promptLepton
+        track_variables:
+          - truthOriginLabel
+          - truthVertexIndex
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
       init_args:
