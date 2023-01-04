@@ -1,6 +1,6 @@
 site_name: Salt documentation
-site_description: Documentation for salt
-site_author: salt team
+site_description: Documentation for the salt training framework
+site_author: Salt Team
 site_url: http://ftag-salt.docs.cern.ch/
 
 repo_name: GitLab
@@ -8,39 +8,45 @@ repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/
 edit_uri: 'tree/main/docs'
 
 theme:
-    name: material
-    logo: assets/salt.png
-    favicon: assets/salt.png
+  name: material
+  logo: assets/salt.png
+  favicon: assets/salt.png
 
 nav:
-    - Introduction: 'index.md'
-    - Setup: setup.md
-    - Preprocessing: preprocessing.md
-    - Training: training.md
-    - Evaluation: evaluation.md
-    - ONNX Export: export.md
-    - Contributing: contributing.md
+  - Introduction: 'index.md'
+  - Setup: setup.md
+  - Preprocessing: preprocessing.md
+  - Training: training.md
+  - Evaluation: evaluation.md
+  - ONNX Export: export.md
+  - Contributing: contributing.md
 
 plugins:
-    - search
-    - markdownextradata
+  - search
+  - mermaid2
+  - markdownextradata
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: date
 
 markdown_extensions:
-    - admonition
-    - codehilite
-    - pymdownx.arithmatex
-    - pymdownx.details
-    - pymdownx.inlinehilite
-    - pymdownx.smartsymbols
-    - pymdownx.superfences:
-        custom_fences:
-        - name: mermaid
-          class: mermaid
-          format: "!!python/name:mermaid2.fence_mermaid"
-    - pymdownx.tabbed:
-        alternate_style: true
-    - toc:
-        permalink: "#"
+  - admonition
+  - codehilite
+  - pymdownx.arithmatex
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+    custom_fences:
+      - name: mermaid
+        class: mermaid
+        format: "!!python/name:mermaid2.fence_mermaid"
+  - pymdownx.tabbed:
+    alternate_style: true
+  - toc:
+    permalink: "#"
 
 extra_javascript:
-    - 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'
+  - 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'
+
+copyright: Copyright &copy; 2022 - 2023 CERN for the benefit of the ATLAS collaboration
