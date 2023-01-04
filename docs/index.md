@@ -14,7 +14,7 @@ Discussions about GNNs take place on Mattermost [here](https://mattermost.web.ce
 
 This repository will cherry pick the best bits of
 
-- https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger
-- https://gitlab.cern.ch/mleigh/flavour_tagging/-/blob/master/ftag/
+- [https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger)
+- [https://gitlab.cern.ch/mleigh/flavour_tagging/-/blob/master/ftag/](https://gitlab.cern.ch/mleigh/flavour_tagging/-/blob/master/ftag/)
 
 and become the default place for everyone to train models going forward.
