@@ -23,7 +23,6 @@ nav:
 
 plugins:
   - search
-  - mermaid2
   - markdownextradata
   - git-revision-date-localized:
       enable_creation_date: true
@@ -37,14 +36,14 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.smartsymbols
   - pymdownx.superfences:
-    custom_fences:
-      - name: mermaid
-        class: mermaid
-        format: "!!python/name:mermaid2.fence_mermaid"
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: "!!python/name:mermaid2.fence_mermaid"
   - pymdownx.tabbed:
-    alternate_style: true
+      alternate_style: true
   - toc:
-    permalink: "#"
+      permalink: "#"
 
 extra_javascript:
   - 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'
