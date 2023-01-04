@@ -8,7 +8,7 @@ from salt.models.dense import Dense
 class SelfAttentionBlock(nn.Module):
     def __init__(
         self,
-        embd_dim: int,
+        embed_dim: int,
         num_heads: int,
         attention: nn.Module,
         activation: str,
@@ -23,16 +23,16 @@ class SelfAttentionBlock(nn.Module):
         self.residual = residual
 
         if norm_layer:
-            self.norm = getattr(torch.nn, norm_layer)(embd_dim, elementwise_affine=False)
+            self.norm = getattr(torch.nn, norm_layer)(embed_dim, elementwise_affine=False)
         else:
             self.register_buffer("norm", None)
 
-        self.mha = MultiheadAttention(embd_dim, num_heads, attention=attention, out_proj=out_proj)
+        self.mha = MultiheadAttention(embed_dim, num_heads, attention=attention, out_proj=out_proj)
 
         self.dense = Dense(
-            embd_dim,
-            embd_dim,
-            [embd_dim],
+            embed_dim,
+            embed_dim,
+            [embed_dim],
             activation,
             norm_layer=norm_layer,
             dropout=dropout,
@@ -63,11 +63,12 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
-        embd_dim: int,
+        embed_dim: int,
         num_heads: int,
         num_layers: int,
         attention: nn.Module,
         activation: str,
+        out_dim: int = None,
         residual: bool = True,
         norm_layer: str = None,
         dropout: float = 0.0,
@@ -75,11 +76,14 @@ class Transformer(nn.Module):
     ):
         super().__init__()
 
+        if out_dim is None:
+            out_dim = embed_dim
+
         layers = []
         for i in range(num_layers):
             layers.append(
                 SelfAttentionBlock(
-                    embd_dim,
+                    embed_dim,
                     num_heads,
                     attention,
                     activation,
@@ -91,7 +95,9 @@ class Transformer(nn.Module):
             )
         self.net = nn.Sequential(*layers)
 
-        self.final_dense = Dense(embd_dim, embd_dim, [embd_dim], activation, norm_layer=norm_layer)
+        self.final_dense = Dense(
+            embed_dim, out_dim, [embed_dim], activation, norm_layer=norm_layer
+        )
 
     def forward(self, x, mask=None):
         for layer in self.net:

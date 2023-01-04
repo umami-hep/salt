@@ -111,8 +111,8 @@ class JetDataModule(pl.LightningDataModule):
             print(f"Created validation dataset with {len(self.val_dset):,} jets")
 
         if stage == "test":
-            assert self.test_file is not None
-            assert self.scale_dict is not None
+            assert self.test_file is not None, "No test file specified, see --data.test_file"
+            assert self.scale_dict is not None, "No scale dict specified, see --data.scale_dict"
             self.test_dset = TestJetDataset(
                 filename=self.test_file,
                 inputs=self.inputs,

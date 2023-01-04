@@ -164,3 +164,14 @@ main fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
 The full training state, including the state of the optimiser, is resumed.
 The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
 where it left off.
+
+### Switching Attention Mechanisms
+
+By default the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) config uses the scaled dot product attention found in transformers.
+To switch to the GATv2 attention, add the [`GATv2.yaml`]({{repo_url}}-/blob/main/salt/configs/GATv2.yaml) config fragment.
+
+```bash
+main fit --config configs/GN1.yaml --config configs/GATv2.yaml
+```
+
+Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.

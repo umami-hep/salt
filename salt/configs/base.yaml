@@ -30,7 +30,6 @@ trainer:
   logger:
     class_path: pytorch_lightning.loggers.CometLogger
     init_args:
-      save_dir: *default_root_dir # TODO: link arguments
       project_name: salt
       display_summary_level: 0
 

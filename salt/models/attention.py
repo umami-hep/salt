@@ -140,10 +140,10 @@ class GATv2Attention(nn.Module):
     https://arxiv.org/abs/2105.14491
     """
 
-    def __init__(self, num_heads: int, head_dim: int, activation: nn.Module = nn.SiLU()):
+    def __init__(self, num_heads: int, head_dim: int, activation: str = "SiLU"):
         super().__init__()
         self.attention = nn.Parameter(torch.FloatTensor(size=(1, num_heads, 1, 1, head_dim)))
-        self.activation = activation
+        self.activation = getattr(nn, activation)()
         nn.init.xavier_uniform_(self.attention)
 
     def forward(self, q: Tensor, k: Tensor, scale: Tensor = None, mask: BoolTensor = None):

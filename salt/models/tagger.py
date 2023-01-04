@@ -50,19 +50,23 @@ class JetTagger(nn.Module):
 
         # concatenate different things
         # TODO: check if it helps to add a flag as to which input type this is
-        embed_x = torch.cat(list(embed_x.values()), dim=1)
+        all_x = torch.cat(list(embed_x.values()), dim=1)
         if mask is not None:
             mask = torch.cat(list(mask.values()), dim=1)
 
         # graph network
         if self.gnn:
-            embed_x = self.gnn(embed_x, mask=mask)
+            all_x = self.gnn(all_x, mask=mask)
 
         # pooling
-        pooled = self.pool_net(embed_x, mask=mask)
+        pooled = self.pool_net(all_x, mask=mask)
+
+        # concat global rep
+        pooled_repeat = torch.repeat_interleave(pooled[:, None, :], all_x.shape[1], dim=1)
+        all_x = torch.cat([pooled_repeat, all_x], dim=-1)
 
         # run tasks
-        preds, loss = self.tasks_forward(pooled, embed_x, mask, labels)
+        preds, loss = self.tasks_forward(pooled, all_x, mask, labels)
 
         return preds, loss
 
