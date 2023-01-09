@@ -114,7 +114,7 @@ class LightningTagger(pl.LightningModule):
             total_steps=self.trainer.estimated_stepping_batches,
             div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
             final_div_factor=self.lrs_config["max"] / self.lrs_config["end"],
-            pct_start=self.lrs_config["pct_start"],
+            pct_start=float(self.lrs_config["pct_start"]),
         )
         sch = {"scheduler": sch, "interval": "step"}
 

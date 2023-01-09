@@ -1,5 +1,5 @@
 pages:
-  image: python:3.9.14
+  image: python:3.11.1
   stage: docs
   needs: []
   script:
@@ -8,7 +8,7 @@ pages:
     - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
     paths:
-    - public
+      - public
     expire_in: 1 hour
   #rules:
   #  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="atlas-flavor-tagging-tools/algorithms/salt"

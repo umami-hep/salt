@@ -106,8 +106,8 @@ class TrainJetDataset(Dataset):
 
     def check_file(self, inputs: Mapping):
         error_str = (
-            "Perhaps you have used an old umami training file. Please make"
-            " sure you use an input file which is produced using a version of umami"
+            "Perhaps you used the wrong track group name or have used an old umami training file."
+            " Please make sure you use an input file which is produced using a version of umami"
             " which includes !648 and !665, i.e. versions >=0.17."
         )
 

@@ -40,18 +40,8 @@ Include the `--all-files` flag if you want to run the checks over all the files 
 
 ### Test Suite
 
-From the top level directory of the repository, run
+From the `salt/` source directory, run
 
 ```bash
-pytest
+pytest --cov=salt --show-capture=stdout
 ```
-
-??? info "Checking code coverage"
-
-    If you want to check the coverage of the test suite, you can instead
-    run the tests using `coverage`.
-
-    ```bash
-    coverage run --source salt -m pytest
-    coverage report
-    ```
