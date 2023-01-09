@@ -20,7 +20,7 @@ def remove_file(path: Path):
     if path.is_file():
         path.unlink()
     else:
-        print(f"No file was found to delete at {path}")
+        print(f"No file to delete at {path}")
 
 
 def remove_files_temp(train_temp_path, val_temp_path):

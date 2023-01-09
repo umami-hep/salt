@@ -25,7 +25,7 @@ trainer:
     init_args:
       find_unused_parameters: false
   log_every_n_steps: 50
-  default_root_dir: &default_root_dir logs
+  default_root_dir: logs
 
   logger:
     class_path: pytorch_lightning.loggers.CometLogger
@@ -44,7 +44,7 @@ trainer:
           - pt
           - eta
           - HadronConeExclTruthLabelID
-          - n_tracks_loose
+          - n_tracks
           - n_truth_promptLepton
         track_variables:
           - truthOriginLabel

@@ -104,7 +104,9 @@ class ONNXModel(LightningTagger):
         return get_probs(outputs)
 
 
-def add_metadata(onnx_path, model_name, sd_path, track_selection, output_names):
+def add_metadata(
+    onnx_path, model_name, sd_path, track_selection, output_names, jet_name, track_name
+):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
     print(f"Using scale dict {sd_path}")
@@ -123,7 +125,7 @@ def add_metadata(onnx_path, model_name, sd_path, track_selection, output_names):
             "name": f"tracks_{track_selection}_sd0sort",
             "variables": [
                 {"name": k, "offset": v["shift"], "scale": v["scale"]}
-                for k, v in scale_dict["tracks"].items()
+                for k, v in scale_dict[track_name].items()
             ],
         }
     ]
@@ -132,7 +134,7 @@ def add_metadata(onnx_path, model_name, sd_path, track_selection, output_names):
             "name": "jet_var",
             "variables": [
                 {"name": k, "offset": v["shift"], "scale": v["scale"]}
-                for k, v in scale_dict["jets"].items()
+                for k, v in scale_dict[jet_name].items()
             ],
         }
     ]
@@ -155,8 +157,9 @@ def compare_output(pt_model, onnx_session, n_track=40):
     n_batch = 1
     n_feat = pt_model.in_dims[0]
 
-    jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat)
+    jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat, all_valid=True)
     inputs = {"track": concat_jet_track(jets, tracks)}
+    mask = {"track": mask}
 
     pred_pt = pt_model(inputs, mask, None)[0]["jet_classification"]
     pred_pt = [p.detach().numpy() for p in get_probs(pred_pt)]
@@ -200,6 +203,8 @@ def main(args=None):
     with open(config_path) as fp:
         config = YAML().load(fp)
         sd_path = config["data"]["scale_dict"] if not args.sd_path else args.sd_path
+        jet_name = config["data"]["inputs"]["jet"]
+        track_name = config["data"]["inputs"]["track"]
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -231,7 +236,9 @@ def main(args=None):
         },
     )
 
-    add_metadata(onnx_path, args.name, sd_path, args.track_selection, output_names)
+    add_metadata(
+        onnx_path, args.name, sd_path, args.track_selection, output_names, jet_name, track_name
+    )
     compare_outputs(pt_model, onnx_path)
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")

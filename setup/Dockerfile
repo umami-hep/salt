@@ -12,7 +12,9 @@ RUN apt-get install -y git h5utils wget curl
 # install requirements
 RUN python --version
 RUN pip3 --version
-COPY pyproject.toml .
-RUN mkdir salt
 RUN pip3 install --upgrade pip
+
+# install package
+COPY salt/ salt/
+COPY pyproject.toml .
 RUN pip3 install -e .
