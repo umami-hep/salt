@@ -22,12 +22,8 @@ def run_train(tmp_path, config_path, train_args):
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     sd_path = tmp_path / "dummy_scale_dict.json"
-    write_dummy_train_file(
-        train_h5_path,
-        n_jet_features=N_JET_FEATURES,
-        n_track_features=N_TRACK_FEATURES,
-    )
     write_dummy_scale_dict(sd_path, N_JET_FEATURES, N_TRACK_FEATURES)
+    write_dummy_train_file(train_h5_path, sd_path)
 
     args = ["fit"]
     args += [f"--config={config_path}"]

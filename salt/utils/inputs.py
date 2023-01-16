@@ -98,7 +98,10 @@ def get_dummy_inputs(
     return jets, tracks
 
 
-def write_dummy_train_file(fname, jets_name="jets", tracks_name="tracks", **kwargs):
+def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks"):
+    with open(sd_path) as f:
+        sd = json.load(f)
+    kwargs = {"n_jet_features": len(sd[jets_name]), "n_track_features": len(sd[tracks_name])}
     jets, tracks = get_dummy_inputs(jets_name=jets_name, tracks_name=tracks_name, **kwargs)
     with h5py.File(fname, "w") as f:
         g_jets = f.create_group(jets_name)
@@ -111,7 +114,8 @@ def write_dummy_train_file(fname, jets_name="jets", tracks_name="tracks", **kwar
         for key, arr in tracks.items():
             g_tracks.create_dataset(key, data=arr)
             if key == "inputs":
-                g_tracks[key].attrs[f"{tracks}_variables"] = ["jet_eta", "pt"]
+                var = list(sd[jets_name].keys()) + list(sd[tracks_name].keys())
+                g_tracks[key].attrs[f"{tracks}_variables"] = var
 
 
 def write_dummy_test_file(fname, sd_fname):
