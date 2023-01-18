@@ -17,6 +17,7 @@ class TrainJetDataset(Dataset):
         inputs: Mapping,
         labels: Mapping = None,
         num_jets: int = -1,
+        exclude: dict = None,
     ):
         """A simple map-style dataset for loading jets from an umami-
         preprocessed training file.
@@ -31,6 +32,9 @@ class TrainJetDataset(Dataset):
             Mapping from task name to label name. Set automatically by the CLI.
         num_jets : int, optional
             Number of jets to use, by default -1 which will use all jets.
+        exclude :
+            Dict of variables in the datasets not to consider for training (TODO: think
+            if the jet variables concatenated to tracks need to be excluded here as well)
         """
         super().__init__()
 
@@ -51,6 +55,12 @@ class TrainJetDataset(Dataset):
 
         # set number of jets
         self.num_jets = self.get_num_jets(num_jets)
+
+        # set dict of variables to exclude
+        self.exclude = exclude
+
+        if self.exclude is None:
+            self.exclude = {}
 
     def __len__(self):
         return int(self.num_jets)
@@ -77,6 +87,15 @@ class TrainJetDataset(Dataset):
         # read inputs
         for name in self.inputs:
             inputs[name] = torch.as_tensor(self.inputs[name][jet_idx], dtype=torch.float)
+
+            # make mask for variables to exclude.
+            if self.exclude.get(name, []):
+                var_mask = [
+                    var not in self.exclude[name]
+                    for var in list(self.inputs[name].attrs.values())[0]
+                ]
+                inputs[name] = inputs[name][..., var_mask]
+
             if name in self.valids:
                 masks[name] = ~torch.as_tensor(self.valids[name][jet_idx], dtype=torch.bool)
 
@@ -152,6 +171,7 @@ class TestJetDataset(Dataset):
         inputs: dict,
         scale_dict: str,
         num_jets: int = -1,
+        exclude: dict = None,
     ):
         """A map-style dataset for loading jets from a structured array file
         produced by the tdd or prepared by umami.
@@ -192,6 +212,12 @@ class TestJetDataset(Dataset):
         # set number of jets
         self.num_jets = self.get_num_jets(num_jets)
 
+        # set dict of variables to exclude
+        self.exclude = exclude
+
+        if self.exclude is None:
+            self.exclude = {}
+
     def __len__(self):
         return int(self.num_jets)
 
@@ -215,16 +241,18 @@ class TestJetDataset(Dataset):
         masks = {}
 
         # read inputs
-        for name in self.inputs:
-            inputs[name] = torch.as_tensor(s2u(self.inputs[name][jet_idx]), dtype=torch.float)
-            if name in self.valids:
-                masks[name] = ~torch.as_tensor(self.valids[name][jet_idx], dtype=torch.bool)
+        for i_type, i_name in self.inputs_names.items():
+            # select only variables not excluded by user
+            include = list(set(self.vars[i_type]) - set(self.exclude.get(i_type, [])))
+            inputs_ = self.inputs[i_type][jet_idx][include]
+            inputs_ = self.scale_inputs(inputs_, self.sd[i_name], include)
+            inputs[i_type] = torch.as_tensor(s2u(inputs_), dtype=torch.float)
 
-        # scale
-        inputs = self.scale_inputs(inputs, masks)
+            if i_type in self.valids:
+                masks[i_type] = ~torch.as_tensor(self.valids[i_type][jet_idx], dtype=torch.bool)
 
         # concatenate
-        for name in self.inputs:
+        for name in inputs:
             if name in self.valids:
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
 
@@ -248,30 +276,12 @@ class TestJetDataset(Dataset):
 
         return scale_dict, variables
 
-    def scale_inputs(self, inputs: dict, masks: dict):
-        """Normalise all inputs."""
-        for i_type, i_name in self.inputs_names.items():
-            if i_type == "jet":
-                inputs[i_type] = self.scale_jets(inputs[i_type], self.sd[i_name])
-            else:
-                inputs[i_type] = self.scale_tracks(inputs[i_type], masks[i_type], self.sd[i_name])
-
-        return inputs
-
-    def scale_jets(self, jets: Tensor, sd: dict):
+    def scale_inputs(self, inputs: Tensor, sd: dict, include: list):
         """Normalise jet inputs."""
-        for i, tf in enumerate(sd.values()):
-            jets[:, i] = (jets[:, i] - tf["shift"]) / tf["scale"]
-
-        return jets
-
-    def scale_tracks(self, tracks: Tensor, mask: Tensor, sd: dict):
-        """Normalise sequence inputs."""
-        for i, tf in enumerate(sd.values()):
-            tracks[..., i] = torch.where(
-                ~mask, (tracks[..., i] - tf["shift"]) / tf["scale"], tracks[..., i]
-            )
-        return tracks
+        for name, tf in sd.items():
+            if name in include:
+                inputs[name] = (inputs[name] - tf["shift"]) / tf["scale"]
+        return inputs
 
     def get_num_jets(self, num_jets_requested: int):
         num_jets_available = len(self.inputs["jet"])

@@ -19,6 +19,7 @@ class JetDataModule(pl.LightningDataModule):
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
+        exclude: dict = None,
         labels: dict = None,
         move_files_temp: str = None,
         scale_dict: str = None,
@@ -48,6 +49,8 @@ class JetDataModule(pl.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
+        exclude :
+            Dict of variables in the input datasets not to consider for training
         labels : dict
             Mapping from task name to label name
         move_files_temp : str
@@ -69,6 +72,7 @@ class JetDataModule(pl.LightningDataModule):
         self.num_jets_train = num_jets_train
         self.num_jets_val = num_jets_val
         self.num_jets_test = num_jets_test
+        self.exclude = exclude
         self.scale_dict = scale_dict
         self.move_files_temp = move_files_temp
 
@@ -95,6 +99,7 @@ class JetDataModule(pl.LightningDataModule):
                 inputs=self.inputs,
                 labels=self.labels,
                 num_jets=self.num_jets_train,
+                exclude=self.exclude,
             )
 
         if stage == "fit":
@@ -103,6 +108,7 @@ class JetDataModule(pl.LightningDataModule):
                 inputs=self.inputs,
                 labels=self.labels,
                 num_jets=self.num_jets_val,
+                exclude=self.exclude,
             )
 
         # Only print train/val dataset details when actually training
@@ -118,6 +124,7 @@ class JetDataModule(pl.LightningDataModule):
                 inputs=self.inputs,
                 scale_dict=self.scale_dict,
                 num_jets=self.num_jets_test,
+                exclude=self.exclude,
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 
