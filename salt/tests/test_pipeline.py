@@ -113,6 +113,10 @@ class TestTrainMisc:
         args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
         run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
 
+    def test_train_exclude(self, tmp_path) -> None:
+        args = ["--data.exclude.track=['dummy_track_var_0']"]
+        run_combined(tmp_path, self.config_path, do_eval=True, do_onnx=False, train_args=args)
+
 
 @pytest.mark.filterwarnings(w)
 class TestModels:

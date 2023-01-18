@@ -175,3 +175,22 @@ main fit --config configs/GN1.yaml --config configs/GATv2.yaml
 ```
 
 Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.
+
+### Excluding Variables from training
+
+It is possible to provide a dictionary of variables not to include in the training, by adding a dictionary to the model.yaml file as
+
+```yaml
+data:
+     exclude: {'jet': ['GN120220509_pb', 'GN120220509_pc', 'GN120220509_pu'],
+              'track': ['jet_GN120220509_pb', 'jet_GN120220509_pc', 'jet_GN120220509_pu']}
+```
+
+If one wants, for instance, to exclude only 'track' variables, it is possible:
+
+```yaml
+data:
+     exclude: {'track': ['dphi']}
+```
+
+Modification of the input_size model parameter is handled automatically by the framework.
