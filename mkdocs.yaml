@@ -11,6 +11,8 @@ theme:
   name: material
   logo: assets/salt.png
   favicon: assets/salt.png
+  features:
+    - content.code.copy
 
 nav:
   - Introduction: 'index.md'
