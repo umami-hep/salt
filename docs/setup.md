@@ -14,6 +14,7 @@ cd salt
 
 You can install salt within a virtual environment or a docker image.
 The recommended workflow is to set the package up using conda.
+Salt requires Python 3.9 or later.
 
 === "conda"
 
@@ -59,37 +60,76 @@ The recommended workflow is to set the package up using conda.
 
 === "singularity"
 
-    Prebuilt docker images are an easy way to use salt, but can also be a bit more cumbersome than other approaches.
+    Prebuilt docker images are an easy way to use salt, but can also be a bit less flexible than other approaches.
     You can run the prebuilt docker images using [singulartiy](https://sylabs.io/guides/latest/user-guide/).
-    It is recommended to set `SINGULARITY_CACHEDIR` in your `~/.bashrc` to make sure images are pulled to a directory with enough free space.
 
-    ```bash
-    export SINGULARITY_CACHEDIR=<some path>/.singularity/
-    ```
+    The first step is to decide which image you want to use.
+    You can either pull an image locally, or use the unpacked images hosted on CVMFS.
+    The latter is faster, but requires a CVMFS connection.
 
-    Next, pull the image:
+    === "Use the image from CVMFS"
 
-    ```bash
-    singularity pull --docker-login \
-        $SINGULARITY_CACHEDIR/salt.simg \
-        docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
-    ```
+        You only need to read this if you aren't manually pulling the Salt image yourself.
 
-    Once you have the image locally, you can run it with
+        The Salt singularity images are hosted on CVMFS.
+        If you have a good connection to CVMFS, using this option can be faster than manually pulling the image.
+        The images are located in
+        `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/`
 
-    ```bash
-    singularity exec -ce --nv --bind $PWD \
-        $SINGULARITY_CACHEDIR/salt.simg bash
-    ```
-    In order to mount a directory to the image when running `singularity exec`, use the `--bind <path>` argument
+        You can run the latest image using
+
+        ```bash
+        singularity exec -ce --nv --bind $PWD \
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/ bash
+        ```
+
+    === "Pull the image"
+
+        You only need to read this if you want to pull the Salt image yourself, rather than using the unpacked image from CVMFS.
+        This approach is slower than using the CVMFS image.
+
+        The first step is to ensure that the `SINGULARITY_CACHEDIR` environment variable is set to a directory with plenty of free space.
+        You may want to add the following lin to your `~/.bashrc` to make sure the variable is consistently set when you log in..
+
+        ```bash
+        export SINGULARITY_CACHEDIR=<some path>/.singularity/
+        ```
+
+        Next, pull the image:
+
+        ```bash
+        singularity pull --docker-login \
+            $SINGULARITY_CACHEDIR/salt.simg \
+            docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
+        ```
+
+        You can then run the image
+
+        ```bash
+        singularity exec -ce --nv --bind $PWD \
+            $SINGULARITY_CACHEDIR/salt.simg bash
+        ```
+
+
+    --------------------------------------------------------
+
+    ??? info "`singularity exec` arguments"
+
+        An explanation of the different arguments and flags is given [here](https://docs.sylabs.io/guides/latest/user-guide/cli/singularity_exec.html?highlight=exec).
+
+        In short, `--nv` is used for GPU support, `-c` isolates the image from your filesystem, `-e` ensures environment variables are not carried over to the image environment, and `--bind <path>` is used to mount a directory to the image.
+
+    Make sure you bind the directory in which you cloned the Salt repository and `cd` there after spinning up the image.
+    This is required to to install the salt package, which is the next step.
+    You may also wish to bind the directories containing your training files.
 
 
 ### Install the salt package
 
-Once inside your container or virtual environment, you can install the `salt` package and it's dependencies via `pip` using
+Once inside your container or virtual environment and in the top level directory of the repo, you can install the `salt` package and it's dependencies via `pip` using
 
 ```bash
-pip3 install -e .
+python -m pip install -e .
 ```
 
 To verify your installation, you can run the [test suite](contributing.md#test-suite).
