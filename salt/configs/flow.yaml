@@ -4,7 +4,7 @@ data:
   train_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
   val_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
   scale_dict: /share/rcifdata/svanstroud/data/flow/scale_dict.json
-  move_files_temp: /dev/shm/svanstro/salt/
+  #move_files_temp: /dev/shm/svanstro/salt/
   inputs:
     jet: jets
     track: tracks

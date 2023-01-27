@@ -103,9 +103,12 @@ def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks
         sd = json.load(f)
     kwargs = {"n_jet_features": len(sd[jets_name]), "n_track_features": len(sd[tracks_name])}
     jets, tracks = get_dummy_inputs(jets_name=jets_name, tracks_name=tracks_name, **kwargs)
+    kwargs["n_track_features"] = 4
+    flow = get_dummy_inputs(jets_name=jets_name, tracks_name="flow", **kwargs)[1]
     with h5py.File(fname, "w") as f:
         g_jets = f.create_group(jets_name)
         g_tracks = f.create_group(tracks_name)
+        g_flow = f.create_group("flow")
 
         for key, arr in jets.items():
             g_jets.create_dataset(key, data=arr)
@@ -115,7 +118,13 @@ def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks
             g_tracks.create_dataset(key, data=arr)
             if key == "inputs":
                 var = list(sd[jets_name].keys()) + list(sd[tracks_name].keys())
-                g_tracks[key].attrs[f"{tracks}_variables"] = var
+                g_tracks[key].attrs[f"{tracks_name}_variables"] = var
+
+        for key, arr in flow.items():
+            g_flow.create_dataset(key, data=arr)
+            if key == "inputs":
+                var = list(sd[jets_name].keys()) + list(sd[tracks_name].keys())
+                g_flow[key].attrs["flow_variables"] = var
 
 
 def write_dummy_test_file(fname, sd_fname):
@@ -166,3 +175,4 @@ def write_dummy_test_file(fname, sd_fname):
     with h5py.File(fname, "w") as f:
         f.create_dataset("jets", data=jets)
         f.create_dataset("tracks", data=tracks)
+        f.create_dataset("flow", data=tracks)
