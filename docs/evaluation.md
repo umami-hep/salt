@@ -8,7 +8,7 @@ After producing the evaluation file, you can make performance plots using [puma]
 To evaluated a trained model on a test file, the `test` subcommand is used.
 
 ```bash
-main test --config logs/<timestamp>/config.yaml --data.test_file path/to/test.h5
+salt test --config logs/<timestamp>/config.yaml --data.test_file path/to/test.h5
 ```
 
 As in the above example, you need to specify the saved config from the training run.

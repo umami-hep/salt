@@ -36,10 +36,10 @@ The configuration is split into two parts.
 The [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
 This config is used by default for all trainings without you having to explicitly specify it.
 Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/salt/configs/gnn.yaml) contain a full description of a specific model.
-You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `main`.
+You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `salt`.
 
 ```bash
-main fit --config configs/GN1.yaml
+salt fit --config configs/GN1.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
@@ -53,7 +53,7 @@ The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io
     exit.
 
     ```bash
-    main fit --config configs/GN1.yaml --trainer.fast_dev_run 2
+    salt fit --config configs/GN1.yaml --trainer.fast_dev_run 2
     ```
 
     Logging and checkpoint are suppressed when using this flag.
@@ -65,7 +65,7 @@ You can also configure the training directly through CLI arguments.
 For a full list of available arguments run
 
 ```bash
-main fit --help
+salt fit --help
 ```
 
 #### Choosing GPUs
@@ -158,7 +158,7 @@ These directories also get a copy of the fully merging training config (`config.
 To resume a training, point to a previously saved config and a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
 
 ```bash
-main fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
+salt fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
 ```
 
 The full training state, including the state of the optimiser, is resumed.
@@ -171,7 +171,7 @@ By default the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) confi
 To switch to the GATv2 attention, add the [`GATv2.yaml`]({{repo_url}}-/blob/main/salt/configs/GATv2.yaml) config fragment.
 
 ```bash
-main fit --config configs/GN1.yaml --config configs/GATv2.yaml
+salt fit --config configs/GN1.yaml --config configs/GATv2.yaml
 ```
 
 Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.

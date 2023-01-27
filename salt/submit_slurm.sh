@@ -49,5 +49,5 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 # run the training
 echo "Running training script..."
-srun main fit \
+srun salt fit \
     --config configs/GN1.yaml \

@@ -46,7 +46,7 @@ def run_train(tmp_path, config_path, train_args):
 
 
 def run_eval(tmp_path, train_config_path, sd_path):
-    test_h5_path = Path(tmp_path) / "dummy_test_inputs.h5"
+    test_h5_path = Path(tmp_path) / "dummy_test_sample_inputs.h5"
     write_dummy_test_file(test_h5_path, sd_path)
 
     args = ["test"]
@@ -57,7 +57,7 @@ def run_eval(tmp_path, train_config_path, sd_path):
 
 
 def run_onnx(train_dir, sd_path):
-    ckpt_path = list((train_dir / "ckpts").iterdir())[-1]
+    ckpt_path = [f for f in (train_dir / "ckpts").iterdir() if f.suffix == ".ckpt"][-1]
     args = [f"--config={train_dir / 'config.yaml'}"]
     args += [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
