@@ -47,6 +47,9 @@ class TrainJetDataset(Dataset):
         self.check_file(inputs)
 
         # get datasets
+        for g in inputs.values():
+            if f"{g}/inputs" not in self.file.keys():
+                raise ValueError(f"No group {g}/inputs in file {self.file.filename}")
         self.inputs = {n: self.file[f"{g}/inputs"] for n, g in inputs.items()}
         self.valids = {
             n: self.file[f"{g}/valid"] for n, g in inputs.items() if "valid" in self.file[g].keys()

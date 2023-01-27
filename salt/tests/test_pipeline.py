@@ -132,3 +132,6 @@ class TestModels:
 
     def test_regression(self, tmp_path) -> None:
         run_combined(tmp_path, "configs/regression.yaml", do_eval=False, do_onnx=False)
+
+    def test_flow(self, tmp_path) -> None:
+        run_combined(tmp_path, "configs/flow.yaml", do_eval=False, do_onnx=False)
