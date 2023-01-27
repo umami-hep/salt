@@ -14,9 +14,9 @@ def main(args: ArgsType = None) -> None:
         model_class=LightningTagger,
         datamodule_class=JetDataModule,
         save_config_callback=SaveConfigCallback,
-        env_parse=True,
         args=args,
         parser_kwargs={
+            "default_env": True,
             "fit": {"default_config_files": ["configs/base.yaml"]},
             "test": {"default_config_files": ["configs/base.yaml"]},
         },
