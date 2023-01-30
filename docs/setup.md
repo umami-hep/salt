@@ -79,9 +79,11 @@ Salt requires Python 3.9 or later.
         You can run the latest image using
 
         ```bash
-        singularity exec -ce --nv --bind $PWD \
-            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/ bash
+        singularity shell -e --nv --bind $PWD \
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/
         ```
+
+        The image comes with salt installed, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
     === "Pull the image"
 
@@ -89,7 +91,7 @@ Salt requires Python 3.9 or later.
         This approach is slower than using the CVMFS image.
 
         The first step is to ensure that the `SINGULARITY_CACHEDIR` environment variable is set to a directory with plenty of free space.
-        You may want to add the following lin to your `~/.bashrc` to make sure the variable is consistently set when you log in..
+        You may want to add the following lin to your `~/.bashrc` to make sure the variable is consistently set when you log in.
 
         ```bash
         export SINGULARITY_CACHEDIR=<some path>/.singularity/
@@ -113,11 +115,12 @@ Salt requires Python 3.9 or later.
 
     --------------------------------------------------------
 
-    ??? info "`singularity exec` arguments"
+    ??? info "`singularity shell` arguments"
 
-        An explanation of the different arguments and flags is given [here](https://docs.sylabs.io/guides/latest/user-guide/cli/singularity_exec.html?highlight=exec).
+        An explanation of the different arguments and flags is given [here](https://docs.sylabs.io/guides/latest/user-guide/cli/singularity_shell.html).
 
-        In short, `--nv` is used for GPU support, `-c` isolates the image from your filesystem, `-e` ensures environment variables are not carried over to the image environment, and `--bind <path>` is used to mount a directory to the image.
+        In short, `--nv` is used for GPU support, `-e` ensures environment variables are not carried over to the image environment, and `--bind <path>` is used to mount a directory to the image.
+        For convenience, you may wish to specify e.g. `--bind $PWD,/eos,/cvmfs`.
 
     Make sure you bind the directory in which you cloned the Salt repository and `cd` there after spinning up the image.
     This is required to to install the salt package, which is the next step.
