@@ -1,0 +1,70 @@
+name: SubjetXbb
+
+data:
+  train_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-resampled_scaled_shuffled.h5
+  val_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-validation-resampled_scaled_shuffled.h5
+  scale_dict: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-scale_dict.json
+  inputs:
+    jet: jets
+    track: subjets
+  num_jets_train: 10_000_000
+  num_jets_val: 500_000
+  num_jets_test: 1_000_000
+
+model:
+  model:
+    class_path: salt.models.JetTagger
+    init_args:
+      init_nets:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.InitNet
+              init_args:
+                name: track
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 12
+                    output_size: &embed_dim 128
+                    hidden_layers: [256]
+                    activation: &activation SiLU
+                    norm_layer: &norm_layer LayerNorm
+
+      gnn:
+        class_path: salt.models.Transformer
+        init_args:
+          attention: salt.models.ScaledDotProductAttention
+          embed_dim: *embed_dim
+          out_proj: False
+          num_heads: 8
+          num_layers: 6
+          residual: true
+          out_dim: &out_dim 128
+          norm_layer: *norm_layer
+          activation: *activation
+          dropout: &dropout 0.1
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args:
+          input_size: *out_dim
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jet_classification
+                label: jets/labels
+                loss: torch.nn.CrossEntropyLoss
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *out_dim
+                    output_size: 4
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout

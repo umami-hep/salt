@@ -148,7 +148,7 @@ There are several options in the script which need to be tailored to make sure t
     and then kill any remaining running python processes using
 
     ```bash
-    pkill -u <username> -f python -e
+    pkill -u <username> -f salt -e
     ```
 
 ### Resuming Training
