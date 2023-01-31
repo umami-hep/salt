@@ -12,4 +12,4 @@ pytest:
     reports:
       coverage_report:
         coverage_format: cobertura
-        path: coverage.xml
+        path: salt/coverage.xml

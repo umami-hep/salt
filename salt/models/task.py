@@ -39,8 +39,8 @@ class Task(nn.Module):
 
 
 class ClassificationTask(Task):
-    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None):
-        preds = self.net(x)
+    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None, context: Tensor = None):
+        preds = self.net(x, context)
 
         # could use ignore_index instead of the mask here
         if mask is not None:
@@ -61,13 +61,13 @@ class RegressionTask(Task):
     Applies softplus activation to sigmas to ensure positivty.
     """
 
-    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None):
+    def forward(self, x: Tensor, labels: Tensor, mask: Tensor = None, context: Tensor = None):
         if x.ndim != 2 or mask is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
 
-        preds = self.net(x)
+        preds = self.net(x, context)
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
