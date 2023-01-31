@@ -10,6 +10,9 @@ pages:
     paths:
       - public
     expire_in: 1 hour
+  variables:
+    GIT_DEPTH: 0
+    GIT_STRATEGY: clone
   #rules:
   #  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="atlas-flavor-tagging-tools/algorithms/salt"
   #    when: always

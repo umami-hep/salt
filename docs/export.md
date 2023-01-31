@@ -40,7 +40,10 @@ The model name is used to construct the output probability variable names in Ath
 You may see some warnings during export, but the `to_onnx` script will verify that there is a good level of compatability between the pytorch and ONNX model outputs, and that there are no `nan` or `0` values in the ouput.
 
 However, as a final check, you should verify the performance of your pytorch model against a version running from the TDD by following the instructions [here](https://training-dataset-dumper.docs.cern.ch/configuration/#dl2-config) to dump the scores of your converted model.
-Make sure to dump at full precision (use the provided flag) so you can then rerun the dump through your pytorch model to fully close the loop.
+Please take note of the following considerations when comparing Athena and Python evaluated models
+- Models in Athena are evaluated with full precision inputs. Make sure to dump inputs using the TDD at full precision (use the provided flag).
+- Models evaluated in Athena are not run for jets with less than two tracks (note: this may not longer be true).
+- Models evaluated in Python are limited to 40 input tracks, whereas models evaluated in Athena have no such limit.
 
 
 ### Viewing ONNX Model Metadata

@@ -1,7 +1,13 @@
 ### Forking Workflow
 
-If you want to contribute to the development of the GNN, you should create a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html) of the repository.
-You can read about forking workflows [here](https://www.atlassian.com/git/tutorials/comparing-workflows/forking-workflow), or take a look at the contributing guidelines in the [training dataset dumper documentation](https://training-dataset-dumper.docs.cern.ch/development/#contributing-guidelines).
+If you want to contribute to the development of the GNN, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html) of the repository.
+You can read about forking workflows [here](https://www.atlassian.com/git/tutorials/comparing-workflows/forking-workflow), or take a look at the contributing guidelines in the [training dataset dumper documentation](https://training-dataset-dumper.docs.cern.ch/contributing/).
+
+After creating a fork, clone the fork and add the upstream repository.
+```
+git clone ssh://git@gitlab.cern.ch:7999/<cern_username>/salt.git
+git remote add upstream ssh://git@gitlab.cern.ch:7999/atlas-flavor-tagging-tools/algorithms/salt.git
+```
 
 ??? info "Ensure your fork is not set to private"
 
@@ -15,7 +21,7 @@ Remember to keep you fork [up to date](https://about.gitlab.com/blog/2016/12/01/
 
 Good coding standards are highly encouraged.
 You can take a look at the [umami docs](https://umami-docs.web.cern.ch/setup/development/) or the coding style [tutorial](https://ftag.docs.cern.ch/software/tutorials/tutorial-coding/) for guidance on code style.
-In short, aim to write clean readible code with plenty of module and function docstrings, and inline comments.
+In short, aim to write clean, readible and type-hinted code with module and function docstrings, and plenty of inline comments.
 Code is formatted using [black](https://github.com/psf/black) (this is enforced by the pre-commit checks).
 
 VS Code is the recommended editor when developing for salt.

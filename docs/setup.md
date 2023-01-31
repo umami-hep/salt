@@ -108,8 +108,8 @@ Salt requires Python 3.9 or later.
         You can then run the image
 
         ```bash
-        singularity exec -ce --nv --bind $PWD \
-            $SINGULARITY_CACHEDIR/salt.simg bash
+        singularity shell -e --nv --bind $PWD \
+            $SINGULARITY_CACHEDIR/salt.simg
         ```
 
 
