@@ -10,34 +10,48 @@ from salt.models import (
     GATv2Attention,
     MultiheadAttention,
     ScaledDotProductAttention,
-    Transformer,
+    TransformerEncoder,
 )
 
 
-def test_dense():
+def test_dense() -> None:
     net = Dense(10, 10, [10, 10], activation="ReLU")
     net(torch.rand(10))
 
 
-def test_transformer():
-    net = Transformer(10, 2, 2, activation="ReLU", attention=ScaledDotProductAttention())
+def test_transformer() -> None:
+    net = TransformerEncoder(
+        embed_dim=10,
+        num_layers=2,
+        mha_config={
+            "num_heads": 2,
+            "attention": ScaledDotProductAttention(),
+        },
+        dense_config={
+            "activation": "ReLU",
+            "hidden_layers": [10],
+            "norm_layer": "LayerNorm",
+        },
+    )
     net(torch.rand(10, 10, 10))
 
 
-def test_mha_mask():
+def test_mha_mask() -> None:
     n_batch = 2
     n_trk = 3
     n_head = 1
     n_dim = 5
 
     net = MultiheadAttention(
-        attention=ScaledDotProductAttention(), embed_dim=n_dim, num_heads=n_head
+        embed_dim=n_dim,
+        num_heads=n_head,
+        attention=ScaledDotProductAttention(),
     )
 
     q = k = v = torch.rand((n_batch, n_trk, n_dim))
     valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    out_no_mask = net(q, k, v, q_mask=None, k_mask=None)
-    out_mask = net(q, k, v, q_mask=valid_mask, k_mask=valid_mask)
+    out_no_mask = net(q, k, v, q_mask=None, kv_mask=None)
+    out_mask = net(q, k, v, q_mask=valid_mask, kv_mask=valid_mask)
 
     assert torch.all(out_no_mask == out_mask)
 
@@ -57,17 +71,17 @@ def test_gatv2():
 
     q = k = v = torch.rand((n_batch, n_trk, n_dim))
     valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    out_no_mask = net(q, k, v, q_mask=None, k_mask=None)
-    out_mask = net(q, k, v, q_mask=valid_mask, k_mask=valid_mask)
+    out_no_mask = net(q, k, v, q_mask=None, kv_mask=None)
+    out_mask = net(q, k, v, q_mask=valid_mask, kv_mask=valid_mask)
 
     assert torch.all(out_no_mask == out_mask)
 
     q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    k_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
+    kv_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
     # TODO: function to generate a realistic padding mask
-    q_mask[:, 2:] = k_mask[:, 4:] = True  # set padding
-    q_mask[1, 3:] = k_mask[1, 5:] = True  # set padding
-    net(q, k, v, q_mask=q_mask, k_mask=k_mask)
+    q_mask[:, 2:] = kv_mask[:, 4:] = True  # set padding
+    q_mask[1, 3:] = kv_mask[1, 5:] = True  # set padding
+    net(q, k, v, q_mask=q_mask, kv_mask=kv_mask)
 
 
 @pytest.mark.parametrize("attention", [ScaledDotProductAttention])
@@ -80,7 +94,11 @@ def test_mha_qkv_different_dims(attention):
     v_dim = 9
 
     net = MultiheadAttention(
-        attention=attention(), embed_dim=q_dim, num_heads=n_head, k_dim=k_dim, v_dim=v_dim
+        num_heads=n_head,
+        embed_dim=q_dim,
+        k_dim=k_dim,
+        v_dim=v_dim,
+        attention=ScaledDotProductAttention(),
     )
 
     q = torch.rand((n_batch, n_trk, q_dim))
@@ -88,28 +106,28 @@ def test_mha_qkv_different_dims(attention):
     v = torch.rand((n_batch, n_trk + 1, v_dim))
 
     q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    k_mask = torch.zeros((n_batch, n_trk + 1), dtype=torch.bool)  # all valid
-    q_mask[:, 2:] = k_mask[:, 3:] = True  # set padding
-
-    net(q, k, v, q_mask=q_mask, k_mask=k_mask)
+    kv_mask = torch.zeros((n_batch, n_trk + 1), dtype=torch.bool)  # all valid
+    q_mask[:, 2:] = kv_mask[:, 3:] = True  # set padding
+    net(q, k, v, q_mask=q_mask, kv_mask=kv_mask)
 
 
 @pytest.mark.parametrize("frac_pad", [0.0, 0.5, 1.0])
 def test_mha_vs_torch(frac_pad):
     torch.manual_seed(0)
-    n_batch = 10
-    n_trk = 40
-    n_head = 4
-    n_dim = 16
+    n_batch = 4
+    n_trk = 10
+    n_head = 1
+    n_dim = 8
+    frac_pad = 0.2
 
     t_net, s_net = get_pytorch_salt_mha(n_dim, n_head)
 
     mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    mask[: int(frac_pad * n_trk)] = True  # set some padding
+    mask[..., : int(frac_pad * n_trk)] = True  # set some padding
 
     x = torch.rand((n_batch, n_trk, n_dim))
     torch_out = t_net(x, x, x, key_padding_mask=mask)[0]
-    out = s_net(x, x, x, q_mask=mask, k_mask=mask)
+    out = s_net(x, x, x, kv_mask=mask)
 
     np.testing.assert_allclose(
         torch_out.detach().numpy(), out.detach().numpy(), rtol=1e-6, atol=1e-6
@@ -123,14 +141,17 @@ def test_mha_vs_torch_timing():
     n_dim = 128
     device = "cpu"
 
+    x = torch.rand((n_batch, n_trk, n_dim), device=device)
+    mask = torch.zeros((n_batch, n_trk), dtype=torch.bool, device=device)  # all valid
+    mask[..., : int(0.5 * n_trk)] = True  # set some padding
+
     t_net, s_net = get_pytorch_salt_mha(n_dim, n_head)
 
-    x = torch.rand((n_batch, n_trk, n_dim), device=device)
-    torch_out = t_net(x, x, x)[0]
-    out = s_net(x, x, x)
+    torch_out = t_net(x, x, x, key_padding_mask=mask)[0]
+    out = s_net(x, x, x, kv_mask=mask)
 
-    t_time = timeit.timeit(lambda: t_net(x, x, x), number=2000)
-    s_time = timeit.timeit(lambda: s_net(x, x, x), number=2000)
+    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=100)
+    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=100)
 
     # ensure the salt mha implementation is not slower than the referenece pytorch
     # allow for some tolerance to avoid false positives

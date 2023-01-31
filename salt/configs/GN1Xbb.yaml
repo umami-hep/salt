@@ -34,7 +34,10 @@ model:
       gnn:
         class_path: salt.models.Transformer
         init_args:
-          attention: salt.models.ScaledDotProductAttention
+          attention:
+            class_path: salt.models.ScaledDotProductAttention
+            init_args:
+                dropout: 0.0
           embed_dim: *embed_dim
           out_proj: False
           num_heads: 8
