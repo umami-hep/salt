@@ -19,6 +19,16 @@ def test_dense() -> None:
     net(torch.rand(10))
 
 
+def test_dense_context() -> None:
+    net = Dense(10, 10, [10, 10], activation="ReLU", context_size=4)
+    net(torch.rand(10), torch.rand(4))
+
+
+def test_dense_context_broadcast() -> None:
+    net = Dense(10, 10, [10, 10], activation="ReLU", context_size=4)
+    net(torch.rand(1, 10, 10), torch.rand(1, 4))
+
+
 def test_transformer() -> None:
     net = TransformerEncoder(
         embed_dim=10,

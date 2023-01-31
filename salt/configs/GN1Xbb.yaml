@@ -32,21 +32,21 @@ model:
                     norm_layer: &norm_layer LayerNorm
 
       gnn:
-        class_path: salt.models.Transformer
+        class_path: salt.models.TransformerEncoder
         init_args:
-          attention:
-            class_path: salt.models.ScaledDotProductAttention
-            init_args:
-                dropout: 0.0
           embed_dim: *embed_dim
-          out_proj: False
-          num_heads: 8
           num_layers: 6
-          residual: true
           out_dim: &out_dim 128
-          norm_layer: *norm_layer
-          activation: *activation
-          dropout: &dropout 0.1
+          mha_config:
+            num_heads: 8
+            attention:
+              class_path: salt.models.ScaledDotProductAttention
+            out_proj: False
+          dense_config:
+            norm_layer: *norm_layer
+            activation: *activation
+            hidden_layers: [256]
+            dropout: &dropout 0.1
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -85,7 +85,8 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args:
-                    input_size: 256 # 2 * out_dim due to global concatenation
+                    input_size: 128
+                    context_size: 128
                     output_size: 8
                     hidden_layers: [128, 64, 32]
                     activation: *activation

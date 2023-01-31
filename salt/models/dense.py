@@ -46,7 +46,7 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
         context = context.expand(*x.shape[:-1], -1)
 
     # Apply the concatenation on the final dimension
-    x = concat([x, context], dim=-1)
+    return concat([x, context], dim=-1)
 
 
 class Dense(nn.Module):
