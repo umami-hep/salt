@@ -1,7 +1,8 @@
 pytest:
   stage: tests
-  needs: ["build_docker"]
-  image: $CI_REGISTRY_IMAGE:latest
+  dependencies:
+    - build_docker_test
+  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
   script:
     - cd salt
     - coverage run --source salt -m pytest --show-capture=stdout
