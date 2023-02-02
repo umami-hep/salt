@@ -10,7 +10,7 @@ data:
     track: tracks
   batched_read: True
   batch_size: 1000
-  num_workers: 20
+  num_workers: 10
   num_jets_train: 23_000_000
   num_jets_val: 1_000_000
   num_jets_test: 1_000_000
