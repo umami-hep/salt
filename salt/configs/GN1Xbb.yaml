@@ -7,9 +7,10 @@ data:
   inputs:
     jet: jets
     track: tracks
-  num_jets_train: 10_000_000
+  num_jets_train: 5_000_000
   num_jets_val: 500_000
   num_jets_test: 1_000_000
+  max_epochs: 10
 
 model:
   model:
