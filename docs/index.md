@@ -10,6 +10,10 @@ The code is hosted on the CERN GitLab:
 You can find information about different taggers at the central FTAG algorithms [docs pages](https://ftag.docs.cern.ch/algorithms/GNN/).
 Discussions about GNNs take place on Mattermost [here](https://mattermost.web.cern.ch/aft-algs/channels/gnns).
 
+???+ info "Salt tutorial"
+
+    A tutorial on how to use the framework is provided at the [central FTAG docs page](https://ftag.docs.cern.ch/software/tutorials/tutorial-salt/)
+
 ### Previous Frameworks
 
 This repository will cherry pick the best bits of
