@@ -10,7 +10,9 @@ data:
   num_jets_train: 5_000_000
   num_jets_val: 500_000
   num_jets_test: 1_000_000
-  max_epochs: 10
+
+trainer:
+  max_epochs: 30
 
 model:
   model:
@@ -28,7 +30,7 @@ model:
                   init_args:
                     input_size: 12
                     output_size: &embed_dim 64
-                    hidden_layers: [128]
+                    hidden_layers: [64]
                     activation: &activation SiLU
                     norm_layer: &norm_layer LayerNorm
 

@@ -10,7 +10,9 @@ data:
   num_jets_train: 5_000_000
   num_jets_val: 500_000
   num_jets_test: 1_000_000
-  max_epochs: 10
+
+trainer:
+  max_epochs: 30
 
 model:
   model:
@@ -28,7 +30,7 @@ model:
                   init_args:
                     input_size: 23
                     output_size: &embed_dim 128
-                    hidden_layers: [256]
+                    hidden_layers: [128]
                     activation: &activation SiLU
                     norm_layer: &norm_layer LayerNorm
 
@@ -36,17 +38,17 @@ model:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
-          num_layers: 6
+          num_layers: 2
           out_dim: &out_dim 128
           mha_config:
-            num_heads: 8
+            num_heads: 4
             attention:
               class_path: salt.models.ScaledDotProductAttention
             out_proj: False
           dense_config:
             norm_layer: *norm_layer
             activation: *activation
-            hidden_layers: [256]
+            hidden_layers: [128]
             dropout: &dropout 0.1
 
       pool_net:
@@ -68,7 +70,7 @@ model:
                   init_args:
                     input_size: *out_dim
                     output_size: 4
-                    hidden_layers: [128, 64, 32]
+                    hidden_layers: [64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
@@ -89,7 +91,7 @@ model:
                     input_size: 128
                     context_size: 128
                     output_size: 8
-                    hidden_layers: [128, 64, 32]
+                    hidden_layers: [64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
