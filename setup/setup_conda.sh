@@ -11,7 +11,7 @@ if [[ ! -d "${CONDA_INSTALL}" ]]; then
   # installation for macOS (including support for M1 MacBooks)
   if [[ $OSTYPE == 'darwin'* ]]; then
     MAC_TYPE="$(uname -m)"
-    if [[ MAC_TYPE == 'arm64' ]]; then
+    if [[ $MAC_TYPE == 'arm64' ]]; then
       CONDA_INSTALLER="Mambaforge-MacOSX-arm64.sh"
     else
       CONDA_INSTALLER="Mambaforge-MacOSX-x86_64.sh"
