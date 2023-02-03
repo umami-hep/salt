@@ -20,6 +20,7 @@ dependencies = [
     "pre-commit==3.0.*",
     "onnx==1.13.0",
     "onnxruntime==1.13.1",
+    "puma-hep",
 ]
 
 [project.urls]
