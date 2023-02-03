@@ -7,9 +7,9 @@ model:
           class_path: salt.models.TransformerEncoder
           init_args:
             mha_config:
-                num_heads: 8
-                attention:
-                  class_path: salt.models.GATv2Attention
-                  init_args:
-                    num_heads: 8
-                    head_dim: 16
+              num_heads: 8
+              attention:
+                class_path: salt.models.GATv2Attention
+                init_args:
+                  num_heads: 8
+                  head_dim: 16
