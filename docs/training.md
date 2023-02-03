@@ -9,8 +9,8 @@ At the moment only comet is supported.
 
 To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key).
 You also need to create a [workspace](https://www.comet.ml/docs/user-interface/#workspaces).
-Next save the API key and the workspace name in environment variables called `PL_TRAINER__LOGGER__API_KEY` and `PL_TRAINER__LOGGER_WORKSPACE`.
-These are named in such a way to be automatically read by the framework (it's possible to configure other aspects of the training using environment variables if you wish).
+Next save the API key and the workspace name in environment variables called `COMET_API_KEY` and `COMET_WORKSPACE`.
+These variables are automatically read by the comet, see [here](https://www.comet.com/docs/v2/guides/tracking-ml-training/configuring-comet/#configure-comet-through-environment-variables) for more info.
 Consider adding these variables to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux).
 
 ??? info "Add the environment variable to your bashrc"
@@ -20,8 +20,8 @@ Consider adding these variables to your [bashrc](https://www.journaldev.com/4147
     Simply add the lines
 
     ```bash
-    export PL_TRAINER__LOGGER__API_KEY="my_api_key"
-    export PL_TRAINER__LOGGER_WORKSPACE="my_workspace_name"
+    export COMET_API_KEY="<Your API Key>"
+    export COMET_WORKSPACE="<Your Workspace Name>"
     ```
 
     to your `~/.bashrc` file.
