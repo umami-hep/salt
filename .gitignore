@@ -4,6 +4,7 @@ __pycache__
 build/
 bin/
 python_install/
+conda/
 
 # files produced in processing
 *.npy
