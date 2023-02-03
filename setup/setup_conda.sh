@@ -16,9 +16,6 @@ if [[ ! -d "${CONDA_INSTALL}" ]]; then
     else
       CONDA_INSTALLER="Mambaforge-MacOSX-x86_64.sh"
     fi
-    echo "Operating system not supported. Setup not possible."
-    exit 1
-
   # installation for linux
   elif [[ $OSTYPE == 'linux'* ]]; then
     CONDA_INSTALLER="Mambaforge-Linux-x86_64.sh"
