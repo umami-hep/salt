@@ -1,18 +1,38 @@
 name: SubjetXbb
 
 data:
-  train_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-resampled_scaled_shuffled.h5
-  val_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-scale_dict.json
+  train_file: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-hybrid-resampled_scaled_shuffled.h5
+  val_file: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-hybrid-validation-resampled_scaled_shuffled.h5
+  scale_dict: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-scale_dict.json
   inputs:
     jet: jets
     track: subjets
   num_jets_train: 5_000_000
   num_jets_val: 500_000
-  num_jets_test: 1_000_000
+  num_jets_test: -1
 
 trainer:
-  max_epochs: 30
+  max_epochs: 10
+  callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_jet_classification_loss
+    - class_path: salt.callbacks.PredictionWriter
+      init_args:
+        jet_variables:
+          - pt
+          - eta
+          - mass
+          - R10TruthLabel_R22v1
+          - R10TruthLabel_R22v1_TruthJetMass
+          - R10TruthLabel_R22v1_TruthJetPt
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    - class_path: pytorch_lightning.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 20
+    - class_path: pytorch_lightning.callbacks.ModelSummary
+      init_args:
+        max_depth: 2
 
 model:
   model:

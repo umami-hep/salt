@@ -12,7 +12,7 @@ from salt.utils.arrays import join_structured_arrays
 
 class PredictionWriter(Callback):
     def __init__(
-        self, jet_variables: list, track_variables: list, write_tracks: bool = False
+        self, jet_variables: list, track_variables: list = None, write_tracks: bool = False
     ) -> None:
         """A callback to write test outputs to h5 file.
 
@@ -29,7 +29,6 @@ class PredictionWriter(Callback):
 
         self.jet_variables = jet_variables
         self.track_variables = track_variables
-
         self.write_tracks = write_tracks
         self.track_cols = [
             "Pileup",
@@ -68,7 +67,7 @@ class PredictionWriter(Callback):
         # get output path
         out_dir = Path(trainer._ckpt_path).parent
         out_basename = str(Path(trainer._ckpt_path).stem)
-        sample = str(Path(self.ds.filename).name).split("_")[2]
+        sample = str(Path(self.ds.filename).stem).split("_")[2]
         fname = f"{out_basename}__test_{sample}.h5"
         self.out_path = Path(out_dir / fname)
 
@@ -86,7 +85,7 @@ class PredictionWriter(Callback):
 
         # create output jet dataframe
         dtype = np.dtype([(n, "f2") for n in self.jet_cols])
-        jets = u2s(jet_class_preds.cpu().numpy(), dtype)
+        jets = u2s(jet_class_preds.float().cpu().numpy(), dtype)
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
 

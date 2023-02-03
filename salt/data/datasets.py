@@ -245,19 +245,25 @@ class TestJetDataset(Dataset):
 
         # read inputs
         for i_type, i_name in self.inputs_names.items():
-            # select only variables not excluded by user
-            include = list(set(self.vars[i_type]) - set(self.exclude.get(i_type, [])))
+            include = [v for v in self.vars[i_type] if v not in self.exclude.get(i_type, [])]
             inputs_ = self.inputs[i_type][jet_idx][include]
             inputs_ = self.scale_inputs(inputs_, self.sd[i_name], include)
             inputs[i_type] = torch.as_tensor(s2u(inputs_), dtype=torch.float)
+
+            # TODO: added for subjets since no valid vlag
+            inputs[i_type] = torch.nan_to_num(inputs[i_type])
 
             if i_type in self.valids:
                 masks[i_type] = ~torch.as_tensor(self.valids[i_type][jet_idx], dtype=torch.bool)
 
         # concatenate
         for name in inputs:
-            if name in self.valids:
+            if name in self.valids or name == "track":  # TODO: added for subjets since no valid
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
+
+                # TODO: added for subjets since no valid vlag
+                if "track" not in masks:
+                    masks["track"] = torch.zeros(inputs["track"].shape[:-1]).bool()
 
                 # fill nan
                 inputs[name][masks[name]] = 0
@@ -281,6 +287,7 @@ class TestJetDataset(Dataset):
 
     def scale_inputs(self, inputs: Tensor, sd: dict, include: list):
         """Normalise jet inputs."""
+        inputs = inputs.astype([(n, "f4") for n in inputs.dtype.names])
         for name, tf in sd.items():
             if name in include:
                 inputs[name] = (inputs[name] - tf["shift"]) / tf["scale"]
