@@ -126,6 +126,8 @@ Salt requires Python 3.9 or later.
     This is required to to install the salt package, which is the next step.
     You may also wish to bind the directories containing your training files.
 
+    Please note that if you want an editable install, you need to run the installation command below each time you open a new singularity shell.
+
 
 ### Install the salt package
 
