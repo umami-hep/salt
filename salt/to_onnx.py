@@ -105,7 +105,13 @@ class ONNXModel(LightningTagger):
 
 
 def add_metadata(
-    onnx_path, model_name, sd_path, track_selection, output_names, jet_name, track_name
+    onnx_path,
+    model_name,
+    sd_path,
+    track_selection,
+    output_names,
+    jet_name,
+    track_name,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
@@ -133,12 +139,15 @@ def add_metadata(
         {
             "name": "jet_var",
             "variables": [
-                {"name": k, "offset": v["shift"], "scale": v["scale"]}
+                {"name": k.removesuffix("_btagJes"), "offset": v["shift"], "scale": v["scale"]}
                 for k, v in scale_dict[jet_name].items()
             ],
         }
     ]
     metadata["outputs"] = {model_name: {"labels": output_names, "node_index": 0}}
+
+    # min tracks used for athena inference
+    metadata["min_n_tracks"] = 2
 
     metadata = {"gnn_config": json.dumps(metadata)}
 
@@ -237,7 +246,13 @@ def main(args=None):
     )
 
     add_metadata(
-        onnx_path, args.name, sd_path, args.track_selection, output_names, jet_name, track_name
+        onnx_path,
+        args.name,
+        sd_path,
+        args.track_selection,
+        output_names,
+        jet_name,
+        track_name,
     )
     compare_outputs(pt_model, onnx_path)
     print("\n" + "-" * 100)
