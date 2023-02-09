@@ -12,6 +12,7 @@ from salt.models import (
     ScaledDotProductAttention,
     TransformerEncoder,
 )
+from salt.utils.inputs import get_random_mask
 
 
 def test_dense() -> None:
@@ -43,10 +44,18 @@ def test_transformer() -> None:
             "norm_layer": "LayerNorm",
         },
     )
+    # basic test
     net(torch.rand(10, 10, 10))
 
+    # test zero track case
+    assert torch.all(net(torch.rand(10, 0, 10)) == torch.empty((10, 0, 10)))
 
-def test_mha_mask() -> None:
+    # test fully padded case
+    out = net(torch.rand(1, 10, 10), mask=get_random_mask(1, 10, 1))
+    assert not torch.isnan(out).any()
+
+
+def test_mha_allvalid_mask() -> None:
     n_batch = 2
     n_trk = 3
     n_head = 1
@@ -59,10 +68,9 @@ def test_mha_mask() -> None:
     )
 
     q = k = v = torch.rand((n_batch, n_trk, n_dim))
-    valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
+    valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)
     out_no_mask = net(q, k, v, q_mask=None, kv_mask=None)
     out_mask = net(q, k, v, q_mask=valid_mask, kv_mask=valid_mask)
-
     assert torch.all(out_no_mask == out_mask)
 
 
@@ -80,17 +88,12 @@ def test_gatv2():
     )
 
     q = k = v = torch.rand((n_batch, n_trk, n_dim))
-    valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
+    valid_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)
     out_no_mask = net(q, k, v, q_mask=None, kv_mask=None)
     out_mask = net(q, k, v, q_mask=valid_mask, kv_mask=valid_mask)
-
     assert torch.all(out_no_mask == out_mask)
 
-    q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    kv_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    # TODO: function to generate a realistic padding mask
-    q_mask[:, 2:] = kv_mask[:, 4:] = True  # set padding
-    q_mask[1, 3:] = kv_mask[1, 5:] = True  # set padding
+    q_mask = kv_mask = get_random_mask(n_batch, n_trk)
     net(q, k, v, q_mask=q_mask, kv_mask=kv_mask)
 
 
@@ -115,9 +118,8 @@ def test_mha_qkv_different_dims(attention):
     k = torch.rand((n_batch, n_trk + 1, k_dim))
     v = torch.rand((n_batch, n_trk + 1, v_dim))
 
-    q_mask = torch.zeros((n_batch, n_trk), dtype=torch.bool)  # all valid
-    kv_mask = torch.zeros((n_batch, n_trk + 1), dtype=torch.bool)  # all valid
-    q_mask[:, 2:] = kv_mask[:, 3:] = True  # set padding
+    q_mask = get_random_mask(n_batch, n_trk)
+    kv_mask = get_random_mask(n_batch, n_trk + 1)
     net(q, k, v, q_mask=q_mask, kv_mask=kv_mask)
 
 
