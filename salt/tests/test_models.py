@@ -8,6 +8,7 @@ import torch.nn as nn
 from salt.models import (
     Dense,
     GATv2Attention,
+    GlobalAttentionPooling,
     MultiheadAttention,
     ScaledDotProductAttention,
     TransformerEncoder,
@@ -28,6 +29,18 @@ def test_dense_context() -> None:
 def test_dense_context_broadcast() -> None:
     net = Dense(10, 10, [10, 10], activation="ReLU", context_size=4)
     net(torch.rand(1, 10, 10), torch.rand(1, 4))
+
+
+def test_global_pooling() -> None:
+    net = GlobalAttentionPooling(10)
+    x = torch.rand(1, 5, 10)
+    out = net(x)
+
+    x = torch.cat([x, torch.zeros((1, 1, x.shape[2]))], dim=1)
+    mask = get_random_mask(1, 6, p_valid=1)
+    mask[:, -1] = True
+    out_with_mask = net(x, mask=mask)
+    assert torch.all(out == out_with_mask)
 
 
 def test_transformer() -> None:
@@ -51,8 +64,18 @@ def test_transformer() -> None:
     assert torch.all(net(torch.rand(10, 0, 10)) == torch.empty((10, 0, 10)))
 
     # test fully padded case
-    out = net(torch.rand(1, 10, 10), mask=get_random_mask(1, 10, 1))
+    out = net(torch.rand(1, 10, 10), mask=get_random_mask(1, 10, p_valid=0))
     assert not torch.isnan(out).any()
+
+    # test that adding a padded track does not change the output
+    tracks = torch.rand(1, 10, 10)
+    mask = get_random_mask(1, 10, p_valid=1)
+    out = net(tracks, mask=mask)
+    tracks = torch.cat([tracks, torch.zeros((1, 1, tracks.shape[2]))], dim=1)
+    mask = torch.zeros(tracks.shape[:-1]).bool()
+    mask[:, -1] = True
+    out_with_pad = net(tracks, mask=mask)[:, :-1]
+    assert torch.all(out == out_with_pad)
 
 
 def test_mha_allvalid_mask() -> None:
@@ -97,8 +120,7 @@ def test_gatv2():
     net(q, k, v, q_mask=q_mask, kv_mask=kv_mask)
 
 
-@pytest.mark.parametrize("attention", [ScaledDotProductAttention])
-def test_mha_qkv_different_dims(attention):
+def test_mha_qkv_different_dims():
     n_batch = 3
     n_trk = 5
     n_head = 2
@@ -162,8 +184,8 @@ def test_mha_vs_torch_timing():
     torch_out = t_net(x, x, x, key_padding_mask=mask)[0]
     out = s_net(x, x, x, kv_mask=mask)
 
-    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=100)
-    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=100)
+    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=500)
+    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=500)
 
     # ensure the salt mha implementation is not slower than the referenece pytorch
     # allow for some tolerance to avoid false positives

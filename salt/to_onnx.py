@@ -91,16 +91,15 @@ class ONNXModel(LightningTagger):
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
         # in athena the jets have a batch dimension but the tracks do not
-        tracks = tracks.unsqueeze(0)
+        tracks = concat_jet_track(jets, tracks.unsqueeze(0))
 
-        # concatenate jet and track inputs
-        inputs = {"track": concat_jet_track(jets, tracks)}
+        # add a padded track
+        tracks = torch.cat([tracks, torch.zeros((1, 1, tracks.shape[2]))], dim=1)
+        mask = torch.zeros(tracks.shape[:-1]).bool()
+        mask[:, -1] = True
 
-        # don't pass padded inputs, so all tracks are taken to be real
-        mask = {"track": torch.zeros(tracks.shape[:-1]).bool()}
-
-        # get probabilities
-        outputs = self.model(inputs, mask, None)[0]["jet_classification"]
+        # return class probabilities
+        outputs = self.model({"track": tracks}, {"track": mask})[0]["jet_classification"]
         return get_probs(outputs)
 
 
@@ -146,11 +145,7 @@ def add_metadata(
     ]
     metadata["outputs"] = {model_name: {"labels": output_names, "node_index": 0}}
 
-    # min tracks used for athena inference
-    metadata["min_n_tracks"] = 2
-
     metadata = {"gnn_config": json.dumps(metadata)}
-
     for k, v in metadata.items():
         meta = onnx_model.metadata_props.add()
         meta.key = k
@@ -166,11 +161,10 @@ def compare_output(pt_model, onnx_session, n_track=40):
     n_batch = 1
     n_feat = pt_model.in_dims[0]
 
-    jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat, all_valid=True)
+    jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat, p_valid=1)
     inputs = {"track": concat_jet_track(jets, tracks)}
-    mask = {"track": mask}
 
-    pred_pt = pt_model(inputs, mask, None)[0]["jet_classification"]
+    pred_pt = pt_model(inputs, {"track": mask})[0]["jet_classification"]
     pred_pt = [p.detach().numpy() for p in get_probs(pred_pt)]
 
     ort_inputs = {
@@ -192,13 +186,13 @@ def compare_outputs(pt_model, onnx_path):
     print("Validating ONNX model...")
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    for n_track in tqdm(range(1, 40), leave=False):
+    for n_track in tqdm(range(0, 40), leave=False):
         for _ in range(10):
             compare_output(pt_model, session, n_track)
 
     print(
-        "Sucess! Pytorch and ONNX models are consistent.\nIt should be safe to ignore"
-        " any above warnings, but you should still verify consistency in Athena."
+        "Sucess! Pytorch and ONNX models are consistent, but should verify this in Athena.\nFor"
+        " more info see: https://ftag-salt.docs.cern.ch/export/#athena-validation"
     )
     print("-" * 100)
 

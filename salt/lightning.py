@@ -29,7 +29,7 @@ class LightningTagger(pl.LightningModule):
 
         self.in_dims = [list(net.parameters())[0].shape[1] for net in self.model.init_nets]
 
-    def forward(self, x, mask, labels):
+    def forward(self, x, mask, labels=None):
         """Forward pass through the model.
 
         Don't call this method directy.

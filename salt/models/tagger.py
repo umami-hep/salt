@@ -42,7 +42,7 @@ class JetTagger(nn.Module):
         sizes = {list(init_net.parameters())[-1].shape[0] for init_net in self.init_nets}
         assert len(sizes) == 1
 
-    def forward(self, inputs: dict, mask: dict, labels: dict):
+    def forward(self, inputs: dict, mask: dict, labels: dict = None):
         # initial embeddings
         embed_x = {}
         for i, init_net in enumerate(self.init_nets):
@@ -66,7 +66,7 @@ class JetTagger(nn.Module):
 
         return preds, loss
 
-    def tasks_forward(self, pooled: Tensor, embed_x: Tensor, mask: Tensor, labels: dict):
+    def tasks_forward(self, pooled: Tensor, embed_x: Tensor, mask: Tensor, labels: dict = None):
         preds = {}
         loss = {}
         # TODO: move this login into the task class, including per element loss weighting
