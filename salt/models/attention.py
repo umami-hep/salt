@@ -7,22 +7,22 @@ from pytorch_lightning.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor
 from torch.nn.functional import softmax
 
+from salt.models.dense import add_dims
 
-def masked_softmax(inpt: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
-    """Applies a softmax over a tensor while not including any padded
-    elements."""
 
-    # apply masking, repeat for number of heads
+def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
+    """Applies softmax over a tensor without including padded elements."""
+
     if mask is not None:
-        inpt = inpt.masked_fill(mask.unsqueeze(-3), -torch.inf)
+        mask = add_dims(mask, x.dim())
+        x = x.masked_fill(mask, -torch.inf)
 
-    inpt = softmax(inpt, dim=dim)
+    x = softmax(x, dim=dim)
 
-    # Remove NaNs that arise from masking (suprisingly quicker than masked fill)
     if mask is not None:
-        inpt = inpt.nan_to_num(0)
+        x = x.masked_fill(mask, 0)
 
-    return inpt
+    return x
 
 
 def merge_masks(
@@ -144,10 +144,7 @@ class MultiheadAttention(nn.Module):
             self.register_buffer("linear_out", None)
 
     def input_projections(self, q, k, v) -> tuple:
-        """Perform all input linear projections.
-
-        Output shapes are (B,H,L,HD)
-        """
+        """Perform input linear projections, output shapes are (B,L,H,HD)."""
         shape = (k.shape[0], -1, self.num_heads, self.head_dim)
         q_proj = self.linear_q(q).view(shape).transpose(1, 2)
         k_proj = self.linear_k(k).view(shape).transpose(1, 2)

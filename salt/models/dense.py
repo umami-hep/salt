@@ -3,6 +3,18 @@ from typing import Optional
 from torch import Tensor, concat, nn
 
 
+def add_dims(x: Tensor, ndim: int):
+    """Adds dimensions to a tensor to match the shape of another tensor."""
+
+    if (dim_diff := ndim - x.dim()) < 0:
+        raise ValueError(f"Target ndim ({ndim}) is larger than input ndim ({x.dim()})")
+
+    if dim_diff > 0:
+        x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
+
+    return x
+
+
 def attach_context(x: Tensor, context: Tensor) -> Tensor:
     """Concatenates a context tensor to an input tensor with considerations for
     broadcasting.
@@ -29,10 +41,7 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
         raise RuntimeError("Expected context is missing from forward pass")
 
     # Check if the context information has less dimensions and the broadcast is needed
-    dim_diff = x.dim() - context.dim()
-
-    # Context cant have more dimensions
-    if dim_diff < 0:
+    if (dim_diff := x.dim() - context.dim()) < 0:
         raise ValueError(
             f"Provided context has more dimensions ({context.dim()}) than inputs ({x.dim()})"
         )
@@ -40,7 +49,7 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
     # If reshaping is required
     if dim_diff > 0:
         # Reshape the context inputs with 1's after the batch dim
-        context = context.view(context.shape[0], *dim_diff * (1,), *context.shape[1:])
+        context = add_dims(context, x.dim())
 
         # Use expand to allow for broadcasting as expand does not allocate memory
         context = context.expand(*x.shape[:-1], -1)

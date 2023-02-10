@@ -1,5 +1,6 @@
-import torch
 from torch import Tensor, nn
+
+from salt.models.attention import masked_softmax
 
 
 class Pooling(nn.Module):
@@ -11,7 +12,9 @@ class GlobalAttentionPooling(Pooling):
         super().__init__()
         self.gate_nn = nn.Linear(input_size, 1)
 
-    def forward(self, x: Tensor, mask: Tensor):
-        weights = torch.softmax(self.gate_nn(x), dim=1)
-        weights[mask] == 0
+    def forward(self, x: Tensor, mask: Tensor = None):
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+
+        weights = masked_softmax(self.gate_nn(x), mask, dim=1)
         return (x * weights).sum(dim=1)

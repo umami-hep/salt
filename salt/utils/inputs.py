@@ -28,18 +28,16 @@ def inputs_sep_no_pad(n_batch: int, n_track: int, n_feat: int):
     return jets, tracks
 
 
-def inputs_sep_with_pad(n_batch: int, n_track: int, n_feat: int, all_valid=False):
+def inputs_sep_with_pad(n_batch: int, n_track: int, n_feat: int, p_valid=0.5):
     jets, tracks = inputs_sep_no_pad(n_batch, n_track, n_feat)
-    if all_valid:
-        mask = torch.full((n_batch, n_track), False)
-    else:
-        mask = get_random_mask(n_batch, n_track)
+    mask = get_random_mask(n_batch, n_track, p_valid)
     return jets, tracks, mask
 
 
-def get_random_mask(n_batch: int, n_track: int, p_mask: float = 0.5):
-    a = rng.choice(a=[False, True], size=(n_batch, n_track), p=[1 - p_mask, p_mask])
-    a[:, 0] = False  # ensure at least one valid track
+def get_random_mask(n_batch: int, n_track: int, p_valid: float = 0.5):
+    a = rng.choice(a=[True, False], size=(n_batch, n_track), p=[1 - p_valid, p_valid])
+    if n_track > 0 and p_valid > 0:  # ensure at least one valid track
+        a[:, 0] = False
     return torch.tensor(a)
 
 
