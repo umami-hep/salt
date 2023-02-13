@@ -4,7 +4,6 @@ model:
   model:
     class_path: salt.models.JetTagger
     init_args:
-
       init_nets:
         class_path: torch.nn.ModuleList
         init_args:
@@ -70,7 +69,8 @@ model:
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight: [7.62, 104.91, 1.56, 20.65, 14.05, 14.06, 1.0, 36.07]
+                    weight:
+                      [7.62, 104.91, 1.56, 20.65, 14.05, 14.06, 1.0, 36.07]
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -81,3 +81,20 @@ model:
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                label: tracks/labels/truthVertexIndex
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args:
+                    reduction: none
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 256
+                    context_size: *out_dim
+                    hidden_layers: [128, 64, 32]
+                    output_size: 1
+                    activation: *activation
