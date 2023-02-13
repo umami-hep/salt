@@ -73,7 +73,7 @@ class PredictionWriter(Callback):
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dl_idx):
         # append test outputs
-        [self.outputs[task].append(outputs[0][task]) for task in self.task_names]
+        [self.outputs[task].append(outputs[0][task].cpu()) for task in self.task_names]
         self.mask.append(outputs[1])
 
     def on_test_end(self, trainer, pl_module):

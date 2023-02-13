@@ -79,8 +79,7 @@ class JetTagger(nn.Module):
                 task_input = embed_x
                 task_mask = mask
                 context = pooled
-            task_labels = labels[task.name] if labels is not None else None
-            task_preds, task_loss = task(task_input, task_labels, task_mask, context=context)
+            task_preds, task_loss = task(task_input, labels, task_mask, context=context)
             preds[task.name] = task_preds
             loss[task.name] = task_loss
 

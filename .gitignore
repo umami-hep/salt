@@ -3,6 +3,7 @@ __pycache__
 
 build/
 bin/
+run
 python_install/
 conda/
 

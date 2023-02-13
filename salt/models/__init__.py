@@ -7,7 +7,7 @@ from salt.models.dense import Dense
 from salt.models.init import InitNet
 from salt.models.pooling import GlobalAttentionPooling, Pooling
 from salt.models.tagger import JetTagger
-from salt.models.task import ClassificationTask, RegressionTask, Task
+from salt.models.task import ClassificationTask, RegressionTask, Task, VertexingTask
 from salt.models.transformer import TransformerEncoder
 
 __all__ = [
@@ -23,5 +23,6 @@ __all__ = [
     "TransformerEncoder",
     "ClassificationTask",
     "RegressionTask",
+    "VertexingTask",
     "JetTagger",
 ]
