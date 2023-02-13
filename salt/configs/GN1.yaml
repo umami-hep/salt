@@ -85,7 +85,7 @@ model:
               init_args:
                 name: track_vertexing
                 label: tracks/labels/truthVertexIndex
-                weight: 0.5
+                weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args:
