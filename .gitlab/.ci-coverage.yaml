@@ -1,10 +1,9 @@
-pytest:
-  stage: tests
-  dependencies:
-    - build_docker_test
+coverage:
+  stage: coverage
+  needs: [test-models, test-pipelines-misc, test-pipelines-models]
   image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
   script:
-    - coverage run --source salt -m pytest --show-capture=stdout
+    - coverage combine
     - coverage report --precision=1
     - coverage xml
   coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
