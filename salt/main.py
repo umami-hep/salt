@@ -3,6 +3,7 @@
 import pathlib
 
 import comet_ml  # noqa F401
+import torch
 from pytorch_lightning.cli import ArgsType
 
 from salt.callbacks import SaveConfigCallback
@@ -10,6 +11,7 @@ from salt.data.datamodules import JetDataModule
 from salt.lightning import LightningTagger
 from salt.utils.cli import SaltCLI
 
+torch.set_float32_matmul_precision("medium")
 config_dir = pathlib.Path(__file__).parent / "configs"
 
 

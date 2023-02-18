@@ -180,22 +180,19 @@ def test_mha_vs_torch_timing():
     mask[..., : int(0.5 * n_trk)] = True  # set some padding
 
     t_net, s_net = get_pytorch_salt_mha(n_dim, n_head)
-
     torch_out = t_net(x, x, x, key_padding_mask=mask)[0]
     out = s_net(x, x, x, kv_mask=mask)
 
-    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=500)
-    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=500)
+    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=1000)
+    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=1000)
 
     # ensure the salt mha implementation is not slower than the referenece pytorch
-    # allow for some tolerance to avoid false positives
-    assert t_time * 1.25 > s_time, (
-        f"salt ({s_time:.2f}s) was significantly slower than pytorch {t_time:.2f}s! Check for"
-        " regressions."
-    )
     np.testing.assert_allclose(
         torch_out.cpu().detach().numpy(), out.cpu().detach().numpy(), rtol=1e-3, atol=1e-3
     )
+    assert (
+        t_time * 1.25 > s_time
+    ), f"salt ({s_time:.2f}s) was slower than pytorch {t_time:.2f}s! Check for regressions"
 
 
 def get_pytorch_salt_mha(n_dim, n_head):

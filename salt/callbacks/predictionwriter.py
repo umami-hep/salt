@@ -12,7 +12,11 @@ from salt.utils.arrays import join_structured_arrays
 
 class PredictionWriter(Callback):
     def __init__(
-        self, jet_variables: list, track_variables: list = None, write_tracks: bool = False
+        self,
+        jet_variables: list,
+        track_variables: list = None,
+        write_tracks: bool = False,
+        half_precision: bool = True,
     ) -> None:
         """A callback to write test outputs to h5 file.
 
@@ -30,6 +34,7 @@ class PredictionWriter(Callback):
         self.jet_variables = jet_variables
         self.track_variables = track_variables
         self.write_tracks = write_tracks
+        self.half_precision = half_precision
         self.track_cols = [
             "Pileup",
             "Fake",
@@ -62,12 +67,13 @@ class PredictionWriter(Callback):
         # get jet class prediction column names
         train_file = trainer.datamodule.train_dataloader().dataset.file
         jet_classes = list(train_file[f"{self.jet}/labels"].attrs.values())[0]
-        self.jet_cols = [f"salt_p{c.split('jets')[0]}" for c in jet_classes]
+        self.jet_cols = [f"{pl_module.name}_p{c.split('jets')[0]}" for c in jet_classes]
 
         # get output path
         out_dir = Path(trainer._ckpt_path).parent
         out_basename = str(Path(trainer._ckpt_path).stem)
-        sample = str(Path(self.ds.filename).stem).split("_")[2]
+        stem = str(Path(self.ds.filename).stem)
+        sample = split[2] if len(split := stem.split("_")) == 3 else stem
         fname = f"{out_basename}__test_{sample}.h5"
         self.out_path = Path(out_dir / fname)
 
@@ -84,7 +90,8 @@ class PredictionWriter(Callback):
         jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)
 
         # create output jet dataframe
-        dtype = np.dtype([(n, "f2") for n in self.jet_cols])
+        precision_str = "f2" if self.half_precision else "f4"
+        dtype = np.dtype([(n, precision_str) for n in self.jet_cols])
         jets = u2s(jet_class_preds.float().cpu().numpy(), dtype)
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
@@ -108,17 +115,17 @@ class PredictionWriter(Callback):
             print("Warning! Overwriting existing file.")
 
         with h5py.File(self.out_path, "w") as f:
-            self.create_dataset(f, jets, self.jet)
+            self.create_dataset(f, jets, self.jet, self.half_precision)
 
             if self.write_tracks and "track_classification" in pl_module.tasks:
-                self.create_dataset(f, t, self.track)
+                self.create_dataset(f, t, self.track, self.half_precision)
 
         print("Created output file", self.out_path)
         print("-" * 100, "\n")
 
-    def create_dataset(self, f, a, name, half_precision=True):
+    def create_dataset(self, f, a, name, half_precision):
         # convert down to float16
-        if half_precision:
+        if half_precision and False:
 
             def half(t):
                 t = np.dtype(t)

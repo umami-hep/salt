@@ -122,7 +122,7 @@ class VertexingTask(Task):
         tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat]
         pred = self.net(tt_matrix, context_matrix)
         loss = None
-        if labels_dict is not None:
+        if labels_dict:
             loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat)
 
         return pred, loss

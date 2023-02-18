@@ -7,7 +7,7 @@ import torch.nn as nn
 
 
 class LightningTagger(pl.LightningModule):
-    def __init__(self, model: nn.Module, lrs_config: Mapping):
+    def __init__(self, model: nn.Module, lrs_config: Mapping, name: str = "salt"):
         """Lightning jet tagger model.
 
         Parameters
@@ -17,6 +17,8 @@ class LightningTagger(pl.LightningModule):
         lrs_config: Mapping
             LRS config which has to be set manually for now
             https://github.com/omni-us/jsonargparse/issues/170#issuecomment-1288167674
+        name: str
+            Name of the model
         """
 
         super().__init__()
@@ -26,6 +28,7 @@ class LightningTagger(pl.LightningModule):
 
         self.model = model
         self.lrs_config = lrs_config
+        self.name = name
 
         self.in_dims = [list(net.parameters())[0].shape[1] for net in self.model.init_nets]
 

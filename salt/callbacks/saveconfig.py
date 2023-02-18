@@ -3,11 +3,12 @@ import socket
 import subprocess
 from pathlib import Path
 
+import h5py
 import pytorch_lightning as pl
 import torch
+import yaml
 from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.cli import LightningArgumentParser, Namespace
-from ruamel.yaml import YAML
 
 
 class SaveConfigCallback(Callback):
@@ -141,9 +142,15 @@ class SaveConfigCallback(Callback):
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 
+        # save the jet classes, which is stored as an attr in the training file
+        with h5py.File(meta["train_file"]) as file:
+            jet_name = self.config["data"]["inputs"]["jet"]
+            jet_classes = file[f"{jet_name}/labels"].attrs["label_classes"]
+            meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes))
+
         if logger:
             logger.log_hyperparams(meta)
 
         meta_path = Path(config_path.parent / "metadata.yaml")
-        with open(meta_path, "w") as f:
-            YAML().dump(meta, f)
+        with open(meta_path, "w") as file:
+            yaml.dump(meta, file, sort_keys=False)
