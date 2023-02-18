@@ -8,10 +8,12 @@ stages:
   - lint
   - builds
   - tests
+  - coverage
   - docs
 
 include:
-  - .gitlab/workflow/.ci-pre-commit.yaml
-  - .gitlab/workflow/.ci-test.yaml
-  - .gitlab/workflow/.ci-build.yaml
-  - .gitlab/workflow/.ci-docs.yaml
+  - .gitlab/.ci-pre-commit.yaml
+  - .gitlab/.ci-build.yaml
+  - .gitlab/.ci-test.yaml
+  - .gitlab/.ci-coverage.yaml
+  - .gitlab/.ci-docs.yaml
