@@ -48,6 +48,7 @@ class SaltCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
         parser.add_argument("--name", default="salt", help="Name for this training run.")
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
+        parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
 
     def before_instantiate_classes(self) -> None:

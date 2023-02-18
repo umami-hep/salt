@@ -4,13 +4,12 @@ pytest:
     - build_docker_test
   image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
   script:
-    - cd salt
     - coverage run --source salt -m pytest --show-capture=stdout
-    - coverage report
+    - coverage report --precision=1
     - coverage xml
   coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
   artifacts:
     reports:
       coverage_report:
         coverage_format: cobertura
-        path: salt/coverage.xml
+        path: coverage.xml

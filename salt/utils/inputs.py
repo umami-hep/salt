@@ -13,6 +13,7 @@ from salt.utils.arrays import join_structured_arrays
 DEFAULT_NTRACK = 40
 
 rng = np.random.default_rng(42)
+torch.manual_seed(42)
 
 
 def concat_jet_track(jets: Tensor, tracks: Tensor):
@@ -110,7 +111,7 @@ def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks
 
         for key, arr in jets.items():
             g_jets.create_dataset(key, data=arr)
-            g_jets[key].attrs['"labels"'] = ["bjets", "cjets", "ujets"]
+            g_jets[key].attrs["label_classes"] = ["bjets", "cjets", "ujets"]
 
         for key, arr in tracks.items():
             g_tracks.create_dataset(key, data=arr)

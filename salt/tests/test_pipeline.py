@@ -63,16 +63,15 @@ def run_onnx(train_dir, sd_path):
     args += ["--track_selection=dipsLoose202102"]
     args += [f"--sd_path={sd_path}"]
     to_onnx(args)
-
-    args = [str(train_dir / "model.onnx")]
-    get_onnx_metadata(args)
+    get_onnx_metadata([str(train_dir / "network.onnx")])
 
 
-def run_combined(tmp_path, config_path, do_eval=True, do_onnx=True, train_args=None):
+def run_combined(tmp_path, config, do_eval=True, do_onnx=True, train_args=None):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
+    config_base = Path(__file__).parent.parent / "configs"
 
     # run training
-    run_train(tmp_path, config_path, train_args)
+    run_train(tmp_path, config_base / config, train_args)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -88,50 +87,50 @@ def run_combined(tmp_path, config_path, do_eval=True, do_onnx=True, train_args=N
 
 @pytest.mark.filterwarnings(w)
 class TestTrainMisc:
-    config_path = "configs/GN1.yaml"
+    config = "GN1.yaml"
 
     def test_train_batched(self, tmp_path) -> None:
         args = ["--data.batched_read=True"]
-        run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_train_unbatched(self, tmp_path) -> None:
         args = ["--data.batched_read=False"]
-        run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_train_dev(self, tmp_path) -> None:
         args = ["--trainer.fast_dev_run=2"]
-        run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_train_movefilestemp(self, tmp_path) -> None:
         tmp_path = Path(tmp_path)
         move_path = tmp_path / "dev" / "shm"
         args = [f"--data.move_files_temp={move_path}"]
-        run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
         assert not Path(move_path).exists()
 
     def test_train_distributed(self, tmp_path) -> None:
         args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
-        run_combined(tmp_path, self.config_path, do_eval=False, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_train_exclude(self, tmp_path) -> None:
         args = ["--data.exclude.track=['dummy_track_var_0']"]
-        run_combined(tmp_path, self.config_path, do_eval=True, do_onnx=False, train_args=args)
+        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
 
 
 @pytest.mark.filterwarnings(w)
 class TestModels:
     def test_GN1(self, tmp_path) -> None:
-        run_combined(tmp_path, "configs/GN1.yaml")
+        run_combined(tmp_path, "GN1.yaml")
 
     def test_GN1_GATv2(self, tmp_path) -> None:
-        args = ["--config=configs/GATv2.yaml"]
-        run_combined(tmp_path, "configs/GN1.yaml", train_args=args)
+        args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
+        run_combined(tmp_path, "GN1.yaml", train_args=args)
 
     def test_DIPS(self, tmp_path) -> None:
-        run_combined(tmp_path, "configs/dips.yaml", do_eval=True, do_onnx=False)
+        run_combined(tmp_path, "dips.yaml", do_eval=True, do_onnx=False)
 
     def test_regression(self, tmp_path) -> None:
-        run_combined(tmp_path, "configs/regression.yaml", do_eval=False, do_onnx=False)
+        run_combined(tmp_path, "regression.yaml", do_eval=False, do_onnx=False)
 
     def test_flow(self, tmp_path) -> None:
-        run_combined(tmp_path, "configs/flow.yaml", do_eval=False, do_onnx=False)
+        run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)

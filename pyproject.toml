@@ -9,7 +9,6 @@ dependencies = [
     "pytest-cov==4.0.*",
     "h5py==3.8.0",
     "numpy==1.24.*",
-    "ruamel.yaml==0.17.21",
     "torch==1.13.1",
     "pytorch-lightning[extra]==1.9.0",
     "jsonargparse[signatures]==4.19.0",
@@ -30,7 +29,7 @@ dependencies = [
 [project.scripts]
 salt = "salt.main:main"
 to_onnx = "salt.to_onnx:main"
-get_onnx_metadata = "salt.get_onnx_metadata:main"
+get_onnx_metadata = "salt.utils.get_onnx_metadata:main"
 
 [tool.setuptools]
 packages = ["salt"]
