@@ -1,0 +1,15 @@
+pytest==7.2.*
+pytest-cov==4.0.*
+h5py==3.8.0
+numpy==1.24.*
+torch==1.13.1
+pytorch-lightning[extra]==1.9.0
+jsonargparse[signatures]==4.19.0
+torchmetrics==0.10.*
+comet_ml==3.31.*
+tqdm==4.64.*
+rich==13.2.0
+pre-commit==3.0.*
+onnx==1.13.0
+onnxruntime==1.13.1
+puma-hep
