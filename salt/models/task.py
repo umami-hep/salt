@@ -14,6 +14,7 @@ class Task(nn.Module):
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
+        label_denominator: str = None,
     ):
         """Task head.
 
@@ -39,6 +40,7 @@ class Task(nn.Module):
         self.net = net
         self.loss = loss
         self.weight = weight
+        self.label_denominator = label_denominator
 
 
 class ClassificationTask(Task):
@@ -77,6 +79,8 @@ class RegressionTask(Task):
 
         preds = self.net(x, context)
         labels = labels_dict[self.name] if labels_dict else None
+        if labels_dict and self.name + "_denominator" in labels_dict:
+            labels = torch.div(labels_dict[self.name], labels_dict[self.name + "_denominator"])
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
