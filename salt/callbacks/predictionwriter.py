@@ -13,7 +13,7 @@ from salt.utils.arrays import join_structured_arrays
 class PredictionWriter(Callback):
     def __init__(
         self,
-        jet_variables: list,
+        jet_variables: list = None,
         track_variables: list = None,
         write_tracks: bool = False,
         half_precision: bool = True,
@@ -93,6 +93,10 @@ class PredictionWriter(Callback):
         precision_str = "f2" if self.half_precision else "f4"
         dtype = np.dtype([(n, precision_str) for n in self.jet_cols])
         jets = u2s(jet_class_preds.float().cpu().numpy(), dtype)
+
+        if self.jet_variables is None:
+            self.jet_variables = self.file[self.jet].dtype.names
+
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
 
@@ -106,7 +110,10 @@ class PredictionWriter(Callback):
             t = t.view(dtype=np.dtype([(name, "f4") for name in self.track_cols]))
             t = t.reshape(t.shape[0], t.shape[1])
 
-            t2 = self.file[self.track].fields(self.track_vars)[: self.num_jets]
+            if self.track_variables is None:
+                self.track_variables = self.file[self.track].dtype.names
+
+            t2 = self.file[self.track].fields(self.track_variables)[: self.num_jets]
             t = join_structured_arrays((t, t2))
 
         # write to h5 file
