@@ -94,6 +94,8 @@ class SaltCLI(LightningCLI):
                 assert "Task" in submodel["class_path"]
                 task = submodel["init_args"]
                 labels[task["name"]] = task["label"]
+                if task["label_denominator"]:
+                    labels[task["name"] + "_denominator"] = task["label_denominator"]
             sc["data"]["labels"] = labels
 
         if self.subcommand == "test":
