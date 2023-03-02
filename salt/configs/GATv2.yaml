@@ -1,3 +1,5 @@
+name: GN1-GATv2
+
 model:
     model:
       class_path: salt.models.JetTagger
@@ -7,9 +9,9 @@ model:
           class_path: salt.models.TransformerEncoder
           init_args:
             mha_config:
-              num_heads: 8
+              num_heads: 2
               attention:
                 class_path: salt.models.GATv2Attention
                 init_args:
-                  num_heads: 8
-                  head_dim: 16
+                  num_heads: 2
+                  head_dim: 128

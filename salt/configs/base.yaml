@@ -60,7 +60,7 @@ trainer:
 # configure learning rate
 model:
   lrs_config:
-    initial: 1e-8
-    max: 1e-3
-    end: 1e-8
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-7
     pct_start: 0.1

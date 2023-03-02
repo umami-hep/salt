@@ -7,12 +7,15 @@ data:
   inputs:
     jet: jets
     track: tracks
-  num_jets_train: 5_000_000
-  num_jets_val: 500_000
+  num_jets_train: -1
+  num_jets_val: -1
   num_jets_test: -1
+  batch_size: 1000
+  num_workers: 20
 
 trainer:
-  max_epochs: 10
+  max_epochs: 100
+  devices: 1
   callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
@@ -115,3 +118,21 @@ model:
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: tracks/labels/track_vertexing
+                label: truthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args:
+                    reduction: none
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 256
+                    context_size: *out_dim
+                    hidden_layers: [64, 32]
+                    output_size: 1
+                    activation: *activation
