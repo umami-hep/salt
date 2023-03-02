@@ -1,18 +1,6 @@
-# this file (imperfectly) replicates the GN1 model used
-# for the note: ATL-PHYS-PUB-2022-027. There are some
-# dfferences:
-# - Here the track init net has output size 256, rather than 64 for the note
-# - We include layernorm by default (this is not currently configurable)
-# - We use ScaledDotProduct attention, which does not affect performance (but reduces memory usage)
-name: GN1
+name: GN2
 
 model:
-  lrs_config:
-    initial: 1e-3
-    max: 1e-3
-    end: 1e-3
-    pct_start: 0.1
-
   model:
     class_path: salt.models.JetTagger
     init_args:
@@ -27,21 +15,27 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: 23
-                    output_size: &embed_dim 256
-                    hidden_layers: [64, 64, 64]
-                    activation: &activation ReLU
+                    output_size: &embed_dim 192
+                    hidden_layers: [256]
+                    activation: &activation SiLU
+                    norm_layer: &norm_layer LayerNorm
 
       gnn:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
-          num_layers: 3
+          num_layers: 6
           out_dim: &out_dim 128
           mha_config:
-            num_heads: 2
+            num_heads: 8
             attention:
               class_path: salt.models.ScaledDotProductAttention
-            out_proj: 128
+            out_proj: False
+          dense_config:
+            norm_layer: *norm_layer
+            activation: *activation
+            hidden_layers: [256]
+            dropout: &dropout 0.1
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -56,15 +50,20 @@ model:
               init_args:
                 name: jet_classification
                 label: jets/labels
-                loss: torch.nn.CrossEntropyLoss
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [1.0, 1.73, 1.08]
 
                 net:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: *out_dim
                     output_size: 3
-                    hidden_layers: [128, 64, 32, 16, 3]
+                    hidden_layers: [128, 64, 32]
                     activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -82,8 +81,10 @@ model:
                     input_size: *out_dim
                     context_size: *out_dim
                     output_size: 8
-                    hidden_layers: [128, 64, 32, 8]
+                    hidden_layers: [128, 64, 32]
                     activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout
 
             - class_path: salt.models.VertexingTask
               init_args:

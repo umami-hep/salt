@@ -183,8 +183,9 @@ def test_mha_vs_torch_timing():
     torch_out = t_net(x, x, x, key_padding_mask=mask)[0]
     out = s_net(x, x, x, kv_mask=mask)
 
-    t_time = timeit.timeit(lambda: t_net(x, x, x, key_padding_mask=mask), number=1000)
-    s_time = timeit.timeit(lambda: s_net(x, x, x, kv_mask=mask), number=1000)
+    kwargs = {"number": 100, "repeat": 5}
+    t_time = min(timeit.repeat(lambda: t_net(x, x, x, key_padding_mask=mask), **kwargs))
+    s_time = min(timeit.repeat(lambda: s_net(x, x, x, kv_mask=mask), **kwargs))
 
     # ensure the salt mha implementation is not slower than the referenece pytorch
     np.testing.assert_allclose(

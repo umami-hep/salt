@@ -26,7 +26,7 @@ class TransformerEncoderLayer(nn.Module):
         self,
         embed_dim: int,
         mha_config: Mapping,
-        dense_config: Mapping,
+        dense_config: Mapping = None,
         context_dim: int = 0,
     ) -> None:
         """Init method of TransformerEncoderBlock.
@@ -37,7 +37,7 @@ class TransformerEncoderLayer(nn.Module):
             The embedding dimension of the transformer block
         mha_config : int
             Configuration for the MultiheadAttention block
-        dense_config : nn.Module
+        dense_config : Mapping
             Configuration for the Dense network
         context_dim: int
             The size of the context tensor
@@ -47,9 +47,15 @@ class TransformerEncoderLayer(nn.Module):
 
         # The main blocks in the transformer
         self.mha = MultiheadAttention(embed_dim, **mha_config)
-        self.dense = Dense(
-            input_size=embed_dim, output_size=embed_dim, context_size=context_dim, **dense_config
-        )
+        if dense_config:
+            self.dense = Dense(
+                input_size=embed_dim,
+                output_size=embed_dim,
+                context_size=context_dim,
+                **dense_config
+            )
+        else:
+            self.register_buffer("dense", None)
 
         # The multiple normalisation layers to keep it all stable
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -66,7 +72,8 @@ class TransformerEncoderLayer(nn.Module):
         x = x + self.norm2(
             self.mha(self.norm1(x), q_mask=mask, attn_mask=attn_mask, attn_bias=attn_bias)
         )
-        x = x + self.dense(x, context)
+        if self.dense:
+            x = x + self.dense(x, context)
         return x
 
 
@@ -84,7 +91,7 @@ class TransformerEncoder(nn.Module):
         embed_dim: int,
         num_layers: int,
         mha_config: Mapping,
-        dense_config: Mapping,
+        dense_config: Mapping = None,
         context_dim: int = 0,
         out_dim: int = 0,
     ) -> None:
@@ -97,7 +104,7 @@ class TransformerEncoder(nn.Module):
             Number of encoder layers used
         mha_config : nn.Module
             Keyword arguments for the mha block
-        dense_config: int
+        dense_config: Mapping
             Keyword arguments for the dense network in each layer
         context_dim: int
             Dimension of the context inputs
