@@ -55,6 +55,10 @@ class SaltCLI(LightningCLI):
         sc = self.config[self.subcommand]
 
         if self.subcommand == "fit":
+            # reduce precision to imrprove performance
+            # don't do this during evaluation as you will get variation wrt Athena
+            torch.set_float32_matmul_precision("medium")
+
             # get timestamped output dir for this run
             timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
             log = "trainer.logger"
