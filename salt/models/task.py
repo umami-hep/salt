@@ -64,7 +64,30 @@ class ClassificationTask(Task):
 
 
 class RegressionTask(Task):
-    """Gaussian regression task.
+    """Regression task without uncertainty prediction."""
+
+    def forward(
+        self, x: Tensor, labels_dict: Mapping, mask: Tensor = None, context: Tensor = None
+    ):
+        if x.ndim != 2 or mask is not None:
+            raise NotImplementedError(
+                "Regression tasks are currently only supported for jet-level predictions."
+            )
+
+        preds = self.net(x, context).squeeze(-1)
+        labels = labels_dict[self.name] if labels_dict else None
+        if labels_dict and f"{self.name}_denominator" in labels_dict:
+            labels = torch.div(labels_dict[self.name], labels_dict[f"{self.name}_denominator"])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss(preds, labels) * self.weight
+
+        return preds, loss
+
+
+class GaussianRegressionTask(Task):
+    """Gaussian regression task, enabling uncertainty prediction.
 
     Applies softplus activation to sigmas to ensure positivty.
     """
@@ -79,8 +102,8 @@ class RegressionTask(Task):
 
         preds = self.net(x, context)
         labels = labels_dict[self.name] if labels_dict else None
-        if labels_dict and self.name + "_denominator" in labels_dict:
-            labels = torch.div(labels_dict[self.name], labels_dict[self.name + "_denominator"])
+        if labels_dict and f"{self.name}_denominator" in labels_dict:
+            labels = torch.div(labels_dict[self.name], labels_dict[f"{self.name}_denominator"])
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0

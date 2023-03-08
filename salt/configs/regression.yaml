@@ -1,4 +1,4 @@
-name: reg
+name: regression_example
 
 model:
   model:
@@ -32,8 +32,21 @@ model:
           modules:
             - class_path: salt.models.RegressionTask
               init_args:
-                name: jet_classification # wrong name for now to avoid ci test failure
-                label: jets/labels
+                name: jet_regression
+                label: jets/add_labels
+                loss: MSELoss
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *embed_dim
+                    output_size: 1
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+
+            - class_path: salt.models.GaussianRegressionTask
+              init_args:
+                name: gaussian_jet_regression
+                label: jets/add_labels
                 loss: GaussianNLLLoss
                 net:
                   class_path: salt.models.Dense
@@ -42,5 +55,3 @@ model:
                     output_size: 2
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: 0.1

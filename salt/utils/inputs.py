@@ -70,6 +70,7 @@ def get_dummy_inputs(
     shapes_jets = {
         "inputs": [n_jets, n_jet_features],
         "labels": [n_jets],
+        "add_labels": [n_jets],
     }
 
     shapes_tracks = {
