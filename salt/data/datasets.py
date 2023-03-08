@@ -103,8 +103,10 @@ class TrainJetDataset(Dataset):
                 masks[name] = ~torch.as_tensor(self.valids[name][jet_idx], dtype=torch.bool)
 
         # read labels
-        labels = {n: torch.as_tensor(l[jet_idx], dtype=torch.long) for n, l in self.labels.items()}
-
+        labels = {}
+        for n, l in self.labels.items():
+            dtype = torch.float if "regression" in n else torch.long
+            labels[n] = torch.as_tensor(l[jet_idx], dtype=dtype)
         return inputs, masks, labels
 
     def get_num_jets(self, num_jets_requested: int):
