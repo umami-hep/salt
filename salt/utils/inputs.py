@@ -142,11 +142,13 @@ def write_dummy_test_file(fname, sd_fname):
         "dummy_jet_var_1",
     ]
 
+    track_vars = list(sd["tracks"]) + ["truthOriginLabel", "truthVertexIndex"]
+
     # settings
     n_jets = 1000
     jet_features = len(jet_vars)
     n_tracks_per_jet = 40
-    track_features = 21
+    track_features = len(track_vars)
 
     # setup jets
     shapes_jets = {
@@ -165,7 +167,7 @@ def write_dummy_test_file(fname, sd_fname):
     jets = u2s(jets, jets_dtype)
 
     # setup tracks
-    tracks_dtype = np.dtype([(n, "f4") for n in sd["tracks"]])
+    tracks_dtype = np.dtype([(n, "f4") for n in track_vars])
     tracks = rng.random(shapes_tracks["inputs"])
     tracks = u2s(tracks, tracks_dtype)
     valid = rng.random(shapes_tracks["valid"])
