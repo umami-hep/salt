@@ -30,3 +30,13 @@ test-pipelines-models:
     - ls -la
   artifacts:
     paths: [.coverage*]
+
+test-union-find:
+  stage: tests
+  needs: [build_docker_test]
+  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
+  script:
+    - $TEST_CMD salt/tests/test_union_find.py
+    - ls -la
+  artifacts:
+    paths: [.coverage*]
