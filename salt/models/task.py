@@ -10,6 +10,7 @@ class Task(nn.Module):
     def __init__(
         self,
         name: str,
+        input_type: str,
         label: str,
         net: Dense,
         loss: nn.Module,
@@ -22,8 +23,10 @@ class Task(nn.Module):
 
         Parameters
         ----------
-        Name : str
+        name : str
             Name of the task
+        input_type : str
+            Type of the task input
         label : str
             Label name for the task
         net : Dense
@@ -36,21 +39,37 @@ class Task(nn.Module):
         super().__init__()
 
         self.name = name
+        self.input_type = input_type
         self.label = label
         self.net = net
         self.loss = loss
         self.weight = weight
         self.label_denominator = label_denominator
 
+    def calculate_input_type_mask(self, masks):
+        input_type_mask = torch.cat(
+            [torch.ones(m.shape[1]) * (t == self.input_type) for t, m in masks.items()]
+        ).bool()
+        return input_type_mask
+
 
 class ClassificationTask(Task):
     def forward(
-        self, x: Tensor, labels_dict: Mapping, mask: Tensor = None, context: Tensor = None
+        self,
+        x: Tensor,
+        labels_dict: Mapping,
+        masks: Mapping = None,
+        context: Tensor = None,
     ):
-        preds = self.net(x, context)
+        if masks is not None:
+            input_type_mask = self.calculate_input_type_mask(masks)
+            preds = self.net(x[:, input_type_mask], context)
+            mask = masks[self.input_type]
+        else:
+            preds = self.net(x, context)
+            mask = None
         labels = labels_dict[self.name] if labels_dict else None
 
-        # could use ignore_index instead of the mask here
         if mask is not None:
             preds = preds[~mask]
             if labels is not None:
@@ -67,9 +86,9 @@ class RegressionTask(Task):
     """Regression task without uncertainty prediction."""
 
     def forward(
-        self, x: Tensor, labels_dict: Mapping, mask: Tensor = None, context: Tensor = None
+        self, x: Tensor, labels_dict: Mapping, masks: Mapping = None, context: Tensor = None
     ):
-        if x.ndim != 2 or mask is not None:
+        if x.ndim != 2 or masks is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
@@ -93,9 +112,13 @@ class GaussianRegressionTask(Task):
     """
 
     def forward(
-        self, x: Tensor, labels_dict: Mapping, mask: Tensor = None, context: Tensor = None
+        self,
+        x: Tensor,
+        labels_dict: Mapping,
+        masks: Mapping = None,
+        context: Tensor = None,
     ):
-        if x.ndim != 2 or mask is not None:
+        if x.ndim != 2 or masks is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
@@ -121,8 +144,18 @@ class VertexingTask(Task):
     """Vertexing task."""
 
     def forward(
-        self, x: Tensor, labels_dict: Mapping, mask: Tensor = None, context: Tensor = None
+        self,
+        x: Tensor,
+        labels_dict: Mapping,
+        masks: Tensor = None,
+        context: Tensor = None,
     ):
+        if masks is not None:
+            input_type_mask = self.calculate_input_type_mask(masks)
+            mask = masks[self.input_type]
+            x = x[:, input_type_mask]
+        else:
+            mask = None
         b, n, d = x.shape
         ex_size = (b, n, n, d)
         if mask is None:
@@ -171,7 +204,7 @@ class VertexingTask(Task):
         loss = self.loss(pred.squeeze(-1), match_matrix)
 
         # If reduction is none and have weight labels, weight the loss
-        weights = self.get_weights(labels_dict["track_classification"], adjmat)
+        weights = self.get_weights(labels_dict[f"{self.input_type}_classification"], adjmat)
         loss = (loss * weights).mean()
 
         return loss * self.weight

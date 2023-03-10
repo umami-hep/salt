@@ -4,7 +4,6 @@ model:
   model:
     class_path: salt.models.JetTagger
     init_args:
-
       init_nets:
         class_path: torch.nn.ModuleList
         init_args:
@@ -33,6 +32,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
+                input_type: jet
                 label: jets/labels
                 loss: torch.nn.CrossEntropyLoss
                 net:

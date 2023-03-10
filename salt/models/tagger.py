@@ -1,3 +1,5 @@
+from typing import Mapping
+
 import torch
 from torch import Tensor, nn
 from torch.nn import ModuleList
@@ -52,21 +54,27 @@ class JetTagger(nn.Module):
         # TODO: use a flag as to which input type this is
         embed_x = torch.cat(list(embed_x.values()), dim=1)
         if mask is not None:
-            mask = torch.cat(list(mask.values()), dim=1)
+            combined_mask = torch.cat(list(mask.values()), dim=1)
 
         # graph network
         if self.gnn:
-            embed_x = self.gnn(embed_x, mask=mask)
+            embed_x = self.gnn(embed_x, mask=combined_mask)
 
         # pooling
-        pooled = self.pool_net(embed_x, mask=mask)
+        pooled = self.pool_net(embed_x, mask=combined_mask)
 
         # run tasks
         preds, loss = self.tasks_forward(pooled, embed_x, mask, labels)
 
         return preds, loss
 
-    def tasks_forward(self, pooled: Tensor, embed_x: Tensor, mask: Tensor, labels: dict = None):
+    def tasks_forward(
+        self,
+        pooled: Tensor,
+        embed_x: Tensor,
+        mask: Mapping,
+        labels: dict = None,
+    ):
         preds = {}
         loss = {}
         # TODO: move this login into the task class, including per element loss weighting
