@@ -4,7 +4,6 @@ model:
   model:
     class_path: salt.models.JetTagger
     init_args:
-
       init_nets:
         class_path: torch.nn.ModuleList
         init_args:
@@ -33,6 +32,7 @@ model:
             - class_path: salt.models.RegressionTask
               init_args:
                 name: jet_regression
+                input_type: jet
                 label: jets/add_labels
                 loss: MSELoss
                 net:
@@ -46,6 +46,7 @@ model:
             - class_path: salt.models.GaussianRegressionTask
               init_args:
                 name: gaussian_jet_regression
+                input_type: jet
                 label: jets/add_labels
                 loss: GaussianNLLLoss
                 net:

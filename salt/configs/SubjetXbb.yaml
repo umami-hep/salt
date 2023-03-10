@@ -82,6 +82,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
+                input_type: jet
                 label: jets/labels
                 loss: torch.nn.CrossEntropyLoss
                 net:

@@ -51,6 +51,7 @@ class TrainJetDataset(Dataset):
             if f"{g}/inputs" not in self.file.keys():
                 raise ValueError(f"No group {g}/inputs in file {self.file.filename}")
         self.inputs = {n: self.file[f"{g}/inputs"] for n, g in inputs.items()}
+
         self.valids = {
             n: self.file[f"{g}/valid"] for n, g in inputs.items() if "valid" in self.file[g].keys()
         }
@@ -101,6 +102,9 @@ class TrainJetDataset(Dataset):
 
             if name in self.valids:
                 masks[name] = ~torch.as_tensor(self.valids[name][jet_idx], dtype=torch.bool)
+
+            # if name in self.valids or name == "track":  # TODO: added for subjets since no valid
+            #     inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
 
         # read labels
         labels = {}
@@ -284,6 +288,8 @@ class TestJetDataset(Dataset):
         # hacky atm
         if "flow" in inputs and inputs["flow"] in scale_dict:
             variables["flow"] = scale_dict[inputs["flow"]].keys()
+        if "electron" in inputs and inputs["electron"] in scale_dict:
+            variables["electron"] = scale_dict[inputs["electron"]].keys()
 
         return scale_dict, variables
 

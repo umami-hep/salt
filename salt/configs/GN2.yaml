@@ -49,6 +49,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
+                input_type: jet
                 label: jets/labels
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -68,13 +69,13 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_classification
+                input_type: track
                 label: tracks/labels/truthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight:
-                      [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
+                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -89,6 +90,7 @@ model:
             - class_path: salt.models.VertexingTask
               init_args:
                 name: track_vertexing
+                input_type: track
                 label: tracks/labels/truthVertexIndex
                 weight: 1.5
                 loss:

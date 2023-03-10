@@ -86,6 +86,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
+                input_type: jet
                 label: jets/labels
                 loss: torch.nn.CrossEntropyLoss
                 net:
@@ -101,6 +102,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_classification
+                input_type: track
                 label: tracks/labels/truthOriginLabel
                 weight: 0.5
                 loss:
@@ -121,8 +123,9 @@ model:
 
             - class_path: salt.models.VertexingTask
               init_args:
-                name: tracks/labels/track_vertexing
-                label: truthVertexIndex
+                name: track_vertexing
+                input_type: track
+                label: tracks/labels/truthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
