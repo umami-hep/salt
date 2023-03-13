@@ -132,7 +132,7 @@ class JetDataModule(pl.LightningDataModule):
             print("-" * 100, "\n")
 
     def get_dataloader(self, stage: str, dataset: TrainJetDataset, shuffle: bool):
-        drop_last = True if stage == "fit" else False
+        drop_last = stage == "fit"
 
         # batched reads from h5 (weak shuffling)
         if self.batched_read:

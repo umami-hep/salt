@@ -17,9 +17,9 @@ class PredictionWriter(Callback):
         jet_variables: list = None,
         track_variables: list = None,
         write_tracks: bool = False,
-        half_precision: bool = True,
+        half_precision: bool = False,
     ) -> None:
-        """A callback to write test outputs to h5 file.
+        """Write test outputs to h5 file.
 
         Parameters
         ----------
@@ -29,6 +29,8 @@ class PredictionWriter(Callback):
             List of track variables to copy from test file
         write_tracks : bool
             If true, write track outputs to file
+        half_precision : bool
+            If true, write outputs at half precision
         """
         super().__init__()
 
@@ -155,7 +157,7 @@ class PredictionWriter(Callback):
 
     def create_dataset(self, f, a, name, half_precision):
         # convert down to float16
-        if half_precision and False:
+        if half_precision:
 
             def half(t):
                 t = np.dtype(t)

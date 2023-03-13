@@ -27,7 +27,6 @@ class RandomBatchSampler(Sampler):
         drop_last : bool
             Drop the last incomplete batch (if present)
         """
-
         self.batch_size = batch_size
         self.dataset_length = len(dataset)
         self.n_batches = self.dataset_length / self.batch_size

@@ -1,5 +1,5 @@
 import json
-from typing import Mapping
+from collections.abc import Mapping
 
 import h5py
 import torch
@@ -19,8 +19,7 @@ class TrainJetDataset(Dataset):
         num_jets: int = -1,
         exclude: dict = None,
     ):
-        """A simple map-style dataset for loading jets from an umami-
-        preprocessed training file.
+        """Create a map-style dataset for loading jets from an umami training file.
 
         Parameters
         ----------
@@ -53,9 +52,9 @@ class TrainJetDataset(Dataset):
         self.inputs = {n: self.file[f"{g}/inputs"] for n, g in inputs.items()}
 
         self.valids = {
-            n: self.file[f"{g}/valid"] for n, g in inputs.items() if "valid" in self.file[g].keys()
+            n: self.file[f"{g}/valid"] for n, g in inputs.items() if "valid" in self.file[g]
         }
-        self.labels = {n: self.file[l] for n, l in labels.items()}
+        self.labels = {n: self.file[label] for n, label in labels.items()}
 
         # set number of jets
         self.num_jets = self.get_num_jets(num_jets)
@@ -84,7 +83,6 @@ class TrainJetDataset(Dataset):
             Inputs (dict of tensor), masks (dict of tensor) and labels (dict of tensor).
             Each tensor will contain a single element or a batch of elements.
         """
-
         inputs = {}
         masks = {}
 
@@ -108,9 +106,9 @@ class TrainJetDataset(Dataset):
 
         # read labels
         labels = {}
-        for n, l in self.labels.items():
+        for n, label in self.labels.items():
             dtype = torch.float if "regression" in n else torch.long
-            labels[n] = torch.as_tensor(l[jet_idx], dtype=dtype)
+            labels[n] = torch.as_tensor(label[jet_idx], dtype=dtype)
         return inputs, masks, labels
 
     def get_num_jets(self, num_jets_requested: int):
@@ -195,6 +193,8 @@ class TestJetDataset(Dataset):
             Path to umami preprocessing scale dict file
         num_jets : int, optional
             Number of jets to use, by default -1
+        exclude : dict, optional
+            Dict of variables to exclude for each input type, by default None
         """
         super().__init__()
 
@@ -245,7 +245,6 @@ class TestJetDataset(Dataset):
             Inputs (tensor) and labels (dict of tensor). Each tensor
             will contain a single element or a batch of elements.
         """
-
         inputs = {}
         masks = {}
 

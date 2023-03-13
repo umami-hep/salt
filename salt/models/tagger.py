@@ -1,4 +1,4 @@
-from typing import Mapping
+from collections.abc import Mapping
 
 import torch
 from torch import Tensor, nn
@@ -22,16 +22,14 @@ class JetTagger(nn.Module):
 
         Parameters
         ----------
-        init_net : Dense
-            Initialisation network
+        init_nets : ModuleList
+            Initialisation networks
         gnn : nn.Module
             Graph neural network
         pool_net : nn.Module
             Pooling network
-        jet_net : Task
-            Jet classification task
-        track_net : Task
-            Track classification task
+        tasks : ModuleList
+            Task networks
         """
         super().__init__()
 
@@ -47,7 +45,7 @@ class JetTagger(nn.Module):
     def forward(self, inputs: dict, mask: dict, labels: dict = None):
         # initial embeddings
         embed_x = {}
-        for i, init_net in enumerate(self.init_nets):
+        for init_net in self.init_nets:
             embed_x[init_net.name] = init_net(inputs)
 
         # concatenate different input groups

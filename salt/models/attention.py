@@ -1,5 +1,5 @@
 import math
-from typing import Mapping, Optional
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,6 @@ from salt.models.dense import add_dims
 
 def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
     """Applies softmax over a tensor without including padded elements."""
-
     if mask is not None:
         mask = add_dims(mask, x.dim())
         x = x.masked_fill(mask, -torch.inf)
@@ -26,9 +25,9 @@ def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
 
 
 def merge_masks(
-    q_mask: Optional[BoolTensor],
-    kv_mask: Optional[BoolTensor],
-    attn_mask: Optional[BoolTensor],
+    q_mask: BoolTensor | None,
+    kv_mask: BoolTensor | None,
+    attn_mask: BoolTensor | None,
     q_shape: Size,
     k_shape: Size,
     device: torch.device,
@@ -39,7 +38,6 @@ def merge_masks(
         False: Real node
         True:  Zero padded
     """
-
     # Create the full mask which combines the attention and padding masks
     merged_mask = None
 
@@ -64,8 +62,8 @@ class MultiheadAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         attention: nn.Module,
-        k_dim: Optional[int] = None,
-        v_dim: Optional[int] = None,
+        k_dim: int | None = None,
+        v_dim: int | None = None,
         out_proj: bool = True,
     ) -> None:
         """Generic multihead attention.
@@ -154,12 +152,12 @@ class MultiheadAttention(nn.Module):
     def forward(
         self,
         q: Tensor,
-        k: Optional[Tensor] = None,
-        v: Optional[Tensor] = None,
-        q_mask: Optional[BoolTensor] = None,
-        kv_mask: Optional[BoolTensor] = None,
-        attn_mask: Optional[BoolTensor] = None,
-        attn_bias: Optional[Tensor] = None,
+        k: Tensor | None = None,
+        v: Tensor | None = None,
+        q_mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+        attn_mask: BoolTensor | None = None,
+        attn_bias: Tensor | None = None,
     ) -> Tensor:
         """Full forward pass through the model.
 
@@ -185,7 +183,6 @@ class MultiheadAttention(nn.Module):
         Tensor
             Output with the same shape as q
         """
-
         # If only q and q_mask are provided then we automatically apply self attention
         if k is None:
             k = q
@@ -235,8 +232,8 @@ class ScaledDotProductAttention(nn.Module):
         q: Tensor,
         k: Tensor,
         scale: Tensor,
-        mask: Optional[BoolTensor] = None,
-        attn_bias: Optional[Tensor] = None,
+        mask: BoolTensor | None = None,
+        attn_bias: Tensor | None = None,
     ) -> Tensor:
         # inputs are of shape (batch, heads, sequence, head_dim)
 
@@ -273,8 +270,8 @@ class GATv2Attention(nn.Module):
         q: Tensor,
         k: Tensor,
         scale: Tensor,
-        mask: Optional[BoolTensor] = None,
-        attn_bias: Optional[Tensor] = None,
+        mask: BoolTensor | None = None,
+        attn_bias: Tensor | None = None,
     ) -> Tensor:
         # inputs are (B, H, Lq/k, D)
         B, H, Lq, D = q.shape

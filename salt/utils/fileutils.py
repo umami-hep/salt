@@ -8,7 +8,7 @@ def get_temp_path(move_files_temp: str, in_path: str):
 
 
 def copy_file(in_path: Path, out_path: Path):
-    """Copys a file unless it already exists."""
+    """Copy a file unless it already exists."""
     if in_path == out_path or out_path.is_file():
         return
     out_path.parent.mkdir(parents=True, exist_ok=True)

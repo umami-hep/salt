@@ -3,12 +3,11 @@ from torch import Tensor
 
 
 def symmetrize_edge_scores(scores: Tensor, node_numbers: list):
-    """Function to make edge scores symmetric.
+    """Make edge scores symmetric.
 
     Output has same format as input: (edges in batch, 1). Node number
     array gives number of nodes per graph in batch as a list.
     """
-
     edge_scores = torch.zeros_like(scores)
 
     edge_offset = 0
@@ -39,14 +38,13 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: list):
 
 
 def update_node_indices(scores: Tensor, node_indices: list, update_indices: list):
-    """Function that performs a single step of the union find algorithm and
-    returns an updated list of vertex indices for each node.
+    """Run a single step of the union find algorithm.
 
     Takes a score matrix with shape (edges in batch, 1) and a list with
     the number of nodes in each graph of the batch as well as a list of
-    booleans specifying which graphs still need updating.
+    booleans specifying which graphs still need updating. Returns an updated
+    list of vertex indices for each node.
     """
-
     node_numbers = [nodes.size(dim=0) for nodes in node_indices]
 
     edge_offset = node_offset = 0
@@ -83,13 +81,12 @@ def update_node_indices(scores: Tensor, node_indices: list, update_indices: list
 
 
 def get_node_assignment(output: Tensor, node_numbers: list):
-    """Wrapper function that runs edge score symmetrization and union find.
+    """Run edge score symmetrization and union find.
 
-    Returns reconstructed vertex indices in shape (nodes in batch, 1).
-    Node number array gives number of nodes per graph in batch as a list
-    (can be derived from mask).
+    Wrapper function which returns reconstructed vertex indices in shape
+    (nodes in batch, 1). Node number array gives number of nodes per graph
+    in batch as a list (can be derived from mask).
     """
-
     # symmetrize edge scores
     scores = symmetrize_edge_scores(output, node_numbers)
 
