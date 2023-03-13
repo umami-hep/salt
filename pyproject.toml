@@ -22,16 +22,13 @@ requires = ["setuptools>=62"]
 build-backend = "setuptools.build_meta"
 
 [tool.black]
-line-length = 99
+line-length = 100
 preview = "True"
 
-[tool.isort]
-profile = "black"
-
-[tool.pylint]
-format.max-line-length = 99
-reports.output-format = "colorized"
-messages_control.enable = ["useless-suppression"]
+[tool.ruff]
+select = ["I", "E", "W", "F", "B", "UP", "ARG", "SIM", "TID", "RUF", "D2", "D3", "D4"]
+ignore = ["ARG002", "D203", "D205", "D213", "D401", "RUF005"]
+line-length = 100
 
 [tool.pytest.ini_options]
 log_cli_level = "debug"

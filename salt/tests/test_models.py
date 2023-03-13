@@ -168,7 +168,6 @@ def test_mha_vs_torch(frac_pad):
 
 def get_pytorch_salt_mha(n_dim, n_head):
     """Get a pytorch and salt MHA layer with equivalent weights."""
-
     t_net = nn.MultiheadAttention(
         embed_dim=n_dim, num_heads=n_head, batch_first=True, bias=True, add_zero_attn=True
     )

@@ -1,4 +1,4 @@
-from typing import Mapping
+from collections.abc import Mapping
 
 import torch
 from torch import Tensor, nn
@@ -35,6 +35,8 @@ class Task(nn.Module):
             Task loss
         weight : float
             Weight in the overall loss
+        label_denominator : str
+            Name of the denominator label for the task
         """
         super().__init__()
 
@@ -158,10 +160,7 @@ class VertexingTask(Task):
             mask = None
         b, n, d = x.shape
         ex_size = (b, n, n, d)
-        if mask is None:
-            t_mask = torch.ones(b, n)
-        else:
-            t_mask = ~mask
+        t_mask = torch.ones(b, n) if mask is None else ~mask
         adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
         adjmat = adjmat & ~torch.diag_embed(torch.ones_like(t_mask).bool())
         adjmat = adjmat.bool()

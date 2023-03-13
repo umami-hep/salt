@@ -59,14 +59,7 @@ def write_dummy_scale_dict(fname, n_jet_features: int, n_track_features: int):
         f.write(json.dumps(sd))
 
 
-def get_dummy_inputs(
-    n_jets=1000,
-    n_jet_features=2,
-    n_track_features=21,
-    n_tracks_per_jet=40,
-    jets_name="jets",
-    tracks_name="tracks",
-):
+def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_tracks_per_jet=40):
     shapes_jets = {
         "inputs": [n_jets, n_jet_features],
         "labels": [n_jets],
@@ -102,9 +95,9 @@ def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks
     with open(sd_path) as f:
         sd = json.load(f)
     kwargs = {"n_jet_features": len(sd[jets_name]), "n_track_features": len(sd[tracks_name])}
-    jets, tracks = get_dummy_inputs(jets_name=jets_name, tracks_name=tracks_name, **kwargs)
+    jets, tracks = get_dummy_inputs(**kwargs)
     kwargs["n_track_features"] = 4
-    flow = get_dummy_inputs(jets_name=jets_name, tracks_name="flow", **kwargs)[1]
+    flow = get_dummy_inputs(**kwargs)[1]
     with h5py.File(fname, "w") as f:
         g_jets = f.create_group(jets_name)
         g_tracks = f.create_group(tracks_name)

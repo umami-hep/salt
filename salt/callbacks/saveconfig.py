@@ -15,13 +15,16 @@ class SaveConfigCallback(Callback):
     """Saves a LightningCLI config to the log_dir when training starts.
 
     Args:
+    ----
         parser: The parser object used to parse the configuration.
         config: The parsed configuration that will be saved.
         config_filename: Filename for the config file.
         overwrite: Whether to overwrite an existing config file.
         multifile: When input is multiple config files, saved config
         preserves this structure.
+
     Raises:
+    ------
         RuntimeError: If the config file already exists in the directory
         to avoid overwriting a previous run
     """
@@ -122,7 +125,7 @@ class SaveConfigCallback(Callback):
         meta["num_jets_train"] = len(train_dset)
         meta["num_jets_val"] = len(val_dset)
         batch_size = train_loader.batch_size
-        batch_size = train_loader.sampler.batch_size if not batch_size else batch_size
+        batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
         params = sum(p.numel() for p in self.plm.parameters() if p.requires_grad)
         meta["trainable_params"] = params
@@ -146,8 +149,7 @@ class SaveConfigCallback(Callback):
         with h5py.File(meta["train_file"]) as file:
             jet_name = self.config["data"]["inputs"]["jet"]
             jet_classes = file[f"{jet_name}/labels"].attrs["label_classes"]
-            meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes))
-
+            meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))
         if logger:
             logger.log_hyperparams(meta)
 

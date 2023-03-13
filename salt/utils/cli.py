@@ -88,7 +88,7 @@ class SaltCLI(LightningCLI):
             if exclude is None:
                 exclude = {}
 
-            for i, submodel in enumerate(model_dict["init_nets"]["init_args"]["modules"]):
+            for submodel in model_dict["init_nets"]["init_args"]["modules"]:
                 if exclude.get(submodel["init_args"]["name"]):
                     submodel["init_args"]["net"]["init_args"]["input_size"] -= len(
                         exclude.get(submodel["init_args"]["name"])
@@ -121,7 +121,7 @@ class SaltCLI(LightningCLI):
 
             # ensure only one device is used for testing
             n_devices = sc["trainer.devices"]
-            if (isinstance(n_devices, str) or isinstance(n_devices, int)) and int(n_devices) > 1:
+            if (isinstance(n_devices, str | int)) and int(n_devices) > 1:
                 print("Setting --trainer.devices=1")
                 sc["trainer.devices"] = "1"
             if isinstance(n_devices, list) and len(n_devices) > 1:

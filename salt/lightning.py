@@ -1,5 +1,5 @@
 import warnings
-from typing import Mapping
+from collections.abc import Mapping
 
 import pytorch_lightning as pl
 import torch
@@ -20,7 +20,6 @@ class LightningTagger(pl.LightningModule):
         name: str
             Name of the model
         """
-
         super().__init__()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -59,7 +58,6 @@ class LightningTagger(pl.LightningModule):
         loss
             Reduced loss over the input batch
         """
-
         # unpack the batch
         inputs, mask, labels = batch
 
@@ -76,9 +74,9 @@ class LightningTagger(pl.LightningModule):
 
     def log_losses(self, loss, stage):
         self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
-        for t, l in loss.items():
+        for t, loss_value in loss.items():
             n = f"{stage}_{t}_loss" if "loss" not in t else f"{stage}_{t}"
-            self.log(n, l, sync_dist=True)
+            self.log(n, loss_value, sync_dist=True)
 
     def training_step(self, batch, batch_idx):
         # foward pass
@@ -106,9 +104,7 @@ class LightningTagger(pl.LightningModule):
         return preds, mask
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(
-            self.parameters(), lr=self.lrs_config["initial"], weight_decay=1e-5
-        )
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lrs_config["initial"], weight_decay=1e-5)
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(

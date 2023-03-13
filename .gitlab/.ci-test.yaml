@@ -1,42 +1,29 @@
 variables:
   TEST_CMD: coverage run -p --source salt -m pytest --show-capture=stdout
 
-test-models:
+.job-template: &job-template
   stage: tests
   needs: [build_docker_test]
-  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
+  image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
+  artifacts:
+    paths: [.coverage*]
+
+test-models:
+  <<: *job-template
   script:
     - $TEST_CMD salt/tests/test_models.py
-    - ls -la
-  artifacts:
-    paths: [.coverage*]
 
 test-pipelines-misc:
-  stage: tests
-  needs: [build_docker_test]
-  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
+  <<: *job-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::TestTrainMisc
-    - ls -la
-  artifacts:
-    paths: [.coverage*]
 
 test-pipelines-models:
-  stage: tests
-  needs: [build_docker_test]
-  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
+  <<: *job-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::TestModels
-    - ls -la
-  artifacts:
-    paths: [.coverage*]
 
 test-union-find:
-  stage: tests
-  needs: [build_docker_test]
-  image: '$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test'
+  <<: *job-template
   script:
     - $TEST_CMD salt/tests/test_union_find.py
-    - ls -la
-  artifacts:
-    paths: [.coverage*]

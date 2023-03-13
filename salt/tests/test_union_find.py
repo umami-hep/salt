@@ -46,8 +46,10 @@ def test_single_vertex_3() -> None:
 
 
 def test_mult_vertices() -> None:
-    """Test union find on a 3 and 4 track jet (the former with one three track
-    vertex and the latter with two two track vertices)."""
+    """Test union find on a 3 and 4 track jet.
+
+    The former with one three track vertex and the latter with two two track vertices.
+    """
     labels_jet1 = torch.tensor([0, 0, 2])
     labels_jet2 = torch.tensor([0, 1, 1, 0])
     labels = torch.cat([labels_jet1.flatten(), labels_jet2.flatten()], dim=0)

@@ -16,7 +16,6 @@ def join_structured_arrays(arrays: list):
     np.array
         A merged structured array
     """
-
     dtype: list = sum((a.dtype.descr for a in arrays), [])
     newrecarray = np.empty(arrays[0].shape, dtype=dtype)
     for a in arrays:

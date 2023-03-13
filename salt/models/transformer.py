@@ -1,4 +1,4 @@
-from typing import Mapping, Optional
+from collections.abc import Mapping
 
 import torch.nn as nn
 from torch import BoolTensor, Tensor
@@ -52,7 +52,7 @@ class TransformerEncoderLayer(nn.Module):
                 input_size=embed_dim,
                 output_size=embed_dim,
                 context_size=context_dim,
-                **dense_config
+                **dense_config,
             )
         else:
             self.register_buffer("dense", None)
@@ -64,10 +64,10 @@ class TransformerEncoderLayer(nn.Module):
     def forward(
         self,
         x: Tensor,
-        mask: Optional[BoolTensor] = None,
-        context: Optional[Tensor] = None,
-        attn_mask: Optional[BoolTensor] = None,
-        attn_bias: Optional[Tensor] = None,
+        mask: BoolTensor | None = None,
+        context: Tensor | None = None,
+        attn_mask: BoolTensor | None = None,
+        attn_bias: Tensor | None = None,
     ) -> Tensor:
         x = x + self.norm2(
             self.mha(self.norm1(x), q_mask=mask, attn_mask=attn_mask, attn_bias=attn_bias)
@@ -95,7 +95,8 @@ class TransformerEncoder(nn.Module):
         context_dim: int = 0,
         out_dim: int = 0,
     ) -> None:
-        """
+        """Transformer encoder module.
+
         Parameters
         ----------
         embed_dim : int

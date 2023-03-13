@@ -1,11 +1,8 @@
-from typing import Optional
-
 from torch import Tensor, concat, nn
 
 
 def add_dims(x: Tensor, ndim: int):
     """Adds dimensions to a tensor to match the shape of another tensor."""
-
     if (dim_diff := ndim - x.dim()) < 0:
         raise ValueError(f"Target ndim ({ndim}) is larger than input ndim ({x.dim()})")
 
@@ -134,7 +131,7 @@ class Dense(nn.Module):
         # build the net
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x: Tensor, context: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor | None = None) -> Tensor:
         if self.context_size:
             x = attach_context(x, context)
         return self.net(x)

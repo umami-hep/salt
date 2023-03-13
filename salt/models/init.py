@@ -13,7 +13,7 @@ class InitNet(nn.Module):
 
         Parameters
         ----------
-        Name : str
+        name : str
             Name of the input.
         net : Dense
             Dense network for performing the the initial embedding.

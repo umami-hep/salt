@@ -2,7 +2,7 @@ import torch
 
 
 def collate(batch):
-    """Custom batch collate function.
+    """Collate input batches.
 
     Parameters
     ----------
@@ -14,7 +14,6 @@ def collate(batch):
     tuple
         Concated batch items
     """
-
     inputs = [sample[0] for sample in batch]
     valid = [sample[1] for sample in batch]
     labels = [sample[2] for sample in batch]
@@ -23,7 +22,7 @@ def collate(batch):
     valid_dict = {}
     elem_inputs = inputs[0]
     elem_valid = valid[0]
-    for key in elem_inputs.keys():
+    for key in elem_inputs:
         out_i = None
         out_v = None
         if torch.utils.data.get_worker_info() is not None:
@@ -45,7 +44,7 @@ def collate(batch):
 
     labels_dict = {}
     elem = labels[0]
-    for key in elem.keys():
+    for key in elem:
         out = None
         if torch.utils.data.get_worker_info() is not None:
             numel = sum(x[key].numel() for x in labels)
