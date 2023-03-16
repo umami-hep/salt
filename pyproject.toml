@@ -3,7 +3,7 @@ name = "salt"
 version = "0.1"
 description = "Jet flavour tagging Python package"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.urls]
 "Homepage" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt"
