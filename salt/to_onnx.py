@@ -125,13 +125,8 @@ class ONNXModel(LightningTagger):
         # in athena the jets have a batch dimension but the tracks do not
         tracks = concat_jet_track(jets, tracks.unsqueeze(0))
 
-        # add a padded track
-        tracks = torch.cat([tracks, torch.zeros((1, 1, tracks.shape[2]))], dim=1)
-        mask = torch.zeros(tracks.shape[:-1]).bool()
-        mask[:, -1] = True
-
         # return class probabilities
-        outputs = self.model({"track": tracks}, {"track": mask})[0]["jet_classification"]
+        outputs = self.model({"track": tracks}, None)[0]["jet_classification"]
         return get_probs(outputs)
 
 

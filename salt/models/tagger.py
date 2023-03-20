@@ -51,6 +51,7 @@ class JetTagger(nn.Module):
         # concatenate different input groups
         # TODO: use a flag as to which input type this is
         embed_x = torch.cat(list(embed_x.values()), dim=1)
+        combined_mask = None
         if mask is not None:
             combined_mask = torch.cat(list(mask.values()), dim=1)
 

@@ -162,8 +162,7 @@ class VertexingTask(Task):
         ex_size = (b, n, n, d)
         t_mask = torch.ones(b, n) if mask is None else ~mask
         adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
-        adjmat = adjmat & ~torch.diag_embed(torch.ones_like(t_mask).bool())
-        adjmat = adjmat.bool()
+        adjmat = adjmat.bool() & ~torch.diag_embed(torch.ones_like(t_mask).bool())
 
         # Deal with context
         context_matrix = None
