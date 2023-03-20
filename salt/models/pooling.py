@@ -1,3 +1,4 @@
+import torch
 from torch import Tensor, nn
 
 from salt.models.attention import masked_softmax
@@ -17,4 +18,9 @@ class GlobalAttentionPooling(Pooling):
             mask = mask.unsqueeze(-1)
 
         weights = masked_softmax(self.gate_nn(x), mask, dim=1)
+
+        # add padded track to avoid error in onnx model when there are no tracks in the jet
+        weights = torch.cat([weights, torch.zeros((weights.shape[0], 1, weights.shape[2]))], dim=1)
+        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]))], dim=1)
+
         return (x * weights).sum(dim=1)
