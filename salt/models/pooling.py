@@ -1,7 +1,10 @@
+from collections.abc import Mapping
+
 import torch
-from torch import Tensor, nn
+from torch import Tensor, nn, randn
 
 from salt.models.attention import masked_softmax
+from salt.models.transformer import TransformerCrossAttentionLayer
 
 
 class Pooling(nn.Module):
@@ -24,3 +27,40 @@ class GlobalAttentionPooling(Pooling):
         x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]))], dim=1)
 
         return (x * weights).sum(dim=1)
+
+
+class CrossAttentionPooling(Pooling):
+    def __init__(
+        self,
+        input_size: int,
+        num_layers: int,
+        mha_config: Mapping,
+        dense_config: Mapping = None,
+        context_dim: int = 0,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.num_layers = num_layers
+
+        self.ca_layers = nn.ModuleList(
+            [
+                TransformerCrossAttentionLayer(input_size, mha_config, dense_config, context_dim)
+                for _ in range(num_layers)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(input_size)
+
+        # Initialise class token which is the query for the cross-attention
+        self.class_token = nn.Parameter(randn(1, 1, input_size))
+
+    def forward(self, x: Tensor, mask: Tensor = None, context: Tensor | None = None):
+        # Expand class token to match batch size
+        class_token = self.class_token.expand(x.shape[0], 1, self.input_size)
+
+        # pass class token through all layers
+        for layer in self.ca_layers:
+            class_token = layer(class_token, x, key_value_mask=mask, context=context)
+
+        class_token = self.final_norm(class_token)
+
+        return class_token.squeeze(1)

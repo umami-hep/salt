@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from salt.models import (
+    CrossAttentionPooling,
     Dense,
     GATv2Attention,
     GlobalAttentionPooling,
@@ -29,8 +30,13 @@ def test_dense_context_broadcast() -> None:
     net(torch.rand(1, 10, 10), torch.rand(1, 4))
 
 
-def test_global_pooling() -> None:
-    net = GlobalAttentionPooling(10)
+@pytest.mark.parametrize("pooling", [GlobalAttentionPooling, CrossAttentionPooling])
+def test_pooling(pooling) -> None:
+    if pooling == CrossAttentionPooling:
+        net = pooling(10, 1, {"num_heads": 1, "attention": ScaledDotProductAttention()})
+    else:
+        net = pooling(10)
+
     x = torch.rand(1, 5, 10)
     out = net(x)
 

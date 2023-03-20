@@ -176,6 +176,30 @@ salt fit --config configs/GN1.yaml --config configs/GATv2.yaml
 
 Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.
 
+### Switching Pooling
+
+The [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2.yaml) config by default uses Global Attention Pooling. This can be switched out for Cross Attention Pooling where a learnable class token is attended to by the learned track representation. The same arguments used for the Transformer Encoder apply to the Cross Attention layers. An example Cross Attention block is shown below:
+
+```yaml
+pool_net:
+    class_path: salt.models.CrossAttentionPooling
+    init_args:
+        embed_dim: *embed_dim
+        num_layers: 3
+        out_dim: &out_dim 128
+        mha_config:
+            num_heads: 4
+            attention:
+              class_path: salt.models.ScaledDotProductAttention
+            out_proj: False
+        dense_config:
+            norm_layer: *norm_layer
+            activation: *activation
+            hidden_layers: [128]
+            dropout: 0.1
+
+```
+
 ### Excluding Variables
 
 It is possible to provide a dictionary of variables not to include in the training, by adding a dictionary to the model.yaml file as in
