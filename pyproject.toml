@@ -13,6 +13,7 @@ requires-python = ">=3.10"
 salt = "salt.main:main"
 to_onnx = "salt.to_onnx:main"
 get_onnx_metadata = "salt.utils.get_onnx_metadata:main"
+compare_models = "salt.utils.compare_models:main"
 
 [tool.setuptools]
 packages = ["salt"]

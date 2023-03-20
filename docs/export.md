@@ -1,7 +1,7 @@
 In order to use your trained model in Athena you need to export it to [ONNX](https://onnxruntime.ai/).
 
 
-### Model Conversion
+### Model Export
 
 The `to_onnx.py` python script handles the ONNX conversion process for you.
 The script has several arguments, you can learn about them by running
@@ -46,6 +46,29 @@ Please take note of the following considerations when comparing Athena and Pytho
 - Models evaluated in Athena are not run for jets with less than two tracks (note: this may not longer be true).
 - Models evaluated in Python are limited to 40 input tracks, whereas models evaluated in Athena have no such limit.
 
+Once you have evaluated your model using the TDD, you should use the resulting h5 file to run `salt test`.
+You can then the provided `compare_models` command to compare the scores of the two models.
+
+```bash
+compare_models \
+    --file_A tdd/output.h5 \
+    --tagger_A name \
+    --file_A salt/eval.h5 \
+    --tagger_B name
+```
+
+See `compare_models.py -h` for more information.
+
+??? info "What level of discrepancy is expected?"
+
+    We usually ask for agreement within `1e-6` for the output probabilities, which is approximately floating point precision error.
+    If you see one or two jets with a discrepancy of `1e-5`, this is probably fine.
+    Common causes of more significant discrepancies are:
+
+        - Not dumping at full precision using the TDD (see above)
+        - Not running `salt test` with `--trainer.precision 32` if you trained at lower precision.
+        - Not writing out salt evaluation scores at full precision (see the `PredictionWriter` callback)
+        - Enabling some runtime optimisaiton in pytorch (e.g. [here](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision)) 
 
 ### Viewing ONNX Model Metadata
 
