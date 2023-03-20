@@ -139,3 +139,38 @@ class TransformerEncoder(nn.Module):
         if self.out_dim:
             x = self.final_linear(x)
         return x
+
+
+class TransformerCrossAttentionLayer(TransformerEncoderLayer):
+    """A transformer encoder layer with cross-attention."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        mha_config: Mapping,
+        dense_config: Mapping = None,
+        context_dim: int = 0,
+    ) -> None:
+        super().__init__(embed_dim, mha_config, dense_config, context_dim)
+
+        self.norm0 = nn.LayerNorm(embed_dim)
+
+    def forward(  # type: ignore
+        self,
+        query: Tensor,
+        key_value: Tensor,
+        query_mask: BoolTensor | None = None,
+        key_value_mask: BoolTensor | None = None,
+        context: Tensor | None = None,
+    ) -> Tensor:
+        query = query + self.norm2(
+            self.mha(
+                self.norm1(query),
+                self.norm0(key_value),
+                q_mask=query_mask,
+                kv_mask=key_value_mask,
+            )
+        )
+        if self.dense:
+            query = query + self.dense(query, context)
+        return query
