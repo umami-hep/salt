@@ -12,4 +12,5 @@ rich==13.2.0
 pre-commit==3.0.*
 onnx==1.13.0
 onnxruntime==1.13.1
-puma-hep
+puma-hep==0.2.2
+atlas-ftag-tools==0.0.4
