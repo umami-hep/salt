@@ -116,11 +116,20 @@ class TestTrainMisc:
         args = ["--data.exclude.track=['dummy_track_var_0']"]
         run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
 
+    def test_write_tracks(self, tmp_path) -> None:
+        args = ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
+        args += ["--trainer.callbacks.write_tracks=True"]
+        args += ["--trainer.callbacks.track_variables=null"]
+        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
+
 
 @pytest.mark.filterwarnings(w)
 class TestModels:
     def test_GN1(self, tmp_path) -> None:
         run_combined(tmp_path, "GN1.yaml")
+
+    def test_GN2(self, tmp_path) -> None:
+        run_combined(tmp_path, "GN2.yaml")
 
     def test_GN1_GATv2(self, tmp_path) -> None:
         args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
