@@ -49,6 +49,7 @@ trainer:
         track_variables:
           - truthOriginLabel
           - truthVertexIndex
+          - valid
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
       init_args:
