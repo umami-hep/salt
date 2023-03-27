@@ -56,9 +56,8 @@ model:
               init_args:
                 name: jet_classification
                 input_type: jet
-                label: jets/labels
+                label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
-
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -69,9 +68,9 @@ model:
 
             - class_path: salt.models.ClassificationTask
               init_args:
-                name: track_classification
+                name: track_origin
                 input_type: track
-                label: tracks/labels/truthOriginLabel
+                label: truthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -90,7 +89,7 @@ model:
               init_args:
                 name: track_vertexing
                 input_type: track
-                label: tracks/labels/truthVertexIndex
+                label: truthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
@@ -104,3 +103,32 @@ model:
                     hidden_layers: [128, 64, 32]
                     output_size: 1
                     activation: *activation
+
+data:
+  variables:
+    jet:
+      - pt_btagJes
+      - eta_btagJes
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      - numberOfPixelHoles
+      - numberOfSCTHoles
+      #- leptonID

@@ -3,12 +3,23 @@ name: flow
 data:
   train_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
   val_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: /share/rcifdata/svanstroud/data/flow/scale_dict.json
+  norm_dict: /share/rcifdata/svanstroud/data/flow/scale_dict.json
   #move_files_temp: /dev/shm/svanstro/salt/
   inputs:
     jet: jets
     track: tracks
     flow: flow
+  variables:
+    jet:
+      - pt_btagJes
+      - eta_btagJes
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+    flow:
+      - deta
+      - dphi
 
 model:
   model:
@@ -24,7 +35,7 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args: &init
-                    input_size: 23
+                    input_size: 5
                     output_size: &embed_dim 128
                     hidden_layers: [256]
                     activation: &activation SiLU
@@ -37,7 +48,7 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     <<: *init
-                    input_size: 6
+                    input_size: 4
 
       gnn:
         class_path: salt.models.TransformerEncoder
@@ -70,7 +81,7 @@ model:
               init_args:
                 name: jet_classification
                 input_type: jet
-                label: jets/labels
+                label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
                 net:
                   class_path: salt.models.Dense

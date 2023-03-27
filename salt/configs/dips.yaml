@@ -33,7 +33,8 @@ model:
               init_args:
                 name: jet_classification
                 input_type: jet
-                label: jets/labels
+                label: HadronConeExclTruthLabelID
+                label_map: { 0: 0, 4: 1, 5: 2 }
                 loss: torch.nn.CrossEntropyLoss
                 net:
                   class_path: salt.models.Dense
@@ -44,3 +45,31 @@ model:
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: 0.1
+
+data:
+  variables:
+    jet:
+      - pt_btagJes
+      - eta_btagJes
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      - numberOfPixelHoles
+      - numberOfSCTHoles

@@ -2,9 +2,8 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
 import salt.utils.fileutils as fu
-from salt.data.datasets import TestJetDataset, TrainJetDataset
+from salt.data.datasets import JetDataset
 from salt.data.samplers import RandomBatchSampler
-from salt.utils.collate import collate
 
 
 class JetDataModule(pl.LightningDataModule):
@@ -13,16 +12,16 @@ class JetDataModule(pl.LightningDataModule):
         train_file: str,
         val_file: str,
         inputs: dict,
-        batched_read: bool,
         batch_size: int,
         num_workers: int,
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
-        exclude: dict = None,
+        norm_dict: str,
+        variables: dict,
         labels: dict = None,
         move_files_temp: str = None,
-        scale_dict: str = None,
+        class_dict: str = None,
         test_file: str = None,
     ):
         """h5 jet datamodule.
@@ -33,12 +32,8 @@ class JetDataModule(pl.LightningDataModule):
             Training file path
         val_file : str
             Validation file path
-        test_file : str
-            Test file path
         inputs : dict
             Input dataset name for each input type
-        batched_read : bool
-            If true, read from h5 in batches
         batch_size : int
             Number of jets to process in each step
         num_workers : int
@@ -49,15 +44,19 @@ class JetDataModule(pl.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
-        exclude :
-            Dict of variables in the input datasets not to consider for training
         labels : dict
             Mapping from task name to label name
+        variables : dict
+            Dict of variables to use for each input type
         move_files_temp : str
             Directory to move training files to, default is None,
             which will result in no copying of files
-        scale_dict : str
+        norm_dict : str
             Path to umami preprocessing scale dict file
+        class_dict : str
+            Path to umami preprocessing scale dict file
+        test_file : str
+            Test file path, default is None
         """
         super().__init__()
 
@@ -66,14 +65,14 @@ class JetDataModule(pl.LightningDataModule):
         self.test_file = test_file
         self.inputs = inputs
         self.labels = labels
-        self.batched_read = batched_read
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_jets_train = num_jets_train
         self.num_jets_val = num_jets_val
         self.num_jets_test = num_jets_test
-        self.exclude = exclude
-        self.scale_dict = scale_dict
+        self.variables = variables
+        self.norm_dict = norm_dict
+        self.class_dict = class_dict
         self.move_files_temp = move_files_temp
 
     def prepare_data(self):
@@ -94,21 +93,23 @@ class JetDataModule(pl.LightningDataModule):
 
         # create training and validation datasets
         if stage == "fit" or stage == "test":
-            self.train_dset = TrainJetDataset(
+            self.train_dset = JetDataset(
                 filename=self.train_file,
                 inputs=self.inputs,
                 labels=self.labels,
+                variables=self.variables,
+                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_train,
-                exclude=self.exclude,
             )
 
         if stage == "fit":
-            self.val_dset = TrainJetDataset(
+            self.val_dset = JetDataset(
                 filename=self.val_file,
                 inputs=self.inputs,
                 labels=self.labels,
+                variables=self.variables,
+                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_val,
-                exclude=self.exclude,
             )
 
         # Only print train/val dataset details when actually training
@@ -118,33 +119,27 @@ class JetDataModule(pl.LightningDataModule):
 
         if stage == "test":
             assert self.test_file is not None, "No test file specified, see --data.test_file"
-            assert self.scale_dict is not None, "No scale dict specified, see --data.scale_dict"
-            self.test_dset = TestJetDataset(
+            assert self.norm_dict is not None, "No scale dict specified, see --data.norm_dict"
+            self.test_dset = JetDataset(
                 filename=self.test_file,
                 inputs=self.inputs,
-                scale_dict=self.scale_dict,
+                variables=self.variables,
+                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_test,
-                exclude=self.exclude,
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 
         if self.trainer.is_global_zero:
             print("-" * 100, "\n")
 
-    def get_dataloader(self, stage: str, dataset: TrainJetDataset, shuffle: bool):
+    def get_dataloader(self, stage: str, dataset: JetDataset, shuffle: bool):
         drop_last = stage == "fit"
 
         # batched reads from h5 (weak shuffling)
-        if self.batched_read:
-            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
-            batch_size = None
-            collate_fn = None
-            shuffle = False
-        # automatic batching with true shuffling
-        else:
-            sampler = None
-            batch_size = self.batch_size
-            collate_fn = collate
+        sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
+        batch_size = None
+        collate_fn = None
+        shuffle = False
 
         return DataLoader(
             dataset=dataset,

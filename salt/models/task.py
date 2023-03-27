@@ -15,6 +15,7 @@ class Task(nn.Module):
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
+        label_map: Mapping = None,
         label_denominator: str = None,
     ):
         """Task head.
@@ -26,7 +27,7 @@ class Task(nn.Module):
         name : str
             Name of the task
         input_type : str
-            Type of the task input
+            Which type of object is input to the task e.g. jet/track/flow
         label : str
             Label name for the task
         net : Dense
@@ -35,8 +36,10 @@ class Task(nn.Module):
             Task loss
         weight : float
             Weight in the overall loss
+        label_map : Mapping
+            Remap integer labels for training (e.g. 0,4,5 -> 0,1,2)
         label_denominator : str
-            Name of the denominator label for the task
+            Name of the denominator label for the task (regression only)
         """
         super().__init__()
 
@@ -46,16 +49,21 @@ class Task(nn.Module):
         self.net = net
         self.loss = loss
         self.weight = weight
+        self.label_map = label_map
         self.label_denominator = label_denominator
+        assert not (self.label_map and self.label_denominator)
 
-    def calculate_input_type_mask(self, masks):
-        input_type_mask = torch.cat(
+    def input_type_mask(self, masks):
+        return torch.cat(
             [torch.ones(m.shape[1]) * (t == self.input_type) for t, m in masks.items()]
         ).bool()
-        return input_type_mask
 
 
 class ClassificationTask(Task):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.label_denominator is None
+
     def forward(
         self,
         x: Tensor,
@@ -64,15 +72,25 @@ class ClassificationTask(Task):
         context: Tensor = None,
     ):
         if masks is not None:
-            input_type_mask = self.calculate_input_type_mask(masks)
+            input_type_mask = self.input_type_mask(masks)
             preds = self.net(x[:, input_type_mask], context)
             mask = masks[self.input_type]
         else:
             preds = self.net(x, context)
             mask = None
-        labels = labels_dict[self.name] if labels_dict else None
 
+        # get labels
+        labels = labels_dict[self.name] if labels_dict else None
+        if labels is not None and self.label_map is not None:
+            for k, v in self.label_map.items():
+                labels[labels == k] = v
+
+        # could use ignore_index instead of the mask here
+        # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199
+        # is in the samples
         if mask is not None:
+            if labels is not None:
+                mask = torch.masked_fill(mask, labels == -2, 1)
             preds = preds[~mask]
             if labels is not None:
                 labels = labels[~mask]
@@ -86,6 +104,10 @@ class ClassificationTask(Task):
 
 class RegressionTask(Task):
     """Regression task without uncertainty prediction."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.label_map is None
 
     def forward(
         self, x: Tensor, labels_dict: Mapping, masks: Mapping = None, context: Tensor = None
@@ -112,6 +134,10 @@ class GaussianRegressionTask(Task):
 
     Applies softplus activation to sigmas to ensure positivty.
     """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.label_map is None
 
     def forward(
         self,
@@ -145,6 +171,10 @@ class GaussianRegressionTask(Task):
 class VertexingTask(Task):
     """Vertexing task."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.label_map is None
+
     def forward(
         self,
         x: Tensor,
@@ -153,7 +183,7 @@ class VertexingTask(Task):
         context: Tensor = None,
     ):
         if masks is not None:
-            input_type_mask = self.calculate_input_type_mask(masks)
+            input_type_mask = self.input_type_mask(masks)
             mask = masks[self.input_type]
             x = x[:, input_type_mask]
         else:
@@ -202,7 +232,7 @@ class VertexingTask(Task):
         loss = self.loss(pred.squeeze(-1), match_matrix)
 
         # If reduction is none and have weight labels, weight the loss
-        weights = self.get_weights(labels_dict[f"{self.input_type}_classification"], adjmat)
+        weights = self.get_weights(labels_dict[f"{self.input_type}_origin"], adjmat)
         loss = (loss * weights).mean()
 
         return loss * self.weight

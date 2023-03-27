@@ -82,24 +82,12 @@ class SaltCLI(LightningCLI):
             labels = {}
             model_dict = vars(sc.model.model.init_args)
 
-            # modify the input size to harmonize with the number of excluded variables
-            exclude = sc["data.exclude"]
-
-            if exclude is None:
-                exclude = {}
-
-            for submodel in model_dict["init_nets"]["init_args"]["modules"]:
-                if exclude.get(submodel["init_args"]["name"]):
-                    submodel["init_args"]["net"]["init_args"]["input_size"] -= len(
-                        exclude.get(submodel["init_args"]["name"])
-                    )
-
             for submodel in model_dict["tasks"]["init_args"]["modules"]:
                 assert "Task" in submodel["class_path"]
                 task = submodel["init_args"]
-                labels[task["name"]] = task["label"]
-                if task["label_denominator"]:
-                    labels[task["name"] + "_denominator"] = task["label_denominator"]
+                labels[task["name"]] = (task["input_type"], task["label"])
+                if denominator := task["label_denominator"]:
+                    labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
             sc["data"]["labels"] = labels
 
         if self.subcommand == "test":

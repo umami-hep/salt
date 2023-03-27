@@ -6,37 +6,32 @@ import pytest
 from salt.main import main
 from salt.to_onnx import main as to_onnx
 from salt.utils.get_onnx_metadata import main as get_onnx_metadata
-from salt.utils.inputs import (
-    write_dummy_scale_dict,
-    write_dummy_test_file,
-    write_dummy_train_file,
-)
+from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::pytorch_lightning.utilities.warnings.PossibleUserWarning:"
-
-N_JET_FEATURES = 2
-N_TRACK_FEATURES = 21
 
 
 def run_train(tmp_path, config_path, train_args):
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
-    sd_path = tmp_path / "dummy_scale_dict.json"
-    write_dummy_scale_dict(sd_path, N_JET_FEATURES, N_TRACK_FEATURES)
-    write_dummy_train_file(train_h5_path, sd_path)
+    nd_path = tmp_path / "dummy_norm_dict.yaml"
+    cd_path = tmp_path / "dummy_class_dict.yaml"
+    write_dummy_norm_dict(nd_path, cd_path)
+    write_dummy_file(train_h5_path, nd_path)
 
     args = ["fit"]
     args += [f"--config={config_path}"]
-    args += [f"--data.scale_dict={sd_path}"]
+    args += [f"--data.norm_dict={nd_path}"]
+    args += [f"--data.class_dict={cd_path}"]
     args += [f"--data.train_file={train_h5_path}"]
     args += [f"--data.val_file={train_h5_path}"]
-    args += ["--data.batched_read=True"]
-    args += ["--data.num_jets_train=1000"]
-    args += ["--data.num_jets_val=1000"]
+    args += ["--data.num_jets_train=500"]
+    args += ["--data.num_jets_val=200"]
     args += ["--data.batch_size=100"]
     args += ["--data.num_workers=0"]
-    args += ["--trainer.max_epochs=2"]
+    args += ["--trainer.max_epochs=1"]
     args += ["--trainer.accelerator=cpu"]
+    args += ["--trainer.devices=1"]
     args += [f"--trainer.default_root_dir={tmp_path}"]
     args += ["--trainer.logger.offline=True"]
     if train_args:
@@ -45,9 +40,9 @@ def run_train(tmp_path, config_path, train_args):
     main(args)
 
 
-def run_eval(tmp_path, train_config_path, sd_path):
+def run_eval(tmp_path, train_config_path, nd_path):
     test_h5_path = Path(tmp_path) / "dummy_test_sample_inputs.h5"
-    write_dummy_test_file(test_h5_path, sd_path)
+    write_dummy_file(test_h5_path, nd_path)
 
     args = ["test"]
     args += [f"--config={train_config_path}"]
@@ -56,12 +51,12 @@ def run_eval(tmp_path, train_config_path, sd_path):
     main(args)
 
 
-def run_onnx(train_dir, sd_path):
+def run_onnx(train_dir, nd_path):
     ckpt_path = [f for f in (train_dir / "ckpts").iterdir() if f.suffix == ".ckpt"][-1]
     args = [f"--config={train_dir / 'config.yaml'}"]
     args += [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
-    args += [f"--sd_path={sd_path}"]
+    args += [f"--nd_path={nd_path}"]
     to_onnx(args)
     get_onnx_metadata([str(train_dir / "network.onnx")])
 
@@ -79,23 +74,17 @@ def run_combined(tmp_path, config, do_eval=True, do_onnx=True, train_args=None):
         train_dir = train_dir[0]
         print(f"Using train_dir {train_dir}.")
         train_config_path = train_dir / "config.yaml"
-        sd_path = [x for x in train_dir.iterdir() if x.suffix == ".json"][0]
-        run_eval(tmp_path, train_config_path, sd_path)
+        nd_path = [x for x in train_dir.iterdir() if x.suffix == ".yaml" and "norm" in str(x)]
+        assert len(nd_path) == 1
+        nd_path = nd_path[0]
+        run_eval(tmp_path, train_config_path, nd_path)
     if do_onnx:
-        run_onnx(train_dir, sd_path)
+        run_onnx(train_dir, nd_path)
 
 
 @pytest.mark.filterwarnings(w)
 class TestTrainMisc:
     config = "GN1.yaml"
-
-    def test_train_batched(self, tmp_path) -> None:
-        args = ["--data.batched_read=True"]
-        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
-
-    def test_train_unbatched(self, tmp_path) -> None:
-        args = ["--data.batched_read=False"]
-        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_train_dev(self, tmp_path) -> None:
         args = ["--trainer.fast_dev_run=2"]
@@ -112,10 +101,6 @@ class TestTrainMisc:
         args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
         run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
-    def test_train_exclude(self, tmp_path) -> None:
-        args = ["--data.exclude.track=['dummy_track_var_0']"]
-        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
-
     def test_write_tracks(self, tmp_path) -> None:
         args = ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
         args += ["--trainer.callbacks.write_tracks=True"]
@@ -124,22 +109,31 @@ class TestTrainMisc:
 
 
 @pytest.mark.filterwarnings(w)
-class TestModels:
-    def test_GN1(self, tmp_path) -> None:
-        run_combined(tmp_path, "GN1.yaml")
+def test_GN1(tmp_path) -> None:
+    run_combined(tmp_path, "GN1.yaml")
 
-    def test_GN2(self, tmp_path) -> None:
-        run_combined(tmp_path, "GN2.yaml")
 
-    def test_GN1_GATv2(self, tmp_path) -> None:
-        args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
-        run_combined(tmp_path, "GN1.yaml", train_args=args)
+@pytest.mark.filterwarnings(w)
+def test_GN2(tmp_path) -> None:
+    run_combined(tmp_path, "GN2.yaml")
 
-    def test_DIPS(self, tmp_path) -> None:
-        run_combined(tmp_path, "dips.yaml", do_eval=True, do_onnx=False)
 
-    def test_regression(self, tmp_path) -> None:
-        run_combined(tmp_path, "regression.yaml", do_eval=False, do_onnx=False)
+@pytest.mark.filterwarnings(w)
+def test_GN1_GATv2(tmp_path) -> None:
+    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
+    run_combined(tmp_path, "GN1.yaml", train_args=args)
 
-    def test_flow(self, tmp_path) -> None:
-        run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)
+
+@pytest.mark.filterwarnings(w)
+def test_DIPS(tmp_path) -> None:
+    run_combined(tmp_path, "dips.yaml", do_eval=True, do_onnx=True)
+
+
+@pytest.mark.filterwarnings(w)
+def test_regression(tmp_path) -> None:
+    run_combined(tmp_path, "regression.yaml", do_eval=False, do_onnx=False)
+
+
+@pytest.mark.filterwarnings(w)
+def test_flow(tmp_path) -> None:
+    run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)

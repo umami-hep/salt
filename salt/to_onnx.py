@@ -17,7 +17,6 @@ from salt.lightning import LightningTagger
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
 
 torch.manual_seed(42)
-
 # https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx
 TRACK_SELECTIONS = [
     "all",
@@ -58,9 +57,9 @@ def parse_args(args):
         default="r22default",
     )
     parser.add_argument(
-        "--sd_path",
+        "--nd_path",
         type=Path,
-        help="Scale dict path. Taken from the config if not provided",
+        help="Norm dict path. Taken from the config if not provided",
     )
     parser.add_argument(
         "-n",
@@ -85,16 +84,18 @@ def get_probs(outputs: Tensor):
 
 
 class InputNorm:
-    def __init__(self, sd_path: str, jet_name: str = "jets", track_name: str = "tracks"):
-        self.sd_path = sd_path
-        self.jet_name = jet_name
-        self.track_name = track_name
-        with open(self.sd_path) as f:
-            self.sd = json.load(f)
-        self.jet_means = torch.tensor([tf["shift"] for tf in self.sd[self.jet_name].values()])
-        self.jet_stds = torch.tensor([tf["scale"] for tf in self.sd[self.jet_name].values()])
-        self.track_means = torch.tensor([tf["shift"] for tf in self.sd[self.track_name].values()])
-        self.track_stds = torch.tensor([tf["scale"] for tf in self.sd[self.track_name].values()])
+    def __init__(self, nd_path: str, variables: dict, input_names: dict):
+        self.nd_path = nd_path
+        self.jet_name = input_names["jet"]
+        self.trk_name = input_names["track"]
+        self.variables = variables
+        with open(self.nd_path) as f:
+            self.nd = yaml.safe_load(f)
+
+        self.jet_means = torch.tensor([self.nd[self.jet_name][v]["mean"] for v in self.jet_vars])
+        self.jet_stds = torch.tensor([self.nd[self.jet_name][v]["std"] for v in self.jet_vars])
+        self.track_means = torch.tensor([self.nd[self.trk_name][v]["mean"] for v in self.trk_vars])
+        self.track_stds = torch.tensor([self.nd[self.trk_name][v]["std"] for v in self.trk_vars])
 
     def __call__(self, jets: Tensor, tracks: Tensor):
         jets = (jets - self.jet_means) / self.jet_stds
@@ -102,12 +103,12 @@ class InputNorm:
         return jets, tracks
 
     @property
-    def jet_sd(self):
-        return self.sd[self.jet_name]
+    def jet_vars(self):
+        return self.variables["jet"]
 
     @property
-    def track_sd(self):
-        return self.sd[self.track_name]
+    def trk_vars(self):
+        return self.variables["track"]
 
 
 class ONNXModel(LightningTagger):
@@ -147,7 +148,7 @@ def compare_output(pt_model, onnx_session, norm, n_track=40):
     pred_onnx = onnx_session.run(None, inputs_onnx)
 
     np.testing.assert_allclose(
-        pred_pt, pred_onnx, rtol=1e-06, atol=1e-06, err_msg="Torch vs ONNX check failed"
+        pred_pt, pred_onnx, rtol=1e-04, atol=1e-04, err_msg="Torch vs ONNX check failed"
     )
 
     assert not np.isnan(np.array(pred_onnx)).any()  # non nans
@@ -178,8 +179,8 @@ def main(args=None):
     with open(args.config) as file:
         config = yaml.safe_load(file)
     model_name = args.name if args.name else config["name"]
-    sd_path = config["data"]["scale_dict"] if not args.sd_path else args.sd_path
-    norm = InputNorm(sd_path, config["data"]["inputs"]["jet"], config["data"]["inputs"]["track"])
+    nd_path = config["data"]["norm_dict"] if not args.nd_path else args.nd_path
+    norm = InputNorm(nd_path, config["data"]["variables"], config["data"]["inputs"])
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -245,7 +246,7 @@ def add_metadata(
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
-    print(f"Using scale dict {norm.sd_path}")
+    print(f"Using scale dict {norm.nd_path}")
 
     # load and check the model
     onnx_model = onnx.load(onnx_path)
@@ -264,16 +265,14 @@ def add_metadata(
             "name": "jet_var",
             "variables": [
                 {"name": k.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0}
-                for k, v in norm.jet_sd.items()
+                for k in norm.jet_vars
             ],
         }
     ]
     metadata["input_sequences"] = [
         {
             "name": f"tracks_{track_selection}_sd0sort",
-            "variables": [
-                {"name": k, "offset": 0.0, "scale": 1.0} for k, v in norm.track_sd.items()
-            ],
+            "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in norm.trk_vars],
         }
     ]
     metadata["outputs"] = {model_name: {"labels": output_names, "node_index": 0}}

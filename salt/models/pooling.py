@@ -23,8 +23,10 @@ class GlobalAttentionPooling(Pooling):
         weights = masked_softmax(self.gate_nn(x), mask, dim=1)
 
         # add padded track to avoid error in onnx model when there are no tracks in the jet
-        weights = torch.cat([weights, torch.zeros((weights.shape[0], 1, weights.shape[2]))], dim=1)
-        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]))], dim=1)
+        weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
+        x_pad = torch.zeros((x.shape[0], 1, x.shape[2]), device=x.device)
+        weights = torch.cat([weights, weight_pad], dim=1)
+        x = torch.cat([x, x_pad], dim=1)
 
         return (x * weights).sum(dim=1)
 

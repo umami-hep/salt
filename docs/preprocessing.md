@@ -1,8 +1,14 @@
 A series of preprocessing steps are required to extract information from xAOD files into a format conducive for training.
-If you want to get started running the code without producing your own samples, some samples are available on EOS
+If you want to get started running the code without producing your own samples, some samples are available on EOS:
 
-- `/eos/user/u/umami/training-samples/gnn/test/` - 10M jets for single b-tagging
-- `/eos/user/u/umami/training-samples/gnn/xbb/` - 12M jets for Xbb tagging
+| Sample | Num Jets | Location |
+|--------|----------|----------|
+| Single b-tagging | 10M | `/eos/user/u/umami/training-samples/gnn/test/` |
+| Single b-tagging (new format) | 8M | `/eos/user/u/umami/training-samples/gnn/22-03-23` |
+| Xbb tagging | 5M | `/eos/user/u/umami/training-samples/gnn/xbb/` |
+| Xbb tagging (new format) | 6M | `/eos/user/u/umami/training-samples/gnn/xbb_3d/` |
+
+
 
 ### Dumping Training Samples
 
@@ -20,6 +26,18 @@ The [default preprocessing config](https://gitlab.cern.ch/atlas-flavor-tagging-t
 
 For more information on how to configure the preprocessing, take a look at the umami [docs](https://umami-docs.web.cern.ch/preprocessing/ntuple_preparation/#config-file).
 
+???+ warning "Updates to the training file format"
+
+    In [!87](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/merge_requests/87), Salt switched to a training file format which is the same as the TDD output format.
+    This is both easier to use, more flexible, and faster.
+    If you are using umami, instead of the `*-hybrid-resampled_scaled_shuffled.h5`, you should use the resampled (but not scaled or shuffled) file, e.g. `*-hybrid-resampled.h5`.
+
+    If you have [umami/!713](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/713), then the resampled file is ready to go out of the box.
+    If not, the jet flavour labels are stored in their own `labels/` dataset.
+    To access them, you will need to set `input_type: /` and `label: labels` in your jet classification task config.
+    Alternatively, you can use an on the fly label mapping using the task's `label_map` option, see [here](training.md#remapping-labels)
+
+
 #### Preprocessing Requirements
 
 1. Please ensure you run preprocessing with a recent version of umami that includes [!648](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/648) and [!665](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/umami/-/merge_requests/665) (i.e. versions >=0.17).
@@ -28,10 +46,12 @@ For more information on how to configure the preprocessing, take a look at the u
 
 3. Finally, it is recommended to produce the training samples with 16-bit floating point precision. To do this set `precision: float16` in your preprocessing config. Reducing the precision leads to significantly smaller filesizes and improved dataloading speeds while maintaining the same level of performance.
 
+
 #### Creating the Validation Sample
 
 Umami can create a resampled validation file for you.
 See [here](https://umami-docs.web.cern.ch/preprocessing/resampling/#create-the-resampled-hybrid-validation-sample) and [here](https://umami-docs.web.cern.ch/preprocessing/write_train_sample/#writing-validation-samples).
+
 
 #### Directory Structure
 

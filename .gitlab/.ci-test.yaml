@@ -1,7 +1,7 @@
 variables:
   TEST_CMD: coverage run -p --source salt -m pytest --show-capture=stdout
 
-.job-template: &job-template
+.test-template: &test-template
   stage: tests
   needs: [build_docker_test]
   image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
@@ -9,21 +9,46 @@ variables:
     paths: [.coverage*]
 
 test-models:
-  <<: *job-template
+  <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_models.py
 
 test-pipelines-misc:
-  <<: *job-template
+  <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::TestTrainMisc
 
-test-pipelines-models:
-  <<: *job-template
-  script:
-    - $TEST_CMD salt/tests/test_pipeline.py::TestModels
-
 test-union-find:
-  <<: *job-template
+  <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_union_find.py
+
+test-GN1:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1
+
+test-GN2:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2
+
+test-GN1_GATv2:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1_GATv2
+
+test-DIPS:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_DIPS
+
+test-regression:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_regression
+
+test-flow:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_flow

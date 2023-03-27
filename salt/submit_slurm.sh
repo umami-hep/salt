@@ -15,17 +15,17 @@
 
 # requesting 4 V100 GPU
 # (remove the "v100:" if you don't care what GPU)
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:a100:1
 
 # note! this needs to match --trainer.devices!
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 
 # number of cpus per task
 # useful if you don't have exclusive access to the node
 # #SBATCH --cpus-per-task=10
 
 # request enough memory
-#SBATCH --mem=200G
+#SBATCH --mem=100G
 
 # Change log names; %j gives job id, %x gives job name
 #SBATCH --output=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.out
@@ -33,7 +33,7 @@
 # #SBATCH --error=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.err
 
 # speedup
-export OMP_NUM_THREADS=1
+#export OMP_NUM_THREADS=1
 
 echo "CPU count: $(cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1)"
 
