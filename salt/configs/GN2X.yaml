@@ -1,21 +1,50 @@
-name: GN1Xbb
+name: GN2X
 
 data:
-  train_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-resampled_scaled_shuffled.h5
-  val_file: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: /eos/user/u/umami/training-samples/gnn/xbb/Xbb-scale_dict.json
+  train_file: /share/lustre/svanstroud/data/xbb/ext_v1/pp_output_train.h5
+  val_file: /share/lustre/svanstroud/data/xbb/ext_v1/pp_output_val.h5
+  norm_dict: /share/lustre/svanstroud/data/xbb/ext_v1/norm_dict.yaml
+  class_dict: /share/lustre/svanstroud/data/xbb/ext_v1/class_dict.yaml
+  move_files_temp: /dev/shm/svanstro/salt/xbb/
   inputs:
     jet: jets
     track: tracks
+  variables:
+    jet:
+      - pt
+      - eta
+      - mass
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      - numberOfPixelHoles
+      - numberOfSCTHoles
   num_jets_train: -1
   num_jets_val: -1
   num_jets_test: -1
   batch_size: 1000
-  num_workers: 20
+  num_workers: 15
 
 trainer:
-  max_epochs: 100
-  devices: 1
+  max_epochs: 50
+  devices: 2
   callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
@@ -51,7 +80,7 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args:
-                    input_size: 23
+                    input_size: 24
                     output_size: &embed_dim 128
                     hidden_layers: [128]
                     activation: &activation SiLU
@@ -61,7 +90,7 @@ model:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
-          num_layers: 2
+          num_layers: 6
           out_dim: &out_dim 128
           mha_config:
             num_heads: 4
@@ -87,8 +116,11 @@ model:
               init_args:
                 name: jet_classification
                 input_type: jet
-                label: jets/labels
-                loss: torch.nn.CrossEntropyLoss
+                label: flavour_label
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [2.75, 1.0, 1.52, 1.52]
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -101,15 +133,15 @@ model:
 
             - class_path: salt.models.ClassificationTask
               init_args:
-                name: track_classification
+                name: track_origin
                 input_type: track
-                label: tracks/labels/truthOriginLabel
+                label: truthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
                     weight:
-                      [7.62, 104.91, 1.56, 20.65, 14.05, 14.06, 1.0, 36.07]
+                      [4.37, 194.0, 1.0, 17.78, 12.25, 13.28, 1.0, 22.46]
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -121,11 +153,32 @@ model:
                     norm_layer: *norm_layer
                     dropout: *dropout
 
+#            - class_path: salt.models.ClassificationTask
+#              init_args:
+#                name: track_type
+#                input_type: track
+#                label: truthTypeLabel
+#                weight: 0.4
+#                loss:
+#                  class_path: torch.nn.CrossEntropyLoss
+#                  init_args:
+#                    weight: [2.12, 6.98, 1.0, 6.28, 22.62, 92.28]
+#                net:
+#                  class_path: salt.models.Dense
+#                  init_args:
+#                    input_size: 128
+#                    context_size: 128
+#                    output_size: 6
+#                    hidden_layers: [64, 32]
+#                    activation: *activation
+#                    norm_layer: *norm_layer
+#                    dropout: *dropout
+
             - class_path: salt.models.VertexingTask
               init_args:
                 name: track_vertexing
                 input_type: track
-                label: tracks/labels/truthVertexIndex
+                label: truthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss

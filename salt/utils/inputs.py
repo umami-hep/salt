@@ -1,9 +1,10 @@
 """Mostly helper functions for generating random inputs."""
-import json
+from pathlib import Path
 
 import h5py
 import numpy as np
 import torch
+import yaml
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from numpy.random import default_rng
 from torch import Tensor
@@ -11,6 +12,35 @@ from torch import Tensor
 from salt.utils.arrays import join_structured_arrays
 
 DEFAULT_NTRACK = 40
+
+JET_VARS = [
+    "pt_btagJes",
+    "eta_btagJes",
+]
+
+TRACK_VARS = [
+    "d0",
+    "z0SinTheta",
+    "dphi",
+    "deta",
+    "qOverP",
+    "IP3D_signed_d0_significance",
+    "IP3D_signed_z0_significance",
+    "phiUncertainty",
+    "thetaUncertainty",
+    "qOverPUncertainty",
+    "numberOfPixelHits",
+    "numberOfSCTHits",
+    "numberOfInnermostPixelLayerHits",
+    "numberOfNextToInnermostPixelLayerHits",
+    "numberOfInnermostPixelLayerSharedHits",
+    "numberOfInnermostPixelLayerSplitHits",
+    "numberOfPixelSharedHits",
+    "numberOfPixelSplitHits",
+    "numberOfSCTSharedHits",
+    "numberOfPixelHoles",
+    "numberOfSCTHoles",
+]
 
 rng = np.random.default_rng(42)
 torch.manual_seed(42)
@@ -49,14 +79,15 @@ def inputs_concat(n_batch: int, n_track: int, n_feat: int):
     return inputs, mask
 
 
-def write_dummy_scale_dict(fname, n_jet_features: int, n_track_features: int):
-    jet_vars = [f"dummy_jet_var_{i}" for i in range(n_jet_features)]
-    track_vars = [f"dummy_track_var_{i}" for i in range(n_track_features)]
+def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd: dict = {}
-    sd["jets"] = {n: {"scale": 1, "shift": 1} for n in jet_vars}
-    sd["tracks"] = {n: {"scale": 1, "shift": 1} for n in track_vars}
-    with open(fname, "w") as f:
-        f.write(json.dumps(sd))
+    sd["jets"] = {n: {"std": 1, "mean": 1} for n in JET_VARS}
+    sd["tracks"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
+    sd["flow"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
+    with open(nd_path, "w") as file:
+        yaml.dump(sd, file, sort_keys=False)
+    with open(cd_path, "w") as file:
+        yaml.dump(sd, file, sort_keys=False)
 
 
 def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_tracks_per_jet=40):
@@ -91,51 +122,23 @@ def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_track
     return jets, tracks
 
 
-def write_dummy_train_file(fname, sd_path, jets_name="jets", tracks_name="tracks"):
-    with open(sd_path) as f:
-        sd = json.load(f)
-    kwargs = {"n_jet_features": len(sd[jets_name]), "n_track_features": len(sd[tracks_name])}
-    jets, tracks = get_dummy_inputs(**kwargs)
-    kwargs["n_track_features"] = 4
-    flow = get_dummy_inputs(**kwargs)[1]
-    with h5py.File(fname, "w") as f:
-        g_jets = f.create_group(jets_name)
-        g_tracks = f.create_group(tracks_name)
-        g_flow = f.create_group("flow")
-
-        for key, arr in jets.items():
-            g_jets.create_dataset(key, data=arr)
-            g_jets[key].attrs["label_classes"] = ["bjets", "cjets", "ujets"]
-
-        for key, arr in tracks.items():
-            g_tracks.create_dataset(key, data=arr)
-            if key == "inputs":
-                var = list(sd[jets_name].keys()) + list(sd[tracks_name].keys())
-                g_tracks[key].attrs[f"{tracks_name}_variables"] = var
-
-        for key, arr in flow.items():
-            g_flow.create_dataset(key, data=arr)
-            if key == "inputs":
-                var = list(sd[jets_name].keys()) + list(sd[tracks_name].keys())
-                g_flow[key].attrs["flow_variables"] = var
-
-
-def write_dummy_test_file(fname, sd_fname):
+def write_dummy_file(fname, sd_fname):
+    """TODO: merge with atlas-ftag-tools test file generation."""
     with open(sd_fname) as f:
-        sd = json.load(f)
+        sd = yaml.safe_load(f)
 
     # TODO: read these from the predictionwriter config
     jet_vars = [
         "pt",
         "eta",
-        "HadronConeExclTruthLabelID",
+        "pt_btagJes",
+        "eta_btagJes",
+        "HadronConeExclTruthLabelPt",
         "n_tracks",
         "n_truth_promptLepton",
-        "dummy_jet_var_0",
-        "dummy_jet_var_1",
     ]
 
-    track_vars = list(sd["tracks"]) + ["truthOriginLabel", "truthVertexIndex"]
+    track_vars = list(sd["tracks"])
 
     # settings
     n_jets = 1000
@@ -145,29 +148,38 @@ def write_dummy_test_file(fname, sd_fname):
 
     # setup jets
     shapes_jets = {
-        "inputs": [n_jets, jet_features],
+        "inputs": [n_jets, jet_features + 2],
     }
 
     # setup tracks
     shapes_tracks = {
-        "inputs": [n_jets, n_tracks_per_jet, track_features],
+        "inputs": [n_jets, n_tracks_per_jet, track_features + 2],
         "valid": [n_jets, n_tracks_per_jet],
     }
 
     # setup jets
-    jets_dtype = np.dtype([(n, "f4") for n in jet_vars])
+    jets_dtype = np.dtype(
+        [(n, "f4") for n in jet_vars]
+        + [("flavour_label", "i4"), ("HadronConeExclTruthLabelID", "i4")]
+    )
     jets = rng.random(shapes_jets["inputs"])
     jets = u2s(jets, jets_dtype)
+    jets["flavour_label"] = rng.choice([0, 1, 2], size=n_jets)
+    jets["HadronConeExclTruthLabelID"] = rng.choice([0, 4, 5], size=n_jets)
 
     # setup tracks
-    tracks_dtype = np.dtype([(n, "f4") for n in track_vars])
+    tracks_dtype = np.dtype(
+        [(n, "f4") for n in track_vars] + [("truthOriginLabel", "i4"), ("truthVertexIndex", "i4")]
+    )
     tracks = rng.random(shapes_tracks["inputs"])
     tracks = u2s(tracks, tracks_dtype)
-    valid = rng.random(shapes_tracks["valid"])
-    valid = valid.astype(bool).view(dtype=np.dtype([("valid", bool)]))
+    valid = rng.choice([True, False], size=shapes_tracks["valid"]).view(
+        dtype=np.dtype([("valid", bool)])
+    )
     tracks = join_structured_arrays([tracks, valid])
 
     with h5py.File(fname, "w") as f:
         f.create_dataset("jets", data=jets)
+        f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
         f.create_dataset("tracks", data=tracks)
         f.create_dataset("flow", data=tracks)

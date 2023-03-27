@@ -88,10 +88,15 @@ class SaveConfigCallback(Callback):
         print(f"Created output dir {config_path.parent}")
         print("-" * 100, "\n")
 
-        # copy the scale dict
-        sd_path = Path(config_path.parent / Path(self.config.data.scale_dict).name)
-        shutil.copyfile(self.config.data.scale_dict, sd_path)
-        self.config.data.scale_dict = str(sd_path.resolve())
+        # copy the norm dict
+        nd_path = Path(config_path.parent / Path(self.config.data.norm_dict).name)
+        shutil.copyfile(self.config.data.norm_dict, nd_path)
+        self.config.data.norm_dict = str(nd_path.resolve())
+
+        # copy the class dict
+        cd_path = Path(config_path.parent / Path(self.config.data.class_dict).name)
+        shutil.copyfile(self.config.data.class_dict, cd_path)
+        self.config.data.class_dict = str(cd_path.resolve())
 
         # write config
         self.parser.save(
@@ -105,7 +110,8 @@ class SaveConfigCallback(Callback):
         # log files as assets
         if self.plm.logger is not None:
             self.plm.logger.experiment.log_asset(config_path)
-            self.plm.logger.experiment.log_asset(sd_path)
+            self.plm.logger.experiment.log_asset(nd_path)
+            self.plm.logger.experiment.log_asset(cd_path)
 
     def save_metadata(self, config_path):
         # TODO: log input variables from datasets
@@ -148,8 +154,12 @@ class SaveConfigCallback(Callback):
         # save the jet classes, which is stored as an attr in the training file
         with h5py.File(meta["train_file"]) as file:
             jet_name = self.config["data"]["inputs"]["jet"]
-            jet_classes = file[f"{jet_name}/labels"].attrs["label_classes"]
+            try:
+                jet_classes = file[f"{jet_name}"].attrs["flavour_label"]
+            except KeyError:
+                jet_classes = "not available"
             meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))
+
         if logger:
             logger.log_hyperparams(meta)
 

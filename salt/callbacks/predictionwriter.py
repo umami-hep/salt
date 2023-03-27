@@ -18,6 +18,7 @@ class PredictionWriter(Callback):
         track_variables: list = None,
         write_tracks: bool = False,
         half_precision: bool = False,
+        jet_classes: list = None,
     ) -> None:
         """Write test outputs to h5 file.
 
@@ -31,6 +32,8 @@ class PredictionWriter(Callback):
             If true, write track outputs to file
         half_precision : bool
             If true, write outputs at half precision
+        jet_classes : list
+            List of flavour names in order of label values
         """
         super().__init__()
 
@@ -38,6 +41,7 @@ class PredictionWriter(Callback):
         self.track_variables = track_variables
         self.write_tracks = write_tracks
         self.half_precision = half_precision
+        self.jet_classes = jet_classes
         self.track_origin_cols = [
             "Pileup",
             "Fake",
@@ -77,21 +81,27 @@ class PredictionWriter(Callback):
 
         # get jet class prediction column names
         train_file = trainer.datamodule.train_dataloader().dataset.file
-        jet_classes = list(train_file[f"{self.jet}/labels"].attrs.values())[0]
-        self.jet_cols = [f"{pl_module.name}_p{c.split('jets')[0]}" for c in jet_classes]
+        if not self.jet_classes:
+            self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
+            jet_task = [t for t in pl_module.model.tasks if t.name == "jet_classification"][0]
+            if jet_task.label_map is not None:  # TODO: extend to xbb
+                d = {0: "ljets", 4: "cjets", 5: "bjets"}
+                self.jet_classes = [d[x] for x in jet_task.label_map]
+        assert self.jet_classes is not None
+        self.jet_cols = [f"{pl_module.name}_p{c.split('jets')[0]}" for c in self.jet_classes]
 
         # get output path
         out_dir = Path(trainer._ckpt_path).parent
         out_basename = str(Path(trainer._ckpt_path).stem)
         stem = str(Path(self.ds.filename).stem)
-        sample = split[2] if len(split := stem.split("_")) == 3 else stem
+        sample = split[3] if len(split := stem.split("_")) == 4 else stem
         fname = f"{out_basename}__test_{sample}.h5"
         self.out_path = Path(out_dir / fname)
 
         # decide whether to write tracks
         self.task_list = [task.name for task in pl_module.model.tasks]
         self.write_tracks = self.write_tracks and any(
-            t in self.task_list for t in ["track_classification", "track_vertexing"]
+            t in self.task_list for t in ["track_origin", "track_vertexing"]
         )
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dl_idx):
@@ -126,8 +136,8 @@ class PredictionWriter(Callback):
             mask = torch.cat(self.mask).unsqueeze(dim=-1)
 
             # add output for track classification
-            if "track_classification" in self.task_list:
-                t2 = outputs["track_classification"]
+            if "track_origin" in self.task_list:
+                t2 = outputs["track_origin"]
                 t2 = F.softmax(mask_fill_flattened(t2, mask), dim=-1).numpy()
                 t2 = t2.view(dtype=np.dtype([(name, "f4") for name in self.track_origin_cols]))
                 t2 = t2.reshape(t2.shape[0], t2.shape[1])

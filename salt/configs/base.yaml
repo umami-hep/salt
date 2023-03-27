@@ -1,19 +1,19 @@
 seed_everything: 42
 
 data:
-  train_file: <Umami base dir>/preprocessed/PFlow-hybrid-resampled_scaled_shuffled.h5
-  val_file: <Umami base dir>/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
-  scale_dict: <Umami base dir>/scale_dict.json
-  #move_files_temp: null
+  train_file: /eos/user/u/umami/training-samples/gnn/22-03-23/pp_output_train.h5
+  val_file: /eos/user/u/umami/training-samples/gnn/22-03-23/pp_output_val.h5
+  norm_dict: /eos/user/u/umami/training-samples/gnn/22-03-23/norm_dict.yaml
+  class_dict: /eos/user/u/umami/training-samples/gnn/22-03-23/class_dict.yaml
+  #move_files_temp: /dev/shm/...
   inputs:
     jet: jets
     track: tracks
-  batched_read: True
   batch_size: 1000
   num_workers: 10
-  num_jets_train: 23_000_000
-  num_jets_val: 1_000_000
-  num_jets_test: 1_000_000
+  num_jets_train: -1
+  num_jets_val: -1
+  num_jets_test: -1
 
 trainer:
   max_epochs: 100
@@ -44,7 +44,6 @@ trainer:
           - pt
           - eta
           - HadronConeExclTruthLabelID
-          - n_tracks
           - n_truth_promptLepton
         track_variables:
           - truthOriginLabel
@@ -53,7 +52,7 @@ trainer:
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
       init_args:
-        refresh_rate: 20
+        refresh_rate: 50
     - class_path: pytorch_lightning.callbacks.ModelSummary
       init_args:
         max_depth: 2

@@ -35,7 +35,7 @@ This allows you control all aspects of the training from config or directly via 
 The configuration is split into two parts.
 The [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
 This config is used by default for all trainings without you having to explicitly specify it.
-Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/salt/configs/gnn.yaml) contain a full description of a specific model.
+Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/salt/configs/gnn.yaml) contain a full description of a specific model, including a list of input variables used.
 You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `salt`.
 
 ```bash
@@ -85,12 +85,10 @@ This flag is set in the [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.
 
 ### Dataloading
 
-There are two types of dataloading modes available, configured by the `data.batched_read` config flag.
-When this flag is `False`, individual jets are loaded from the training file randomly, and pytorch handles the batching behind the scenes.
-This is inefficient as h5 files benefit from block reads.
-Setting `data.batched_read` to `True` will read a full batch at a time from the input file.
-This is much more efficient, but only implements "weak shuffling" in that while the different batches are shuffled, the same batches of jets are used epoch after epoch.
-In practice, this is unlikely to make much difference to the training.
+Jets are loaded in weakly shuffled batches from the training file.
+This is much more efficient than randomly accessing individual jets, which would be prohibitively slow.
+
+Some other dataloading considerations are discussed below.
 
 #### Worker Counts
 
@@ -165,7 +163,11 @@ The full training state, including the state of the optimiser, is resumed.
 The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
 where it left off.
 
-### Switching Attention Mechanisms
+
+
+### Customising Training
+
+#### Switching Attention Mechanisms
 
 By default the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) config uses the scaled dot product attention found in transformers.
 To switch to the GATv2 attention, add the [`GATv2.yaml`]({{repo_url}}-/blob/main/salt/configs/GATv2.yaml) config fragment.
@@ -176,7 +178,7 @@ salt fit --config configs/GN1.yaml --config configs/GATv2.yaml
 
 Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.
 
-### Switching Pooling
+#### Switching Pooling Mechanisms
 
 The [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2.yaml) config by default uses Global Attention Pooling. This can be switched out for Cross Attention Pooling where a learnable class token is attended to by the learned track representation. The same arguments used for the Transformer Encoder apply to the Cross Attention layers. An example Cross Attention block is shown below:
 
@@ -200,16 +202,48 @@ pool_net:
 
 ```
 
-### Excluding Variables
+#### Selecting Training Variables
 
-It is possible to provide a dictionary of variables not to include in the training, by adding a dictionary to the model.yaml file as in
+Training files are structured arrays, so it is easy to specify which variables you want to include in the training by name.
+
+In your `data` config there is a `variables` key which specifies which variables to include in the training for each input type.
+These are defined in the model files, rather than the `base.yaml` config.
+
+??? warning "Make sure you do not train on truth information!"
+
+    The variables listed under `data.variables` are the inputs to the training.
+    You should include any truth information, but rather specify truth labels for each task in your model config.
+
+For example, in [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you will find the following variables:
 
 ```yaml
 data:
-  exclude:
-    jet: [pt]
-    track: [dphi, deta]
+  variables:
+    jet:
+      - pt_btagJes
+      - eta_btagJes
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      ...
 ```
 
-The `jet` and `track` input type keys are optional, so you can specify either or both.
-Modification of the `input_size` model parameter is handled automatically by the framework.
+For now, you will need to manually match your model input size to the number of variables you are using.
+
+
+#### Remapping Labels
+
+In the config block for each task, you can specify a `label_map` which maps the labels in the training file to the labels you want to use in the training.
+For example, 
+
+```yaml
+class_path: salt.models.ClassificationTask
+init_args:
+    input_type: jet
+    name: jet_classification
+    label: HadronConeExclTruthLabelID
+    label_map: { 0: 0, 4: 1, 5: 2 }
+    ...
+```
