@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
-from pytorch_lightning.cli import instantiate_class
+from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor
 from torch.nn.functional import softmax
 

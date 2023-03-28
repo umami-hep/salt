@@ -1,5 +1,5 @@
 # base image
-FROM pytorch/pytorch:1.13.1-cuda11.6-cudnn8-runtime
+FROM pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime
 
 # local and envs
 ENV LANG C.UTF-8
@@ -9,12 +9,15 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # add some packages
 RUN apt-get update
-RUN apt-get install -y git h5utils wget vim
+RUN apt-get install -y git h5utils wget vim  build-essential
 
 # update python pip
 RUN python -m pip install --upgrade pip
 RUN python --version
 RUN python -m pip --version
+
+# add puma to the image, instead of as a package dependency
+RUN python -m pip install puma-hep
 
 # install dependencies (make use of caching)
 COPY requirements.txt .

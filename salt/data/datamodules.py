@@ -1,4 +1,4 @@
-import pytorch_lightning as pl
+import lightning as L
 from torch.utils.data import DataLoader
 
 import salt.utils.fileutils as fu
@@ -6,7 +6,7 @@ from salt.data.datasets import JetDataset
 from salt.data.samplers import RandomBatchSampler
 
 
-class JetDataModule(pl.LightningDataModule):
+class JetDataModule(L.LightningDataModule):
     def __init__(
         self,
         train_file: str,

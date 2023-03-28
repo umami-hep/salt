@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from jsonargparse.typing import register_type
-from pytorch_lightning.cli import LightningCLI
+from lightning.pytorch.cli import LightningCLI
 
 
 # add support for converting yaml lists to tensors

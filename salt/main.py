@@ -3,7 +3,7 @@
 import pathlib
 
 import comet_ml  # noqa F401
-from pytorch_lightning.cli import ArgsType
+from lightning.pytorch.cli import ArgsType
 
 from salt.callbacks import SaveConfigCallback
 from salt.data.datamodules import JetDataModule

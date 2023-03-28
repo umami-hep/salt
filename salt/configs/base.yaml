@@ -20,15 +20,12 @@ trainer:
   accelerator: gpu
   devices: 1
   #precision: bf16
-  strategy:
-    class_path: pytorch_lightning.strategies.DDPStrategy
-    init_args:
-      find_unused_parameters: false
+  strategy: ddp
   log_every_n_steps: 50
   default_root_dir: logs
 
   logger:
-    class_path: pytorch_lightning.loggers.CometLogger
+    class_path: lightning.pytorch.loggers.CometLogger
     init_args:
       project_name: salt
       display_summary_level: 0
@@ -49,11 +46,11 @@ trainer:
           - truthOriginLabel
           - truthVertexIndex
           - valid
-    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
-    - class_path: pytorch_lightning.callbacks.TQDMProgressBar
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
         refresh_rate: 50
-    - class_path: pytorch_lightning.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.ModelSummary
       init_args:
         max_depth: 2
 

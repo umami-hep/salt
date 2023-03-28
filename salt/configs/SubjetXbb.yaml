@@ -26,11 +26,11 @@ trainer:
           - R10TruthLabel_R22v1
           - R10TruthLabel_R22v1_TruthJetMass
           - R10TruthLabel_R22v1_TruthJetPt
-    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
-    - class_path: pytorch_lightning.callbacks.TQDMProgressBar
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
         refresh_rate: 20
-    - class_path: pytorch_lightning.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.ModelSummary
       init_args:
         max_depth: 2
 

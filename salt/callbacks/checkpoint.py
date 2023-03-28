@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
+from lightning import LightningModule, Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 
 class Checkpoint(ModelCheckpoint):
