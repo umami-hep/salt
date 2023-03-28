@@ -128,7 +128,11 @@ class PredictionWriter(Callback):
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
 
-        if self.write_tracks:
+        task_list = [task.name for task in pl_module.model.tasks]
+
+        if self.write_tracks and (
+            "track_classification" in task_list or "track_vertexing" in task_list
+        ):
             if self.track_variables is None:
                 self.track_variables = self.file[self.track].dtype.names
 
@@ -154,7 +158,7 @@ class PredictionWriter(Callback):
             if "track_vertexing" in self.task_list:
                 t2 = outputs["track_vertexing"]
                 t2 = get_node_assignment(
-                    t2, (~mask).squeeze(dim=-1).sum(dim=-1).tolist()
+                    t2, mask
                 )  # could switch this to running on individual batches if memory becomes an issue
                 t2 = mask_fill_flattened(t2, mask).numpy()
 
@@ -193,15 +197,16 @@ class PredictionWriter(Callback):
 
 
 # convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
-def mask_fill_flattened(flat_array, mask_array):
-    filled = torch.full(
-        (mask_array.shape[0], mask_array.shape[1], flat_array.shape[1]), float("-inf")
-    )
+@torch.jit.script
+def mask_fill_flattened(flat_array, mask):
+    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
+    mask = mask.to(torch.bool)
     start_index = end_index = 0
 
-    for i in range(mask_array.shape[0]):
-        end_index += (~mask_array[i]).sum().item()
-        filled[i, : end_index - start_index] = flat_array[start_index:end_index]
-        start_index = end_index
+    for i in range(mask.shape[0]):
+        if mask[i].shape[0] > 0:
+            end_index += (~mask[i]).to(torch.long).sum()
+            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
+            start_index = end_index
 
     return filled

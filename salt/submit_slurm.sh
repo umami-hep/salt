@@ -33,7 +33,7 @@
 # #SBATCH --error=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.err
 
 # speedup
-#export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=1
 
 echo "CPU count: $(cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1)"
 
