@@ -4,11 +4,11 @@ import subprocess
 from pathlib import Path
 
 import h5py
-import pytorch_lightning as pl
+import lightning as L
 import torch
 import yaml
-from pytorch_lightning import Callback, LightningModule, Trainer
-from pytorch_lightning.cli import LightningArgumentParser, Namespace
+from lightning import Callback, LightningModule, Trainer
+from lightning.pytorch.cli import LightningArgumentParser, Namespace
 
 
 class SaveConfigCallback(Callback):
@@ -114,8 +114,6 @@ class SaveConfigCallback(Callback):
             self.plm.logger.experiment.log_asset(cd_path)
 
     def save_metadata(self, config_path):
-        # TODO: log input variables from datasets
-
         trainer = self.trainer
         logger = self.plm.logger
 
@@ -147,7 +145,7 @@ class SaveConfigCallback(Callback):
         if hasattr(self.trainer, "timestamp"):
             meta["timestamp"] = trainer.timestamp
         meta["torch_version"] = str(torch.__version__)
-        meta["lightning_version"] = str(pl.__version__)
+        meta["lightning_version"] = str(L.__version__)
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 

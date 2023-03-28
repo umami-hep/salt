@@ -17,7 +17,6 @@ class JetTagger(nn.Module):
     ):
         """Jet constituent tagger.
 
-        # TODO: multiple inputs not compatible with aux tasks
         # TODO: add option to pool separately for each task
 
         Parameters
@@ -76,9 +75,8 @@ class JetTagger(nn.Module):
     ):
         preds = {}
         loss = {}
-        # TODO: move this login into the task class, including per element loss weighting
         for task in self.tasks:
-            if "jet" in task.name:  # TODO: make robust with a flag to say what the task is on
+            if task.input_type == "jet":
                 task_input = pooled
                 task_mask = None
                 context = None

@@ -1,12 +1,12 @@
 import warnings
 from collections.abc import Mapping
 
-import pytorch_lightning as pl
+import lightning as L
 import torch
 import torch.nn as nn
 
 
-class LightningTagger(pl.LightningModule):
+class LightningTagger(L.LightningModule):
     def __init__(self, model: nn.Module, lrs_config: Mapping, name: str = "salt"):
         """Lightning jet tagger model.
 

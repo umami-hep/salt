@@ -23,9 +23,6 @@ class JetDataset(Dataset):
     ):
         """A map-style dataset for loading jets from a structured array file.
 
-        TODO: improve input type, name abstraction. either do everything in the init,
-        so only types are reffered to after or always refer through a dict of type->name
-
         Parameters
         ----------
         filename : str

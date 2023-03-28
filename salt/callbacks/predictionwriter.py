@@ -4,8 +4,9 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
+from ftag import Flavours
+from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
-from pytorch_lightning import Callback, LightningModule, Trainer
 
 from salt.utils.arrays import join_structured_arrays
 from salt.utils.union_find import get_node_assignment
@@ -61,16 +62,18 @@ class PredictionWriter(Callback):
             "Muon",
         ]
 
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+    def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
         if stage != "test":
             return
+
+        self.trainer = trainer
 
         # inputs names
         self.jet = trainer.datamodule.inputs["jet"]
         self.track = trainer.datamodule.inputs["track"]
 
         # place to store intermediate outputs
-        self.task_names = [task.name for task in pl_module.model.tasks]
+        self.task_names = [task.name for task in module.model.tasks]
         self.outputs: dict = {task: [] for task in self.task_names}
         self.mask: list = []
 
@@ -83,34 +86,35 @@ class PredictionWriter(Callback):
         train_file = trainer.datamodule.train_dataloader().dataset.file
         if not self.jet_classes:
             self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
-            jet_task = [t for t in pl_module.model.tasks if t.name == "jet_classification"][0]
+            jet_task = [t for t in module.model.tasks if t.name == "jet_classification"][0]
             if jet_task.label_map is not None:  # TODO: extend to xbb
-                d = {0: "ljets", 4: "cjets", 5: "bjets"}
+                d = {0: "ujets", 4: "cjets", 5: "bjets"}
                 self.jet_classes = [d[x] for x in jet_task.label_map]
         assert self.jet_classes is not None
-        self.jet_cols = [f"{pl_module.name}_p{c.split('jets')[0]}" for c in self.jet_classes]
-
-        # get output path
-        out_dir = Path(trainer._ckpt_path).parent
-        out_basename = str(Path(trainer._ckpt_path).stem)
-        stem = str(Path(self.ds.filename).stem)
-        sample = split[3] if len(split := stem.split("_")) == 4 else stem
-        fname = f"{out_basename}__test_{sample}.h5"
-        self.out_path = Path(out_dir / fname)
+        self.jet_cols = [f"{module.name}_{Flavours[c].px}" for c in self.jet_classes]
 
         # decide whether to write tracks
-        self.task_list = [task.name for task in pl_module.model.tasks]
+        self.task_list = [task.name for task in module.model.tasks]
         self.write_tracks = self.write_tracks and any(
             t in self.task_list for t in ["track_origin", "track_vertexing"]
         )
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dl_idx):
+    @property
+    def output_path(self) -> Path:
+        out_dir = Path(self.trainer.ckpt_path).parent
+        out_basename = str(Path(self.trainer.ckpt_path).stem)
+        stem = str(Path(self.ds.filename).stem)
+        sample = split[3] if len(split := stem.split("_")) == 4 else stem
+        return Path(out_dir / f"{out_basename}__test_{sample}.h5")
+
+    def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):
         # append test outputs
         [self.outputs[task].append(outputs[0][task].cpu()) for task in self.task_names]
         if self.write_tracks:
             self.mask.append(outputs[1]["track"].cpu())  # TODO: don't hardcode "track"
 
-    def on_test_end(self, trainer, pl_module):
+    def on_test_end(self, trainer, module):
+        print("svs", trainer.ckpt_path)
         # concat test batches
         outputs = {task: torch.cat(self.outputs[task]) for task in self.task_names}
 
@@ -128,7 +132,7 @@ class PredictionWriter(Callback):
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
 
-        task_list = [task.name for task in pl_module.model.tasks]
+        task_list = [task.name for task in module.model.tasks]
 
         if self.write_tracks and (
             "track_classification" in task_list or "track_vertexing" in task_list
@@ -169,15 +173,15 @@ class PredictionWriter(Callback):
 
         # write to h5 file
         print("\n" + "-" * 100)
-        if self.out_path.exists():
+        if self.output_path.exists():
             print("Warning! Overwriting existing file.")
 
-        with h5py.File(self.out_path, "w") as f:
+        with h5py.File(self.output_path, "w") as f:
             self.create_dataset(f, jets, self.jet, self.half_precision)
             if self.write_tracks:
                 self.create_dataset(f, t, self.track, self.half_precision)
 
-        print("Created output file", self.out_path)
+        print("Created output file", self.output_path)
         print("-" * 100, "\n")
 
     def create_dataset(self, f, a, name, half_precision):

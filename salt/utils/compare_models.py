@@ -21,7 +21,7 @@ from ftag import Cuts
 from ftag.hdf5 import H5Reader
 
 
-def parse_args():
+def parse_args(args=None):
     parser = argparse.ArgumentParser(
         description="Script to compare predictions between two models.",
     )
@@ -67,16 +67,16 @@ def parse_args():
         help="Compare this many jets (defaults to all).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     args.file_B = args.file_B or args.file_A
     args.tagger_B = args.tagger_B or args.tagger_A
 
     return args
 
 
-def main():
-    # parse args
-    args = parse_args()
+def main(args):
+    if args.file_A == args.file_B and args.tagger_A == args.tagger_B:
+        raise ValueError("Attempted to compare the same model!")
 
     vars_A = [f"{args.tagger_A}_p{v}" for v in args.vars]
     vars_B = [f"{args.tagger_B}_p{v}" for v in args.vars]
@@ -120,4 +120,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)

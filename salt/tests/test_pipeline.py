@@ -8,7 +8,7 @@ from salt.to_onnx import main as to_onnx
 from salt.utils.get_onnx_metadata import main as get_onnx_metadata
 from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
-w = "ignore::pytorch_lightning.utilities.warnings.PossibleUserWarning:"
+w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 
 
 def run_train(tmp_path, config_path, train_args):

@@ -23,6 +23,11 @@ test-union-find:
   script:
     - $TEST_CMD salt/tests/test_union_find.py
 
+test-utils:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_utils.py
+
 test-GN1:
   <<: *test-template
   script:
