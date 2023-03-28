@@ -13,8 +13,10 @@ from torch import Tensor
 from torch.nn.functional import softmax
 from tqdm import tqdm
 
+from salt.callbacks.predictionwriter import mask_fill_flattened
 from salt.lightning import LightningTagger
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
+from salt.utils.union_find import get_node_assignment
 
 torch.manual_seed(42)
 # https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx
@@ -74,6 +76,11 @@ def parse_args(args):
         help="Overwrite existing exported ONNX model.",
         action="store_true",
     )
+    parser.add_argument(
+        "--include_aux",
+        help="Include auxiliary task outputs (if available)",
+        action="store_true",
+    )
 
     return parser.parse_args(args)
 
@@ -112,9 +119,10 @@ class InputNorm:
 
 
 class ONNXModel(LightningTagger):
-    def __init__(self, model: nn.Module, norm: InputNorm) -> None:
+    def __init__(self, model: nn.Module, norm: InputNorm, include_aux=False) -> None:
         super().__init__(model=model, lrs_config={})
         self.norm = norm
+        self.include_aux = include_aux
         assert len(self.in_dims) == 1, "Multi input ONNX models are not yet supported."
         jets, tracks = inputs_sep_no_pad(1, 40, self.in_dims[0])
         self.example_input_array = jets, tracks.squeeze(0)
@@ -127,45 +135,79 @@ class ONNXModel(LightningTagger):
         tracks = concat_jet_track(jets, tracks.unsqueeze(0))
 
         # return class probabilities
-        outputs = self.model({"track": tracks}, None)[0]["jet_classification"]
-        return get_probs(outputs)
+        outputs = self.model({"track": tracks}, None)[0]
+        onnx_outputs = get_probs(outputs["jet_classification"])
+
+        if self.include_aux and "track_vertexing" in outputs:
+            mask = torch.zeros(tracks.shape[:-1])
+            edge_scores = outputs["track_vertexing"]
+            vertex_indices = get_node_assignment(edge_scores, mask)
+            vertex_list = mask_fill_flattened(vertex_indices, mask)  # get list of vertex indices
+            onnx_outputs += (vertex_list,)
+
+        return onnx_outputs
 
 
-def compare_output(pt_model, onnx_session, norm, n_track=40):
+def compare_output(pt_model, onnx_session, norm, include_aux, n_track=40):
     n_batch = 1
     n_feat = pt_model.in_dims[0]
 
     jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat, p_valid=1)
 
     inputs_pt = {"track": concat_jet_track(*norm(jets, tracks))}
-    pred_pt = pt_model(inputs_pt, {"track": mask})[0]["jet_classification"]
-    pred_pt = [p.detach().numpy() for p in get_probs(pred_pt)]
+    outputs_pt = pt_model(inputs_pt, {"track": mask})[0]
+    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jet_classification"])]
 
     inputs_onnx = {
         "jet_features": jets.numpy(),
         "track_features": tracks.squeeze(0).numpy(),
     }
-    pred_onnx = onnx_session.run(None, inputs_onnx)
+    outputs_onnx = onnx_session.run(None, inputs_onnx)
+
+    # test jet classification
+    if include_aux and "track_vertexing" in outputs_pt:
+        pred_onnx_jc = outputs_onnx[:-1]
+    else:
+        pred_onnx_jc = outputs_onnx
 
     np.testing.assert_allclose(
-        pred_pt, pred_onnx, rtol=1e-04, atol=1e-04, err_msg="Torch vs ONNX check failed"
+        pred_pt_jc,
+        pred_onnx_jc,
+        rtol=1e-04,
+        atol=1e-04,
+        err_msg="Torch vs ONNX check failed for jet classification",
     )
 
-    assert not np.isnan(np.array(pred_onnx)).any()  # non nans
-    assert not (np.array(pred_onnx) == 0).any()  # no trivial zeros
+    assert not np.isnan(np.array(pred_onnx_jc)).any()  # non nans
+    assert not (np.array(pred_onnx_jc) == 0).any()  # no trivial zeros
+
+    # test vertexing
+    if include_aux and "track_vertexing" in outputs_pt:
+        pred_pt_scores = outputs_pt["track_vertexing"].detach()
+        pred_pt_indices = get_node_assignment(pred_pt_scores, mask)
+        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, mask)
+
+        pred_onnx_vtx = outputs_onnx[-1]
+        np.testing.assert_allclose(
+            pred_pt_vtx,
+            pred_onnx_vtx,
+            rtol=1e-06,
+            atol=1e-06,
+            err_msg="Torch vs ONNX check failed for vertexing",
+        )
 
 
-def compare_outputs(pt_model, onnx_path, norm):
+def compare_outputs(pt_model, onnx_path, norm, include_aux):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     for n_track in tqdm(range(0, 40), leave=False):
         for _ in range(10):
-            compare_output(pt_model, session, norm, n_track)
+            compare_output(pt_model, session, norm, include_aux, n_track)
 
     print(
-        "Sucess! Pytorch and ONNX models are consistent, but you should verify this in"
+        "Success! Pytorch and ONNX models are consistent, but you should verify this in"
         " Athena.\nFor more info see: https://ftag-salt.docs.cern.ch/export/#athena-validation"
     )
     print("-" * 100)
@@ -188,7 +230,9 @@ def main(args=None):
         pt_model = LightningTagger.load_from_checkpoint(args.ckpt_path)
         pt_model.eval()
 
-        onnx_model = ONNXModel.load_from_checkpoint(args.ckpt_path, norm=norm)
+        onnx_model = ONNXModel.load_from_checkpoint(
+            args.ckpt_path, norm=norm, include_aux=args.include_aux
+        )
         onnx_model.eval()
 
     print("\n" + "-" * 100)
@@ -206,6 +250,13 @@ def main(args=None):
         jet_classes = yaml.safe_load(file)["jet_classes"]
     input_names = ["jet_features", "track_features"]
     output_names = [f"p{flav.rstrip('jets')}" for flav in jet_classes.values()]
+    output_types = ["float" for flav in jet_classes.values()]
+    dynamic_axes = {"track_features": {0: "n_tracks"}}
+
+    if args.include_aux and "track_vertexing" in config["data"]["labels"]:
+        output_names.append("vertex_indices")
+        output_types.append("vec_char")
+        dynamic_axes["vertex_indices"] = {0: "n_tracks"}
 
     # export
     onnx_model.to_onnx(
@@ -213,9 +264,7 @@ def main(args=None):
         opset_version=16,
         input_names=input_names,
         output_names=output_names,
-        dynamic_axes={
-            "track_features": {0: "n_tracks"},
-        },
+        dynamic_axes=dynamic_axes,
     )
 
     # add metadata
@@ -226,10 +275,11 @@ def main(args=None):
         norm,
         args.track_selection,
         output_names,
+        output_types,
     )
 
     # validate
-    compare_outputs(pt_model, onnx_path, norm)
+    compare_outputs(pt_model, onnx_path, norm, args.include_aux)
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
     print("-" * 100)
@@ -243,6 +293,7 @@ def add_metadata(
     norm,
     track_selection,
     output_names,
+    output_types,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
@@ -275,7 +326,13 @@ def add_metadata(
             "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in norm.trk_vars],
         }
     ]
-    metadata["outputs"] = {model_name: {"labels": output_names, "node_index": 0}}
+    metadata["outputs"] = {
+        model_name: {
+            "labels": output_names,
+            "types": output_types,
+            "node_index": 0,
+        }
+    }
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}
