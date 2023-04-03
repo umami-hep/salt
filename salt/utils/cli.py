@@ -8,6 +8,8 @@ import torch
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
+from salt.utils.git_check import check_for_uncommitted_changes, create_and_push_tag
+
 
 # add support for converting yaml lists to tensors
 def serializer(x: torch.Tensor) -> list:
@@ -50,6 +52,8 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
+        parser.add_argument("--force", action="store_true", help="Run with uncomitted changes.")
+        parser.add_argument("--tag", action="store_true", help="Push a tag for the current code.")
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
@@ -73,7 +77,8 @@ class SaltCLI(LightningCLI):
                 pass
 
             # set the timestampped dir
-            log_dir_timestamp = str(Path(log_dir / f"{name}_{timestamp}").resolve())
+            dirname = f"{name}_{timestamp}"
+            log_dir_timestamp = str(Path(log_dir / dirname).resolve())
             sc["trainer.default_root_dir"] = log_dir_timestamp
             if sc[log]:
                 sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
@@ -89,6 +94,11 @@ class SaltCLI(LightningCLI):
                 if denominator := task["label_denominator"]:
                     labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
             sc["data"]["labels"] = labels
+
+            if not sc["force"]:
+                check_for_uncommitted_changes()
+                if sc["tag"]:
+                    create_and_push_tag(dirname)
 
         if self.subcommand == "test":
             print("\n" + "-" * 100)

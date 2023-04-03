@@ -74,14 +74,41 @@ By default the config will try to use the first available GPU, but
 you can specify which ones to use with the `--trainer.devices` flag.
 Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerators/gpu_basic.html#train-on-multiple-gpus) to learn more about the different ways you can specify which GPUs to use.
 
-??? warning "Check GPU usage before starting training."
+??? warning "Check GPU usage before starting training"
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
 
-#### Reproducibility
+### Reproducibility
 
-Trainings are fully reproducible thanks to the `--seed_everything` flag.
-This flag is set in the [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config.
+Reproducibility of tagger trainings is very important.
+The following features try to ensure reproducibility without too much overhead.
+
+#### Commit Hashes & Tags
+
+When training, the framework will complain if you have any uncommitted changes.
+You can override this by setting the `--force` flag, but you should only do so if you are sure that preserving your training configuration is not necessary.
+The commit hash used for the training is saved in the `metadata.yaml` for the training run.
+
+Additionally, you can create and push a tag of the current state using the `--tag` argument.
+This will push a tag to your personal fork of the repo.
+The tag name is the same as the output directory name, which is generated automatically by the framework.
+
+??? warning "Using `--force` will prevent a tag from being created and pushed"
+
+    Try and avoid using `--force` if you can, as it hampers reproducibility.
+
+
+#### Random Seeds
+
+Training runs are reproducible thanks to the `--seed_everything` flag,
+which is already set for you in the [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config.
+The flat seeds all random number generators used in the training.
+This means for example that weight initialisation and data shuffling happen in a deterministic way.
+
+??? info "Stochastic operations can still lead to divergences between training runs"
+
+    For more info take a look [here](https://pytorch.org/docs/stable/notes/randomness.html).
+
 
 ### Dataloading
 
