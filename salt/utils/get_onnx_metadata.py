@@ -33,7 +33,9 @@ def main(args=None):
     onnx_model = onnx.load(args.file)
     onnx.checker.check_model(onnx_model)
 
-    sess = ort.InferenceSession(args.file, providers=ort.get_available_providers())
+    sess_options = ort.SessionOptions()
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    sess = ort.InferenceSession(args.file, sess_options, providers=ort.get_available_providers())
     meta = sess.get_modelmeta()
     name = meta.description
     config = meta.custom_metadata_map[args.key]
