@@ -128,6 +128,8 @@ class SaveConfigCallback(Callback):
         meta["val_file"] = str(val_dset.filename)
         meta["num_jets_train"] = len(train_dset)
         meta["num_jets_val"] = len(val_dset)
+        meta["num_unique_jets_train"] = int(train_dset.file.attrs["unique_jets"])
+        meta["num_unique_jets_val"] = int(val_dset.file.attrs["unique_jets"])
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
@@ -142,6 +144,7 @@ class SaveConfigCallback(Callback):
         meta["git_hash"] = git_hash.decode("ascii").strip()
         if logger:
             meta["out_dir"] = logger.save_dir
+            meta["log_url"] = logger.experiment.url
         if hasattr(self.trainer, "timestamp"):
             meta["timestamp"] = trainer.timestamp
         meta["torch_version"] = str(torch.__version__)
