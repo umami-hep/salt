@@ -74,7 +74,8 @@ def parse_args(args=None):
     return args
 
 
-def main(args):
+def main(args=None):
+    args = parse_args(args)
     if args.file_A == args.file_B and args.tagger_A == args.tagger_B:
         raise ValueError("Attempted to compare the same model!")
 
@@ -120,5 +121,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()
