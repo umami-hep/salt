@@ -16,6 +16,20 @@ DEFAULT_NTRACK = 40
 JET_VARS = [
     "pt_btagJes",
     "eta_btagJes",
+    "softMuon_pt",
+    "softMuon_dR",
+    "softMuon_eta",
+    "softMuon_phi",
+    "softMuon_qOverPratio",
+    "softMuon_momentumBalanceSignificance",
+    "softMuon_scatteringNeighbourSignificance",
+    "softMuon_pTrel",
+    "softMuon_ip3dD0",
+    "softMuon_ip3dZ0",
+    "softMuon_ip3dD0Significance",
+    "softMuon_ip3dZ0Significance",
+    "softMuon_ip3dD0Uncertainty",
+    "softMuon_ip3dZ0Uncertainty",
 ]
 
 TRACK_VARS = [
@@ -40,6 +54,37 @@ TRACK_VARS = [
     "numberOfSCTSharedHits",
     "numberOfPixelHoles",
     "numberOfSCTHoles",
+]
+
+ELECTRON_VARS = [
+    "pt",
+    "ptfrac",
+    "ptrel",
+    "dr",
+    "abs_eta",
+    "eta",
+    "phi",
+    "ftag_et",
+    "qOverP",
+    "d0RelativeToBeamspotSignificance",
+    "ftag_z0AlongBeamspotSignificance",
+    "ftag_ptVarCone30OverPt",
+    "numberOfPixelHits",
+    "numberOfSCTHitsInclDead",
+    "ftag_deltaPOverP",
+    "eProbabilityHT",
+    "deltaEta1",
+    "deltaPhiRescaled2",
+    "ftag_energyOverP",
+    "Rhad",
+    "Rhad1",
+    "Eratio",
+    "weta2",
+    "Rphi",
+    "Reta",
+    "wtots1",
+    "f1",
+    "f3",
 ]
 
 rng = np.random.default_rng(42)
@@ -83,6 +128,7 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd: dict = {}
     sd["jets"] = {n: {"std": 1, "mean": 1} for n in JET_VARS}
     sd["tracks"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
+    sd["electrons"] = {n: {"std": 1, "mean": 1} for n in ELECTRON_VARS}
     sd["flow"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
     with open(nd_path, "w") as file:
         yaml.dump(sd, file, sort_keys=False)
@@ -136,15 +182,32 @@ def write_dummy_file(fname, sd_fname):
         "HadronConeExclTruthLabelPt",
         "n_tracks",
         "n_truth_promptLepton",
+        "softMuon_pt",
+        "softMuon_dR",
+        "softMuon_eta",
+        "softMuon_phi",
+        "softMuon_qOverPratio",
+        "softMuon_momentumBalanceSignificance",
+        "softMuon_scatteringNeighbourSignificance",
+        "softMuon_pTrel",
+        "softMuon_ip3dD0",
+        "softMuon_ip3dZ0",
+        "softMuon_ip3dD0Significance",
+        "softMuon_ip3dZ0Significance",
+        "softMuon_ip3dD0Uncertainty",
+        "softMuon_ip3dZ0Uncertainty",
     ]
 
     track_vars = list(sd["tracks"])
+    electron_vars = list(sd["electrons"])
 
     # settings
     n_jets = 1000
     jet_features = len(jet_vars)
     n_tracks_per_jet = 40
     track_features = len(track_vars)
+    n_electrons_per_jet = 10
+    electron_features = len(electron_vars)
 
     # setup jets
     shapes_jets = {
@@ -155,6 +218,11 @@ def write_dummy_file(fname, sd_fname):
     shapes_tracks = {
         "inputs": [n_jets, n_tracks_per_jet, track_features + 2],
         "valid": [n_jets, n_tracks_per_jet],
+    }
+
+    shapes_electrons = {
+        "inputs": [n_jets, n_electrons_per_jet, electron_features + 2],
+        "valid": [n_jets, n_electrons_per_jet],
     }
 
     # setup jets
@@ -178,9 +246,22 @@ def write_dummy_file(fname, sd_fname):
     )
     tracks = join_structured_arrays([tracks, valid])
 
+    # setup electrons
+    electrons_dtype = np.dtype(
+        [(n, "f4") for n in electron_vars]
+        + [("truthOriginLabel", "i4"), ("truthVertexIndex", "i4")]
+    )
+    electrons = rng.random(shapes_electrons["inputs"])
+    electrons = u2s(electrons, electrons_dtype)
+    valid = rng.choice([True, False], size=shapes_electrons["valid"]).view(
+        dtype=np.dtype([("valid", bool)])
+    )
+    electrons = join_structured_arrays([electrons, valid])
+
     with h5py.File(fname, "w") as f:
         f.attrs["unique_jets"] = len(jets)
         f.create_dataset("jets", data=jets)
         f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
         f.create_dataset("tracks", data=tracks)
+        f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
