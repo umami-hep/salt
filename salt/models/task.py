@@ -191,15 +191,9 @@ class VertexingTask(Task):
         b, n, d = x.shape
         ex_size = (b, n, n, d)
         t_mask = torch.ones(b, n) if mask is None else ~mask
+        t_mask = torch.cat([t_mask, torch.zeros(b, 1)], dim=1)  # pad t_mask for onnx compatibility
         adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
-        adjmat = adjmat.bool() & ~torch.eye(n, n).repeat(b, 1, 1).bool().to(adjmat.device)
-        adjmat_pad = torch.cat(
-            [
-                torch.cat([adjmat, torch.zeros(b, n, 1).to(adjmat.device)], dim=2),
-                torch.zeros(b, 1, n + 1).to(adjmat.device),
-            ],
-            dim=1,
-        ).bool()  # padded with extra track for onnx compatibility
+        adjmat = adjmat.bool() & ~torch.eye(n + 1, n + 1).repeat(b, 1, 1).bool().to(adjmat.device)
 
         # Deal with context
         context_matrix = None
@@ -207,18 +201,18 @@ class VertexingTask(Task):
             context_d = context.shape[-1]
             context = context.unsqueeze(1).expand(b, n, context_d)
             context_matrix = torch.zeros(
-                (adjmat_pad.sum(), 2 * context_d), device=x.device, dtype=x.dtype
+                (adjmat.sum(), 2 * context_d), device=x.device, dtype=x.dtype
             )
-            context_matrix = context.unsqueeze(-2).expand((b, n, n, context_d))[adjmat]
+            context_matrix = context.unsqueeze(-2).expand((b, n, n, context_d))[adjmat[:, :-1, :-1]]
 
         # Create the track-track matrix as a compressed tensor
-        tt_matrix = torch.zeros((adjmat_pad.sum(), d * 2), device=x.device, dtype=x.dtype)
-        tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat]
-        tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat]
+        tt_matrix = torch.zeros((adjmat.sum(), d * 2), device=x.device, dtype=x.dtype)
+        tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat[:, :-1, :-1]]
+        tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
         pred = self.net(tt_matrix, context_matrix)
         loss = None
         if labels_dict:
-            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat)
+            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat[:, :-1, :-1])
 
         return pred, loss
 
