@@ -5,6 +5,7 @@ from pathlib import Path
 
 import h5py
 import lightning as L
+import numpy as np
 import torch
 import yaml
 from lightning import Callback, LightningModule, Trainer
@@ -13,7 +14,10 @@ from lightning.pytorch.cli import LightningArgumentParser, Namespace
 
 def get_attr(file, attribute, key=None):
     obj = file if key is None else file[key]
-    return dict(obj.attrs).get(attribute)
+    value = dict(obj.attrs).get(attribute)
+    if np.issubdtype(type(value), np.integer):
+        value = int(value)
+    return value
 
 
 class SaveConfigCallback(Callback):
@@ -133,8 +137,8 @@ class SaveConfigCallback(Callback):
         meta["val_file"] = str(val_dset.filename)
         meta["num_jets_train"] = len(train_dset)
         meta["num_jets_val"] = len(val_dset)
-        meta["num_unique_jets_train"] = int(get_attr(train_dset.file, "unique_jets"))
-        meta["num_unique_jets_val"] = int(get_attr(val_dset.file, "unique_jets"))
+        meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
+        meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
