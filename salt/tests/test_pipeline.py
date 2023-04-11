@@ -57,6 +57,7 @@ def run_onnx(train_dir, nd_path):
     args += [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
     args += [f"--nd_path={nd_path}"]
+    args += ["--include_aux"]
     to_onnx(args)
     get_onnx_metadata([str(train_dir / "network.onnx")])
 
