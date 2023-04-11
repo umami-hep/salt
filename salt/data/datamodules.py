@@ -23,6 +23,7 @@ class JetDataModule(L.LightningDataModule):
         move_files_temp: str = None,
         class_dict: str = None,
         test_file: str = None,
+        nan_to_num: bool = False,
     ):
         """h5 jet datamodule.
 
@@ -57,6 +58,8 @@ class JetDataModule(L.LightningDataModule):
             Path to umami preprocessing scale dict file
         test_file : str
             Test file path, default is None
+        nan_to_num : bool, optinal
+            Convert nans to zeros, by default False
         """
         super().__init__()
 
@@ -74,6 +77,7 @@ class JetDataModule(L.LightningDataModule):
         self.norm_dict = norm_dict
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
+        self.nan_to_num = nan_to_num
 
     def prepare_data(self):
         if self.move_files_temp and not self.trainer.fast_dev_run:
@@ -100,6 +104,7 @@ class JetDataModule(L.LightningDataModule):
                 variables=self.variables,
                 norm_dict=self.norm_dict,
                 num_jets=self.num_jets_train,
+                nan_to_num=self.nan_to_num,
             )
 
         if stage == "fit":
@@ -110,6 +115,7 @@ class JetDataModule(L.LightningDataModule):
                 variables=self.variables,
                 norm_dict=self.norm_dict,
                 num_jets=self.num_jets_val,
+                nan_to_num=self.nan_to_num,
             )
 
         # Only print train/val dataset details when actually training
@@ -126,6 +132,7 @@ class JetDataModule(L.LightningDataModule):
                 variables=self.variables,
                 norm_dict=self.norm_dict,
                 num_jets=self.num_jets_test,
+                nan_to_num=self.nan_to_num,
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 

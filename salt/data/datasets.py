@@ -20,6 +20,7 @@ class JetDataset(Dataset):
         num_jets: int = -1,
         concat_jet_tracks: int = True,
         labels: Mapping = None,
+        nan_to_num: bool = False,
     ):
         """A map-style dataset for loading jets from a structured array file.
 
@@ -39,6 +40,8 @@ class JetDataset(Dataset):
             Concatenate jet inputs with track-type inputs, by default True
         labels : Mapping
             Mapping from task name to label name. Set automatically by the CLI.
+        nan_to_num : bool, optional
+            Convert nans to zeros, by default False
         """
         super().__init__()
 
@@ -53,6 +56,7 @@ class JetDataset(Dataset):
         self.input_names = inputs
         self.input_types = dict(map(reversed, self.input_names.items()))  # type:ignore
         self.concat_jet_tracks = concat_jet_tracks
+        self.nan_to_num = nan_to_num
         with open(norm_dict) as f:
             self.norm_dict = yaml.safe_load(f)
 
@@ -130,7 +134,7 @@ class JetDataset(Dataset):
 
         # concatenate and fill nan
         for name in inputs:
-            if self.concat_jet_tracks and name != "jet":
+            if self.concat_jet_tracks and name not in ["jet", "global"]:
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
                 inputs[name][masks[name]] = 0
 
@@ -139,6 +143,8 @@ class JetDataset(Dataset):
     def scale_input(self, batch: dict, input_type: str):
         """Normalise jet inputs."""
         inputs = s2u(batch[self.variables[input_type]])  # type: ignore
+        if self.nan_to_num:
+            inputs = np.nan_to_num(inputs)
         inputs = (inputs - self.norm[input_type]["mean"]) / self.norm[input_type]["std"]
         return inputs
 

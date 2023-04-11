@@ -1,0 +1,251 @@
+name: GN2emu
+
+model:
+  model:
+    class_path: salt.models.JetTagger
+    init_args:
+      init_nets:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.InitNet
+              init_args:
+                name: track
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 23
+                    output_size: &embed_dim 192
+                    hidden_layers: [256]
+                    activation: &activation SiLU
+                    norm_layer: &norm_layer LayerNorm
+            - class_path: salt.models.InitNet
+              init_args:
+                name: electron
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 30
+                    output_size: *embed_dim
+                    hidden_layers: [256]
+                    activation: *activation
+                    norm_layer: *norm_layer
+
+      gnn:
+        class_path: salt.models.TransformerEncoder
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 6
+          out_dim: 128
+          mha_config:
+            num_heads: 8
+            attention:
+              class_path: salt.models.ScaledDotProductAttention
+            out_proj: False
+          dense_config:
+            norm_layer: *norm_layer
+            activation: *activation
+            hidden_layers: [256]
+            dropout: &dropout 0.1
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args:
+          input_size: &out_dim 142
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jet_classification
+                input_type: jet
+                label: flavour_label
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [1.0, 1.73, 1.08]
+
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *out_dim
+                    output_size: 3
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_type: track
+                label: truthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *out_dim
+                    context_size: *out_dim
+                    output_size: 8
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_type: track
+                label: truthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args:
+                    reduction: none
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 284
+                    context_size: *out_dim
+                    hidden_layers: [128, 64, 32]
+                    output_size: 1
+                    activation: *activation
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: electron_origin
+                input_type: electron
+                label: truthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *out_dim
+                    context_size: *out_dim
+                    output_size: 8
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+                    norm_layer: *norm_layer
+                    dropout: *dropout
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: electron_vertexing
+                input_type: electron
+                label: truthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args:
+                    reduction: none
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 284
+                    context_size: *out_dim
+                    hidden_layers: [128, 64, 32]
+                    output_size: 1
+                    activation: *activation
+
+data:
+  variables:
+    global:
+      - softMuon_pt
+      - softMuon_dR
+      - softMuon_eta
+      - softMuon_phi
+      - softMuon_qOverPratio
+      - softMuon_momentumBalanceSignificance
+      - softMuon_scatteringNeighbourSignificance
+      - softMuon_pTrel
+      - softMuon_ip3dD0
+      - softMuon_ip3dZ0
+      - softMuon_ip3dD0Significance
+      - softMuon_ip3dZ0Significance
+      - softMuon_ip3dD0Uncertainty
+      - softMuon_ip3dZ0Uncertainty
+    jet:
+      - pt_btagJes
+      - eta_btagJes
+      #- absEta_btagJes
+    track:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      #- abs_deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      - numberOfPixelHoles
+      - numberOfSCTHoles
+      #- numberOfTRTHits
+      #- leptonID
+    electron:
+      - pt
+      - ptfrac
+      - ptrel
+      - dr
+      - abs_eta
+      - eta
+      - phi
+      - ftag_et
+      - qOverP
+      - d0RelativeToBeamspotSignificance
+      - ftag_z0AlongBeamspotSignificance
+      - ftag_ptVarCone30OverPt
+      - numberOfPixelHits
+      - numberOfSCTHitsInclDead
+      - ftag_deltaPOverP
+      - eProbabilityHT
+      - deltaEta1
+      - deltaPhiRescaled2
+      - ftag_energyOverP
+      - Rhad
+      - Rhad1
+      - Eratio
+      - weta2
+      - Rphi
+      - Reta
+      - wtots1
+      - f1
+      - f3
+  inputs:
+    jet: jets
+    track: tracks
+    electron: electrons
+    global: jets
+  batch_size: 1000
+  num_workers: 40
+  num_jets_train: -1
+  num_jets_val: -1
+  num_jets_test: -1
+  nan_to_num: true
+
+trainer:
+  max_epochs: 40
+  accelerator: gpu
+  devices: 4
+  #precision: bf16

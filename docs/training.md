@@ -274,3 +274,40 @@ init_args:
     label_map: { 0: 0, 4: 1, 5: 2 }
     ...
 ```
+
+#### Jet features concatentaion
+
+You can concatenate the jet features with the node embeddings after the GNN step. In order to this you should add a `global` key to the `inputs` section and specify which variables do you want to concatenate in the `data.variables` section.
+
+??? warning "Don't forget to change pooling and task input size accordingly"
+
+    If you concatenate 2 variables you should increase the `input_size` by 2 (for example `128->130`) for `pool_net` and all tasks (except vertexing, here you should increase by 4).
+
+For example, for the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you can add jet features concatenation in the following way:
+
+- `inputs` section
+    ```yaml
+    inputs:
+        jet: jets
+        track: tracks
+        global: jets
+    ```
+- `variables` section
+    ```yaml
+    data:
+    variables:
+        global:
+        - pt_btagJes
+        - eta_btagJes
+        jet:
+        - pt_btagJes
+        - eta_btagJes
+        track:
+        - d0
+        - z0SinTheta
+        - dphi
+        - deta
+        ...
+    ```
+
+You can find the full example at [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml)

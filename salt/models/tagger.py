@@ -5,6 +5,7 @@ from torch import Tensor, nn
 from torch.nn import ModuleList
 
 from salt.models import Pooling
+from salt.models.dense import attach_context
 
 
 class JetTagger(nn.Module):
@@ -57,7 +58,9 @@ class JetTagger(nn.Module):
         # graph network
         if self.gnn:
             embed_x = self.gnn(embed_x, mask=combined_mask)
-
+            global_feats = inputs.get("global", None)
+            if global_feats is not None:
+                embed_x = attach_context(embed_x, global_feats)
         # pooling
         pooled = self.pool_net(embed_x, mask=combined_mask)
 
