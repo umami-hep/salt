@@ -11,6 +11,11 @@ from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
 
 
+def get_attr(file, attribute, key=None):
+    obj = file if key is None else file[key]
+    return dict(obj.attrs).get(attribute)
+
+
 class SaveConfigCallback(Callback):
     """Saves a LightningCLI config to the log_dir when training starts.
 
@@ -128,8 +133,8 @@ class SaveConfigCallback(Callback):
         meta["val_file"] = str(val_dset.filename)
         meta["num_jets_train"] = len(train_dset)
         meta["num_jets_val"] = len(val_dset)
-        meta["num_unique_jets_train"] = int(train_dset.file.attrs["unique_jets"])
-        meta["num_unique_jets_val"] = int(val_dset.file.attrs["unique_jets"])
+        meta["num_unique_jets_train"] = int(get_attr(train_dset.file, "unique_jets"))
+        meta["num_unique_jets_val"] = int(get_attr(val_dset.file, "unique_jets"))
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
