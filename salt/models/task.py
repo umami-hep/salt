@@ -190,8 +190,10 @@ class VertexingTask(Task):
             mask = None
         b, n, d = x.shape
         ex_size = (b, n, n, d)
-        t_mask = torch.ones(b, n) if mask is None else ~mask
-        t_mask = torch.cat([t_mask, torch.zeros(b, 1)], dim=1)  # pad t_mask for onnx compatibility
+        t_mask = torch.ones(b, n, device=x.device) if mask is None else ~mask
+        t_mask = torch.cat(
+            [t_mask, torch.zeros(b, 1, device=x.device)], dim=1
+        )  # pad t_mask for onnx compatibility
         adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
         adjmat = adjmat.bool() & ~torch.eye(n + 1, n + 1).repeat(b, 1, 1).bool().to(adjmat.device)
 
