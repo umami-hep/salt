@@ -7,7 +7,7 @@ from lightning.pytorch.cli import ArgsType
 
 from salt.callbacks import SaveConfigCallback
 from salt.data.datamodules import JetDataModule
-from salt.lightning import LightningTagger
+from salt.lightning_module import LightningTagger
 from salt.utils.cli import SaltCLI
 
 config_dir = pathlib.Path(__file__).parent / "configs"
