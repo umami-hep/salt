@@ -14,7 +14,7 @@ from torch.nn.functional import softmax
 from tqdm import tqdm
 
 from salt.callbacks.predictionwriter import mask_fill_flattened
-from salt.lightning import LightningTagger
+from salt.lightning_module import LightningTagger
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
 
