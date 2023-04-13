@@ -167,12 +167,14 @@ class JetDataset(Dataset):
             return num_jets_requested
 
     def check_file(self, inputs: Mapping):
+        keys = set(inputs.values())
+        available = set(self.file.keys())
+        if missing := keys - available:
+            raise KeyError(
+                f"The input file '{self.filename}' does not contain the following keys: {missing}."
+                f" Available keys: {available}"
+            )
         for inp in inputs.values():
-            if inp not in self.file:
-                raise KeyError(
-                    f"The input file '{self.filename}' does not a contain an object named '{inp}'."
-                )
-
             if not isinstance(self.file[inp], h5py.Dataset):
                 raise KeyError(f"The object '{inp}' in file '{self.filename}' is not a dataset.")
 
