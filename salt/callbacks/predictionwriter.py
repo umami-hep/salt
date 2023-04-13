@@ -34,7 +34,7 @@ class PredictionWriter(Callback):
         half_precision : bool
             If true, write outputs at half precision
         jet_classes : list
-            List of flavour names in order of label values
+            List of flavour names with the index corresponding to the label values
         """
         super().__init__()
 
@@ -84,14 +84,16 @@ class PredictionWriter(Callback):
 
         # get jet class prediction column names
         train_file = trainer.datamodule.train_dataloader().dataset.file
-        if not self.jet_classes:
+        if not self.jet_classes:  # class names not specified explicitly, get them from train file
             self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
             jet_task = [t for t in module.model.tasks if t.name == "jet_classification"][0]
+            # handle case where the labels have been remapped on the fly during training
             if jet_task.label_map is not None:  # TODO: extend to xbb
                 d = {0: "ujets", 4: "cjets", 5: "bjets"}
                 self.jet_classes = [d[x] for x in jet_task.label_map]
         assert self.jet_classes is not None
-        self.jet_cols = [f"{module.name}_{Flavours[c].px}" for c in self.jet_classes]
+        jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
+        self.jet_cols = [f"{module.name}_{px}" for px in jet_px]
 
         # decide whether to write tracks
         self.task_list = [task.name for task in module.model.tasks]

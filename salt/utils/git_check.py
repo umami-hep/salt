@@ -10,7 +10,9 @@ def check_for_uncommitted_changes():
     try:
         subprocess.check_output(["git", "diff", "--quiet", "--exit-code"])
     except CalledProcessError:
-        raise GitError("Uncommitted changes detected. Please commit them before running.") from None
+        raise GitError(
+            "Uncommitted changes detected. Please commit them before running, or use --force."
+        ) from None
 
 
 def check_for_fork():
