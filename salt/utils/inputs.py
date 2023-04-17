@@ -262,6 +262,7 @@ def write_dummy_file(fname, sd_fname):
 
     with h5py.File(fname, "w") as f:
         f.attrs["unique_jets"] = len(jets)
+        f.attrs["config"] = "{}"
         f.create_dataset("jets", data=jets)
         f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
         f.create_dataset("tracks", data=tracks)

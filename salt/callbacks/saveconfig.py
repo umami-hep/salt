@@ -1,6 +1,8 @@
+import json
 import shutil
 import socket
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
 import h5py
@@ -17,6 +19,9 @@ def get_attr(file, attribute, key=None):
     value = dict(obj.attrs).get(attribute)
     if np.issubdtype(type(value), np.integer):
         value = int(value)
+    if isinstance(value, str):
+        with suppress(json.decoder.JSONDecodeError, TypeError):
+            value = json.loads(value)
     return value
 
 
@@ -130,6 +135,7 @@ class SaveConfigCallback(Callback):
         val_loader = trainer.datamodule.val_dataloader()
         train_dset = train_loader.dataset
         val_dset = val_loader.dataset
+        jet_name = self.config["data"]["inputs"]["jet"]
 
         meta = {}
 
@@ -137,14 +143,16 @@ class SaveConfigCallback(Callback):
         meta["val_file"] = str(val_dset.filename)
         meta["num_jets_train"] = len(train_dset)
         meta["num_jets_val"] = len(val_dset)
+        meta["total_jets_train"] = len(train_dset.file[jet_name])
+        meta["total_jets_val"] = len(val_dset.file[jet_name])
         meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
         meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
+        meta["dsids"] = get_attr(train_dset.file, "dsids")
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
         params = sum(p.numel() for p in self.plm.parameters() if p.requires_grad)
         meta["trainable_params"] = params
-
         meta["num_gpus"] = trainer.num_devices
         meta["gpu_ids"] = trainer.device_ids
         meta["num_workers"] = train_loader.num_workers
@@ -161,17 +169,21 @@ class SaveConfigCallback(Callback):
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 
+        if logger:
+            logger.log_hyperparams(meta)
+
         # save the jet classes, which is stored as an attr in the training file
         with h5py.File(meta["train_file"]) as file:
-            jet_name = self.config["data"]["inputs"]["jet"]
             try:
                 jet_classes = file[f"{jet_name}"].attrs["flavour_label"]
             except KeyError:
                 jet_classes = "not available"
             meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))
 
-        if logger:
-            logger.log_hyperparams(meta)
+        meta["jet_counts_train"] = get_attr(train_dset.file, "jet_counts")
+        meta["jet_counts_val"] = get_attr(val_dset.file, "jet_counts")
+        meta["pp_config_train"] = get_attr(train_dset.file, "config")
+        meta["pp_config_val"] = get_attr(val_dset.file, "config")
 
         meta_path = Path(config_path.parent / "metadata.yaml")
         with open(meta_path, "w") as file:
