@@ -98,14 +98,16 @@ def concat_jet_track(jets: Tensor, tracks: Tensor):
     return inputs
 
 
-def inputs_sep_no_pad(n_batch: int, n_track: int, n_feat: int):
-    jets = torch.rand(n_batch, 2)
-    tracks = torch.rand(n_batch, n_track, n_feat - 2)
+def inputs_sep_no_pad(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
+    jets = torch.rand(n_batch, n_jet_feat)
+    tracks = torch.rand(n_batch, n_track, n_track_feat)
     return jets, tracks
 
 
-def inputs_sep_with_pad(n_batch: int, n_track: int, n_feat: int, p_valid=0.5):
-    jets, tracks = inputs_sep_no_pad(n_batch, n_track, n_feat)
+def inputs_sep_with_pad(
+    n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int, p_valid=0.5
+):
+    jets, tracks = inputs_sep_no_pad(n_batch, n_track, n_jet_feat, n_track_feat)
     mask = get_random_mask(n_batch, n_track, p_valid)
     return jets, tracks, mask
 
@@ -117,8 +119,8 @@ def get_random_mask(n_batch: int, n_track: int, p_valid: float = 0.5):
     return torch.tensor(a)
 
 
-def inputs_concat(n_batch: int, n_track: int, n_feat: int):
-    jets, tracks = inputs_sep_no_pad(n_batch, DEFAULT_NTRACK, n_feat)
+def inputs_concat(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
+    jets, tracks = inputs_sep_no_pad(n_batch, DEFAULT_NTRACK, n_jet_feat, n_track_feat)
     inputs = concat_jet_track(jets, tracks)
     mask = get_random_mask(n_batch, n_track)
     return inputs, mask

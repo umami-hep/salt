@@ -96,6 +96,10 @@ class InputNorm:
         self.jet_name = input_names["jet"]
         self.trk_name = input_names["track"]
         self.variables = variables
+
+        self.jet_dim = len(self.variables["jet"])
+        self.trk_dim = len(self.variables["track"])
+
         with open(self.nd_path) as f:
             self.nd = yaml.safe_load(f)
 
@@ -123,8 +127,10 @@ class ONNXModel(LightningTagger):
         super().__init__(model=model, lrs_config={})
         self.norm = norm
         self.include_aux = include_aux
+
         assert len(self.in_dims) == 1, "Multi input ONNX models are not yet supported."
-        jets, tracks = inputs_sep_no_pad(1, 40, self.in_dims[0])
+
+        jets, tracks = inputs_sep_no_pad(1, 40, norm.jet_dim, norm.trk_dim)
         self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
@@ -150,9 +156,10 @@ class ONNXModel(LightningTagger):
 
 def compare_output(pt_model, onnx_session, norm, include_aux, n_track=40):
     n_batch = 1
-    n_feat = pt_model.in_dims[0]
 
-    jets, tracks, mask = inputs_sep_with_pad(n_batch, n_track, n_feat, p_valid=1)
+    jets, tracks, mask = inputs_sep_with_pad(
+        n_batch, n_track, norm.jet_dim, norm.trk_dim, p_valid=1
+    )
 
     inputs_pt = {"track": concat_jet_track(*norm(jets, tracks))}
     outputs_pt = pt_model(inputs_pt, {"track": mask})[0]
