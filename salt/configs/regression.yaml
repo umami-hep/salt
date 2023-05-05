@@ -14,7 +14,7 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args:
-                    input_size: 23
+                    input_size: 21
                     output_size: &embed_dim 128
                     hidden_layers: [256]
                     activation: &activation SiLU
@@ -85,5 +85,3 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-      - numberOfPixelHoles
-      - numberOfSCTHoles

@@ -25,7 +25,7 @@ model:
                 net:
                   class_path: salt.models.Dense
                   init_args:
-                    input_size: 30
+                    input_size: 28
                     output_size: *embed_dim
                     hidden_layers: [256]
                     activation: *activation
@@ -199,8 +199,6 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-      - numberOfPixelHoles
-      - numberOfSCTHoles
       #- numberOfTRTHits
       #- leptonID
     electron:
