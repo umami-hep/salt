@@ -90,8 +90,8 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: 22
-                    output_size: &embed_dim 128
-                    hidden_layers: [128]
+                    output_size: &embed_dim 192
+                    hidden_layers: [256]
                     activation: &activation SiLU
                     norm_layer: &norm_layer LayerNorm
 
@@ -109,7 +109,7 @@ model:
           dense_config:
             norm_layer: *norm_layer
             activation: *activation
-            hidden_layers: [128]
+            hidden_layers: [256]
             dropout: &dropout 0.1
 
       pool_net:
@@ -130,12 +130,13 @@ model:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
                     weight: [2.75, 1.0, 1.52, 1.52]
+                    ignore_index: -1
                 net:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: *out_dim
                     output_size: 4
-                    hidden_layers: [64, 32]
+                    hidden_layers: [128, 64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
@@ -156,7 +157,7 @@ model:
                     input_size: 128
                     context_size: 128
                     output_size: 8
-                    hidden_layers: [64, 32]
+                    hidden_layers: [128, 64, 32]
                     activation: *activation
                     norm_layer: *norm_layer
                     dropout: *dropout
@@ -197,6 +198,6 @@ model:
                   init_args:
                     input_size: 256
                     context_size: *out_dim
-                    hidden_layers: [64, 32]
+                    hidden_layers: [128, 64, 32]
                     output_size: 1
                     activation: *activation

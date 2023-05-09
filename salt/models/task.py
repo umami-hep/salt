@@ -224,7 +224,7 @@ class VertexingTask(Task):
         match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
 
         # Remove matching pairs if either of them come from the negative class
-        unique_matrix = labels == -2
+        unique_matrix = labels < 0
         unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
         match_matrix = match_matrix * ~unique_matrix
 
@@ -236,7 +236,13 @@ class VertexingTask(Task):
 
         # If reduction is none and have weight labels, weight the loss
         weights = self.get_weights(labels_dict[f"{self.input_type}_origin"], adjmat)
-        loss = (loss * weights).mean()
+        weighted_loss = loss * weights
+
+        # Calculate the number of non-masked elements
+        num_non_masked_elements = match_matrix.sum()
+
+        # Take average over the non-masked elements
+        loss = weighted_loss.sum() / num_non_masked_elements
 
         return loss * self.weight
 
