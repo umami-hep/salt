@@ -137,7 +137,9 @@ class PredictionWriter(Callback):
         task_list = [task.name for task in module.model.tasks]
 
         if self.write_tracks and (
-            "track_classification" in task_list or "track_vertexing" in task_list
+            "track_origin" in task_list
+            or "track_type" in task_list
+            or "track_vertexing" in task_list
         ):
             if self.track_variables is None:
                 self.track_variables = self.file[self.track].dtype.names
