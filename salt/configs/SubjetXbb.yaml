@@ -1,18 +1,37 @@
 name: SubjetXbb
 
 data:
-  train_file: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-hybrid-resampled_scaled_shuffled.h5
-  val_file: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-hybrid-validation-resampled_scaled_shuffled.h5
-  norm_dict: /share/rcifdata/svanstroud/data/xbb/tutorial/Xbb-scale_dict.json
+  train_file: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/pp_output_train.h5
+  val_file: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/pp_output_val.h5
+  norm_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/norm_dict.yaml
+  class_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/class_dict.yaml
   inputs:
     jet: jets
     track: subjets
-  num_jets_train: 5_000_000
-  num_jets_val: 500_000
+  variables:
+    jet:
+      - pt
+      - eta
+      - mass
+    track:
+      - pt
+      - eta
+      - mass
+      - energy
+      - deta
+      - dphi
+      - GN2v00_pb
+      - GN2v00_pc
+      - GN2v00_pu
+  num_jets_train: -1
+  num_jets_val: -1
   num_jets_test: -1
+  batch_size: 1000
+  num_workers: 15
 
 trainer:
-  max_epochs: 10
+  max_epochs: 50
+  devices: 1
   callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
@@ -26,6 +45,17 @@ trainer:
           - R10TruthLabel_R22v1
           - R10TruthLabel_R22v1_TruthJetMass
           - R10TruthLabel_R22v1_TruthJetPt
+          - GN2Xv00_phbb
+          - GN2Xv00_phcc
+          - GN2Xv00_ptop
+          - GN2Xv00_pqcd
+          - GN2XWithMassv00_phbb
+          - GN2XWithMassv00_phcc
+          - GN2XWithMassv00_ptop
+          - GN2XWithMassv00_pqcd
+          - Xbb2020v3_Higgs
+          - Xbb2020v3_Top
+          - Xbb2020v3_QCD
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
