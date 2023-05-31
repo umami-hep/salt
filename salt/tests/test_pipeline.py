@@ -108,6 +108,15 @@ class TestTrainMisc:
         args += ["--trainer.callbacks.track_variables=null"]
         run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
 
+    def test_truncate_inputs(self, tmp_path) -> None:
+        args = ["--data.num_inputs.track=10"]
+        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
+
+    def test_truncate_inputs_error(self, tmp_path) -> None:
+        args = ["--data.num_inputs.this_should_error=10"]
+        with pytest.raises(ValueError):
+            run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
+
 
 @pytest.mark.filterwarnings(w)
 def test_GN1(tmp_path) -> None:

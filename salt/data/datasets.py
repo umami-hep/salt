@@ -18,9 +18,10 @@ class JetDataset(Dataset):
         norm_dict: str,
         variables: dict,
         num_jets: int = -1,
-        concat_jet_tracks: int = True,
+        concat_jet_tracks: bool = True,
         labels: Mapping = None,
         nan_to_num: bool = False,
+        num_inputs: dict = None,
     ):
         """A map-style dataset for loading jets from a structured array file.
 
@@ -42,21 +43,29 @@ class JetDataset(Dataset):
             Mapping from task name to label name. Set automatically by the CLI.
         nan_to_num : bool, optional
             Convert nans to zeros, by default False
+        num_inputs : dict, optional
+            Truncate the number of inputs to this number, by default None
         """
         super().__init__()
 
         # check labels have been configured
-        self.labels = labels
-        if self.labels is None:
-            self.labels = {}
+        self.labels = labels if labels is not None else {}
 
-        # load input info
         self.filename = filename
         self.file = h5py.File(self.filename, "r")
         self.input_names = inputs
         self.input_types = dict(map(reversed, self.input_names.items()))  # type:ignore
         self.concat_jet_tracks = concat_jet_tracks
         self.nan_to_num = nan_to_num
+        self.num_inputs = num_inputs
+
+        # check that num_inputs contains valid keys
+        if self.num_inputs is not None and not set(self.num_inputs).issubset(self.input_names):
+            raise ValueError(
+                f"num_inputs keys {self.num_inputs.keys()} must be a subset of input_names keys"
+                f" {self.input_names.keys()}"
+            )
+
         with open(norm_dict) as f:
             self.norm_dict = yaml.safe_load(f)
 
@@ -116,23 +125,37 @@ class JetDataset(Dataset):
         labels = {}
         masks = {}
 
+        # loop over input types
         for input_type in self.input_names:
+            # load data (inputs + labels) for this input type
             batch = self.arrays[input_type]
             shape = (jet_idx.stop - jet_idx.start,) + self.dss[input_type].shape[1:]
             batch.resize(shape, refcheck=False)
             self.dss[input_type].read_direct(batch, jet_idx)
+
+            # truncate inputs
+            if self.num_inputs is not None and input_type in self.num_inputs:
+                batch = batch[:, : int(self.num_inputs[input_type])]
+
+            # process inputs for this input type
             scaled_inputs = self.scale_input(batch, input_type)
             inputs[input_type] = torch.from_numpy(scaled_inputs)
+
+            # process labels for this input type
             for name, (group, label) in self.labels.items():
                 if input_type == group:
                     dtype = torch.long if np.issubdtype(batch[label].dtype, np.integer) else None
                     labels[name] = torch.as_tensor(batch[label].copy(), dtype=dtype)
+
+                # hack to handle the old umami train file format
                 if input_type == "jet" and group == "/":
                     labels[name] = torch.as_tensor(self.file["labels"][jet_idx], dtype=torch.long)
+
+            # get the padding mask
             if "valid" in batch.dtype.names:
                 masks[input_type] = ~torch.from_numpy(batch["valid"])
 
-        # concatenate and fill nan
+        # concatenate jet and track inputs, and fill padded entries with zeros
         for name in inputs:
             if self.concat_jet_tracks and name not in ["jet", "global"]:
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])

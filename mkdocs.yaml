@@ -5,7 +5,7 @@ site_url: http://ftag-salt.docs.cern.ch/
 
 repo_name: GitLab
 repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/
-edit_uri: 'tree/main/docs'
+edit_uri: "tree/main/docs"
 
 theme:
   name: material
@@ -15,10 +15,11 @@ theme:
     - content.code.copy
 
 nav:
-  - Introduction: 'index.md'
+  - Introduction: "index.md"
   - Setup: setup.md
   - Preprocessing: preprocessing.md
   - Training: training.md
+  - Configuration: configuration.md
   - Evaluation: evaluation.md
   - ONNX Export: export.md
   - Contributing: contributing.md
@@ -48,6 +49,6 @@ markdown_extensions:
       permalink: "#"
 
 extra_javascript:
-  - 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'
+  - "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML"
 
 copyright: Copyright &copy; 2022 - 2023 CERN for the benefit of the ATLAS collaboration
