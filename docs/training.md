@@ -68,6 +68,7 @@ For a full list of available arguments run
 salt fit --help
 ```
 
+
 #### Choosing GPUs
 
 By default the config will try to use the first available GPU, but
@@ -77,6 +78,21 @@ Take a look [here](https://pytorch-lightning.readthedocs.io/en/latest/accelerato
 ??? warning "Check GPU usage before starting training"
 
     You should check with `nvidia-smi` that any GPUs you use are not in use by some other user before starting training.
+
+#### Resuming Training
+
+Model checkpoints are saved in timestamped directories under `logs/`.
+These directories also get a copy of the fully merging training config (`config.yaml`), and a copy of the umami scale dict.
+To resume a training, point to a previously saved config and a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
+
+```bash
+salt fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
+```
+
+The full training state, including the state of the optimiser, is resumed.
+The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
+where it left off.
+
 
 ### Reproducibility
 
@@ -108,22 +124,6 @@ This means for example that weight initialisation and data shuffling happen in a
 ??? info "Stochastic operations can still lead to divergences between training runs"
 
     For more info take a look [here](https://pytorch.org/docs/stable/notes/randomness.html).
-
-
-
-### Resuming Training
-
-Model checkpoints are saved in timestamped directories under `logs/`.
-These directories also get a copy of the fully merging training config (`config.yaml`), and a copy of the umami scale dict.
-To resume a training, point to a previously saved config and a `.ckpt` checkpoint file by using the `--ckpt_path` argument.
-
-```bash
-salt fit --config logs/run/config.yaml --ckpt_path path/to/checkpoint.ckpt
-```
-
-The full training state, including the state of the optimiser, is resumed.
-The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
-where it left off.
 
 
 
