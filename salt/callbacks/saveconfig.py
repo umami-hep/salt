@@ -1,3 +1,4 @@
+import contextlib
 import json
 import shutil
 import socket
@@ -145,9 +146,6 @@ class SaveConfigCallback(Callback):
         meta["num_jets_val"] = len(val_dset)
         meta["total_jets_train"] = len(train_dset.file[jet_name])
         meta["total_jets_val"] = len(val_dset.file[jet_name])
-        meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
-        meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
-        meta["dsids"] = get_attr(train_dset.file, "dsids")
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
@@ -156,6 +154,11 @@ class SaveConfigCallback(Callback):
         meta["num_gpus"] = trainer.num_devices
         meta["gpu_ids"] = trainer.device_ids
         meta["num_workers"] = train_loader.num_workers
+
+        with contextlib.suppress(KeyError):
+            meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
+            meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
+            meta["dsids"] = get_attr(train_dset.file, "dsids")
 
         git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
         meta["git_hash"] = git_hash.decode("ascii").strip()
@@ -180,10 +183,11 @@ class SaveConfigCallback(Callback):
                 jet_classes = "not available"
             meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))
 
-        meta["jet_counts_train"] = get_attr(train_dset.file, "jet_counts")
-        meta["jet_counts_val"] = get_attr(val_dset.file, "jet_counts")
-        meta["pp_config_train"] = get_attr(train_dset.file, "config")
-        meta["pp_config_val"] = get_attr(val_dset.file, "config")
+        with contextlib.suppress(KeyError):
+            meta["jet_counts_train"] = get_attr(train_dset.file, "jet_counts")
+            meta["jet_counts_val"] = get_attr(val_dset.file, "jet_counts")
+            meta["pp_config_train"] = get_attr(train_dset.file, "config")
+            meta["pp_config_val"] = get_attr(val_dset.file, "config")
 
         meta_path = Path(config_path.parent / "metadata.yaml")
         with open(meta_path, "w") as file:

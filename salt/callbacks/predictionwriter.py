@@ -66,21 +66,20 @@ class PredictionWriter(Callback):
         if stage != "test":
             return
 
+        # some basic info
         self.trainer = trainer
+        self.ds = trainer.datamodule.test_dataloader().dataset
+        self.file = self.ds.file
+        self.num_jets = len(self.ds)
 
         # inputs names
-        self.jet = trainer.datamodule.inputs["jet"]
-        self.track = trainer.datamodule.inputs["track"]
+        self.jet = self.ds.input_names["jet"]
+        self.track = self.ds.input_names["track"]
 
         # place to store intermediate outputs
         self.task_names = [task.name for task in module.model.tasks]
         self.outputs: dict = {task: [] for task in self.task_names}
         self.mask: list = []
-
-        # get test dataset
-        self.ds = trainer.datamodule.test_dataloader().dataset
-        self.file = self.ds.file
-        self.num_jets = len(self.ds)
 
         # get jet class prediction column names
         train_file = trainer.datamodule.train_dataloader().dataset.file

@@ -11,19 +11,15 @@ class JetDataModule(L.LightningDataModule):
         self,
         train_file: str,
         val_file: str,
-        inputs: dict,
         batch_size: int,
         num_workers: int,
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
-        norm_dict: str,
-        variables: dict,
-        labels: dict = None,
         move_files_temp: str = None,
         class_dict: str = None,
         test_file: str = None,
-        nan_to_num: bool = False,
+        **kwargs,
     ):
         """h5 jet datamodule.
 
@@ -33,8 +29,6 @@ class JetDataModule(L.LightningDataModule):
             Training file path
         val_file : str
             Validation file path
-        inputs : dict
-            Input dataset name for each input type
         batch_size : int
             Number of jets to process in each step
         num_workers : int
@@ -45,39 +39,29 @@ class JetDataModule(L.LightningDataModule):
             Total number of validation jets
         num_jets_test : int
             Total number of testing jets
-        labels : dict
-            Mapping from task name to label name
-        variables : dict
-            Dict of variables to use for each input type
         move_files_temp : str
             Directory to move training files to, default is None,
             which will result in no copying of files
-        norm_dict : str
-            Path to umami preprocessing scale dict file
         class_dict : str
             Path to umami preprocessing scale dict file
         test_file : str
             Test file path, default is None
-        nan_to_num : bool, optinal
-            Convert nans to zeros, by default False
+        **kwargs
+            Additional arguments to pass to the Dataset class
         """
         super().__init__()
 
         self.train_file = train_file
         self.val_file = val_file
         self.test_file = test_file
-        self.inputs = inputs
-        self.labels = labels
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_jets_train = num_jets_train
         self.num_jets_val = num_jets_val
         self.num_jets_test = num_jets_test
-        self.variables = variables
-        self.norm_dict = norm_dict
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
-        self.nan_to_num = nan_to_num
+        self.kwargs = kwargs
 
     def prepare_data(self):
         if self.move_files_temp and not self.trainer.fast_dev_run:
@@ -99,23 +83,15 @@ class JetDataModule(L.LightningDataModule):
         if stage == "fit" or stage == "test":
             self.train_dset = JetDataset(
                 filename=self.train_file,
-                inputs=self.inputs,
-                labels=self.labels,
-                variables=self.variables,
-                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_train,
-                nan_to_num=self.nan_to_num,
+                **self.kwargs,
             )
 
         if stage == "fit":
             self.val_dset = JetDataset(
                 filename=self.val_file,
-                inputs=self.inputs,
-                labels=self.labels,
-                variables=self.variables,
-                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_val,
-                nan_to_num=self.nan_to_num,
+                **self.kwargs,
             )
 
         # Only print train/val dataset details when actually training
@@ -125,14 +101,10 @@ class JetDataModule(L.LightningDataModule):
 
         if stage == "test":
             assert self.test_file is not None, "No test file specified, see --data.test_file"
-            assert self.norm_dict is not None, "No scale dict specified, see --data.norm_dict"
             self.test_dset = JetDataset(
                 filename=self.test_file,
-                inputs=self.inputs,
-                variables=self.variables,
-                norm_dict=self.norm_dict,
                 num_jets=self.num_jets_test,
-                nan_to_num=self.nan_to_num,
+                **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
 
