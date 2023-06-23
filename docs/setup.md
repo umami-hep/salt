@@ -139,7 +139,7 @@ python -m pip install -e .
 
 To verify your installation, you can run the [test suite](contributing.md#test-suite).
 
-??? info "Installation problems"
+??? failure "`ModuleNotFoundError` or `error: can't create or remove files in install directory` problems"
 
     If you get an `error: can't create or remove files in install directory` when installing
     or get `ModuleNotFoundError: No module named 'salt'` when trying to run the code,
@@ -148,6 +148,20 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     ```bash
     source setup/install.sh
     ```
+
+??? failure "`ERROR: Could not build wheels for jsonnet` during `pip install`"
+    
+    If you see the following message when running `pip install`:
+    ```
+    Failed to build jsonnet
+    ERROR: Could not build wheels for jsonnet, which is required to install pyproject.toml-based projects
+    ```
+    You need to first install `jsonnet` via conda with
+    ```
+    conda install jsonnet
+    ```
+    and then re-run `pip install`.
+
 
 ??? info "Installing `h5ls`"
 
