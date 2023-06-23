@@ -6,9 +6,9 @@ torch==2.0.1
 lightning==2.0.2
 jsonargparse[all]==4.19.0
 torchmetrics==0.11.4
-comet_ml==3.32.4
+comet_ml==3.33.5
 tqdm==4.65.0
-rich==13.2.0
+rich==13.4.2
 pre-commit==3.2.1
 onnx==1.13.0
 onnxruntime==1.13.1
