@@ -103,6 +103,9 @@ class SaltCLI(LightningCLI):
         if self.subcommand == "test":
             print("\n" + "-" * 100)
 
+            # don't load labels for evaluation
+            sc["data"]["labels"] = None
+
             # modify callbacks when testing
             self.save_config_callback = None
             sc["trainer.logger"] = False
