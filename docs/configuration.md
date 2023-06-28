@@ -74,6 +74,17 @@ For example, for the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml)
 You can find the full example at [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml)
 
 
+#### Edge Features
+
+It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
+
+- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
+- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
+- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
+- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
+- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
+
+
 #### Truncating Inputs
 
 You can truncate the number of tracks used for training.

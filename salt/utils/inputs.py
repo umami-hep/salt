@@ -14,6 +14,9 @@ from salt.utils.arrays import join_structured_arrays
 DEFAULT_NTRACK = 40
 
 JET_VARS = [
+    "pt",
+    "eta",
+    "mass",
     "pt_btagJes",
     "eta_btagJes",
     "softMuon_pt",
@@ -30,6 +33,20 @@ JET_VARS = [
     "softMuon_ip3dZ0Significance",
     "softMuon_ip3dD0Uncertainty",
     "softMuon_ip3dZ0Uncertainty",
+    "R10TruthLabel_R22v1",
+    "R10TruthLabel_R22v1_TruthJetMass",
+    "R10TruthLabel_R22v1_TruthJetPt",
+    "GN2Xv00_phbb",
+    "GN2Xv00_phcc",
+    "GN2Xv00_ptop",
+    "GN2Xv00_pqcd",
+    "GN2XWithMassv00_phbb",
+    "GN2XWithMassv00_phcc",
+    "GN2XWithMassv00_ptop",
+    "GN2XWithMassv00_pqcd",
+    "Xbb2020v3_Higgs",
+    "Xbb2020v3_Top",
+    "Xbb2020v3_QCD",
 ]
 
 TRACK_VARS = [
@@ -54,6 +71,10 @@ TRACK_VARS = [
     "numberOfSCTSharedHits",
     "numberOfPixelHoles",
     "numberOfSCTHoles",
+    "pt",
+    "eta",
+    "phi",
+    "subjetIndex",
 ]
 
 ELECTRON_VARS = [
@@ -170,7 +191,7 @@ def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_track
     return jets, tracks
 
 
-def write_dummy_file(fname, sd_fname):
+def write_dummy_file(fname, sd_fname, make_xbb=False):
     """TODO: merge with atlas-ftag-tools test file generation."""
     with open(sd_fname) as f:
         sd = yaml.safe_load(f)
@@ -179,6 +200,7 @@ def write_dummy_file(fname, sd_fname):
     jet_vars = [
         "pt",
         "eta",
+        "mass",
         "pt_btagJes",
         "eta_btagJes",
         "HadronConeExclTruthLabelPt",
@@ -198,6 +220,20 @@ def write_dummy_file(fname, sd_fname):
         "softMuon_ip3dZ0Significance",
         "softMuon_ip3dD0Uncertainty",
         "softMuon_ip3dZ0Uncertainty",
+        "R10TruthLabel_R22v1",
+        "R10TruthLabel_R22v1_TruthJetMass",
+        "R10TruthLabel_R22v1_TruthJetPt",
+        "GN2Xv00_phbb",
+        "GN2Xv00_phcc",
+        "GN2Xv00_ptop",
+        "GN2Xv00_pqcd",
+        "GN2XWithMassv00_phbb",
+        "GN2XWithMassv00_phcc",
+        "GN2XWithMassv00_ptop",
+        "GN2XWithMassv00_pqcd",
+        "Xbb2020v3_Higgs",
+        "Xbb2020v3_Top",
+        "Xbb2020v3_QCD",
     ]
 
     track_vars = list(sd["tracks"])
@@ -234,7 +270,10 @@ def write_dummy_file(fname, sd_fname):
     )
     jets = rng.random(shapes_jets["inputs"])
     jets = u2s(jets, jets_dtype)
-    jets["flavour_label"] = rng.choice([0, 1, 2], size=n_jets)
+    if make_xbb:
+        jets["flavour_label"] = rng.choice([0, 1, 2, 3], size=n_jets)
+    else:
+        jets["flavour_label"] = rng.choice([0, 1, 2], size=n_jets)
     jets["HadronConeExclTruthLabelID"] = rng.choice([0, 4, 5], size=n_jets)
 
     # setup tracks
@@ -264,7 +303,18 @@ def write_dummy_file(fname, sd_fname):
         f.attrs["unique_jets"] = len(jets)
         f.attrs["config"] = "{}"
         f.create_dataset("jets", data=jets)
-        f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
+        if make_xbb:
+            f["jets"].attrs["flavour_label"] = ["hbb", "hcc", "top", "qcd"]
+        else:
+            f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
         f.create_dataset("tracks", data=tracks)
         f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
+
+
+def as_half(typestr) -> np.dtype:
+    """Cast float type to half precision."""
+    t = np.dtype(typestr)
+    if t.kind != "f" or t.itemsize != 2:
+        return t
+    return np.dtype("f2")

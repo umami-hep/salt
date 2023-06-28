@@ -14,7 +14,11 @@ from salt.models.task import (
     Task,
     VertexingTask,
 )
-from salt.models.transformer import TransformerCrossAttentionLayer, TransformerEncoder
+from salt.models.transformer import (
+    TransformerCrossAttentionLayer,
+    TransformerEncoder,
+    TransformerEncoderLayer,
+)
 
 __all__ = [
     "Dense",
@@ -28,6 +32,7 @@ __all__ = [
     "CrossAttentionPooling",
     "Task",
     "TransformerEncoder",
+    "TransformerEncoderLayer",
     "TransformerCrossAttentionLayer",
     "ClassificationTask",
     "RegressionTask",
