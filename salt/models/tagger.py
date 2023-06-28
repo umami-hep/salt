@@ -38,15 +38,20 @@ class JetTagger(nn.Module):
         self.tasks = tasks
         self.gnn = gnn
 
-        # check init nets have the same output embedding size
+        # check init nets have the same output embedding size (unless an edge init net is present)
         sizes = {list(init_net.parameters())[-1].shape[0] for init_net in self.init_nets}
-        assert len(sizes) == 1
+        names = {init_net.name for init_net in self.init_nets}
+        assert len(sizes) == 1 or ("edge" in names and len(sizes) == 2)
 
     def forward(self, inputs: dict, mask: dict, labels: dict = None):
         # initial embeddings
         embed_x = {}
+        edge_x = None
         for init_net in self.init_nets:
-            embed_x[init_net.name] = init_net(inputs)
+            if init_net.name != "edge":
+                embed_x[init_net.name] = init_net(inputs)
+            else:
+                edge_x = init_net(inputs)
 
         # concatenate different input groups
         # TODO: use a flag as to which input type this is
@@ -57,10 +62,11 @@ class JetTagger(nn.Module):
 
         # graph network
         if self.gnn:
-            embed_x = self.gnn(embed_x, mask=combined_mask)
+            embed_x = self.gnn(embed_x, mask=combined_mask, edge_x=edge_x)
             global_feats = inputs.get("global", None)
             if global_feats is not None:
                 embed_x = attach_context(embed_x, global_feats)
+
         # pooling
         pooled = self.pool_net(embed_x, mask=combined_mask)
 

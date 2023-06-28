@@ -7,7 +7,8 @@ import yaml
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
-from salt.utils.inputs import concat_jet_track
+from salt.data.edge_features import get_dtype_edge, get_inputs_edge
+from salt.utils.inputs import as_half, concat_jet_track
 
 
 class JetDataset(Dataset):
@@ -87,7 +88,10 @@ class JetDataset(Dataset):
             self.dss[input_type] = self.file[input_name]
             variables = [lab for (g, lab) in self.labels.values() if g == input_type]  # type:ignore
             variables += self.variables[input_type]
-            dtype = get_dtype(self.file[input_name], variables)
+            if input_type == "edge":
+                dtype = get_dtype_edge(self.file[input_name], variables)
+            else:
+                dtype = get_dtype(self.file[input_name], variables)
             self.arrays[input_type] = np.array(0, dtype=dtype)
 
         # set number of jets
@@ -98,10 +102,14 @@ class JetDataset(Dataset):
         for input_type, input_name in self.input_names.items():
             nd = self.norm_dict[input_name]
             var = self.variables[input_type]
-            mean_key = "mean" if "mean" in nd[var[0]] else "shift"
-            std_key = "std" if "std" in nd[var[0]] else "scale"
-            means = np.array([nd[v][mean_key] for v in var], dtype=np.float32)
-            stds = np.array([nd[v][std_key] for v in var], dtype=np.float32)
+            if input_type == "edge":
+                means = np.array([0.0 for v in var], dtype=np.float32)
+                stds = np.array([1.0 for v in var], dtype=np.float32)
+            else:
+                mean_key = "mean" if "mean" in nd[var[0]] else "shift"
+                std_key = "std" if "std" in nd[var[0]] else "scale"
+                means = np.array([nd[v][mean_key] for v in var], dtype=np.float32)
+                stds = np.array([nd[v][std_key] for v in var], dtype=np.float32)
             self.norm[input_type] = {"mean": means, "std": stds}
 
     def __len__(self):
@@ -138,8 +146,13 @@ class JetDataset(Dataset):
                 batch = batch[:, : int(self.num_inputs[input_type])]
 
             # process inputs for this input type
-            scaled_inputs = self.scale_input(batch, input_type)
-            inputs[input_type] = torch.from_numpy(scaled_inputs)
+            if input_type == "edge":
+                inputs[input_type] = torch.from_numpy(
+                    get_inputs_edge(batch, self.variables[input_type])
+                )
+            else:
+                scaled_inputs = self.scale_input(batch, input_type)
+                inputs[input_type] = torch.from_numpy(scaled_inputs)
 
             # process labels for this input type
             for name, (group, label) in self.labels.items():
@@ -152,12 +165,12 @@ class JetDataset(Dataset):
                     labels[name] = torch.as_tensor(self.file["labels"][jet_idx], dtype=torch.long)
 
             # get the padding mask
-            if "valid" in batch.dtype.names:
+            if "valid" in batch.dtype.names and input_type != "edge":
                 masks[input_type] = ~torch.from_numpy(batch["valid"])
 
         # concatenate jet and track inputs, and fill padded entries with zeros
         for name in inputs:
-            if self.concat_jet_tracks and name not in ["jet", "global"]:
+            if self.concat_jet_tracks and name not in ["jet", "global", "edge"]:
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
                 inputs[name][masks[name]] = 0
 
@@ -215,11 +228,3 @@ def get_dtype(ds, variables=None) -> np.dtype:
         )
 
     return np.dtype([(n, as_half(x)) for n, x in ds.dtype.descr if n in variables])
-
-
-def as_half(typestr) -> np.dtype:
-    """Cast float type to half precision."""
-    t = np.dtype(typestr)
-    if t.kind != "f" or t.itemsize != 2:
-        return t
-    return np.dtype("f2")

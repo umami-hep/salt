@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor
-from torch.nn.functional import softmax
+from torch.nn.functional import sigmoid, softmax
 
 from salt.models.dense import add_dims
 
@@ -62,9 +62,11 @@ class MultiheadAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         attention: nn.Module,
+        edge_embed_dim: int = 0,
         k_dim: int | None = None,
         v_dim: int | None = None,
         out_proj: bool = True,
+        update_edges: bool = False,
     ) -> None:
         """Generic multihead attention.
 
@@ -105,27 +107,38 @@ class MultiheadAttention(nn.Module):
             Number of attention heads. The embed_dim is split into num_heads chunks.
         attention : nn.Module
             Type of attention (pooling operation) to use.
+        edge_embed_dim: int, optional
+            Model embedding dimension for edge features.
         k_dim : int, optional
             Key dimension, by default None where it assumes embed_dim
         v_dim : int, optional
             Value dimension, by default None where it assumes embed_dim
         out_proj : bool
             An optional output linear layer
+        update_edges : bool, optional
+            Indicate whether to update edge features.
         """
         super().__init__()
 
         # Check that the dimension of each heads makes internal sense
         if embed_dim % num_heads != 0:
             raise ValueError(f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}")
+        elif edge_embed_dim % num_heads != 0:
+            raise ValueError(
+                f"edge_embed_dim {edge_embed_dim} must be divisible by num_heads {num_heads}"
+            )
 
         # Model base attributes
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.out_proj = out_proj
+        self.edge_embed_dim = edge_embed_dim
+        self.edge_head_dim = edge_embed_dim // num_heads
         self.k_dim = k_dim or embed_dim
         self.v_dim = v_dim or embed_dim
         self.scale = math.sqrt(self.head_dim)
+        self.update_edges = update_edges
 
         # Explicitly instantiate the attention class if passed as a dictionary
         if isinstance(attention, Mapping):
@@ -136,6 +149,13 @@ class MultiheadAttention(nn.Module):
         self.linear_q = nn.Linear(self.embed_dim, self.embed_dim)
         self.linear_k = nn.Linear(self.k_dim, self.embed_dim)
         self.linear_v = nn.Linear(self.v_dim, self.embed_dim)
+        if self.edge_embed_dim > 0:
+            self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads)
+            self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads)
+            if self.update_edges:
+                self.linear_e_out = nn.Linear(self.num_heads, self.edge_embed_dim)
+            else:
+                self.register_buffer("linear_e_out", None)
         if self.out_proj:
             self.linear_out = nn.Linear(self.embed_dim, self.embed_dim)
         else:
@@ -154,6 +174,7 @@ class MultiheadAttention(nn.Module):
         q: Tensor,
         k: Tensor | None = None,
         v: Tensor | None = None,
+        edges: Tensor | None = None,
         q_mask: BoolTensor | None = None,
         kv_mask: BoolTensor | None = None,
         attn_mask: BoolTensor | None = None,
@@ -169,6 +190,8 @@ class MultiheadAttention(nn.Module):
             Seperate sequence from which to generate the keys, by default None
         v : Optional[Tensor], optional
             Seperate sequence from which to generate the values, by default None
+        edges : Optional[Tensor], optional
+            Main sequence for edge features (used to calculate E and G)
         q_mask : Optional[BoolTensor], optional
             Shows which elements of q are real verses padded, by default None
         kv_mask : Optional[BoolTensor], optional
@@ -199,18 +222,40 @@ class MultiheadAttention(nn.Module):
         # Apply the input projections (B,H,L,HD)
         q_proj, k_proj, v_proj = self.input_projections(q, k, v)
 
+        # Calculate edge feature matrices E, G and reshape them to (B,L,L,H)
+        if edges is not None:
+            e = self.linear_e(edges)
+            g = sigmoid(self.linear_g(edges))
+            attn_bias = e if attn_bias is None else attn_bias + e
+
         # Calculate attention scores (B,H,Lq,Lk)
-        attn_scores = self.attention(q_proj, k_proj, self.scale, attn_mask, attn_bias)
+        attn_weights = self.attention(
+            q_proj, k_proj, self.scale, attn_mask, attn_bias, self.update_edges
+        )
+        if self.update_edges:
+            attn_weights, attn_scores = attn_weights
+
+        # Apply gating to attention scores
+        if edges is not None:
+            attn_weights = attn_weights * g.permute(0, 3, 1, 2)
 
         # Use the scores for pooling and reshape (B, Lv, F)
-        out = torch.matmul(attn_scores, v_proj)
+        out = torch.matmul(attn_weights, v_proj)
         out = out.transpose(1, 2).contiguous().view(b_size, -1, self.embed_dim)
+
+        # update edges with dot product attention scores (if desired)
+        edge_out = None
+        if self.update_edges:
+            edge_out = self.linear_e_out(attn_scores.permute(0, 2, 3, 1))
 
         # Optional output layer
         if self.out_proj:
             out = self.linear_out(out)
 
-        return out
+        if edges is not None:
+            return out, edge_out
+        else:
+            return out
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -234,6 +279,7 @@ class ScaledDotProductAttention(nn.Module):
         scale: Tensor,
         mask: BoolTensor | None = None,
         attn_bias: Tensor | None = None,
+        return_scores: bool = False,
     ) -> Tensor:
         # inputs are of shape (batch, heads, sequence, head_dim)
 
@@ -250,7 +296,10 @@ class ScaledDotProductAttention(nn.Module):
         # softmax, use the mask to not included padded information
         attention_weights = masked_softmax(scores, mask)
 
-        return attention_weights
+        if return_scores:
+            return attention_weights, scores
+        else:
+            return attention_weights
 
 
 class GATv2Attention(nn.Module):
@@ -272,6 +321,7 @@ class GATv2Attention(nn.Module):
         scale: Tensor,
         mask: BoolTensor | None = None,
         attn_bias: Tensor | None = None,
+        return_scores: bool = False,
     ) -> Tensor:
         # inputs are (B, H, Lq/k, D)
         B, H, Lq, D = q.shape
@@ -291,4 +341,7 @@ class GATv2Attention(nn.Module):
         # softmax
         attention_weights = masked_softmax(scores, mask)
 
-        return attention_weights
+        if return_scores:
+            return attention_weights, scores
+        else:
+            return attention_weights

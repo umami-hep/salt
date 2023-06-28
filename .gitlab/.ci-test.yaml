@@ -23,6 +23,11 @@ test-union-find:
   script:
     - $TEST_CMD salt/tests/test_union_find.py
 
+test-edge-features:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_edges.py
+
 test-utils:
   <<: *test-template
   script:
@@ -37,6 +42,11 @@ test-GN2:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_GN2
+
+test-GN2XE:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2XE
 
 test-GN1_GATv2:
   <<: *test-template
