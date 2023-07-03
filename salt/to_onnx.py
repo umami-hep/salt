@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from salt.callbacks.predictionwriter import mask_fill_flattened
 from salt.lightning_module import LightningTagger
+from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
 
@@ -81,6 +82,7 @@ def parse_args(args):
         help="Include auxiliary task outputs (if available)",
         action="store_true",
     )
+    parser.add_argument("--force", help="Run with uncomitted changes.", action="store_true")
 
     return parser.parse_args(args)
 
@@ -224,6 +226,9 @@ def main(args=None):
     # parse args
     args = parse_args(args)
 
+    if not args.force:
+        check_for_uncommitted_changes()
+
     # get the config file
     with open(args.config) as file:
         config = yaml.safe_load(file)
@@ -340,6 +345,9 @@ def add_metadata(
             "node_index": 0,
         }
     }
+
+    # Save the git hash of the repo used for exporting onnx model
+    metadata["export_git_hash"] = get_git_hash()
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}

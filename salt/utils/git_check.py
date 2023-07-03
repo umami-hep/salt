@@ -32,3 +32,8 @@ def create_and_push_tag(tagname):
     check_for_fork()
     subprocess.check_output(["git", "tag", tagname, "-m", "automated salt training tag"])
     subprocess.check_output(["git", "push", "-q", "origin", "--tags"])
+
+
+def get_git_hash():
+    git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
+    return git_hash.decode("ascii").strip()
