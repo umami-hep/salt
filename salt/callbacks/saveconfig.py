@@ -2,7 +2,6 @@ import contextlib
 import json
 import shutil
 import socket
-import subprocess
 from contextlib import suppress
 from pathlib import Path
 
@@ -13,6 +12,8 @@ import torch
 import yaml
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
+
+from salt.utils.git_check import get_git_hash
 
 
 def get_attr(file, attribute, key=None):
@@ -160,8 +161,7 @@ class SaveConfigCallback(Callback):
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
             meta["dsids"] = get_attr(train_dset.file, "dsids")
 
-        git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-        meta["git_hash"] = git_hash.decode("ascii").strip()
+        meta["git_hash"] = get_git_hash()
         if logger:
             meta["out_dir"] = logger.save_dir
             meta["log_url"] = logger.experiment.url
