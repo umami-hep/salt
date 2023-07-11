@@ -8,7 +8,8 @@
 
 # requesting one node
 #SBATCH --nodes=1
-#SBATCH --exclusive
+# Only if you really need it!
+# #SBATCH --exclusive
 
 # keep environment variables
 #SBATCH --export=ALL
@@ -21,8 +22,8 @@
 #SBATCH --ntasks-per-node=1
 
 # number of cpus per task
-# useful if you don't have exclusive access to the node
-# #SBATCH --cpus-per-task=10
+# don't use this if you have exclusive access to the node
+#SBATCH --cpus-per-task=10
 
 # request enough memory
 #SBATCH --mem=100G
@@ -32,9 +33,11 @@
 # optional separate error output file
 # #SBATCH --error=/share/rcifdata/svanstroud/submit/out/slurm-%j.%x.err
 
-# speedup
+# speedup (not sure if this does anything)
 export OMP_NUM_THREADS=1
 
+# print host info
+echo "Hostname: $(hostname)"
 echo "CPU count: $(cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1)"
 
 # move to workdir
