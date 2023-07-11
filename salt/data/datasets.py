@@ -178,7 +178,7 @@ class JetDataset(Dataset):
 
     def scale_input(self, batch: dict, input_type: str):
         """Normalise jet inputs."""
-        inputs = s2u(batch[self.variables[input_type]]).astype(np.float32)  # type: ignore
+        inputs = s2u(batch[self.variables[input_type]], dtype=np.float32)
         if self.nan_to_num:
             inputs = np.nan_to_num(inputs)
         return (inputs - self.norm[input_type]["mean"]) / self.norm[input_type]["std"]
