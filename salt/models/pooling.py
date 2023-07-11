@@ -37,7 +37,7 @@ class CrossAttentionPooling(Pooling):
         input_size: int,
         num_layers: int,
         mha_config: Mapping,
-        dense_config: Mapping = None,
+        dense_config: Mapping | None = None,
         context_dim: int = 0,
     ):
         super().__init__()

@@ -2,9 +2,8 @@ import math
 from collections.abc import Mapping
 
 import torch
-import torch.nn as nn
 from lightning.pytorch.cli import instantiate_class
-from torch import BoolTensor, Size, Tensor
+from torch import BoolTensor, Size, Tensor, nn
 from torch.nn.functional import sigmoid, softmax
 
 from salt.models.dense import add_dims
@@ -123,7 +122,7 @@ class MultiheadAttention(nn.Module):
         # Check that the dimension of each heads makes internal sense
         if embed_dim % num_heads != 0:
             raise ValueError(f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}")
-        elif edge_embed_dim % num_heads != 0:
+        if edge_embed_dim % num_heads != 0:
             raise ValueError(
                 f"edge_embed_dim {edge_embed_dim} must be divisible by num_heads {num_heads}"
             )
@@ -254,8 +253,8 @@ class MultiheadAttention(nn.Module):
 
         if edges is not None:
             return out, edge_out
-        else:
-            return out
+
+        return out
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -298,8 +297,8 @@ class ScaledDotProductAttention(nn.Module):
 
         if return_scores:
             return attention_weights, scores
-        else:
-            return attention_weights
+
+        return attention_weights
 
 
 class GATv2Attention(nn.Module):
@@ -343,5 +342,5 @@ class GATv2Attention(nn.Module):
 
         if return_scores:
             return attention_weights, scores
-        else:
-            return attention_weights
+
+        return attention_weights

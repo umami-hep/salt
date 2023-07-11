@@ -7,9 +7,8 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-import torch.nn as nn
 import yaml
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn.functional import softmax
 from tqdm import tqdm
 

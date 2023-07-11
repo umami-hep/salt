@@ -43,7 +43,7 @@ class JetTagger(nn.Module):
         names = {init_net.name for init_net in self.init_nets}
         assert len(sizes) == 1 or ("edge" in names and len(sizes) == 2)
 
-    def forward(self, inputs: dict, mask: dict, labels: dict = None):
+    def forward(self, inputs: dict, mask: dict, labels: dict | None = None):
         # initial embeddings
         embed_x = {}
         edge_x = None
@@ -80,7 +80,7 @@ class JetTagger(nn.Module):
         pooled: Tensor,
         embed_x: Tensor,
         mask: Mapping,
-        labels: dict = None,
+        labels: dict | None = None,
     ):
         preds = {}
         loss = {}

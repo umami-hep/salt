@@ -52,8 +52,8 @@ def update_node_indices(
     index and algorithm termination tensors.
     """
     edge_offset = node_offset = 0
-    for i, nnodes in enumerate(node_numbers):
-        nnodes = int(nnodes.item())
+    for i, _nnodes in enumerate(node_numbers):
+        nnodes = int(_nnodes.item())
         nedges = nnodes * (nnodes - 1)
 
         if nnodes <= 1:

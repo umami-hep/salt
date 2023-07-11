@@ -16,9 +16,9 @@ class JetDataModule(L.LightningDataModule):
         num_jets_train: int,
         num_jets_val: int,
         num_jets_test: int,
-        move_files_temp: str = None,
-        class_dict: str = None,
-        test_file: str = None,
+        move_files_temp: str | None = None,
+        class_dict: str | None = None,
+        test_file: str | None = None,
         **kwargs,
     ):
         """h5 jet datamodule.
@@ -139,7 +139,7 @@ class JetDataModule(L.LightningDataModule):
     def test_dataloader(self):
         return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
 
-    def teardown(self, stage: str = None):
+    def teardown(self, stage: str | None = None):
         """Remove temporary files."""
         if (
             stage == "fit"
