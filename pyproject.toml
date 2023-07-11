@@ -31,8 +31,8 @@ line-length = 100
 preview = "True"
 
 [tool.ruff]
-select = ["I", "E", "W", "F", "B", "UP", "ARG", "SIM", "TID", "RUF", "D2", "D3", "D4"]
-ignore = ["ARG002", "D203", "D205", "D213", "D401", "RUF005"]
+select = ["A", "I", "E", "W", "F", "B", "UP", "PL", "ARG", "SIM", "TID", "RUF", "RET", "C4", "D2", "D3", "D4", "SIM", "PTH"]
+ignore = ["ARG002", "D203", "D205", "D213", "D401", "PLR", "PTH123"]
 line-length = 100
 
 [tool.pytest.ini_options]

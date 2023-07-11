@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import lightning as L
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class LightningTagger(L.LightningModule):
@@ -95,9 +95,7 @@ class LightningTagger(L.LightningModule):
         self.log_losses(loss, stage="val")
 
         # return loss (and maybe more stuff)
-        return_dict = loss
-
-        return return_dict
+        return loss
 
     def test_step(self, batch, batch_idx):
         preds, _, mask, _ = self.shared_step(batch, evaluation=True)

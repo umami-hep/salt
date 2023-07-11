@@ -20,9 +20,9 @@ class JetDataset(Dataset):
         variables: dict,
         num_jets: int = -1,
         concat_jet_tracks: bool = True,
-        labels: Mapping = None,
+        labels: Mapping | None = None,
         nan_to_num: bool = False,
-        num_inputs: dict = None,
+        num_inputs: dict | None = None,
     ):
         """A map-style dataset for loading jets from a structured array file.
 
@@ -181,8 +181,7 @@ class JetDataset(Dataset):
         inputs = s2u(batch[self.variables[input_type]]).astype(np.float32)  # type: ignore
         if self.nan_to_num:
             inputs = np.nan_to_num(inputs)
-        inputs = (inputs - self.norm[input_type]["mean"]) / self.norm[input_type]["std"]
-        return inputs
+        return (inputs - self.norm[input_type]["mean"]) / self.norm[input_type]["std"]
 
     def get_num_jets(self, num_jets_requested: int):
         num_jets_available = len(self.dss["jet"])
@@ -199,8 +198,7 @@ class JetDataset(Dataset):
             return num_jets_available
 
         # use requested jets
-        else:
-            return num_jets_requested
+        return num_jets_requested
 
     def check_file(self, inputs: Mapping):
         keys = set(inputs.values())

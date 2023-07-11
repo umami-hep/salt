@@ -15,8 +15,8 @@ class Task(nn.Module):
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
-        label_map: Mapping = None,
-        label_denominator: str = None,
+        label_map: Mapping | None = None,
+        label_denominator: str | None = None,
     ):
         """Task head.
 
@@ -68,7 +68,7 @@ class ClassificationTask(Task):
         self,
         x: Tensor,
         labels_dict: Mapping,
-        masks: Mapping = None,
+        masks: Mapping | None = None,
         context: Tensor = None,
     ):
         if masks is not None:
@@ -110,7 +110,7 @@ class RegressionTask(Task):
         assert self.label_map is None
 
     def forward(
-        self, x: Tensor, labels_dict: Mapping, masks: Mapping = None, context: Tensor = None
+        self, x: Tensor, labels_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
     ):
         if x.ndim != 2 or masks is not None:
             raise NotImplementedError(
@@ -143,7 +143,7 @@ class GaussianRegressionTask(Task):
         self,
         x: Tensor,
         labels_dict: Mapping,
-        masks: Mapping = None,
+        masks: Mapping | None = None,
         context: Tensor = None,
     ):
         if x.ndim != 2 or masks is not None:
@@ -250,5 +250,4 @@ class VertexingTask(Task):
         weights = torch.clip(sum(labels == i for i in (3, 4, 5)), 0, 1) - (labels == 1).int()
         weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
         weights = weights[adjmat]
-        weights = 1 + weights
-        return weights
+        return 1 + weights

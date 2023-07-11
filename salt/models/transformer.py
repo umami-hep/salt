@@ -1,7 +1,6 @@
 from collections.abc import Mapping
 
-import torch.nn as nn
-from torch import BoolTensor, Tensor
+from torch import BoolTensor, Tensor, nn
 
 from salt.models.attention import MultiheadAttention
 from salt.models.dense import Dense
@@ -26,7 +25,7 @@ class TransformerEncoderLayer(nn.Module):
         self,
         embed_dim: int,
         mha_config: Mapping,
-        dense_config: Mapping = None,
+        dense_config: Mapping | None = None,
         context_dim: int = 0,
         edge_embed_dim: int = 0,
         update_edges: bool = False,
@@ -111,8 +110,8 @@ class TransformerEncoderLayer(nn.Module):
 
         if edge_x is not None:
             return x, edge_x
-        else:
-            return x
+
+        return x
 
 
 class TransformerEncoder(nn.Module):
@@ -130,7 +129,7 @@ class TransformerEncoder(nn.Module):
         num_layers: int,
         mha_config: Mapping,
         edge_embed_dim: int = 0,
-        dense_config: Mapping = None,
+        dense_config: Mapping | None = None,
         context_dim: int = 0,
         out_dim: int = 0,
         update_edges: bool = False,
@@ -204,7 +203,7 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         self,
         embed_dim: int,
         mha_config: Mapping,
-        dense_config: Mapping = None,
+        dense_config: Mapping | None = None,
         context_dim: int = 0,
     ) -> None:
         super().__init__(embed_dim, mha_config, dense_config, context_dim)

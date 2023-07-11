@@ -15,11 +15,11 @@ from salt.utils.union_find import get_node_assignment
 class PredictionWriter(Callback):
     def __init__(
         self,
-        jet_variables: list = None,
-        track_variables: list = None,
+        jet_variables: list | None = None,
+        track_variables: list | None = None,
         write_tracks: bool = False,
         half_precision: bool = False,
-        jet_classes: list = None,
+        jet_classes: list | None = None,
     ) -> None:
         """Write test outputs to h5 file.
 

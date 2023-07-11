@@ -115,8 +115,7 @@ torch.manual_seed(42)
 def concat_jet_track(jets: Tensor, tracks: Tensor):
     n_track = tracks.shape[-2]
     jets_repeat = torch.repeat_interleave(jets[:, None, :], n_track, dim=1)
-    inputs = torch.cat([jets_repeat, tracks], dim=2)
-    return inputs
+    return torch.cat([jets_repeat, tracks], dim=2)
 
 
 def inputs_sep_no_pad(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
