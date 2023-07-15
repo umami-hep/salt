@@ -112,6 +112,22 @@ class JetDataset(Dataset):
                 stds = np.array([nd[v][std_key] for v in var], dtype=np.float32)
             self.norm[input_type] = {"mean": means, "std": stds}
 
+        # for each regression task the target value must also be scaled and shifted
+        for name, (_group, input_name) in self.labels.items():
+            if "regression" in name:
+                if input_name in self.norm_dict["jets"]:
+                    nd = self.norm_dict["jets"]
+                    mean_key = "mean" if "mean" in nd[input_name] else "shift"
+                    std_key = "std" if "std" in nd[input_name] else "scale"
+                    means = np.array(nd[input_name][mean_key], dtype=np.float32)
+                    stds = np.array(nd[input_name][std_key], dtype=np.float32)
+                    self.norm[input_name] = {"mean": means, "std": stds}
+                else:
+                    means = np.array(1, dtype=np.float32)
+                    stds = np.array(1, dtype=np.float32)
+                    self.norm[input_name] = {"mean": means, "std": stds}
+                    print("No scaling for the regression target was found in the norm dict")
+
     def __len__(self):
         return int(self.num_jets)
 
@@ -163,6 +179,15 @@ class JetDataset(Dataset):
                 # hack to handle the old umami train file format
                 if input_type == "jet" and group == "/":
                     labels[name] = torch.as_tensor(self.file["labels"][jet_idx], dtype=torch.long)
+
+                # scale target value of regression
+                if (
+                    input_type == "jet"
+                    and "regression" in name
+                    and "jet_regression_denominator" not in self.labels.keys()
+                ):
+                    shift, scale = self.norm[label]["mean"], self.norm[label]["std"]
+                    labels[name] = (labels[name] - shift) / scale
 
             # get the padding mask
             if "valid" in batch.dtype.names and input_type != "edge":

@@ -71,6 +71,7 @@ class PredictionWriter(Callback):
         self.ds = trainer.datamodule.test_dataloader().dataset
         self.file = self.ds.file
         self.num_jets = len(self.ds)
+        self.norm_dict = self.ds.norm_dict
 
         # inputs names
         self.jet = self.ds.input_names["jet"]
@@ -82,22 +83,30 @@ class PredictionWriter(Callback):
         self.mask: list = []
 
         # get jet class prediction column names
-        train_file = trainer.datamodule.train_dataloader().dataset.file
-        if not self.jet_classes:  # class names not specified explicitly, get them from train file
-            self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
-            jet_task = [t for t in module.model.tasks if t.name == "jet_classification"][0]
-            # handle case where the labels have been remapped on the fly during training
-            if jet_task.label_map is not None:  # TODO: extend to xbb
-                d = {0: "ujets", 4: "cjets", 5: "bjets"}
-                self.jet_classes = [d[x] for x in jet_task.label_map]
-        assert self.jet_classes is not None
-        jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
-        self.jet_cols = [f"{module.name}_{px}" for px in jet_px]
+        if any(t.name == "jet_classification" for t in module.model.tasks):
+            train_file = trainer.datamodule.train_dataloader().dataset.file
+            # class names not specified explicitly, get them from train file
+            if not self.jet_classes:
+                self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
+                jet_task = [t for t in module.model.tasks if t.name == "jet_classification"][0]
+                # handle case where the labels have been remapped on the fly during training
+                if jet_task.label_map is not None:  # TODO: extend to xbb
+                    d = {0: "ujets", 4: "cjets", 5: "bjets"}
+                    self.jet_classes = [d[x] for x in jet_task.label_map]
+            assert self.jet_classes is not None
+            jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
+            self.jet_cols = [f"{module.name}_{px}" for px in jet_px]
+
+        else:
+            self.jet_cols = []
+            for t in module.model.tasks:
+                for i in range(t.net.output_size):
+                    self.jet_cols.append(t.label + "_" + t.name + "_" + str(i))
 
         # decide whether to write tracks
         self.task_list = [task.name for task in module.model.tasks]
         self.write_tracks = self.write_tracks and any(
-            t in self.task_list for t in ["track_origin", "track_vertexing"]
+            t in self.task_list for t in ["track_origin", "track_vertexing", "jet_regression"]
         )
 
     @property
@@ -120,12 +129,37 @@ class PredictionWriter(Callback):
         outputs = {task: torch.cat(self.outputs[task]) for task in self.task_names}
 
         # softmax jet classification outputs
-        jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)
+        if any(t.name == "jet_classification" for t in module.model.tasks):
+            jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)
+        else:
+            jet_class_preds = outputs[module.model.tasks[0].name]
 
         # create output jet dataframe
         precision_str = "f2" if self.half_precision else "f4"
         dtype = np.dtype([(n, precision_str) for n in self.jet_cols])
-        jets = u2s(jet_class_preds.float().cpu().numpy(), dtype)
+
+        # in case of regression on 1 target, reshape [x x x] into [[x] [x] [x]]
+        jets = jet_class_preds.float().cpu().numpy()
+        if len(dtype) == 1:
+            jets = jets.reshape(-1, 1)
+
+        # denormalise jet regression outputs
+        if not any(t.name == "jet_classification" for t in module.model.tasks):
+            tr = module.model.tasks[0]
+            ld = tr.label_denominator
+            if ld is None and tr.label in self.norm_dict["jets"]:
+                print("Scaling using mu/sigma of target value")
+                nd = self.norm_dict["jets"][tr.label]
+                mean_key = "mean" if "mean" in nd else "shift"
+                std_key = "std" if "std" in nd else "scale"
+                jets[:, 0] = jets[:, 0] * nd[std_key] + nd[mean_key]
+            elif ld is not None:
+                print("Scaling using reco value as label_denominator")
+                jets[:, 0] = jets[:, 0] * self.ds.file["jets"][ld][: self.num_jets]
+            else:
+                print("No scaling for the regression target value")
+
+        jets = u2s(jets, dtype)
 
         if self.jet_variables is None:
             self.jet_variables = self.file[self.jet].dtype.names
@@ -139,6 +173,7 @@ class PredictionWriter(Callback):
             "track_origin" in task_list
             or "track_type" in task_list
             or "track_vertexing" in task_list
+            or "jet_regression" in task_list
         ):
             if self.track_variables is None:
                 self.track_variables = self.file[self.track].dtype.names

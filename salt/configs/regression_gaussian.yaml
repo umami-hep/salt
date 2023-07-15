@@ -29,18 +29,18 @@ model:
         class_path: torch.nn.ModuleList
         init_args:
           modules:
-            - class_path: salt.models.RegressionTask
+            - class_path: salt.models.GaussianRegressionTask
               init_args:
-                name: jet_regression
+                name: gaussian_jet_regression
                 input_type: jet
                 label: HadronConeExclTruthLabelPt
-                #label_denominator: pt_btagJes
-                loss: MSELoss
+                label_denominator: pt_btagJes
+                loss: GaussianNLLLoss
                 net:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: *embed_dim
-                    output_size: 1
+                    output_size: 2
                     hidden_layers: [128, 64, 32]
                     activation: *activation
 
