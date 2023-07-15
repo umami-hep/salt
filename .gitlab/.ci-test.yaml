@@ -43,6 +43,11 @@ test-GN2:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_GN2
 
+test-GN2emu:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2emu
+
 test-GN2XE:
   <<: *test-template
   script:
@@ -62,6 +67,11 @@ test-regression:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_regression
+
+test-regression_gaussian:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_regression_gaussian
 
 test-flow:
   <<: *test-template

@@ -41,7 +41,11 @@ class JetTagger(nn.Module):
         # check init nets have the same output embedding size (unless an edge init net is present)
         sizes = {list(init_net.parameters())[-1].shape[0] for init_net in self.init_nets}
         names = {init_net.name for init_net in self.init_nets}
-        assert len(sizes) == 1 or ("edge" in names and len(sizes) == 2)
+        assert (
+            len(sizes) == 1
+            or ("edge" in names and len(sizes) == 2)
+            or ("electron" in names and len(sizes) == 2)
+        )
 
     def forward(self, inputs: dict, mask: dict, labels: dict | None = None):
         # initial embeddings
