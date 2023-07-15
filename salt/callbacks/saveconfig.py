@@ -110,9 +110,10 @@ class SaveConfigCallback(Callback):
         self.config.data.norm_dict = str(nd_path.resolve())
 
         # copy the class dict
-        cd_path = Path(config_path.parent / Path(self.config.data.class_dict).name)
-        shutil.copyfile(self.config.data.class_dict, cd_path)
-        self.config.data.class_dict = str(cd_path.resolve())
+        if self.config.data.class_dict:
+            cd_path = Path(config_path.parent / Path(self.config.data.class_dict).name)
+            shutil.copyfile(self.config.data.class_dict, cd_path)
+            self.config.data.class_dict = str(cd_path.resolve())
 
         # write config
         self.parser.save(
