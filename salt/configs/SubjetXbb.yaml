@@ -5,7 +5,7 @@ data:
   val_file: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/pp_output_val.h5
   norm_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/norm_dict.yaml
   class_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/class_dict.yaml
-  inputs:
+  input_names:
     jet: jets
     track: subjets
   variables:

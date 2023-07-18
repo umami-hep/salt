@@ -48,7 +48,7 @@ For example, for the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml)
 
 - `inputs` section
     ```yaml
-    inputs:
+    input_names:
         jet: jets
         track: tracks
         global: jets

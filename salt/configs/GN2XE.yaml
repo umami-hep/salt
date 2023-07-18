@@ -6,7 +6,7 @@ data:
   norm_dict: /share/lustre/svanstroud/data/xbb/ext_v1/norm_dict.yaml
   class_dict: /share/lustre/svanstroud/data/xbb/ext_v1/class_dict.yaml
   move_files_temp: /dev/shm/svanstro/salt/xbb/
-  inputs:
+  input_names:
     jet: jets
     track: tracks
     edge: tracks

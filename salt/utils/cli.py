@@ -58,8 +58,27 @@ class SaltCLI(LightningCLI):
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
 
+        # add normalisation to init nets
+        if sc.data.norm_in_model:
+            for init_net in sc.model.model.init_args.init_nets.init_args.modules:
+                init_net.init_args.norm_dict = sc.data.norm_dict
+                init_net.init_args.variables = sc.data.variables
+                init_net.init_args.input_names = sc.data.input_names
+                init_net.init_args.concat_jet_tracks = sc.data.concat_jet_tracks
+
+        # add the labels from the model config to the data config
+        labels = {}
+        model_dict = vars(sc.model.model.init_args)
+        for submodel in model_dict["tasks"]["init_args"]["modules"]:
+            assert "Task" in submodel["class_path"]
+            task = submodel["init_args"]
+            labels[task["name"]] = (task["input_type"], task["label"])
+            if denominator := task.get("label_denominator"):
+                labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
+        sc["data"]["labels"] = labels
+
         if self.subcommand == "fit":
-            # reduce precision to imrprove performance
+            # reduce precision to improve performance
             # don't do this during evaluation as you will get variation wrt Athena
             torch.set_float32_matmul_precision("medium")
 
@@ -83,18 +102,6 @@ class SaltCLI(LightningCLI):
             if sc[log]:
                 sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
 
-            # add the labels from the model config to the data config
-            labels = {}
-            model_dict = vars(sc.model.model.init_args)
-
-            for submodel in model_dict["tasks"]["init_args"]["modules"]:
-                assert "Task" in submodel["class_path"]
-                task = submodel["init_args"]
-                labels[task["name"]] = (task["input_type"], task["label"])
-                if denominator := task["label_denominator"]:
-                    labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
-            sc["data"]["labels"] = labels
-
             if not sc["force"]:
                 check_for_uncommitted_changes()
                 if sc["tag"]:
@@ -102,9 +109,6 @@ class SaltCLI(LightningCLI):
 
         if self.subcommand == "test":
             print("\n" + "-" * 100)
-
-            # don't load labels for evaluation
-            sc["data"]["labels"] = None
 
             # modify callbacks when testing
             self.save_config_callback = None

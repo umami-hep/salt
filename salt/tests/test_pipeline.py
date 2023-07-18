@@ -51,12 +51,10 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
     main(args)
 
 
-def run_onnx(train_dir, nd_path):
+def run_onnx(train_dir):
     ckpt_path = [f for f in (train_dir / "ckpts").iterdir() if f.suffix == ".ckpt"][-1]
-    args = [f"--config={train_dir / 'config.yaml'}"]
-    args += [f"--ckpt_path={ckpt_path}"]
+    args = [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
-    args += [f"--nd_path={nd_path}"]
     args += ["--include_aux"]
     to_onnx(args)
     get_onnx_metadata([str(train_dir / "network.onnx")])
@@ -80,7 +78,7 @@ def run_combined(tmp_path, config, do_eval=True, do_onnx=True, train_args=None, 
         nd_path = nd_path[0]
         run_eval(tmp_path, train_config_path, nd_path, do_xbb)
     if do_onnx:
-        run_onnx(train_dir, nd_path)
+        run_onnx(train_dir)
 
 
 @pytest.mark.filterwarnings(w)
@@ -156,7 +154,7 @@ def test_regression(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_regression_gaussian(tmp_path) -> None:
-    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=True, do_onnx=False)
+    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=False, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)

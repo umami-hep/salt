@@ -4,7 +4,7 @@ from salt.models.attention import (
     ScaledDotProductAttention,
 )
 from salt.models.dense import Dense
-from salt.models.init import InitNet
+from salt.models.initnet import InitNet
 from salt.models.pooling import CrossAttentionPooling, GlobalAttentionPooling, Pooling
 from salt.models.tagger import JetTagger
 from salt.models.task import (

@@ -9,7 +9,7 @@ def test_no_vertex() -> None:
     pairwise_probs = torch.tensor([[-1.0, -1.0]])
     mask = torch.tensor([[False, False]])
     assert torch.equal(
-        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask.unsqueeze(dim=-1)),
+        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
         labels.unsqueeze(dim=-1),
     )
 
@@ -20,7 +20,7 @@ def test_single_vertex_1() -> None:
     pairwise_probs = torch.tensor([[-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]])
     mask = torch.tensor([[False, False, False]])
     assert torch.equal(
-        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask.unsqueeze(dim=-1)),
+        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
         labels.unsqueeze(dim=-1),
     )
 
@@ -31,7 +31,7 @@ def test_single_vertex_2() -> None:
     pairwise_probs = torch.tensor([[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
     mask = torch.tensor([[False, False, False]])
     assert torch.equal(
-        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask.unsqueeze(dim=-1)),
+        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
         labels.unsqueeze(dim=-1),
     )
 
@@ -44,7 +44,7 @@ def test_single_vertex_3() -> None:
     )
     mask = torch.tensor([[False, False, False, False]])
     assert torch.equal(
-        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask.unsqueeze(dim=-1)),
+        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
         labels.unsqueeze(dim=-1),
     )
 
@@ -66,6 +66,6 @@ def test_mult_vertices() -> None:
     )
     mask = torch.tensor([[False, False, False, True], [False, False, False, False]])
     assert torch.equal(
-        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask.unsqueeze(dim=-1)),
+        get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
         labels.flatten().unsqueeze(dim=-1),
     )

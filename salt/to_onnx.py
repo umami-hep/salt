@@ -38,17 +38,17 @@ def parse_args(args):
     )
 
     parser.add_argument(
-        "-c",
-        "--config",
-        type=Path,
-        help="Saved training config.",
-        required=True,
-    )
-    parser.add_argument(
         "--ckpt_path",
         type=Path,
         help="Checkpoint path.",
         required=True,
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        help="Saved training config. If not provided, look in the parent directory of `ckpt_path`.",
+        required=False,
     )
     parser.add_argument(
         "-t",
@@ -57,11 +57,6 @@ def parse_args(args):
         help="Track selection, must match `trk_select_regexes` in 'DataPrepUtilities.cxx'",
         choices=TRACK_SELECTIONS,
         default="r22default",
-    )
-    parser.add_argument(
-        "--nd_path",
-        type=Path,
-        help="Norm dict path. Taken from the config if not provided",
     )
     parser.add_argument(
         "-n",
@@ -91,53 +86,17 @@ def get_probs(outputs: Tensor):
     return torch.split(outputs.squeeze(), 1, -1)
 
 
-class InputNorm:
-    def __init__(self, nd_path: str, variables: dict, input_names: dict):
-        self.nd_path = nd_path
-        self.jet_name = input_names["jet"]
-        self.trk_name = input_names["track"]
-        self.variables = variables
-
-        self.jet_dim = len(self.variables["jet"])
-        self.trk_dim = len(self.variables["track"])
-
-        with open(self.nd_path) as f:
-            self.nd = yaml.safe_load(f)
-
-        self.jet_means = torch.tensor([self.nd[self.jet_name][v]["mean"] for v in self.jet_vars])
-        self.jet_stds = torch.tensor([self.nd[self.jet_name][v]["std"] for v in self.jet_vars])
-        self.track_means = torch.tensor([self.nd[self.trk_name][v]["mean"] for v in self.trk_vars])
-        self.track_stds = torch.tensor([self.nd[self.trk_name][v]["std"] for v in self.trk_vars])
-
-    def __call__(self, jets: Tensor, tracks: Tensor):
-        jets = (jets - self.jet_means) / self.jet_stds
-        tracks = (tracks - self.track_means) / self.track_stds
-        return jets, tracks
-
-    @property
-    def jet_vars(self):
-        return self.variables["jet"]
-
-    @property
-    def trk_vars(self):
-        return self.variables["track"]
-
-
 class ONNXModel(LightningTagger):
-    def __init__(self, model: nn.Module, norm: InputNorm, include_aux=False) -> None:
+    def __init__(self, model: nn.Module, include_aux=False) -> None:
         super().__init__(model=model, lrs_config={})
-        self.norm = norm
         self.include_aux = include_aux
 
         assert len(self.in_dims) == 1, "Multi input ONNX models are not yet supported."
 
-        jets, tracks = inputs_sep_no_pad(1, 40, norm.jet_dim, norm.trk_dim)
+        jets, tracks = inputs_sep_no_pad(1, 40, 2, self.in_dims[0] - 2)
         self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
-        # normalise inputs
-        jets, tracks = self.norm(jets, tracks)
-
         # in athena the jets have a batch dimension but the tracks do not
         tracks = concat_jet_track(jets, tracks.unsqueeze(0))
 
@@ -155,14 +114,14 @@ class ONNXModel(LightningTagger):
         return onnx_outputs
 
 
-def compare_output(pt_model, onnx_session, norm, include_aux, n_track=40):
+def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     n_batch = 1
 
     jets, tracks, mask = inputs_sep_with_pad(
-        n_batch, n_track, norm.jet_dim, norm.trk_dim, p_valid=1
+        n_batch, n_track, 2, pt_model.in_dims[0] - 2, p_valid=1
     )
 
-    inputs_pt = {"track": concat_jet_track(*norm(jets, tracks))}
+    inputs_pt = {"track": concat_jet_track(jets, tracks)}
     outputs_pt = pt_model(inputs_pt, {"track": mask})[0]
     pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jet_classification"])]
 
@@ -205,14 +164,14 @@ def compare_output(pt_model, onnx_session, norm, include_aux, n_track=40):
         )
 
 
-def compare_outputs(pt_model, onnx_path, norm, include_aux):
+def compare_outputs(pt_model, onnx_path, include_aux):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     for n_track in tqdm(range(0, 40), leave=False):
         for _ in range(10):
-            compare_output(pt_model, session, norm, include_aux, n_track)
+            compare_output(pt_model, session, include_aux, n_track)
 
     print(
         "Success! Pytorch and ONNX models are consistent, but you should verify this in"
@@ -228,12 +187,12 @@ def main(args=None):
     if not args.force:
         check_for_uncommitted_changes()
 
-    # get the config file
-    with open(args.config) as file:
-        config = yaml.safe_load(file)
+    if not (config_path := args.config):
+        config_path = args.ckpt_path.parents[1] / "config.yaml"
+        assert config_path.is_file(), f"Could not find config file at {config_path}"
+
+    config = yaml.safe_load(config_path.read_text())
     model_name = args.name if args.name else config["name"]
-    nd_path = config["data"]["norm_dict"] if not args.nd_path else args.nd_path
-    norm = InputNorm(nd_path, config["data"]["variables"], config["data"]["inputs"])
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -241,9 +200,7 @@ def main(args=None):
         pt_model = LightningTagger.load_from_checkpoint(args.ckpt_path)
         pt_model.eval()
 
-        onnx_model = ONNXModel.load_from_checkpoint(
-            args.ckpt_path, norm=norm, include_aux=args.include_aux
-        )
+        onnx_model = ONNXModel.load_from_checkpoint(args.ckpt_path, include_aux=args.include_aux)
         onnx_model.eval()
 
     print("\n" + "-" * 100)
@@ -257,11 +214,10 @@ def main(args=None):
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
 
     # configure inputs and outputs
-    with open(base_path / "metadata.yaml") as file:
-        jet_classes = yaml.safe_load(file)["jet_classes"]
+    jet_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["jet_classes"]
     input_names = ["jet_features", "track_features"]
     output_names = [f"p{flav.rstrip('jets')}" for flav in jet_classes.values()]
-    output_types = ["float" for flav in jet_classes.values()]
+    output_types = ["float" for _ in jet_classes.values()]
     dynamic_axes = {"track_features": {0: "n_tracks"}}
 
     if args.include_aux and "track_vertexing" in config["data"]["labels"]:
@@ -280,17 +236,17 @@ def main(args=None):
 
     # add metadata
     add_metadata(
+        config_path,
         args.ckpt_path,
         onnx_path,
         model_name,
-        norm,
         args.track_selection,
         output_names,
         output_types,
     )
 
     # validate
-    compare_outputs(pt_model, onnx_path, norm, args.include_aux)
+    compare_outputs(pt_model, onnx_path, args.include_aux)
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
     print("-" * 100)
@@ -298,17 +254,16 @@ def main(args=None):
 
 
 def add_metadata(
+    config_path,
     ckpt_path,
     onnx_path,
     model_name,
-    norm,
     track_selection,
     output_names,
     output_types,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
-    print(f"Using scale dict {norm.nd_path}")
 
     # load and check the model
     onnx_model = onnx.load(onnx_path)
@@ -316,25 +271,25 @@ def add_metadata(
 
     # add metadata
     metadata = {"ckpt_path": str(ckpt_path.resolve()), "layers": [], "nodes": []}
-    with open(ckpt_path.parents[1] / "config.yaml") as file:
-        metadata["config.yaml"] = yaml.safe_load(file)
-    with open(ckpt_path.parents[1] / "metadata.yaml") as file:
-        metadata["metadata.yaml"] = yaml.safe_load(file)
+    config = yaml.safe_load(config_path.read_text())
+    metadata["config.yaml"] = config
+    jet_vars = config["data"]["variables"]["jet"]
+    trk_vars = config["data"]["variables"]["track"]
+    metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
 
     # add inputs
     metadata["inputs"] = [
         {
             "name": "jet_var",
             "variables": [
-                {"name": k.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0}
-                for k in norm.jet_vars
+                {"name": k.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0} for k in jet_vars
             ],
         }
     ]
     metadata["input_sequences"] = [
         {
             "name": f"tracks_{track_selection}_sd0sort",
-            "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in norm.trk_vars],
+            "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in trk_vars],
         }
     ]
     metadata["outputs"] = {

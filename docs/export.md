@@ -10,15 +10,16 @@ The script has several arguments, you can learn about them by running
 to_onnx --help
 ```
 
-At a minimum, you need to specify the path to a training config, a checkpoint to convert, and a track selection.
+At a minimum, you need to specify the path to a checkpoint to convert, and a track selection.
 For example
 
 ```bash
 to_onnx \
-    --config logs/<timestamp>/config.yaml \
     --ckpt_path logs/<timestamp>/ckpts/checkpoint.ckpt \
     --track_selection r22default
 ```
+
+If you don't specify a config path using `--config`, the script will look for one in the parent of the `--ckpt_path`.
 
 ??? warning "Track selection"
 
@@ -65,10 +66,10 @@ See `compare_models.py -h` for more information.
     If you see one or two jets with a discrepancy of `1e-5`, this is probably fine.
     Common causes of more significant discrepancies are:
 
-        - Not dumping at full precision using the TDD (see above)
-        - Not running `salt test` with `--trainer.precision 32` if you trained at lower precision.
-        - Not writing out salt evaluation scores at full precision (see the `PredictionWriter` callback)
-        - Enabling some runtime optimisaiton in pytorch (e.g. [here](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision)) 
+    - Not dumping at full precision using the TDD (see above)
+    - Not running `salt test` with `--trainer.precision 32` if you trained at lower precision.
+    - Not writing out salt evaluation scores at full precision (see the `PredictionWriter` callback)
+    - Enabling some runtime optimisaiton in pytorch (e.g. [here](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision))
 
 ### Viewing ONNX Model Metadata
 

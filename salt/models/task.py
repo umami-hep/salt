@@ -15,8 +15,6 @@ class Task(nn.Module):
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
-        label_map: Mapping | None = None,
-        label_denominator: str | None = None,
     ):
         """Task head.
 
@@ -36,10 +34,6 @@ class Task(nn.Module):
             Task loss
         weight : float
             Weight in the overall loss
-        label_map : Mapping
-            Remap integer labels for training (e.g. 0,4,5 -> 0,1,2)
-        label_denominator : str
-            Name of the denominator label for the task (regression only)
         """
         super().__init__()
 
@@ -49,9 +43,6 @@ class Task(nn.Module):
         self.net = net
         self.loss = loss
         self.weight = weight
-        self.label_map = label_map
-        self.label_denominator = label_denominator
-        assert not (self.label_map and self.label_denominator)
 
     def input_type_mask(self, masks):
         return torch.cat(
@@ -60,9 +51,18 @@ class Task(nn.Module):
 
 
 class ClassificationTask(Task):
-    def __init__(self, **kwargs):
+    def __init__(self, label_map: Mapping | None = None, **kwargs):
+        """Classification task.
+
+        Parameters
+        ----------
+        label_map : Mapping | None, optional
+            Remap integer labels for training (e.g. 0,4,5 -> 0,1,2), by default None
+        **kwargs
+            Keyword arguments for Task
+        """
         super().__init__(**kwargs)
-        assert self.label_denominator is None
+        self.label_map = label_map
 
     def forward(
         self,
@@ -101,14 +101,63 @@ class ClassificationTask(Task):
 
         return preds, loss
 
+    def run_inference(self, preds: Tensor, mask: Tensor | None = None):
+        if mask is None:
+            assert preds.ndim == 2
+            probs = torch.softmax(preds, dim=-1)
 
-class RegressionTask(Task):
-    """Regression task without uncertainty prediction."""
+        else:
+            assert preds.ndim == 2
+            probs = torch.softmax(preds, dim=-1)
 
-    def __init__(self, **kwargs):
+            # the preds are a flat tensor of only valid tracks
+            # add back in the track dimension using the mask
+            out = torch.full((*mask.shape[:2], preds.shape[1]), torch.nan, device=preds.device)
+            out[~mask] = probs
+            probs = out
+        return probs
+
+
+class RegressionTaskBase(Task):
+    def __init__(
+        self, label_denominator: str | None = None, norm_params: dict | None = None, **kwargs
+    ):
+        """Base class for regression tasks.
+
+        Parameters
+        ----------
+        label_denominator : str | None, optional
+            Name of the denominator label for the task, by default None
+        norm_params : dict | None, optional
+            Normalization parameters for the task, by default None
+        **kwargs
+            Keyword arguments for Task
+        """
         super().__init__(**kwargs)
-        assert self.label_map is None
+        self.label_denominator = label_denominator
+        self.norm_params = norm_params
+        if self.label_denominator is not None and self.norm_params is not None:
+            raise ValueError("Cannot use label_denominator and norm_params at the same time.")
+        self.denominator_key = f"{self.name}_denominator"
 
+    def get_labels(self, labels_dict: Mapping):
+        labels = labels_dict[self.name] if labels_dict else None
+        if labels is not None:
+            if self.label_denominator in labels_dict:
+                labels = torch.div(labels_dict[self.name], labels_dict[self.denominator_key])
+            elif self.norm_params is not None:
+                labels = (labels - self.norm_params["mean"]) / self.norm_params["std"]
+        return labels
+
+    def run_inference(self, preds: Tensor, labels_dict: Mapping):
+        if self.label_denominator is not None:
+            preds = preds * labels_dict[self.denominator_key]
+        elif self.norm_params is not None:
+            preds = preds * self.norm_params["std"] + self.norm_params["mean"]
+        return preds
+
+
+class RegressionTask(RegressionTaskBase):
     def forward(
         self, x: Tensor, labels_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
     ):
@@ -118,9 +167,7 @@ class RegressionTask(Task):
             )
 
         preds = self.net(x, context).squeeze(-1)
-        labels = labels_dict[self.name] if labels_dict else None
-        if labels_dict and f"{self.name}_denominator" in labels_dict:
-            labels = torch.div(labels_dict[self.name], labels_dict[f"{self.name}_denominator"])
+        labels = self.get_labels(labels_dict)
 
         loss = None
         if labels is not None:
@@ -129,16 +176,7 @@ class RegressionTask(Task):
         return preds, loss
 
 
-class GaussianRegressionTask(Task):
-    """Gaussian regression task, enabling uncertainty prediction.
-
-    Applies softplus activation to sigmas to ensure positivty.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        assert self.label_map is None
-
+class GaussianRegressionTask(RegressionTaskBase):
     def forward(
         self,
         x: Tensor,
@@ -152,9 +190,7 @@ class GaussianRegressionTask(Task):
             )
 
         preds = self.net(x, context)
-        labels = labels_dict[self.name] if labels_dict else None
-        if labels_dict and f"{self.name}_denominator" in labels_dict:
-            labels = torch.div(labels_dict[self.name], labels_dict[f"{self.name}_denominator"])
+        labels = self.get_labels(labels_dict)  # type:ignore
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
@@ -169,11 +205,8 @@ class GaussianRegressionTask(Task):
 
 
 class VertexingTask(Task):
-    """Vertexing task."""
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        assert self.label_map is None
 
     def forward(
         self,

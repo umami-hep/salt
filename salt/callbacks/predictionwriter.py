@@ -3,11 +3,11 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
-import torch.nn.functional as F
 from ftag import Flavours
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
+from salt.models.task import ClassificationTask, RegressionTaskBase
 from salt.utils.arrays import join_structured_arrays
 from salt.utils.union_find import get_node_assignment
 
@@ -71,42 +71,42 @@ class PredictionWriter(Callback):
         self.ds = trainer.datamodule.test_dataloader().dataset
         self.file = self.ds.file
         self.num_jets = len(self.ds)
-        self.norm_dict = self.ds.norm_dict
+        self.norm_dict = self.ds.scaler.norm_dict
 
         # inputs names
         self.jet = self.ds.input_names["jet"]
         self.track = self.ds.input_names["track"]
 
         # place to store intermediate outputs
-        self.task_names = [task.name for task in module.model.tasks]
-        self.outputs: dict = {task: [] for task in self.task_names}
+        self.tasks = module.model.tasks
+        self.outputs: dict = {task: [] for task in self.tasks}
         self.mask: list = []
 
         # get jet class prediction column names
-        if any(t.name == "jet_classification" for t in module.model.tasks):
+        if any(t.name == "jet_classification" for t in self.tasks):
             train_file = trainer.datamodule.train_dataloader().dataset.file
             # class names not specified explicitly, get them from train file
             if not self.jet_classes:
                 self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
-                jet_task = [t for t in module.model.tasks if t.name == "jet_classification"][0]
+                jet_task = [t for t in self.tasks if t.name == "jet_classification"][0]
                 # handle case where the labels have been remapped on the fly during training
                 if jet_task.label_map is not None:  # TODO: extend to xbb
                     d = {0: "ujets", 4: "cjets", 5: "bjets"}
                     self.jet_classes = [d[x] for x in jet_task.label_map]
             assert self.jet_classes is not None
             jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
-            self.jet_cols = [f"{module.name}_{px}" for px in jet_px]
+            self.jet_class_cols = [f"{module.name}_{px}" for px in jet_px]
 
         else:
-            self.jet_cols = []
-            for t in module.model.tasks:
+            self.jet_class_cols = []
+            for t in self.tasks:
                 for i in range(t.net.output_size):
-                    self.jet_cols.append(t.label + "_" + t.name + "_" + str(i))
+                    self.jet_class_cols.append(t.label + "_" + t.name + "_" + str(i))
 
         # decide whether to write tracks
-        self.task_list = [task.name for task in module.model.tasks]
+        self.task_names = [task.name for task in self.tasks]
         self.write_tracks = self.write_tracks and any(
-            t in self.task_list for t in ["track_origin", "track_vertexing", "jet_regression"]
+            t in self.task_names for t in ["track_origin", "track_vertexing", "jet_regression"]
         )
 
     @property
@@ -118,90 +118,75 @@ class PredictionWriter(Callback):
         return Path(out_dir / f"{out_basename}__test_{sample}.h5")
 
     def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):
-        # append test outputs
-        [self.outputs[task].append(outputs[0][task].cpu()) for task in self.task_names]
-        if self.write_tracks:
-            self.mask.append(outputs[1]["track"].cpu())  # TODO: don't hardcode "track"
+        preds = outputs
+        inputs, masks, labels = batch
+        this_batch = False
+
+        for task in self.tasks:
+            task_preds = preds[task.name]
+            task_mask = masks.get(task.input_type)
+            if isinstance(task, ClassificationTask):
+                task_preds = task.run_inference(task_preds, task_mask)
+            elif issubclass(type(task), RegressionTaskBase):
+                task_preds = task.run_inference(task_preds, labels)
+            self.outputs[task].append(task_preds.cpu())
+
+            if self.write_tracks and task_mask is not None and not this_batch:
+                self.mask.append(task_mask.cpu())
+                this_batch = True
 
     def on_test_end(self, trainer, module):
-        print("svs", trainer.ckpt_path)
         # concat test batches
-        outputs = {task: torch.cat(self.outputs[task]) for task in self.task_names}
+        outputs = {task: torch.cat(self.outputs[task]) for task in self.tasks}
 
-        # softmax jet classification outputs
-        if any(t.name == "jet_classification" for t in module.model.tasks):
-            jet_class_preds = torch.softmax(outputs["jet_classification"], dim=-1)
-        else:
-            jet_class_preds = outputs[module.model.tasks[0].name]
-
-        # create output jet dataframe
+        # handle jets
         precision_str = "f2" if self.half_precision else "f4"
-        dtype = np.dtype([(n, precision_str) for n in self.jet_cols])
+        jet_outs = []
+        for task in self.tasks:
+            if task.input_type != "jet":
+                continue
 
-        # in case of regression on 1 target, reshape [x x x] into [[x] [x] [x]]
-        jets = jet_class_preds.float().cpu().numpy()
-        if len(dtype) == 1:
-            jets = jets.reshape(-1, 1)
+            if task.name == "jet_classification":
+                dtype = np.dtype([(n, precision_str) for n in self.jet_class_cols])
+                jets = outputs[task].float().cpu().numpy()
+                jet_outs.append(u2s(jets, dtype))
 
-        # denormalise jet regression outputs
-        if not any(t.name == "jet_classification" for t in module.model.tasks):
-            tr = module.model.tasks[0]
-            ld = tr.label_denominator
-            if ld is None and tr.label in self.norm_dict["jets"]:
-                print("Scaling using mu/sigma of target value")
-                nd = self.norm_dict["jets"][tr.label]
-                mean_key = "mean" if "mean" in nd else "shift"
-                std_key = "std" if "std" in nd else "scale"
-                jets[:, 0] = jets[:, 0] * nd[std_key] + nd[mean_key]
-            elif ld is not None:
-                print("Scaling using reco value as label_denominator")
-                jets[:, 0] = jets[:, 0] * self.ds.file["jets"][ld][: self.num_jets]
-            else:
-                print("No scaling for the regression target value")
+            if issubclass(type(task), RegressionTaskBase):
+                dtype = np.dtype([(f"{task.label}_{task.name}", precision_str)])
+                jets = outputs[task].float().cpu().unsqueeze(-1).numpy()
+                jet_outs.append(u2s(jets, dtype))
 
-        jets = u2s(jets, dtype)
-
+        jets = join_structured_arrays(jet_outs)
         if self.jet_variables is None:
             self.jet_variables = self.file[self.jet].dtype.names
-
         jets2 = self.file[self.jet].fields(self.jet_variables)[: self.num_jets]
         jets = join_structured_arrays((jets, jets2))
 
-        task_list = [task.name for task in module.model.tasks]
-
-        if self.write_tracks and (
-            "track_origin" in task_list
-            or "track_type" in task_list
-            or "track_vertexing" in task_list
-            or "jet_regression" in task_list
-        ):
+        if self.write_tracks:
+            outputs = {task.name: outputs[task] for task in self.tasks}
             if self.track_variables is None:
                 self.track_variables = self.file[self.track].dtype.names
-
             t = self.file[self.track].fields(self.track_variables)[: self.num_jets]
-            mask = torch.cat(self.mask).unsqueeze(dim=-1)
 
             # add output for track classification
-            if "track_origin" in self.task_list:
-                t2 = outputs["track_origin"]
-                t2 = F.softmax(mask_fill_flattened(t2, mask), dim=-1).numpy()
+            if "track_origin" in self.task_names:
+                t2 = outputs["track_origin"].numpy()
                 t2 = t2.view(dtype=np.dtype([(name, "f4") for name in self.track_origin_cols]))
                 t2 = t2.reshape(t2.shape[0], t2.shape[1])
                 t = join_structured_arrays((t, t2))
 
-            if "track_type" in self.task_list:
-                t2 = outputs["track_type"]
-                t2 = F.softmax(mask_fill_flattened(t2, mask), dim=-1).numpy()
+            if "track_type" in self.task_names:
+                t2 = outputs["track_type"].numpy()
                 t2 = t2.view(dtype=np.dtype([(name, "f4") for name in self.track_type_cols]))
                 t2 = t2.reshape(t2.shape[0], t2.shape[1])
                 t = join_structured_arrays((t, t2))
 
             # add output for vertexing
-            if "track_vertexing" in self.task_list:
+            if "track_vertexing" in self.task_names:
+                mask = torch.cat(self.mask)
                 t2 = outputs["track_vertexing"]
-                t2 = get_node_assignment(
-                    t2, mask
-                )  # could switch this to running on individual batches if memory becomes an issue
+                # could switch this to running on individual batches if memory becomes an issue
+                t2 = get_node_assignment(t2, mask)
                 t2 = mask_fill_flattened(t2, mask).numpy()
 
                 # convert to structured array

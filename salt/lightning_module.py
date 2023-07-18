@@ -98,8 +98,9 @@ class LightningTagger(L.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        preds, _, mask, _ = self.shared_step(batch, evaluation=True)
-        return preds, mask
+        inputs, mask, labels = batch
+        batch = (inputs, mask, None)
+        return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lrs_config["initial"], weight_decay=1e-5)
