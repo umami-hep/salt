@@ -138,7 +138,7 @@ class SaveConfigCallback(Callback):
         val_loader = trainer.datamodule.val_dataloader()
         train_dset = train_loader.dataset
         val_dset = val_loader.dataset
-        jet_name = self.config["data"]["inputs"]["jet"]
+        jet_name = self.config["data"]["input_names"]["jet"]
 
         meta = {}
 

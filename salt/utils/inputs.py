@@ -134,9 +134,10 @@ def inputs_sep_with_pad(
 
 def get_random_mask(n_batch: int, n_track: int, p_valid: float = 0.5):
     a = rng.choice(a=[True, False], size=(n_batch, n_track), p=[1 - p_valid, p_valid])
+    a = np.sort(a, axis=-1)[:, ::-1]
     if n_track > 0 and p_valid > 0:  # ensure at least one valid track
         a[:, 0] = False
-    return torch.tensor(a)
+    return torch.tensor(a.copy())
 
 
 def inputs_concat(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
@@ -281,9 +282,8 @@ def write_dummy_file(fname, sd_fname, make_xbb=False):
     )
     tracks = rng.random(shapes_tracks["inputs"])
     tracks = u2s(tracks, tracks_dtype)
-    valid = rng.choice([True, False], size=shapes_tracks["valid"]).view(
-        dtype=np.dtype([("valid", bool)])
-    )
+    valid = rng.choice([True, False], size=shapes_tracks["valid"])
+    valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
     tracks = join_structured_arrays([tracks, valid])
 
     # setup electrons
@@ -293,9 +293,8 @@ def write_dummy_file(fname, sd_fname, make_xbb=False):
     )
     electrons = rng.random(shapes_electrons["inputs"])
     electrons = u2s(electrons, electrons_dtype)
-    valid = rng.choice([True, False], size=shapes_electrons["valid"]).view(
-        dtype=np.dtype([("valid", bool)])
-    )
+    valid = rng.choice([True, False], size=shapes_electrons["valid"])
+    valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
     electrons = join_structured_arrays([electrons, valid])
 
     with h5py.File(fname, "w") as f:

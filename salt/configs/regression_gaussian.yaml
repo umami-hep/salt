@@ -34,7 +34,6 @@ model:
                 name: gaussian_jet_regression
                 input_type: jet
                 label: HadronConeExclTruthLabelPt
-                label_denominator: pt_btagJes
                 loss: GaussianNLLLoss
                 net:
                   class_path: salt.models.Dense
@@ -43,7 +42,6 @@ model:
                     output_size: 2
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-
 
 data:
   variables:

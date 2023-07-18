@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from subprocess import CalledProcessError
 
 
@@ -7,6 +8,8 @@ class GitError(Exception):
 
 
 def check_for_uncommitted_changes():
+    if "pytest" in sys.modules:
+        return
     try:
         subprocess.check_output(["git", "diff", "--quiet", "--exit-code"])
     except CalledProcessError:

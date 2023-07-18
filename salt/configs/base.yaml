@@ -1,12 +1,13 @@
 seed_everything: 42
 
 data:
+  norm_in_model: False
   train_file: /eos/user/u/umami/training-samples/gnn/22-03-23/pp_output_train.h5
   val_file: /eos/user/u/umami/training-samples/gnn/22-03-23/pp_output_val.h5
   norm_dict: /eos/user/u/umami/training-samples/gnn/22-03-23/norm_dict.yaml
   class_dict: /eos/user/u/umami/training-samples/gnn/22-03-23/class_dict.yaml
   #move_files_temp: /dev/shm/...
-  inputs:
+  input_names:
     jet: jets
     track: tracks
   batch_size: 1000

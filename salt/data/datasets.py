@@ -3,11 +3,11 @@ from collections.abc import Mapping
 import h5py
 import numpy as np
 import torch
-import yaml
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
 from salt.data.edge_features import get_dtype_edge, get_inputs_edge
+from salt.data.scaler import NormDictScaler
 from salt.utils.inputs import as_half, concat_jet_track
 
 
@@ -15,14 +15,15 @@ class JetDataset(Dataset):
     def __init__(
         self,
         filename: str,
-        inputs: dict,
+        input_names: dict,
         norm_dict: str,
         variables: dict,
         num_jets: int = -1,
-        concat_jet_tracks: bool = True,
         labels: Mapping | None = None,
-        nan_to_num: bool = False,
+        concat_jet_tracks: bool = True,
         num_inputs: dict | None = None,
+        nan_to_num: bool = False,
+        norm_in_model: bool = False,
     ):
         """A map-style dataset for loading jets from a structured array file.
 
@@ -30,22 +31,25 @@ class JetDataset(Dataset):
         ----------
         filename : str
             Input h5 filepath containing structured arrays
-        inputs : dict
+        input_names : dict
             Names of the h5 group to access for each type of input
         norm_dict : str
             Path to file containing normalisation parameters
         variables : dict
-            Variables and labels to use for the training
+            Input variables used in the forward pass
         num_jets : int, optional
             Number of jets to use, by default -1
+        labels : Mapping
+            Mapping from task name to label name, set automatically by the CLI
         concat_jet_tracks : bool, optional
             Concatenate jet inputs with track-type inputs, by default True
-        labels : Mapping
-            Mapping from task name to label name. Set automatically by the CLI.
+        num_inputs : dict, optional
+            Truncate the number of track-like inputs to this number, by default None
         nan_to_num : bool, optional
             Convert nans to zeros, by default False
-        num_inputs : dict, optional
-            Truncate the number of inputs to this number, by default None
+        norm_in_model : bool, optional
+            Normalise inputs in the model rather than in this Dataloader, by default False
+            TODO: remove this and default to True when backwards compatability no longer needed
         """
         super().__init__()
 
@@ -54,11 +58,11 @@ class JetDataset(Dataset):
 
         self.filename = filename
         self.file = h5py.File(self.filename, "r")
-        self.input_names = inputs
-        self.input_types = dict(map(reversed, self.input_names.items()))  # type:ignore
+        self.input_names = input_names
         self.concat_jet_tracks = concat_jet_tracks
-        self.nan_to_num = nan_to_num
         self.num_inputs = num_inputs
+        self.nan_to_num = nan_to_num
+        self.norm_in_model = norm_in_model
 
         # check that num_inputs contains valid keys
         if self.num_inputs is not None and not set(self.num_inputs).issubset(self.input_names):
@@ -67,27 +71,21 @@ class JetDataset(Dataset):
                 f" {self.input_names.keys()}"
             )
 
-        with open(norm_dict) as f:
-            self.norm_dict = yaml.safe_load(f)
-
-        self.variables = variables
-        if self.variables is None:
-            self.variables = {
-                self.input_types[k]: list(v.keys())
-                for k, v in self.norm_dict.items()
-                if k in self.input_types
-            }
-
         # make sure the input file looks okay
         self.check_file(self.input_names)
 
-        # setup fields
+        # create scaler
+        self.scaler = NormDictScaler(norm_dict, input_names, variables)
+        self.input_variables = self.scaler.variables
+        assert self.input_variables is not None
+
+        # setup datasets and accessor arrays
         self.dss = {}
         self.arrays = {}
         for input_type, input_name in self.input_names.items():
             self.dss[input_type] = self.file[input_name]
             variables = [lab for (g, lab) in self.labels.values() if g == input_type]  # type:ignore
-            variables += self.variables[input_type]
+            variables += self.input_variables[input_type]
             if input_type == "edge":
                 dtype = get_dtype_edge(self.file[input_name], variables)
             else:
@@ -96,37 +94,6 @@ class JetDataset(Dataset):
 
         # set number of jets
         self.num_jets = self.get_num_jets(num_jets)
-
-        # get norm params as arrays
-        self.norm = {}
-        for input_type, input_name in self.input_names.items():
-            nd = self.norm_dict[input_name]
-            var = self.variables[input_type]
-            if input_type == "edge":
-                means = np.array([0.0 for v in var], dtype=np.float32)
-                stds = np.array([1.0 for v in var], dtype=np.float32)
-            else:
-                mean_key = "mean" if "mean" in nd[var[0]] else "shift"
-                std_key = "std" if "std" in nd[var[0]] else "scale"
-                means = np.array([nd[v][mean_key] for v in var], dtype=np.float32)
-                stds = np.array([nd[v][std_key] for v in var], dtype=np.float32)
-            self.norm[input_type] = {"mean": means, "std": stds}
-
-        # for each regression task the target value must also be scaled and shifted
-        for name, (_group, input_name) in self.labels.items():
-            if "regression" in name:
-                if input_name in self.norm_dict["jets"]:
-                    nd = self.norm_dict["jets"]
-                    mean_key = "mean" if "mean" in nd[input_name] else "shift"
-                    std_key = "std" if "std" in nd[input_name] else "scale"
-                    means = np.array(nd[input_name][mean_key], dtype=np.float32)
-                    stds = np.array(nd[input_name][std_key], dtype=np.float32)
-                    self.norm[input_name] = {"mean": means, "std": stds}
-                else:
-                    means = np.array(1, dtype=np.float32)
-                    stds = np.array(1, dtype=np.float32)
-                    self.norm[input_name] = {"mean": means, "std": stds}
-                    print("No scaling for the regression target was found in the norm dict")
 
     def __len__(self):
         return int(self.num_jets)
@@ -157,18 +124,23 @@ class JetDataset(Dataset):
             batch.resize(shape, refcheck=False)
             self.dss[input_type].read_direct(batch, jet_idx)
 
-            # truncate inputs
+            # truncate track-like inputs
             if self.num_inputs is not None and input_type in self.num_inputs:
+                assert int(self.num_inputs[input_type]) <= batch.shape[1]
                 batch = batch[:, : int(self.num_inputs[input_type])]
 
             # process inputs for this input type
             if input_type == "edge":
                 inputs[input_type] = torch.from_numpy(
-                    get_inputs_edge(batch, self.variables[input_type])
+                    get_inputs_edge(batch, self.input_variables[input_type])
                 )
             else:
-                scaled_inputs = self.scale_input(batch, input_type)
-                inputs[input_type] = torch.from_numpy(scaled_inputs)
+                flat_array = s2u(batch[self.input_variables[input_type]], dtype=np.float32)
+                if self.nan_to_num:
+                    flat_array = np.nan_to_num(flat_array)
+                if not self.norm_in_model:
+                    flat_array = self.scaler(flat_array, input_type)
+                inputs[input_type] = torch.from_numpy(flat_array)
 
             # process labels for this input type
             for name, (group, label) in self.labels.items():
@@ -179,15 +151,6 @@ class JetDataset(Dataset):
                 # hack to handle the old umami train file format
                 if input_type == "jet" and group == "/":
                     labels[name] = torch.as_tensor(self.file["labels"][jet_idx], dtype=torch.long)
-
-                # scale target value of regression
-                if (
-                    input_type == "jet"
-                    and "regression" in name
-                    and "jet_regression_denominator" not in self.labels.keys()
-                ):
-                    shift, scale = self.norm[label]["mean"], self.norm[label]["std"]
-                    labels[name] = (labels[name] - shift) / scale
 
             # get the padding mask
             if "valid" in batch.dtype.names and input_type != "edge":
@@ -200,13 +163,6 @@ class JetDataset(Dataset):
                 inputs[name][masks[name]] = 0
 
         return inputs, masks, labels
-
-    def scale_input(self, batch: dict, input_type: str):
-        """Normalise jet inputs."""
-        inputs = s2u(batch[self.variables[input_type]], dtype=np.float32)
-        if self.nan_to_num:
-            inputs = np.nan_to_num(inputs)
-        return (inputs - self.norm[input_type]["mean"]) / self.norm[input_type]["std"]
 
     def get_num_jets(self, num_jets_requested: int):
         num_jets_available = len(self.dss["jet"])

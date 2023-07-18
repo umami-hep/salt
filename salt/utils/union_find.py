@@ -103,16 +103,10 @@ def get_node_assignment(output: Tensor, mask: Tensor):
     Wrapper function which returns reconstructed vertex indices in shape
     (nodes in batch, 1). Assumes mask of shape (batch, max_tracks).
     """
-    if mask.dim() > 2:  # if mask has shape (batch, max_tracks, 1) then squeeze last dim
-        mask = mask.squeeze(dim=-1)
+    # pad mask with additional track to avoid onnx error
+    mask = torch.cat([mask, torch.ones((mask.shape[0], 1), dtype=torch.bool)], dim=1).to(torch.bool)
 
-    mask = torch.cat(
-        [mask.to(torch.bool), torch.ones((mask.shape[0], 1), dtype=torch.bool)], dim=1
-    ).to(
-        torch.bool
-    )  # pad mask with additional track to avoid onnx error
-
-    node_numbers = (~mask).sum(dim=-1).to(torch.long)
+    node_numbers = (~mask).sum(dim=-1).long()
 
     # symmetrize edge scores
     scores = symmetrize_edge_scores(output, node_numbers) if output.shape[0] > 0 else output
@@ -120,7 +114,6 @@ def get_node_assignment(output: Tensor, mask: Tensor):
     # update node assignments until no more changes occur
     node_indices = torch.cat([torch.arange(nnodes) for nnodes in node_numbers])
     update_indices = torch.ones_like(node_numbers, dtype=torch.bool)
-
     while torch.any(update_indices):
         node_indices, update_indices = update_node_indices(
             scores, node_indices, update_indices, node_numbers

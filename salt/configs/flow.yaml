@@ -5,7 +5,7 @@ data:
   val_file: /share/rcifdata/svanstroud/data/flow/preprocessed/PFlow-hybrid-validation-resampled_scaled_shuffled.h5
   norm_dict: /share/rcifdata/svanstroud/data/flow/scale_dict.json
   #move_files_temp: /dev/shm/svanstro/salt/
-  inputs:
+  input_names:
     jet: jets
     track: tracks
     flow: flow

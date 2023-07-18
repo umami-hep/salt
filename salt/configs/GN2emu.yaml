@@ -230,7 +230,7 @@ data:
       - wtots1
       - f1
       - f3
-  inputs:
+  input_names:
     jet: jets
     track: tracks
     electron: electrons
