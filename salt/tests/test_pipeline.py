@@ -148,6 +148,11 @@ def test_DIPS(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
+def test_DL1(tmp_path) -> None:
+    run_combined(tmp_path, "DL1.yaml", do_eval=True, do_onnx=False)
+
+
+@pytest.mark.filterwarnings(w)
 def test_regression(tmp_path) -> None:
     run_combined(tmp_path, "regression.yaml", do_eval=True, do_onnx=False)
 

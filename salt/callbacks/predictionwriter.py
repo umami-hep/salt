@@ -75,7 +75,7 @@ class PredictionWriter(Callback):
 
         # inputs names
         self.jet = self.ds.input_names["jet"]
-        self.track = self.ds.input_names["track"]
+        self.track = self.ds.input_names.get("track")
 
         # place to store intermediate outputs
         self.tasks = module.model.tasks

@@ -63,6 +63,11 @@ test-DIPS:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_DIPS
 
+test-DL1:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_DL1
+
 test-regression:
   <<: *test-template
   script:

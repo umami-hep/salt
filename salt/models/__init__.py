@@ -5,6 +5,7 @@ from salt.models.attention import (
 )
 from salt.models.dense import Dense
 from salt.models.initnet import InitNet
+from salt.models.mlp_tagger import MLPTagger
 from salt.models.pooling import CrossAttentionPooling, GlobalAttentionPooling, Pooling
 from salt.models.tagger import JetTagger
 from salt.models.task import (
@@ -39,4 +40,5 @@ __all__ = [
     "GaussianRegressionTask",
     "VertexingTask",
     "JetTagger",
+    "MLPTagger",
 ]
