@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 from jsonargparse.typing import register_type
@@ -72,14 +73,17 @@ class SaltCLI(LightningCLI):
         for submodel in model_dict["tasks"]["init_args"]["modules"]:
             assert "Task" in submodel["class_path"]
             task = submodel["init_args"]
-            labels[task["name"]] = (task["input_type"], task["label"])
+            if self.subcommand == "fit":
+                labels[task["name"]] = (task["input_type"], task["label"])
             if denominator := task.get("label_denominator"):
                 labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
         sc["data"]["labels"] = labels
 
         if self.subcommand == "fit":
+            self.add_jet_class_names()
+
             # reduce precision to improve performance
-            # don't do this during evaluation as you will get variation wrt Athena
+            # don't do this during evaluation as you will get increased variation wrt Athena
             torch.set_float32_matmul_precision("medium")
 
             # get timestamped output dir for this run
@@ -102,6 +106,7 @@ class SaltCLI(LightningCLI):
             if sc[log]:
                 sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
 
+            # run git checks
             if not sc["force"]:
                 check_for_uncommitted_changes()
                 if sc["tag"]:
@@ -136,3 +141,17 @@ class SaltCLI(LightningCLI):
             sc["data.move_files_temp"] = None
 
             print("-" * 100 + "\n")
+
+    def add_jet_class_names(self) -> None:
+        # add flavour label class names to jet classification task, if it exists
+        sc = self.config[self.subcommand]
+        for task in sc.model.model.init_args.tasks.init_args.modules:
+            args = task.init_args
+            if (
+                args.name == "jet_classification"
+                and args.label == "flavour_label"
+                and args.class_names is None
+            ):
+                with h5py.File(sc.data.train_file) as f:
+                    name = sc.data.input_names[args.input_type]
+                    args.class_names = f[name].attrs[args.label]

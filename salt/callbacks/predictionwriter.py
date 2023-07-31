@@ -82,26 +82,18 @@ class PredictionWriter(Callback):
         self.outputs: dict = {task: [] for task in self.tasks}
         self.mask: list = []
 
-        # get jet class prediction column names
-        if any(t.name == "jet_classification" for t in self.tasks):
-            train_file = trainer.datamodule.train_dataloader().dataset.file
-            # class names not specified explicitly, get them from train file
-            if not self.jet_classes:
-                self.jet_classes = train_file[f"{self.jet}"].attrs["flavour_label"]
-                jet_task = [t for t in self.tasks if t.name == "jet_classification"][0]
-                # handle case where the labels have been remapped on the fly during training
-                if jet_task.label_map is not None:  # TODO: extend to xbb
-                    d = {0: "ujets", 4: "cjets", 5: "bjets"}
-                    self.jet_classes = [d[x] for x in jet_task.label_map]
-            assert self.jet_classes is not None
+        # get jet class names for output file
+        for task in self.tasks:
+            if task.name != "jet_classification":
+                continue
+            if self.jet_classes is None and task.class_names is not None:
+                self.jet_classes = task.class_names
+            else:
+                raise ValueError(
+                    "Couldn't infer jet classes from model. Please provide a list of jet classes."
+                )
             jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
             self.jet_class_cols = [f"{module.name}_{px}" for px in jet_px]
-
-        else:
-            self.jet_class_cols = []
-            for t in self.tasks:
-                for i in range(t.net.output_size):
-                    self.jet_class_cols.append(t.label + "_" + t.name + "_" + str(i))
 
         # decide whether to write tracks
         self.task_names = [task.name for task in self.tasks]

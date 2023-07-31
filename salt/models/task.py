@@ -51,18 +51,25 @@ class Task(nn.Module):
 
 
 class ClassificationTask(Task):
-    def __init__(self, label_map: Mapping | None = None, **kwargs):
+    def __init__(
+        self, class_names: list[str] | None = None, label_map: Mapping | None = None, **kwargs
+    ):
         """Classification task.
 
         Parameters
         ----------
+        class_names : list[str] | None, optional
+            List of class names, ordered by output index, by default None
         label_map : Mapping | None, optional
             Remap integer labels for training (e.g. 0,4,5 -> 0,1,2), by default None
         **kwargs
             Keyword arguments for Task
         """
         super().__init__(**kwargs)
+        self.class_names = class_names
         self.label_map = label_map
+        if self.label_map is not None and self.class_names is None:
+            raise ValueError("Specify class names when using label_map.")
 
     def forward(
         self,

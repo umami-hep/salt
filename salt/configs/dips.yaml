@@ -35,6 +35,7 @@ model:
                 input_type: jet
                 label: HadronConeExclTruthLabelID
                 label_map: { 0: 0, 4: 1, 5: 2 }
+                class_names: [ujets, cjets, bjets]
                 loss: torch.nn.CrossEntropyLoss
                 net:
                   class_path: salt.models.Dense

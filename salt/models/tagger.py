@@ -38,6 +38,10 @@ class JetTagger(nn.Module):
         self.tasks = tasks
         self.gnn = gnn
 
+        # ensure unique names
+        assert len({init_net.name for init_net in self.init_nets}) == len(self.init_nets)
+        assert len({task.name for task in self.tasks}) == len(self.tasks)
+
         # check init nets have the same output embedding size (unless an edge init net is present)
         sizes = {list(init_net.parameters())[-1].shape[0] for init_net in self.init_nets}
         names = {init_net.name for init_net in self.init_nets}
