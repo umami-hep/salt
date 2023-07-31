@@ -80,14 +80,12 @@ class JetDataModule(L.LightningDataModule):
             self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
 
         # create training and validation datasets
-        if stage == "fit" or stage == "test":
+        if stage == "fit":
             self.train_dset = JetDataset(
                 filename=self.train_file,
                 num_jets=self.num_jets_train,
                 **self.kwargs,
             )
-
-        if stage == "fit":
             self.val_dset = JetDataset(
                 filename=self.val_file,
                 num_jets=self.num_jets_val,
@@ -113,20 +111,13 @@ class JetDataModule(L.LightningDataModule):
 
     def get_dataloader(self, stage: str, dataset: JetDataset, shuffle: bool):
         drop_last = stage == "fit"
-
-        # batched reads from h5 (weak shuffling)
-        sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
-        batch_size = None
-        collate_fn = None
-        shuffle = False
-
         return DataLoader(
             dataset=dataset,
-            batch_size=batch_size,
-            collate_fn=collate_fn,
-            sampler=sampler,
+            batch_size=None,
+            collate_fn=None,
+            sampler=RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last),
             num_workers=self.num_workers,
-            shuffle=shuffle,
+            shuffle=False,
             pin_memory=True,
         )
 

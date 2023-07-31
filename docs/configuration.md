@@ -111,9 +111,12 @@ init_args:
     name: jet_classification
     label: HadronConeExclTruthLabelID
     label_map: { 0: 0, 4: 1, 5: 2 }
+    class_names: [ujets, cjets, bjets]
     ...
 ```
 
+Note, when using `label_map` you also need to provide `class_names`.
+When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
 
 
 ### Model Architecture

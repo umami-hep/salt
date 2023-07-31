@@ -55,7 +55,6 @@ model:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
                     weight: [1.0, 1.73, 1.08]
-
                 net:
                   class_path: salt.models.Dense
                   init_args:
