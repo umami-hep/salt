@@ -4,23 +4,9 @@ from collections.abc import Mapping
 import torch
 from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor, nn
-from torch.nn.functional import sigmoid, softmax
+from torch.nn.functional import sigmoid
 
-from salt.models.dense import add_dims
-
-
-def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
-    """Applies softmax over a tensor without including padded elements."""
-    if mask is not None:
-        mask = add_dims(mask, x.dim())
-        x = x.masked_fill(mask, -torch.inf)
-
-    x = softmax(x, dim=dim)
-
-    if mask is not None:
-        x = x.masked_fill(mask, 0)
-
-    return x
+from salt.utils.tensor import masked_softmax
 
 
 def merge_masks(
@@ -323,7 +309,7 @@ class GATv2Attention(nn.Module):
         return_scores: bool = False,
     ) -> Tensor:
         # inputs are (B, H, Lq/k, D)
-        B, H, Lq, D = q.shape
+        # B, H, Lq, D = q.shape
 
         # sum each pair of tracks within a batch
         # shape: (B, H, Lq, Lk, D)

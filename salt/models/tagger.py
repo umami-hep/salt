@@ -5,7 +5,7 @@ from torch import Tensor, nn
 from torch.nn import ModuleList
 
 from salt.models import Pooling
-from salt.models.dense import attach_context
+from salt.utils.tensor import attach_context
 
 
 class JetTagger(nn.Module):

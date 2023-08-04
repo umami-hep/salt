@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import Dense
+from salt.utils.tensor import masked_softmax
 
 
 class Task(nn.Module):
@@ -46,7 +47,10 @@ class Task(nn.Module):
 
     def input_type_mask(self, masks):
         return torch.cat(
-            [torch.ones(m.shape[1]) * (t == self.input_type) for t, m in masks.items()]
+            [
+                torch.ones(m.shape[1], device=m.device) * (t == self.input_type)
+                for t, m in masks.items()
+            ],
         ).bool()
 
 
@@ -70,6 +74,8 @@ class ClassificationTask(Task):
         self.label_map = label_map
         if self.label_map is not None and self.class_names is None:
             raise ValueError("Specify class names when using label_map.")
+        if hasattr(self.loss, "ignore_index"):
+            self.loss.ignore_index = -1
 
     def forward(
         self,
@@ -92,19 +98,20 @@ class ClassificationTask(Task):
             for k, v in self.label_map.items():
                 labels[labels == k] = v
 
-        # could use ignore_index instead of the mask here
-        # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199
-        # is in the samples
-        if mask is not None:
-            if labels is not None:
-                mask = torch.masked_fill(mask, labels == -2, 1)
-            preds = preds[~mask]
-            if labels is not None:
-                labels = labels[~mask]
+        if mask is not None and labels is not None:
+            # mask out dodgey labels
+            # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199 is in
+            mask = torch.masked_fill(mask, labels == -2, True)
+
+            # update the labels based on the mask (in case not done already)
+            labels = torch.masked_fill(labels, mask, -1)
 
         loss = None
         if labels is not None:
-            loss = self.loss(preds, labels) * self.weight
+            if preds.ndim == 3:
+                loss = self.loss(preds.permute(0, 2, 1), labels) * self.weight
+            else:
+                loss = self.loss(preds, labels) * self.weight
 
         return preds, loss
 
@@ -112,16 +119,9 @@ class ClassificationTask(Task):
         if mask is None:
             assert preds.ndim == 2
             probs = torch.softmax(preds, dim=-1)
-
         else:
-            assert preds.ndim == 2
-            probs = torch.softmax(preds, dim=-1)
-
-            # the preds are a flat tensor of only valid tracks
-            # add back in the track dimension using the mask
-            out = torch.full((*mask.shape[:2], preds.shape[1]), torch.nan, device=preds.device)
-            out[~mask] = probs
-            probs = out
+            assert preds.ndim == 3
+            probs = masked_softmax(preds, mask.unsqueeze(-1))
         return probs
 
 
@@ -235,7 +235,9 @@ class VertexingTask(Task):
             [t_mask, torch.zeros(b, 1, device=x.device)], dim=1
         )  # pad t_mask for onnx compatibility
         adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
-        adjmat = adjmat.bool() & ~torch.eye(n + 1, n + 1).repeat(b, 1, 1).bool().to(adjmat.device)
+        adjmat = (
+            adjmat.bool() & ~torch.eye(n + 1, n + 1, device=adjmat.device).repeat(b, 1, 1).bool()
+        )
 
         # Deal with context
         context_matrix = None
