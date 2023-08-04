@@ -165,7 +165,7 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
 
 ??? info "Installing `h5ls`"
 
-    If you set up with conda, you can run
+    If you set up with conda/mamba, you can run
 
     ```bash
     mamba install h5utils

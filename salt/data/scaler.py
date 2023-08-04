@@ -30,6 +30,9 @@ class NormDictScaler:
         with open(norm_dict) as f:
             self.norm_dict = yaml.safe_load(f)
 
+        if missing := set(self.input_types) - (avai := set(self.norm_dict)):
+            raise ValueError(f"No norm params for {missing} in {norm_dict}. Choose from {avai}.")
+
         # if no variables are specified, use all variables in the norm_dict
         self.variables = variables
         if self.variables is None:

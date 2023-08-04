@@ -128,10 +128,10 @@ class TransformerEncoder(nn.Module):
         embed_dim: int,
         num_layers: int,
         mha_config: Mapping,
-        edge_embed_dim: int = 0,
         dense_config: Mapping | None = None,
         context_dim: int = 0,
         out_dim: int = 0,
+        edge_embed_dim: int = 0,
         update_edges: bool = False,
     ) -> None:
         """Transformer encoder module.
@@ -144,14 +144,14 @@ class TransformerEncoder(nn.Module):
             Number of encoder layers used
         mha_config : nn.Module
             Keyword arguments for the mha block
-        edge_embed_dim : int
-            Feature size for input and output of edge features
         dense_config: Mapping
             Keyword arguments for the dense network in each layer
         context_dim: int
             Dimension of the context inputs
         out_dim: int
             If set, a final linear layer resizes the outputs of the model
+        edge_embed_dim : int
+            Feature size for input and output of edge features
         update_edges: bool
             If set, edge features are updated in each encoder layer
         """

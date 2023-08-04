@@ -9,7 +9,7 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from numpy.random import default_rng
 from torch import Tensor
 
-from salt.utils.arrays import join_structured_arrays
+from salt.utils.array import join_structured_arrays
 
 DEFAULT_NTRACK = 40
 
