@@ -19,6 +19,7 @@ class JetDataModule(L.LightningDataModule):
         move_files_temp: str | None = None,
         class_dict: str | None = None,
         test_file: str | None = None,
+        test_suff: str | None = None,
         **kwargs,
     ):
         """h5 jet datamodule.
@@ -46,6 +47,8 @@ class JetDataModule(L.LightningDataModule):
             Path to umami preprocessing scale dict file
         test_file : str
             Test file path, default is None
+        test_suff : str
+            Test file suffix, default is None
         **kwargs
             Additional arguments to pass to the Dataset class
         """
@@ -54,6 +57,7 @@ class JetDataModule(L.LightningDataModule):
         self.train_file = train_file
         self.val_file = val_file
         self.test_file = test_file
+        self.test_suff = test_suff
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.num_jets_train = num_jets_train

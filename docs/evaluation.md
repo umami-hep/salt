@@ -32,7 +32,7 @@ override the default in the training config.
 
 ??? warning "Output files are overwritten by default."
 
-    Get in touch if this is a problem.
+    You can use `--data.test_suff` to append an additional suffix to the evaluation output file name.
 
 ### Extra Evaluation Variables
 When evaluating a model, the jet and track variables included in the output file can be configured.
