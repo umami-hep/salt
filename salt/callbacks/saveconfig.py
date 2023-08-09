@@ -28,23 +28,6 @@ def get_attr(file, attribute, key=None):
 
 
 class SaveConfigCallback(Callback):
-    """Saves a LightningCLI config to the log_dir when training starts.
-
-    Args:
-    ----
-        parser: The parser object used to parse the configuration.
-        config: The parsed configuration that will be saved.
-        config_filename: Filename for the config file.
-        overwrite: Whether to overwrite an existing config file.
-        multifile: When input is multiple config files, saved config
-        preserves this structure.
-
-    Raises:
-    ------
-        RuntimeError: If the config file already exists in the directory
-        to avoid overwriting a previous run
-    """
-
     def __init__(
         self,
         parser: LightningArgumentParser,
@@ -53,6 +36,28 @@ class SaveConfigCallback(Callback):
         overwrite: bool = False,
         multifile: bool = False,
     ) -> None:
+        """Saves a LightningCLI config to the log_dir when training starts.
+
+        Parameters
+        ----------
+        parser : LightningArgumentParser
+            The parser object used to parse the configuration.
+        config : Namespace
+            The parsed configuration that will be saved.
+        config_filename : str, optional
+            Filename for the config file.
+        overwrite : bool, optional
+            Whether to overwrite an existing config file.
+        multifile : bool, optional
+            When input is multiple config files, saved config
+
+        Raises
+        ------
+        RuntimeError:
+            If the config file already exists in the directory
+            to avoid overwriting a previous run
+
+        """
         super().__init__()
         self.parser = parser
         self.config = config
