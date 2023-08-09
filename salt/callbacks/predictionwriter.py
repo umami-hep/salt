@@ -69,6 +69,7 @@ class PredictionWriter(Callback):
         # some basic info
         self.trainer = trainer
         self.ds = trainer.datamodule.test_dataloader().dataset
+        self.test_suff = trainer.datamodule.test_suff
         self.file = self.ds.file
         self.num_jets = len(self.ds)
         self.norm_dict = self.ds.scaler.norm_dict
@@ -107,7 +108,8 @@ class PredictionWriter(Callback):
         out_basename = str(Path(self.trainer.ckpt_path).stem)
         stem = str(Path(self.ds.filename).stem)
         sample = split[3] if len(split := stem.split("_")) == 4 else stem
-        return Path(out_dir / f"{out_basename}__test_{sample}.h5")
+        suffix = f"_{self.test_suff}" if self.test_suff is not None else ""
+        return Path(out_dir / f"{out_basename}__test_{sample}{suffix}.h5")
 
     def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):
         preds = outputs
