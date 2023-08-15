@@ -41,7 +41,6 @@ model:
             num_heads: 8
             attention:
               class_path: salt.models.ScaledDotProductAttention
-            out_proj: False
           dense_config:
             norm_layer: *norm_layer
             activation: *activation
