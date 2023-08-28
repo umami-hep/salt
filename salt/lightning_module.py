@@ -28,7 +28,6 @@ class LightningTagger(L.LightningModule):
         self.model = model
         self.lrs_config = lrs_config
         self.name = name
-
         self.in_dims = [list(net.parameters())[0].shape[1] for net in self.model.init_nets]
 
     def forward(self, x, mask, labels=None):
@@ -73,10 +72,11 @@ class LightningTagger(L.LightningModule):
         return preds, labels, mask, loss
 
     def log_losses(self, loss, stage):
-        self.log(f"{stage}_loss", loss["loss"], sync_dist=True)
+        kwargs = {"sync_dist": len(self.trainer.device_ids) > 1}
+        self.log(f"{stage}_loss", loss["loss"], **kwargs)
         for t, loss_value in loss.items():
             n = f"{stage}_{t}_loss" if "loss" not in t else f"{stage}_{t}"
-            self.log(n, loss_value, sync_dist=True)
+            self.log(n, loss_value, **kwargs)
 
     def training_step(self, batch, batch_idx):
         # foward pass
