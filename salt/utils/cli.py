@@ -55,6 +55,14 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
         parser.add_argument("--force", action="store_true", help="Run with uncomitted changes.")
         parser.add_argument("--tag", action="store_true", help="Push a tag for the current code.")
+        parser.add_argument(
+            "--compile", action="store_true", help="Compile the model to speed up training."
+        )
+
+    def fit(self, model, **kwargs):
+        if self.config[self.subcommand]["compile"]:
+            model = torch.compile(model, mode="reduce-overhead")
+        self.trainer.fit(model, **kwargs)
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
