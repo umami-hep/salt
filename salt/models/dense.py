@@ -59,7 +59,7 @@ class Dense(nn.Module):
 
             # normalisation first
             if norm_layer and (norm_final_layer or not is_final_layer):
-                layers.append(getattr(nn, norm_layer)(node_list[i], elementwise_affine=False))
+                layers.append(getattr(nn, norm_layer)(node_list[i]))
 
             # then dropout
             if dropout and (norm_final_layer or not is_final_layer):

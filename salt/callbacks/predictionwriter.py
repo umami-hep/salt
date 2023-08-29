@@ -166,13 +166,13 @@ class PredictionWriter(Callback):
 
             # add output for track classification
             if "track_origin" in self.task_names:
-                t2 = outputs["track_origin"].numpy()
+                t2 = outputs["track_origin"].float().cpu().numpy()
                 t2 = t2.view(dtype=np.dtype([(name, "f4") for name in self.track_origin_cols]))
                 t2 = t2.reshape(t2.shape[0], t2.shape[1])
                 t = join_structured_arrays((t, t2))
 
             if "track_type" in self.task_names:
-                t2 = outputs["track_type"].numpy()
+                t2 = outputs["track_type"].float().cpu().numpy()
                 t2 = t2.view(dtype=np.dtype([(name, "f4") for name in self.track_type_cols]))
                 t2 = t2.reshape(t2.shape[0], t2.shape[1])
                 t = join_structured_arrays((t, t2))
@@ -183,7 +183,7 @@ class PredictionWriter(Callback):
                 t2 = outputs["track_vertexing"]
                 # could switch this to running on individual batches if memory becomes an issue
                 t2 = get_node_assignment(t2, mask)
-                t2 = mask_fill_flattened(t2, mask).numpy()
+                t2 = mask_fill_flattened(t2, mask).float().cpu().numpy()
 
                 # convert to structured array
                 t2 = t2.view(dtype=np.dtype([("VertexIndex", "f4")]))

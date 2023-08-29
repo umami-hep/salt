@@ -83,7 +83,7 @@ def run_combined(tmp_path, config, do_eval=True, do_onnx=True, train_args=None, 
 
 @pytest.mark.filterwarnings(w)
 class TestTrainMisc:
-    config = "GN1.yaml"
+    config = "GN2.yaml"
 
     def test_train_dev(self, tmp_path) -> None:
         args = ["--trainer.fast_dev_run=2"]

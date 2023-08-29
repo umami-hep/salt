@@ -28,7 +28,7 @@ class LightningTagger(L.LightningModule):
         self.model = model
         self.lrs_config = lrs_config
         self.name = name
-        self.in_dims = [list(net.parameters())[0].shape[1] for net in self.model.init_nets]
+        self.in_dims = [self.model.init_nets[0].net.input_size for net in self.model.init_nets]
 
     def forward(self, x, mask, labels=None):
         """Forward pass through the model.
@@ -111,7 +111,7 @@ class LightningTagger(L.LightningModule):
             max_lr=self.lrs_config["max"],
             total_steps=self.trainer.estimated_stepping_batches,
             div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
-            final_div_factor=self.lrs_config["max"] / self.lrs_config["end"],
+            final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
             pct_start=float(self.lrs_config["pct_start"]),
         )
         sch = {"scheduler": sch, "interval": "step"}
