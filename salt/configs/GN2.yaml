@@ -1,6 +1,11 @@
 name: GN2
 
 model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
   model:
     class_path: salt.models.JetTagger
     init_args:
@@ -15,25 +20,23 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: 21
-                    output_size: &embed_dim 192
+                    output_size: &embed_dim 256
                     hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
+                    activation: &activation ReLU
 
       gnn:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
-          num_layers: 6
+          num_layers: 4
           out_dim: &out_dim 128
           mha_config:
             num_heads: 8
             attention:
               class_path: salt.models.ScaledDotProductAttention
           dense_config:
-            norm_layer: *norm_layer
             activation: *activation
-            hidden_layers: [256]
+            hidden_layers: [512]
             dropout: &dropout 0.1
 
       pool_net:
@@ -61,7 +64,6 @@ model:
                     output_size: 3
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-                    norm_layer: *norm_layer
                     dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
@@ -82,7 +84,6 @@ model:
                     output_size: 8
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-                    norm_layer: *norm_layer
                     dropout: *dropout
 
             - class_path: salt.models.VertexingTask
@@ -103,6 +104,7 @@ model:
                     hidden_layers: [128, 64, 32]
                     output_size: 1
                     activation: *activation
+                    dropout: *dropout
 
 data:
   norm_in_model: True
@@ -110,13 +112,11 @@ data:
     jet:
       - pt_btagJes
       - eta_btagJes
-      #- absEta_btagJes
     track:
       - d0
       - z0SinTheta
       - dphi
       - deta
-      #- abs_deta
       - qOverP
       - IP3D_signed_d0_significance
       - IP3D_signed_z0_significance
@@ -143,7 +143,7 @@ data:
   input_names:
     jet: jets
     track: tracks
-  batch_size: 1000
+  batch_size: 4000
   num_workers: 40
   num_jets_train: -1
   num_jets_val: -1
@@ -152,5 +152,5 @@ data:
 trainer:
   max_epochs: 40
   accelerator: gpu
-  devices: 4
-  #precision: bf16
+  devices: 1
+  precision: 16-mixed

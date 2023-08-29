@@ -53,8 +53,12 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
-        parser.add_argument("--force", action="store_true", help="Run with uncomitted changes.")
-        parser.add_argument("--tag", action="store_true", help="Push a tag for the current code.")
+        parser.add_argument(
+            "-f", "--force", action="store_true", help="Run with uncomitted changes."
+        )
+        parser.add_argument(
+            "-t", "--tag", action="store_true", help="Push a tag for the current code."
+        )
         parser.add_argument(
             "--compile", action="store_true", help="Compile the model to speed up training."
         )

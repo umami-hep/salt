@@ -72,11 +72,17 @@ def parse_args(args):
         action="store_true",
     )
     parser.add_argument(
+        "-a",
         "--include_aux",
         help="Include auxiliary task outputs (if available)",
         action="store_true",
     )
-    parser.add_argument("--force", help="Run with uncomitted changes.", action="store_true")
+    parser.add_argument(
+        "-f",
+        "--force",
+        help="Run with uncomitted changes.",
+        action="store_true",
+    )
 
     return parser.parse_args(args)
 
@@ -193,6 +199,7 @@ def main(args=None):
 
     config = yaml.safe_load(config_path.read_text())
     model_name = args.name if args.name else config["name"]
+    model_name = model_name.replace("-", "_")  # dashes not allowed for AuxVars
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

@@ -77,6 +77,11 @@ trainer:
         max_depth: 2
 
 model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
   model:
     class_path: salt.models.JetTagger
     init_args:
@@ -91,25 +96,23 @@ model:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: 22
-                    output_size: &embed_dim 192
+                    output_size: &embed_dim 256
                     hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
+                    activation: &activation ReLU
 
       gnn:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
-          num_layers: 6
+          num_layers: 4
           out_dim: &out_dim 128
           mha_config:
-            num_heads: 4
+            num_heads: 8
             attention:
               class_path: salt.models.ScaledDotProductAttention
           dense_config:
-            norm_layer: *norm_layer
             activation: *activation
-            hidden_layers: [256]
+            hidden_layers: [512]
             dropout: &dropout 0.1
 
       pool_net:
@@ -138,7 +141,6 @@ model:
                     output_size: 4
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-                    norm_layer: *norm_layer
                     dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
@@ -159,7 +161,6 @@ model:
                     output_size: 8
                     hidden_layers: [128, 64, 32]
                     activation: *activation
-                    norm_layer: *norm_layer
                     dropout: *dropout
 
             #- class_path: salt.models.ClassificationTask
@@ -201,3 +202,4 @@ model:
                     hidden_layers: [128, 64, 32]
                     output_size: 1
                     activation: *activation
+                    dropout: *dropout

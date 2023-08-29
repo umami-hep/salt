@@ -3,7 +3,7 @@
 # dfferences:
 # - Here the track init net has output size 256, rather than 64 for the note
 # - We include layernorm by default (this is not currently configurable)
-# - We use ScaledDotProduct attention, which does not affect performance (but reduces memory usage)
+# - We use ScaledDotProduct attention rather than GATv2, which does not affect performance (but reduces memory usage)
 name: GN1
 
 model:

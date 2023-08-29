@@ -7,18 +7,16 @@ from salt.models.dense import Dense
 
 
 class TransformerEncoderLayer(nn.Module):
-    """A transformer encoder layer based on the GPT-2+Normformer style
-    arcitecture.
+    """A transformer encoder layer.
 
-    We choose Normformer as it has often proved to be the most stable to train
-    https://arxiv.org/abs/2210.06423
-    https://arxiv.org/abs/2110.09456
+    We switched from normformer style to pre-ln style in MR !132.
 
     It contains:
-    - Multihead(self)Attention block
+    - Multihead attention block
     - A feedforward network (which can take optional context information)
-    - Layernorm is applied before each operation
-    - Residual connections are used to bypass each operation
+    - Layernorms
+    - Residual connections
+    - Optional edge update blocks
     """
 
     def __init__(
@@ -102,11 +100,11 @@ class TransformerEncoderLayer(nn.Module):
                 attn_bias=attn_bias,
             )
 
-        x = x + self.norm2(xi)
+        x = x + xi
         if self.update_edges:
             edge_x = edge_x + self.enorm2(edge_xi)
         if self.dense:
-            x = x + self.dense(x, context)
+            x = x + self.dense(self.norm2(x), context)
 
         if edge_x is not None:
             return x, edge_x
@@ -190,7 +188,7 @@ class TransformerEncoder(nn.Module):
                 x = layer(x, **kwargs)
         x = self.final_norm(x)
 
-        # Optinal resizing layer
+        # optional resizing layer
         if self.out_dim:
             x = self.final_linear(x)
         return x
@@ -207,7 +205,6 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         context_dim: int = 0,
     ) -> None:
         super().__init__(embed_dim, mha_config, dense_config, context_dim)
-
         self.norm0 = nn.LayerNorm(embed_dim)
 
     def forward(  # type: ignore
@@ -218,14 +215,12 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         key_value_mask: BoolTensor | None = None,
         context: Tensor | None = None,
     ) -> Tensor:
-        query = query + self.norm2(
-            self.mha(
-                self.norm1(query),
-                self.norm0(key_value),
-                q_mask=query_mask,
-                kv_mask=key_value_mask,
-            )
+        query = query + self.mha(
+            self.norm1(query),
+            self.norm0(key_value),
+            q_mask=query_mask,
+            kv_mask=key_value_mask,
         )
         if self.dense:
-            query = query + self.dense(query, context)
+            query = query + self.dense(self.norm2(query), context)
         return query
