@@ -87,12 +87,14 @@ class PredictionWriter(Callback):
         for task in self.tasks:
             if task.name != "jet_classification":
                 continue
-            if self.jet_classes is None and task.class_names is not None:
-                self.jet_classes = task.class_names
-            else:
-                raise ValueError(
-                    "Couldn't infer jet classes from model. Please provide a list of jet classes."
-                )
+            if self.jet_classes is None:
+                if task.class_names is not None:
+                    self.jet_classes = task.class_names
+                else:
+                    raise ValueError(
+                        "Couldn't infer jet classes from model. "
+                        "Please provide a list of jet classes."
+                    )
             jet_px = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.jet_classes]
             self.jet_class_cols = [f"{module.name}_{px}" for px in jet_px]
 
