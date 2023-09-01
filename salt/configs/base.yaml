@@ -1,6 +1,7 @@
 seed_everything: 42
 
 data:
+  variables: {} # to be overwritten
   norm_in_model: False
   train_file: /eos/user/u/umamibot/www/ci/salt/pflow_3M/pp_output_train.h5
   test_file: /eos/user/u/umamibot/www/ci/salt/pflow_3M/pp_output_test_zprime.h5

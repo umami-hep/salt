@@ -15,7 +15,7 @@ class InitNet(nn.Module):
         norm_dict: Path | None = None,
         variables: dict | None = None,
         input_names: dict | None = None,
-        concat_jet_tracks: bool = True,
+        concat_jet_tracks: bool = False,
     ):
         """Initialiser network which can optionally handle input normalisation.
 
@@ -32,13 +32,13 @@ class InitNet(nn.Module):
         input_names : dict | None, optional
             Names of the h5 group to access for each type of input, by default None
         concat_jet_tracks : bool, optional
-            Concatenate jet inputs with track-type inputs, by default True
+            Concatenate jet inputs with track-type inputs, by default False
         """
         super().__init__()
 
         self.name = name
         self.net = net
-
+        self.concat_jet_tracks = concat_jet_tracks
         if bool(norm_dict) != bool(variables) != bool(input_names):
             raise ValueError("Must provide either all or none of norm_dict, variables, input_names")
 
@@ -56,4 +56,5 @@ class InitNet(nn.Module):
         x = inputs[self.name]
         if self.means is not None:
             x = (x - self.means) / self.stds
+
         return self.net(x)
