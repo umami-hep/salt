@@ -8,7 +8,7 @@ from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.models.task import ClassificationTask, RegressionTaskBase
-from salt.utils.array import join_structured_arrays
+from salt.utils.array_utils import join_structured_arrays
 from salt.utils.union_find import get_node_assignment
 
 

@@ -1,6 +1,6 @@
 from torch import Tensor, nn
 
-from salt.utils.tensor import attach_context
+from salt.utils.tensor_utils import attach_context
 
 
 class Dense(nn.Module):

@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import Dense
-from salt.utils.tensor import masked_softmax
+from salt.utils.tensor_utils import masked_softmax
 
 
 class Task(nn.Module):
