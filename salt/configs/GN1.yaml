@@ -105,6 +105,7 @@ model:
                     activation: *activation
 
 data:
+  norm_in_model: True
   variables:
     jet:
       - pt_btagJes

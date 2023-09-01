@@ -43,6 +43,7 @@ model:
 
 data:
   norm_in_model: True
+  concat_jet_tracks: False
   variables:
     jet:
       - pt_btagJes

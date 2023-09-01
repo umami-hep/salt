@@ -93,13 +93,14 @@ def get_probs(outputs: Tensor):
 
 
 class ONNXModel(LightningTagger):
-    def __init__(self, model: nn.Module, include_aux=False) -> None:
-        super().__init__(model=model, lrs_config={})
+    def __init__(self, model: nn.Module, dims: dict, include_aux=False) -> None:
+        super().__init__(model=model, dims=dims, lrs_config={})
         self.include_aux = include_aux
 
-        assert len(self.in_dims) == 1, "Multi input ONNX models are not yet supported."
+        assert len(model.init_nets) == 1, "Multi input ONNX models are not yet supported."
+        assert model.init_nets[0].concat_jet_tracks, "norm_in_model and concat_jet_tracks required"
 
-        jets, tracks = inputs_sep_no_pad(1, 40, 2, self.in_dims[0] - 2)
+        jets, tracks = inputs_sep_no_pad(1, 40, self.dims["jet"], self.dims["track"])
         self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
@@ -124,7 +125,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     n_batch = 1
 
     jets, tracks, mask = inputs_sep_with_pad(
-        n_batch, n_track, 2, pt_model.in_dims[0] - 2, p_valid=1
+        n_batch, n_track, pt_model.dims["jet"], pt_model.dims["track"], p_valid=1
     )
 
     inputs_pt = {"track": concat_jet_track(jets, tracks)}

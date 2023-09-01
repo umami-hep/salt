@@ -48,11 +48,25 @@ def get_best_epoch(config_path: Path) -> Path:
 
 
 class SaltCLI(LightningCLI):
-    def add_arguments_to_parser(self, parser) -> None:
-        parser.add_argument("--name", default="salt", help="Name for this training run.")
+    def apply_links(self, parser) -> None:
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
+
+        def link_sizes(x):
+            if x is None:
+                return None
+            return dict(zip(x, map(len, list(x.values())), strict=True))
+
+        parser.link_arguments(
+            "data.variables",
+            "model.dims",
+            compute_fn=link_sizes,
+            apply_on="parse",
+        )
+
+    def add_arguments_to_parser(self, parser) -> None:
+        parser.add_argument("--name", default="salt", help="Name for this training run.")
         parser.add_argument(
             "-f", "--force", action="store_true", help="Run with uncomitted changes."
         )
@@ -62,6 +76,7 @@ class SaltCLI(LightningCLI):
         parser.add_argument(
             "--compile", action="store_true", help="Compile the model to speed up training."
         )
+        self.apply_links(parser)
 
     def fit(self, model, **kwargs):
         if self.config[self.subcommand]["compile"]:
