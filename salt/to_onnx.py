@@ -89,7 +89,7 @@ def parse_args(args):
 
 def get_probs(outputs: Tensor):
     outputs = softmax(outputs, dim=-1)
-    return torch.split(outputs.squeeze(), 1, -1)
+    return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
 
 
 class ONNXModel(LightningTagger):
@@ -111,12 +111,18 @@ class ONNXModel(LightningTagger):
         outputs = self.model({"track": tracks}, None)[0]
         onnx_outputs = get_probs(outputs["jet_classification"])
 
-        if self.include_aux and "track_vertexing" in outputs:
-            mask = torch.zeros(tracks.shape[:-1])
-            edge_scores = outputs["track_vertexing"]
-            vertex_indices = get_node_assignment(edge_scores, mask)
-            vertex_list = mask_fill_flattened(vertex_indices, mask)  # get list of vertex indices
-            onnx_outputs += (vertex_list,)
+        if self.include_aux:
+            if "track_origin" in outputs:
+                outputs_track = torch.argmax(outputs["track_origin"], dim=-1)
+                outputs_track = outputs_track.squeeze(0).char()
+                onnx_outputs += (outputs_track,)
+
+            if "track_vertexing" in outputs:
+                mask = torch.zeros(tracks.shape[:-1])
+                edge_scores = outputs["track_vertexing"]
+                vertex_indices = get_node_assignment(edge_scores, mask)
+                vertex_list = mask_fill_flattened(vertex_indices, mask)
+                onnx_outputs += (vertex_list.reshape(-1).char(),)
 
         return onnx_outputs
 
@@ -139,10 +145,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     outputs_onnx = onnx_session.run(None, inputs_onnx)
 
     # test jet classification
-    if include_aux and "track_vertexing" in outputs_pt:
-        pred_onnx_jc = outputs_onnx[:-1]
-    else:
-        pred_onnx_jc = outputs_onnx
+    pred_onnx_jc = outputs_onnx[: len(pred_pt_jc)]
 
     np.testing.assert_allclose(
         pred_pt_jc,
@@ -155,6 +158,22 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     assert not np.isnan(np.array(pred_onnx_jc)).any()  # non nans
     assert not (np.array(pred_onnx_jc) == 0).any()  # no trivial zeros
 
+    # test track origin
+    if include_aux and "track_origin" in outputs_pt:
+        if n_track == 0:
+            return
+
+        pred_pt_origin = torch.argmax(outputs_pt["track_origin"], dim=-1).detach().numpy()
+        pred_onnx_origin = outputs_onnx[len(pred_pt_jc) : len(pred_pt_jc) + len(pred_pt_origin)][0]
+
+        np.testing.assert_allclose(
+            pred_pt_origin.squeeze(),
+            pred_onnx_origin,
+            rtol=1e-06,
+            atol=1e-06,
+            err_msg="Torch vs ONNX check failed for track origin",
+        )
+
     # test vertexing
     if include_aux and "track_vertexing" in outputs_pt:
         pred_pt_scores = outputs_pt["track_vertexing"].detach()
@@ -163,7 +182,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
 
         pred_onnx_vtx = outputs_onnx[-1]
         np.testing.assert_allclose(
-            pred_pt_vtx,
+            pred_pt_vtx.squeeze(),
             pred_onnx_vtx,
             rtol=1e-06,
             atol=1e-06,
@@ -175,7 +194,12 @@ def compare_outputs(pt_model, onnx_path, include_aux):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    sess_options = ort.SessionOptions()
+    # suppress warnings due to unoptimized subgraphs - https://github.com/microsoft/onnxruntime/issues/14694
+    sess_options.log_severity_level = 3
+    session = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
+    )
     for n_track in tqdm(range(0, 40), leave=False):
         for _ in range(10):
             compare_output(pt_model, session, include_aux, n_track)
@@ -205,10 +229,14 @@ def main(args=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
-        pt_model = LightningTagger.load_from_checkpoint(args.ckpt_path)
+        pt_model = LightningTagger.load_from_checkpoint(
+            args.ckpt_path, map_location=torch.device("cpu")
+        )
         pt_model.eval()
 
-        onnx_model = ONNXModel.load_from_checkpoint(args.ckpt_path, include_aux=args.include_aux)
+        onnx_model = ONNXModel.load_from_checkpoint(
+            args.ckpt_path, include_aux=args.include_aux, map_location=torch.device("cpu")
+        )
         onnx_model.eval()
 
     print("\n" + "-" * 100)
@@ -225,13 +253,16 @@ def main(args=None):
     jet_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["jet_classes"]
     input_names = ["jet_features", "track_features"]
     output_names = [f"p{flav.rstrip('jets')}" for flav in jet_classes.values()]
-    output_types = ["float" for _ in jet_classes.values()]
     dynamic_axes = {"track_features": {0: "n_tracks"}}
 
-    if args.include_aux and "track_vertexing" in config["data"]["labels"]:
-        output_names.append("vertex_indices")
-        output_types.append("vec_char")
-        dynamic_axes["vertex_indices"] = {0: "n_tracks"}
+    if args.include_aux:
+        if "track_origin" in config["data"]["labels"]:
+            output_names.append("track_class")
+            dynamic_axes["track_class"] = {0: "n_tracks"}
+
+        if "track_vertexing" in config["data"]["labels"]:
+            output_names.append("vertex_indices")
+            dynamic_axes["vertex_indices"] = {0: "n_tracks"}
 
     # export
     onnx_model.to_onnx(
@@ -249,8 +280,6 @@ def main(args=None):
         onnx_path,
         model_name,
         args.track_selection,
-        output_names,
-        output_types,
     )
 
     # validate
@@ -267,8 +296,6 @@ def add_metadata(
     onnx_path,
     model_name,
     track_selection,
-    output_names,
-    output_types,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
@@ -300,13 +327,9 @@ def add_metadata(
             "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in trk_vars],
         }
     ]
-    metadata["outputs"] = {
-        model_name: {
-            "labels": output_names,
-            "types": output_types,
-            "node_index": 0,
-        }
-    }
+
+    # add model version instead of specifying outputs
+    metadata["onnx_model_version"] = "v1"
 
     # Save the git hash of the repo used for exporting onnx model
     metadata["export_git_hash"] = get_git_hash()
