@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn, randn
 
 from salt.models.transformer import TransformerCrossAttentionLayer
-from salt.utils.tensor import masked_softmax
+from salt.utils.tensor_utils import masked_softmax
 
 
 class Pooling(nn.Module):

@@ -1,7 +1,7 @@
 import lightning as L
 from torch.utils.data import DataLoader
 
-import salt.utils.fileutils as fu
+import salt.utils.file_utils as fu
 from salt.data.datasets import JetDataset
 from salt.data.samplers import RandomBatchSampler
 

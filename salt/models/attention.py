@@ -6,7 +6,7 @@ from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor, nn
 from torch.nn.functional import sigmoid
 
-from salt.utils.tensor import masked_softmax
+from salt.utils.tensor_utils import masked_softmax
 
 
 def merge_masks(
