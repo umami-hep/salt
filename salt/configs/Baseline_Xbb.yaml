@@ -1,0 +1,83 @@
+name: Baseline_Xbb
+
+data:
+  train_file: /data/atlas/users/okarkout/xbb/fortraining/Boosted_training-resampled.h5
+  val_file: /data/atlas/users/okarkout/xbb/fortraining/Boosted_validation-resampled.h5
+  norm_dict: /data/atlas/users/okarkout/xbb/fortraining/Boosted_scale_dict.json
+  class_dict: /project/atlas/users/okarkout/salt/class_dict.yaml
+  input_names:
+    jet: jets
+    track: subjets
+  variables:
+    jet:
+      - pt
+      - eta
+    track:
+      - DL1dv01_VR_pb
+      - DL1dv01_VR_pc
+      - DL1dv01_VR_pu
+  num_jets_train: -1
+  num_jets_val: -1
+  num_jets_test: -1
+
+trainer:
+  max_epochs: 50
+  callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_jet_classification_loss
+    - class_path: salt.callbacks.PredictionWriter
+      init_args:
+        jet_variables:
+          - pt
+          - eta
+          - mass
+          - R10TruthLabel_R22v1
+        track_variables:
+          - DL1dv01_VR_pb
+          - DL1dv01_VR_pc
+          - DL1dv01_VR_pu
+          - relativeDeltaRToVRJet
+          - HadronGhostTruthLabelID
+          - valid
+        jet_classes:
+        - hbb
+        - hcc
+        - qcd
+        - top
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 20
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+      init_args:
+        max_depth: 2
+
+model:
+  lrs_config:
+    initial: 4e-10
+    max: 1e-6
+    end: 4e-10
+    pct_start: 0.1
+
+  model:
+    class_path: salt.models.R21Xbb
+    init_args:
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jet_classification
+                input_type: jet
+                label: flavour_label
+                loss: torch.nn.CrossEntropyLoss
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: 15
+                    output_size: 4
+                    hidden_layers: [250,250,250,250,250,250]
+                    activation: ReLU
+                    dropout: 0.1
