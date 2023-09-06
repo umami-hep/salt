@@ -80,7 +80,7 @@ model:
               init_args:
                 name: track_origin
                 input_type: track
-                label: truthOriginLabel
+                label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -101,7 +101,7 @@ model:
               init_args:
                 name: track_vertexing
                 input_type: track
-                label: truthVertexIndex
+                label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
@@ -120,7 +120,7 @@ model:
               init_args:
                 name: electron_origin
                 input_type: electron
-                label: truthOriginLabel
+                label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -141,7 +141,7 @@ model:
               init_args:
                 name: electron_vertexing
                 input_type: electron
-                label: truthVertexIndex
+                label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss

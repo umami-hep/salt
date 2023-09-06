@@ -45,8 +45,8 @@ trainer:
           - HadronConeExclTruthLabelID
           - n_truth_promptLepton
         track_variables:
-          - truthOriginLabel
-          - truthVertexIndex
+          - ftagTruthOriginLabel
+          - ftagTruthVertexIndex
           - valid
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar

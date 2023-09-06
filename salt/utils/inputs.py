@@ -168,6 +168,8 @@ def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_track
 
     shapes_tracks = {
         "inputs": [n_jets, n_tracks_per_jet, n_jet_features + n_track_features],
+        "labels/ftagTruthOriginLabel": [n_jets, n_tracks_per_jet],
+        "labels/ftagTruthVertexIndex": [n_jets, n_tracks_per_jet],
         "labels/truthOriginLabel": [n_jets, n_tracks_per_jet],
         "labels/truthVertexIndex": [n_jets, n_tracks_per_jet],
         "valid": [n_jets, n_tracks_per_jet],
@@ -191,7 +193,7 @@ def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_track
     return jets, tracks
 
 
-def write_dummy_file(fname, sd_fname, make_xbb=False):
+def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
     """TODO: merge with atlas-ftag-tools test file generation."""
     with open(sd_fname) as f:
         sd = yaml.safe_load(f)
@@ -278,7 +280,11 @@ def write_dummy_file(fname, sd_fname, make_xbb=False):
 
     # setup tracks
     tracks_dtype = np.dtype(
-        [(n, "f4") for n in track_vars] + [("truthOriginLabel", "i4"), ("truthVertexIndex", "i4")]
+        [(n, "f4") for n in track_vars]
+        + [
+            ("ftagTruthOriginLabel", "i4"),
+            ("ftagTruthVertexIndex", "i4"),
+        ]
     )
     tracks = rng.random(shapes_tracks["inputs"])
     tracks = u2s(tracks, tracks_dtype)
@@ -289,7 +295,10 @@ def write_dummy_file(fname, sd_fname, make_xbb=False):
     # setup electrons
     electrons_dtype = np.dtype(
         [(n, "f4") for n in electron_vars]
-        + [("truthOriginLabel", "i4"), ("truthVertexIndex", "i4")]
+        + [
+            ("ftagTruthOriginLabel", "i4"),
+            ("ftagTruthVertexIndex", "i4"),
+        ]
     )
     electrons = rng.random(shapes_electrons["inputs"])
     electrons = u2s(electrons, electrons_dtype)
@@ -304,7 +313,9 @@ def write_dummy_file(fname, sd_fname, make_xbb=False):
         if make_xbb:
             f["jets"].attrs["flavour_label"] = ["hbb", "hcc", "top", "qcd"]
         else:
-            f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"]
+            f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"] + (
+                ["taus"] if inc_taus else []
+            )
         f.create_dataset("tracks", data=tracks)
         f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
