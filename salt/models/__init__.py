@@ -7,6 +7,7 @@ from salt.models.dense import Dense
 from salt.models.initnet import InitNet
 from salt.models.mlp_tagger import MLPTagger
 from salt.models.pooling import CrossAttentionPooling, GlobalAttentionPooling, Pooling
+from salt.models.r21xbb import R21Xbb
 from salt.models.tagger import JetTagger
 from salt.models.task import (
     ClassificationTask,
@@ -40,5 +41,6 @@ __all__ = [
     "GaussianRegressionTask",
     "VertexingTask",
     "JetTagger",
+    "R21Xbb",
     "MLPTagger",
 ]
