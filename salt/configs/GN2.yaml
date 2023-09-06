@@ -56,12 +56,12 @@ model:
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight: [1.0, 1.73, 1.08]
+                    weight: [1.0, 2.0, 2.0, 16.76]
                 net:
                   class_path: salt.models.Dense
                   init_args:
                     input_size: *out_dim
-                    output_size: 3
+                    output_size: 4
                     hidden_layers: [128, 64, 32]
                     activation: *activation
                     dropout: *dropout
@@ -70,12 +70,12 @@ model:
               init_args:
                 name: track_origin
                 input_type: track
-                label: truthOriginLabel
+                label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
+                    weight: [4.15, 73.74, 1.0, 17.53, 12.25, 12.5, 141.67, 22.29]
                 net:
                   class_path: salt.models.Dense
                   init_args:
@@ -90,7 +90,7 @@ model:
               init_args:
                 name: track_vertexing
                 input_type: track
-                label: truthVertexIndex
+                label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
@@ -135,10 +135,11 @@ data:
       #- numberOfTRTHits
       #- leptonID
 
-  train_file: /share/rcifdata/svanstroud/data/p5169ts_big/pp_output_train.h5
-  val_file: /share/rcifdata/svanstroud/data/p5169ts_big/pp_output_val.h5
-  norm_dict: /share/rcifdata/svanstroud/data/p5169ts_big/norm_dict.yaml
-  class_dict: /share/rcifdata/svanstroud/data/p5169ts_big/class_dict.yaml
+  train_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_train.h5
+  val_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_val.h5
+  norm_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/norm_dict.yaml
+  class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
+
   #move_files_temp: /dev/shm/svanstro/salt/gn2/
   input_names:
     jet: jets

@@ -11,13 +11,13 @@ from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
     cd_path = tmp_path / "dummy_class_dict.yaml"
     write_dummy_norm_dict(nd_path, cd_path)
-    write_dummy_file(train_h5_path, nd_path, do_xbb)
+    write_dummy_file(train_h5_path, nd_path, do_xbb, inc_taus)
 
     args = ["fit"]
     args += [f"--config={config_path}"]
@@ -60,12 +60,14 @@ def run_onnx(train_dir):
     get_onnx_metadata([str(train_dir / "network.onnx")])
 
 
-def run_combined(tmp_path, config, do_eval=True, do_onnx=True, train_args=None, do_xbb=False):
+def run_combined(
+    tmp_path, config, do_eval=True, do_onnx=True, train_args=None, do_xbb=False, inc_taus=False
+):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
     config_base = Path(__file__).parent.parent / "configs"
 
     # run training
-    run_train(tmp_path, config_base / config, train_args, do_xbb)
+    run_train(tmp_path, config_base / config, train_args, do_xbb, inc_taus)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -104,11 +106,15 @@ class TestTrainMisc:
         args = ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
         args += ["--trainer.callbacks.write_tracks=True"]
         args += ["--trainer.callbacks.track_variables=null"]
-        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
+        run_combined(
+            tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args, inc_taus=True
+        )
 
     def test_truncate_inputs(self, tmp_path) -> None:
         args = ["--data.num_inputs.track=10"]
-        run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
+        run_combined(
+            tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args, inc_taus=True
+        )
 
     def test_truncate_inputs_error(self, tmp_path) -> None:
         args = ["--data.num_inputs.this_should_error=10"]
@@ -123,7 +129,7 @@ def test_GN1(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
-    run_combined(tmp_path, "GN2.yaml")
+    run_combined(tmp_path, "GN2.yaml", inc_taus=True)
 
 
 @pytest.mark.filterwarnings(w)
