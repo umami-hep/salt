@@ -147,6 +147,23 @@ class RegressionTaskBase(Task):
             raise ValueError("Cannot use label_denominator and norm_params at the same time.")
         self.denominator_key = f"{self.name}_denominator"
 
+    def nan_loss(self, preds, labels, **kwargs):
+        """Calculates the loss function, and excludes any NaNs.
+        If Nans are included in the labels, then the loss should be instansiated
+        with the `reduction="none"` option, and this function will take the mean
+        excluding any nans.
+        """
+        loss = self.loss(preds, labels, **kwargs)
+        if len(loss.shape) == 0:
+            if torch.isnan(loss):
+                raise ValueError(
+                    "Regression loss is NaN. This may be due to NaN labels,"
+                    + " check configs/nan_regression.yaml for options to deal with this."
+                )
+            return loss
+
+        return loss.nanmean()
+
     def get_labels(self, labels_dict: Mapping):
         labels = labels_dict[self.name] if labels_dict else None
         if labels is not None:
@@ -178,7 +195,7 @@ class RegressionTask(RegressionTaskBase):
 
         loss = None
         if labels is not None:
-            loss = self.loss(preds, labels) * self.weight
+            loss = self.nan_loss(preds, labels) * self.weight
 
         return preds, loss
 
@@ -206,7 +223,7 @@ class GaussianRegressionTask(RegressionTaskBase):
 
         loss = None
         if labels is not None:
-            loss = self.loss(means, labels, var=sigmas) * self.weight
+            loss = self.nan_loss(means, labels, var=sigmas) * self.weight
 
         return preds, loss
 
