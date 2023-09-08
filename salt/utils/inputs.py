@@ -206,6 +206,7 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
         "pt_btagJes",
         "eta_btagJes",
         "HadronConeExclTruthLabelPt",
+        "HadronConeExclTruthLabelLxy",
         "n_tracks",
         "n_truth_promptLepton",
         "softMuon_pt",
@@ -277,7 +278,7 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
     else:
         jets["flavour_label"] = rng.choice([0, 1, 2], size=n_jets)
     jets["HadronConeExclTruthLabelID"] = rng.choice([0, 4, 5], size=n_jets)
-
+    jets["HadronConeExclTruthLabelLxy"][jets["flavour_label"] == 0] = np.nan
     # setup tracks
     tracks_dtype = np.dtype(
         [(n, "f4") for n in track_vars]
