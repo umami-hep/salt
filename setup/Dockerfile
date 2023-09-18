@@ -21,8 +21,8 @@ RUN python -m pip --version
 COPY requirements.txt .
 RUN python -m pip install -r requirements.txt
 
-# add puma to the image, instead of as a package dependency
-RUN python -m pip install puma-hep
+# add some other packages to the image, instead of as a package dependency
+RUN python -m pip install puma-hep umami-preprocessing
 
 # copy and install package
 COPY . .
