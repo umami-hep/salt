@@ -83,7 +83,7 @@ Salt requires Python 3.9 or later.
             /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/
         ```
 
-        The image comes with salt installed, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
     === "Pull the image"
 
@@ -112,6 +112,8 @@ Salt requires Python 3.9 or later.
             $SINGULARITY_CACHEDIR/salt.simg
         ```
 
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+
 
     --------------------------------------------------------
 
@@ -131,7 +133,7 @@ Salt requires Python 3.9 or later.
 
 ### Install the salt package
 
-Once inside your container or virtual environment and in the top level directory of the repo, you can install the `salt` package and it's dependencies via `pip` using
+Once inside your container or virtual environment and in the top level directory of the cloned repo, you can install the `salt` package and it's dependencies via `pip` using
 
 ```bash
 python -m pip install -e .

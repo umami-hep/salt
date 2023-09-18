@@ -145,7 +145,8 @@ class RegressionTaskBase(Task):
         self.norm_params = norm_params
         if self.label_denominator is not None and self.norm_params is not None:
             raise ValueError("Cannot use label_denominator and norm_params at the same time.")
-        self.denominator_key = f"{self.name}_denominator"
+        if self.label_denominator is not None:
+            self.denominator_key = f"{self.name}_denominator"
 
     def nan_loss(self, preds, labels, **kwargs):
         """Calculates the loss function, and excludes any NaNs.
@@ -167,7 +168,7 @@ class RegressionTaskBase(Task):
     def get_labels(self, labels_dict: Mapping):
         labels = labels_dict[self.name] if labels_dict else None
         if labels is not None:
-            if self.label_denominator in labels_dict:
+            if self.label_denominator is not None:
                 labels = torch.div(labels_dict[self.name], labels_dict[self.denominator_key])
             elif self.norm_params is not None:
                 labels = (labels - self.norm_params["mean"]) / self.norm_params["std"]
