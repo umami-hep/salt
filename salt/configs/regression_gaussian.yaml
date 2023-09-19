@@ -33,7 +33,7 @@ model:
               init_args:
                 name: gaussian_jet_regression
                 input_type: jet
-                label: HadronConeExclTruthLabelPt
+                targets: HadronConeExclTruthLabelPt
                 loss: GaussianNLLLoss
                 net:
                   class_path: salt.models.Dense

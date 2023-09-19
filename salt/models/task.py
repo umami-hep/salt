@@ -12,7 +12,6 @@ class Task(nn.Module):
         self,
         name: str,
         input_type: str,
-        label: str,
         net: Dense,
         loss: nn.Module,
         weight: float = 1.0,
@@ -27,8 +26,6 @@ class Task(nn.Module):
             Name of the task
         input_type : str
             Which type of object is input to the task e.g. jet/track/flow
-        label : str
-            Label name for the task
         net : Dense
             Dense network for performing the task
         loss : nn.Module
@@ -40,7 +37,6 @@ class Task(nn.Module):
 
         self.name = name
         self.input_type = input_type
-        self.label = label
         self.net = net
         self.loss = loss
         self.weight = weight
@@ -56,12 +52,18 @@ class Task(nn.Module):
 
 class ClassificationTask(Task):
     def __init__(
-        self, class_names: list[str] | None = None, label_map: Mapping | None = None, **kwargs
+        self,
+        label: str,
+        class_names: list[str] | None = None,
+        label_map: Mapping | None = None,
+        **kwargs,
     ):
         """Classification task.
 
         Parameters
         ----------
+        label : str
+            Label name for the task
         class_names : list[str] | None, optional
             List of class names, ordered by output index, by default None
         label_map : Mapping | None, optional
@@ -70,6 +72,7 @@ class ClassificationTask(Task):
             Keyword arguments for Task
         """
         super().__init__(**kwargs)
+        self.label = label
         self.class_names = class_names
         self.label_map = label_map
         if self.label_map is not None and self.class_names is None:
@@ -127,76 +130,120 @@ class ClassificationTask(Task):
 
 class RegressionTaskBase(Task):
     def __init__(
-        self, label_denominator: str | None = None, norm_params: dict | None = None, **kwargs
+        self,
+        targets: list[str] | str,
+        target_denominators: list[str] | str | None = None,
+        norm_params: dict | None = None,
+        **kwargs,
     ):
         """Base class for regression tasks.
 
         Parameters
         ----------
-        label_denominator : str | None, optional
-            Name of the denominator label for the task, by default None
+        targets : list[str] | str
+            Target names for the task
+        target_denominators : list[str] | str | None, optional
+            Name of the target denominator for the task, by default None
         norm_params : dict | None, optional
             Normalization parameters for the task, by default None
         **kwargs
             Keyword arguments for Task
         """
         super().__init__(**kwargs)
-        self.label_denominator = label_denominator
-        self.norm_params = norm_params
-        if self.label_denominator is not None and self.norm_params is not None:
-            raise ValueError("Cannot use label_denominator and norm_params at the same time.")
-        if self.label_denominator is not None:
-            self.denominator_key = f"{self.name}_denominator"
 
-    def nan_loss(self, preds, labels, **kwargs):
+        def listify(maybe_list):
+            if maybe_list is None:
+                return None
+            if isinstance(maybe_list, list):
+                return maybe_list
+            return [maybe_list]
+
+        self.targets = listify(targets)
+        self.target_denominators = listify(target_denominators)
+        if norm_params:
+            norm_params["mean"] = listify(norm_params["mean"])
+            norm_params["std"] = listify(norm_params["std"])
+        self.norm_params = norm_params
+        if self.target_denominators is not None and self.norm_params is not None:
+            raise ValueError("Cannot use target_denominators and norm_params at the same time.")
+        self.denominator_key = f"{self.name}_denominators"
+        if self.target_denominators and len(self.targets) != len(self.target_denominators):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of targets ({len(self.targets)}) does not match "
+                f"number of target denominators ({len(self.target_denominators)})"
+            )
+        if self.norm_params and len(self.norm_params["mean"]) != self.net.output_size:
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of means in norm_params ({len(self.norm_params['mean'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        if self.norm_params and len(self.norm_params["std"]) != self.net.output_size:
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+
+    def nan_loss(self, preds, targets, **kwargs):
         """Calculates the loss function, and excludes any NaNs.
-        If Nans are included in the labels, then the loss should be instansiated
+        If Nans are included in the targets, then the loss should be instansiated
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
         """
-        loss = self.loss(preds, labels, **kwargs)
+        loss = self.loss(preds, targets, **kwargs)
         if len(loss.shape) == 0:
             if torch.isnan(loss):
                 raise ValueError(
-                    "Regression loss is NaN. This may be due to NaN labels,"
+                    "Regression loss is NaN. This may be due to NaN targets,"
                     + " check configs/nan_regression.yaml for options to deal with this."
                 )
             return loss
 
         return loss.nanmean()
 
-    def get_labels(self, labels_dict: Mapping):
-        labels = labels_dict[self.name] if labels_dict else None
-        if labels is not None:
-            if self.label_denominator is not None:
-                labels = torch.div(labels_dict[self.name], labels_dict[self.denominator_key])
-            elif self.norm_params is not None:
-                labels = (labels - self.norm_params["mean"]) / self.norm_params["std"]
-        return labels
+    def get_targets(self, targets_dict: Mapping):
+        targets = targets_dict[self.name] if targets_dict else None
+        if targets is not None:
+            if self.target_denominators is not None:
+                targets = torch.div(targets, targets_dict[self.denominator_key])
+            if targets.ndim == 1:
+                targets = targets.unsqueeze(-1)
+            if self.norm_params is not None:
+                for i in range(len(self.norm_params["mean"])):
+                    targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
+                        self.norm_params["std"][i]
+                    )
+        return targets
 
-    def run_inference(self, preds: Tensor, labels_dict: Mapping):
-        if self.label_denominator is not None:
-            preds = preds * labels_dict[self.denominator_key]
+    def run_inference(self, preds: Tensor, targets_dict: Mapping):
+        if self.target_denominators is not None:
+            if preds.shape[-1] == 1:
+                preds = preds * targets_dict[self.denominator_key].unsqueeze(-1)
+            else:
+                preds = preds * targets_dict[self.denominator_key]
         elif self.norm_params is not None:
-            preds = preds * self.norm_params["std"] + self.norm_params["mean"]
+            for i in range(len(self.norm_params["mean"])):
+                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
         return preds
 
 
 class RegressionTask(RegressionTaskBase):
     def forward(
-        self, x: Tensor, labels_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
+        self, x: Tensor, targets_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
     ):
         if x.ndim != 2 or masks is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
 
-        preds = self.net(x, context).squeeze(-1)
-        labels = self.get_labels(labels_dict)
+        preds = self.net(x, context)
+        targets = self.get_targets(targets_dict)
 
         loss = None
-        if labels is not None:
-            loss = self.nan_loss(preds, labels) * self.weight
+        if targets is not None:
+            loss = self.nan_loss(preds, targets) * self.weight
 
         return preds, loss
 
@@ -205,7 +252,7 @@ class GaussianRegressionTask(RegressionTaskBase):
     def forward(
         self,
         x: Tensor,
-        labels_dict: Mapping,
+        targets_dict: Mapping,
         masks: Mapping | None = None,
         context: Tensor = None,
     ):
@@ -215,7 +262,7 @@ class GaussianRegressionTask(RegressionTaskBase):
             )
 
         preds = self.net(x, context)
-        labels = self.get_labels(labels_dict)  # type:ignore
+        targets = self.get_targets(targets_dict)  # type:ignore
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
@@ -223,15 +270,16 @@ class GaussianRegressionTask(RegressionTaskBase):
         sigmas = nn.functional.softplus(sigmas)  # enforce positive variance
 
         loss = None
-        if labels is not None:
-            loss = self.nan_loss(means, labels, var=sigmas) * self.weight
+        if targets is not None:
+            loss = self.nan_loss(means, targets, var=sigmas) * self.weight
 
         return preds, loss
 
 
 class VertexingTask(Task):
-    def __init__(self, **kwargs):
+    def __init__(self, label: str, **kwargs):
         super().__init__(**kwargs)
+        self.label = label
 
     def forward(
         self,

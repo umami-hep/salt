@@ -33,7 +33,7 @@ model:
               init_args:
                 name: regression_with_mean_std_norm
                 input_type: jet
-                label: HadronConeExclTruthLabelPt
+                targets: HadronConeExclTruthLabelPt
                 norm_params:
                   mean: 1.0
                   std: 1.0
@@ -50,8 +50,8 @@ model:
               init_args:
                 name: regression_with_ratio_norm
                 input_type: jet
-                label: HadronConeExclTruthLabelPt
-                label_denominator: pt_btagJes
+                targets: HadronConeExclTruthLabelPt
+                target_denominators: pt_btagJes
                 loss: MSELoss
                 net:
                   class_path: salt.models.Dense
