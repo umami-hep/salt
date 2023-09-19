@@ -146,7 +146,7 @@ class JetDataset(Dataset):
             for name, (group, label) in self.labels.items():
                 if input_type == group:
                     dtype = torch.long if np.issubdtype(batch[label].dtype, np.integer) else None
-                    labels[name] = torch.as_tensor(batch[label].copy(), dtype=dtype)
+                    labels[name] = torch.as_tensor(batch[label].copy().tolist(), dtype=dtype)
 
                 # hack to handle the old umami train file format
                 if input_type == "jet" and group == "/":
@@ -201,7 +201,15 @@ def get_dtype(ds, variables=None) -> np.dtype:
     if "valid" in ds.dtype.names and "valid" not in variables:
         variables.append("valid")
 
-    if missing := set(variables) - set(ds.dtype.names):
+    variables_flat = []
+    for item in variables:
+        if isinstance(item, list):
+            for subitem in item:
+                variables_flat.append(subitem)
+        else:
+            variables_flat.append(item)
+
+    if missing := set(variables_flat) - set(ds.dtype.names):
         raise ValueError(
             f"Variables {missing} were not found in dataset {ds.name} in file {ds.file.filename}"
         )

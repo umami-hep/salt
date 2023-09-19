@@ -101,9 +101,12 @@ class SaltCLI(LightningCLI):
             assert "Task" in submodel["class_path"]
             task = submodel["init_args"]
             if self.subcommand == "fit":
-                labels[task["name"]] = (task["input_type"], task["label"])
-            if denominator := task.get("label_denominator"):
-                labels[task["name"] + "_denominator"] = (task["input_type"], denominator)
+                if label := task.get("label"):
+                    labels[task["name"]] = (task["input_type"], label)
+                if targets := task.get("targets"):
+                    labels[task["name"]] = (task["input_type"], targets)
+            if denominators := task.get("target_denominators"):
+                labels[task["name"] + "_denominators"] = (task["input_type"], denominators)
         sc["data"]["labels"] = labels
 
         if self.subcommand == "fit":

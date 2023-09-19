@@ -148,8 +148,8 @@ class PredictionWriter(Callback):
                 jet_outs.append(u2s(jets, dtype))
 
             if issubclass(type(task), RegressionTaskBase):
-                dtype = np.dtype([(f"{task.label}_{task.name}", precision_str)])
-                jets = outputs[task].float().cpu().unsqueeze(-1).numpy()
+                dtype = np.dtype([(f"{task.name}_{t}", precision_str) for t in task.targets])
+                jets = outputs[task].float().cpu().numpy()
                 jet_outs.append(u2s(jets, dtype))
 
         jets = join_structured_arrays(jet_outs)
