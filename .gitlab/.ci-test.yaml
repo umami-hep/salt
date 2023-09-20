@@ -73,6 +73,12 @@ test-regression:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_regression
 
+test-nan-regression:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_nan_regression
+
+
 test-regression_gaussian:
   <<: *test-template
   script:
