@@ -192,7 +192,15 @@ class RegressionTaskBase(Task):
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
         """
+        mask = torch.isnan(targets)
+        preds = torch.where(mask, torch.zeros_like(preds), preds)
+        targets = torch.where(mask, torch.zeros_like(targets), targets)
+
+        if "var" in kwargs:
+            kwargs["var"] = torch.where(mask, torch.zeros_like(kwargs["var"]), kwargs["var"])
+
         loss = self.loss(preds, targets, **kwargs)
+
         if len(loss.shape) == 0:
             if torch.isnan(loss):
                 raise ValueError(
@@ -201,7 +209,10 @@ class RegressionTaskBase(Task):
                 )
             return loss
 
-        return loss.nanmean()
+        nanmean = torch.nanmean(loss)
+        if torch.isnan(nanmean):
+            raise ValueError("NanRegression is NaN. This means all model predictions are NaN")
+        return nanmean
 
     def get_targets(self, targets_dict: Mapping):
         targets = targets_dict[self.name] if targets_dict else None
