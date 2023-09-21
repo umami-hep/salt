@@ -16,9 +16,12 @@ class GlobalAttentionPooling(Pooling):
         super().__init__()
         self.gate_nn = nn.Linear(input_size, 1)
 
-    def forward(self, x: Tensor, mask: Tensor = None):
+    def forward(self, x: Tensor | dict, mask: dict | None = None):
+        if isinstance(x, dict):
+            x = torch.cat(list(x.values()), dim=1)
+
         if mask is not None:
-            mask = mask.unsqueeze(-1)
+            mask = torch.cat(list(mask.values()), dim=1).unsqueeze(-1)
 
         weights = masked_softmax(self.gate_nn(x), mask, dim=1)
 
@@ -31,7 +34,7 @@ class GlobalAttentionPooling(Pooling):
         return (x * weights).sum(dim=1)
 
 
-class CrossAttentionPooling(Pooling):
+class BaseCrossAttentionPooling(Pooling):
     def __init__(
         self,
         input_size: int,
@@ -43,7 +46,6 @@ class CrossAttentionPooling(Pooling):
         super().__init__()
         self.input_size = input_size
         self.num_layers = num_layers
-
         self.ca_layers = nn.ModuleList(
             [
                 TransformerCrossAttentionLayer(input_size, mha_config, dense_config, context_dim)
@@ -51,18 +53,41 @@ class CrossAttentionPooling(Pooling):
             ]
         )
         self.final_norm = nn.LayerNorm(input_size)
-
-        # Initialise class token which is the query for the cross-attention
         self.class_token = nn.Parameter(randn(1, 1, input_size))
 
-    def forward(self, x: Tensor, mask: Tensor = None, context: Tensor | None = None):
-        # Expand class token to match batch size
-        class_token = self.class_token.expand(x.shape[0], 1, self.input_size)
+    def expand_class_token(self, x: Tensor | dict):
+        if isinstance(x, dict):
+            return self.class_token.expand(x[list(x.keys())[0]].shape[0], 1, self.input_size)
 
-        # pass class token through all layers
+        return self.class_token.expand(x.shape[0], 1, self.input_size)
+
+
+class DictCrossAttentionPooling(BaseCrossAttentionPooling):
+    def forward(self, x: dict, mask: dict | None = None, context: Tensor | None = None):
+        class_token = self.expand_class_token(x)
+        for layer in self.ca_layers:
+            new_class_token = torch.zeros_like(class_token)
+            for input_type in x:
+                new_class_token += layer(
+                    class_token,
+                    x[input_type],
+                    key_value_mask=mask[input_type] if mask else None,
+                    context=context,
+                )
+            class_token = new_class_token
+
+        class_token = self.final_norm(class_token)
+        return class_token.squeeze(1)
+
+
+class TensorCrossAttentionPooling(BaseCrossAttentionPooling):
+    def forward(self, x: Tensor, mask: dict | None = None, context: Tensor | None = None):
+        class_token = self.expand_class_token(x)
+        if mask is not None:
+            mask = torch.cat(list(mask.values()), dim=1)
+
         for layer in self.ca_layers:
             class_token = layer(class_token, x, key_value_mask=mask, context=context)
 
         class_token = self.final_norm(class_token)
-
         return class_token.squeeze(1)
