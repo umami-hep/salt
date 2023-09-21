@@ -1,6 +1,8 @@
 from collections.abc import Mapping
+from itertools import combinations
 
-from torch import BoolTensor, Tensor, nn
+import torch.nn as nn
+from torch import BoolTensor, Tensor, cat
 
 from salt.models.attention import MultiheadAttention
 from salt.models.dense import Dense
@@ -179,13 +181,21 @@ class TransformerEncoder(nn.Module):
         if self.out_dim:
             self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
 
-    def forward(self, x: Tensor, edge_x: Tensor = None, **kwargs) -> Tensor:
+    def forward(
+        self, x: Tensor | dict, edge_x: Tensor = None, mask: Tensor | dict | None = None, **kwargs
+    ) -> Tensor:
         """Pass the input through all layers sequentially."""
+        if isinstance(x, dict):
+            x = cat(list(x.values()), dim=1)
+
+        if isinstance(mask, dict):
+            mask = cat(list(mask.values()), dim=1)
+
         for layer in self.layers:
             if edge_x is not None:
-                x, edge_x = layer(x, edge_x, **kwargs)
+                x, edge_x = layer(x, edge_x, mask=mask, **kwargs)
             else:
-                x = layer(x, **kwargs)
+                x = layer(x, mask=mask, **kwargs)
         x = self.final_norm(x)
 
         # optional resizing layer
@@ -224,3 +234,124 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         if self.dense:
             query = query + self.dense(self.norm2(query), context)
         return query
+
+
+class TransformerCrossAttentionEncoder(nn.Module):
+    """A stack of N transformer encoder layers interspersed with cross-attention
+    layers between inputs types.
+    """
+
+    def __init__(
+        self,
+        input_types: list[str],
+        embed_dim: int,
+        num_layers: int,
+        mha_config: Mapping,
+        sa_dense_config: Mapping | None = None,
+        ca_dense_config: Mapping | None = None,
+        context_dim: int = 0,
+        out_dim: int = 0,
+        ca_every_layer: bool = False,
+        merge_dict: dict[str, list[str]] | None = None,
+        update_edges: bool = False,
+    ):
+        super().__init__()
+        self.input_types = input_types
+        self.embed_dim = embed_dim
+        self.num_layers = num_layers
+        self.out_dim = out_dim
+        self.ca_every_layer = ca_every_layer
+        self.merge_dict = merge_dict if merge_dict else {}
+        self.update_edges = update_edges
+
+        # Generate a list of final input types, merging as necessary
+        self.final_input_types = list(
+            set(input_types) - {it for sublist in self.merge_dict.values() for it in sublist}
+        )
+        self.final_input_types.extend(self.merge_dict.keys())
+
+        # Layers for each input type
+        # need to use ModuleDict so device is set correctly
+        self.type_layers = nn.ModuleDict(
+            {
+                input_type: nn.ModuleList(
+                    [
+                        TransformerEncoderLayer(
+                            embed_dim,
+                            mha_config,
+                            sa_dense_config,
+                            context_dim,
+                            update_edges if i != num_layers - 1 else False,
+                        )
+                        for i in range(num_layers)
+                    ]
+                )
+                for input_type in self.final_input_types
+            }
+        )
+
+        ca_layers = num_layers if ca_every_layer else 2 if num_layers > 1 else 1
+
+        # module dict only supports string keys
+        self.cross_layers = nn.ModuleDict(
+            {
+                f"{input_type1}_{input_type2}": nn.ModuleList(
+                    [
+                        TransformerCrossAttentionLayer(
+                            embed_dim, mha_config, ca_dense_config, context_dim
+                        )
+                        for _ in range(ca_layers)
+                    ]
+                )
+                for input_type1, input_type2 in combinations(self.final_input_types, 2)
+            }
+        )
+
+        self.final_norm = nn.LayerNorm(embed_dim)
+
+        # For resizing the output tokens
+        if self.out_dim:
+            self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
+
+    def forward(
+        self, x: dict[str, Tensor], mask: dict[str, Tensor], edge_x: Tensor = None, **kwargs
+    ) -> Tensor:
+        """Pass the input through all layers sequentially."""
+        if edge_x is not None:
+            raise ValueError("Edge updates of Cross Attention Encoder not yet supported")
+
+        # Initialise updated representations dictionary
+        updated_x = {k: 0 for k in x}
+
+        # Merge inputs as specified
+        for merge_name, merge_types in self.merge_dict.items():
+            x[merge_name] = cat([x.pop(mt) for mt in merge_types], dim=1)
+
+        for i in range(self.num_layers):
+            # Self-attention for each type
+            for it in self.final_input_types:
+                updated_x[it] += self.type_layers[it][i](x[it], mask=mask[it], **kwargs)
+
+            # Cross-attention between pairs of types - symmetric update
+            # i % len(self.cross_layers[layer_key]) evals to 0 for first layer
+            # and final layer and 1 everywhere else to give behaviour we want
+            if self.ca_every_layer or i in [0, self.num_layers - 1]:
+                for it1, it2 in combinations(self.final_input_types, 2):
+                    layer_key = f"{it1}_{it2}"
+                    updated_x[it1] += self.cross_layers[layer_key][
+                        i % len(self.cross_layers[layer_key])
+                    ](x[it1], x[it2], mask[it1], mask[it2], **kwargs)
+                    updated_x[it2] += self.cross_layers[layer_key][
+                        i % len(self.cross_layers[layer_key])
+                    ](x[it2], x[it1], mask[it2], mask[it1], **kwargs)
+
+        # Apply final normalization
+        for it in self.final_input_types:
+            updated_x[it] = self.final_norm(updated_x[it])
+
+        # Optional resizing layer
+        if self.out_dim:
+            for it in self.final_input_types:
+                updated_x[it] = self.final_linear(updated_x[it])
+
+        return updated_x

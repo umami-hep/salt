@@ -33,6 +33,8 @@ data:
 
 For now, you will need to manually match your model input size to the number of variables you are using.
 
+Training with multiple types of inputs beyond jets and tracks is supported to create a heterogenous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2emu.yaml) which includes a separate electrons input type.
+
 
 #### Global Jet Features
 
@@ -139,22 +141,73 @@ The [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2.yaml) config by defaul
 
 ```yaml
 pool_net:
-    class_path: salt.models.CrossAttentionPooling
+class_path: salt.models.CrossAttentionPooling
+init_args:
+    input_size: 128
+    num_layers: 4
+    mha_config:
+        num_heads: 4
+        attention:
+            class_path: salt.models.ScaledDotProductAttention
+        out_proj: False
+    dense_config:
+        norm_layer: *norm_layer
+        activation: *activation
+        hidden_layers: [128]
+        dropout: 0.1
+
+```
+
+
+### Heterogeneous Models
+If multiple input types are provided, separate initialiser networks should be provided for each input type. An example using both track and electron input types is provided below:
+
+```yaml
+- class_path: salt.models.InitNet
     init_args:
-        embed_dim: *embed_dim
-        num_layers: 3
+    name: track
+    net:
+        class_path: salt.models.Dense
+        init_args:
+        input_size: 23
+        output_size: &embed_dim 192
+        hidden_layers: [256]
+        activation: &activation SiLU
+        norm_layer: &norm_layer LayerNorm
+- class_path: salt.models.InitNet
+    init_args:
+    name: electron
+    net:
+        class_path: salt.models.Dense
+        init_args:
+        input_size: 28
+        output_size: *embed_dim
+        hidden_layers: [256]
+        activation: *activation
+        norm_layer: *norm_layer
+```
+
+The separate input types are by default combined and treated homogeneously within the GNN layers. Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
+
+```yaml
+    gnn:
+    class_path: salt.models.TransformerCrossAttentionEncoder
+    init_args:
+        input_types: [track, electron]
+        ca_every_layer: true
+        embed_dim: 192
+        num_layers: 6
         out_dim: &out_dim 128
         mha_config:
-            num_heads: 4
-            attention:
-              class_path: salt.models.ScaledDotProductAttention
-            out_proj: False
-        dense_config:
-            norm_layer: *norm_layer
-            activation: *activation
-            hidden_layers: [128]
-            dropout: 0.1
-
+        num_heads: 4
+        attention:
+            class_path: salt.models.ScaledDotProductAttention
+        out_proj: False
+        sa_dense_config:
+        norm_layer: *norm_layer
+        activation: *activation
+        hidden_layers: [256]
+        dropout: &dropout 0.1
 ```
 
 #### Compiled Models

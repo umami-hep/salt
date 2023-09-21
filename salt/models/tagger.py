@@ -61,22 +61,14 @@ class JetTagger(nn.Module):
             else:
                 edge_x = init_net(inputs)
 
-        # concatenate different input groups
-        # TODO: use a flag as to which input type this is
-        embed_x = torch.cat(list(embed_x.values()), dim=1)
-        combined_mask = None
-        if mask is not None:
-            combined_mask = torch.cat(list(mask.values()), dim=1)
-
-        # graph network
         if self.gnn:
-            embed_x = self.gnn(embed_x, mask=combined_mask, edge_x=edge_x)
+            embed_x = self.gnn(embed_x, mask=mask, edge_x=edge_x)
             global_feats = inputs.get("global", None)
             if global_feats is not None:
                 embed_x = attach_context(embed_x, global_feats)
 
         # pooling
-        pooled = self.pool_net(embed_x, mask=combined_mask)
+        pooled = self.pool_net(embed_x, mask=mask)
 
         # run tasks
         preds, loss = self.tasks_forward(pooled, embed_x, mask, labels)
@@ -92,6 +84,10 @@ class JetTagger(nn.Module):
     ):
         preds = {}
         loss = {}
+
+        if isinstance(embed_x, dict):
+            embed_x = torch.cat(list(embed_x.values()), dim=1)
+
         for task in self.tasks:
             if task.input_type == "jet":
                 task_input = pooled

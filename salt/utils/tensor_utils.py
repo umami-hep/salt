@@ -28,6 +28,22 @@ def add_dims(x: Tensor, ndim: int):
     return x
 
 
+def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
+    if context is None:
+        raise RuntimeError("Expected context is missing from forward pass")
+
+    if (dim_diff := x.dim() - context.dim()) < 0:
+        raise ValueError(
+            f"Provided context has more dimensions ({context.dim()}) than inputs ({x.dim()})"
+        )
+
+    if dim_diff > 0:
+        context = add_dims(context, x.dim())
+        context = context.expand(*x.shape[:-1], -1)
+
+    return torch.cat([x, context], dim=-1)
+
+
 def attach_context(x: Tensor, context: Tensor) -> Tensor:
     """Concatenates a context tensor to an input tensor with considerations for
     broadcasting.
@@ -50,22 +66,7 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
     high level jet variables, which will be expanded to [b,1,1,jf] or the conditioning
     on the node features which will be expanded to [b,1,n,nf]
     """
-    if context is None:
-        raise RuntimeError("Expected context is missing from forward pass")
+    if isinstance(x, dict):
+        return {key: attach_context_single(val, context) for key, val in x.items()}
 
-    # Check if the context information has less dimensions and the broadcast is needed
-    if (dim_diff := x.dim() - context.dim()) < 0:
-        raise ValueError(
-            f"Provided context has more dimensions ({context.dim()}) than inputs ({x.dim()})"
-        )
-
-    # If reshaping is required
-    if dim_diff > 0:
-        # Reshape the context inputs with 1's after the batch dim
-        context = add_dims(context, x.dim())
-
-        # Use expand to allow for broadcasting as expand does not allocate memory
-        context = context.expand(*x.shape[:-1], -1)
-
-    # Apply the concatenation on the final dimension
-    return torch.cat([x, context], dim=-1)
+    return attach_context_single(x, context)

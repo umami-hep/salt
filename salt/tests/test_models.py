@@ -4,12 +4,13 @@ import torch
 from torch import nn
 
 from salt.models import (
-    CrossAttentionPooling,
     Dense,
     GATv2Attention,
     GlobalAttentionPooling,
     MultiheadAttention,
     ScaledDotProductAttention,
+    TensorCrossAttentionPooling,
+    TransformerCrossAttentionEncoder,
     TransformerEncoder,
 )
 from salt.utils.inputs import get_random_mask
@@ -30,9 +31,9 @@ def test_dense_context_broadcast() -> None:
     net(torch.rand(1, 10, 10), torch.rand(1, 4))
 
 
-@pytest.mark.parametrize("pooling", [GlobalAttentionPooling, CrossAttentionPooling])
+@pytest.mark.parametrize("pooling", [GlobalAttentionPooling, TensorCrossAttentionPooling])
 def test_pooling(pooling) -> None:
-    if pooling == CrossAttentionPooling:
+    if pooling != GlobalAttentionPooling:
         net = pooling(10, 1, {"num_heads": 1, "attention": ScaledDotProductAttention()})
     else:
         net = pooling(10)
@@ -43,6 +44,7 @@ def test_pooling(pooling) -> None:
     x = torch.cat([x, torch.zeros((1, 1, x.shape[2]))], dim=1)
     mask = get_random_mask(1, 6, p_valid=1)
     mask[:, -1] = True
+    mask = {"mask": mask}
     out_with_mask = net(x, mask=mask)
     assert torch.all(out == out_with_mask)
 
@@ -80,6 +82,56 @@ def test_transformer() -> None:
     mask[:, -1] = True
     out_with_pad = net(tracks, mask=mask)[:, :-1]
     assert torch.all(out == out_with_pad)
+
+
+def test_transformer_cross_attention_encoder() -> None:
+    net = TransformerCrossAttentionEncoder(
+        input_types=["type1", "type2"],
+        embed_dim=10,
+        num_layers=2,
+        mha_config={
+            "num_heads": 2,
+            "attention": ScaledDotProductAttention(),
+        },
+        sa_dense_config={
+            "activation": "ReLU",
+            "hidden_layers": [10],
+            "norm_layer": "LayerNorm",
+        },
+    )
+    # Basic Functionality Test
+    x = {
+        "type1": torch.rand(10, 10, 10),
+        "type2": torch.rand(10, 10, 10),
+    }
+    mask = {
+        "type1": get_random_mask(10, 10, p_valid=1),
+        "type2": get_random_mask(10, 10, p_valid=1),
+    }
+    net(x, mask)
+
+    # Zero Input Case Test
+    x["type1"] = torch.rand(10, 0, 10)
+    mask["type1"] = torch.empty((10, 0), dtype=bool)
+    assert torch.all(net(x, mask)["type1"] == torch.empty((10, 0, 10)))
+
+    # Padded Case Test
+    x["type1"] = torch.rand(1, 10, 10)
+    x["type2"] = torch.rand(1, 10, 10)
+    mask["type1"] = get_random_mask(1, 10, p_valid=0)
+    mask["type2"] = get_random_mask(1, 10, p_valid=1)
+    out = net(x, mask)
+    assert not torch.isnan(out["type1"]).any()
+
+    # Padding Invariance Test
+    x["type1"] = torch.rand(1, 10, 10)
+    mask["type1"] = get_random_mask(1, 10, p_valid=1)
+    out = net(x, mask)
+    x["type1"] = torch.cat([x["type1"], torch.zeros((1, 1, 10))], dim=1)
+    mask["type1"] = torch.zeros(x["type1"].shape[:-1]).bool()
+    mask["type1"][:, -1] = True
+    out_with_pad = net(x, mask)["type1"][:, :-1]
+    assert torch.all(out["type1"] == out_with_pad)
 
 
 def test_mha_allvalid_mask() -> None:
