@@ -9,6 +9,7 @@ import torch
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
+from salt.utils.array_utils import listify
 from salt.utils.git_check import check_for_uncommitted_changes, create_and_push_tag
 
 
@@ -95,18 +96,22 @@ class SaltCLI(LightningCLI):
                 init_net.init_args.concat_jet_tracks = sc.data.concat_jet_tracks
 
         # add the labels from the model config to the data config
-        labels = {}
+        labels = {}  # type: ignore
         model_dict = vars(sc.model.model.init_args)
         for submodel in model_dict["tasks"]["init_args"]["modules"]:
             assert "Task" in submodel["class_path"]
             task = submodel["init_args"]
+            if task["input_type"] not in labels:
+                labels[task["input_type"]] = []
             if self.subcommand == "fit":
                 if label := task.get("label"):
-                    labels[task["name"]] = (task["input_type"], label)
+                    labels[task["input_type"]].append(label)
                 if targets := task.get("targets"):
-                    labels[task["name"]] = (task["input_type"], targets)
+                    for target in listify(targets):
+                        labels[task["input_type"]].append(target)
             if denominators := task.get("target_denominators"):
-                labels[task["name"] + "_denominators"] = (task["input_type"], denominators)
+                for denominator in listify(denominators):
+                    labels[task["input_type"]].append(denominator)
         sc["data"]["labels"] = labels
 
         if self.subcommand == "fit":

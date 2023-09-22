@@ -84,7 +84,7 @@ class JetDataset(Dataset):
         self.arrays = {}
         for input_type, input_name in self.input_names.items():
             self.dss[input_type] = self.file[input_name]
-            variables = [lab for (g, lab) in self.labels.values() if g == input_type]  # type:ignore
+            variables = self.labels[input_type] if input_type in self.labels else []
             variables += self.input_variables[input_type]
             if input_type == "edge":
                 dtype = get_dtype_edge(self.file[input_name], variables)
@@ -143,14 +143,20 @@ class JetDataset(Dataset):
                 inputs[input_type] = torch.from_numpy(flat_array)
 
             # process labels for this input type
-            for name, (group, label) in self.labels.items():
-                if input_type == group:
+            if input_type in self.labels:
+                labels[input_type] = {}
+                for label in self.labels[input_type]:
                     dtype = torch.long if np.issubdtype(batch[label].dtype, np.integer) else None
-                    labels[name] = torch.as_tensor(batch[label].copy().tolist(), dtype=dtype)
+                    labels[input_type][label] = torch.as_tensor(batch[label].copy(), dtype=dtype)
 
                 # hack to handle the old umami train file format
-                if input_type == "jet" and group == "/":
-                    labels[name] = torch.as_tensor(self.file["labels"][jet_idx], dtype=torch.long)
+                if input_type == "jet" and "/" in self.labels:
+                    if "jet" not in labels:
+                        labels["jet"] = {}
+                    for label in self.labels["/"]:
+                        labels[input_type][label] = torch.as_tensor(
+                            self.file["labels"][jet_idx], dtype=torch.long
+                        )
 
             # get the padding mask
             if "valid" in batch.dtype.names and input_type != "edge":

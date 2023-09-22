@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import Dense
+from salt.utils.array_utils import listify
 from salt.utils.tensor_utils import masked_softmax
 
 
@@ -96,7 +97,7 @@ class ClassificationTask(Task):
             mask = None
 
         # get labels
-        labels = labels_dict[self.name] if labels_dict else None
+        labels = labels_dict[self.input_type][self.label] if labels_dict else None
         if labels is not None and self.label_map is not None:
             for k, v in self.label_map.items():
                 labels[labels == k] = v
@@ -151,13 +152,6 @@ class RegressionTaskBase(Task):
         """
         super().__init__(**kwargs)
 
-        def listify(maybe_list):
-            if maybe_list is None:
-                return None
-            if isinstance(maybe_list, list):
-                return maybe_list
-            return [maybe_list]
-
         self.targets = listify(targets)
         self.target_denominators = listify(target_denominators)
         if norm_params:
@@ -166,20 +160,19 @@ class RegressionTaskBase(Task):
         self.norm_params = norm_params
         if self.target_denominators is not None and self.norm_params is not None:
             raise ValueError("Cannot use target_denominators and norm_params at the same time.")
-        self.denominator_key = f"{self.name}_denominators"
         if self.target_denominators and len(self.targets) != len(self.target_denominators):
             raise ValueError(
                 f"{self.name}: "
                 f"Number of targets ({len(self.targets)}) does not match "
                 f"number of target denominators ({len(self.target_denominators)})"
             )
-        if self.norm_params and len(self.norm_params["mean"]) != self.net.output_size:
+        if self.norm_params and len(self.norm_params["mean"]) != len(self.targets):
             raise ValueError(
                 f"{self.name}: "
                 f"Number of means in norm_params ({len(self.norm_params['mean'])}) does not match "
                 f"number of targets ({len(self.targets)})"
             )
-        if self.norm_params and len(self.norm_params["std"]) != self.net.output_size:
+        if self.norm_params and len(self.norm_params["std"]) != len(self.targets):
             raise ValueError(
                 f"{self.name}: "
                 f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
@@ -215,12 +208,18 @@ class RegressionTaskBase(Task):
         return nanmean
 
     def get_targets(self, targets_dict: Mapping):
-        targets = targets_dict[self.name] if targets_dict else None
+        targets = None
+        if targets_dict:
+            targets = torch.stack(
+                [targets_dict[self.input_type][target] for target in self.targets], dim=-1
+            )
+
         if targets is not None:
             if self.target_denominators is not None:
-                targets = torch.div(targets, targets_dict[self.denominator_key])
-            if targets.ndim == 1:
-                targets = targets.unsqueeze(-1)
+                for i in range(len(self.targets)):
+                    targets[:, i] = torch.div(
+                        targets[:, i], targets_dict[self.input_type][self.target_denominators[i]]
+                    )
             if self.norm_params is not None:
                 for i in range(len(self.norm_params["mean"])):
                     targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
@@ -230,10 +229,10 @@ class RegressionTaskBase(Task):
 
     def run_inference(self, preds: Tensor, targets_dict: Mapping):
         if self.target_denominators is not None:
-            if preds.shape[-1] == 1:
-                preds = preds * targets_dict[self.denominator_key].unsqueeze(-1)
-            else:
-                preds = preds * targets_dict[self.denominator_key]
+            for i in range(len(self.targets)):
+                preds[:, i] = (
+                    preds[:, i] * targets_dict[self.input_type][self.target_denominators[i]]
+                )
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
                 preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
@@ -241,6 +240,15 @@ class RegressionTaskBase(Task):
 
 
 class RegressionTask(RegressionTaskBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.net.output_size != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of outputs ({self.net.output_size}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+
     def forward(
         self, x: Tensor, targets_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
     ):
@@ -260,6 +268,15 @@ class RegressionTask(RegressionTaskBase):
 
 
 class GaussianRegressionTask(RegressionTaskBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.net.output_size != 2 * len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of targets ({len(self.targets)}) is not twice the "
+                f"number of outputs ({self.net.output_size})"
+            )
+
     def forward(
         self,
         x: Tensor,
@@ -338,7 +355,7 @@ class VertexingTask(Task):
         return pred, loss
 
     def calculate_loss(self, pred, labels_dict, adjmat):
-        labels = labels_dict[self.name]
+        labels = labels_dict[self.input_type][self.label]
 
         match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
 
@@ -354,7 +371,8 @@ class VertexingTask(Task):
         loss = self.loss(pred.squeeze(-1), match_matrix)
 
         # If reduction is none and have weight labels, weight the loss
-        weights = self.get_weights(labels_dict[f"{self.input_type}_origin"], adjmat)
+        self.label.replace("VertexIndex", "OriginLabel")
+        weights = self.get_weights(labels_dict[self.input_type][self.label], adjmat)
         weighted_loss = loss * weights
 
         # Calculate the number of non-masked elements
