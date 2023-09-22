@@ -43,6 +43,20 @@ model:
                     hidden_layers: [128, 64, 32]
                     activation: *activation
 
+            - class_path: salt.models.GaussianRegressionTask
+              init_args:
+                name: gaussian_multi_output_jet_regression
+                input_type: jet
+                targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+                loss: GaussianNLLLoss
+                net:
+                  class_path: salt.models.Dense
+                  init_args:
+                    input_size: *embed_dim
+                    output_size: 4
+                    hidden_layers: [128, 64, 32]
+                    activation: *activation
+
 data:
   variables:
     jet:

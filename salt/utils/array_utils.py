@@ -4,7 +4,7 @@ import numpy as np
 def join_structured_arrays(arrays: list):
     """Join a list of structured numpy arrays.
 
-    sSee https://github.com/numpy/numpy/issues/7811
+    See https://github.com/numpy/numpy/issues/7811
 
     Parameters
     ----------
@@ -23,3 +23,24 @@ def join_structured_arrays(arrays: list):
             newrecarray[name] = a[name]
 
     return newrecarray
+
+
+def listify(maybe_list):
+    """Convert a scalar or list to a list.
+    If None, returns None.
+
+    Parameters
+    ----------
+    maybe_list
+        A scalar, list or None
+
+    Returns
+    -------
+    list
+        A list or None
+    """
+    if maybe_list is None:
+        return None
+    if isinstance(maybe_list, list):
+        return maybe_list
+    return [maybe_list]
