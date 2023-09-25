@@ -37,7 +37,7 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor):
 
     edge_scores = (scores + scores[sym_ind]) / 2.0
 
-    return torch.sigmoid(edge_scores)
+    return torch.sigmoid(edge_scores.float())
 
 
 @torch.jit.script
