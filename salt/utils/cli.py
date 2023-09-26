@@ -88,6 +88,27 @@ class SaltCLI(LightningCLI):
         """A lot of automatic configuration is done here."""
         sc = self.config[self.subcommand]
 
+        # add the labels from the model config to the data config
+        labels = {}  # type: ignore
+        model_dict = vars(sc.model.model.init_args)
+        for submodel in model_dict["tasks"]["init_args"]["modules"]:
+            assert "Task" in submodel["class_path"]
+            task = submodel["init_args"]
+            if task["input_type"] not in labels:
+                labels[task["input_type"]] = []
+            if self.subcommand == "fit":
+                if label := task.get("label"):
+                    labels[task["input_type"]].append(label)
+                if weight := task.get("sample_weight"):
+                    labels[task["input_type"]].append(weight)
+                if targets := task.get("targets"):
+                    for target in listify(targets):
+                        labels[task["input_type"]].append(target)
+            if denominators := task.get("target_denominators"):
+                for denominator in listify(denominators):
+                    labels[task["input_type"]].append(denominator)
+        sc["data"]["labels"] = labels
+
         if self.subcommand == "fit":
             # set input sizes
             for input_type, variables in sc.data.variables.items():
@@ -104,25 +125,6 @@ class SaltCLI(LightningCLI):
                     init_net["variables"] = sc.data.variables
                     init_net["input_names"] = sc.data.input_names
                     init_net["concat_jet_tracks"] = sc.data.concat_jet_tracks
-
-            # add the labels from the model config to the data config
-            labels = {}  # type: ignore
-            model_dict = vars(sc.model.model.init_args)
-            for submodel in model_dict["tasks"]["init_args"]["modules"]:
-                assert "Task" in submodel["class_path"]
-                task = submodel["init_args"]
-                if task["input_type"] not in labels:
-                    labels[task["input_type"]] = []
-                if self.subcommand == "fit":
-                    if label := task.get("label"):
-                        labels[task["input_type"]].append(label)
-                    if targets := task.get("targets"):
-                        for target in listify(targets):
-                            labels[task["input_type"]].append(target)
-                if denominators := task.get("target_denominators"):
-                    for denominator in listify(denominators):
-                        labels[task["input_type"]].append(denominator)
-            sc["data"]["labels"] = labels
 
             self.add_jet_class_names()
 
