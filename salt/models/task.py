@@ -40,7 +40,7 @@ class Task(nn.Module):
         self.loss = loss
         self.weight = weight
 
-    def input_type_mask(self, masks):
+    def input_type_mask(self, masks: Mapping):
         return torch.cat(
             [
                 torch.ones(m.shape[1], device=m.device) * (t == self.input_type)
@@ -55,6 +55,7 @@ class ClassificationTask(Task):
         label: str,
         class_names: list[str] | None = None,
         label_map: Mapping | None = None,
+        sample_weight: str | None = None,
         **kwargs,
     ):
         """Classification task.
@@ -67,6 +68,8 @@ class ClassificationTask(Task):
             List of class names, ordered by output index, by default None
         label_map : Mapping | None, optional
             Remap integer labels for training (e.g. 0,4,5 -> 0,1,2), by default None
+        sample_weight : str | None, optional
+            Name of the sample weight to use, by default None
         **kwargs
             Keyword arguments for Task
         """
@@ -78,6 +81,17 @@ class ClassificationTask(Task):
             raise ValueError("Specify class names when using label_map.")
         if hasattr(self.loss, "ignore_index"):
             self.loss.ignore_index = -1
+        self.sample_weight = sample_weight
+        if self.sample_weight is not None:
+            assert (
+                self.loss.reduction == "none"
+            ), "Sample weights only supported for reduction='none'"
+
+    def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
+        """Apply per sample weights, if specified."""
+        if self.sample_weight is None:
+            return loss
+        return (loss * labels_dict[self.input_type][self.sample_weight]).mean()
 
     def forward(
         self,
@@ -111,9 +125,11 @@ class ClassificationTask(Task):
         loss = None
         if labels is not None:
             if preds.ndim == 3:
-                loss = self.loss(preds.permute(0, 2, 1), labels) * self.weight
+                loss = self.loss(preds.permute(0, 2, 1), labels)
             else:
-                loss = self.loss(preds, labels) * self.weight
+                loss = self.loss(preds, labels)
+            loss = self.apply_sample_weight(loss, labels_dict)
+            loss *= self.weight
 
         return preds, loss
 
@@ -177,7 +193,7 @@ class RegressionTaskBase(Task):
                 f"number of targets ({len(self.targets)})"
             )
 
-    def nan_loss(self, preds, targets, **kwargs):
+    def nan_loss(self, preds: Tensor, targets: Tensor, **kwargs) -> Tensor:
         """Calculates the loss function, and excludes any NaNs.
         If Nans are included in the targets, then the loss should be instansiated
         with the `reduction="none"` option, and this function will take the mean
