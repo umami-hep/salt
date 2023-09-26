@@ -85,36 +85,45 @@ class SaltCLI(LightningCLI):
         self.trainer.fit(model, **kwargs)
 
     def before_instantiate_classes(self) -> None:
+        """A lot of automatic configuration is done here."""
         sc = self.config[self.subcommand]
 
-        # add normalisation to init nets
-        if sc.data.norm_in_model:
-            for init_net in sc.model.model.init_args.init_nets.init_args.modules:
-                init_net.init_args.norm_dict = sc.data.norm_dict
-                init_net.init_args.variables = sc.data.variables
-                init_net.init_args.input_names = sc.data.input_names
-                init_net.init_args.concat_jet_tracks = sc.data.concat_jet_tracks
-
-        # add the labels from the model config to the data config
-        labels = {}  # type: ignore
-        model_dict = vars(sc.model.model.init_args)
-        for submodel in model_dict["tasks"]["init_args"]["modules"]:
-            assert "Task" in submodel["class_path"]
-            task = submodel["init_args"]
-            if task["input_type"] not in labels:
-                labels[task["input_type"]] = []
-            if self.subcommand == "fit":
-                if label := task.get("label"):
-                    labels[task["input_type"]].append(label)
-                if targets := task.get("targets"):
-                    for target in listify(targets):
-                        labels[task["input_type"]].append(target)
-            if denominators := task.get("target_denominators"):
-                for denominator in listify(denominators):
-                    labels[task["input_type"]].append(denominator)
-        sc["data"]["labels"] = labels
-
         if self.subcommand == "fit":
+            # set input sizes
+            for input_type, variables in sc.data.variables.items():
+                for init_net in sc.model.model.init_args.init_nets:
+                    if init_net["name"] == input_type:
+                        init_net["dense_config"]["input_size"] = len(variables)
+                        if sc.data.concat_jet_tracks and input_type != "edge":
+                            init_net["dense_config"]["input_size"] += len(sc.data.variables["jet"])
+
+            # add normalisation to init nets
+            if sc.data.norm_in_model:
+                for init_net in sc.model.model.init_args.init_nets:
+                    init_net["norm_dict"] = sc.data.norm_dict
+                    init_net["variables"] = sc.data.variables
+                    init_net["input_names"] = sc.data.input_names
+                    init_net["concat_jet_tracks"] = sc.data.concat_jet_tracks
+
+            # add the labels from the model config to the data config
+            labels = {}  # type: ignore
+            model_dict = vars(sc.model.model.init_args)
+            for submodel in model_dict["tasks"]["init_args"]["modules"]:
+                assert "Task" in submodel["class_path"]
+                task = submodel["init_args"]
+                if task["input_type"] not in labels:
+                    labels[task["input_type"]] = []
+                if self.subcommand == "fit":
+                    if label := task.get("label"):
+                        labels[task["input_type"]].append(label)
+                    if targets := task.get("targets"):
+                        for target in listify(targets):
+                            labels[task["input_type"]].append(target)
+                if denominators := task.get("target_denominators"):
+                    for denominator in listify(denominators):
+                        labels[task["input_type"]].append(denominator)
+            sc["data"]["labels"] = labels
+
             self.add_jet_class_names()
 
             # reduce precision to improve performance
@@ -142,7 +151,7 @@ class SaltCLI(LightningCLI):
                 sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
 
             # run git checks
-            if not sc["force"]:
+            if not sc["force"] and not sc.trainer.fast_dev_run:
                 check_for_uncommitted_changes()
                 if sc["tag"]:
                     create_and_push_tag(dirname)

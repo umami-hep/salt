@@ -6,23 +6,16 @@ model:
     max: 5e-4
     end: 1e-5
     pct_start: 0.01
+
   model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: track
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 21
-                    output_size: &embed_dim 256
-                    hidden_layers: [256]
-                    activation: &activation ReLU
+        - name: track
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
 
       gnn:
         class_path: salt.models.TransformerEncoder
@@ -32,17 +25,14 @@ model:
           out_dim: &out_dim 128
           mha_config:
             num_heads: 8
-            attention:
-              class_path: salt.models.ScaledDotProductAttention
+            attention: { class_path: salt.models.ScaledDotProductAttention }
           dense_config:
             activation: *activation
-            hidden_layers: [512]
             dropout: &dropout 0.1
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args:
-          input_size: *out_dim
+        init_args: { input_size: *out_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -55,16 +45,13 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [1.0, 2.0, 2.0, 16.76]
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *out_dim
-                    output_size: 4
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    dropout: *dropout
+                  init_args: { weight: [1.0, 2.0, 2.0, 16.8] }
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 4
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -75,16 +62,11 @@ model:
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight: [4.15, 73.74, 1.0, 17.53, 12.25, 12.5, 141.67, 22.29]
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *out_dim
-                    context_size: *out_dim
-                    output_size: 8
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    dropout: *dropout
+                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
 
             - class_path: salt.models.VertexingTask
               init_args:
@@ -94,17 +76,12 @@ model:
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
-                  init_args:
-                    reduction: none
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 256
-                    context_size: *out_dim
-                    hidden_layers: [128, 64, 32]
-                    output_size: 1
-                    activation: *activation
-                    dropout: *dropout
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
 
 data:
   norm_in_model: True
@@ -139,16 +116,10 @@ data:
   val_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_val.h5
   norm_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/norm_dict.yaml
   class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
-
   #move_files_temp: /dev/shm/svanstro/salt/gn2/
-  input_names:
-    jet: jets
-    track: tracks
-  batch_size: 4000
+
+  batch_size: 400
   num_workers: 40
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
 
 trainer:
   max_epochs: 40

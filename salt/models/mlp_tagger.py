@@ -1,11 +1,13 @@
 from torch import Tensor, nn
 from torch.nn import ModuleList
 
+from salt.models import InitNet
+
 
 class MLPTagger(nn.Module):
     def __init__(
         self,
-        init_nets: ModuleList,
+        init_nets: list[dict],
         tasks: ModuleList,
     ):
         """Jet level tagger, similar to DL1.
@@ -13,13 +15,13 @@ class MLPTagger(nn.Module):
         Parameters
         ----------
         init_nets: ModuleList
-            Initialisation / dense network
+            Initialisation networks configuration
         tasks : ModuleList
             Task networks
         """
         super().__init__()
 
-        self.init_nets = init_nets
+        self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
         self.tasks = tasks
 
         if len(self.init_nets) != 1:

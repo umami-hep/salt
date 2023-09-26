@@ -5,25 +5,17 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: track
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 21
-                    output_size: &embed_dim 128
-                    hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
+        - name: track
+          dense_config:
+            input_size: 21
+            output_size: &embed_dim 128
+            hidden_layers: [256]
+            activation: &activation SiLU
+            norm_layer: &norm_layer LayerNorm
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args:
-          input_size: *embed_dim
+        init_args: { input_size: *embed_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -34,34 +26,32 @@ model:
                 name: regression_with_mean_std_norm
                 input_type: jet
                 targets: HadronConeExclTruthLabelPt
-                norm_params:
-                  mean: 1.0
-                  std: 1.0
+                norm_params: { mean: 1.0, std: 1.0 }
                 loss: MSELoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 1
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
             - class_path: salt.models.RegressionTask
               init_args:
                 name: regression_multi_output_with_mean_std_norm
                 input_type: jet
-                targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+                targets:
+                  [
+                    R10TruthLabel_R22v1_TruthJetMass,
+                    R10TruthLabel_R22v1_TruthJetPt,
+                  ]
                 norm_params:
                   mean: [1.0, 2.0]
                   std: [3.0, 4.0]
                 loss: MSELoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 2
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
             - class_path: salt.models.RegressionTask
               init_args:
@@ -70,28 +60,28 @@ model:
                 targets: HadronConeExclTruthLabelPt
                 target_denominators: pt_btagJes
                 loss: MSELoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 1
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
             - class_path: salt.models.RegressionTask
               init_args:
                 name: regression_multi_output_with_ratio_norm
                 input_type: jet
-                targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+                targets:
+                  [
+                    R10TruthLabel_R22v1_TruthJetMass,
+                    R10TruthLabel_R22v1_TruthJetPt,
+                  ]
                 target_denominators: [mass, pt]
                 loss: MSELoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 2
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
 data:
   variables:

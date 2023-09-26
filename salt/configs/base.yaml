@@ -28,9 +28,7 @@ trainer:
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
-    init_args:
-      project_name: salt
-      display_summary_level: 0
+    init_args: { project_name: salt, display_summary_level: 0 }
 
   callbacks:
     - class_path: salt.callbacks.Checkpoint
@@ -50,11 +48,9 @@ trainer:
           - valid
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
-      init_args:
-        refresh_rate: 50
+      init_args: { refresh_rate: 50 }
     - class_path: lightning.pytorch.callbacks.ModelSummary
-      init_args:
-        max_depth: 2
+      init_args: { max_depth: 2 }
 
 # configure learning rate
 model:

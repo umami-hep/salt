@@ -5,21 +5,14 @@ model:
     class_path: salt.models.MLPTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: jet
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 2
-                    hidden_layers: [128, 128, 128]
-                    output_size: 64
-                    activation: &activation Mish
-                    norm_layer: &norm_layer LayerNorm
-                    dropout: &dropout 0.1
+        - name: jet
+          dense_config:
+            input_size: 2
+            hidden_layers: [128, 128, 128]
+            output_size: 64
+            activation: &activation Mish
+            norm_layer: &norm_layer LayerNorm
+            dropout: &dropout 0.1
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -31,15 +24,13 @@ model:
                 input_type: jet
                 label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 64
-                    output_size: 3
-                    hidden_layers: [128]
-                    activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: *dropout
+                dense_config:
+                  input_size: 64
+                  output_size: 3
+                  hidden_layers: [128]
+                  activation: *activation
+                  norm_layer: *norm_layer
+                  dropout: *dropout
 
 data:
   norm_in_model: True

@@ -13,24 +13,22 @@ class Task(nn.Module):
         self,
         name: str,
         input_type: str,
-        net: Dense,
+        dense_config: dict,
         loss: nn.Module,
         weight: float = 1.0,
     ):
-        """Task head.
-
-        A wrapper around a dense network, a loss function, a label and a weight.
+        """Task head. Wraps a dense network, a loss, a label, and a weight.
 
         Parameters
         ----------
         name : str
-            Name of the task
+            Name of the task, used for logging and inference
         input_type : str
             Which type of object is input to the task e.g. jet/track/flow
-        net : Dense
-            Dense network for performing the task
+        dense_config : dict
+            Keyword arguments for the dense network producing the task outputs
         loss : nn.Module
-            Task loss
+            Loss function applied to the dense network outputs
         weight : float
             Weight in the overall loss
         """
@@ -38,7 +36,7 @@ class Task(nn.Module):
 
         self.name = name
         self.input_type = input_type
-        self.net = net
+        self.net = Dense(**dense_config)
         self.loss = loss
         self.weight = weight
 

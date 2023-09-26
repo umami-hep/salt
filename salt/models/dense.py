@@ -8,11 +8,11 @@ class Dense(nn.Module):
         self,
         input_size: int,
         output_size: int,
-        hidden_layers: list,
+        hidden_layers: list | None = None,
+        hidden_dim_scale: int = 2,
         activation: str = "ReLU",
         final_activation: str | None = None,
         norm_layer: str | None = None,
-        norm_final_layer: bool = False,
         dropout: float = 0.0,
         context_size: int = 0,
     ) -> None:
@@ -25,22 +25,26 @@ class Dense(nn.Module):
             Input size
         output_size : int
             Output size
-        hidden_layers : list
-            Number of nodes per layer
+        hidden_layers : list, optional
+            Number of nodes per layer, if not specified, the network will have
+            a single hidden layer with size `input_size * hidden_dim_scale`
+        hidden_dim_scale : int, optional
+            Scale factor for the hidden layer size, by default 2
         activation : str
             Activation function for hidden layers, by default "ReLU"
         final_activation : str, optional
             Activation function for the output layer, by default None
         norm_layer : str, optional
             Normalisation layer, by default None
-        norm_final_layer : bool, optional
-            Whether to use normalisation on the final layer, by default False
         dropout : float, optional
             Apply dropout with the supplied probability, by default 0.0
         context_size : int
             Size of the context tensor, 0 means no context information is provided
         """
         super().__init__()
+
+        if hidden_layers is None:
+            hidden_layers = [input_size * hidden_dim_scale]
 
         # Save the networks input and output sizes
         self.input_size = input_size
@@ -55,24 +59,22 @@ class Dense(nn.Module):
 
         num_layers = len(node_list) - 1
         for i in range(num_layers):
-            is_final_layer = i == num_layers - 1
-
             # normalisation first
-            if norm_layer and (norm_final_layer or not is_final_layer):
+            if norm_layer:
                 layers.append(getattr(nn, norm_layer)(node_list[i]))
 
             # then dropout
-            if dropout and (norm_final_layer or not is_final_layer):
+            if dropout:
                 layers.append(nn.Dropout(dropout))
 
             # linear projection
             layers.append(nn.Linear(node_list[i], node_list[i + 1]))
 
-            # activation
-            if not is_final_layer:
+            # activation for all but the final layer
+            if i != num_layers - 1:
                 layers.append(getattr(nn, activation)())
 
-            # final layer: return logits by default, otherwise apply activation
+            # final layer: return logits by default, or activation if specified
             elif final_activation:
                 layers.append(getattr(nn, final_activation)())
 

@@ -5,31 +5,15 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: track
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 21
-                    output_size: &embed_dim 192
-                    hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
-            - class_path: salt.models.InitNet
-              init_args:
-                name: electron
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 30
-                    output_size: *embed_dim
-                    hidden_layers: [256]
-                    activation: *activation
-                    norm_layer: *norm_layer
+        - name: track
+          dense_config: &init
+            output_size: &embed_dim 192
+            hidden_layers: [256]
+            activation: &activation SiLU
+            norm_layer: &norm_layer LayerNorm
+        - name: electron
+          dense_config:
+            <<: *init
 
       gnn:
         class_path: salt.models.TransformerEncoder
@@ -39,8 +23,7 @@ model:
           out_dim: 128
           mha_config:
             num_heads: 8
-            attention:
-              class_path: salt.models.ScaledDotProductAttention
+            attention: { class_path: salt.models.ScaledDotProductAttention }
           dense_config:
             norm_layer: *norm_layer
             activation: *activation
@@ -49,8 +32,7 @@ model:
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args:
-          input_size: &out_dim 142
+        init_args: { input_size: &out_dim 142 }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -63,18 +45,14 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [1.0, 1.73, 1.08]
-
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *out_dim
-                    output_size: 3
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: *dropout
+                  init_args: { weight: [1.0, 1.73, 1.08] }
+                dense_config: &task
+                  input_size: *out_dim
+                  output_size: 3
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  norm_layer: *norm_layer
+                  dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -86,16 +64,11 @@ model:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
                     weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *out_dim
-                    context_size: *out_dim
-                    output_size: 8
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: *dropout
+                dense_config:
+                  <<: *task
+                  input_size: *out_dim
+                  context_size: *out_dim
+                  output_size: 8
 
             - class_path: salt.models.VertexingTask
               init_args:
@@ -105,16 +78,12 @@ model:
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
-                  init_args:
-                    reduction: none
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 284
-                    context_size: *out_dim
-                    hidden_layers: [128, 64, 32]
-                    output_size: 1
-                    activation: *activation
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task
+                  input_size: 284
+                  context_size: *out_dim
+                  output_size: 1
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -126,16 +95,11 @@ model:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
                     weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *out_dim
-                    context_size: *out_dim
-                    output_size: 8
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: *dropout
+                dense_config:
+                  <<: *task
+                  input_size: *out_dim
+                  context_size: *out_dim
+                  output_size: 8
 
             - class_path: salt.models.VertexingTask
               init_args:
@@ -145,16 +109,13 @@ model:
                 weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
-                  init_args:
-                    reduction: none
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 284
-                    context_size: *out_dim
-                    hidden_layers: [128, 64, 32]
-                    output_size: 1
-                    activation: *activation
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task
+                  input_size: 284
+                  context_size: *out_dim
+                  hidden_layers: [128, 64, 32]
+                  output_size: 1
 
 data:
   variables:
