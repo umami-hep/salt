@@ -11,7 +11,7 @@ class InitNet(nn.Module):
     def __init__(
         self,
         name: str,
-        net: Dense,
+        dense_config: dict,
         norm_dict: Path | None = None,
         variables: dict | None = None,
         input_names: dict | None = None,
@@ -22,9 +22,9 @@ class InitNet(nn.Module):
         Parameters
         ----------
         name : str
-            Name of the input.
-        net : Dense
-            Dense network for performing the the initial embedding.
+            Name of the input, must match the input types in the data config.
+        dense_config : dict
+            Keyword arguments for the dense networkfor performing the the initial embedding.
         norm_dict : Path | None, optional
             Path to yaml file containing normalisation parameters, by default None
         variables : dict | None, optional
@@ -37,7 +37,7 @@ class InitNet(nn.Module):
         super().__init__()
 
         self.name = name
-        self.net = net
+        self.net = Dense(**dense_config)
         self.concat_jet_tracks = concat_jet_tracks
         if bool(norm_dict) != bool(variables) != bool(input_names):
             raise ValueError("Must provide either all or none of norm_dict, variables, input_names")

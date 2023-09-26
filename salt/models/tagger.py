@@ -4,14 +4,14 @@ import torch
 from torch import Tensor, nn
 from torch.nn import ModuleList
 
-from salt.models import Pooling
+from salt.models import InitNet, Pooling
 from salt.utils.tensor_utils import attach_context
 
 
 class JetTagger(nn.Module):
     def __init__(
         self,
-        init_nets: ModuleList,
+        init_nets: list[dict],
         pool_net: Pooling,
         tasks: ModuleList,
         gnn: nn.Module = None,
@@ -33,7 +33,7 @@ class JetTagger(nn.Module):
         """
         super().__init__()
 
-        self.init_nets = init_nets
+        self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
         self.pool_net = pool_net
         self.tasks = tasks
         self.gnn = gnn

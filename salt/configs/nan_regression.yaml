@@ -5,25 +5,17 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: track
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: 21
-                    output_size: &embed_dim 128
-                    hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
+        - name: track
+          dense_config:
+            input_size: 21
+            output_size: &embed_dim 128
+            hidden_layers: [256]
+            activation: &activation SiLU
+            norm_layer: &norm_layer LayerNorm
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args:
-          input_size: *embed_dim
+        init_args: { input_size: *embed_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -34,37 +26,30 @@ model:
                 name: regression_with_mean_std_norm
                 input_type: jet
                 targets: HadronConeExclTruthLabelLxy
-                target_denominators: pt_btagJes
-                weight: 20
+                norm_params: { mean: 1.0, std: 1.0 }
                 loss:
                   class_path: torch.nn.MSELoss
-                  init_args:
-                    reduction: none
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 1
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
+                  init_args: { reduction: none }
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
-            # - class_path: salt.models.RegressionTask
-            #   init_args:
-            #     name: regression_with_ratio_norm
-            #     input_type: jet
-            #     label: HadronConeExclTruthLabelLxy
-            #     label_denominator: pt_btagJes
-            #     loss:
-            #       class_path: torch.nn.MSELoss
-            #       init_args:
-            #         reduction: none
-            #     net:
-            #       class_path: salt.models.Dense
-            #       init_args:
-            #         input_size: *embed_dim
-            #         output_size: 1
-            #         hidden_layers: [128, 64, 32]
-            #         activation: *activation
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_with_ratio_norm
+                input_type: jet
+                targets: HadronConeExclTruthLabelLxy
+                target_denominators: pt_btagJes
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args: { reduction: none }
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
 
 data:
   variables:

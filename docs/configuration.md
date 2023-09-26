@@ -31,7 +31,7 @@ data:
       ...
 ```
 
-For now, you will need to manually match your model input size to the number of variables you are using.
+The number of variables specified here will be used to automatically set the input size of your `InitNets`.
 
 Training with multiple types of inputs beyond jets and tracks is supported to create a heterogenous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2emu.yaml) which includes a separate electrons input type.
 
@@ -166,25 +166,21 @@ If multiple input types are provided, separate initialiser networks should be pr
 - class_path: salt.models.InitNet
     init_args:
     name: track
-    net:
-        class_path: salt.models.Dense
-        init_args:
-        input_size: 23
-        output_size: &embed_dim 192
-        hidden_layers: [256]
-        activation: &activation SiLU
-        norm_layer: &norm_layer LayerNorm
+    dense_config:
+      input_size: 23
+      output_size: &embed_dim 192
+      hidden_layers: [256]
+      activation: &activation SiLU
+      norm_layer: &norm_layer LayerNorm
 - class_path: salt.models.InitNet
     init_args:
     name: electron
-    net:
-        class_path: salt.models.Dense
-        init_args:
-        input_size: 28
-        output_size: *embed_dim
-        hidden_layers: [256]
-        activation: *activation
-        norm_layer: *norm_layer
+    dense_config:
+      input_size: 28
+      output_size: *embed_dim
+      hidden_layers: [256]
+      activation: *activation
+      norm_layer: *norm_layer
 ```
 
 The separate input types are by default combined and treated homogeneously within the GNN layers. Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:

@@ -26,29 +26,17 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        class_path: torch.nn.ModuleList
-        init_args:
-          modules:
-            - class_path: salt.models.InitNet
-              init_args:
-                name: track
-                net:
-                  class_path: salt.models.Dense
-                  init_args: &init
-                    input_size: 5
-                    output_size: &embed_dim 128
-                    hidden_layers: [256]
-                    activation: &activation SiLU
-                    norm_layer: &norm_layer LayerNorm
-
-            - class_path: salt.models.InitNet
-              init_args:
-                name: flow
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    <<: *init
-                    input_size: 4
+        - name: track
+          dense_config: &init
+            input_size: 5
+            output_size: &embed_dim 128
+            hidden_layers: [256]
+            activation: &activation SiLU
+            norm_layer: &norm_layer LayerNorm
+        - name: flow
+          dense_config:
+            <<: *init
+            input_size: 4
 
       gnn:
         class_path: salt.models.TransformerEncoder
@@ -70,8 +58,7 @@ model:
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args:
-          input_size: *embed_dim
+        init_args: { input_size: *embed_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -83,12 +70,10 @@ model:
                 input_type: jet
                 label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
-                net:
-                  class_path: salt.models.Dense
-                  init_args:
-                    input_size: *embed_dim
-                    output_size: 3
-                    hidden_layers: [128, 64, 32]
-                    activation: *activation
-                    norm_layer: *norm_layer
-                    dropout: *dropout
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 3
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  norm_layer: *norm_layer
+                  dropout: *dropout
