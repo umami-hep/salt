@@ -17,14 +17,17 @@ class InitNet(nn.Module):
         input_names: dict | None = None,
         concat_jet_tracks: bool = False,
     ):
-        """Initialiser network which can optionally handle input normalisation.
+        """Initialiser network to perform input embedding.
+
+        This class can also  optionally be used to handle input normalisation.
 
         Parameters
         ----------
         name : str
             Name of the input, must match the input types in the data config.
         dense_config : dict
-            Keyword arguments for the dense networkfor performing the the initial embedding.
+            Keyword arguments for [salt.models.Dense][salt.models.Dense],
+            the dense network performing the initial embedding.
         norm_dict : Path | None, optional
             Path to yaml file containing normalisation parameters, by default None
         variables : dict | None, optional

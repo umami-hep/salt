@@ -18,6 +18,7 @@ from salt.models.task import (
     ClassificationTask,
     GaussianRegressionTask,
     RegressionTask,
+    RegressionTaskBase,
     Task,
     VertexingTask,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "ClassificationTask",
     "RegressionTask",
     "GaussianRegressionTask",
+    "RegressionTaskBase",
     "VertexingTask",
     "JetTagger",
     "R21Xbb",

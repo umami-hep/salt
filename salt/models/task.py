@@ -1,3 +1,4 @@
+from abc import ABC
 from collections.abc import Mapping
 
 import torch
@@ -8,7 +9,7 @@ from salt.utils.array_utils import listify
 from salt.utils.tensor_utils import masked_softmax
 
 
-class Task(nn.Module):
+class Task(nn.Module, ABC):
     def __init__(
         self,
         name: str,
@@ -17,16 +18,19 @@ class Task(nn.Module):
         loss: nn.Module,
         weight: float = 1.0,
     ):
-        """Task head. Wraps a dense network, a loss, a label, and a weight.
+        """Task head base class.
+
+        Tasks wraps a dense network, a loss, a label, and a weight.
 
         Parameters
         ----------
         name : str
-            Name of the task, used for logging and inference
+            Arbitrary name of the task, used for logging and inference
         input_type : str
             Which type of object is input to the task e.g. jet/track/flow
         dense_config : dict
-            Keyword arguments for the dense network producing the task outputs
+            Keyword arguments for [salt.models.Dense][salt.models.Dense],
+            the dense network producing the task outputs
         loss : nn.Module
             Loss function applied to the dense network outputs
         weight : float
@@ -143,7 +147,7 @@ class ClassificationTask(Task):
         return probs
 
 
-class RegressionTaskBase(Task):
+class RegressionTaskBase(Task, ABC):
     def __init__(
         self,
         targets: list[str] | str,

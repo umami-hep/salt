@@ -29,17 +29,19 @@ class Dense(nn.Module):
             Number of nodes per layer, if not specified, the network will have
             a single hidden layer with size `input_size * hidden_dim_scale`
         hidden_dim_scale : int, optional
-            Scale factor for the hidden layer size, by default 2
+            Scale factor for the hidden layer size.
         activation : str
-            Activation function for hidden layers, by default "ReLU"
+            Activation function for hidden layers.
+            Must be a valid torch.nn activation function.
         final_activation : str, optional
-            Activation function for the output layer, by default None
+            Activation function for the output layer.
+            Must be a valid torch.nn activation function.
         norm_layer : str, optional
-            Normalisation layer, by default None
+            Normalisation layer.
         dropout : float, optional
-            Apply dropout with the supplied probability, by default 0.0
+            Apply dropout with the supplied probability.
         context_size : int
-            Size of the context tensor, 0 means no context information is provided
+            Size of the context tensor, 0 means no context information is provided.
         """
         super().__init__()
 
