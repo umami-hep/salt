@@ -45,7 +45,7 @@ plugins:
             merge_init_into_class: true
             annotations_path: full
             show_signature: false
-
+            members: false
 
 markdown_extensions:
   - admonition

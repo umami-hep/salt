@@ -29,13 +29,13 @@ class InitNet(nn.Module):
             Keyword arguments for [salt.models.Dense][salt.models.Dense],
             the dense network performing the initial embedding.
         norm_dict : Path | None, optional
-            Path to yaml file containing normalisation parameters, by default None
+            Path to yaml file containing normalisation parameters.
         variables : dict | None, optional
-            Input variables used in the forward pass, by default None
+            Input variables used in the forward pass.
         input_names : dict | None, optional
-            Names of the h5 group to access for each type of input, by default None
+            Names of the h5 group to access for each type of input.
         concat_jet_tracks : bool, optional
-            Concatenate jet inputs with track-type inputs, by default False
+            Concatenate jet inputs with track-type inputs.
         """
         super().__init__()
 

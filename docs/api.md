@@ -6,7 +6,7 @@
 ### ::: salt.models.InitNet
 
 ## Task Heads
-### ::: salt.models.Task
+### ::: salt.models.TaskBase
 ### ::: salt.models.ClassificationTask
 ### ::: salt.models.RegressionTaskBase
 ### ::: salt.models.RegressionTask

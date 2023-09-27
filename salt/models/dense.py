@@ -8,7 +8,7 @@ class Dense(nn.Module):
         self,
         input_size: int,
         output_size: int,
-        hidden_layers: list | None = None,
+        hidden_layers: list[int] | None = None,
         hidden_dim_scale: int = 2,
         activation: str = "ReLU",
         final_activation: str | None = None,

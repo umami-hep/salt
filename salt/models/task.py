@@ -13,7 +13,7 @@ from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import get_node_assignment
 
 
-class Task(nn.Module, ABC):
+class TaskBase(nn.Module, ABC):
     def __init__(
         self,
         name: str,
@@ -24,21 +24,21 @@ class Task(nn.Module, ABC):
     ):
         """Task head base class.
 
-        Tasks wraps a dense network, a loss, a label, and a weight.
+        Tasks wrap a dense network, a loss, a label, and a weight.
 
         Parameters
         ----------
         name : str
-            Arbitrary name of the task, used for logging and inference
+            Arbitrary name of the task, used for logging and inference.
         input_type : str
-            Which type of object is input to the task e.g. jet/track/flow
+            Which type of object is input to the task e.g. jet/track/flow.
         dense_config : dict
             Keyword arguments for [salt.models.Dense][salt.models.Dense],
-            the dense network producing the task outputs
+            the dense network producing the task outputs.
         loss : nn.Module
-            Loss function applied to the dense network outputs
+            Loss function applied to the dense network outputs.
         weight : float
-            Weight in the overall loss
+            Weight in the overall loss.
         """
         super().__init__()
 
@@ -57,7 +57,7 @@ class Task(nn.Module, ABC):
         ).bool()
 
 
-class ClassificationTask(Task):
+class ClassificationTask(TaskBase):
     def __init__(
         self,
         label: str,
@@ -73,13 +73,14 @@ class ClassificationTask(Task):
         label : str
             Label name for the task
         class_names : list[str] | None, optional
-            List of class names, ordered by output index, by default None
+            List of class names, ordered by output index. If not specified attempt to
+            automatically determine these from the label name.
         label_map : Mapping | None, optional
-            Remap integer labels for training (e.g. 0,4,5 -> 0,1,2), by default None
+            Remap integer labels for training (e.g. 0,4,5 -> 0,1,2).
         sample_weight : str | None, optional
-            Name of the sample weight to use, by default None
+            Name of a per sample weighting to apply in the loss function.
         **kwargs
-            Keyword arguments for Task
+            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
         self.label = label
@@ -155,7 +156,7 @@ class ClassificationTask(Task):
         return u2s(probs.float().cpu().numpy(), dtype)
 
 
-class RegressionTaskBase(Task, ABC):
+class RegressionTaskBase(TaskBase, ABC):
     def __init__(
         self,
         targets: list[str] | str,
@@ -168,13 +169,15 @@ class RegressionTaskBase(Task, ABC):
         Parameters
         ----------
         targets : list[str] | str
-            Target names for the task
+            Regression target(s).
         target_denominators : list[str] | str | None, optional
-            Name of the target denominator for the task, by default None
+            Variables to divide regression target(s) by (i.e. for regressing a ratio).
+            Cannot be used with norm_params.
         norm_params : dict | None, optional
-            Normalization parameters for the task, by default None
+            Mean and std normalization parameters for each target, used for scaling.
+            Cannot be used with target_denominators.
         **kwargs
-            Keyword arguments for Task
+            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
 
@@ -269,6 +272,13 @@ class RegressionTaskBase(Task, ABC):
 
 class RegressionTask(RegressionTaskBase):
     def __init__(self, **kwargs):
+        """Regression task.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments for [salt.modles.RegressionTaskBase][salt.models.RegressionTaskBase].
+        """
         super().__init__(**kwargs)
         if self.net.output_size != len(self.targets):
             raise ValueError(
@@ -297,6 +307,14 @@ class RegressionTask(RegressionTaskBase):
 
 class GaussianRegressionTask(RegressionTaskBase):
     def __init__(self, **kwargs):
+        """Regression task that outputs a mean and variance for each target.
+        The loss function should be the negative log likelihood of the Gaussian distribution.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments for [salt.modles.RegressionTaskBase][salt.models.RegressionTaskBase].
+        """
         super().__init__(**kwargs)
         if self.net.output_size != 2 * len(self.targets):
             raise ValueError(
@@ -332,8 +350,17 @@ class GaussianRegressionTask(RegressionTaskBase):
         return preds, loss
 
 
-class VertexingTask(Task):
+class VertexingTask(TaskBase):
     def __init__(self, label: str, **kwargs):
+        """Edge classification task for vertexing.
+
+        Parameters
+        ----------
+        label : str
+            Label name for the target object IDs.
+        **kwargs
+            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
+        """
         super().__init__(**kwargs)
         self.label = label
 
