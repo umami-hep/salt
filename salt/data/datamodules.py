@@ -53,7 +53,7 @@ class JetDataModule(L.LightningDataModule):
         pin_memory: bool
             Pin memory for faster GPU transfer, default is True
         **kwargs
-            Additional arguments to pass to the Dataset class
+            Keyword arguments for [salt.data.JetDataset][salt.data.JetDataset]
         """
         super().__init__()
 
@@ -139,7 +139,6 @@ class JetDataModule(L.LightningDataModule):
         return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
 
     def teardown(self, stage: str | None = None):
-        """Remove temporary files."""
         if (
             stage == "fit"
             and self.move_files_temp

@@ -1,0 +1,5 @@
+mkdocs==1.4.2
+mkdocs-material==9.0.5
+mkdocstrings[python]
+mkdocs-markdownextradata-plugin>=0.2.5
+mkdocs-git-revision-date-localized-plugin
