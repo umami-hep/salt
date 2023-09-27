@@ -18,18 +18,18 @@ class JetTagger(nn.Module):
     ):
         """Jet constituent tagger.
 
-        # TODO: add option to pool separately for each task
-
         Parameters
         ----------
-        init_nets : ModuleList
-            Initialisation networks configuration
+        init_nets : list[dict]
+            List of keyword arguments used to instantiate one or more
+            [salt.models.InitNet][salt.models.InitNet].
         gnn : nn.Module
-            Graph neural network
+            Graph neural network. If not specified the model will be a deep set.
         pool_net : nn.Module
-            Pooling network
+            Pooling network.
         tasks : ModuleList
-            Task networks
+            List of tasks to perform. Each task inherits from
+            [salt.models.task.TaskBase][salt.models.task.TaskBase].
         """
         super().__init__()
 

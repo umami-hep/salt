@@ -19,7 +19,7 @@ from salt.models.task import (
     GaussianRegressionTask,
     RegressionTask,
     RegressionTaskBase,
-    Task,
+    TaskBase,
     VertexingTask,
 )
 from salt.models.transformer import (
@@ -40,7 +40,7 @@ __all__ = [
     "GlobalAttentionPooling",
     "DictCrossAttentionPooling",
     "TensorCrossAttentionPooling",
-    "Task",
+    "TaskBase",
     "TransformerEncoder",
     "TransformerEncoderLayer",
     "TransformerCrossAttentionLayer",
