@@ -35,17 +35,6 @@ trainer:
       init_args:
         monitor_loss: val_jet_classification_loss
     - class_path: salt.callbacks.PredictionWriter
-      init_args:
-        write_tracks: False
-        jet_variables:
-          - pt
-          - eta
-          - HadronConeExclTruthLabelID
-          - n_truth_promptLepton
-        track_variables:
-          - ftagTruthOriginLabel
-          - ftagTruthVertexIndex
-          - valid
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args: { refresh_rate: 50 }

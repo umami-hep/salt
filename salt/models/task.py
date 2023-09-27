@@ -1,12 +1,16 @@
 from abc import ABC
 from collections.abc import Mapping
 
+import numpy as np
 import torch
+from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor, nn
 
 from salt.models import Dense
 from salt.utils.array_utils import listify
+from salt.utils.class_names import CLASS_NAMES
 from salt.utils.tensor_utils import masked_softmax
+from salt.utils.union_find import get_node_assignment
 
 
 class Task(nn.Module, ABC):
@@ -90,6 +94,8 @@ class ClassificationTask(Task):
             assert (
                 self.loss.reduction == "none"
             ), "Sample weights only supported for reduction='none'"
+        if self.class_names is None:
+            self.class_names = CLASS_NAMES.get(self.label)
 
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
         """Apply per sample weights, if specified."""
@@ -137,14 +143,16 @@ class ClassificationTask(Task):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, mask: Tensor | None = None):
+    def run_inference(self, preds: Tensor, mask: Tensor | None = None, precision: str = "f4"):
         if mask is None:
             assert preds.ndim == 2
             probs = torch.softmax(preds, dim=-1)
         else:
             assert preds.ndim == 3
             probs = masked_softmax(preds, mask.unsqueeze(-1))
-        return probs
+        assert self.class_names is not None
+        dtype = np.dtype([(n, precision) for n in self.class_names])
+        return u2s(probs.float().cpu().numpy(), dtype)
 
 
 class RegressionTaskBase(Task, ABC):
@@ -245,7 +253,7 @@ class RegressionTaskBase(Task, ABC):
                     )
         return targets
 
-    def run_inference(self, preds: Tensor, targets_dict: Mapping):
+    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
         if self.target_denominators is not None:
             for i in range(len(self.targets)):
                 preds[:, i] = (
@@ -254,7 +262,9 @@ class RegressionTaskBase(Task, ABC):
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
                 preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
-        return preds
+
+        dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
+        return u2s(preds.float().cpu().numpy(), dtype)
 
 
 class RegressionTask(RegressionTaskBase):
@@ -406,3 +416,25 @@ class VertexingTask(Task):
         weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
         weights = weights[adjmat]
         return 1 + weights
+
+    def run_inference(self, preds: Tensor, mask: Tensor | None = None, precision: str = "f4"):
+        preds = get_node_assignment(preds, mask)
+        preds = mask_fill_flattened(preds, mask)
+        dtype = np.dtype([("VertexIndex", "i8")])
+        return u2s(preds.int().cpu().numpy(), dtype)
+
+
+# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
+@torch.jit.script
+def mask_fill_flattened(flat_array, mask):
+    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
+    mask = mask.to(torch.bool)
+    start_index = end_index = 0
+
+    for i in range(mask.shape[0]):
+        if mask[i].shape[0] > 0:
+            end_index += (~mask[i]).to(torch.long).sum()
+            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
+            start_index = end_index
+
+    return filled

@@ -12,8 +12,8 @@ from torch import Tensor, nn
 from torch.nn.functional import softmax
 from tqdm import tqdm
 
-from salt.callbacks.predictionwriter import mask_fill_flattened
 from salt.lightning_module import LightningTagger
+from salt.models.task import mask_fill_flattened
 from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
 from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
@@ -109,7 +109,7 @@ class ONNXModel(LightningTagger):
 
         # return class probabilities
         outputs = self.model({"track": tracks}, None)[0]
-        onnx_outputs = get_probs(outputs["jet_classification"])
+        onnx_outputs = get_probs(outputs["jet"]["jet_classification"])
 
         if self.include_aux:
             if "track_origin" in outputs:
@@ -136,7 +136,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
 
     inputs_pt = {"track": concat_jet_track(jets, tracks)}
     outputs_pt = pt_model(inputs_pt, {"track": mask})[0]
-    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jet_classification"])]
+    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jet"]["jet_classification"])]
 
     inputs_onnx = {
         "jet_features": jets.numpy(),

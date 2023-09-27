@@ -23,7 +23,7 @@ class JetTagger(nn.Module):
         Parameters
         ----------
         init_nets : ModuleList
-            Initialisation networks
+            Initialisation networks configuration
         gnn : nn.Module
             Graph neural network
         pool_net : nn.Module
@@ -82,7 +82,7 @@ class JetTagger(nn.Module):
         mask: Mapping,
         labels: dict | None = None,
     ):
-        preds = {}
+        preds: dict[str, dict[str, Tensor]] = {}
         loss = {}
 
         if isinstance(embed_x, dict):
@@ -98,7 +98,9 @@ class JetTagger(nn.Module):
                 task_mask = mask
                 context = pooled
             task_preds, task_loss = task(task_input, labels, task_mask, context=context)
-            preds[task.name] = task_preds
+            if task.input_type not in preds:
+                preds[task.input_type] = {}
+            preds[task.input_type][task.name] = task_preds
             loss[task.name] = task_loss
 
         return preds, loss

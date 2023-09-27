@@ -46,7 +46,7 @@ class MultiheadAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
-        attention: nn.Module,
+        attention: nn.Module | Mapping,
         edge_embed_dim: int = 0,
         k_dim: int | None = None,
         v_dim: int | None = None,

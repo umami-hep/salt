@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import h5py
 import pytest
 
 from salt.main import main
@@ -34,6 +35,11 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
     args += ["--trainer.devices=1"]
     args += [f"--trainer.default_root_dir={tmp_path}"]
     args += ["--trainer.logger.offline=True"]
+
+    # add another instance of the prediction writer callback with tracks added
+    args += ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
+    args += ["--trainer.callbacks.write_tracks=True"]
+
     if train_args:
         args += train_args
 
@@ -49,6 +55,18 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
     args += [f"--data.test_file={test_h5_path}"]
     args += ["--data.num_jets_test=1000"]
     main(args)
+
+    # check output h5 files are produced
+    h5_dir = train_config_path.parent / "ckpts"
+    h5_files = [f for f in h5_dir.iterdir() if f.suffix == ".h5"]
+    assert len(h5_files) == 1
+    h5_file = h5_files[0]
+    with h5py.File(h5_file, "r") as f:
+        assert "jets" in f
+        assert len(f["jets"]) == 1000
+        if "GN2" in str(train_config_path):
+            assert "tracks" in f
+            assert len(f["tracks"]) == 1000
 
 
 def run_onnx(train_dir):
@@ -101,14 +119,6 @@ class TestTrainMisc:
     def test_train_distributed(self, tmp_path) -> None:
         args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
         run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
-
-    def test_write_tracks(self, tmp_path) -> None:
-        args = ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
-        args += ["--trainer.callbacks.write_tracks=True"]
-        args += ["--trainer.callbacks.track_variables=null"]
-        run_combined(
-            tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args, inc_taus=True
-        )
 
     def test_truncate_inputs(self, tmp_path) -> None:
         args = ["--data.num_inputs.track=10"]
