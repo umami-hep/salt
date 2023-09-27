@@ -44,37 +44,6 @@ data:
 trainer:
   max_epochs: 50
   devices: 2
-  callbacks:
-    - class_path: salt.callbacks.Checkpoint
-      init_args:
-        monitor_loss: val_jet_classification_loss
-    - class_path: salt.callbacks.PredictionWriter
-      init_args:
-        jet_variables:
-          - pt
-          - eta
-          - mass
-          - R10TruthLabel_R22v1
-          - R10TruthLabel_R22v1_TruthJetMass
-          - R10TruthLabel_R22v1_TruthJetPt
-          - GN2Xv00_phbb
-          - GN2Xv00_phcc
-          - GN2Xv00_ptop
-          - GN2Xv00_pqcd
-          - GN2XWithMassv00_phbb
-          - GN2XWithMassv00_phcc
-          - GN2XWithMassv00_ptop
-          - GN2XWithMassv00_pqcd
-          - Xbb2020v3_Higgs
-          - Xbb2020v3_Top
-          - Xbb2020v3_QCD
-    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
-    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
-      init_args:
-        refresh_rate: 20
-    - class_path: lightning.pytorch.callbacks.ModelSummary
-      init_args:
-        max_depth: 2
 
 model:
   lrs_config:
@@ -135,7 +104,7 @@ model:
               init_args:
                 name: track_origin
                 input_type: track
-                label: ftagTruthOriginLabel
+                label: ftag
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss

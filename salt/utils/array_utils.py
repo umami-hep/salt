@@ -44,3 +44,14 @@ def listify(maybe_list):
     if isinstance(maybe_list, list):
         return maybe_list
     return [maybe_list]
+
+
+def maybe_pad(src: np.ndarray, tgt: np.ndarray) -> np.ndarray:
+    """Pad src to the shape of tgt if necessary."""
+    if src.shape == tgt.shape:
+        return src
+    seq_len = tgt.shape[1] if tgt.ndim == 2 else None
+    if seq_len and seq_len != src.shape[1]:
+        n_pad = seq_len - src.shape[1]
+        src = np.pad(src, ((0, 0), (0, n_pad)), mode="constant")
+    return src

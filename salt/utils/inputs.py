@@ -288,11 +288,11 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
         ]
     )
     tracks = rng.random(shapes_tracks["inputs"])
-    tracks = u2s(tracks, tracks_dtype)
     valid = rng.choice([True, False], size=shapes_tracks["valid"])
     valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
+    tracks[~valid["valid"]] = 0
+    tracks = u2s(tracks, tracks_dtype)
     tracks = join_structured_arrays([tracks, valid])
-
     # setup electrons
     electrons_dtype = np.dtype(
         [(n, "f4") for n in electron_vars]

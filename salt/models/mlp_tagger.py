@@ -43,8 +43,10 @@ class MLPTagger(nn.Module):
         return self.tasks_forward(self.init_net(inputs), labels)
 
     def tasks_forward(self, x: Tensor, labels: dict | None = None):
-        preds = {}
+        preds: dict[str, dict[str, Tensor]] = {}
         loss = {}
         for task in self.tasks:
-            preds[task.name], loss[task.name] = task(x, labels)
+            if task.input_type not in preds:
+                preds[task.input_type] = {}
+            preds[task.input_type][task.name], loss[task.name] = task(x, labels)
         return preds, loss
