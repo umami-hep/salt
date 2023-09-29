@@ -12,6 +12,7 @@ model:
     max: 1e-3
     end: 1e-3
     pct_start: 0.1
+    weight_decay: 1e-5
 
   model:
     class_path: salt.models.JetTagger
