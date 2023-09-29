@@ -105,7 +105,11 @@ class LightningTagger(L.LightningModule):
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lrs_config["initial"], weight_decay=1e-5)
+        opt = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.lrs_config["initial"],
+            weight_decay=self.lrs_config.get("weight_decay", 1e-5),
+        )
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(
