@@ -3,8 +3,8 @@ If you want to get started running the code without producing your own samples, 
 
 | Sample | Num Jets | Location |
 |--------|----------|----------|
-| Single b-tagging | 10M | `/eos/user/u/umami/training-samples/gnn/test/` |
-| Single b-tagging (new format) | 8M | `/eos/user/u/umami/training-samples/gnn/22-03-23` |
+| Single b-tagging | 30M | `/eos/atlas/atlascerngroupdisk/perf-flavtag/training/training_gn2_20230915_mc20mc23_combined_30Mjets` |
+| Single b-tagging | 300M | `/eos/atlas/atlascerngroupdisk/perf-flavtag/training/training_gn2_20230915_mc20mc23_combined_300Mjets` |
 | Xbb tagging | 5M | `/eos/user/u/umami/training-samples/gnn/xbb/` |
 | Xbb tagging (new format) | 6M | `/eos/user/u/umami/training-samples/gnn/xbb_3d/` |
 
