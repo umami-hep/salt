@@ -138,7 +138,9 @@ class PredictionWriter(Callback):
 
             # add mask if present
             if input_type in self.masks:
-                mask = np.concatenate(self.masks[input_type])  # concat test batches
+                mask = np.concatenate(
+                    [m.cpu() for m in self.masks[input_type]]
+                )  # concat test batches
                 mask = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
                 this_outputs.append(maybe_pad(mask, inputs))
 
