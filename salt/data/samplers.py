@@ -32,16 +32,16 @@ class RandomBatchSampler(Sampler):
         self.n_batches = self.dataset_length / self.batch_size
         self.nonzero_last_batch = int(self.n_batches) < self.n_batches
         self.drop_last = drop_last
-
-        if shuffle:
-            self.batch_ids = torch.randperm(int(self.n_batches))
-        else:
-            self.batch_ids = torch.arange(int(self.n_batches))
+        self.shuffle = shuffle
 
     def __len__(self):
         return int(self.n_batches) + int(not self.drop_last and self.nonzero_last_batch)
 
     def __iter__(self):
+        if self.shuffle:
+            self.batch_ids = torch.randperm(int(self.n_batches))
+        else:
+            self.batch_ids = torch.arange(int(self.n_batches))
         # yield full batches from the dataset
         for batch_id in self.batch_ids:
             start, stop = batch_id * self.batch_size, (batch_id + 1) * self.batch_size
