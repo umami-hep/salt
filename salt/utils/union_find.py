@@ -103,6 +103,9 @@ def get_node_assignment(output: Tensor, mask: Tensor):
     Wrapper function which returns reconstructed vertex indices in shape
     (nodes in batch, 1). Assumes mask of shape (batch, max_tracks).
     """
+    # Ensure all tensors are on CPU
+    output = output.cpu()
+    mask = mask.cpu()
     # pad mask with additional track to avoid onnx error
     mask = torch.cat([mask, torch.ones((mask.shape[0], 1), dtype=torch.bool)], dim=1).to(torch.bool)
 
