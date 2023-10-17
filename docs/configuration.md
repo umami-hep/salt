@@ -222,3 +222,21 @@ With these limitations in mind, you may find compiling your model useful for spe
 You can also try to decorate functions with `@torch.compile`, for example the `forward()` methods of various submodules.
 Passing `mode="reduce-overhead"` may also improve further performance.
 Note that this will break ONNX export.
+
+### Katib
+
+In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed 
+metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
+
+An example configuration to be added to the `base.yaml` config file is: 
+
+```yaml
+callbacks:
+  - class_path: salt.callbacks.PerformanceWriter
+    init_args:
+      dir_path: /mylocal/path #any local path that is writable
+      add_metrics: # a list of string of potential additional metrics - included by default: train_loss, val_loss, val_accuracy_loss
+        - a_fancy_new_metric
+        - another_fancy_new_metric 
+      stdOut: True # whether to print to stdOut 
+``````

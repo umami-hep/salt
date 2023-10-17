@@ -7,7 +7,9 @@ from torch import nn
 
 
 class LightningTagger(L.LightningModule):
-    def __init__(self, model: nn.Module, lrs_config: Mapping, dims: dict, name: str = "salt"):
+    def __init__(
+        self, model: nn.Module, lrs_config: Mapping[str, float], dims: dict, name: str = "salt"
+    ):
         """Lightning jet tagger model.
 
         Parameters
