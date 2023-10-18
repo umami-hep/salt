@@ -46,7 +46,7 @@ class NormDictScaler:
         # get norm params as arrays
         self.norm_params = {}
         for input_type in self.variables:
-            if input_type == "edge":
+            if input_type == "edge" or input_type == "parameters":
                 continue
             nd = self.norm_dict[self.input_names[input_type]]
             var = self.variables[input_type]
@@ -55,12 +55,17 @@ class NormDictScaler:
 
             means = [nd[v][mean_key] for v in var]
             stds = [nd[v][std_key] for v in var]
-            if concat_jet_tracks and input_type not in ["jet", "global", "edge"]:
+            if concat_jet_tracks and input_type not in ["jet", "global", "edge", "parameters"]:
                 jets_name = self.input_names["jet"]
                 jet_nd = self.norm_dict[jets_name]
                 jet_var = self.variables["jet"]
                 means = [jet_nd[v][mean_key] for v in jet_var] + means
                 stds = [jet_nd[v][std_key] for v in jet_var] + stds
+
+                if "parameters" in self.input_names:
+                    param_var = self.variables["parameters"]
+                    means = [0 for v in param_var] + means
+                    stds = [1 for v in param_var] + stds
 
             means = np.array(means, dtype=np.float32)
             stds = np.array(stds, dtype=np.float32)

@@ -92,11 +92,13 @@ class JetDataModule(L.LightningDataModule):
             self.train_dset = JetDataset(
                 filename=self.train_file,
                 num_jets=self.num_jets_train,
+                stage=stage,
                 **self.kwargs,
             )
             self.val_dset = JetDataset(
                 filename=self.val_file,
                 num_jets=self.num_jets_val,
+                stage=stage,
                 **self.kwargs,
             )
 
@@ -110,6 +112,7 @@ class JetDataModule(L.LightningDataModule):
             self.test_dset = JetDataset(
                 filename=self.test_file,
                 num_jets=self.num_jets_test,
+                stage=stage,
                 **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dset):,} jets")
