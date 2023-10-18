@@ -18,12 +18,14 @@ class JetDataset(Dataset):
         input_names: dict,
         norm_dict: str,
         variables: dict,
+        stage: str,
         num_jets: int = -1,
         labels: Mapping | None = None,
         concat_jet_tracks: bool = True,
         num_inputs: dict | None = None,
         nan_to_num: bool = False,
         norm_in_model: bool = False,
+        parameters: dict | None = None,
     ):
         """A map-style dataset for loading jets from a structured array file.
 
@@ -37,6 +39,8 @@ class JetDataset(Dataset):
             Path to file containing normalisation parameters
         variables : dict
             Input variables used in the forward pass
+        stage: str
+            Either 'fit' or 'test'
         num_jets : int, optional
             Number of jets to use, by default -1
         labels : Mapping
@@ -50,6 +54,8 @@ class JetDataset(Dataset):
         norm_in_model : bool, optional
             Normalise inputs in the model rather than in this Dataloader, by default False
             TODO: remove this and default to True when backwards compatability no longer needed
+        parameters: dict
+            Variables used to parameterise the network, by default None.
         """
         super().__init__()
 
@@ -63,6 +69,8 @@ class JetDataset(Dataset):
         self.num_inputs = num_inputs
         self.nan_to_num = nan_to_num
         self.norm_in_model = norm_in_model
+        self.parameters = parameters
+        self.stage = stage
 
         # check that num_inputs contains valid keys
         if self.num_inputs is not None and not set(self.num_inputs).issubset(self.input_names):
@@ -78,6 +86,14 @@ class JetDataset(Dataset):
         self.scaler = NormDictScaler(norm_dict, input_names, variables)
         self.input_variables = self.scaler.variables
         assert self.input_variables is not None
+
+        # check parameters listed in variables appear in the same order in the parameters block
+        if "parameters" in self.input_variables:
+            assert self.parameters is not None
+            assert self.input_variables["parameters"] is not None
+            assert len(self.input_variables["parameters"]) == len(self.parameters)
+            for idx, param_key in enumerate(self.parameters.keys()):
+                assert self.input_variables["parameters"][idx] == param_key
 
         # setup datasets and accessor arrays
         self.dss = {}
@@ -134,6 +150,31 @@ class JetDataset(Dataset):
                 inputs[input_type] = torch.from_numpy(
                     get_inputs_edge(batch, self.input_variables[input_type])
                 )
+            elif input_type == "parameters":
+                flat_array = s2u(batch[self.input_variables[input_type]], dtype=np.float32)
+
+                for ind, param in enumerate(self.parameters):
+                    if self.stage == "fit":
+                        # assign random values to jets with parameters not set to those in the
+                        # train list, values are chosen at random from those in the train list
+                        # according to probabilities if given, else with equal probability
+                        try:
+                            prob = self.parameters[param]["prob"]
+                        except KeyError:
+                            prob = None
+                        mask = ~np.isin(flat_array[:, ind], self.parameters[param]["train"])
+                        random = np.random.choice(
+                            self.parameters[param]["train"], size=np.sum(mask), p=prob
+                        )
+                        flat_array[mask, ind] = random
+
+                    if self.stage == "test":
+                        # assign parameter values for all jets to those passed in the 'test' option
+                        test_arr = np.full(np.shape(flat_array)[0], self.parameters[param]["test"])
+                        flat_array[:, ind] = test_arr
+
+                inputs[input_type] = torch.from_numpy(flat_array)
+
             else:
                 flat_array = s2u(batch[self.input_variables[input_type]], dtype=np.float32)
                 if self.nan_to_num:
@@ -159,13 +200,15 @@ class JetDataset(Dataset):
                         )
 
             # get the padding mask
-            if "valid" in batch.dtype.names and input_type != "edge":
+            if "valid" in batch.dtype.names and input_type != "edge" and input_type != "parameters":
                 masks[input_type] = ~torch.from_numpy(batch["valid"])
 
-        # concatenate jet and track inputs, and fill padded entries with zeros
+        # concatenate jet (and jet parameters) and track inputs, and fill padded entries with zeros
         for name in inputs:
-            if self.concat_jet_tracks and name not in ["jet", "global", "edge"]:
+            if self.concat_jet_tracks and name not in ["jet", "global", "edge", "parameters"]:
                 inputs[name] = concat_jet_track(inputs["jet"], inputs[name])
+                if "parameters" in self.input_names:
+                    inputs[name] = concat_jet_track(inputs["parameters"], inputs[name])
                 inputs[name][masks[name]] = 0
 
         return inputs, masks, labels

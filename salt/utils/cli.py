@@ -114,9 +114,12 @@ class SaltCLI(LightningCLI):
             for input_type, variables in sc.data.variables.items():
                 for init_net in sc.model.model.init_args.init_nets:
                     if init_net["name"] == input_type:
-                        init_net["dense_config"]["input_size"] = len(variables)
+                        input_size = len(variables)
                         if sc.data.concat_jet_tracks and input_type != "edge":
-                            init_net["dense_config"]["input_size"] += len(sc.data.variables["jet"])
+                            input_size += len(sc.data.variables["jet"])
+                            if "parameters" in sc.data.variables:
+                                input_size += len(sc.data.variables["parameters"])
+                        init_net["dense_config"]["input_size"] = input_size
 
             # add normalisation to init nets
             if sc.data.norm_in_model:
