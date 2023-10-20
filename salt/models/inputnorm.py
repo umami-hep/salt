@@ -52,7 +52,7 @@ class InputNorm(nn.Module):
             if missing := set(vs) - set(self.norm_dict[name]):
                 raise ValueError(
                     f"Missing variables {missing} for {name} in {norm_dict}. Choose from"
-                    f" {self.norm_dict[name]}."
+                    f" {self.norm_dict[name].keys()}."
                 )
 
             # store normalisation parameters with the model

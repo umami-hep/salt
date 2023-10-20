@@ -1,8 +1,8 @@
-name: ensemble
+name: DL1
 
 model:
   model:
-    class_path: salt.models.MLPTagger
+    class_path: salt.models.SaltModel
     init_args:
       init_nets:
         - input_name: jets
@@ -12,8 +12,6 @@ model:
             hidden_layers: [128, 128, 128]
             output_size: 64
             activation: &activation Mish
-            norm_layer: &norm_layer LayerNorm
-            dropout: &dropout 0.1
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -30,8 +28,6 @@ model:
                   output_size: 3
                   hidden_layers: [128]
                   activation: *activation
-                  norm_layer: *norm_layer
-                  dropout: *dropout
 
 data:
   variables:

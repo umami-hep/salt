@@ -5,9 +5,8 @@
 ## Components
 ### ::: salt.models.Dense
 
-## Modules
-### ::: salt.models.JetTagger
-### ::: salt.models.MLPTagger
+## Models
+### ::: salt.models.SaltModel
 
 ## Wrappers
-### ::: salt.modelwrapper.SaltModelWrapper
+### ::: salt.modelwrapper.ModelWrapper
