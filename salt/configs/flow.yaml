@@ -19,7 +19,7 @@ data:
 
 model:
   model:
-    class_path: salt.models.JetTagger
+    class_path: salt.models.SaltModel
     init_args:
       init_nets:
         - input_name: tracks

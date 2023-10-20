@@ -13,7 +13,7 @@ from torch.nn.functional import softmax
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
-from salt.modelwrapper import SaltModelWrapper
+from salt.modelwrapper import ModelWrapper
 from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
 from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
@@ -92,7 +92,7 @@ def get_probs(outputs: Tensor):
     return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
 
 
-class ONNXModel(SaltModelWrapper):
+class ONNXModel(ModelWrapper):
     def __init__(self, include_aux=False, **kwargs) -> None:
         super().__init__(**kwargs)
         assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
@@ -234,7 +234,7 @@ def main(args=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
-        pt_model = SaltModelWrapper.load_from_checkpoint(
+        pt_model = ModelWrapper.load_from_checkpoint(
             args.ckpt_path, map_location=torch.device("cpu")
         )
         pt_model.eval()

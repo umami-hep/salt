@@ -12,10 +12,10 @@ class R21Xbb(nn.Module):
     def forward(self, inputs: dict, mask=None, labels: dict | None = None):
         x = inputs["track"]
         x = torch.flatten(x, start_dim=1)
-        preds, loss = self.tasks_forward(x, labels)
+        preds, loss = self.run_tasks(x, labels)
         return preds, loss
 
-    def tasks_forward(
+    def run_tasks(
         self,
         x: Tensor,
         labels: dict | None = None,

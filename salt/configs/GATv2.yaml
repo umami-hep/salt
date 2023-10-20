@@ -2,7 +2,7 @@ name: GN1-GATv2
 
 model:
   model:
-    class_path: salt.models.JetTagger
+    class_path: salt.models.SaltModel
     init_args:
       encoder:
         class_path: salt.models.TransformerEncoder

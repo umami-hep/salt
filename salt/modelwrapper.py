@@ -14,7 +14,7 @@ def check_unique(modules: nn.ModuleList, attr_name: str) -> None:
     ), f"Attribute '{attr_name}' must be unique for class {modules[0].__class__.__name__}"
 
 
-class SaltModelWrapper(L.LightningModule):
+class ModelWrapper(L.LightningModule):
     def __init__(
         self,
         model: nn.Module,
@@ -57,6 +57,7 @@ class SaltModelWrapper(L.LightningModule):
         self.name = name
 
         # all tasks should inherit the global object type
+        self.model.global_object = self.global_object
         for task in self.model.tasks:
             task.global_object = self.global_object
 
