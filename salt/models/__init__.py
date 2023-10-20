@@ -5,6 +5,7 @@ from salt.models.attention import (
 )
 from salt.models.dense import Dense
 from salt.models.initnet import InitNet
+from salt.models.inputnorm import InputNorm
 from salt.models.mlp_tagger import MLPTagger
 from salt.models.pooling import (
     DictCrossAttentionPooling,
@@ -53,4 +54,5 @@ __all__ = [
     "JetTagger",
     "R21Xbb",
     "MLPTagger",
+    "InputNorm",
 ]

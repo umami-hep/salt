@@ -5,7 +5,7 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config:
             input_size: 23
             output_size: &embed_dim 128
@@ -24,7 +24,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: HadronConeExclTruthLabelID
                 label_map: { 0: 0, 4: 1, 5: 2 }
                 class_names: [ujets, cjets, bjets]
@@ -38,12 +38,11 @@ model:
                   dropout: 0.1
 
 data:
-  norm_in_model: True
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi

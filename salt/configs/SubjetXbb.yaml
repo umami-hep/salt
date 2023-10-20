@@ -5,15 +5,12 @@ data:
   val_file: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/pp_output_val.h5
   norm_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/norm_dict.yaml
   class_dict: /eos/atlas/atlascerngroupdisk/perf-flavtag/training/Xbb/v2/class_dict.yaml
-  input_names:
-    jet: jets
-    track: subjets
   variables:
-    jet:
+    jets:
       - pt
       - eta
       - mass
-    track:
+    tracks:
       - pt
       - eta
       - mass
@@ -23,9 +20,9 @@ data:
       - GN2v00_pb
       - GN2v00_pc
       - GN2v00_pu
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
+  num_train: -1
+  num_val: -1
+  num_test: -1
   batch_size: 1000
   num_workers: 15
 
@@ -69,7 +66,7 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config:
             input_size: 12
             output_size: &embed_dim 64
@@ -77,7 +74,7 @@ model:
             activation: &activation SiLU
             norm_layer: &norm_layer LayerNorm
 
-      gnn:
+      encoder:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
@@ -103,7 +100,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:

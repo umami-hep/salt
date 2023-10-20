@@ -41,7 +41,7 @@ def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
         context = add_dims(context, x.dim())
         context = context.expand(*x.shape[:-1], -1)
 
-    return torch.cat([x, context], dim=-1)
+    return torch.cat([context, x], dim=-1)
 
 
 def attach_context(x: Tensor, context: Tensor) -> Tensor:

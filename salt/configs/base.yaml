@@ -2,21 +2,18 @@ seed_everything: 42
 
 data:
   variables: {} # to be overwritten
-  norm_in_model: False
+  global_object: jets
   train_file: /eos/user/u/umamibot/www/ci/salt/pflow_3M/pp_output_train.h5
   test_file: /eos/user/u/umamibot/www/ci/salt/pflow_3M/pp_output_test_zprime.h5
   val_file: /eos/user/u/umamibot/www/ci/salt/pflow_3M/pp_output_val.h5
   norm_dict: /eos/user/u/umamibot/www/ci/salt/pflow_3M/norm_dict.yaml
   class_dict: /eos/user/u/umamibot/www/ci/salt/pflow_3M/class_dict.yaml
   #move_files_temp: /dev/shm/...
-  input_names:
-    jet: jets
-    track: tracks
   batch_size: 1000
   num_workers: 10
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
+  num_train: -1
+  num_val: -1
+  num_test: -1
 
 trainer:
   max_epochs: 100

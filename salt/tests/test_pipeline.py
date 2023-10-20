@@ -26,8 +26,8 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
     args += [f"--data.class_dict={cd_path}"]
     args += [f"--data.train_file={train_h5_path}"]
     args += [f"--data.val_file={train_h5_path}"]
-    args += ["--data.num_jets_train=500"]
-    args += ["--data.num_jets_val=200"]
+    args += ["--data.num_train=500"]
+    args += ["--data.num_val=200"]
     args += ["--data.batch_size=100"]
     args += ["--data.num_workers=0"]
     args += ["--trainer.max_epochs=1"]
@@ -53,7 +53,7 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
     args = ["test"]
     args += [f"--config={train_config_path}"]
     args += [f"--data.test_file={test_h5_path}"]
-    args += ["--data.num_jets_test=1000"]
+    args += ["--data.num_test=1000"]
     main(args)
 
     # check output h5 files are produced
@@ -69,17 +69,26 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
             assert len(f["tracks"]) == 1000
 
 
-def run_onnx(train_dir):
+def run_onnx(train_dir, args=None):
     ckpt_path = [f for f in (train_dir / "ckpts").iterdir() if f.suffix == ".ckpt"][-1]
-    args = [f"--ckpt_path={ckpt_path}"]
+    if args is None:
+        args = []
+    args += [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
-    args += ["--include_aux"]
+    args += args
     to_onnx(args)
     get_onnx_metadata([str(train_dir / "network.onnx")])
 
 
 def run_combined(
-    tmp_path, config, do_eval=True, do_onnx=True, train_args=None, do_xbb=False, inc_taus=False
+    tmp_path,
+    config,
+    do_eval=True,
+    do_onnx=True,
+    train_args=None,
+    export_args=None,
+    do_xbb=False,
+    inc_taus=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
     config_base = Path(__file__).parent.parent / "configs"
@@ -98,7 +107,7 @@ def run_combined(
         nd_path = nd_path[0]
         run_eval(tmp_path, train_config_path, nd_path, do_xbb)
     if do_onnx:
-        run_onnx(train_dir)
+        run_onnx(train_dir, export_args)
 
 
 @pytest.mark.filterwarnings(w)
@@ -121,7 +130,7 @@ class TestTrainMisc:
         run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
 
     def test_truncate_inputs(self, tmp_path) -> None:
-        args = ["--data.num_inputs.track=10"]
+        args = ["--data.num_inputs.tracks=10"]
         run_combined(
             tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args, inc_taus=True
         )
@@ -139,7 +148,7 @@ def test_GN1(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
-    run_combined(tmp_path, "GN2.yaml", inc_taus=True)
+    run_combined(tmp_path, "GN2.yaml", inc_taus=True, export_args=["--include_aux"])
 
 
 @pytest.mark.filterwarnings(w)

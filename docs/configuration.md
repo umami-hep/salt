@@ -20,10 +20,10 @@ For example, in [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you 
 ```yaml
 data:
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi
@@ -31,49 +31,48 @@ data:
       ...
 ```
 
-The number of variables specified here will be used to automatically set the input size of your `InitNets`.
+The number of variables specified here will be used to automatically set the `input_size` of your [`salt.models.InitNet`][salt.models.InitNet] modules.
 
-Training with multiple types of inputs beyond jets and tracks is supported to create a heterogenous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2emu.yaml) which includes a separate electrons input type.
+Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2emu.yaml) which includes a separate electrons input type.
+
+#### Mapping Input Dataset Names
+
+By default, the input names are used to directly retrieve dataset in the input h5 files.
+If you want to use a different name to retrieve the h5 datasets, you can specify a mapping in the `data` config, using the `input_map` key.
+
+```yaml
+data:
+  input_map:
+    internal_name: dataset_name
+```
+
+In this example, `dataset_name` will be used to retrieve the datasets from the input h5 files, while internally this input type will be referred to as `internal_name`.
 
 
-#### Global Jet Features
+#### Global Object Features
 
-By default, variables under the `jet` key are concatenated with each of the input tracks.
-You can also chooose to instead concatenate jet features with the pooled jet embedding after the GNN step.
-In order to this you should add a `global` key under `data.variables.inputs` and specify which variables do you want to use.
+By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
+in the [`salt.models.InitNet`][salt.models.InitNet].
+You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
+In order to this you should add a `GLOBAL` key under `data.variables` and specify which global-level variables do you want to use.
 
 ??? warning "Don't forget to change pooling and task input size accordingly"
 
-    If you concatenate 2 variables you should increase the `input_size` by 2 (for example `128->130`) for `pool_net` and all tasks (except vertexing, here you should increase by 4).
+    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
 
-For example, for the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you can add jet features concatenation in the following way:
+For example you can concatenate jet features after the gnn model with:
 
-- `inputs` section
-    ```yaml
-    input_names:
-        jet: jets
-        track: tracks
-        global: jets
-    ```
-- `variables` section
-    ```yaml
-    data:
-        variables:
-            global:
-            - pt_btagJes
-            - eta_btagJes
-            jet:
-            - pt_btagJes
-            - eta_btagJes
-            track:
-            - d0
-            - z0SinTheta
-            - dphi
-            - deta
-            ...
-    ```
+`variables` section
+```yaml
+data:
+    variables:
+        GOBAL:
+        - pt_btagJes
+        - eta_btagJes
+        ...
+```
 
-You can find the full example at [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml)
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
 
 
 #### Edge Features
@@ -97,7 +96,7 @@ A parameterised network can be configured in the following way:
     ```yaml
     input_names:
         ...
-        parameters: jets
+        PARAMETERS: jets
         ...
     ```
 - `variables` section: Add your parameters to lists of variables used in training.
@@ -105,13 +104,13 @@ A parameterised network can be configured in the following way:
     data:
         variables:
             ...
-            parameters:
+            PARAMETERS:
             - mass
             ...
     ```
-- `parameters` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `parameters` as in `variables`.
+- `PARAMETERS` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `PARAMETERS` as in `variables`.
     ```yaml
-    parameters:
+    PARAMETERS:
         mass:
             train: [5, 16, 55]
             test: 40
@@ -130,7 +129,7 @@ This can also be configured in yaml via
 ```yaml
 data:
   num_inputs:
-    track: 10
+    tracks: 10
 ```
 
 #### Remapping Labels
@@ -142,7 +141,7 @@ For example, instead of using the pre-mapped `flavour_label`, you could directly
 ```yaml
 class_path: salt.models.ClassificationTask
 init_args:
-    input_type: jet
+    input_name: jets
     name: jet_classification
     label: HadronConeExclTruthLabelID
     label_map: { 0: 0, 4: 1, 5: 2 }
@@ -193,36 +192,29 @@ init_args:
 
 
 ### Heterogeneous Models
-If multiple input types are provided, separate initialiser networks should be provided for each input type. An example using both track and electron input types is provided below:
+If multiple input types are provided, separate initialiser networks should be provided for each input type.
+An example using both track and electron input types is provided below:
 
 ```yaml
-- class_path: salt.models.InitNet
-    init_args:
-    name: track
+init_nets:
+  - input_name: tracks
+    dense_config: &init
+    output_size: &embed_dim 192
+    hidden_layers: [256]
+    activation: &activation SiLU
+    norm_layer: &norm_layer LayerNorm
+  - input_name: electrons
     dense_config:
-      input_size: 23
-      output_size: &embed_dim 192
-      hidden_layers: [256]
-      activation: &activation SiLU
-      norm_layer: &norm_layer LayerNorm
-- class_path: salt.models.InitNet
-    init_args:
-    name: electron
-    dense_config:
-      input_size: 28
-      output_size: *embed_dim
-      hidden_layers: [256]
-      activation: *activation
-      norm_layer: *norm_layer
+    <<: *init
 ```
 
 The separate input types are by default combined and treated homogeneously within the GNN layers. Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
 
 ```yaml
-    gnn:
+    encoder:
     class_path: salt.models.TransformerCrossAttentionEncoder
     init_args:
-        input_types: [track, electron]
+        input_names: [tracks, electrons]
         ca_every_layer: true
         embed_dim: 192
         num_layers: 6

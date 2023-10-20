@@ -5,7 +5,7 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config:
             input_size: 21
             output_size: &embed_dim 128
@@ -24,7 +24,7 @@ model:
             - class_path: salt.models.GaussianRegressionTask
               init_args:
                 name: gaussian_jet_regression
-                input_type: jet
+                input_name: jets
                 targets: HadronConeExclTruthLabelPt
                 loss: GaussianNLLLoss
                 dense_config:
@@ -36,7 +36,7 @@ model:
             - class_path: salt.models.GaussianRegressionTask
               init_args:
                 name: gaussian_multi_output_jet_regression
-                input_type: jet
+                input_name: jets
                 targets:
                   [
                     R10TruthLabel_R22v1_TruthJetMass,
@@ -51,10 +51,10 @@ model:
 
 data:
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi

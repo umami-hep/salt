@@ -23,7 +23,10 @@ nav:
   - Evaluation: evaluation.md
   - ONNX Export: export.md
   - Contributing: contributing.md
-  - API Reference: api.md
+  - API Reference:
+    - api/data.md
+    - api/tasks.md
+    - api/models.md
 
 plugins:
   - search

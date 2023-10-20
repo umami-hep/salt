@@ -86,7 +86,7 @@ def test_transformer() -> None:
 
 def test_transformer_cross_attention_encoder() -> None:
     net = TransformerCrossAttentionEncoder(
-        input_types=["type1", "type2"],
+        input_names=["type1", "type2"],
         embed_dim=10,
         num_layers=2,
         mha_config={

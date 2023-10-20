@@ -17,7 +17,7 @@ class TaskBase(nn.Module, ABC):
     def __init__(
         self,
         name: str,
-        input_type: str,
+        input_name: str,
         dense_config: dict,
         loss: nn.Module,
         weight: float = 1.0,
@@ -30,10 +30,10 @@ class TaskBase(nn.Module, ABC):
         ----------
         name : str
             Arbitrary name of the task, used for logging and inference.
-        input_type : str
+        input_name : str
             Which type of object is input to the task e.g. jet/track/flow.
         dense_config : dict
-            Keyword arguments for [salt.models.Dense][salt.models.Dense],
+            Keyword arguments for [`salt.models.Dense`][salt.models.Dense],
             the dense network producing the task outputs.
         loss : nn.Module
             Loss function applied to the dense network outputs.
@@ -43,15 +43,15 @@ class TaskBase(nn.Module, ABC):
         super().__init__()
 
         self.name = name
-        self.input_type = input_type
+        self.input_name = input_name
         self.net = Dense(**dense_config)
         self.loss = loss
         self.weight = weight
 
-    def input_type_mask(self, masks: Mapping):
+    def input_name_mask(self, masks: Mapping):
         return torch.cat(
             [
-                torch.ones(m.shape[1], device=m.device) * (t == self.input_type)
+                torch.ones(m.shape[1], device=m.device) * (t == self.input_name)
                 for t, m in masks.items()
             ],
         ).bool()
@@ -80,7 +80,7 @@ class ClassificationTask(TaskBase):
         sample_weight : str | None, optional
             Name of a per sample weighting to apply in the loss function.
         **kwargs
-            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
+            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
         self.label = label
@@ -102,7 +102,7 @@ class ClassificationTask(TaskBase):
         """Apply per sample weights, if specified."""
         if self.sample_weight is None:
             return loss
-        return (loss * labels_dict[self.input_type][self.sample_weight]).mean()
+        return (loss * labels_dict[self.input_name][self.sample_weight]).mean()
 
     def forward(
         self,
@@ -112,15 +112,15 @@ class ClassificationTask(TaskBase):
         context: Tensor = None,
     ):
         if masks is not None:
-            input_type_mask = self.input_type_mask(masks)
-            preds = self.net(x[:, input_type_mask], context)
-            mask = masks[self.input_type]
+            input_name_mask = self.input_name_mask(masks)
+            preds = self.net(x[:, input_name_mask], context)
+            mask = masks[self.input_name]
         else:
             preds = self.net(x, context)
             mask = None
 
         # get labels
-        labels = labels_dict[self.input_type][self.label] if labels_dict else None
+        labels = labels_dict[self.input_name][self.label] if labels_dict else None
         if labels is not None and self.label_map is not None:
             for k, v in self.label_map.items():
                 labels[labels == k] = v
@@ -177,7 +177,7 @@ class RegressionTaskBase(TaskBase, ABC):
             Mean and std normalization parameters for each target, used for scaling.
             Cannot be used with target_denominators.
         **kwargs
-            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
+            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
 
@@ -240,14 +240,14 @@ class RegressionTaskBase(TaskBase, ABC):
         targets = None
         if targets_dict:
             targets = torch.stack(
-                [targets_dict[self.input_type][target] for target in self.targets], dim=-1
+                [targets_dict[self.input_name][target] for target in self.targets], dim=-1
             )
 
         if targets is not None:
             if self.target_denominators is not None:
                 for i in range(len(self.targets)):
                     targets[:, i] = torch.div(
-                        targets[:, i], targets_dict[self.input_type][self.target_denominators[i]]
+                        targets[:, i], targets_dict[self.input_name][self.target_denominators[i]]
                     )
             if self.norm_params is not None:
                 for i in range(len(self.norm_params["mean"])):
@@ -260,7 +260,7 @@ class RegressionTaskBase(TaskBase, ABC):
         if self.target_denominators is not None:
             for i in range(len(self.targets)):
                 preds[:, i] = (
-                    preds[:, i] * targets_dict[self.input_type][self.target_denominators[i]]
+                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
                 )
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
@@ -277,7 +277,8 @@ class RegressionTask(RegressionTaskBase):
         Parameters
         ----------
         **kwargs
-            Keyword arguments for [salt.modles.RegressionTaskBase][salt.models.RegressionTaskBase].
+            Keyword arguments for
+            [`salt.modles.RegressionTaskBase`][salt.models.RegressionTaskBase].
         """
         super().__init__(**kwargs)
         if self.net.output_size != len(self.targets):
@@ -313,7 +314,8 @@ class GaussianRegressionTask(RegressionTaskBase):
         Parameters
         ----------
         **kwargs
-            Keyword arguments for [salt.modles.RegressionTaskBase][salt.models.RegressionTaskBase].
+            Keyword arguments for
+            [`salt.modles.RegressionTaskBase`][salt.models.RegressionTaskBase].
         """
         super().__init__(**kwargs)
         if self.net.output_size != 2 * len(self.targets):
@@ -359,7 +361,7 @@ class VertexingTask(TaskBase):
         label : str
             Label name for the target object IDs.
         **kwargs
-            Keyword arguments for [salt.modles.TaskBase][salt.models.TaskBase].
+            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
         self.label = label
@@ -372,9 +374,9 @@ class VertexingTask(TaskBase):
         context: Tensor = None,
     ):
         if masks is not None:
-            input_type_mask = self.input_type_mask(masks)
-            mask = masks[self.input_type]
-            x = x[:, input_type_mask]
+            input_name_mask = self.input_name_mask(masks)
+            mask = masks[self.input_name]
+            x = x[:, input_name_mask]
         else:
             mask = None
         b, n, d = x.shape
@@ -410,7 +412,7 @@ class VertexingTask(TaskBase):
         return pred, loss
 
     def calculate_loss(self, pred, labels_dict, adjmat):
-        labels = labels_dict[self.input_type][self.label]
+        labels = labels_dict[self.input_name][self.label]
 
         match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
 
@@ -427,7 +429,7 @@ class VertexingTask(TaskBase):
 
         # If reduction is none and have weight labels, weight the loss
         self.label.replace("VertexIndex", "OriginLabel")
-        weights = self.get_weights(labels_dict[self.input_type][self.label], adjmat)
+        weights = self.get_weights(labels_dict[self.input_name][self.label], adjmat)
         weighted_loss = loss * weights
 
         # Calculate the number of non-masked elements

@@ -145,7 +145,7 @@ class TransformerEncoder(nn.Module):
         mha_config : nn.Module
             Keyword arguments for the mha block
         dense_config: Mapping
-            Keyword arguments for the dense network in each layer
+            Keyword arguments for [`salt.models.Dense`][salt.models.Dense]
         context_dim: int
             Dimension of the context inputs
         out_dim: int
@@ -243,7 +243,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
 
     def __init__(
         self,
-        input_types: list[str],
+        input_names: list[str],
         embed_dim: int,
         num_layers: int,
         mha_config: Mapping,
@@ -256,7 +256,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
         update_edges: bool = False,
     ):
         super().__init__()
-        self.input_types = input_types
+        self.input_names = input_names
         self.embed_dim = embed_dim
         self.num_layers = num_layers
         self.out_dim = out_dim
@@ -265,16 +265,16 @@ class TransformerCrossAttentionEncoder(nn.Module):
         self.update_edges = update_edges
 
         # Generate a list of final input types, merging as necessary
-        self.final_input_types = list(
-            set(input_types) - {it for sublist in self.merge_dict.values() for it in sublist}
+        self.final_input_names = list(
+            set(input_names) - {it for sublist in self.merge_dict.values() for it in sublist}
         )
-        self.final_input_types.extend(self.merge_dict.keys())
+        self.final_input_names.extend(self.merge_dict.keys())
 
         # Layers for each input type
         # need to use ModuleDict so device is set correctly
         self.type_layers = nn.ModuleDict(
             {
-                input_type: nn.ModuleList(
+                input_name: nn.ModuleList(
                     [
                         TransformerEncoderLayer(
                             embed_dim,
@@ -286,7 +286,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                         for i in range(num_layers)
                     ]
                 )
-                for input_type in self.final_input_types
+                for input_name in self.final_input_names
             }
         )
 
@@ -295,7 +295,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
         # module dict only supports string keys
         self.cross_layers = nn.ModuleDict(
             {
-                f"{input_type1}_{input_type2}": nn.ModuleList(
+                f"{input_name1}_{input_name2}": nn.ModuleList(
                     [
                         TransformerCrossAttentionLayer(
                             embed_dim, mha_config, ca_dense_config, context_dim
@@ -303,7 +303,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                         for _ in range(ca_layers)
                     ]
                 )
-                for input_type1, input_type2 in combinations(self.final_input_types, 2)
+                for input_name1, input_name2 in combinations(self.final_input_names, 2)
             }
         )
 
@@ -329,14 +329,14 @@ class TransformerCrossAttentionEncoder(nn.Module):
 
         for i in range(self.num_layers):
             # Self-attention for each type
-            for it in self.final_input_types:
+            for it in self.final_input_names:
                 updated_x[it] += self.type_layers[it][i](x[it], mask=mask[it], **kwargs)
 
             # Cross-attention between pairs of types - symmetric update
             # i % len(self.cross_layers[layer_key]) evals to 0 for first layer
             # and final layer and 1 everywhere else to give behaviour we want
             if self.ca_every_layer or i in [0, self.num_layers - 1]:
-                for it1, it2 in combinations(self.final_input_types, 2):
+                for it1, it2 in combinations(self.final_input_names, 2):
                     layer_key = f"{it1}_{it2}"
                     updated_x[it1] += self.cross_layers[layer_key][
                         i % len(self.cross_layers[layer_key])
@@ -346,12 +346,12 @@ class TransformerCrossAttentionEncoder(nn.Module):
                     ](x[it2], x[it1], mask[it2], mask[it1], **kwargs)
 
         # Apply final normalization
-        for it in self.final_input_types:
+        for it in self.final_input_names:
             updated_x[it] = self.final_norm(updated_x[it])
 
         # Optional resizing layer
         if self.out_dim:
-            for it in self.final_input_types:
+            for it in self.final_input_names:
                 updated_x[it] = self.final_linear(updated_x[it])
 
         return updated_x

@@ -10,6 +10,7 @@ logs/
 tmp/
 env/
 
+*.pyc
 *.xml
 *.npy
 *.root

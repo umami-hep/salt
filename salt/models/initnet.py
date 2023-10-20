@@ -1,63 +1,58 @@
-from pathlib import Path
-
-import torch
 from torch import nn
 
-from salt.data.scaler import NormDictScaler
 from salt.models import Dense
+from salt.utils.tensor_utils import attach_context
+from salt.utils.typing import Tensors, Vars
 
 
 class InitNet(nn.Module):
     def __init__(
         self,
-        name: str,
+        input_name: str,
         dense_config: dict,
-        norm_dict: Path | None = None,
-        variables: dict | None = None,
-        input_names: dict | None = None,
-        concat_jet_tracks: bool = False,
+        variables: Vars,
+        global_object: str,
+        attach_global: bool = True,
     ):
-        """Initialiser network to perform input embedding.
-
-        This class can also  optionally be used to handle input normalisation.
+        """Initial input embedding network which can handle input concatenation.
 
         Parameters
         ----------
-        name : str
-            Name of the input, must match the input types in the data config.
+        input_name : str
+            Name of the input, must match the input types in the data config
         dense_config : dict
-            Keyword arguments for [salt.models.Dense][salt.models.Dense],
-            the dense network performing the initial embedding.
-        norm_dict : Path | None, optional
-            Path to yaml file containing normalisation parameters.
-        variables : dict | None, optional
-            Input variables used in the forward pass.
-        input_names : dict | None, optional
-            Names of the h5 group to access for each type of input.
-        concat_jet_tracks : bool, optional
-            Concatenate jet inputs with track-type inputs.
+            Keyword arguments for [`salt.models.Dense`][salt.models.Dense],
+            the dense network producing the initial embedding. The `input_size`
+            argument is inferred automatically by the framework
+        variables : Vars
+            Input variables used in the forward pass, set automatically by the framework
+        global_object : str
+            Name of the global object, set automatically by the framework
+        attach_global : str, optional
+            Concatenate global-level inputs with constituent-level inputs before embedding
         """
         super().__init__()
 
-        self.name = name
+        # set input size
+        if "input_size" not in dense_config:
+            dense_config["input_size"] = len(variables[input_name])
+            if attach_global and input_name != "EDGE":
+                dense_config["input_size"] += len(variables[global_object])
+                dense_config["input_size"] += len(variables.get("PARAMETERS", []))
+
+        self.input_name = input_name
         self.net = Dense(**dense_config)
-        self.concat_jet_tracks = concat_jet_tracks
-        if bool(norm_dict) != bool(variables) != bool(input_names):
-            raise ValueError("Must provide either all or none of norm_dict, variables, input_names")
+        self.variables = variables
+        self.attach_global = attach_global
+        self.global_object = global_object
 
-        if norm_dict is not None and self.name != "edge":
-            assert input_names is not None
-            self.scaler = NormDictScaler(norm_dict, input_names, variables, concat_jet_tracks)
-            means, stds = self.scaler.norm_params[self.name]
-            self.register_buffer("means", torch.from_numpy(means))
-            self.register_buffer("stds", torch.from_numpy(stds))
-        else:
-            self.register_buffer("means", None)
-            self.register_buffer("stds", None)
+    def forward(self, inputs: Tensors):
+        x = inputs[self.input_name]
 
-    def forward(self, inputs: dict):
-        x = inputs[self.name]
-        if self.means is not None:
-            x = (x - self.means) / self.stds
+        if self.attach_global:
+            x = attach_context(x, inputs[self.global_object])
+
+        if "PARAMETERS" in self.variables:
+            x = attach_context(x, inputs["PARAMETERS"])
 
         return self.net(x)

@@ -5,20 +5,17 @@ data:
   val_file: /data/atlas/users/okarkout/xbb/fortraining/Boosted_validation-resampled.h5
   norm_dict: /data/atlas/users/okarkout/xbb/fortraining/Boosted_scale_dict.json
   class_dict: /project/atlas/users/okarkout/salt/class_dict.yaml
-  input_names:
-    jet: jets
-    track: subjets
   variables:
-    jet:
+    jets:
       - pt
       - eta
-    track:
+    tracks:
       - DL1dv01_VR_pb
       - DL1dv01_VR_pc
       - DL1dv01_VR_pu
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
+  num_train: -1
+  num_val: -1
+  num_test: -1
 
 trainer:
   max_epochs: 50
@@ -70,7 +67,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:

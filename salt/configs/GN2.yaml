@@ -12,13 +12,13 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
 
-      gnn:
+      encoder:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
@@ -42,7 +42,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -57,7 +57,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_origin
-                input_type: track
+                input_name: tracks
                 label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
@@ -72,7 +72,7 @@ model:
             - class_path: salt.models.VertexingTask
               init_args:
                 name: track_vertexing
-                input_type: track
+                input_name: tracks
                 label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
@@ -85,12 +85,11 @@ model:
                   context_size: *out_dim
 
 data:
-  norm_in_model: True
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi

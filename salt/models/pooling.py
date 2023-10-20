@@ -67,11 +67,11 @@ class DictCrossAttentionPooling(BaseCrossAttentionPooling):
         class_token = self.expand_class_token(x)
         for layer in self.ca_layers:
             new_class_token = torch.zeros_like(class_token)
-            for input_type in x:
+            for input_name in x:
                 new_class_token += layer(
                     class_token,
-                    x[input_type],
-                    key_value_mask=mask[input_type] if mask else None,
+                    x[input_name],
+                    key_value_mask=mask[input_name] if mask else None,
                     context=context,
                 )
             class_token = new_class_token

@@ -53,18 +53,7 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
-
-        def link_sizes(x):
-            if x is None:
-                return None
-            return dict(zip(x, map(len, list(x.values())), strict=True))
-
-        parser.link_arguments(
-            "data.variables",
-            "model.dims",
-            compute_fn=link_sizes,
-            apply_on="parse",
-        )
+        parser.link_arguments("data.global_object", "model.global_object")
 
     def add_arguments_to_parser(self, parser) -> None:
         parser.add_argument("--name", default="salt", help="Name for this training run.")
@@ -94,41 +83,34 @@ class SaltCLI(LightningCLI):
         for submodel in model_dict["tasks"]["init_args"]["modules"]:
             assert "Task" in submodel["class_path"]
             task = submodel["init_args"]
-            if task["input_type"] not in labels:
-                labels[task["input_type"]] = []
+            if task["input_name"] not in labels:
+                labels[task["input_name"]] = []
             if self.subcommand == "fit":
                 if label := task.get("label"):
-                    labels[task["input_type"]].append(label)
+                    labels[task["input_name"]].append(label)
                 if weight := task.get("sample_weight"):
-                    labels[task["input_type"]].append(weight)
+                    labels[task["input_name"]].append(weight)
                 if targets := task.get("targets"):
                     for target in listify(targets):
-                        labels[task["input_type"]].append(target)
+                        labels[task["input_name"]].append(target)
             if denominators := task.get("target_denominators"):
                 for denominator in listify(denominators):
-                    labels[task["input_type"]].append(denominator)
+                    labels[task["input_name"]].append(denominator)
         sc["data"]["labels"] = labels
 
+        # add norm
+        sc["model"]["norm_config"] = {}
+        sc["model"]["norm_config"]["norm_dict"] = sc.data.norm_dict
+        sc["model"]["norm_config"]["variables"] = sc.data.variables
+        sc["model"]["norm_config"]["global_object"] = sc.data.global_object
+
         if self.subcommand == "fit":
-            # set input sizes
-            for input_type, variables in sc.data.variables.items():
-                for init_net in sc.model.model.init_args.init_nets:
-                    if init_net["name"] == input_type:
-                        input_size = len(variables)
-                        if sc.data.concat_jet_tracks and input_type != "edge":
-                            input_size += len(sc.data.variables["jet"])
-                            if "parameters" in sc.data.variables:
-                                input_size += len(sc.data.variables["parameters"])
-                        init_net["dense_config"]["input_size"] = input_size
+            # add variables to init nets
+            for init_net in sc.model.model.init_args.init_nets:
+                init_net["variables"] = sc.data.variables
+                init_net["global_object"] = sc.data.global_object
 
-            # add normalisation to init nets
-            if sc.data.norm_in_model:
-                for init_net in sc.model.model.init_args.init_nets:
-                    init_net["norm_dict"] = sc.data.norm_dict
-                    init_net["variables"] = sc.data.variables
-                    init_net["input_names"] = sc.data.input_names
-                    init_net["concat_jet_tracks"] = sc.data.concat_jet_tracks
-
+            # extract jet class names from h5 attrs (requires FTAG preprocessing)
             self.add_jet_class_names()
 
             # reduce precision to improve performance
@@ -195,12 +177,14 @@ class SaltCLI(LightningCLI):
         # add flavour label class names to jet classification task, if it exists
         sc = self.config[self.subcommand]
         for task in sc.model.model.init_args.tasks.init_args.modules:
-            args = task.init_args
+            t_args = task.init_args
             if (
-                args.name == "jet_classification"
-                and args.label == "flavour_label"
-                and args.class_names is None
+                t_args.name == "jet_classification"
+                and t_args.label == "flavour_label"
+                and t_args.class_names is None
             ):
+                name = (
+                    sc.data.input_map[t_args.input_name] if sc.data.input_map else t_args.input_name
+                )
                 with h5py.File(sc.data.train_file) as f:
-                    name = sc.data.input_names[args.input_type]
-                    args.class_names = f[name].attrs[args.label]
+                    t_args.class_names = f[name].attrs[t_args.label]

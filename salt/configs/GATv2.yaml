@@ -4,8 +4,7 @@ model:
   model:
     class_path: salt.models.JetTagger
     init_args:
-
-      gnn:
+      encoder:
         class_path: salt.models.TransformerEncoder
         init_args:
           mha_config:

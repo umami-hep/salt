@@ -36,5 +36,6 @@ ignore = ["ARG002", "D203", "D205", "D213", "D401", "PLR", "PTH123"]
 line-length = 100
 
 [tool.pytest.ini_options]
-log_cli_level = "debug"
+log_cli = true
+log_cli_level = "CRITICAL"
 filterwarnings = ["ignore::DeprecationWarning"]
