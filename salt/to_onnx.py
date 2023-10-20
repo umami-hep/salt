@@ -8,14 +8,14 @@ import onnx
 import onnxruntime as ort
 import torch
 import yaml
-from torch import Tensor, nn
+from torch import Tensor
 from torch.nn.functional import softmax
 from tqdm import tqdm
 
-from salt.lightning_module import LightningTagger
 from salt.models.task import mask_fill_flattened
+from salt.modelwrapper import SaltModelWrapper
 from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
-from salt.utils.inputs import concat_jet_track, inputs_sep_no_pad, inputs_sep_with_pad
+from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
 
 torch.manual_seed(42)
@@ -92,34 +92,38 @@ def get_probs(outputs: Tensor):
     return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
 
 
-class ONNXModel(LightningTagger):
-    def __init__(self, model: nn.Module, dims: dict, include_aux=False) -> None:
-        super().__init__(model=model, dims=dims, lrs_config={})
+class ONNXModel(SaltModelWrapper):
+    def __init__(self, include_aux=False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
         self.include_aux = include_aux
-
-        assert len(model.init_nets) == 1, "Multi input ONNX models are not yet supported."
-        assert model.init_nets[0].concat_jet_tracks, "norm_in_model and concat_jet_tracks required"
-
-        jets, tracks = inputs_sep_no_pad(1, 40, self.dims["jet"], self.dims["track"])
+        self.const = "tracks"
+        jets, tracks = inputs_sep_no_pad(
+            1, 40, self.input_dims[self.global_object], self.input_dims[self.const]
+        )
         self.example_input_array = jets, tracks.squeeze(0)
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):
-        # in athena the jets have a batch dimension but the tracks do not
-        tracks = concat_jet_track(jets, tracks.unsqueeze(0))
+        # in athena the jets have a batch dim but the tracks don't, so add it here
+        tracks = tracks.unsqueeze(0)
 
-        # return class probabilities
-        outputs = self.model({"track": tracks}, None)[0]
-        onnx_outputs = get_probs(outputs["jet"]["jet_classification"])
+        # forward pass
+        outputs = super().forward({self.global_object: jets, self.const: tracks}, None)[0]
 
+        # get class probabilities
+        onnx_outputs = get_probs(outputs[self.global_object]["jet_classification"])
+
+        # add aux outputs
         if self.include_aux:
-            if "track_origin" in outputs:
-                outputs_track = torch.argmax(outputs["track_origin"], dim=-1)
+            track_outs = outputs[self.const]
+            if "track_origin" in track_outs:
+                outputs_track = torch.argmax(track_outs["track_origin"], dim=-1)
                 outputs_track = outputs_track.squeeze(0).char()
                 onnx_outputs += (outputs_track,)
 
-            if "track_vertexing" in outputs:
-                mask = torch.zeros(tracks.shape[:-1])
-                edge_scores = outputs["track_vertexing"]
+            if "track_vertexing" in track_outs:
+                mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
+                edge_scores = track_outs["track_vertexing"]
                 vertex_indices = get_node_assignment(edge_scores, mask)
                 vertex_list = mask_fill_flattened(vertex_indices, mask)
                 onnx_outputs += (vertex_list.reshape(-1).char(),)
@@ -131,12 +135,12 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     n_batch = 1
 
     jets, tracks, mask = inputs_sep_with_pad(
-        n_batch, n_track, pt_model.dims["jet"], pt_model.dims["track"], p_valid=1
+        n_batch, n_track, pt_model.input_dims["jets"], pt_model.input_dims["tracks"], p_valid=1
     )
 
-    inputs_pt = {"track": concat_jet_track(jets, tracks)}
-    outputs_pt = pt_model(inputs_pt, {"track": mask})[0]
-    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jet"]["jet_classification"])]
+    inputs_pt = {"jets": jets, "tracks": tracks}
+    outputs_pt = pt_model(inputs_pt, {"tracks": mask})[0]
+    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jet_classification"])]
 
     inputs_onnx = {
         "jet_features": jets.numpy(),
@@ -201,6 +205,7 @@ def compare_outputs(pt_model, onnx_path, include_aux):
         str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
     )
     for n_track in tqdm(range(0, 40), leave=False):
+        print(n_track)
         for _ in range(10):
             compare_output(pt_model, session, include_aux, n_track)
 
@@ -229,10 +234,11 @@ def main(args=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
-        pt_model = LightningTagger.load_from_checkpoint(
+        pt_model = SaltModelWrapper.load_from_checkpoint(
             args.ckpt_path, map_location=torch.device("cpu")
         )
         pt_model.eval()
+        pt_model.float()
 
         onnx_model = ONNXModel.load_from_checkpoint(
             args.ckpt_path, include_aux=args.include_aux, map_location=torch.device("cpu")
@@ -256,13 +262,13 @@ def main(args=None):
     dynamic_axes = {"track_features": {0: "n_tracks"}}
 
     if args.include_aux:
-        if "track_origin" in config["data"]["labels"]:
+        if "track_origin" in [t.name for t in pt_model.model.tasks]:
             output_names.append("track_class")
             dynamic_axes["track_class"] = {0: "n_tracks"}
 
-        if "track_vertexing" in config["data"]["labels"]:
-            output_names.append("vertex_indices")
-            dynamic_axes["vertex_indices"] = {0: "n_tracks"}
+        if "track_vertexing" in [t.name for t in pt_model.model.tasks]:
+            output_names.append("vertex_index")
+            dynamic_axes["vertex_index"] = {0: "n_tracks"}
 
     # export
     onnx_model.to_onnx(
@@ -308,8 +314,8 @@ def add_metadata(
     metadata = {"ckpt_path": str(ckpt_path.resolve()), "layers": [], "nodes": []}
     config = yaml.safe_load(config_path.read_text())
     metadata["config.yaml"] = config
-    jet_vars = config["data"]["variables"]["jet"]
-    trk_vars = config["data"]["variables"]["track"]
+    jet_vars = config["data"]["variables"]["jets"]
+    trk_vars = config["data"]["variables"]["tracks"]
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
 
     # add inputs

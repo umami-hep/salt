@@ -51,15 +51,15 @@ class PredictionWriter(Callback):
         self.ds = trainer.datamodule.test_dataloader().dataset
         self.test_suff = trainer.datamodule.test_suff
         self.file = self.ds.file
-        self.num_jets = len(self.ds)
-        self.norm_dict = self.ds.scaler.norm_dict
+        self.num = len(self.ds)
+        self.norm_dict = self.ds.norm_dict
 
         # inputs names
-        self.input_names = self.ds.input_names
+        self.input_map = self.ds.input_map
 
         # place to store intermediate outputs
         self.tasks = module.model.tasks
-        self.outputs: dict = {input_type: {} for input_type in {t.input_type for t in self.tasks}}
+        self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
         self.masks: dict = {}
 
         # get jet class names for output file
@@ -89,11 +89,11 @@ class PredictionWriter(Callback):
         inputs, masks, labels = batch
         add_mask = False
         for task in self.tasks:
-            if not self.write_tracks and task.input_type == "track":
+            if not self.write_tracks and task.input_name == "tracks":
                 continue
 
-            this_preds = preds[task.input_type][task.name]
-            this_mask = masks.get(task.input_type)
+            this_preds = preds[task.input_name][task.name]
+            this_mask = masks.get(task.input_name)
 
             if isinstance(task, ClassificationTask):
                 # special case for jet classification output names
@@ -105,13 +105,13 @@ class PredictionWriter(Callback):
                 this_preds = task.run_inference(this_preds, this_mask)
             elif issubclass(type(task), RegressionTaskBase):
                 this_preds = task.run_inference(this_preds, labels, self.precision)
-            if task.name not in self.outputs[task.input_type]:
-                self.outputs[task.input_type][task.name] = []
-            self.outputs[task.input_type][task.name].append(this_preds)
+            if task.name not in self.outputs[task.input_name]:
+                self.outputs[task.input_name][task.name] = []
+            self.outputs[task.input_name][task.name].append(this_preds)
             if this_mask is not None and add_mask is False:
-                if task.input_type not in self.masks:
-                    self.masks[task.input_type] = []
-                self.masks[task.input_type].append(this_mask)
+                if task.input_name not in self.masks:
+                    self.masks[task.input_name] = []
+                self.masks[task.input_name].append(this_mask)
                 add_mask = True
 
     def on_test_end(self, trainer, module):
@@ -120,14 +120,14 @@ class PredictionWriter(Callback):
             print("Warning! Overwriting existing file.")
         f = h5py.File(self.output_path, "w")
 
-        for input_type, outputs in self.outputs.items():
-            input_name = self.input_names[input_type]
+        for input_name, outputs in self.outputs.items():
+            name = self.input_map[input_name]
 
             # get input variables
-            input_variables = self.extra_vars[input_type]
+            input_variables = self.extra_vars[name]
             if not input_variables:
-                input_variables = self.file[input_name].dtype.names
-            inputs = self.file[input_name].fields(input_variables)[: self.num_jets]
+                input_variables = self.file[name].dtype.names
+            inputs = self.file[name].fields(input_variables)[: self.num]
 
             # get output variables
             this_outputs = [inputs]
@@ -137,10 +137,8 @@ class PredictionWriter(Callback):
                 this_outputs.append(maybe_pad(x, inputs))
 
             # add mask if present
-            if input_type in self.masks:
-                mask = np.concatenate(
-                    [m.cpu() for m in self.masks[input_type]]
-                )  # concat test batches
+            if name in self.masks:
+                mask = np.concatenate([m.cpu() for m in self.masks[name]])  # concat test batches
                 mask = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
                 this_outputs.append(maybe_pad(mask, inputs))
 
@@ -148,7 +146,7 @@ class PredictionWriter(Callback):
             this_outputs = join_structured_arrays(this_outputs)
 
             # write the dataset for this input type
-            self.create_dataset(f, this_outputs, input_name, self.half_precision)
+            self.create_dataset(f, this_outputs, name, self.half_precision)
 
         f.close()
         print("Created output file", self.output_path)

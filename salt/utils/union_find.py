@@ -14,23 +14,24 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor):
 
     # calculate cumulative edge numbers and offsets for symmetric index calculation
     cum_edges = torch.cumsum(edge_numbers, 0).long()
-    edge_offsets = torch.cat([torch.tensor([0]).long(), cum_edges[:-1]])
+    edge_offsets = torch.cat([torch.tensor([0], device=cum_edges.device).long(), cum_edges[:-1]])
 
     torch.tensor_split(scores, cum_edges)
 
     # calculate opposite edge indices (assumes edges sorted by src then dest or vice versa)
     sym_ind = torch.cat(
         [
-            torch.arange(nnodes - 1, nnodes * (nnodes - 1) ** 2 + 1, nnodes - 1)
-            for nnodes in node_numbers
+            torch.arange(n - 1, n * (n - 1) ** 2 + 1, n - 1, device=node_numbers.device)
+            for n in node_numbers
         ]
     )
     sym_ind += torch.cat(
-        [torch.arange(0, nnodes - 1).repeat(nnodes).sort()[0] * nnodes for nnodes in node_numbers]
+        [
+            torch.arange(0, n - 1, device=sym_ind.device).repeat(n).sort()[0] * n
+            for n in node_numbers
+        ]
     )
-    sym_ind = sym_ind % torch.cat(
-        [edge_numbers[i].repeat(edge_numbers[i]) for i in range(len(edge_numbers))]
-    )
+    sym_ind = sym_ind % torch.cat([n.repeat(n) for n in edge_numbers])
     sym_ind += torch.cat(
         [edge_offsets[i].repeat(edge_numbers[i]) for i in range(len(edge_offsets))]
     )
@@ -103,12 +104,10 @@ def get_node_assignment(output: Tensor, mask: Tensor):
     Wrapper function which returns reconstructed vertex indices in shape
     (nodes in batch, 1). Assumes mask of shape (batch, max_tracks).
     """
-    # Ensure all tensors are on CPU
-    output = output.cpu()
-    mask = mask.cpu()
     # pad mask with additional track to avoid onnx error
-    mask = torch.cat([mask, torch.ones((mask.shape[0], 1), dtype=torch.bool)], dim=1).to(torch.bool)
-
+    mask = torch.cat(
+        [mask, torch.ones((mask.shape[0], 1), dtype=torch.bool, device=mask.device)], dim=1
+    )
     node_numbers = (~mask).sum(dim=-1).long()
 
     # symmetrize edge scores

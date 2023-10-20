@@ -5,7 +5,7 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config:
             input_size: 21
             output_size: &embed_dim 128
@@ -24,7 +24,7 @@ model:
             - class_path: salt.models.RegressionTask
               init_args:
                 name: regression_with_mean_std_norm
-                input_type: jet
+                input_name: jets
                 targets: HadronConeExclTruthLabelLxy
                 norm_params: { mean: 1.0, std: 1.0 }
                 loss:
@@ -39,7 +39,7 @@ model:
             - class_path: salt.models.RegressionTask
               init_args:
                 name: regression_with_ratio_norm
-                input_type: jet
+                input_name: jets
                 targets: HadronConeExclTruthLabelLxy
                 target_denominators: pt_btagJes
                 loss:
@@ -53,10 +53,10 @@ model:
 
 data:
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi

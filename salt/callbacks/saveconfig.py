@@ -143,16 +143,19 @@ class SaveConfigCallback(Callback):
         val_loader = trainer.datamodule.val_dataloader()
         train_dset = train_loader.dataset
         val_dset = val_loader.dataset
-        jet_name = self.config["data"]["input_names"]["jet"]
+
+        global_object = self.plm.global_object
+        if input_map := self.config["data"]["input_map"]:
+            global_object = input_map[global_object]
 
         meta = {}
 
         meta["train_file"] = str(train_dset.filename)
         meta["val_file"] = str(val_dset.filename)
-        meta["num_jets_train"] = len(train_dset)
-        meta["num_jets_val"] = len(val_dset)
-        meta["total_jets_train"] = len(train_dset.file[jet_name])
-        meta["total_jets_val"] = len(val_dset.file[jet_name])
+        meta["num_train"] = len(train_dset)
+        meta["num_val"] = len(val_dset)
+        meta["available_train"] = len(train_dset.file[global_object])
+        meta["available_val"] = len(val_dset.file[global_object])
         batch_size = train_loader.batch_size
         batch_size = batch_size if batch_size else train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
@@ -184,7 +187,7 @@ class SaveConfigCallback(Callback):
         # save the jet classes, which is stored as an attr in the training file
         with h5py.File(meta["train_file"]) as file:
             try:
-                jet_classes = file[f"{jet_name}"].attrs["flavour_label"]
+                jet_classes = file[f"{global_object}"].attrs["flavour_label"]
             except KeyError:
                 jet_classes = "not available"
             meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))

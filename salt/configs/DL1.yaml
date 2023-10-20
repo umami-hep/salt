@@ -5,7 +5,8 @@ model:
     class_path: salt.models.MLPTagger
     init_args:
       init_nets:
-        - name: jet
+        - input_name: jets
+          attach_global: false
           dense_config:
             input_size: 2
             hidden_layers: [128, 128, 128]
@@ -21,7 +22,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: flavour_label
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:
@@ -33,10 +34,8 @@ model:
                   dropout: *dropout
 
 data:
-  norm_in_model: True
-  concat_jet_tracks: False
   variables:
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
       #- GN120220509_pb
@@ -56,13 +55,11 @@ data:
   val_file: /unix/atlastracking/samples/ftag_dumps/truthv2/hlt_ensemble/pp_output_val.h5
   norm_dict: /unix/atlastracking/samples/ftag_dumps/truthv2/hlt_ensemble/norm_dict.yaml
   class_dict: /unix/atlastracking/samples/ftag_dumps/truthv2/hlt_ensemble/class_dict.yaml
-  input_names:
-    jet: jets
   batch_size: 2000
   num_workers: 15
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
+  num_train: -1
+  num_val: -1
+  num_test: -1
 
 trainer:
   max_epochs: 100

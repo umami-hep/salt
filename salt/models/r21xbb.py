@@ -7,7 +7,7 @@ class R21Xbb(nn.Module):
     def __init__(self, tasks: ModuleList):
         super().__init__()
         self.tasks = tasks
-        self.init_nets = False
+        self.init_nets = []  # type: ignore
 
     def forward(self, inputs: dict, mask=None, labels: dict | None = None):
         x = inputs["track"]
@@ -23,10 +23,10 @@ class R21Xbb(nn.Module):
         preds = {}
         loss = {}
         for task in self.tasks:
-            if task.input_type == "jet":
+            if task.input_name == self.tasks[0].global_object:
                 task_input = x
             else:
-                print("WARNING: R21Xbb is not configured for input_type other than jet")
+                print("WARNING: R21Xbb is not configured for input_name other than jet")
                 print("WARNING: R21Xbb shall go on jet tagging")
                 task_input = x
             task_preds, task_loss = task(task_input, labels, None, context=None)

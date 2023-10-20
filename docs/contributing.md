@@ -55,3 +55,5 @@ From the `salt/` source directory (the one with the `tests/` dir inside), run
 ```bash
 pytest --cov=salt --show-capture=stdout
 ```
+
+Adding `--show-capture=stdout` just hides a bunch of `DEBUG` statements.

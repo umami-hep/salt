@@ -7,9 +7,9 @@ import torch
 import yaml
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from numpy.random import default_rng
-from torch import Tensor
 
 from salt.utils.array_utils import join_structured_arrays
+from salt.utils.tensor_utils import attach_context
 
 DEFAULT_NTRACK = 40
 
@@ -112,12 +112,6 @@ rng = np.random.default_rng(42)
 torch.manual_seed(42)
 
 
-def concat_jet_track(jets: Tensor, tracks: Tensor):
-    n_track = tracks.shape[-2]
-    jets_repeat = torch.repeat_interleave(jets[:, None, :], n_track, dim=1)
-    return torch.cat([jets_repeat, tracks], dim=2)
-
-
 def inputs_sep_no_pad(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
     jets = torch.rand(n_batch, n_jet_feat)
     tracks = torch.rand(n_batch, n_track, n_track_feat)
@@ -142,17 +136,17 @@ def get_random_mask(n_batch: int, n_track: int, p_valid: float = 0.5):
 
 def inputs_concat(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int):
     jets, tracks = inputs_sep_no_pad(n_batch, DEFAULT_NTRACK, n_jet_feat, n_track_feat)
-    inputs = concat_jet_track(jets, tracks)
+    inputs = attach_context(tracks, jets)
     mask = get_random_mask(n_batch, n_track)
     return inputs, mask
 
 
 def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd: dict = {}
-    sd["jets"] = {n: {"std": 1, "mean": 1} for n in JET_VARS}
-    sd["tracks"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
-    sd["electrons"] = {n: {"std": 1, "mean": 1} for n in ELECTRON_VARS}
-    sd["flow"] = {n: {"std": 1, "mean": 1} for n in TRACK_VARS}
+    sd["jets"] = {n: {"std": 1.0, "mean": 1.0} for n in JET_VARS}
+    sd["tracks"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
+    sd["electrons"] = {n: {"std": 1.0, "mean": 1.0} for n in ELECTRON_VARS}
+    sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     with open(nd_path, "w") as file:
         yaml.dump(sd, file, sort_keys=False)
     with open(cd_path, "w") as file:

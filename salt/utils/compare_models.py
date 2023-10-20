@@ -61,7 +61,7 @@ def parse_args(args=None):
     )
     parser.add_argument(
         "-n",
-        "--num_jets",
+        "--num",
         default=-1,
         type=float,
         help="Compare this many jets (defaults to all).",
@@ -86,8 +86,8 @@ def main(args=None):
     # load the data
     reader_A = H5Reader(args.file_A)
     reader_B = H5Reader(args.file_B)
-    jets_A = reader_A.load({"jets": vars_A}, cuts=cuts, num_jets=args.num_jets)["jets"]
-    jets_B = reader_B.load({"jets": vars_B}, cuts=cuts, num_jets=args.num_jets)["jets"]
+    jets_A = reader_A.load({"jets": vars_A}, cuts=cuts, num_jets=args.num)["jets"]
+    jets_B = reader_B.load({"jets": vars_B}, cuts=cuts, num_jets=args.num)["jets"]
 
     diff_regions = np.array(
         [[float(f"1e-{i}"), float(f"5e-{i}")] for i in range(7, 1, -1)]

@@ -13,9 +13,9 @@ class JetDataModule(L.LightningDataModule):
         val_file: str,
         batch_size: int,
         num_workers: int,
-        num_jets_train: int,
-        num_jets_val: int,
-        num_jets_test: int,
+        num_train: int,
+        num_val: int,
+        num_test: int,
         move_files_temp: str | None = None,
         class_dict: str | None = None,
         test_file: str | None = None,
@@ -35,11 +35,11 @@ class JetDataModule(L.LightningDataModule):
             Number of jets to process in each step
         num_workers : int
             Number of worker processes to load batches
-        num_jets_train : int
+        num_train : int
             Total number of training jets
-        num_jets_val : int
+        num_val : int
             Total number of validation jets
-        num_jets_test : int
+        num_test : int
             Total number of testing jets
         move_files_temp : str
             Directory to move training files to, default is None,
@@ -53,7 +53,7 @@ class JetDataModule(L.LightningDataModule):
         pin_memory: bool
             Pin memory for faster GPU transfer, default is True
         **kwargs
-            Keyword arguments for [salt.data.JetDataset][salt.data.JetDataset]
+            Keyword arguments for [`salt.data.JetDataset`][salt.data.JetDataset]
         """
         super().__init__()
 
@@ -63,9 +63,9 @@ class JetDataModule(L.LightningDataModule):
         self.test_suff = test_suff
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.num_jets_train = num_jets_train
-        self.num_jets_val = num_jets_val
-        self.num_jets_test = num_jets_test
+        self.num_train = num_train
+        self.num_val = num_val
+        self.num_test = num_test
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
         self.pin_memory = pin_memory
@@ -91,13 +91,13 @@ class JetDataModule(L.LightningDataModule):
         if stage == "fit":
             self.train_dset = JetDataset(
                 filename=self.train_file,
-                num_jets=self.num_jets_train,
+                num=self.num_train,
                 stage=stage,
                 **self.kwargs,
             )
             self.val_dset = JetDataset(
                 filename=self.val_file,
-                num_jets=self.num_jets_val,
+                num=self.num_val,
                 stage=stage,
                 **self.kwargs,
             )
@@ -111,7 +111,7 @@ class JetDataModule(L.LightningDataModule):
             assert self.test_file is not None, "No test file specified, see --data.test_file"
             self.test_dset = JetDataset(
                 filename=self.test_file,
-                num_jets=self.num_jets_test,
+                num=self.num_test,
                 stage=stage,
                 **self.kwargs,
             )

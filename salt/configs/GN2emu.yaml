@@ -5,22 +5,22 @@ model:
     class_path: salt.models.JetTagger
     init_args:
       init_nets:
-        - name: track
+        - input_name: tracks
           dense_config: &init
             output_size: &embed_dim 192
             hidden_layers: [256]
             activation: &activation SiLU
             norm_layer: &norm_layer LayerNorm
-        - name: electron
+        - input_name: electrons
           dense_config:
             <<: *init
 
-      gnn:
+      encoder:
         class_path: salt.models.TransformerEncoder
         init_args:
           embed_dim: *embed_dim
           num_layers: 6
-          out_dim: 128
+          out_dim: &out_dim 128
           mha_config:
             num_heads: 8
             attention: { class_path: salt.models.ScaledDotProductAttention }
@@ -32,7 +32,7 @@ model:
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
-        init_args: { input_size: &out_dim 142 }
+        init_args: { input_size: *out_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -41,13 +41,13 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jet_classification
-                input_type: jet
+                input_name: jets
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args: { weight: [1.0, 1.73, 1.08] }
                 dense_config: &task
-                  input_size: *out_dim
+                  input_size: &pooled_dim 142
                   output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
@@ -57,7 +57,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_origin
-                input_type: track
+                input_name: tracks
                 label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
@@ -67,13 +67,13 @@ model:
                 dense_config:
                   <<: *task
                   input_size: *out_dim
-                  context_size: *out_dim
+                  context_size: *pooled_dim
                   output_size: 8
 
             - class_path: salt.models.VertexingTask
               init_args:
                 name: track_vertexing
-                input_type: track
+                input_name: tracks
                 label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
@@ -81,14 +81,14 @@ model:
                   init_args: { reduction: none }
                 dense_config:
                   <<: *task
-                  input_size: 284
-                  context_size: *out_dim
+                  input_size: 256
+                  context_size: *pooled_dim
                   output_size: 1
 
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: electron_origin
-                input_type: electron
+                input_name: electrons
                 label: ftagTruthOriginLabel
                 weight: 0.5
                 loss:
@@ -98,13 +98,13 @@ model:
                 dense_config:
                   <<: *task
                   input_size: *out_dim
-                  context_size: *out_dim
+                  context_size: *pooled_dim
                   output_size: 8
 
             - class_path: salt.models.VertexingTask
               init_args:
                 name: electron_vertexing
-                input_type: electron
+                input_name: electrons
                 label: ftagTruthVertexIndex
                 weight: 1.5
                 loss:
@@ -112,14 +112,14 @@ model:
                   init_args: { reduction: none }
                 dense_config:
                   <<: *task
-                  input_size: 284
-                  context_size: *out_dim
+                  input_size: 256
+                  context_size: *pooled_dim
                   hidden_layers: [128, 64, 32]
                   output_size: 1
 
 data:
   variables:
-    global:
+    GLOBAL:
       - softMuon_pt
       - softMuon_dR
       - softMuon_eta
@@ -134,11 +134,11 @@ data:
       - softMuon_ip3dZ0Significance
       - softMuon_ip3dD0Uncertainty
       - softMuon_ip3dZ0Uncertainty
-    jet:
+    jets:
       - pt_btagJes
       - eta_btagJes
       #- absEta_btagJes
-    track:
+    tracks:
       - d0
       - z0SinTheta
       - dphi
@@ -161,7 +161,7 @@ data:
       - numberOfSCTSharedHits
       #- numberOfTRTHits
       #- leptonID
-    electron:
+    electrons:
       - pt
       - ptfrac
       - ptrel
@@ -190,16 +190,11 @@ data:
       - wtots1
       - f1
       - f3
-  input_names:
-    jet: jets
-    track: tracks
-    electron: electrons
-    global: jets
   batch_size: 1000
   num_workers: 40
-  num_jets_train: -1
-  num_jets_val: -1
-  num_jets_test: -1
+  num_train: -1
+  num_val: -1
+  num_test: -1
   nan_to_num: true
 
 trainer:
