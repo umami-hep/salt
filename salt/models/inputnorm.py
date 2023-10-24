@@ -56,10 +56,14 @@ class InputNorm(nn.Module):
                 )
 
             # store normalisation parameters with the model
-            means = [self.norm_dict[name][v]["mean"] for v in vs]
-            stds = [self.norm_dict[name][v]["std"] for v in vs]
-            self.register_buffer(f"{k}_means", torch.as_tensor(means))
-            self.register_buffer(f"{k}_stds", torch.as_tensor(stds))
+            means = torch.as_tensor([self.norm_dict[name][v]["mean"] for v in vs])
+            stds = torch.as_tensor([self.norm_dict[name][v]["std"] for v in vs])
+            self.register_buffer(f"{k}_means", means)
+            self.register_buffer(f"{k}_stds", stds)
+
+            # check normalisation parameters are finite
+            if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
+                raise ValueError(f"Non-finite normalisation parameters for {name} in {norm_dict}.")
 
     def forward(self, inputs: Tensors) -> Tensors:
         for k, x in inputs.items():
