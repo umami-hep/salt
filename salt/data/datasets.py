@@ -100,7 +100,7 @@ class JetDataset(Dataset):
         self.arrays = {}
         for internal, external in self.input_map.items():
             self.dss[internal] = self.file[external]
-            this_vars = self.labels[internal] if internal in self.labels else []
+            this_vars = self.labels[internal].copy() if internal in self.labels else []
             this_vars += self.input_variables[internal]
             if internal == "EDGE":
                 dtype = get_dtype_edge(self.file[external], this_vars)
@@ -200,6 +200,12 @@ class JetDataset(Dataset):
             # get the padding mask
             if "valid" in batch.dtype.names and input_name not in ["EDGE", "PARAMETERS"]:
                 masks[input_name] = ~torch.from_numpy(batch["valid"])
+                if input_name not in [self.global_object, "GLOBAL"]:
+                    inputs[input_name][masks[input_name]] = 0
+
+            # check inputs and labels are finite
+            if not torch.isfinite(inputs[input_name]).all():
+                raise ValueError(f"Non-finite inputs for {input_name} in {self.filename}.")
 
         return inputs, masks, labels
 
