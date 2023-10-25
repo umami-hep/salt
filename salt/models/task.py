@@ -64,6 +64,7 @@ class ClassificationTask(TaskBase):
         class_names: list[str] | None = None,
         label_map: Mapping | None = None,
         sample_weight: str | None = None,
+        use_class_dict_weights: bool = False,
         **kwargs,
     ):
         """Classification task.
@@ -79,6 +80,8 @@ class ClassificationTask(TaskBase):
             Remap integer labels for training (e.g. 0,4,5 -> 0,1,2).
         sample_weight : str | None, optional
             Name of a per sample weighting to apply in the loss function.
+        use_class_dict_weights : bool, optional
+            If True, read class weights for the loss from the class_dict file.
         **kwargs
             Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
         """
@@ -97,6 +100,7 @@ class ClassificationTask(TaskBase):
             ), "Sample weights only supported for reduction='none'"
         if self.class_names is None:
             self.class_names = CLASS_NAMES.get(self.label)
+        self.use_class_dict_weights = use_class_dict_weights
 
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
         """Apply per sample weights, if specified."""

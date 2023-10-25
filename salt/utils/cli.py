@@ -6,6 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+import yaml
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
@@ -112,6 +113,33 @@ class SaltCLI(LightningCLI):
 
             # extract jet class names from h5 attrs (requires FTAG preprocessing)
             self.add_jet_class_names()
+
+            # if class weights are not specified, read them from class_dict
+            for submodel in sc.model.model.init_args.tasks.init_args.modules:
+                if "ClassificationTask" in submodel["class_path"] and submodel["init_args"].get(
+                    "use_class_dict_weights"
+                ):
+                    if (class_dict_filename := sc.data.class_dict) is None:
+                        raise ValueError(
+                            "use_class_dict_weights=True requires class_dict to be specified"
+                        )
+                    if submodel["init_args"]["loss"]["init_args"]["weight"] is not None:
+                        raise ValueError(
+                            "Class weights are already specified, set use_class_dict_weights=False"
+                            " or remove class weights."
+                        )
+                    with open(class_dict_filename) as f:
+                        class_dict = yaml.safe_load(f)
+                    input_name = submodel["init_args"]["input_name"]
+                    if submodel["init_args"]["label"] in class_dict[input_name]:
+                        class_weights = class_dict[input_name][submodel["init_args"]["label"]]
+                        submodel["init_args"]["loss"]["init_args"]["weight"] = class_weights
+                    else:
+                        raise ValueError(
+                            f"Label {submodel['init_args']['label']} not found in class_dict. "
+                            "Consider setting use_class_dict_weights=False "
+                            "and specifying class weights manually."
+                        )
 
             # reduce precision to improve performance
             # don't do this during evaluation as you will get increased variation wrt Athena
