@@ -104,6 +104,7 @@ class SaltCLI(LightningCLI):
         sc["model"]["norm_config"]["norm_dict"] = sc.data.norm_dict
         sc["model"]["norm_config"]["variables"] = sc.data.variables
         sc["model"]["norm_config"]["global_object"] = sc.data.global_object
+        sc["model"]["norm_config"]["input_map"] = sc.data.input_map
 
         if self.subcommand == "fit":
             # add variables to init nets

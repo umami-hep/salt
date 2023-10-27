@@ -43,10 +43,10 @@ If you want to use a different name to retrieve the h5 datasets, you can specify
 ```yaml
 data:
   input_map:
-    internal_name: dataset_name
+    internal_name: h5_dataset_name
 ```
 
-In this example, `dataset_name` will be used to retrieve the datasets from the input h5 files, while internally this input type will be referred to as `internal_name`.
+In this example, `h5_dataset_name` will be used to retrieve the datasets from the input h5 files, while internally (and elsewhere in the configuration) this input type will be referred to as `internal_name`.
 
 
 #### Global Object Features
