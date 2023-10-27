@@ -8,7 +8,9 @@ from salt.utils.typing import Tensors, Vars
 
 
 class InputNorm(nn.Module):
-    def __init__(self, norm_dict: Path, variables: Vars, global_object: str) -> None:
+    def __init__(
+        self, norm_dict: Path, variables: Vars, global_object: str, input_map: dict[str, str]
+    ) -> None:
         """Normalise inputs on the fly using a pre-computed normalisation dictionary.
 
         Parameters
@@ -20,6 +22,9 @@ class InputNorm(nn.Module):
         global_object : str
             Name of the global input object, as opposed to the constituent-level
             inputs
+        input_map : dict
+            Map names to the corresponding dataset names in the input h5 file.
+            Set automatically by the framework.
         """
         super().__init__()
         self.variables = variables
@@ -29,8 +34,11 @@ class InputNorm(nn.Module):
             self.norm_dict = yaml.safe_load(f)
 
         # get the keys that need to be normalised
-        keys = set(variables.keys())
-        keys.discard("EDGE")
+        if input_map is None:
+            input_map = {k: k for k in variables}
+        keys = {input_map[k] for k in set(variables.keys())}
+        if "EDGE" in keys:
+            keys.remove("EDGE")
         if "GLOBAL" in keys:
             keys.remove("GLOBAL")
             keys.add(self.global_object)
@@ -46,7 +54,7 @@ class InputNorm(nn.Module):
         for k, vs in variables.items():
             if k in self.NO_NORM:
                 continue
-            name = k
+            name = input_map[k]
             if k == "GLOBAL":
                 name = self.global_object
             if missing := set(vs) - set(self.norm_dict[name]):
@@ -61,9 +69,11 @@ class InputNorm(nn.Module):
             self.register_buffer(f"{k}_means", means)
             self.register_buffer(f"{k}_stds", stds)
 
-            # check normalisation parameters are finite
+            # check normalisation parameters are ok
             if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
                 raise ValueError(f"Non-finite normalisation parameters for {name} in {norm_dict}.")
+            if any(stds == 0):
+                raise ValueError(f"Zero standard deviation for {name} in {norm_dict}.")
 
     def forward(self, inputs: Tensors) -> Tensors:
         for k, x in inputs.items():

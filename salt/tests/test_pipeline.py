@@ -195,3 +195,9 @@ def test_regression_gaussian(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_flow(tmp_path) -> None:
     run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)
+
+
+@pytest.mark.filterwarnings(w)
+def test_no_global_inputs(tmp_path) -> None:
+    [f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'no_global_inputs.yaml'}"]
+    run_combined(tmp_path, "GN2.yaml", do_eval=False, do_onnx=False)

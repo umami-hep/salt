@@ -41,7 +41,7 @@ class JetDataset(Dataset):
         labels : Vars
             List of required labels for each input type
         input_map : dict, optional
-            Map input names to the corresponding dataset names in the input file.
+            Map names to the corresponding dataset names in the input h5 file.
             If not provided, the input names will be used as the dataset names.
         num_inputs : dict, optional
             Truncate the number of constituent inputs to this number, to speed up training
@@ -61,10 +61,11 @@ class JetDataset(Dataset):
         # default input mapping: use input names as dataset names
         if input_map is None:
             input_map = {k: k for k in variables}
+
         if "GLOBAL" in input_map:
             input_map["GLOBAL"] = global_object
-        self.input_map = input_map
 
+        self.input_map = input_map
         self.filename = filename
         self.file = h5py.File(self.filename, "r")
         self.num_inputs = num_inputs
@@ -101,12 +102,14 @@ class JetDataset(Dataset):
         for internal, external in self.input_map.items():
             self.dss[internal] = self.file[external]
             this_vars = self.labels[internal].copy() if internal in self.labels else []
-            this_vars += self.input_variables[internal]
+            this_vars += self.input_variables[internal] if internal in self.input_variables else []
             if internal == "EDGE":
                 dtype = get_dtype_edge(self.file[external], this_vars)
             else:
                 dtype = get_dtype(self.file[external], this_vars)
             self.arrays[internal] = np.array(0, dtype=dtype)
+        if self.global_object not in self.dss:
+            self.dss[self.global_object] = self.file[self.global_object]
 
         # set number of jets
         self.num = self.get_num(num)
@@ -145,11 +148,13 @@ class JetDataset(Dataset):
                 assert int(self.num_inputs[input_name]) <= batch.shape[1]
                 batch = batch[:, : int(self.num_inputs[input_name])]
 
-            # process inputs for this input type
+            # load edge inputs for this input type
             if input_name == "EDGE":
                 inputs[input_name] = torch.from_numpy(
                     get_inputs_edge(batch, self.input_variables[input_name])
                 )
+
+            # load parameters for this input type
             elif input_name == "PARAMETERS":
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
 
@@ -175,11 +180,22 @@ class JetDataset(Dataset):
 
                 inputs[input_name] = torch.from_numpy(flat_array)
 
-            else:
+            # load standard inputs for this input type
+            elif self.input_variables.get(input_name):
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
                 if self.nan_to_num:
                     flat_array = np.nan_to_num(flat_array)
                 inputs[input_name] = torch.from_numpy(flat_array)
+
+                # apply the input padding mask
+                if "valid" in batch.dtype.names and input_name not in ["EDGE", "PARAMETERS"]:
+                    masks[input_name] = ~torch.from_numpy(batch["valid"])
+                    if input_name not in [self.global_object, "GLOBAL"]:
+                        inputs[input_name][masks[input_name]] = 0
+
+                # check inputs are finite
+                if not torch.isfinite(inputs[input_name]).all():
+                    raise ValueError(f"Non-finite inputs for '{input_name}' in {self.filename}.")
 
             # process labels for this input type
             if input_name in self.labels:
@@ -196,16 +212,6 @@ class JetDataset(Dataset):
                         labels[input_name][label] = torch.as_tensor(
                             self.file["labels"][jet_idx], dtype=torch.long
                         )
-
-            # get the padding mask
-            if "valid" in batch.dtype.names and input_name not in ["EDGE", "PARAMETERS"]:
-                masks[input_name] = ~torch.from_numpy(batch["valid"])
-                if input_name not in [self.global_object, "GLOBAL"]:
-                    inputs[input_name][masks[input_name]] = 0
-
-            # check inputs and labels are finite
-            if not torch.isfinite(inputs[input_name]).all():
-                raise ValueError(f"Non-finite inputs for {input_name} in {self.filename}.")
 
         return inputs, masks, labels
 
@@ -227,8 +233,9 @@ class JetDataset(Dataset):
         return num_requested
 
     def check_file(self):
+        keys = {self.input_map[k] for k in self.variables}
         available = set(self.file.keys())
-        if missing := set(self.variables) - available - {"EDGE", "GLOBAL"}:
+        if missing := keys - available - {"EDGE", "GLOBAL"}:
             raise KeyError(
                 f"Input file '{self.filename}' does not contain keys {missing}."
                 f" Available keys: {available}"
@@ -238,11 +245,12 @@ class JetDataset(Dataset):
                 continue
             if k == "GLOBAL":
                 k = self.global_object  # noqa: PLW2901
-            if not isinstance(self.file[k], h5py.Dataset):
-                raise KeyError(f"The object '{k}' in file '{self.filename}' is not a dataset.")
-            if missing := set(v) - set(self.file[k].dtype.names):
+            name = self.input_map[k]
+            if not isinstance(self.file[name], h5py.Dataset):
+                raise KeyError(f"The object '{name}' in file '{self.filename}' is not a dataset.")
+            if missing := set(v) - set(self.file[name].dtype.names):
                 raise KeyError(
-                    f"Variables {missing} are missing from dataset '{k}' in input file"
+                    f"Variables {missing} are missing from dataset '{name}' in input file"
                     f" '{self.filename}'."
                 )
 
