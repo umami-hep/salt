@@ -194,3 +194,41 @@ There are several options in the script which need to be tailored to make sure t
     ```bash
     pkill -u <username> -f salt -e
     ```
+
+
+## Troubleshooting
+
+If you encounter issues, as a first step you should try pulling the latest updates from `main` to see if your problem has been resolved.
+
+
+### Confusing Errors
+
+You might see confusing/cryptic errors when running on the GPU, for example
+
+```
+../aten/src/ATen/native/cuda/NLLLoss2d.cu:103: nll_loss2d_forward_kernel: block: [377,0,0], thread: [13,0,0] Assertion `t >= 0 && t < n_classes` failed.
+```
+
+Often, if you instead run on the CPU you will get a much more helpful error message.
+Use `--trainer.accelerator=cpu` to run on the CPU instead of the GPU.
+
+
+### NaNs
+
+Salt will automatically check:
+
+- That there are no `nan` inputs (see [salt.data.JetDataset][salt.data.JetDataset])
+- That your normalisation paramters are finite in (see [salt.models.InputNorm][salt.models.InputNorm])
+
+You may still encounter `nan` values in your outputs and losses.
+Here are some mitigation strategies you can try are:
+
+- Make sure you have pulled the latest changes from `main`.
+- Make doubly sure that your inputs are finite, even apply applying normalisation.
+- Ensure you don't have unexpected non-finite labels.
+- Check your training precision: you should use  `--trainer.precision=32` or `--trainer.precision=bf16-mixed` (avoid `16-mixed`!). See [here](https://lightning.ai/docs/pytorch/stable/common/trainer.html#precision) for more info. 
+- Apply gradient clipping to negate the effects of exploding gradients. See [here] for more info.
+- If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your [Tasks][salt.models.TaskBase].
+- Try lowering your max learning rate in the `lrs_config`.
+- Auto detect gradient anomalies. See [here](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies) for more info.
+- If you are running on multiple GPUs, try running on a single GPU with `--trainer.devices=1`
