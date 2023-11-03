@@ -5,14 +5,19 @@ site_url: http://ftag-salt.docs.cern.ch/
 
 repo_name: GitLab
 repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/
-edit_uri: "tree/main/docs"
+edit_uri: tree/main/docs
 
 theme:
   name: material
   logo: assets/salt.png
   favicon: assets/salt.png
   features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.indexes
+    - navigation.top
     - content.code.copy
+    - content.action.edit
   palette:
     - scheme: default
       toggle:
