@@ -10,7 +10,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 WORKDIR /salt
 
 # add some packages
-RUN apt-get update && apt-get install -y git h5utils wget vim build-essential
+RUN apt-get update && apt-get install -y git h5utils wget vim build-essential jq
 
 # update python pip
 RUN python -m pip install --upgrade pip
