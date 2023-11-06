@@ -163,11 +163,11 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     assert not (np.array(pred_onnx_jc) == 0).any()  # no trivial zeros
 
     # test track origin
-    if include_aux and "track_origin" in outputs_pt:
+    if include_aux:
         if n_track == 0:
             return
 
-        pred_pt_origin = torch.argmax(outputs_pt["track_origin"], dim=-1).detach().numpy()
+        pred_pt_origin = torch.argmax(outputs_pt["tracks"]["track_origin"], dim=-1).detach().numpy()
         pred_onnx_origin = outputs_onnx[len(pred_pt_jc) : len(pred_pt_jc) + len(pred_pt_origin)][0]
 
         np.testing.assert_allclose(
@@ -179,8 +179,8 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
         )
 
     # test vertexing
-    if include_aux and "track_vertexing" in outputs_pt:
-        pred_pt_scores = outputs_pt["track_vertexing"].detach()
+    if include_aux:
+        pred_pt_scores = outputs_pt["tracks"]["track_vertexing"].detach()
         pred_pt_indices = get_node_assignment(pred_pt_scores, mask)
         pred_pt_vtx = mask_fill_flattened(pred_pt_indices, mask)
 
@@ -263,12 +263,14 @@ def main(args=None):
 
     if args.include_aux:
         if "track_origin" in [t.name for t in pt_model.model.tasks]:
-            output_names.append("track_class")
-            dynamic_axes["track_class"] = {0: "n_tracks"}
+            out_name = f"{model_name}_TrackOrigin"
+            output_names.append(out_name)
+            dynamic_axes[out_name] = {0: "n_tracks"}
 
         if "track_vertexing" in [t.name for t in pt_model.model.tasks]:
-            output_names.append("vertex_index")
-            dynamic_axes["vertex_index"] = {0: "n_tracks"}
+            out_name = f"{model_name}_VertexIndex"
+            output_names.append(out_name)
+            dynamic_axes[out_name] = {0: "n_tracks"}
 
     # export
     onnx_model.to_onnx(
