@@ -1,4 +1,3 @@
-import glob
 import re
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +25,7 @@ def deserializer(x: list) -> torch.Tensor:
 register_type(torch.Tensor, serializer, deserializer)
 
 
-def get_best_epoch(config_path: Path) -> Path:
+def get_best_epoch(config_path: Path) -> str:
     """Find the best perfoming epoch.
 
     Parameters
@@ -41,12 +40,12 @@ def get_best_epoch(config_path: Path) -> Path:
     """
     ckpt_dir = Path(config_path.parent / "ckpts")
     print("No --ckpt_path specified, looking for best checkpoint in", ckpt_dir)
-    ckpts = glob.glob(f"{ckpt_dir}/*.ckpt")
+    ckpts = list(Path(ckpt_dir).glob("*.ckpt"))
     exp = r"(?<=loss=)(?:(?:\d+(?:\.\d*)?|\.\d+))"
     losses = [float(re.findall(exp, Path(ckpt).name)[0]) for ckpt in ckpts]
     ckpt = ckpts[np.argmin(losses)]
     print("Using checkpoint", ckpt)
-    return ckpt
+    return str(ckpt)
 
 
 class SaltCLI(LightningCLI):
@@ -186,8 +185,7 @@ class SaltCLI(LightningCLI):
             if sc["ckpt_path"] is None:
                 config = sc["config"]
                 assert len(config) == 1
-                best_epoch_path = get_best_epoch(Path(config[0].rel_path))
-                sc["ckpt_path"] = best_epoch_path
+                sc["ckpt_path"] = get_best_epoch(Path(config[0].rel_path))
 
             # ensure only one device is used for testing
             n_devices = sc["trainer.devices"]

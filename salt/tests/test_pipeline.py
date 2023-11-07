@@ -10,6 +10,7 @@ from salt.utils.get_onnx_metadata import main as get_onnx_metadata
 from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
+CONFIG = "GN2.yaml"
 
 
 def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
@@ -111,44 +112,13 @@ def run_combined(
 
 
 @pytest.mark.filterwarnings(w)
-class TestTrainMisc:
-    config = "GN2.yaml"
-
-    def test_train_dev(self, tmp_path) -> None:
-        args = ["--trainer.fast_dev_run=2"]
-        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
-
-    def test_train_movefilestemp(self, tmp_path) -> None:
-        tmp_path = Path(tmp_path)
-        move_path = tmp_path / "dev" / "shm"
-        args = [f"--data.move_files_temp={move_path}"]
-        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
-        assert not Path(move_path).exists()
-
-    def test_train_distributed(self, tmp_path) -> None:
-        args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
-        run_combined(tmp_path, self.config, do_eval=False, do_onnx=False, train_args=args)
-
-    def test_truncate_inputs(self, tmp_path) -> None:
-        args = ["--data.num_inputs.tracks=10"]
-        run_combined(
-            tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args, inc_taus=True
-        )
-
-    def test_truncate_inputs_error(self, tmp_path) -> None:
-        args = ["--data.num_inputs.this_should_error=10"]
-        with pytest.raises(ValueError):
-            run_combined(tmp_path, self.config, do_eval=True, do_onnx=False, train_args=args)
-
-
-@pytest.mark.filterwarnings(w)
 def test_GN1(tmp_path) -> None:
     run_combined(tmp_path, "GN1.yaml")
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
-    run_combined(tmp_path, "GN2.yaml", inc_taus=True, export_args=["--include_aux"])
+    run_combined(tmp_path, CONFIG, inc_taus=True, export_args=["--include_aux"])
 
 
 @pytest.mark.filterwarnings(w)
@@ -200,4 +170,34 @@ def test_flow(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_no_global_inputs(tmp_path) -> None:
     [f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'no_global_inputs.yaml'}"]
-    run_combined(tmp_path, "GN2.yaml", do_eval=False, do_onnx=False)
+    run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False)
+
+
+@pytest.mark.filterwarnings(w)
+def test_train_dev(tmp_path) -> None:
+    args = ["--trainer.fast_dev_run=2"]
+    run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_train_movefilestemp(tmp_path) -> None:
+    tmp_path = Path(tmp_path)
+    move_path = tmp_path / "dev" / "shm"
+    args = [f"--data.move_files_temp={move_path}"]
+    run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
+    assert not Path(move_path).exists()
+
+
+@pytest.mark.filterwarnings(w)
+def test_train_distributed(tmp_path) -> None:
+    args = ["--trainer.devices=2", "--data.num_workers=2", "--model.lrs_config.pct_start=0.2"]
+    run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_truncate_inputs(tmp_path) -> None:
+    args = ["--data.num_inputs.tracks=10"]
+    run_combined(tmp_path, CONFIG, do_eval=True, do_onnx=False, train_args=args, inc_taus=True)
+    args = ["--data.num_inputs.this_should_error=10"]
+    with pytest.raises(ValueError):
+        run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
