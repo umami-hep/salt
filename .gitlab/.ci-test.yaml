@@ -13,10 +13,25 @@ test-models:
   script:
     - $TEST_CMD salt/tests/test_models.py
 
-test-pipelines-misc:
+test-fast_dev_run:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::TestTrainMisc
+    - $TEST_CMD salt/tests/test_pipeline.py::test_train_dev
+
+test-move-files-tmp:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_train_movefilestemp
+
+test-train-distributed:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_train_distributed
+
+test-truncate-inputs:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs
 
 test-union-find:
   <<: *test-template
