@@ -1,9 +1,9 @@
 [project]
 name = "salt"
-version = "0.2"
+version = "0.3"
 description = "Jet flavour tagging Python package"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dynamic = ["dependencies"]
 
 [project.urls]
