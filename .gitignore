@@ -9,6 +9,8 @@ conda/
 logs/
 tmp/
 env/
+plots/
+cern_configs/
 
 *.pyc
 *.xml

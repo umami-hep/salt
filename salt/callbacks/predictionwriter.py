@@ -7,7 +7,12 @@ from ftag import Flavours as Flavs
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.models.task import ClassificationTask, RegressionTaskBase, VertexingTask
+from salt.models.task import (
+    ClassificationTask,
+    GaussianRegressionTask,
+    RegressionTask,
+    VertexingTask,
+)
 from salt.utils.array_utils import join_structured_arrays, maybe_pad
 
 
@@ -116,11 +121,19 @@ class PredictionWriter(Callback):
                 this_preds = task.run_inference(this_preds, this_mask, self.precision)
             elif isinstance(task, VertexingTask):
                 this_preds = task.run_inference(this_preds, this_mask)
-            elif issubclass(type(task), RegressionTaskBase):
+            elif issubclass(type(task), RegressionTask):
                 this_preds = task.run_inference(this_preds, labels, self.precision)
+            elif issubclass(type(task), GaussianRegressionTask):
+                means, stddevs = task.run_inference(this_preds, labels, self.precision)
             if task.name not in self.outputs[task.input_name]:
                 self.outputs[task.input_name][task.name] = []
-            self.outputs[task.input_name][task.name].append(this_preds)
+            if issubclass(type(task), GaussianRegressionTask):
+                if task.name + "_stddev" not in self.outputs[task.input_name]:
+                    self.outputs[task.input_name][task.name + "_stddev"] = []
+                self.outputs[task.input_name][task.name].append(means)
+                self.outputs[task.input_name][task.name + "_stddev"].append(stddevs)
+            else:
+                self.outputs[task.input_name][task.name].append(this_preds)
             if this_mask is not None and add_mask is False:
                 if task.input_name not in self.masks:
                     self.masks[task.input_name] = []
