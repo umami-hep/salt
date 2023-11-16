@@ -198,6 +198,10 @@ def test_train_distributed(tmp_path) -> None:
 def test_truncate_inputs(tmp_path) -> None:
     args = ["--data.num_inputs.tracks=10"]
     run_combined(tmp_path, CONFIG, do_eval=True, do_onnx=False, train_args=args, inc_taus=True)
+
+
+@pytest.mark.filterwarnings(w)
+def test_truncate_inputs_error(tmp_path) -> None:
     args = ["--data.num_inputs.this_should_error=10"]
     with pytest.raises(ValueError):
         run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
