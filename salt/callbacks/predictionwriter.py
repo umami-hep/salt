@@ -57,6 +57,19 @@ class PredictionWriter(Callback):
         # inputs names
         self.input_map = self.ds.input_map
 
+        # check extra vars exist
+        for input_type, vars_to_check in self.extra_vars.items():
+            if input_type in self.input_map:
+                dataset_name = self.input_map[input_type]
+                available_vars = set(self.file[dataset_name].dtype.names)
+                if missing_vars := set(vars_to_check) - available_vars:
+                    raise ValueError(
+                        f"The following variables are missing for input type"
+                        f"'{input_type}': {missing_vars}"
+                    )
+            else:
+                raise ValueError(f"Input type '{input_type}' is not recognized in input_map.")
+
         # place to store intermediate outputs
         self.tasks = module.model.tasks
         self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
