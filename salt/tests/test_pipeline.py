@@ -159,7 +159,7 @@ def test_nan_regression(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_regression_gaussian(tmp_path) -> None:
-    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=False, do_onnx=False)
+    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=True, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)

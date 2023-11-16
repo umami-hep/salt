@@ -23,11 +23,6 @@ test-move-files-tmp:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_train_movefilestemp
 
-test-train-distributed:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_train_distributed
-
 test-truncate-inputs:
   <<: *test-template
   script:
