@@ -1,0 +1,83 @@
+name: Dipz
+
+
+model:
+  lrs_config:
+    initial: 1e-4
+    max: 1e-3
+    end: 1e-7
+    pct_start: 0.2
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+
+      init_nets:
+        - input_name: super_tracks
+          dense_config:
+            input_size: 9
+            output_size: &out_dim 32
+            hidden_layers: [128, 128, 128]
+            activation: &activation ReLU
+            dropout: &dropout 0.
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args:
+          input_size: *out_dim
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.GaussianRegressionTask
+              init_args:
+                name: gaussian_regression
+                input_name: jets
+                targets: TruthJetPVz
+                norm_params: { mean: 0, std: 37.81209182739258 }  # mean = -0.13051632046699524
+                loss: GaussianNLLLoss
+                dense_config:
+                  input_size: *out_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  dropout: *dropout
+
+
+data:
+  batch_size: 2048
+  num_workers: 4
+  train_file: /eos/user/b/backes/QT/preprocessing/Dipz_output/pp_output_train.h5
+  test_file: /eos/user/b/backes/QT/preprocessing/Dipz_output/pp_output_test.h5
+  val_file: /eos/user/b/backes/QT/preprocessing/Dipz_output/pp_output_val.h5
+  norm_dict: /eos/user/b/backes/QT/preprocessing/Dipz_output/norm_dict.yaml
+  class_dict: /eos/user/b/backes/QT/preprocessing/Dipz_output/class_dict.yaml
+  variables:
+    jets:
+      - eta
+    super_tracks:
+      - z0RelativeToBeamspot
+      - pt
+      - d0
+      - deta
+      - dphi
+      - chiSquared
+      - numberDoF
+      - qOverP
+
+
+trainer:
+  max_epochs: 40
+  precision: 16-mixed
+  log_every_n_steps: 10
+  callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_gaussian_regression_loss
+    - class_path: salt.callbacks.PredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args: { refresh_rate: 50 }
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+      init_args: { max_depth: 2 }

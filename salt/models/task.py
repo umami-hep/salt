@@ -260,19 +260,6 @@ class RegressionTaskBase(TaskBase, ABC):
                     )
         return targets
 
-    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
-        if self.target_denominators is not None:
-            for i in range(len(self.targets)):
-                preds[:, i] = (
-                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
-                )
-        elif self.norm_params is not None:
-            for i in range(len(self.norm_params["mean"])):
-                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
-
-        dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
-        return u2s(preds.float().cpu().numpy(), dtype)
-
 
 class RegressionTask(RegressionTaskBase):
     def __init__(self, **kwargs):
@@ -308,6 +295,19 @@ class RegressionTask(RegressionTaskBase):
             loss = self.nan_loss(preds, targets) * self.weight
 
         return preds, loss
+
+    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
+        if self.target_denominators is not None:
+            for i in range(len(self.targets)):
+                preds[:, i] = (
+                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
+                )
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
+
+        dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
+        return u2s(preds.float().cpu().numpy(), dtype)
 
 
 class GaussianRegressionTask(RegressionTaskBase):
@@ -346,14 +346,37 @@ class GaussianRegressionTask(RegressionTaskBase):
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
-        means, sigmas = preds.tensor_split(2, -1)
-        sigmas = nn.functional.softplus(sigmas)  # enforce positive variance
+        means, variances = preds.tensor_split(2, -1)
+        variances = nn.functional.softplus(variances)  # ensure positiveness of variance
 
         loss = None
         if targets is not None:
-            loss = self.nan_loss(means, targets, var=sigmas) * self.weight
+            loss = self.nan_loss(means, targets, var=variances) * self.weight
 
         return preds, loss
+
+    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
+        if self.target_denominators is not None:
+            for i in range(len(self.targets)):
+                preds[:, i] = (
+                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
+                )
+                preds[:, i + 1] = (
+                    preds[:, i + 1] * targets_dict[self.input_name][self.target_denominators[i]]
+                )
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
+                preds[:, i + 1] = (
+                    torch.sqrt(nn.functional.softplus(preds[:, i + 1])) * self.norm_params["std"][i]
+                )  # return stddev as sqrt(var)
+
+        means, stddev = preds.tensor_split(2, -1)
+        mean_dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
+        stddev_dtype = np.dtype([(f"{self.name}_{t}_stddev", precision) for t in self.targets])
+        return u2s(means.float().cpu().numpy(), mean_dtype), u2s(
+            stddev.float().cpu().numpy(), stddev_dtype
+        )
 
 
 class VertexingTask(TaskBase):
