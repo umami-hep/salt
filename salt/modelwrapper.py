@@ -157,6 +157,7 @@ class ModelWrapper(L.LightningModule):
             div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
             final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
             pct_start=float(self.lrs_config["pct_start"]),
+            last_epoch=int(self.lrs_config.get("last_epoch", -1)),
         )
         sch = {"scheduler": sch, "interval": "step"}
 

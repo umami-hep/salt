@@ -93,6 +93,8 @@ The full training state, including the state of the optimiser, is resumed.
 The logs for the resumed training will be saved in a new directory, but the epoch count will continue from
 where it left off.
 
+Note that the [`OneCycleLR`](https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.OneCycleLR.html) learning rate scheduler will set a pre-determined total number of steps in the cycle. In order to resume a training which exceeds the maximum number of epochs, using e.g. `--trainer.max_epochs <value>`, you need to re-set the `--model.lrs_config.last_epoch 0` as well.
+
 
 ### Reproducibility
 
