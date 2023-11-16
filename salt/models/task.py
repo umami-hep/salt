@@ -313,7 +313,7 @@ class RegressionTask(RegressionTaskBase):
 class GaussianRegressionTask(RegressionTaskBase):
     def __init__(self, **kwargs):
         """Regression task that outputs a mean and variance for each target.
-        The loss function should be the negative log likelihood of the Gaussian distribution.
+        The loss function is the negative log likelihood of a Gaussian distribution.
 
         Parameters
         ----------
