@@ -14,8 +14,8 @@
 # keep environment variables
 #SBATCH --export=ALL
 
-# requesting 4 V100 GPU
-# (remove the "v100:" if you don't care what GPU)
+# requesting 4 A100 GPU
+# (remove the "a100:" if you don't care what GPU)
 #SBATCH --gres=gpu:a100:1
 
 # note! this needs to match --trainer.devices!
@@ -53,4 +53,4 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 # run the training
 echo "Running training script..."
 srun salt fit \
-    --config configs/GN1.yaml \
+    --config configs/GN2.yaml \
