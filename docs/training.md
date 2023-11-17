@@ -39,7 +39,7 @@ Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/sa
 You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `salt`.
 
 ```bash
-salt fit --config configs/GN1.yaml
+salt fit --config configs/GN2.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
@@ -53,7 +53,7 @@ The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io
     exit.
 
     ```bash
-    salt fit --config configs/GN1.yaml --trainer.fast_dev_run 2
+    salt fit --config configs/GN2.yaml --trainer.fast_dev_run 2
     ```
 
     Logging and checkpoint are suppressed when using this flag.
@@ -170,12 +170,34 @@ If you have enough RAM, you can load the training data into shared memory before
 
 
 
-### Slurm Batch
+### Batch systems
+
+#### HTCondor Batch
+
+Those at institutions with HTCondor managed GPU batch queues can submit training jobs using
+
+```bash
+python submit/submit_htcondor.py --config configs/GN2.yaml
+```
+
+It is required to pass the path to the configuration file via the `--config` argument.
+Further, it is possible to specify the environment in which the job will run with `-e` / `--environment`.
+This depends how you installed salt and can either be a `local` environment, a `conda` environment
+(which is assumed to be in the `salt/conda` directory) or a `singularity` container.
+
+By default, all job jobmission files and batch logs will be stored in the `condor` directory
+which is created upon job submission.
+
+Running multiple trainings in parallel is possible by specifying different names for the jobs using the `-t` / `--tag` argument.
+
+The job parameters such as memory requirements, number of GPUs and CPUs requested have to be modified in the file `submit/submit_htcondor.py`.
+
+#### Slurm Batch
 
 Those at institutions with Slurm managed GPU batch queues can submit training jobs using
 
 ```bash
-sbatch submit_slurm.sh
+sbatch submit/submit_slurm.sh
 ```
 
 The submit script only supports running from a conda environment for now.
