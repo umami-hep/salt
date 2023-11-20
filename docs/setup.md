@@ -175,3 +175,31 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
 
     to install the `h5ls` command.
     The `h5utils` is already present in the docker image.
+
+
+### Setup Logging
+
+Salt has the potential to supports any logging framework also supported by Lightning.
+At the moment only comet is supported.
+
+#### Comet
+
+To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key).
+You also need to create a [workspace](https://www.comet.ml/docs/user-interface/#workspaces).
+Next save the API key and the workspace name in environment variables called `COMET_API_KEY` and `COMET_WORKSPACE`.
+These variables are automatically read by the comet, see [here](https://www.comet.com/docs/v2/guides/tracking-ml-training/configuring-comet/#configure-comet-through-environment-variables) for more info.
+Consider adding these variables to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux).
+
+??? info "Add the environment variable to your bashrc"
+
+    To ensure the environment variables are defined every time you log in,
+    you can add the definitions to your bashrc.
+    Simply add the lines
+
+    ```bash
+    export COMET_API_KEY="<Your API Key>"
+    export COMET_WORKSPACE="<Your Workspace Name>"
+    ```
+
+    to your `~/.bashrc` file.
+    If no such file exists, create one in your home directory.
