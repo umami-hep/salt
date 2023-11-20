@@ -191,7 +191,8 @@ init_args:
 ```
 
 
-### Heterogeneous Models
+#### Heterogeneous Models
+
 If multiple input types are provided, separate initialiser networks should be provided for each input type.
 An example using both track and electron input types is provided below:
 
@@ -264,4 +265,4 @@ callbacks:
         - a_fancy_new_metric
         - another_fancy_new_metric 
       stdOut: True # whether to print to stdOut 
-``````
+```
