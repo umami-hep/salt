@@ -1,0 +1,103 @@
+name: event_classifier
+
+model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: objects
+          attach_global: false
+          dense_config:
+            output_size: &embed_dim 64
+            hidden_layers: [256, 128, 64]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.TransformerEncoder
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 6
+          out_dim: &out_dim 128
+          mha_config:
+            num_heads: 4
+            attention: { class_path: salt.models.ScaledDotProductAttention }
+          dense_config:
+            activation: *activation
+            dropout: &dropout 0.1
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: event_classification
+                input_name: events
+                label: signalType
+                class_names: [ggF, VBF]
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [1.0, 3.47] }
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  dropout: *dropout
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: mHH_regression
+                input_name: events
+                targets: truthMHH
+                target_denominators: mHH
+                loss:
+                  class_path: MSELoss
+                  init_args: { reduction: none }
+                dense_config:
+                  input_size: *out_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+data:
+  global_object: events
+  input_map:
+    events: event_vars
+    objects: objects_vars
+
+  variables:
+    events:
+      - mBB
+    objects:
+      - type
+      - pt
+      - eta
+      - phi
+      - mass
+      - btag
+      - tauId
+
+  train_file: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/Training_dataset.h5
+  val_file: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/Validation_dataset.h5
+  norm_dict: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/norm_dict.yaml
+  #class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
+  #move_files_temp: /dev/shm/svanstro/salt/gn2/
+  batch_size: 1000
+  num_workers: 4
+
+trainer:
+  max_epochs: 30
+  accelerator: gpu
+  devices: 1
+  #precision: 16-mixed
