@@ -21,6 +21,7 @@ class JetDataModule(L.LightningDataModule):
         test_file: str | None = None,
         test_suff: str | None = None,
         pin_memory: bool = True,
+        config_S3: dict | None = None,
         **kwargs,
     ):
         """h5 jet datamodule.
@@ -52,6 +53,8 @@ class JetDataModule(L.LightningDataModule):
             Test file suffix, default is None
         pin_memory: bool
             Pin memory for faster GPU transfer, default is True
+        config_S3: dict, optional
+            Some parameters for the S3 access
         **kwargs
             Keyword arguments for [`salt.data.JetDataset`][salt.data.JetDataset]
         """
@@ -69,6 +72,7 @@ class JetDataModule(L.LightningDataModule):
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
         self.pin_memory = pin_memory
+        self.config_S3 = config_S3
         self.kwargs = kwargs
 
     def prepare_data(self):

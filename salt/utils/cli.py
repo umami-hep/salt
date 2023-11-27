@@ -77,6 +77,12 @@ class SaltCLI(LightningCLI):
         """A lot of automatic configuration is done here."""
         sc = self.config[self.subcommand]
 
+        if "config_S3" in sc.data:
+            from salt.utils.file_utils import require_S3_CLI, setup_S3_CLI
+
+            if require_S3_CLI(sc.data["config_S3"]):
+                sc.data = setup_S3_CLI(sc.data)
+
         # add the labels from the model config to the data config
         labels = {}  # type: ignore
         model_dict = vars(sc.model.model.init_args)
@@ -149,8 +155,8 @@ class SaltCLI(LightningCLI):
             timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
             log = "trainer.logger"
             name = sc["name"]
-            log_dir = Path(sc["trainer.default_root_dir"])
-
+            log_dir = sc["trainer.default_root_dir"]
+            log_dir = Path(log_dir) if "s3://" not in log_dir else Path(log_dir[5:])
             # handle case where we re-use an existing config: use parent of timestampped dir
             try:
                 datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")
@@ -160,7 +166,11 @@ class SaltCLI(LightningCLI):
 
             # set the timestampped dir
             dirname = f"{name}_{timestamp}"
-            log_dir_timestamp = str(Path(log_dir / dirname).resolve())
+            if "s3:/" not in sc["trainer.default_root_dir"]:
+                log_dir_timestamp = str(Path(log_dir / dirname).resolve())
+            else:
+                log_dir_timestamp = str(Path(log_dir / dirname))
+                log_dir_timestamp = "s3://" + log_dir_timestamp
             sc["trainer.default_root_dir"] = log_dir_timestamp
             if sc[log]:
                 sc[f"{log}.init_args.save_dir"] = log_dir_timestamp

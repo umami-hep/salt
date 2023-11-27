@@ -15,6 +15,7 @@ salt = "salt.main:main"
 to_onnx = "salt.to_onnx:main"
 get_onnx_metadata = "salt.utils.get_onnx_metadata:main"
 compare_models = "salt.utils.compare_models:main"
+download_S3 = "salt.utils.file_utils:download_from_S3"
 
 [tool.setuptools]
 packages = ["salt"]
