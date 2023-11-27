@@ -13,3 +13,7 @@ pre-commit==3.2.1
 onnx==1.13.0
 onnxruntime==1.13.1
 atlas-ftag-tools==0.1.11
+boto3==1.28.17
+s3fs==2023.9.2
+s3path==0.5.0
+tensorboard==2.14.1

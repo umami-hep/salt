@@ -2,6 +2,7 @@ from pathlib import Path
 
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
+from s3path import S3Path
 
 
 class Checkpoint(ModelCheckpoint):
@@ -15,9 +16,16 @@ class Checkpoint(ModelCheckpoint):
             if trainer.fast_dev_run:
                 return
 
-            # set the output dirpath from the trainer log dir
-            log_dir = Path(trainer.log_dir)
-            self.dirpath = str(log_dir / "ckpts")
+            if "s3:/" in trainer.log_dir[:4]:
+                log_dir = S3Path(trainer.log_dir.replace("s3://", "").replace("s3:/", ""))
+                self.dirpath = "s3://" + str(log_dir / "ckpts")
+            elif "s3:/" in trainer.log_dir:
+                raise ValueError(
+                    f"trainer.log_dir should start with 's3:/', instead of {trainer.log_dir}"
+                )
+            else:
+                log_dir = Path(trainer.log_dir)
+                self.dirpath = str(log_dir / "ckpts")
 
             # this could be used to add the timestamp to the filename
             # self.timestamp = log_dir.name

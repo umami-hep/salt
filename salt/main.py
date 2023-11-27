@@ -13,6 +13,7 @@ from salt.utils.cli import SaltCLI
 
 def main(args: ArgsType = None) -> None:
     config_dir = pathlib.Path(__file__).parent / "configs"
+
     SaltCLI(
         model_class=ModelWrapper,
         datamodule_class=JetDataModule,

@@ -12,6 +12,8 @@ import torch
 import yaml
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
+from s3fs import S3FileSystem
+from s3path import S3Path
 
 from salt.utils.git_check import get_git_hash
 
@@ -75,12 +77,24 @@ class SaveConfigCallback(Callback):
         self.plm = pl_module
 
         # get path info
-        log_dir = Path(trainer.log_dir)
+        if "s3:/" in trainer.log_dir[:4]:
+            self.use_S3 = True
+            self.make_path = S3Path
+            log_dir = self.make_path("/" + trainer.log_dir.replace("s3://", "").replace("s3:/", ""))
+            self.S3_session = S3FileSystem(anon=False)
+        elif "s3:/" in trainer.log_dir:
+            raise ValueError(
+                f"trainer.log_dir should start with 's3:/', instead of {trainer.log_dir}"
+            )
+        else:
+            self.use_S3 = False
+            self.make_path = Path
+            log_dir = self.make_path(trainer.log_dir)
+
         assert log_dir is not None
         trainer.timestamp = log_dir.name
-        config_path = Path(log_dir / self.config_filename)
-
         # broadcast whether to fail to all ranks
+        config_path = self.make_path(log_dir / self.config_filename)
         file_exists = config_path.exists()
         file_exists = trainer.strategy.broadcast(file_exists)
         if file_exists and not self.overwrite:
@@ -106,31 +120,27 @@ class SaveConfigCallback(Callback):
         # to do it usually but it hasn't logged anything at this point
         config_path.parent.mkdir(parents=True, exist_ok=True)
         print("-" * 100)
-        print(f"Created output dir {config_path.parent}")
+        print(f"Created output dir {config_path.parent} {'on S3' if self.use_S3 else ''}")
         print("-" * 100, "\n")
 
         # copy the norm dict
-        nd_path = Path(config_path.parent / Path(self.config.data.norm_dict).name)
-        shutil.copyfile(self.config.data.norm_dict, nd_path)
-        self.config.data.norm_dict = str(nd_path.resolve())
-
+        nd_path = self.make_path(
+            config_path.parent / self.make_path(self.config.data.norm_dict).name
+        )
+        self.config.data.norm_dict = self.write_file(self.config.data.norm_dict, nd_path)
         # copy the class dict
         if self.config.data.class_dict:
-            cd_path = Path(config_path.parent / Path(self.config.data.class_dict).name)
-            shutil.copyfile(self.config.data.class_dict, cd_path)
-            self.config.data.class_dict = str(cd_path.resolve())
+            cd_path = self.make_path(
+                config_path.parent / self.make_path(self.config.data.class_dict).name
+            )
+            self.config.data.class_dict = self.write_file(self.config.data.class_dict, cd_path)
 
         # write config
-        self.parser.save(
-            self.config,
-            str(config_path),
-            skip_none=False,
-            overwrite=self.overwrite,
-            multifile=self.multifile,
-        )
+        self.write_yaml_file(self.config, config_path)
 
         # log files as assets
-        if self.plm.logger is not None:
+        #  currently cannot save log files as assests on S3
+        if self.plm.logger is not None and not self.use_S3:
             self.plm.logger.experiment.log_asset(config_path)
             self.plm.logger.experiment.log_asset(nd_path)
             self.plm.logger.experiment.log_asset(cd_path)
@@ -173,7 +183,9 @@ class SaveConfigCallback(Callback):
         meta["git_hash"] = get_git_hash()
         if logger:
             meta["out_dir"] = logger.save_dir
-            meta["log_url"] = logger.experiment.url
+            if not self.use_S3:
+                # Currently not available on S3
+                meta["log_url"] = logger.experiment.url
         if hasattr(self.trainer, "timestamp"):
             meta["timestamp"] = trainer.timestamp
         meta["torch_version"] = str(torch.__version__)
@@ -181,7 +193,8 @@ class SaveConfigCallback(Callback):
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 
-        if logger:
+        if logger and not self.use_S3:
+            # Currently not available on S3
             logger.log_hyperparams(meta)
 
         # save the jet classes, which is stored as an attr in the training file
@@ -198,6 +211,49 @@ class SaveConfigCallback(Callback):
             meta["pp_config_train"] = get_attr(train_dset.file, "config")
             meta["pp_config_val"] = get_attr(val_dset.file, "config")
 
-        meta_path = Path(config_path.parent / "metadata.yaml")
-        with open(meta_path, "w") as file:
-            yaml.dump(meta, file, sort_keys=False)
+        meta_path = self.make_path(config_path.parent / "metadata.yaml")
+        self.write_dump_yaml_file(meta, meta_path)
+
+    def write_file(self, file, store_path):
+        """Writes the file on S3 at the store_path."""
+        if self.use_S3:
+            self.S3_session.put(file, store_path)
+            outpath = file
+        else:
+            shutil.copyfile(file, store_path)
+            outpath = str(store_path.resolve())
+        return outpath
+
+    def write_yaml_file(self, yaml_file, store_path):
+        """Writes the file on S3 at the store_path."""
+        if self.use_S3:
+            local_path = Path("local_config.yaml")
+            self.parser.save(
+                yaml_file,
+                str(local_path),
+                skip_none=False,
+                overwrite=self.overwrite,
+                multifile=self.multifile,
+            )
+            self.S3_session.put(str(local_path), store_path)
+            local_path.unlink()
+        else:
+            self.parser.save(
+                yaml_file,
+                str(store_path),
+                skip_none=False,
+                overwrite=self.overwrite,
+                multifile=self.multifile,
+            )
+
+    def write_dump_yaml_file(self, meta, store_path):
+        """Writes the file on S3 at the store_path."""
+        if self.use_S3:
+            local_path = Path("metadata.yaml")
+            with open(str(local_path), "w") as file:
+                yaml.dump(meta, file, sort_keys=False)
+            self.S3_session.put(str(local_path), store_path)
+            local_path.unlink()
+        else:
+            with open(store_path, "w") as file:
+                yaml.dump(meta, file, sort_keys=False)

@@ -266,3 +266,40 @@ callbacks:
         - another_fancy_new_metric 
       stdOut: True # whether to print to stdOut 
 ```
+
+### S3:
+
+To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
+```yaml
+config_S3:
+  use_S3: False  # Set to true to setup S3 (needed for storing results)
+  download_S3: False # Set to true to download files in download_files from S3
+  pubKey: # public key
+  secKey: # private key
+  url: https://s3.cern.ch # url, for OpenStack at cern used this.
+  bucket: # bucket name
+  download_path: # local path to download the files to
+  download_files: # files key to download, matching an entry in the config.data
+    - train_file
+    - val_file
+    - norm_dict
+    - class_dict
+```
+Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
+
+```bash
+download_S3 --config configs/GN2.yaml
+```
+
+This will run the downloading script without starting the salt CLI. 
+
+Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
+```yaml
+trainer:
+  ...
+  default_root_dir: s3://BUCKET/FOLDER
+  ...
+  logger:
+    class_path:  lightning.pytorch.loggers.TensorBoardLogger
+```
+As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 
