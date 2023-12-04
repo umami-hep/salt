@@ -41,7 +41,7 @@ Salt is currently used for the following projects:
 - [Primary vertexing](https://indico.cern.ch/event/1311519/timetable/?view=standard#25-leveraging-the-ftag-softwar)
 - [LLP vertexing](https://indico.cern.ch/event/1311519/timetable/?view=standard#25-leveraging-the-ftag-softwar)
 - [Prompt lepton veto](https://indico.cern.ch/event/1341494/contributions/5647850/attachments/2742923/4771964/PLIV_ftagTPLT_20231030_pgadow.pdf)
-- [tttt analysis](https://indico.cern.ch/event/1344154/contributions/5657769/subcontributions/452377/attachments/2754554/4795867/metsai_20231115.pdf)
-
+- [multitop analysis](https://indico.cern.ch/event/1344154/contributions/5657769/subcontributions/452377/attachments/2754554/4795867/metsai_20231115.pdf)
+- [PU rejection using hits](https://its.cern.ch/jira/browse/ATR-28390)
 
 The framework is originally based on work from two previously existing projects: [[1]](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger) [[2]](https://gitlab.cern.ch/mleigh/flavour_tagging/).

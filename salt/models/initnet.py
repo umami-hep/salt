@@ -1,8 +1,8 @@
 from torch import nn
 
 from salt.models import Dense
+from salt.typing import Tensors, Vars
 from salt.utils.tensor_utils import attach_context
-from salt.utils.typing import Tensors, Vars
 
 
 class InitNet(nn.Module):

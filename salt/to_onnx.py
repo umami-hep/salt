@@ -8,13 +8,13 @@ import onnx
 import onnxruntime as ort
 import torch
 import yaml
+from ftag.git_check import check_for_uncommitted_changes, get_git_hash
 from torch import Tensor
 from torch.nn.functional import softmax
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
 from salt.modelwrapper import ModelWrapper
-from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
 from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
 
@@ -103,7 +103,7 @@ class ONNXModel(ModelWrapper):
         )
         self.example_input_array = jets, tracks.squeeze(0)
 
-    def forward(self, jets: Tensor, tracks: Tensor, labels=None):
+    def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore
         # in athena the jets have a batch dim but the tracks don't, so add it here
         tracks = tracks.unsqueeze(0)
 
@@ -221,7 +221,7 @@ def main(args=None):
     args = parse_args(args)
 
     if not args.force:
-        check_for_uncommitted_changes()
+        check_for_uncommitted_changes(Path(__file__).parent)
 
     if not (config_path := args.config):
         config_path = args.ckpt_path.parents[1] / "config.yaml"
@@ -340,7 +340,7 @@ def add_metadata(
     metadata["onnx_model_version"] = "v1"
 
     # Save the git hash of the repo used for exporting onnx model
-    metadata["export_git_hash"] = get_git_hash()
+    metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}

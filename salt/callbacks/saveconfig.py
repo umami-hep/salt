@@ -10,12 +10,11 @@ import lightning as L
 import numpy as np
 import torch
 import yaml
+from ftag.git_check import get_git_hash
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
 from s3fs import S3FileSystem
 from s3path import S3Path
-
-from salt.utils.git_check import get_git_hash
 
 
 def get_attr(file, attribute, key=None):
@@ -180,7 +179,7 @@ class SaveConfigCallback(Callback):
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
             meta["dsids"] = get_attr(train_dset.file, "dsids")
 
-        meta["git_hash"] = get_git_hash()
+        meta["salt_hash"] = get_git_hash(Path(__file__).parent)
         if logger:
             meta["out_dir"] = logger.save_dir
             if not self.use_S3:

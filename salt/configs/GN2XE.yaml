@@ -5,7 +5,7 @@ data:
   val_file: /share/lustre/svanstroud/data/xbb/ext_v1/pp_output_val.h5
   norm_dict: /share/lustre/svanstroud/data/xbb/ext_v1/norm_dict.yaml
   class_dict: /share/lustre/svanstroud/data/xbb/ext_v1/class_dict.yaml
-  move_files_temp: /dev/shm/svanstro/salt/xbb/
+  #move_files_temp: /dev/shm/svanstro/salt/xbb/
   input_map:
     jets: jets
     tracks: tracks
@@ -105,9 +105,7 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [2.75, 1.0, 1.52, 1.52]
-                    ignore_index: -1
+                  init_args: { weight: [2.75, 1.0, 1.52, 1.52] }
                 dense_config:
                   input_size: *out_dim
                   output_size: 4

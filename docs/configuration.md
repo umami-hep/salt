@@ -49,76 +49,6 @@ data:
 In this example, `h5_dataset_name` will be used to retrieve the datasets from the input h5 files, while internally (and elsewhere in the configuration) this input type will be referred to as `internal_name`.
 
 
-#### Global Object Features
-
-By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
-in the [`salt.models.InitNet`][salt.models.InitNet].
-You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
-In order to this you should add a `GLOBAL` key under `data.variables` and specify which global-level variables do you want to use.
-
-??? warning "Don't forget to change pooling and task input size accordingly"
-
-    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
-
-For example you can concatenate jet features after the gnn model with:
-
-`variables` section
-```yaml
-data:
-    variables:
-        GOBAL:
-        - pt_btagJes
-        - eta_btagJes
-        ...
-```
-
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
-
-
-#### Edge Features
-
-It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
-
-- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
-- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
-- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
-- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
-- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
-
-
-#### Parameterised GNN
-
-It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
-
-A parameterised network can be configured in the following way:
-
-- `inputs` section: Specify the collection containing the parameters.
-    ```yaml
-    input_names:
-        ...
-        PARAMETERS: jets
-        ...
-    ```
-- `variables` section: Add your parameters to lists of variables used in training.
-    ```yaml
-    data:
-        variables:
-            ...
-            PARAMETERS:
-            - mass
-            ...
-    ```
-- `PARAMETERS` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `PARAMETERS` as in `variables`.
-    ```yaml
-    PARAMETERS:
-        mass:
-            train: [5, 16, 55]
-            test: 40
-            prob: [0.2, 0.3, 0.5]
-    ```
-
-??? warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
-
 #### Truncating Inputs
 
 You can truncate the number of tracks used for training.
@@ -153,7 +83,73 @@ Note, when using `label_map` you also need to provide `class_names`.
 When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
 
 
+
+#### Data From S3
+
+To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
+```yaml
+config_S3:
+  use_S3: False  # Set to true to setup S3 (needed for storing results)
+  download_S3: False # Set to true to download files in download_files from S3
+  pubKey: # public key
+  secKey: # private key
+  url: https://s3.cern.ch # url, for OpenStack at cern used this.
+  bucket: # bucket name
+  download_path: # local path to download the files to
+  download_files: # files key to download, matching an entry in the config.data
+    - train_file
+    - val_file
+    - norm_dict
+    - class_dict
+```
+Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
+
+```bash
+download_S3 --config configs/GN2.yaml
+```
+
+This will run the downloading script without starting the salt CLI. 
+
+Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
+```yaml
+trainer:
+  ...
+  default_root_dir: s3://BUCKET/FOLDER
+  ...
+  logger:
+    class_path:  lightning.pytorch.loggers.TensorBoardLogger
+```
+As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 
+
+
 ### Model Architecture
+
+
+#### Global Object Features
+
+By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
+in the [`salt.models.InitNet`][salt.models.InitNet].
+You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
+In order to this you should add a `GLOBAL` key under `data.variables` and specify which global-level variables do you want to use.
+
+??? warning "Don't forget to change pooling and task input size accordingly"
+
+    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
+
+For example you can concatenate jet features after the gnn model with:
+
+`variables` section
+```yaml
+data:
+    variables:
+        GOBAL:
+        - pt_btagJes
+        - eta_btagJes
+        ...
+```
+
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
+
 
 #### Switching Attention Mechanisms
 
@@ -191,8 +187,19 @@ init_args:
 ```
 
 
-#### Heterogeneous Models
 
+#### Edge Features
+
+It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
+
+- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
+- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
+- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
+- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
+- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
+
+
+#### Heterogeneous Models
 If multiple input types are provided, separate initialiser networks should be provided for each input type.
 An example using both track and electron input types is provided below:
 
@@ -209,7 +216,12 @@ init_nets:
     <<: *init
 ```
 
-The separate input types are by default combined and treated homogeneously within the GNN layers. Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
+The separate input types are by default combined and treated homogeneously within the GNN layers. 
+Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
+
+!!!warning "This isn't recommended"
+
+    It is slower and hasn't proved to be more performant than the homogeneous GNN approach
 
 ```yaml
     encoder:
@@ -232,6 +244,46 @@ The separate input types are by default combined and treated homogeneously withi
         dropout: &dropout 0.1
 ```
 
+#### Parameterised GNN
+
+It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
+
+A parameterised network can be configured in the following way:
+
+- `inputs` section: Specify the collection containing the parameters.
+    ```yaml
+    input_names:
+        ...
+        PARAMETERS: jets
+        ...
+    ```
+- `variables` section: Add your parameters to lists of variables used in training.
+    ```yaml
+    data:
+        variables:
+            ...
+            PARAMETERS:
+            - mass
+            ...
+    ```
+- `PARAMETERS` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `PARAMETERS` as in `variables`.
+    ```yaml
+    PARAMETERS:
+        mass:
+            train: [5, 16, 55]
+            test: 40
+            prob: [0.2, 0.3, 0.5]
+    ```
+
+??? warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
+
+
+
+
+
+
+### Training
+
 #### Compiled Models
 
 Pytorch 2.0 introduced compiled models via `torch.compile()` for improved execution times. 
@@ -249,7 +301,10 @@ You can also try to decorate functions with `@torch.compile`, for example the `f
 Passing `mode="reduce-overhead"` may also improve further performance.
 Note that this will break ONNX export.
 
-### Katib
+
+### Hyperparameter Optimisation
+
+#### Katib
 
 In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
 
@@ -266,9 +321,15 @@ callbacks:
       stdOut: True # whether to print to stdOut 
 ```
 
-### muP
 
-More detail on muP is given in the training docs, but the relevant configuration setups are sumamrised here. The model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+
+#### muTransfer
+
+Salt is compatible with the muTransfer technique outline in the paper [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466).
+
+##### Setup
+
+To setup muP, the model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
 
 ```yaml
 muP_config:
@@ -281,6 +342,80 @@ muP_config:
 ```
 
 Such that the `base` (`delta`) models are instantiated with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_muP/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup).
+
+To run a GN2 training with muP, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `muP` configuration with the following boolean parameters: 
+
+- for `init_nets` (only if changing embedding dim):
+
+```yaml
+init_nets:
+    - input_name: tracks
+        dense_config:
+            ...
+            muP: True
+```
+
+- for `encoder`:
+
+```yaml
+encoder:
+    class_path: salt.models.TransformerEncoder
+    init_args:
+        ...
+        muP: True
+```
+
+
+##### Run
+
+To run muP, you must instantiate a GN2 model into the Maximal Update Parametrisation (muP). To do this, you must follow the following steps, which are further detailed next. 
+
+- step 1: create `storeshapes` file using a model config file with muP configuration: 
+
+```bash
+setup_muP -config GN2.yaml
+```
+
+- step 2: run a muP training normally with the model config with muP configuration:
+
+```bash
+salt fit --config GN2.yaml
+```
+
+The config file `GN2_muP.yaml` gives an example of a valid configuration file for muP.
+
+A gentle introduction to muP is available in this [talk](https://indico.cern.ch/event/1339085/#3-mup-for-gn2-hyperparameter-o).
+
+Important note: muP has been implemented to scale the transformer encoder (and init_nets if the embedding is changed). The last layer in the scaling __must__ be the out-projecting of the encoder (controlled with `out_dim`), which in particular must be set!
+
+
+**Step 1:**
+
+To leverage the existing [muP library](https://github.com/microsoft/mup), a `base` and `delta` models have to be instantiated using the `main_muP` script to generate a `storeshapes` file to be passed to the muP library. Note that you __must__ vary a parameter between the `base` and `delta` models, as this will define the dimension to muTransfer along (embedding dimension and num_heads are supported). This script is installed with salt and callable under the name `setup_muP`. For example, run: 
+
+```bash
+setup_muP -c GN2.yaml
+```
+
+Where the `GN2.yaml` is your usual model configuration file, endowed with the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+
+```yaml
+muP_config:
+    shape_path: my_path_to_a_folder_for_shape
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: 128 
+      parameter_delta: 4
+```
+
+The `setup_muP` script will instantiate a `base` (`delta`) model with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_muP/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup). Note: currently supporting the num_heads & embedding size of the transformer `encoder`, with the latter being also relevant to `init_nets`. Both the base and delta value have to be divided by your chosen `num_heads`!
+
+
+
+**Step 2:**
+
+With step 1 creating a `storeshapes` under the path `shape_path` or the default `./temp_muP`, you can now turn to training a GN2 models with your desired widths. The model will have to load the `storeshapes` in the initialiser of `ModelWrapper`, and you must make sure the model has the muP_config passed to it with, in particular, the right path to the `storeshapes` (easiest is to not change the config w.r.t. base and delta model initialisation). 
 
 To run a GN2 training with muP, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `muP` configuration with the following boolean parameters: 
 - for `init_nets` (only if changing embedding dim):
@@ -300,39 +435,9 @@ encoder:
         muP: True
 ```
 
-### S3:
-
-To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
-```yaml
-config_S3:
-  use_S3: False  # Set to true to setup S3 (needed for storing results)
-  download_S3: False # Set to true to download files in download_files from S3
-  pubKey: # public key
-  secKey: # private key
-  url: https://s3.cern.ch # url, for OpenStack at cern used this.
-  bucket: # bucket name
-  download_path: # local path to download the files to
-  download_files: # files key to download, matching an entry in the config.data
-    - train_file
-    - val_file
-    - norm_dict
-    - class_dict
-```
-Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
-
+If correctly setup, you can just run a salt training in the usual way: 
 ```bash
-download_S3 --config configs/GN2.yaml
+salt fit --config GN2.yaml
 ```
 
-This will run the downloading script without starting the salt CLI. 
-
-Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
-```yaml
-trainer:
-  ...
-  default_root_dir: s3://BUCKET/FOLDER
-  ...
-  logger:
-    class_path:  lightning.pytorch.loggers.TensorBoardLogger
-```
-As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 
+You are now training a muP-GN2!
