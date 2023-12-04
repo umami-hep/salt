@@ -177,6 +177,7 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     The `h5utils` is already present in the docker image.
 
 
+
 ### Setup Logging
 
 Salt has the potential to supports any logging framework also supported by Lightning.

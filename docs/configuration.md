@@ -49,76 +49,6 @@ data:
 In this example, `h5_dataset_name` will be used to retrieve the datasets from the input h5 files, while internally (and elsewhere in the configuration) this input type will be referred to as `internal_name`.
 
 
-#### Global Object Features
-
-By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
-in the [`salt.models.InitNet`][salt.models.InitNet].
-You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
-In order to this you should add a `GLOBAL` key under `data.variables` and specify which global-level variables do you want to use.
-
-??? warning "Don't forget to change pooling and task input size accordingly"
-
-    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
-
-For example you can concatenate jet features after the gnn model with:
-
-`variables` section
-```yaml
-data:
-    variables:
-        GOBAL:
-        - pt_btagJes
-        - eta_btagJes
-        ...
-```
-
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
-
-
-#### Edge Features
-
-It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
-
-- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
-- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
-- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
-- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
-- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
-
-
-#### Parameterised GNN
-
-It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
-
-A parameterised network can be configured in the following way:
-
-- `inputs` section: Specify the collection containing the parameters.
-    ```yaml
-    input_names:
-        ...
-        PARAMETERS: jets
-        ...
-    ```
-- `variables` section: Add your parameters to lists of variables used in training.
-    ```yaml
-    data:
-        variables:
-            ...
-            PARAMETERS:
-            - mass
-            ...
-    ```
-- `PARAMETERS` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `PARAMETERS` as in `variables`.
-    ```yaml
-    PARAMETERS:
-        mass:
-            train: [5, 16, 55]
-            test: 40
-            prob: [0.2, 0.3, 0.5]
-    ```
-
-??? warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
-
 #### Truncating Inputs
 
 You can truncate the number of tracks used for training.
@@ -153,7 +83,73 @@ Note, when using `label_map` you also need to provide `class_names`.
 When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
 
 
+
+#### Data From S3
+
+To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
+```yaml
+config_S3:
+  use_S3: False  # Set to true to setup S3 (needed for storing results)
+  download_S3: False # Set to true to download files in download_files from S3
+  pubKey: # public key
+  secKey: # private key
+  url: https://s3.cern.ch # url, for OpenStack at cern used this.
+  bucket: # bucket name
+  download_path: # local path to download the files to
+  download_files: # files key to download, matching an entry in the config.data
+    - train_file
+    - val_file
+    - norm_dict
+    - class_dict
+```
+Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
+
+```bash
+download_S3 --config configs/GN2.yaml
+```
+
+This will run the downloading script without starting the salt CLI. 
+
+Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
+```yaml
+trainer:
+  ...
+  default_root_dir: s3://BUCKET/FOLDER
+  ...
+  logger:
+    class_path:  lightning.pytorch.loggers.TensorBoardLogger
+```
+As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 
+
+
 ### Model Architecture
+
+
+#### Global Object Features
+
+By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
+in the [`salt.models.InitNet`][salt.models.InitNet].
+You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
+In order to this you should add a `GLOBAL` key under `data.variables` and specify which global-level variables do you want to use.
+
+??? warning "Don't forget to change pooling and task input size accordingly"
+
+    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
+
+For example you can concatenate jet features after the gnn model with:
+
+`variables` section
+```yaml
+data:
+    variables:
+        GOBAL:
+        - pt_btagJes
+        - eta_btagJes
+        ...
+```
+
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
+
 
 #### Switching Attention Mechanisms
 
@@ -191,8 +187,19 @@ init_args:
 ```
 
 
-#### Heterogeneous Models
 
+#### Edge Features
+
+It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
+
+- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
+- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
+- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
+- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
+- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
+
+
+#### Heterogeneous Models
 If multiple input types are provided, separate initialiser networks should be provided for each input type.
 An example using both track and electron input types is provided below:
 
@@ -209,7 +216,12 @@ init_nets:
     <<: *init
 ```
 
-The separate input types are by default combined and treated homogeneously within the GNN layers. Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
+The separate input types are by default combined and treated homogeneously within the GNN layers. 
+Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
+
+!!!warning "This isn't recommended"
+
+    It is slower and hasn't proved to be more performant than the homogeneous GNN approach
 
 ```yaml
     encoder:
@@ -232,6 +244,46 @@ The separate input types are by default combined and treated homogeneously withi
         dropout: &dropout 0.1
 ```
 
+#### Parameterised GNN
+
+It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
+
+A parameterised network can be configured in the following way:
+
+- `inputs` section: Specify the collection containing the parameters.
+    ```yaml
+    input_names:
+        ...
+        PARAMETERS: jets
+        ...
+    ```
+- `variables` section: Add your parameters to lists of variables used in training.
+    ```yaml
+    data:
+        variables:
+            ...
+            PARAMETERS:
+            - mass
+            ...
+    ```
+- `PARAMETERS` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `PARAMETERS` as in `variables`.
+    ```yaml
+    PARAMETERS:
+        mass:
+            train: [5, 16, 55]
+            test: 40
+            prob: [0.2, 0.3, 0.5]
+    ```
+
+??? warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
+
+
+
+
+
+
+### Training
+
 #### Compiled Models
 
 Pytorch 2.0 introduced compiled models via `torch.compile()` for improved execution times. 
@@ -249,7 +301,8 @@ You can also try to decorate functions with `@torch.compile`, for example the `f
 Passing `mode="reduce-overhead"` may also improve further performance.
 Note that this will break ONNX export.
 
-### Katib
+
+#### Katib
 
 In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed 
 metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
@@ -266,40 +319,3 @@ callbacks:
         - another_fancy_new_metric 
       stdOut: True # whether to print to stdOut 
 ```
-
-### S3:
-
-To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
-```yaml
-config_S3:
-  use_S3: False  # Set to true to setup S3 (needed for storing results)
-  download_S3: False # Set to true to download files in download_files from S3
-  pubKey: # public key
-  secKey: # private key
-  url: https://s3.cern.ch # url, for OpenStack at cern used this.
-  bucket: # bucket name
-  download_path: # local path to download the files to
-  download_files: # files key to download, matching an entry in the config.data
-    - train_file
-    - val_file
-    - norm_dict
-    - class_dict
-```
-Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
-
-```bash
-download_S3 --config configs/GN2.yaml
-```
-
-This will run the downloading script without starting the salt CLI. 
-
-Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
-```yaml
-trainer:
-  ...
-  default_root_dir: s3://BUCKET/FOLDER
-  ...
-  logger:
-    class_path:  lightning.pytorch.loggers.TensorBoardLogger
-```
-As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 

@@ -197,7 +197,29 @@ There are several options in the script which need to be tailored to make sure t
 ## Troubleshooting
 
 If you encounter issues, as a first step you should try pulling the latest updates from `main` to see if your problem has been resolved.
+If you need more help you can post on [mattermost](https://mattermost.web.cern.ch/aft-algs/channels/gnns).
 
+### Slow Training
+
+This section contains some suggestions for speeding up trainings.
+Some external advice can be found [here](https://lightning.ai/docs/pytorch/stable/advanced/speed.html) and [here](https://lightning.ai/docs/pytorch/stable/levels/intermediate_level_13.html).
+
+If you are not producing a "final" version of your model (i.e. with maximum possible performance), but instead are running some studies, you should consider the following:
+
+- Limit the training statistics (e.g. 20M samples)
+- Reduce the number of epochs you train for (e.g. 20 epochs)
+- Remove any auxiliary tasks
+- [Compile the model][compiled-models]
+
+Other things you can always do:
+
+- Use bfloat16 precision
+- Use the maximum possible [batch size](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.BatchSizeFinder.html)
+- Increase your effective batch size by [accumulating gradients](https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html#accumulate-gradients)
+- Ensure you have enough [workers for dataloading](worker-counts)
+- Use newer GPUs if possible
+- Use [multiple GPUs][choosing-gpus]
+- Reduce the size of the model (in particular the number of layers)
 
 ### Confusing Errors
 
@@ -219,14 +241,14 @@ Salt will automatically check:
 - That your normalisation paramters are finite in (see [salt.models.InputNorm][salt.models.InputNorm])
 
 You may still encounter `nan` values in your outputs and losses.
-Here are some mitigation strategies you can try are:
+Here are some mitigation strategies you can try:
 
 - Make sure you have pulled the latest changes from `main`.
 - Make doubly sure that your inputs are finite, even apply applying normalisation.
 - Ensure you don't have unexpected non-finite labels.
-- Check your training precision: you should use  `--trainer.precision=32` or `--trainer.precision=bf16-mixed` (avoid `16-mixed`!). See [here](https://lightning.ai/docs/pytorch/stable/common/trainer.html#precision) for more info. 
-- Apply gradient clipping to negate the effects of exploding gradients. See [here](https://pytorch-lightning.readthedocs.io/en/1.5.10/advanced/training_tricks.html#gradient-clipping) for more info.
-- If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your [Tasks][salt.models.TaskBase].
 - Try lowering your max learning rate in the `lrs_config`.
+- If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your [Tasks][salt.models.TaskBase].
+- Check your training precision: if you have done the above and still have problems, you can try  `--trainer.precision=32` or `--trainer.precision=bf16-mixed`. See [here](https://lightning.ai/docs/pytorch/stable/common/trainer.html#precision) for more info. 
+- Apply gradient clipping to negate the effects of exploding gradients. See [here] for more info.
 - Auto detect gradient anomalies. See [here](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies) for more info.
 - If you are running on multiple GPUs, try running on a single GPU with `--trainer.devices=1`
