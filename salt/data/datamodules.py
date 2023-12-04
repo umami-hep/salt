@@ -67,7 +67,6 @@ class JetDataModule(L.LightningDataModule):
             Keyword arguments for [`salt.data.JetDataset`][salt.data.JetDataset]
         """
         super().__init__()
-
         self.train_file = train_file
         self.val_file = val_file
         self.test_file = test_file
@@ -91,7 +90,7 @@ class JetDataModule(L.LightningDataModule):
             fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
 
     def setup(self, stage: str):
-        if self.trainer.is_global_zero:
+        if self.trainer is not None and self.trainer.is_global_zero:
             print("-" * 100)
 
         if stage == "fit" and self.move_files_temp and not self.trainer.fast_dev_run:

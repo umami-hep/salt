@@ -302,10 +302,11 @@ Passing `mode="reduce-overhead"` may also improve further performance.
 Note that this will break ONNX export.
 
 
+### Hyperparameter Optimisation
+
 #### Katib
 
-In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed 
-metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
+In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
 
 An example configuration to be added to the `base.yaml` config file is: 
 
@@ -319,3 +320,124 @@ callbacks:
         - another_fancy_new_metric 
       stdOut: True # whether to print to stdOut 
 ```
+
+
+
+#### muTransfer
+
+Salt is compatible with the muTransfer technique outline in the paper [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466).
+
+##### Setup
+
+To setup muP, the model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+
+```yaml
+muP_config:
+    shape_path: my_path_to_a_folder_for_shape
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: 128 
+      parameter_delta: 4
+```
+
+Such that the `base` (`delta`) models are instantiated with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_muP/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup).
+
+To run a GN2 training with muP, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `muP` configuration with the following boolean parameters: 
+
+- for `init_nets` (only if changing embedding dim):
+
+```yaml
+init_nets:
+    - input_name: tracks
+        dense_config:
+            ...
+            muP: True
+```
+
+- for `encoder`:
+
+```yaml
+encoder:
+    class_path: salt.models.TransformerEncoder
+    init_args:
+        ...
+        muP: True
+```
+
+
+##### Run
+
+To run muP, you must instantiate a GN2 model into the Maximal Update Parametrisation (muP). To do this, you must follow the following steps, which are further detailed next. 
+
+- step 1: create `storeshapes` file using a model config file with muP configuration: 
+
+```bash
+setup_muP -config GN2.yaml
+```
+
+- step 2: run a muP training normally with the model config with muP configuration:
+
+```bash
+salt fit --config GN2.yaml
+```
+
+The config file `GN2_muP.yaml` gives an example of a valid configuration file for muP.
+
+A gentle introduction to muP is available in this [talk](https://indico.cern.ch/event/1339085/#3-mup-for-gn2-hyperparameter-o).
+
+Important note: muP has been implemented to scale the transformer encoder (and init_nets if the embedding is changed). The last layer in the scaling __must__ be the out-projecting of the encoder (controlled with `out_dim`), which in particular must be set!
+
+
+**Step 1:**
+
+To leverage the existing [muP library](https://github.com/microsoft/mup), a `base` and `delta` models have to be instantiated using the `main_muP` script to generate a `storeshapes` file to be passed to the muP library. Note that you __must__ vary a parameter between the `base` and `delta` models, as this will define the dimension to muTransfer along (embedding dimension and num_heads are supported). This script is installed with salt and callable under the name `setup_muP`. For example, run: 
+
+```bash
+setup_muP -c GN2.yaml
+```
+
+Where the `GN2.yaml` is your usual model configuration file, endowed with the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+
+```yaml
+muP_config:
+    shape_path: my_path_to_a_folder_for_shape
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: 128 
+      parameter_delta: 4
+```
+
+The `setup_muP` script will instantiate a `base` (`delta`) model with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_muP/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup). Note: currently supporting the num_heads & embedding size of the transformer `encoder`, with the latter being also relevant to `init_nets`. Both the base and delta value have to be divided by your chosen `num_heads`!
+
+
+
+**Step 2:**
+
+With step 1 creating a `storeshapes` under the path `shape_path` or the default `./temp_muP`, you can now turn to training a GN2 models with your desired widths. The model will have to load the `storeshapes` in the initialiser of `ModelWrapper`, and you must make sure the model has the muP_config passed to it with, in particular, the right path to the `storeshapes` (easiest is to not change the config w.r.t. base and delta model initialisation). 
+
+To run a GN2 training with muP, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `muP` configuration with the following boolean parameters: 
+- for `init_nets` (only if changing embedding dim):
+```yaml
+init_nets:
+    - input_name: tracks
+        dense_config:
+            ...
+            muP: True
+```
+- for `encoder`:
+```yaml
+encoder:
+    class_path: salt.models.TransformerEncoder
+    init_args:
+        ...
+        muP: True
+```
+
+If correctly setup, you can just run a salt training in the usual way: 
+```bash
+salt fit --config GN2.yaml
+```
+
+You are now training a muP-GN2!

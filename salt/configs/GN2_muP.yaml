@@ -7,6 +7,13 @@ model:
     end: 1e-5
     pct_start: 0.01
     weight_decay: 1e-5
+  muP_config:
+    shape_path: ./shape_muP
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: &embed_dim 256
+      parameter_delta: &num_heads 8
 
   model:
     class_path: salt.models.SaltModel
@@ -14,9 +21,10 @@ model:
       init_nets:
         - input_name: tracks
           dense_config:
-            output_size: &embed_dim 256
+            output_size: *embed_dim
             hidden_layers: [256]
             activation: &activation ReLU
+            muP: True
 
       encoder:
         class_path: salt.models.TransformerEncoder
@@ -25,11 +33,12 @@ model:
           num_layers: 4
           out_dim: &out_dim 128
           mha_config:
-            num_heads: 8
+            num_heads: *num_heads
             attention: { class_path: salt.models.ScaledDotProductAttention }
           dense_config:
             activation: *activation
-            dropout: &dropout 0.0
+            dropout: &dropout 0.1
+          muP: True
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -46,10 +55,10 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 2.0, 2.0, 16.8] }
+                  init_args: { weight: [1.0, 1.73, 1.08] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 4
+                  output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
                   dropout: *dropout
@@ -125,4 +134,4 @@ trainer:
   max_epochs: 40
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  #precision: 16-mixed
