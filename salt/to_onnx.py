@@ -221,7 +221,7 @@ def main(args=None):
     args = parse_args(args)
 
     if not args.force:
-        check_for_uncommitted_changes()
+        check_for_uncommitted_changes(Path(__file__).parent)
 
     if not (config_path := args.config):
         config_path = args.ckpt_path.parents[1] / "config.yaml"
@@ -340,7 +340,7 @@ def add_metadata(
     metadata["onnx_model_version"] = "v1"
 
     # Save the git hash of the repo used for exporting onnx model
-    metadata["salt_export_hash"] = get_git_hash()
+    metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}

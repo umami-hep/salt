@@ -179,7 +179,7 @@ class SaveConfigCallback(Callback):
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
             meta["dsids"] = get_attr(train_dset.file, "dsids")
 
-        meta["salt_hash"] = get_git_hash()
+        meta["salt_hash"] = get_git_hash(Path(__file__).parent)
         if logger:
             meta["out_dir"] = logger.save_dir
             if not self.use_S3:

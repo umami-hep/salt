@@ -1,5 +1,5 @@
 At the moment, Salt accepts data in HDF5 format.
-The specific format of the H5 files is described below [][].
+The specific format of the H5 files is described [below][salt-input-format].
 
 A series of steps are therefore to extract data from xAODs into a format that can be read by salt.
 If you want to get started running the code without producing your own samples, some samples are available on EOS:

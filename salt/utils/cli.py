@@ -177,9 +177,15 @@ class SaltCLI(LightningCLI):
 
             # run git checks
             if not sc["force"] and not sc.trainer.fast_dev_run:
-                check_for_uncommitted_changes()
+                path = Path(__file__).parent
+                check_for_uncommitted_changes(path)
                 if sc["tag"]:
-                    create_and_push_tag(dirname)
+                    create_and_push_tag(
+                        path,
+                        "atlas-flavor-tagging-tools/algorithms/salt",
+                        dirname,
+                        "automated salt tag",
+                    )
 
         if self.subcommand == "test":
             print("\n" + "-" * 100)
