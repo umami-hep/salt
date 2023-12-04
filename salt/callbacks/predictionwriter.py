@@ -13,6 +13,7 @@ from salt.models.task import (
     RegressionTask,
     VertexingTask,
 )
+from salt.typing import Vars
 from salt.utils.array_utils import join_structured_arrays, maybe_pad
 
 
@@ -22,7 +23,7 @@ class PredictionWriter(Callback):
         write_tracks: bool = False,
         half_precision: bool = False,
         jet_classes: list | None = None,
-        extra_vars: dict[str, list[str]] | None = None,
+        extra_vars: Vars | None = None,
     ) -> None:
         """Write test outputs to h5 file.
 

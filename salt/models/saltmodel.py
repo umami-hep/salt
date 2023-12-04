@@ -2,7 +2,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import InitNet, Pooling
-from salt.utils.typing import BoolTensors, NestedTensors, Tensors
+from salt.typing import BoolTensors, NestedTensors, Tensors
 
 
 class SaltModel(nn.Module):

@@ -4,7 +4,7 @@ import torch
 import yaml
 from torch import nn
 
-from salt.utils.typing import Tensors, Vars
+from salt.typing import Tensors, Vars
 
 
 class InputNorm(nn.Module):
