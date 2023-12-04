@@ -8,13 +8,13 @@ import onnx
 import onnxruntime as ort
 import torch
 import yaml
+from ftag.git_check import check_for_uncommitted_changes, get_git_hash
 from torch import Tensor
 from torch.nn.functional import softmax
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
 from salt.modelwrapper import ModelWrapper
-from salt.utils.git_check import check_for_uncommitted_changes, get_git_hash
 from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment
 
@@ -340,7 +340,7 @@ def add_metadata(
     metadata["onnx_model_version"] = "v1"
 
     # Save the git hash of the repo used for exporting onnx model
-    metadata["export_git_hash"] = get_git_hash()
+    metadata["salt_export_hash"] = get_git_hash()
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}

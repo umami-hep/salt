@@ -6,11 +6,11 @@ import h5py
 import numpy as np
 import torch
 import yaml
+from ftag.git_check import check_for_uncommitted_changes, create_and_push_tag
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
 from salt.utils.array_utils import listify
-from salt.utils.git_check import check_for_uncommitted_changes, create_and_push_tag
 
 
 # add support for converting yaml lists to tensors
