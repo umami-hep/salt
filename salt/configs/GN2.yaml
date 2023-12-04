@@ -29,7 +29,7 @@ model:
             attention: { class_path: salt.models.ScaledDotProductAttention }
           dense_config:
             activation: *activation
-            dropout: &dropout 0.1
+            dropout: &dropout 0.0
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
