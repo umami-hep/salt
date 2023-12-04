@@ -21,6 +21,8 @@ You can specify a different checkpoint with the `--ckpt_path` argument.
     we be evaluated. To instead evaluate on the desired checkpoint from the resumed training job, you should explicitly
     specify `--ckpt_path` again to overwrite the one that is already saved in the config.
 
+    If you still want to choose the best epoch automatically, use `--ckpt_path null`.
+
 You also need to specify a path to the test file using `--data.test_file`.
 This should be a prepared umami test file, and the framework should extract
 the sample name and append this to the checkpint file basename.
