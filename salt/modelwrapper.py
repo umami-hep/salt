@@ -23,9 +23,15 @@ class ModelWrapper(L.LightningModule):
         norm_config: dict | None = None,
         name: str = "salt",
     ):
-        """Model wrapper class containing things that are common to all salt models.
+        """A wrapper class for any model implemented in Salt.
 
-        These are:
+        This wrapper class allows is as generic as possible. It wraps
+        [`SaltModel`][salt.models.SaltModel], but could also be used to
+        wrap any other model if you want to do train something that doesn't
+        fit into the [`SaltModel`][salt.models.SaltModel] architecture.
+
+        This class is responsible for containing things that are common to all
+        salt models. These are:
 
         - A generic forward pass, including input normalisation
         - Training, validation and test steps, which include logging
@@ -72,10 +78,28 @@ class ModelWrapper(L.LightningModule):
         assert norm_config is not None
         self.norm = InputNorm(**norm_config)
 
-    def forward(self, x, mask, labels=None):
-        """Forward pass through the model. Don't call this method directy."""
-        x = self.norm(x)
-        return self.model(x, mask, labels)
+    def forward(self, inputs, masks=None, labels=None):
+        """Generic forward pass through any salt-compatible model.
+
+        This function performs input normalisation and then calls the `self.model`'s
+        forward pass. Don't call this method directy, instead use `__call__`.
+
+        Parameters
+        ----------
+        inputs
+            Any generic input to the model.
+        masks
+            Input padding masks.
+        labels
+            Training targets. If not specified, assume we are running model inference
+            (i.e. no loss computation).
+
+        Returns
+        -------
+        Whatever is returned by `self.model`'s forward pass.
+        """
+        x = self.norm(inputs)
+        return self.model(x, masks, labels)
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute

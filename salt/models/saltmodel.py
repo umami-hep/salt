@@ -13,10 +13,13 @@ class SaltModel(nn.Module):
         encoder: nn.Module = None,
         pool_net: Pooling = None,
     ):
-        """A generic multi-modal, multi-task model.
+        """A generic multi-modal, multi-task neural network.
 
         This model can be used to implement a wide range of models, including
-        DL1, DIPS, GN2 and more.
+        [DL1](https://ftag.docs.cern.ch/algorithms/taggers/dips/),
+        [DIPS](https://ftag.docs.cern.ch/algorithms/taggers/dl1/),
+        [GN2](https://ftag.docs.cern.ch/algorithms/taggers/GN2/)
+        and more.
 
         Parameters
         ----------
@@ -51,7 +54,35 @@ class SaltModel(nn.Module):
             assert len(self.init_nets) == 1, "pool_net must be set if more than one init_net is set"
             assert self.init_nets[0].input_name == self.init_nets[0].global_object
 
-    def forward(self, inputs: Tensors, mask: BoolTensors, labels: NestedTensors | None = None):
+    def forward(
+        self, inputs: Tensors, masks: BoolTensors | None = None, labels: NestedTensors | None = None
+    ) -> tuple[NestedTensors, Tensors]:
+        """Forward pass through the `SaltModel`.
+
+        Don't call this method directy, instead use `__call__`.
+
+        Parameters
+        ----------
+        inputs : Tensors
+            Dict of input tensors for each modality. Each tensor is of shape
+            `(batch_size, num_inputs, input_size)`.
+        masks : BoolTensors
+            Dict of input padding mask tensors for each modality. Each tensor is of
+            shape `(batch_size, num_inputs)`.
+        labels : Tensors, optional
+            Nested dict of label tensors. The outer dict is keyed by input modality,
+            the inner dict is keyed by label variable name. Each tensor is of shape
+            `(batch_size, num_inputs)`. If not specified, assume we are running model
+            inference (i.e. no loss computation).
+
+        Returns
+        -------
+        preds : NestedTensors
+            Dict of model predictions for each task, separated by input modality.
+            Tensors have varying shapes depending on the task.
+        loss : Tensors
+            Dict of losses for each task, aggregated over the batch.
+        """
         # initial input embeddings
         initial_embeddings = {}
         edge_x = None
@@ -64,11 +95,11 @@ class SaltModel(nn.Module):
         # input encoding
         combined_embeddings = initial_embeddings
         if self.encoder:
-            combined_embeddings = self.encoder(initial_embeddings, mask=mask, edge_x=edge_x)
+            combined_embeddings = self.encoder(initial_embeddings, mask=masks, edge_x=edge_x)
 
         # pooling
         if self.pool_net:
-            global_rep = self.pool_net(combined_embeddings, mask=mask)
+            global_rep = self.pool_net(combined_embeddings, mask=masks)
         else:
             global_rep = initial_embeddings[self.global_object]
 
@@ -77,7 +108,7 @@ class SaltModel(nn.Module):
             global_rep = torch.cat([global_rep, global_feats], dim=-1)
 
         # run tasks
-        preds, loss = self.run_tasks(global_rep, combined_embeddings, mask, labels)
+        preds, loss = self.run_tasks(global_rep, combined_embeddings, masks, labels)
 
         return preds, loss
 

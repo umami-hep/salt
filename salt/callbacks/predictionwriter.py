@@ -27,15 +27,23 @@ class PredictionWriter(Callback):
     ) -> None:
         """Write test outputs to h5 file.
 
+        This callback will write the outputs of the model to an h5 evaluation file. The outputs
+        are produced by calling the `run_inference` method of each task. The output file
+        is written to the same directory as the checkpoint file, and has the same name
+        as the checkpoint file, but with the suffix `__test_<sample><suffix>.h5`. The file will
+        contain one dataset for each input type, with the same name as the input type in the test
+        file.
+
         Parameters
         ----------
         write_tracks : bool
-            If true, write track outputs to file
+            If False, skip any tasks with `input_name="tracks"`.
         half_precision : bool
             If true, write outputs at half precision
         jet_classes : list
-            List of flavour names with the index corresponding to the label values
-        extra_vars : dict
+            List of flavour names with the index corresponding to the label values. This is used
+            to construct the jet classification probability output names.
+        extra_vars : Vars
             Extra variables to write to file for each input type. If not specified for a given input
             type, all variables in the test file will be written.
         """

@@ -24,7 +24,8 @@ class JetDataset(Dataset):
         global_object: str = "jets",
         parameters: dict | None = None,
     ):
-        """A map-style dataset for loading jets from a structured array file.
+        """An efficient map-style dataset for loading data from an H5 file containing structured
+        arrays.
 
         Parameters
         ----------

@@ -115,6 +115,7 @@ class ClassificationTask(TaskBase):
         masks: Mapping | None = None,
         context: Tensor = None,
     ):
+        # get predictions and mask
         if masks is not None:
             input_name_mask = self.input_name_mask(masks)
             preds = self.net(x[:, input_name_mask], context)
@@ -123,12 +124,13 @@ class ClassificationTask(TaskBase):
             preds = self.net(x, context)
             mask = None
 
-        # get labels
+        # get labels and remap them if necessary
         labels = labels_dict[self.input_name][self.label] if labels_dict else None
         if labels is not None and self.label_map is not None:
             for k, v in self.label_map.items():
                 labels[labels == k] = v
 
+        # use the mask to remove padded values from the loss (ignore_index=-1 is set by default)
         if mask is not None and labels is not None:
             # mask out dodgey labels
             # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199 is in

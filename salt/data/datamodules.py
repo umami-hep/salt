@@ -24,7 +24,15 @@ class JetDataModule(L.LightningDataModule):
         config_S3: dict | None = None,
         **kwargs,
     ):
-        """h5 jet datamodule.
+        """H5 datamodule, wraps a [`salt.data.JetDataset`][salt.data.JetDataset] for training,
+        validation and testing.
+
+        This datamodule will load data from h5 files. The training, validation and test files
+        are specified by the `train_file`, `val_file` and `test_file` arguments.
+
+        The arguments of this class can be set from the YAML config file or from the command line
+        using the `data` key. For example, to set the `batch_size` from the command line, use
+        `--data.batch_size=1000`.
 
         Parameters
         ----------
@@ -33,15 +41,15 @@ class JetDataModule(L.LightningDataModule):
         val_file : str
             Validation file path
         batch_size : int
-            Number of jets to process in each step
+            Number of samples to process in each training step
         num_workers : int
-            Number of worker processes to load batches
+            Number of CPU worker processes to load batches from disk
         num_train : int
-            Total number of training jets
+            Total number of training samples
         num_val : int
-            Total number of validation jets
+            Total number of validation samples
         num_test : int
-            Total number of testing jets
+            Total number of testing samples
         move_files_temp : str
             Directory to move training files to, default is None,
             which will result in no copying of files
