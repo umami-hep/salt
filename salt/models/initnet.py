@@ -13,6 +13,7 @@ class InitNet(nn.Module):
         variables: Vars,
         global_object: str,
         attach_global: bool = True,
+        muP: bool = False,
     ):
         """Initial input embedding network which can handle input concatenation.
 
@@ -30,6 +31,8 @@ class InitNet(nn.Module):
             Name of the global object, set automatically by the framework
         attach_global : str, optional
             Concatenate global-level inputs with constituent-level inputs before embedding
+        muP: bool, optional,
+            Whether to use the muP parametrisation (impacts initialisation).
         """
         super().__init__()
 
@@ -45,6 +48,9 @@ class InitNet(nn.Module):
         self.variables = variables
         self.attach_global = attach_global
         self.global_object = global_object
+        self.muP = muP
+        if muP:
+            self.net.reset_parameters()
 
     def forward(self, inputs: Tensors):
         x = inputs[self.input_name]

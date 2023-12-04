@@ -75,7 +75,7 @@ class SaltCLI(LightningCLI):
 
     def before_instantiate_classes(self) -> None:
         """A lot of automatic configuration is done here."""
-        sc = self.config[self.subcommand]
+        sc = self.config[self.subcommand] if self.subcommand else self.config
 
         if "config_S3" in sc.data:
             from salt.utils.file_utils import require_S3_CLI, setup_S3_CLI
@@ -111,7 +111,7 @@ class SaltCLI(LightningCLI):
         sc["model"]["norm_config"]["global_object"] = sc.data.global_object
         sc["model"]["norm_config"]["input_map"] = sc.data.input_map
 
-        if self.subcommand == "fit":
+        if self.subcommand == "fit" or self.subcommand is None:
             # add variables to init nets
             for init_net in sc.model.model.init_args.init_nets:
                 init_net["variables"] = sc.data.variables
@@ -212,7 +212,7 @@ class SaltCLI(LightningCLI):
 
     def add_jet_class_names(self) -> None:
         # add flavour label class names to jet classification task, if it exists
-        sc = self.config[self.subcommand]
+        sc = self.config[self.subcommand] if self.subcommand else self.config
         for task in sc.model.model.init_args.tasks.init_args.modules:
             t_args = task.init_args
             if (

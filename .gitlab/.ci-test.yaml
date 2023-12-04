@@ -53,6 +53,11 @@ test-GN2:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_GN2
 
+test-GN2_muP:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2_muP
+
 test-GN2emu:
   <<: *test-template
   script:

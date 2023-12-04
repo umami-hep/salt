@@ -13,7 +13,7 @@ w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_taus=False):
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
@@ -43,6 +43,12 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, inc_taus=False):
 
     if train_args:
         args += train_args
+
+    if do_muP:
+        from salt.utils.muP_utils.main_muP import main as main_muP
+
+        # skip fit and callbacks
+        main_muP(args=args[1:-2])
 
     main(args)
 
@@ -89,13 +95,14 @@ def run_combined(
     train_args=None,
     export_args=None,
     do_xbb=False,
+    do_muP=False,
     inc_taus=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
     config_base = Path(__file__).parent.parent / "configs"
 
     # run training
-    run_train(tmp_path, config_base / config, train_args, do_xbb, inc_taus)
+    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP, inc_taus)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -119,6 +126,11 @@ def test_GN1(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
     run_combined(tmp_path, CONFIG, inc_taus=True, export_args=["--include_aux"])
+
+
+@pytest.mark.filterwarnings(w)
+def test_GN2_muP(tmp_path) -> None:
+    run_combined(tmp_path, "GN2_muP.yaml", do_muP=True, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)

@@ -251,8 +251,7 @@ Note that this will break ONNX export.
 
 ### Katib
 
-In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed 
-metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
+In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to stdOut. 
 
 An example configuration to be added to the `base.yaml` config file is: 
 
@@ -265,6 +264,40 @@ callbacks:
         - a_fancy_new_metric
         - another_fancy_new_metric 
       stdOut: True # whether to print to stdOut 
+```
+
+### muP
+
+More detail on muP is given in the training docs, but the relevant configuration setups are sumamrised here. The model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+
+```yaml
+muP_config:
+    shape_path: my_path_to_a_folder_for_shape
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: 128 
+      parameter_delta: 4
+```
+
+Such that the `base` (`delta`) models are instantiated with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_muP/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup).
+
+To run a GN2 training with muP, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `muP` configuration with the following boolean parameters: 
+- for `init_nets` (only if changing embedding dim):
+```yaml
+init_nets:
+    - input_name: tracks
+        dense_config:
+            ...
+            muP: True
+```
+- for `encoder`:
+```yaml
+encoder:
+    class_path: salt.models.TransformerEncoder
+    init_args:
+        ...
+        muP: True
 ```
 
 ### S3:

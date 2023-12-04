@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from itertools import combinations
 
 import torch.nn as nn
+from mup import MuReadout
 from torch import BoolTensor, Tensor, cat
 
 from salt.models.attention import MultiheadAttention
@@ -29,6 +30,7 @@ class TransformerEncoderLayer(nn.Module):
         context_dim: int = 0,
         edge_embed_dim: int = 0,
         update_edges: bool = False,
+        muP: bool = False,
     ) -> None:
         """Init method of TransformerEncoderBlock.
 
@@ -46,17 +48,21 @@ class TransformerEncoderLayer(nn.Module):
             The embedding dimension of the transformer block for edge features
         update_edges: bool
             Value indicating whether to update edge features via attention
+        muP: bool, optional,
+            Whether to use the muP parametrisation (impacts initialisation).
         """
         super().__init__()
         self.embed_dim = embed_dim
         self.edge_embed_dim = edge_embed_dim
         self.update_edges = update_edges
+        self.muP = muP
 
         # The main blocks in the transformer
         self.mha = MultiheadAttention(
             embed_dim,
             edge_embed_dim=edge_embed_dim,
             update_edges=update_edges,
+            muP=self.muP,
             **mha_config,
         )
         if dense_config:
@@ -64,6 +70,7 @@ class TransformerEncoderLayer(nn.Module):
                 input_size=embed_dim,
                 output_size=embed_dim,
                 context_size=context_dim,
+                muP=self.muP,
                 **dense_config,
             )
         else:
@@ -133,6 +140,7 @@ class TransformerEncoder(nn.Module):
         out_dim: int = 0,
         edge_embed_dim: int = 0,
         update_edges: bool = False,
+        muP: bool = False,
     ) -> None:
         """Transformer encoder module.
 
@@ -154,6 +162,8 @@ class TransformerEncoder(nn.Module):
             Feature size for input and output of edge features
         update_edges: bool
             If set, edge features are updated in each encoder layer
+        muP: bool, optional,
+            Whether to use the muP parametrisation (impacts initialisation).
         """
         super().__init__()
         self.embed_dim = embed_dim
@@ -161,6 +171,7 @@ class TransformerEncoder(nn.Module):
         self.num_layers = num_layers
         self.out_dim = out_dim
         self.update_edges = update_edges
+        self.muP = muP
 
         self.layers = nn.ModuleList(
             [
@@ -171,6 +182,7 @@ class TransformerEncoder(nn.Module):
                     context_dim,
                     edge_embed_dim,
                     update_edges if i != num_layers - 1 else False,
+                    self.muP,
                 )
                 for i in range(num_layers)
             ]
@@ -178,8 +190,16 @@ class TransformerEncoder(nn.Module):
         self.final_norm = nn.LayerNorm(embed_dim)
 
         # For resizing the output tokens
+        if self.muP:
+            assert self.out_dim, "Need the out_dim layer for muP, \
+                as this is the last layer of the muP-part of the model"
         if self.out_dim:
-            self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
+            if self.muP:
+                self.final_linear = MuReadout(self.embed_dim, self.out_dim)
+                self.final_linear.bias.data.zero_()
+                self.final_linear.weight.data.zero_()
+            else:
+                self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
 
     def forward(
         self, x: Tensor | dict, edge_x: Tensor = None, mask: Tensor | dict | None = None, **kwargs
@@ -213,8 +233,9 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         mha_config: Mapping,
         dense_config: Mapping | None = None,
         context_dim: int = 0,
+        muP: bool = False,
     ) -> None:
-        super().__init__(embed_dim, mha_config, dense_config, context_dim)
+        super().__init__(embed_dim, mha_config, dense_config, context_dim, muP)
         self.norm0 = nn.LayerNorm(embed_dim)
 
     def forward(  # type: ignore
@@ -254,6 +275,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
         ca_every_layer: bool = False,
         merge_dict: dict[str, list[str]] | None = None,
         update_edges: bool = False,
+        muP: bool = False,
     ):
         super().__init__()
         self.input_names = input_names
@@ -263,6 +285,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
         self.ca_every_layer = ca_every_layer
         self.merge_dict = merge_dict if merge_dict else {}
         self.update_edges = update_edges
+        self.muP = muP
 
         # Generate a list of final input types, merging as necessary
         self.final_input_names = list(
@@ -282,6 +305,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                             sa_dense_config,
                             context_dim,
                             update_edges if i != num_layers - 1 else False,
+                            muP,
                         )
                         for i in range(num_layers)
                     ]
@@ -298,7 +322,11 @@ class TransformerCrossAttentionEncoder(nn.Module):
                 f"{input_name1}_{input_name2}": nn.ModuleList(
                     [
                         TransformerCrossAttentionLayer(
-                            embed_dim, mha_config, ca_dense_config, context_dim
+                            embed_dim,
+                            mha_config,
+                            ca_dense_config,
+                            context_dim,
+                            muP,
                         )
                         for _ in range(ca_layers)
                     ]
@@ -309,9 +337,18 @@ class TransformerCrossAttentionEncoder(nn.Module):
 
         self.final_norm = nn.LayerNorm(embed_dim)
 
+        if self.muP:
+            assert self.out_dim, "Need the out_dim layer for muP, \
+                as this is the last layer of the muP-part of the model"
+
         # For resizing the output tokens
         if self.out_dim:
-            self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
+            if muP:
+                self.final_linear = MuReadout(self.embed_dim, self.out_dim)
+                self.final_linear.bias.data.zero_()
+                self.final_linear.weight.data.zero_()
+            else:
+                self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
 
     def forward(
         self, x: dict[str, Tensor], mask: dict[str, Tensor], edge_x: Tensor = None, **kwargs
