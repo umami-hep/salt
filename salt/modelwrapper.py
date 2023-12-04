@@ -22,6 +22,7 @@ class ModelWrapper(L.LightningModule):
         global_object: str,
         norm_config: dict | None = None,
         name: str = "salt",
+        muP_config: dict | None = None,
     ):
         """Model wrapper class containing things that are common to all salt models.
 
@@ -45,6 +46,8 @@ class ModelWrapper(L.LightningModule):
             Keyword arguments for [`salt.models.InputNorm`][salt.models.InputNorm].
         name: str, optional
             Name of the model, used for logging and inference output names
+        muP_config: dict, optional
+            The muP configuration.
         """
         super().__init__()
         with warnings.catch_warnings():
@@ -55,6 +58,15 @@ class ModelWrapper(L.LightningModule):
         self.lrs_config = lrs_config
         self.global_object = global_object
         self.name = name
+        self.muP = muP_config if muP_config else {}
+        # Here the model should pick it up
+        if self.muP:
+            from salt.utils.muP_utils.configuration_muP import instantiate_mup
+
+            load_path = None
+            if "shape_path" in self.muP:
+                load_path = self.muP["shape_path"]
+            instantiate_mup(model, load_path)
 
         # all tasks should inherit the global object type
         self.model.global_object = self.global_object
@@ -143,7 +155,11 @@ class ModelWrapper(L.LightningModule):
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(
+        if self.muP:
+            from mup import MuAdamW as AdamW
+        else:
+            from torch.optim import AdamW
+        opt = AdamW(
             self.parameters(),
             lr=self.lrs_config["initial"],
             weight_decay=self.lrs_config.get("weight_decay", 1e-5),

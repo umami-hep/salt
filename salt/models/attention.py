@@ -5,8 +5,9 @@ import torch
 from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor, nn
 from torch.nn.functional import sigmoid
+from torch.nn.init import constant_
 
-from salt.utils.tensor_utils import masked_softmax
+from salt.utils.tensor_utils import init_method_normal, masked_softmax
 
 
 def merge_masks(
@@ -52,6 +53,7 @@ class MultiheadAttention(nn.Module):
         v_dim: int | None = None,
         out_proj: bool = True,
         update_edges: bool = False,
+        muP: bool = False,
     ) -> None:
         """Generic multihead attention.
 
@@ -102,6 +104,10 @@ class MultiheadAttention(nn.Module):
             An optional output linear layer
         update_edges : bool, optional
             Indicate whether to update edge features.
+        muP: bool, optional,
+            Whether to use the muP parametrisation.
+            Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
+            Ref: https://arxiv.org/abs/2203.03466
         """
         super().__init__()
 
@@ -122,8 +128,9 @@ class MultiheadAttention(nn.Module):
         self.edge_head_dim = edge_embed_dim // num_heads
         self.k_dim = k_dim or embed_dim
         self.v_dim = v_dim or embed_dim
-        self.scale = math.sqrt(self.head_dim)
+        self.scale = self.head_dim if muP else math.sqrt(self.head_dim)
         self.update_edges = update_edges
+        self.muP = muP
 
         # Explicitly instantiate the attention class if passed as a dictionary
         if isinstance(attention, Mapping):
@@ -145,6 +152,30 @@ class MultiheadAttention(nn.Module):
             self.linear_out = nn.Linear(self.embed_dim, self.embed_dim)
         else:
             self.register_buffer("linear_out", None)
+
+        if self.muP:
+            self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Initialise the weights and biases for muP."""
+        constant_(self.linear_q.weight, 0)  # zero initialisation of query weights
+        init_method_normal((1.0 / self.k_dim) ** 0.5)(self.linear_k.weight)
+        init_method_normal((1.0 / self.v_dim) ** 0.5)(self.linear_v.weight)
+        linear_list = [self.linear_q, self.linear_k, self.linear_v]
+        if self.edge_embed_dim > 0:
+            init_method_normal((1.0 / self.edge_embed_dim) ** 0.5)(self.linear_e.weight)
+            init_method_normal((1.0 / self.edge_embed_dim) ** 0.5)(self.linear_g.weight)
+            linear_list.extend([self.linear_e, self.linear_g])
+            if self.update_edges:
+                init_method_normal((1.0 / self.num_heads) ** 0.5)(self.linear_e_out.weight)
+                linear_list.append(self.linear_e_out)
+        if self.out_proj:
+            init_method_normal((1.0 / self.embed_dim) ** 0.5)(self.linear_out.weight)
+            linear_list.append(self.linear_out)
+
+        # Also 0 initialise the bias
+        for linear in linear_list:
+            constant_(linear.bias, 0.0)
 
     def input_projections(self, q, k, v) -> tuple:
         """Perform input linear projections, output shapes are (B,L,H,HD)."""
@@ -246,7 +277,7 @@ class MultiheadAttention(nn.Module):
 class ScaledDotProductAttention(nn.Module):
     """Scaled dot product attention, commonly used in transformers.
 
-    Contains dropout layer to stochastically mask messages, used alot in language
+    Contains dropout layer to stochastically mask messages, used a lot in language
     processing.
 
     Allows for addition of extra bias term in the attention matrix as used in the

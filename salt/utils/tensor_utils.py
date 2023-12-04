@@ -20,7 +20,7 @@ def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
 def add_dims(x: Tensor, ndim: int):
     """Adds dimensions to a tensor to match the shape of another tensor."""
     if (dim_diff := ndim - x.dim()) < 0:
-        raise ValueError(f"Target ndim ({ndim}) is larger than input ndim ({x.dim()})")
+        raise ValueError(f"Target ndim ({ndim}) is smaller than input ndim ({x.dim()})")
 
     if dim_diff > 0:
         x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
@@ -70,3 +70,14 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
         return {key: attach_context_single(val, context) for key, val in x.items()}
 
     return attach_context_single(x, context)
+
+
+def init_method_normal(std):
+    """Init method based on N(0, std).
+    Necessary for muP initialisation.
+    """
+
+    def init_(tensor):
+        return torch.nn.init.normal_(tensor, mean=0.0, std=std)
+
+    return init_
