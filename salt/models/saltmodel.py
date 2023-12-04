@@ -116,7 +116,7 @@ class SaltModel(nn.Module):
         self,
         global_rep: Tensor,
         embed_x: Tensor,
-        mask: BoolTensors,
+        masks: BoolTensors | None,
         labels: NestedTensors | None = None,
     ):
         preds: NestedTensors = {}
@@ -129,7 +129,7 @@ class SaltModel(nn.Module):
             if task.input_name == task.global_object:
                 task_preds, task_loss = task(global_rep, labels, None, context=None)
             else:
-                task_preds, task_loss = task(embed_x, labels, mask, context=global_rep)
+                task_preds, task_loss = task(embed_x, labels, masks, context=global_rep)
             if task.input_name not in preds:
                 preds[task.input_name] = {}
             preds[task.input_name][task.name] = task_preds

@@ -103,7 +103,7 @@ class ONNXModel(ModelWrapper):
         )
         self.example_input_array = jets, tracks.squeeze(0)
 
-    def forward(self, jets: Tensor, tracks: Tensor, labels=None):
+    def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore
         # in athena the jets have a batch dim but the tracks don't, so add it here
         tracks = tracks.unsqueeze(0)
 
