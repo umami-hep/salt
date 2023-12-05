@@ -1,7 +1,7 @@
 from torch import nn
 
 from salt.models import Dense
-from salt.typing import Tensors, Vars
+from salt.stypes import Tensors, Vars
 from salt.utils.tensor_utils import attach_context
 
 

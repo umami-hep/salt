@@ -275,7 +275,7 @@ A parameterised network can be configured in the following way:
             prob: [0.2, 0.3, 0.5]
     ```
 
-??? warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
+!!! warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
 
 
 
@@ -286,20 +286,12 @@ A parameterised network can be configured in the following way:
 
 #### Compiled Models
 
-Pytorch 2.0 introduced compiled models via `torch.compile()` for improved execution times. 
-You can enabled this by passing the `--compile` flag to the CLI.
-When enabled, you may see some warnings printed at the start of training, and the first step will take a while as the model is JIT compiled.
+Pytorch 2.0 introduced compiled models via `torch.compile()` which improves execution times.
+In tests, compilation can decrease the time to train GN2 by 30%.
+You can enable compilation by passing the `--compile` flag to the CLI.
+You may see some warnings printed at the start of training, and the first step will take a while as the model is JIT compiled.
 
-As of pytorch 2.0.1 there are some known limitations when compiling models:
-
-- Compiled models have fixed shapes, which precludes running the vertexing aux task (which uses tensors of variable size depending on the number of valid tracks in the batch).
-- There may be issues exporting a compiled model with ONNX.
-
-With these limitations in mind, you may find compiling your model useful for speeding up studies in cases where you don't require the vertexing task or ONNX export.
-
-You can also try to decorate functions with `@torch.compile`, for example the `forward()` methods of various submodules.
-Passing `mode="reduce-overhead"` may also improve further performance.
-Note that this will break ONNX export.
+!!! warning "Exporting compiled models to ONNX is not currently supported."
 
 
 ### Hyperparameter Optimisation

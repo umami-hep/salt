@@ -56,7 +56,7 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("data.global_object", "model.global_object")
 
     def add_arguments_to_parser(self, parser) -> None:
-        parser.add_argument("--name", default="salt", help="Name for this training run.")
+        parser.add_argument("-n", "--name", default="salt", help="Name for this training run.")
         parser.add_argument(
             "-f", "--force", action="store_true", help="Run with uncomitted changes."
         )
@@ -70,7 +70,7 @@ class SaltCLI(LightningCLI):
 
     def fit(self, model, **kwargs):
         if self.config[self.subcommand]["compile"]:
-            model = torch.compile(model, mode="reduce-overhead")
+            model.model = torch.compile(model.model)
         self.trainer.fit(model, **kwargs)
 
     def before_instantiate_classes(self) -> None:

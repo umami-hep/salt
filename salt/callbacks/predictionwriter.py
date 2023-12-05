@@ -13,7 +13,7 @@ from salt.models.task import (
     RegressionTask,
     VertexingTask,
 )
-from salt.typing import Vars
+from salt.stypes import Vars
 from salt.utils.array_utils import join_structured_arrays, maybe_pad
 
 

@@ -18,11 +18,11 @@ Salt requires Python 3.9 or later.
 
 === "conda"
 
-    After cloning the repo, you will need to set up conda if you don't already have it installed.
+    After cloning the repo, you will need to set up conda/mamba if you don't already have it installed.
 
     ??? info "Check for an existing conda installation"
 
-        Your institute cluster may already have a managed conda installation present,
+        Your institute cluster may already have a managed conda/mamba installation present,
         please consult any local experts or documentation to find out whether this is the case.
 
         If already present you should skip the installation, and instead just create a new environment.
@@ -36,10 +36,10 @@ Salt requires Python 3.9 or later.
     source setup/setup_conda.sh
     ```
 
-    Once you have conda installed, you can instead create a fresh python environment using
+    Once you have mamba installed, you can instead create a fresh python environment using
 
     ```
-    conda create -n salt python=3.10
+    mamba create -n salt python=3.11
     ```
 
     To activate it, just run

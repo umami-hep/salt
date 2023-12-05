@@ -39,16 +39,19 @@ The model name is used to construct the output probability variable names in Ath
 ### Athena Validation
 
 You may see some warnings during export, but the `to_onnx` script will verify that there is a good level of compatability between the pytorch and ONNX model outputs, and that there are no `nan` or `0` values in the output.
+However, as a final check, you should verify the performance of your pytorch model against a version running from the TDD.
 
-However, as a final check, you should verify the performance of your pytorch model against a version running from the TDD by following the instructions [here](https://training-dataset-dumper.docs.cern.ch/configuration/#dl2-config) to dump the scores of your converted model.
+First, follow the instructions [here](https://training-dataset-dumper.docs.cern.ch/configuration/#dl2-config) to dump the scores of your export model.
 Please take note of the following considerations when comparing Athena and Python evaluated models:
 
 - Models in Athena are evaluated with full precision inputs. Make sure to dump using the TDD at full precision (use the provided flag `--force-full-precision`).
-- Models evaluated in Athena are not run for jets with less than two tracks (note: this may not longer be true).
 - Models evaluated in Python are limited to 40 input tracks, whereas models evaluated in Athena have no such limit.
 
+
 Once you have evaluated your model using the TDD, you should use the resulting h5 file to run `salt test`.
-You can then the provided `compare_models` command to compare the scores of the two models.
+Be sure to run with `--trainer.precision 32`.
+
+Finally, you can then the `compare_models` command to compare the scores of the two models.
 
 ```bash
 compare_models \
@@ -71,6 +74,7 @@ See `compare_models.py -h` for more information.
     - Not writing out salt evaluation scores at full precision (see the `PredictionWriter` callback)
     - Enabling some runtime optimisaiton in pytorch (e.g. [here](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision))
 
+
 ### Viewing ONNX Model Metadata
 
 To view the metadata stored in an ONNX file, you can use
@@ -80,7 +84,6 @@ get_onnx_metadata path/to/model.onnx
 ```
 
 Inside are the list of input features including normalisation values, and also the list of outputs and the model name.
-
 
 ??? info "A command with the same name is also available in Athena"
 
