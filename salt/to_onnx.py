@@ -205,7 +205,6 @@ def compare_outputs(pt_model, onnx_path, include_aux):
         str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
     )
     for n_track in tqdm(range(0, 40), leave=False):
-        print(n_track)
         for _ in range(10):
             compare_output(pt_model, session, include_aux, n_track)
 
@@ -229,7 +228,7 @@ def main(args=None):
 
     config = yaml.safe_load(config_path.read_text())
     model_name = args.name if args.name else config["name"]
-    model_name = model_name.replace("-", "_")  # dashes not allowed for AuxVars
+    model_name = model_name.replace("-", "_")  # dashes are not allowed for AuxVars in Athena
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -258,7 +257,7 @@ def main(args=None):
     # configure inputs and outputs
     jet_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["jet_classes"]
     input_names = ["jet_features", "track_features"]
-    output_names = [f"p{flav.rstrip('jets')}" for flav in jet_classes.values()]
+    output_names = [f"{model_name}_p{flav.rstrip('jets')}" for flav in jet_classes.values()]
     dynamic_axes = {"track_features": {0: "n_tracks"}}
 
     if args.include_aux:
@@ -320,7 +319,7 @@ def add_metadata(
     trk_vars = config["data"]["variables"]["tracks"]
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
 
-    # add inputs
+    # add input info - needed by athena!
     metadata["inputs"] = [
         {
             "name": "jet_var",
