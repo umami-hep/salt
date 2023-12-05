@@ -57,7 +57,7 @@ Finally, you can then the `compare_models` command to compare the scores of the 
 compare_models \
     --file_A tdd/output.h5 \
     --tagger_A name \
-    --file_A salt/eval.h5 \
+    --file_B salt/eval.h5 \
     --tagger_B name
 ```
 

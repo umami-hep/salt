@@ -16,14 +16,14 @@ class GlobalAttentionPooling(Pooling):
         super().__init__()
         self.gate_nn = nn.Linear(input_size, 1)
 
-    def forward(self, x: Tensor | dict, mask: dict | None = None):
+    def forward(self, x: Tensor | dict, pad_mask: dict | None = None):
         if isinstance(x, dict):
             x = torch.cat(list(x.values()), dim=1)
 
-        if mask is not None:
-            mask = torch.cat(list(mask.values()), dim=1).unsqueeze(-1)
+        if pad_mask is not None:
+            pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
 
-        weights = masked_softmax(self.gate_nn(x), mask, dim=1)
+        weights = masked_softmax(self.gate_nn(x), pad_mask, dim=1)
 
         # add padded track to avoid error in onnx model when there are no tracks in the jet
         weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
@@ -63,7 +63,7 @@ class BaseCrossAttentionPooling(Pooling):
 
 
 class DictCrossAttentionPooling(BaseCrossAttentionPooling):
-    def forward(self, x: dict, mask: dict | None = None, context: Tensor | None = None):
+    def forward(self, x: dict, pad_mask: dict | None = None, context: Tensor | None = None):
         class_token = self.expand_class_token(x)
         for layer in self.ca_layers:
             new_class_token = torch.zeros_like(class_token)
@@ -71,7 +71,7 @@ class DictCrossAttentionPooling(BaseCrossAttentionPooling):
                 new_class_token += layer(
                     class_token,
                     x[input_name],
-                    key_value_mask=mask[input_name] if mask else None,
+                    key_value_mask=pad_mask[input_name] if pad_mask else None,
                     context=context,
                 )
             class_token = new_class_token
@@ -81,13 +81,13 @@ class DictCrossAttentionPooling(BaseCrossAttentionPooling):
 
 
 class TensorCrossAttentionPooling(BaseCrossAttentionPooling):
-    def forward(self, x: Tensor, mask: dict | None = None, context: Tensor | None = None):
+    def forward(self, x: Tensor, pad_mask: dict | None = None, context: Tensor | None = None):
         class_token = self.expand_class_token(x)
-        if mask is not None:
-            mask = torch.cat(list(mask.values()), dim=1)
+        if pad_mask is not None:
+            pad_mask = torch.cat(list(pad_mask.values()), dim=1)
 
         for layer in self.ca_layers:
-            class_token = layer(class_token, x, key_value_mask=mask, context=context)
+            class_token = layer(class_token, x, key_value_mask=pad_mask, context=context)
 
         class_token = self.final_norm(class_token)
         return class_token.squeeze(1)

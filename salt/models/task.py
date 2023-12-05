@@ -48,11 +48,11 @@ class TaskBase(nn.Module, ABC):
         self.loss = loss
         self.weight = weight
 
-    def input_name_mask(self, masks: Mapping):
+    def input_name_mask(self, pad_masks: Mapping):
         return torch.cat(
             [
                 torch.ones(m.shape[1], device=m.device) * (t == self.input_name)
-                for t, m in masks.items()
+                for t, m in pad_masks.items()
             ],
         ).bool()
 
@@ -112,17 +112,17 @@ class ClassificationTask(TaskBase):
         self,
         x: Tensor,
         labels_dict: Mapping,
-        masks: Mapping | None = None,
+        pad_masks: Mapping | None = None,
         context: Tensor = None,
     ):
         # get predictions and mask
-        if masks is not None:
-            input_name_mask = self.input_name_mask(masks)
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
             preds = self.net(x[:, input_name_mask], context)
-            mask = masks[self.input_name]
+            pad_mask = pad_masks[self.input_name]
         else:
             preds = self.net(x, context)
-            mask = None
+            pad_mask = None
 
         # get labels and remap them if necessary
         labels = labels_dict[self.input_name][self.label] if labels_dict else None
@@ -131,13 +131,13 @@ class ClassificationTask(TaskBase):
                 labels[labels == k] = v
 
         # use the mask to remove padded values from the loss (ignore_index=-1 is set by default)
-        if mask is not None and labels is not None:
+        if pad_mask is not None and labels is not None:
             # mask out dodgey labels
             # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199 is in
-            mask = torch.masked_fill(mask, labels == -2, True)
+            pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
 
             # update the labels based on the mask (in case not done already)
-            labels = torch.masked_fill(labels, mask, -1)
+            labels = torch.masked_fill(labels, pad_mask, -1)
 
         loss = None
         if labels is not None:
@@ -150,13 +150,13 @@ class ClassificationTask(TaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, mask: Tensor | None = None, precision: str = "f4"):
-        if mask is None:
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None, precision: str = "f4"):
+        if pad_mask is None:
             assert preds.ndim == 2
             probs = torch.softmax(preds, dim=-1)
         else:
             assert preds.ndim == 3
-            probs = masked_softmax(preds, mask.unsqueeze(-1))
+            probs = masked_softmax(preds, pad_mask.unsqueeze(-1))
         assert self.class_names is not None
         dtype = np.dtype([(n, precision) for n in self.class_names])
         return u2s(probs.float().cpu().numpy(), dtype)
@@ -220,12 +220,12 @@ class RegressionTaskBase(TaskBase, ABC):
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
         """
-        mask = torch.isnan(targets)
-        preds = torch.where(mask, torch.zeros_like(preds), preds)
-        targets = torch.where(mask, torch.zeros_like(targets), targets)
+        invalid = torch.isnan(targets)
+        preds = torch.where(invalid, torch.zeros_like(preds), preds)
+        targets = torch.where(invalid, torch.zeros_like(targets), targets)
 
         if "var" in kwargs:
-            kwargs["var"] = torch.where(mask, torch.zeros_like(kwargs["var"]), kwargs["var"])
+            kwargs["var"] = torch.where(invalid, torch.zeros_like(kwargs["var"]), kwargs["var"])
 
         loss = self.loss(preds, targets, **kwargs)
 
@@ -282,9 +282,13 @@ class RegressionTask(RegressionTaskBase):
             )
 
     def forward(
-        self, x: Tensor, targets_dict: Mapping, masks: Mapping | None = None, context: Tensor = None
+        self,
+        x: Tensor,
+        targets_dict: Mapping,
+        pad_masks: Mapping | None = None,
+        context: Tensor = None,
     ):
-        if x.ndim != 2 or masks is not None:
+        if x.ndim != 2 or pad_masks is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
@@ -335,10 +339,10 @@ class GaussianRegressionTask(RegressionTaskBase):
         self,
         x: Tensor,
         targets_dict: Mapping,
-        masks: Mapping | None = None,
+        pad_masks: Mapping | None = None,
         context: Tensor = None,
     ):
-        if x.ndim != 2 or masks is not None:
+        if x.ndim != 2 or pad_masks is not None:
             raise NotImplementedError(
                 "Regression tasks are currently only supported for jet-level predictions."
             )
@@ -399,12 +403,12 @@ class VertexingTask(TaskBase):
         self,
         x: Tensor,
         labels_dict: Mapping,
-        masks: Tensor = None,
+        pad_masks: Tensor = None,
         context: Tensor = None,
     ):
-        if masks is not None:
-            input_name_mask = self.input_name_mask(masks)
-            mask = masks[self.input_name]
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            mask = pad_masks[self.input_name]
             x = x[:, input_name_mask]
         else:
             mask = None
@@ -475,9 +479,9 @@ class VertexingTask(TaskBase):
         weights = weights[adjmat]
         return 1 + weights
 
-    def run_inference(self, preds: Tensor, mask: Tensor | None = None, precision: str = "f4"):
-        preds = get_node_assignment(preds, mask)
-        preds = mask_fill_flattened(preds, mask)
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None, precision: str = "f4"):
+        preds = get_node_assignment(preds, pad_mask)
+        preds = mask_fill_flattened(preds, pad_mask)
         dtype = np.dtype([("VertexIndex", "i8")])
         return u2s(preds.int().cpu().numpy(), dtype)
 

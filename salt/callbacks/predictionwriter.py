@@ -87,7 +87,7 @@ class PredictionWriter(Callback):
         # place to store intermediate outputs
         self.tasks = module.model.tasks
         self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
-        self.masks: dict = {}
+        self.pad_masks: dict = {}
 
         # get jet class names for output file
         for task in self.tasks:
@@ -113,23 +113,23 @@ class PredictionWriter(Callback):
 
     def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):
         preds = outputs
-        inputs, masks, labels = batch
+        inputs, pad_masks, labels = batch
         add_mask = False
         for task in self.tasks:
             if not self.write_tracks and task.input_name == "tracks":
                 continue
 
             this_preds = preds[task.input_name][task.name]
-            this_mask = masks.get(task.input_name)
+            this_pad_masks = pad_masks.get(task.input_name)
 
             if isinstance(task, ClassificationTask):
                 # special case for jet classification output names
                 if task.name == "jet_classification":
                     flavs = [f"{Flavs[c].px}" if c in Flavs else f"p{c}" for c in self.jet_classes]
                     task.class_names = [f"{module.name}_{px}" for px in flavs]
-                this_preds = task.run_inference(this_preds, this_mask, self.precision)
+                this_preds = task.run_inference(this_preds, this_pad_masks, self.precision)
             elif isinstance(task, VertexingTask):
-                this_preds = task.run_inference(this_preds, this_mask)
+                this_preds = task.run_inference(this_preds, this_pad_masks)
             elif issubclass(type(task), RegressionTask):
                 this_preds = task.run_inference(this_preds, labels, self.precision)
             elif issubclass(type(task), GaussianRegressionTask):
@@ -143,10 +143,10 @@ class PredictionWriter(Callback):
                 self.outputs[task.input_name][task.name + "_stddev"].append(stddevs)
             else:
                 self.outputs[task.input_name][task.name].append(this_preds)
-            if this_mask is not None and add_mask is False:
-                if task.input_name not in self.masks:
-                    self.masks[task.input_name] = []
-                self.masks[task.input_name].append(this_mask)
+            if this_pad_masks is not None and add_mask is False:
+                if task.input_name not in self.pad_masks:
+                    self.pad_masks[task.input_name] = []
+                self.pad_masks[task.input_name].append(this_pad_masks)
                 add_mask = True
 
     def on_test_end(self, trainer, module):
@@ -172,10 +172,12 @@ class PredictionWriter(Callback):
                 this_outputs.append(maybe_pad(x, inputs))
 
             # add mask if present
-            if name in self.masks:
-                mask = np.concatenate([m.cpu() for m in self.masks[name]])  # concat test batches
-                mask = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
-                this_outputs.append(maybe_pad(mask, inputs))
+            if name in self.pad_masks:
+                pad_mask = np.concatenate(
+                    [m.cpu() for m in self.pad_masks[name]]
+                )  # concat test batches
+                pad_mask = u2s(np.expand_dims(pad_mask, -1), dtype=np.dtype([("mask", "?")]))
+                this_outputs.append(maybe_pad(pad_mask, inputs))
 
             # join structured arrays
             this_outputs = join_structured_arrays(this_outputs)

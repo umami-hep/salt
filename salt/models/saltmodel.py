@@ -55,7 +55,10 @@ class SaltModel(nn.Module):
             assert self.init_nets[0].input_name == self.init_nets[0].global_object
 
     def forward(
-        self, inputs: Tensors, masks: BoolTensors | None = None, labels: NestedTensors | None = None
+        self,
+        inputs: Tensors,
+        pad_masks: BoolTensors | None = None,
+        labels: NestedTensors | None = None,
     ) -> tuple[NestedTensors, Tensors]:
         """Forward pass through the `SaltModel`.
 
@@ -66,7 +69,7 @@ class SaltModel(nn.Module):
         inputs : Tensors
             Dict of input tensors for each modality. Each tensor is of shape
             `(batch_size, num_inputs, input_size)`.
-        masks : BoolTensors
+        pad_masks : BoolTensors
             Dict of input padding mask tensors for each modality. Each tensor is of
             shape `(batch_size, num_inputs)`.
         labels : Tensors, optional
@@ -95,11 +98,13 @@ class SaltModel(nn.Module):
         # input encoding
         combined_embeddings = initial_embeddings
         if self.encoder:
-            combined_embeddings = self.encoder(initial_embeddings, mask=masks, edge_x=edge_x)
+            combined_embeddings = self.encoder(
+                initial_embeddings, pad_mask=pad_masks, edge_x=edge_x
+            )
 
         # pooling
         if self.pool_net:
-            global_rep = self.pool_net(combined_embeddings, mask=masks)
+            global_rep = self.pool_net(combined_embeddings, pad_mask=pad_masks)
         else:
             global_rep = initial_embeddings[self.global_object]
 
@@ -108,7 +113,7 @@ class SaltModel(nn.Module):
             global_rep = torch.cat([global_rep, global_feats], dim=-1)
 
         # run tasks
-        preds, loss = self.run_tasks(global_rep, combined_embeddings, masks, labels)
+        preds, loss = self.run_tasks(global_rep, combined_embeddings, pad_masks, labels)
 
         return preds, loss
 

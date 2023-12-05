@@ -45,7 +45,7 @@ def test_pooling(pooling) -> None:
     mask = get_random_mask(1, 6, p_valid=1)
     mask[:, -1] = True
     mask = {"mask": mask}
-    out_with_mask = net(x, mask=mask)
+    out_with_mask = net(x, pad_mask=mask)
     assert torch.all(out == out_with_mask)
 
 
@@ -70,17 +70,17 @@ def test_transformer() -> None:
     assert torch.all(net(torch.rand(10, 0, 10)) == torch.empty((10, 0, 10)))
 
     # test fully padded case
-    out = net(torch.rand(1, 10, 10), mask=get_random_mask(1, 10, p_valid=0))
+    out = net(torch.rand(1, 10, 10), pad_mask=get_random_mask(1, 10, p_valid=0))
     assert not torch.isnan(out).any()
 
     # test that adding a padded track does not change the output
     tracks = torch.rand(1, 10, 10)
     mask = get_random_mask(1, 10, p_valid=1)
-    out = net(tracks, mask=mask)
+    out = net(tracks, pad_mask=mask)
     tracks = torch.cat([tracks, torch.zeros((1, 1, tracks.shape[2]))], dim=1)
     mask = torch.zeros(tracks.shape[:-1]).bool()
     mask[:, -1] = True
-    out_with_pad = net(tracks, mask=mask)[:, :-1]
+    out_with_pad = net(tracks, pad_mask=mask)[:, :-1]
     assert torch.all(out == out_with_pad)
 
 
