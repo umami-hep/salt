@@ -9,7 +9,7 @@ If you want to get started running the code without producing your own samples, 
     Several 30M jet slices are available below in the following folder:
 
     ```
-    /eos/home-u/umami/training-samples/2023/GN2v01_fold3/
+    /eos/atlas/atlascerngroupdisk/perf-flavtag/training/training_gn2_fold3_20231205_mc20mc23_combined_270M
     ```
 
     The samples contain only jets from the 3rd fold in a 4-fold setup (see the preprocessing configs for more info).
