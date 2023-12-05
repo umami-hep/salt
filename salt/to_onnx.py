@@ -286,6 +286,7 @@ def main(args=None):
         args.ckpt_path,
         onnx_path,
         model_name,
+        output_names,
         args.track_selection,
     )
 
@@ -302,6 +303,7 @@ def add_metadata(
     ckpt_path,
     onnx_path,
     model_name,
+    output_names,
     track_selection,
 ):
     print("\n" + "-" * 100)
@@ -318,6 +320,7 @@ def add_metadata(
     jet_vars = config["data"]["variables"]["jets"]
     trk_vars = config["data"]["variables"]["tracks"]
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
+    metadata["output_names"] = output_names
 
     # add input info - needed by athena!
     metadata["inputs"] = [
