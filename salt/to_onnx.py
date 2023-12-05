@@ -122,10 +122,10 @@ class ONNXModel(ModelWrapper):
                 onnx_outputs += (outputs_track,)
 
             if "track_vertexing" in track_outs:
-                mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
+                pad_mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
                 edge_scores = track_outs["track_vertexing"]
-                vertex_indices = get_node_assignment(edge_scores, mask)
-                vertex_list = mask_fill_flattened(vertex_indices, mask)
+                vertex_indices = get_node_assignment(edge_scores, pad_mask)
+                vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
                 onnx_outputs += (vertex_list.reshape(-1).char(),)
 
         return onnx_outputs
@@ -134,12 +134,12 @@ class ONNXModel(ModelWrapper):
 def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     n_batch = 1
 
-    jets, tracks, mask = inputs_sep_with_pad(
+    jets, tracks, pad_mask = inputs_sep_with_pad(
         n_batch, n_track, pt_model.input_dims["jets"], pt_model.input_dims["tracks"], p_valid=1
     )
 
     inputs_pt = {"jets": jets, "tracks": tracks}
-    outputs_pt = pt_model(inputs_pt, {"tracks": mask})[0]
+    outputs_pt = pt_model(inputs_pt, {"tracks": pad_mask})[0]
     pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jet_classification"])]
 
     inputs_onnx = {
@@ -181,8 +181,8 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     # test vertexing
     if include_aux:
         pred_pt_scores = outputs_pt["tracks"]["track_vertexing"].detach()
-        pred_pt_indices = get_node_assignment(pred_pt_scores, mask)
-        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, mask)
+        pred_pt_indices = get_node_assignment(pred_pt_scores, pad_mask)
+        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, pad_mask)
 
         pred_onnx_vtx = outputs_onnx[-1]
         np.testing.assert_allclose(

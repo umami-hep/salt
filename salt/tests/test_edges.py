@@ -34,7 +34,7 @@ def test_transformer_edges() -> None:
 
     # test fully padded case
     out = net(
-        torch.rand(1, 10, 10), torch.rand(1, 10, 10, 10), mask=get_random_mask(1, 10, p_valid=0)
+        torch.rand(1, 10, 10), torch.rand(1, 10, 10, 10), pad_mask=get_random_mask(1, 10, p_valid=0)
     )
     assert not torch.isnan(out).any()
 
@@ -42,13 +42,13 @@ def test_transformer_edges() -> None:
     tracks = torch.rand(1, 10, 10)
     edges = torch.rand(1, 10, 10, 10)
     mask = get_random_mask(1, 10, p_valid=1)
-    out = net(tracks, edges, mask=mask)
+    out = net(tracks, edges, pad_mask=mask)
     tracks = torch.cat([tracks, torch.zeros((1, 1, tracks.shape[2]))], dim=1)
     edges = torch.cat([edges, torch.zeros((1, 1, 10, edges.shape[3]))], dim=1)
     edges = torch.cat([edges, torch.zeros((1, 11, 1, edges.shape[3]))], dim=2)
     mask = torch.zeros(tracks.shape[:-1]).bool()
     mask[:, -1] = True
-    out_with_pad = net(tracks, edges, mask=mask)[:, :-1]
+    out_with_pad = net(tracks, edges, pad_mask=mask)[:, :-1]
     assert torch.all(out == out_with_pad)
 
 

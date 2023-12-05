@@ -90,7 +90,7 @@ class ModelWrapper(L.LightningModule):
         assert norm_config is not None
         self.norm = InputNorm(**norm_config)
 
-    def forward(self, inputs, masks=None, labels=None):
+    def forward(self, inputs, pad_masks=None, labels=None):
         """Generic forward pass through any salt-compatible model.
 
         This function performs input normalisation and then calls the `self.model`'s
@@ -100,7 +100,7 @@ class ModelWrapper(L.LightningModule):
         ----------
         inputs
             Any generic input to the model.
-        masks
+        pad_masks
             Input padding masks.
         labels
             Training targets. If not specified, assume we are running model inference
@@ -111,7 +111,7 @@ class ModelWrapper(L.LightningModule):
         Whatever is returned by `self.model`'s forward pass.
         """
         x = self.norm(inputs)
-        return self.model(x, masks, labels)
+        return self.model(x, pad_masks, labels)
 
     def shared_step(self, batch, evaluation=False):
         """Function used to unpack the batch, run the forward pass, and compute
@@ -120,7 +120,7 @@ class ModelWrapper(L.LightningModule):
         Parameters
         ----------
         batch : tuple
-            A single batch of inputs, masks and labels
+            A single batch of inputs, pad_masks and labels
         evaluation : bool
             If true, don't compute the losses and return early
 
@@ -134,18 +134,18 @@ class ModelWrapper(L.LightningModule):
             Reduced loss over the input batch
         """
         # unpack the batch
-        inputs, mask, labels = batch
+        inputs, pad_masks, labels = batch
 
         # forward pass through model
-        preds, loss = self(inputs, mask, labels)
+        preds, loss = self(inputs, pad_masks, labels)
 
         if evaluation:
-            return preds, labels, mask, None
+            return preds, labels, pad_masks, None
 
         # compute total loss
         loss["loss"] = sum(subloss for subloss in loss.values())
 
-        return preds, labels, mask, loss
+        return preds, labels, pad_masks, loss
 
     def log_losses(self, loss, stage):
         kwargs = {"sync_dist": len(self.trainer.device_ids) > 1}
@@ -174,8 +174,8 @@ class ModelWrapper(L.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        inputs, mask, labels = batch
-        batch = (inputs, mask, None)
+        inputs, pad_masks, labels = batch
+        batch = (inputs, pad_masks, None)
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self):

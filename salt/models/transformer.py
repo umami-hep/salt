@@ -88,7 +88,7 @@ class TransformerEncoderLayer(nn.Module):
         self,
         x: Tensor,
         edge_x: Tensor | None = None,
-        mask: BoolTensor | None = None,
+        pad_mask: BoolTensor | None = None,
         context: Tensor | None = None,
         attn_mask: BoolTensor | None = None,
         attn_bias: Tensor | None = None,
@@ -97,14 +97,14 @@ class TransformerEncoderLayer(nn.Module):
             xi, edge_xi = self.mha(
                 self.norm1(x),
                 edges=self.enorm1(edge_x),
-                q_mask=mask,
+                q_mask=pad_mask,
                 attn_mask=attn_mask,
                 attn_bias=attn_bias,
             )
         else:
             xi = self.mha(
                 self.norm1(x),
-                q_mask=mask,
+                q_mask=pad_mask,
                 attn_mask=attn_mask,
                 attn_bias=attn_bias,
             )
@@ -202,20 +202,24 @@ class TransformerEncoder(nn.Module):
                 self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
 
     def forward(
-        self, x: Tensor | dict, edge_x: Tensor = None, mask: Tensor | dict | None = None, **kwargs
+        self,
+        x: Tensor | dict,
+        edge_x: Tensor = None,
+        pad_mask: Tensor | dict | None = None,
+        **kwargs,
     ) -> Tensor:
         """Pass the input through all layers sequentially."""
         if isinstance(x, dict):
             x = cat(list(x.values()), dim=1)
 
-        if isinstance(mask, dict):
-            mask = cat(list(mask.values()), dim=1)
+        if isinstance(pad_mask, dict):
+            pad_mask = cat(list(pad_mask.values()), dim=1)
 
         for layer in self.layers:
             if edge_x is not None:
-                x, edge_x = layer(x, edge_x, mask=mask, **kwargs)
+                x, edge_x = layer(x, edge_x, pad_mask=pad_mask, **kwargs)
             else:
-                x = layer(x, mask=mask, **kwargs)
+                x = layer(x, pad_mask=pad_mask, **kwargs)
         x = self.final_norm(x)
 
         # optional resizing layer
@@ -367,7 +371,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
         for i in range(self.num_layers):
             # Self-attention for each type
             for it in self.final_input_names:
-                updated_x[it] += self.type_layers[it][i](x[it], mask=mask[it], **kwargs)
+                updated_x[it] += self.type_layers[it][i](x[it], pad_mask=mask[it], **kwargs)
 
             # Cross-attention between pairs of types - symmetric update
             # i % len(self.cross_layers[layer_key]) evals to 0 for first layer

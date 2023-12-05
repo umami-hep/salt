@@ -129,12 +129,12 @@ class JetDataset(Dataset):
         Returns
         -------
         tuple
-            Dict of tensor for each of the inputs, masks, and labels.
+            Dict of tensor for each of the inputs, pad_masks, and labels.
             Each tensor will contain a batch of samples.
         """
         inputs = {}
         labels = {}
-        masks = {}
+        pad_masks = {}
 
         # loop over input types
         for input_name in self.input_map:
@@ -168,11 +168,11 @@ class JetDataset(Dataset):
                             prob = self.parameters[param]["prob"]
                         except KeyError:
                             prob = None
-                        mask = ~np.isin(flat_array[:, ind], self.parameters[param]["train"])
+                        pad_masks = ~np.isin(flat_array[:, ind], self.parameters[param]["train"])
                         random = np.random.choice(
-                            self.parameters[param]["train"], size=np.sum(mask), p=prob
+                            self.parameters[param]["train"], size=np.sum(pad_masks), p=prob
                         )
-                        flat_array[mask, ind] = random
+                        flat_array[pad_masks, ind] = random
 
                     if self.stage == "test":
                         # assign parameter values for all jets to those passed in the 'test' option
@@ -190,9 +190,9 @@ class JetDataset(Dataset):
 
                 # apply the input padding mask
                 if "valid" in batch.dtype.names and input_name not in ["EDGE", "PARAMETERS"]:
-                    masks[input_name] = ~torch.from_numpy(batch["valid"])
+                    pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
                     if input_name not in [self.global_object, "GLOBAL"]:
-                        inputs[input_name][masks[input_name]] = 0
+                        inputs[input_name][pad_masks[input_name]] = 0
 
                 # check inputs are finite
                 if not torch.isfinite(inputs[input_name]).all():
@@ -214,7 +214,7 @@ class JetDataset(Dataset):
                             self.file["labels"][jet_idx], dtype=torch.long
                         )
 
-        return inputs, masks, labels
+        return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
         num_available = len(self.dss[self.global_object])
