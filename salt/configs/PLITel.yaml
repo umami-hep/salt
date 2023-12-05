@@ -1,0 +1,140 @@
+name: PLITel
+
+model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: electron_tracks
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.TransformerEncoder
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 3
+          out_dim: &out_dim 128
+          mha_config:
+            num_heads: 4
+            attention: { class_path: salt.models.ScaledDotProductAttention }
+          dense_config:
+            activation: *activation
+            dropout: &dropout 0.0
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                # needs to be jet_classification for salt to recognise global_object classification
+                name: jet_classification
+                input_name: electrons
+                label: flavour_label
+                class_names: [elxprompt, npxall]
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [1.0, 1.9] }
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  dropout: *dropout
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: electron_tracks
+                label: ftagTruthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [1.52, 963.55, 1.0, 13.32, 9.4, 34.65, 112.99, 25.84]
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: electron_tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+
+data:
+  global_object: electrons
+  variables:
+    electrons:
+      - pt
+      - eta
+      - phi
+      - ptvarcone30Rel
+      - topoetcone30Rel
+      - caloClusterSumEtRel
+      - ptfrac_lepton
+      - ptrel_lepton
+      - dRtrackjet_lepton
+      - nTracksTrackjet
+    electron_tracks:
+      - ptfrac
+      - dr_trackjet
+      # - dr_lepton
+      - btagIp_d0
+      - btagIp_z0SinTheta
+      - btagIp_d0Uncertainty
+      # - btagIp_z0SinThetaUncertainty
+      - btagIp_d0_significance
+      - btagIp_z0SinTheta_significance
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTHits
+      - numberOfSCTSharedHits
+
+
+  train_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/pp_output_train.h5
+  val_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/pp_output_val.h5
+  norm_dict: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/norm_dict.yaml
+  class_dict: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/class_dict.yaml
+
+  batch_size: 400
+  num_workers: 60
+
+  num_train: 38_000_000
+  num_val: 3_000_000
+  num_test: 3_000_000
+
+trainer:
+  max_epochs: 40
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
