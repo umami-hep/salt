@@ -4,12 +4,27 @@ The specific format of the H5 files is described [below][salt-input-format].
 A series of steps are therefore to extract data from xAODs into a format that can be read by salt.
 If you want to get started running the code without producing your own samples, some samples are available on EOS:
 
-| Sample | Num Jets | Location |
-|--------|----------|----------|
-| Single b-tagging | 30M | `/eos/atlas/atlascerngroupdisk/perf-flavtag/training/training_gn2_20230915_mc20mc23_combined_30Mjets` |
-| Single b-tagging | 300M | `/eos/atlas/atlascerngroupdisk/perf-flavtag/training/training_gn2_20230915_mc20mc23_combined_300Mjets` |
-| Xbb tagging | 5M | `/eos/user/u/umami/training-samples/gnn/xbb/` |
-| Xbb tagging (new format) | 6M | `/eos/user/u/umami/training-samples/gnn/xbb_3d/` |
+??? example "Single b-tagging"
+
+    Several 30M jet slices are available below in the following folder:
+
+    ```
+    /eos/home-u/umami/training-samples/2023/GN2v01_fold3/
+    ```
+
+    The samples contain only jets from the 3rd fold in a 4-fold setup (see the preprocessing configs for more info).
+    
+    If you want to train on more than 30M jets, you can easily combine the files using
+    [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools/#create-virtual-file)
+
+??? example "Xbb tagging"
+    
+    See also the [xbb docs](https://xbb-docs.docs.cern.ch/Samples/Training/)
+
+    | Sample | Num Jets | Location |
+    |--------|----------|----------|
+    | Xbb tagging | 5M | `/eos/user/u/umami/training-samples/gnn/xbb/` |
+    | Xbb tagging (new format) | 6M | `/eos/user/u/umami/training-samples/gnn/xbb_3d/` |
 
 
 
