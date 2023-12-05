@@ -5,7 +5,7 @@ from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
 from salt.data.edge_features import get_dtype_edge, get_inputs_edge
-from salt.typing import Vars
+from salt.stypes import Vars
 from salt.utils.inputs import as_half
 
 

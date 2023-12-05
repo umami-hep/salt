@@ -118,7 +118,7 @@ data:
   class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
   #move_files_temp: /dev/shm/svanstro/salt/gn2/
 
-  batch_size: 400
+  batch_size: 4000
   num_workers: 40
 
 trainer:
