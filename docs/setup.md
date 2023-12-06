@@ -165,6 +165,20 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     and then re-run `pip install`.
 
 
+??? failure "`RuntimeError: The NVIDIA driver on your system is too old` when running salt"
+    
+    If you see the following error when running `salt fit`, then you need to install suitable pytorch version.
+    You can read about available versions [here](https://pytorch.org/get-started/locally/).
+
+    First, create a new conda environment and activate it.
+    Assuming, you have chosen `pytorch-cuda=11.8`, run in the new conda environment:
+    ```
+    mamba install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia
+    ```
+
+    and then re-run `pip install`.
+
+
 ??? info "Installing `h5ls`"
 
     If you set up with conda/mamba, you can run
