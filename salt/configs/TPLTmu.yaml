@@ -1,0 +1,154 @@
+name: TPLTmu
+
+model:
+  lrs_config:
+    initial: 1e-3
+    max: 1e-3
+    end: 1e-3
+    pct_start: 0.1
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: muon_tracks
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.TransformerEncoder
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 3
+          out_dim: &out_dim 128
+          mha_config:
+            num_heads: 2
+            attention: { class_path: salt.models.ScaledDotProductAttention }
+          dense_config:
+            activation: *activation
+            dropout: &dropout 0.1
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                # needs to be jet_classification for salt to recognise global_object classification
+                name: jet_classification
+                input_name: muons
+                label: flavour_label
+                class_names: [muxprompt, npxall]
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [1.0, 1.0] }
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+                  dropout: *dropout
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: muon_tracks
+                label: ftagTruthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: muon_tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+
+            # - class_path: salt.models.ClassificationTask
+            #   init_args:
+            #     name: track_type
+            #     input_name: muon_tracks
+            #     label: ftagTruthTypeLabel
+            #     weight: 0.5
+            #     loss:
+            #       class_path: torch.nn.CrossEntropyLoss
+            #       init_args:
+            #         weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            #     dense_config:
+            #       <<: *task_dense_config
+            #       output_size: 7
+            #       context_size: *out_dim
+
+
+data:
+  global_object: muons
+  variables:
+    muons:
+      - pt
+      - eta
+      - phi
+      - ptvarcone30TTVARel
+      - topoetcone30Rel
+      - caloClusterERel
+      - ptfrac_lepton
+      - ptrel_lepton
+      - dRtrackjet_lepton
+      - nTracksTrackjet
+    muon_tracks:
+      - ptfrac
+      - dr_trackjet
+      - btagIp_d0
+      - btagIp_z0SinTheta
+      - btagIp_d0Uncertainty
+      - btagIp_d0_significance
+      - btagIp_z0SinTheta_significance
+      - numberOfPixelHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTHits
+      - numberOfSCTSharedHits
+
+  train_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/muons_40M/pp_output_train.h5
+  val_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/muons_40M/pp_output_val.h5
+  norm_dict: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/muons_40M/norm_dict.yaml
+  class_dict: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/muons_40M/class_dict.yaml
+  #move_files_temp: /dev/shm/svanstro/salt/gn2/
+
+  batch_size: 500
+  num_workers: 60
+
+  num_train: 3_000_000
+  num_val: 300_000
+  num_test: 300_000
+
+trainer:
+  max_epochs: 40
+  accelerator: gpu
+  devices: 2
+  precision: 16-mixed
