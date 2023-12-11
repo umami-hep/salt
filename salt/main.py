@@ -6,7 +6,7 @@ import comet_ml  # noqa F401
 from lightning.pytorch.cli import ArgsType
 
 from salt.callbacks import SaveConfigCallback
-from salt.data.datamodules import JetDataModule
+from salt.data.datamodules import SaltDataModule
 from salt.modelwrapper import ModelWrapper
 from salt.utils.cli import SaltCLI
 
@@ -16,7 +16,7 @@ def main(args: ArgsType = None) -> None:
 
     SaltCLI(
         model_class=ModelWrapper,
-        datamodule_class=JetDataModule,
+        datamodule_class=SaltDataModule,
         save_config_callback=SaveConfigCallback,
         args=args,
         parser_kwargs={

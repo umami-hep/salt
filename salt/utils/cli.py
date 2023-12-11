@@ -117,8 +117,8 @@ class SaltCLI(LightningCLI):
                 init_net["variables"] = sc.data.variables
                 init_net["global_object"] = sc.data.global_object
 
-            # extract jet class names from h5 attrs (requires FTAG preprocessing)
-            self.add_jet_class_names()
+            # extract object class names from h5 attrs (requires FTAG preprocessing)
+            self.add_object_class_names()
 
             # if class weights are not specified, read them from class_dict
             for submodel in sc.model.model.init_args.tasks.init_args.modules:
@@ -216,13 +216,13 @@ class SaltCLI(LightningCLI):
 
             print("-" * 100 + "\n")
 
-    def add_jet_class_names(self) -> None:
-        # add flavour label class names to jet classification task, if it exists
+    def add_object_class_names(self) -> None:
+        # add flavour label class names to global object classification task, if it exists
         sc = self.config[self.subcommand] if self.subcommand else self.config
         for task in sc.model.model.init_args.tasks.init_args.modules:
             t_args = task.init_args
             if (
-                t_args.name == "jet_classification"
+                t_args.name == f"{sc.data.global_object}_classification"
                 and t_args.label == "flavour_label"
                 and t_args.class_names is None
             ):

@@ -1,3 +1,3 @@
 # Dataloading
-## :::salt.data.JetDataset
-## :::salt.data.JetDataModule
+## :::salt.data.SaltDataset
+## :::salt.data.SaltDataModule

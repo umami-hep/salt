@@ -39,7 +39,7 @@ Pre-dumped h5 samples are available [here](https://ftag.docs.cern.ch/samples/sam
 ## Python pre-processing
 
 The H5 files produced by the TDD are processed by [UPP](https://github.com/umami-hep/umami-preprocessing) to produce training, validation and testing files.
-UPP is a flexible and easy to use package which handles jet selection, kinematic resampling, normalisation, shuffling and train/val/test splitting.
+UPP is a flexible and easy to use package which handles object selection, kinematic resampling, normalisation, shuffling and train/val/test splitting.
 
 Training files are suggested to follow a certain directory structure, which is based on the output structure of UPP preprocessing jobs.
 

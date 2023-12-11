@@ -111,7 +111,9 @@ class ONNXModel(ModelWrapper):
         outputs = super().forward({self.global_object: jets, self.const: tracks}, None)[0]
 
         # get class probabilities
-        onnx_outputs = get_probs(outputs[self.global_object]["jet_classification"])
+        onnx_outputs = get_probs(
+            outputs[self.global_object][f"{self.global_object}_classification"]
+        )
 
         # add aux outputs
         if self.include_aux:
@@ -140,7 +142,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
 
     inputs_pt = {"jets": jets, "tracks": tracks}
     outputs_pt = pt_model(inputs_pt, {"tracks": pad_mask})[0]
-    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jet_classification"])]
+    pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jets_classification"])]
 
     inputs_onnx = {
         "jet_features": jets.numpy(),
@@ -255,9 +257,9 @@ def main(args=None):
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
 
     # configure inputs and outputs
-    jet_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["jet_classes"]
+    object_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["object_classes"]
     input_names = ["jet_features", "track_features"]
-    output_names = [f"{model_name}_p{flav.rstrip('jets')}" for flav in jet_classes.values()]
+    output_names = [f"{model_name}_p{flav.rstrip('jets')}" for flav in object_classes.values()]
     dynamic_axes = {"track_features": {0: "n_tracks"}}
 
     if args.include_aux:

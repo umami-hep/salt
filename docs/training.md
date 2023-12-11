@@ -104,8 +104,8 @@ This means for example that weight initialisation and data shuffling happen in a
 
 ### Dataloading
 
-Jets are loaded in weakly shuffled batches from the training file.
-This is much more efficient than randomly accessing individual jets, which would be prohibitively slow.
+Objects are loaded in weakly shuffled batches from the training file.
+This is much more efficient than randomly accessing individual entries, which would be prohibitively slow.
 
 Some other dataloading considerations are discussed below.
 
@@ -236,7 +236,7 @@ Use `--trainer.accelerator=cpu` to run on the CPU instead of the GPU.
 
 Salt will automatically check:
 
-- That there are no `nan` inputs (see [salt.data.JetDataset][salt.data.JetDataset])
+- That there are no `nan` inputs (see [salt.data.SaltDataset][salt.data.SaltDataset])
 - That your normalisation paramters are finite in (see [salt.models.InputNorm][salt.models.InputNorm])
 
 You may still encounter `nan` values in your outputs and losses.

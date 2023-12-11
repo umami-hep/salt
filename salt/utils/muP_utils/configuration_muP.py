@@ -412,9 +412,9 @@ def check_muP(
     doTrainingPlots : bool, default: True,
         whether to plot the training check results
     """
-    from salt.data.datamodules import JetDataModule, JetDataset
+    from salt.data.datamodules import SaltDataModule, SaltDataset
 
-    datamodule = JetDataModule(
+    datamodule = SaltDataModule(
         train_file=train_file,
         val_file="",
         batch_size=batch_size,
@@ -448,7 +448,7 @@ def check_muP(
             "numberOfSCTSharedHits",
         ],
     }
-    datamodule.train_dset = JetDataset(
+    datamodule.train_dset = SaltDataset(
         filename=datamodule.train_file,
         num=datamodule.num_train,
         stage="fit",

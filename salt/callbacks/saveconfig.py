@@ -175,6 +175,7 @@ class SaveConfigCallback(Callback):
         meta["num_workers"] = train_loader.num_workers
 
         with contextlib.suppress(KeyError):
+            # TODO: update UPP to call attribute objects instead of jets
             meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
             meta["dsids"] = get_attr(train_dset.file, "dsids")
@@ -196,13 +197,15 @@ class SaveConfigCallback(Callback):
             # Currently not available on S3
             logger.log_hyperparams(meta)
 
-        # save the jet classes, which is stored as an attr in the training file
+        # save the object classes, which is stored as an attr in the training file
         with h5py.File(meta["train_file"]) as file:
             try:
-                jet_classes = file[f"{global_object}"].attrs["flavour_label"]
+                object_classes = file[global_object].attrs["flavour_label"]
             except KeyError:
-                jet_classes = "not available"
-            meta["jet_classes"] = dict(zip(range(len(jet_classes)), jet_classes, strict=True))
+                object_classes = "not available"
+            meta["object_classes"] = dict(
+                zip(range(len(object_classes)), object_classes, strict=True)
+            )
 
         with contextlib.suppress(KeyError):
             meta["jet_counts_train"] = get_attr(train_dset.file, "jet_counts")

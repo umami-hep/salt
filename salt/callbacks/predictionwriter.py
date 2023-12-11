@@ -22,7 +22,7 @@ class PredictionWriter(Callback):
         self,
         write_tracks: bool = False,
         half_precision: bool = False,
-        jet_classes: list | None = None,
+        object_classes: list | None = None,
         extra_vars: Vars | None = None,
     ) -> None:
         """Write test outputs to h5 file.
@@ -40,9 +40,9 @@ class PredictionWriter(Callback):
             If False, skip any tasks with `input_name="tracks"`.
         half_precision : bool
             If true, write outputs at half precision
-        jet_classes : list
+        object_classes : list
             List of flavour names with the index corresponding to the label values. This is used
-            to construct the jet classification probability output names.
+            to construct the global object classification probability output names.
         extra_vars : Vars
             Extra variables to write to file for each input type. If not specified for a given input
             type, all variables in the test file will be written.
@@ -54,7 +54,7 @@ class PredictionWriter(Callback):
         self.write_tracks = write_tracks
         self.half_precision = half_precision
         self.precision = "f2" if self.half_precision else "f4"
-        self.jet_classes = jet_classes
+        self.object_classes = object_classes
 
     def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
         if stage != "test":
@@ -78,7 +78,7 @@ class PredictionWriter(Callback):
                 available_vars = set(self.file[dataset_name].dtype.names)
                 if missing_vars := set(vars_to_check) - available_vars:
                     raise ValueError(
-                        f"The following variables are missing for input type"
+                        "The following variables are missing for input type"
                         f"'{input_type}': {missing_vars}"
                     )
             else:
@@ -89,17 +89,17 @@ class PredictionWriter(Callback):
         self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
         self.pad_masks: dict = {}
 
-        # get jet class names for output file
+        # get object class names for output file
         for task in self.tasks:
-            if task.name != "jet_classification":
+            if task.name != f"{module.global_object}_classification":
                 continue
-            if self.jet_classes is None:
+            if self.object_classes is None:
                 if task.class_names is not None:
-                    self.jet_classes = task.class_names
+                    self.object_classes = task.class_names
                 else:
                     raise ValueError(
-                        "Couldn't infer jet classes from model. "
-                        "Please provide a list of jet classes."
+                        "Couldn't infer object classes from model. "
+                        "Please provide a list of object classes."
                     )
 
     @property
@@ -123,9 +123,11 @@ class PredictionWriter(Callback):
             this_pad_masks = pad_masks.get(task.input_name)
 
             if isinstance(task, ClassificationTask):
-                # special case for jet classification output names
-                if task.name == "jet_classification":
-                    flavs = [f"{Flavs[c].px}" if c in Flavs else f"p{c}" for c in self.jet_classes]
+                # special case for object classification output names
+                if task.name == f"{module.global_object}_classification":
+                    flavs = [
+                        f"{Flavs[c].px}" if c in Flavs else f"p{c}" for c in self.object_classes
+                    ]
                     task.class_names = [f"{module.name}_{px}" for px in flavs]
                 this_preds = task.run_inference(this_preds, this_pad_masks, self.precision)
             elif isinstance(task, VertexingTask):
