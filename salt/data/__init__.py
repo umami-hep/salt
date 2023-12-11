@@ -1,7 +1,7 @@
-from salt.data.datamodules import JetDataModule
-from salt.data.datasets import JetDataset
+from salt.data.datamodules import SaltDataModule
+from salt.data.datasets import SaltDataset
 
 __all__ = [
-    "JetDataset",
-    "JetDataModule",
+    "SaltDataset",
+    "SaltDataModule",
 ]

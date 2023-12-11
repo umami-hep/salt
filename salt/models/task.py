@@ -290,7 +290,7 @@ class RegressionTask(RegressionTaskBase):
     ):
         if x.ndim != 2 or pad_masks is not None:
             raise NotImplementedError(
-                "Regression tasks are currently only supported for jet-level predictions."
+                "Regression tasks are currently only supported for global object level predictions."
             )
 
         preds = self.net(x, context)
@@ -344,7 +344,7 @@ class GaussianRegressionTask(RegressionTaskBase):
     ):
         if x.ndim != 2 or pad_masks is not None:
             raise NotImplementedError(
-                "Regression tasks are currently only supported for jet-level predictions."
+                "Regression tasks are currently only supported for global object level predictions."
             )
 
         preds = self.net(x, context)

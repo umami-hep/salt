@@ -41,8 +41,7 @@ model:
           modules:
             - class_path: salt.models.ClassificationTask
               init_args:
-                # needs to be jet_classification for salt to recognise global_object classification
-                name: jet_classification
+                name: electrons_classification
                 input_name: electrons
                 label: flavour_label
                 class_names: [elxprompt, npxall]

@@ -2,11 +2,11 @@ import lightning as L
 from torch.utils.data import DataLoader
 
 import salt.utils.file_utils as fu
-from salt.data.datasets import JetDataset
+from salt.data.datasets import SaltDataset
 from salt.data.samplers import RandomBatchSampler
 
 
-class JetDataModule(L.LightningDataModule):
+class SaltDataModule(L.LightningDataModule):
     def __init__(
         self,
         train_file: str,
@@ -24,7 +24,7 @@ class JetDataModule(L.LightningDataModule):
         config_S3: dict | None = None,
         **kwargs,
     ):
-        """H5 datamodule, wraps a [`salt.data.JetDataset`][salt.data.JetDataset] for training,
+        """H5 datamodule, wraps a [`salt.data.SaltDataset`][salt.data.SaltDataset] for training,
         validation and testing.
 
         This datamodule will load data from h5 files. The training, validation and test files
@@ -64,7 +64,7 @@ class JetDataModule(L.LightningDataModule):
         config_S3: dict, optional
             Some parameters for the S3 access
         **kwargs
-            Keyword arguments for [`salt.data.JetDataset`][salt.data.JetDataset]
+            Keyword arguments for [`salt.data.SaltDataset`][salt.data.SaltDataset]
         """
         super().__init__()
         self.train_file = train_file
@@ -100,13 +100,13 @@ class JetDataModule(L.LightningDataModule):
 
         # create training and validation datasets
         if stage == "fit":
-            self.train_dset = JetDataset(
+            self.train_dset = SaltDataset(
                 filename=self.train_file,
                 num=self.num_train,
                 stage=stage,
                 **self.kwargs,
             )
-            self.val_dset = JetDataset(
+            self.val_dset = SaltDataset(
                 filename=self.val_file,
                 num=self.num_val,
                 stage=stage,
@@ -115,23 +115,23 @@ class JetDataModule(L.LightningDataModule):
 
         # Only print train/val dataset details when actually training
         if stage == "fit" and self.trainer.is_global_zero:
-            print(f"Created training dataset with {len(self.train_dset):,} jets")
-            print(f"Created validation dataset with {len(self.val_dset):,} jets")
+            print(f"Created training dataset with {len(self.train_dset):,} entries")
+            print(f"Created validation dataset with {len(self.val_dset):,} entries")
 
         if stage == "test":
             assert self.test_file is not None, "No test file specified, see --data.test_file"
-            self.test_dset = JetDataset(
+            self.test_dset = SaltDataset(
                 filename=self.test_file,
                 num=self.num_test,
                 stage=stage,
                 **self.kwargs,
             )
-            print(f"Created test dataset with {len(self.test_dset):,} jets")
+            print(f"Created test dataset with {len(self.test_dset):,} entries")
 
         if self.trainer.is_global_zero:
             print("-" * 100, "\n")
 
-    def get_dataloader(self, stage: str, dataset: JetDataset, shuffle: bool):
+    def get_dataloader(self, stage: str, dataset: SaltDataset, shuffle: bool):
         drop_last = stage == "fit"
         return DataLoader(
             dataset=dataset,

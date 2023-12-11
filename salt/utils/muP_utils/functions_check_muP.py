@@ -216,7 +216,7 @@ def _get_coord_data(
             a dict of model paths, where the keys are numbers indicating width.
             Each entry of `models` is a path to an already instantiated model.
         dataloader:
-            a dataloader, compatible with the jet classification task.
+            a dataloader, compatible with the global object classification task.
         optcls:
             a function so that `optcls(model)` gives an optimizer used to train
             the model.
@@ -324,7 +324,7 @@ def get_coord_data(models, dataloader, optimizer="adamw", lr=None, mup=True, **k
             a dict of lazy models, where the keys are numbers indicating width.
             Each entry of `models` is a path to an already instantiated model.
         dataloader:
-            a dataloader, compatible with the jet classification task.
+            a dataloader, compatible with the global object classification task.
         optimizer:
             a string in `['sgd', 'adam', 'adamw']`, with default being `'adamw'`.
         lr:
@@ -523,7 +523,7 @@ def _get_training_data(
             a dict of model paths, where the keys are numbers indicating width.
             Each entry of `models` is a path to an already instantiated model.
         dataloader:
-            a dataloader, compatible with the jet classification task.
+            a dataloader, compatible with the global object classification task.
         optcls:
             a function so that `optcls(model)` gives an optimizer used to train
             the model.

@@ -42,7 +42,7 @@ model:
           modules:
             - class_path: salt.models.ClassificationTask
               init_args:
-                name: event_classification
+                name: events_classification
                 input_name: events
                 label: signalType
                 class_names: [ggF, VBF]

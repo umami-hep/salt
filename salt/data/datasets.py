@@ -9,7 +9,7 @@ from salt.stypes import Vars
 from salt.utils.inputs import as_half
 
 
-class JetDataset(Dataset):
+class SaltDataset(Dataset):
     def __init__(
         self,
         filename: str,
@@ -112,19 +112,19 @@ class JetDataset(Dataset):
         if self.global_object not in self.dss:
             self.dss[self.global_object] = self.file[self.global_object]
 
-        # set number of jets
+        # set number of objects
         self.num = self.get_num(num)
 
     def __len__(self):
         return int(self.num)
 
-    def __getitem__(self, jet_idx):
+    def __getitem__(self, object_idx):
         """Return on sample or batch from the dataset.
 
         Parameters
         ----------
-        jet_idx
-            A numpy slice corresponding to a batch of jets.
+        object_idx
+            A numpy slice corresponding to a batch of objects.
 
         Returns
         -------
@@ -140,9 +140,9 @@ class JetDataset(Dataset):
         for input_name in self.input_map:
             # load data (inputs + labels) for this input type
             batch = self.arrays[input_name]
-            shape = (jet_idx.stop - jet_idx.start,) + self.dss[input_name].shape[1:]
+            shape = (object_idx.stop - object_idx.start,) + self.dss[input_name].shape[1:]
             batch.resize(shape, refcheck=False)
-            self.dss[input_name].read_direct(batch, jet_idx)
+            self.dss[input_name].read_direct(batch, object_idx)
 
             # truncate track-like inputs
             if self.num_inputs is not None and input_name in self.num_inputs:
@@ -161,7 +161,7 @@ class JetDataset(Dataset):
 
                 for ind, param in enumerate(self.parameters):
                     if self.stage == "fit":
-                        # assign random values to jets with parameters not set to those in the
+                        # assign random values to objects with parameters not set to those in the
                         # train list, values are chosen at random from those in the train list
                         # according to probabilities if given, else with equal probability
                         try:
@@ -175,7 +175,7 @@ class JetDataset(Dataset):
                         flat_array[pad_masks, ind] = random
 
                     if self.stage == "test":
-                        # assign parameter values for all jets to those passed in the 'test' option
+                        # assign parameter values for all objects passed in the 'test' option
                         test_arr = np.full(np.shape(flat_array)[0], self.parameters[param]["test"])
                         flat_array[:, ind] = test_arr
 
@@ -211,7 +211,7 @@ class JetDataset(Dataset):
                         labels[self.global_object] = {}
                     for label in self.labels["/"]:
                         labels[input_name][label] = torch.as_tensor(
-                            self.file["labels"][jet_idx], dtype=torch.long
+                            self.file["labels"][object_idx], dtype=torch.long
                         )
 
         return inputs, pad_masks, labels
@@ -219,18 +219,18 @@ class JetDataset(Dataset):
     def get_num(self, num_requested: int):
         num_available = len(self.dss[self.global_object])
 
-        # not enough jets
+        # not enough objects
         if num_requested > num_available:
             raise ValueError(
-                f"Requested {num_requested:,} jets, but only {num_available:,} are"
-                f" available in the file {self.filename}."
+                f"Requested {num_requested:,} from {self.global_object}, but only"
+                f" {num_available:,} are available in the file {self.filename}."
             )
 
-        # use all jets
+        # use all objects
         if num_requested < 0:
             return num_available
 
-        # use requested jets
+        # use requested number of objects
         return num_requested
 
     def check_file(self):

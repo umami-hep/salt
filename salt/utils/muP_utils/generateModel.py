@@ -8,7 +8,7 @@ from lightning.pytorch.cli import ArgsType
 from torch import save
 
 from salt.callbacks import SaveConfigCallback
-from salt.data.datamodules import JetDataModule
+from salt.data.datamodules import SaltDataModule
 from salt.modelwrapper import ModelWrapper
 from salt.utils.cli import SaltCLI
 from salt.utils.muP_utils.configuration_muP import get_model_path
@@ -26,7 +26,7 @@ def generateModel(args: ArgsType = None) -> None:
 
     cli = SaltCLI(
         model_class=ModelWrapper,
-        datamodule_class=JetDataModule,
+        datamodule_class=SaltDataModule,
         save_config_callback=SaveConfigCallback,
         args=args,
         run=False,

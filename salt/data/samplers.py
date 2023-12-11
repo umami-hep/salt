@@ -13,7 +13,7 @@ class RandomBatchSampler(Sampler):
     ):
         """Batch sampler for an h5 dataset.
 
-        The batch sampler performs weak shuffling. Jets are batched first,
+        The batch sampler performs weak shuffling. Objects are batched first,
         and then batches are shuffled.
 
         Parameters
@@ -21,7 +21,7 @@ class RandomBatchSampler(Sampler):
         dataset : torch.data.Dataset
             Input dataset
         batch_size : int
-            Number of jets to batch
+            Number of objects to batch
         shuffle : bool
             Shuffle the batches
         drop_last : bool
