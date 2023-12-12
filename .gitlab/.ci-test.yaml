@@ -28,6 +28,11 @@ test-truncate-inputs:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs
 
+test-truncate-inputs-error:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs_error
+
 test-union-find:
   <<: *test-template
   script:
