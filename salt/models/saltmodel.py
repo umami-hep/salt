@@ -86,34 +86,30 @@ class SaltModel(nn.Module):
         loss : Tensors
             Dict of losses for each task, aggregated over the batch.
         """
-        # initial input embeddings
-        initial_embeddings = {}
-        edge_x = None
+        # initial input projections
+        xs = {}
         for init_net in self.init_nets:
-            if init_net.input_name != "EDGE":
-                initial_embeddings[init_net.input_name] = init_net(inputs)
-            else:
-                edge_x = init_net(inputs)
+            xs[init_net.input_name] = init_net(inputs)
 
-        # input encoding
-        combined_embeddings = initial_embeddings
-        if self.encoder:
-            combined_embeddings = self.encoder(
-                initial_embeddings, pad_mask=pad_masks, edge_x=edge_x
-            )
+        # handle edge features if present
+        edge_x = xs.pop("EDGE", None)
+        kwargs = {} if edge_x is None else {"edge_x": edge_x}
+
+        # input embedding
+        embed_xs = self.encoder(xs, pad_mask=pad_masks, **kwargs) if self.encoder else xs
 
         # pooling
         if self.pool_net:
-            global_rep = self.pool_net(combined_embeddings, pad_mask=pad_masks)
+            global_rep = self.pool_net(embed_xs, pad_mask=pad_masks)
         else:
-            global_rep = initial_embeddings[self.global_object]
+            global_rep = xs[self.global_object]
 
-        # add global features to global_rep representation
+        # add global features to global representation
         if (global_feats := inputs.get("GLOBAL")) is not None:
             global_rep = torch.cat([global_rep, global_feats], dim=-1)
 
         # run tasks
-        preds, loss = self.run_tasks(global_rep, combined_embeddings, pad_masks, labels)
+        preds, loss = self.run_tasks(global_rep, embed_xs, pad_masks, labels)
 
         return preds, loss
 
