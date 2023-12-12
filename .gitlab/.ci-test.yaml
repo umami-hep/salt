@@ -107,3 +107,8 @@ test-no-global-inputs:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_no_global_inputs
+
+test-tfv2:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_tfv2

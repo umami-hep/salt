@@ -217,3 +217,9 @@ def test_truncate_inputs_error(tmp_path) -> None:
     args = ["--data.num_inputs.this_should_error=10"]
     with pytest.raises(ValueError):
         run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_tfv2(tmp_path) -> None:
+    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'tv2.yaml'}"]
+    run_combined(tmp_path, CONFIG, inc_taus=True, train_args=args)

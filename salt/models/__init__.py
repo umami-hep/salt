@@ -1,8 +1,4 @@
-from salt.models.attention import (
-    GATv2Attention,
-    MultiheadAttention,
-    ScaledDotProductAttention,
-)
+from salt.models.attention import GATv2Attention, MultiheadAttention, ScaledDotProductAttention
 from salt.models.dense import Dense
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
@@ -28,6 +24,7 @@ from salt.models.transformer import (
     TransformerEncoder,
     TransformerEncoderLayer,
 )
+from salt.models.transformerv2 import TransformerV2
 
 __all__ = [
     "Dense",
@@ -53,4 +50,5 @@ __all__ = [
     "SaltModel",
     "R21Xbb",
     "InputNorm",
+    "TransformerV2",
 ]
