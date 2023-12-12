@@ -93,15 +93,59 @@ def get_probs(outputs: Tensor):
 
 
 class ONNXModel(ModelWrapper):
-    def __init__(self, include_aux=False, **kwargs) -> None:
+    def __init__(self, name: str | None = None, include_aux: bool = False, **kwargs) -> None:
         super().__init__(**kwargs)
         assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
+        self.name = name if name else self.name
         self.include_aux = include_aux
         self.const = "tracks"
+        self.input_names = ["jet_features", "track_features"]
         jets, tracks = inputs_sep_no_pad(
             1, 40, self.input_dims[self.global_object], self.input_dims[self.const]
         )
-        self.example_input_array = jets, tracks.squeeze(0)
+        self.example_input_array = jets, tracks.squeeze(0)  # used for the tracing during export
+
+    @property
+    def model_name(self) -> str:
+        # aux variables are not allowed to have dashes in Athena
+        return self.name.replace("-", "_")
+
+    @property
+    def output_names(self) -> list[str]:
+        """The output names are a list of strings, one for each output of the model."""
+        # get the global task output
+        global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
+        assert len(global_tasks) == 1, "Multi global task ONNX models are not yet supported."
+        object_classes = global_tasks[0].class_names
+        outputs = [f"{self.name}_p{flav.rstrip('jets')}" for flav in object_classes]
+
+        # aux task output names
+        if self.include_aux:
+            if "track_origin" in [t.name for t in self.model.tasks]:
+                out_name = f"{self.model_name}_TrackOrigin"
+                outputs.append(out_name)
+
+            if "track_vertexing" in [t.name for t in self.model.tasks]:
+                out_name = f"{self.model_name}_VertexIndex"
+                outputs.append(out_name)
+
+        return outputs
+
+    @property
+    def dynamic_axes(self) -> dict[str, dict[int, str]]:
+        """Let ONNX know which inputs/outputs have dynamic shape (i.e. can vary in length)."""
+        # dynamic inputs
+        dynamic_axes = {"track_features": {0: "n_tracks"}}
+
+        # dynamic outputs
+        if self.include_aux:
+            if "track_origin" in [t.name for t in self.model.tasks]:
+                out_name = f"{self.model_name}_TrackOrigin"
+                dynamic_axes[out_name] = {0: "n_tracks"}
+            if "track_vertexing" in [t.name for t in self.model.tasks]:
+                out_name = f"{self.model_name}_VertexIndex"
+                dynamic_axes[out_name] = {0: "n_tracks"}
+        return dynamic_axes
 
     def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore
         # in athena the jets have a batch dim but the tracks don't, so add it here
@@ -228,10 +272,7 @@ def main(args=None):
         config_path = args.ckpt_path.parents[1] / "config.yaml"
         assert config_path.is_file(), f"Could not find config file at {config_path}"
 
-    config = yaml.safe_load(config_path.read_text())
-    model_name = args.name if args.name else config["name"]
-    model_name = model_name.replace("-", "_")  # dashes are not allowed for AuxVars in Athena
-
+    # instantiate pytorch and wrapper models
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
 
@@ -242,7 +283,10 @@ def main(args=None):
         pt_model.float()
 
         onnx_model = ONNXModel.load_from_checkpoint(
-            args.ckpt_path, include_aux=args.include_aux, map_location=torch.device("cpu")
+            args.ckpt_path,
+            name=args.name,
+            include_aux=args.include_aux,
+            map_location=torch.device("cpu"),
         )
         onnx_model.eval()
 
@@ -256,30 +300,13 @@ def main(args=None):
     if onnx_path.exists() and not args.overwrite:
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
 
-    # configure inputs and outputs
-    object_classes = yaml.safe_load((base_path / "metadata.yaml").read_text())["object_classes"]
-    input_names = ["jet_features", "track_features"]
-    output_names = [f"{model_name}_p{flav.rstrip('jets')}" for flav in object_classes.values()]
-    dynamic_axes = {"track_features": {0: "n_tracks"}}
-
-    if args.include_aux:
-        if "track_origin" in [t.name for t in pt_model.model.tasks]:
-            out_name = f"{model_name}_TrackOrigin"
-            output_names.append(out_name)
-            dynamic_axes[out_name] = {0: "n_tracks"}
-
-        if "track_vertexing" in [t.name for t in pt_model.model.tasks]:
-            out_name = f"{model_name}_VertexIndex"
-            output_names.append(out_name)
-            dynamic_axes[out_name] = {0: "n_tracks"}
-
     # export
     onnx_model.to_onnx(
         onnx_path,
         opset_version=16,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        input_names=onnx_model.input_names,
+        output_names=onnx_model.output_names,
+        dynamic_axes=onnx_model.dynamic_axes,
     )
 
     # add metadata
@@ -287,12 +314,12 @@ def main(args=None):
         config_path,
         args.ckpt_path,
         onnx_path,
-        model_name,
-        output_names,
+        onnx_model.model_name,
+        onnx_model.output_names,
         args.track_selection,
     )
 
-    # validate
+    # validate pytorch and exported onnx models
     compare_outputs(pt_model, onnx_path, args.include_aux)
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
