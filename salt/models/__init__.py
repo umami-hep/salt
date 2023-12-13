@@ -8,6 +8,7 @@ from salt.models.pooling import (
     Pooling,
     TensorCrossAttentionPooling,
 )
+from salt.models.posenc import PositionalEncoder
 from salt.models.r21xbb import R21Xbb
 from salt.models.saltmodel import SaltModel
 from salt.models.task import (
@@ -51,4 +52,5 @@ __all__ = [
     "R21Xbb",
     "InputNorm",
     "TransformerV2",
+    "PositionalEncoder",
 ]
