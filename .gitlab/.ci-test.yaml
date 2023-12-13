@@ -8,12 +8,39 @@ variables:
   artifacts:
     paths: [.coverage*]
 
+# --------------------------- UNIT TESTS ---------------------------
 test-models:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_models.py
 
-test-fast_dev_run:
+test-union-find:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_union_find.py
+
+test-edge-features:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_edges.py
+
+test-utils:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_utils.py
+
+test-posenc:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_posenc.py
+
+test-initnet:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_initnet.py
+
+# --------------------------- PIPELINE TESTS ---------------------------
+test-fast-dev-run:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_train_dev
@@ -32,21 +59,6 @@ test-truncate-inputs-error:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs_error
-
-test-union-find:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_union_find.py
-
-test-edge-features:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_edges.py
-
-test-utils:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_utils.py
 
 test-GN1:
   <<: *test-template
