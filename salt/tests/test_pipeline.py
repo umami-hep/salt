@@ -13,13 +13,14 @@ w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_taus=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False):
+    incl_taus = config_path.name == CONFIG
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
     cd_path = tmp_path / "dummy_class_dict.yaml"
     write_dummy_norm_dict(nd_path, cd_path)
-    write_dummy_file(train_h5_path, nd_path, do_xbb, inc_taus)
+    write_dummy_file(train_h5_path, nd_path, do_xbb, incl_taus)
 
     args = ["fit"]
     args += [f"--config={config_path}"]
@@ -96,13 +97,12 @@ def run_combined(
     export_args=None,
     do_xbb=False,
     do_muP=False,
-    inc_taus=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
     config_base = Path(__file__).parent.parent / "configs"
 
     # run training
-    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP, inc_taus)
+    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -125,7 +125,7 @@ def test_GN1(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
-    run_combined(tmp_path, CONFIG, inc_taus=True, export_args=["--include_aux"])
+    run_combined(tmp_path, CONFIG, export_args=["--include_aux"])
 
 
 @pytest.mark.filterwarnings(w)
@@ -209,7 +209,7 @@ def test_train_distributed(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_truncate_inputs(tmp_path) -> None:
     args = ["--data.num_inputs.tracks=10"]
-    run_combined(tmp_path, CONFIG, do_eval=True, do_onnx=False, train_args=args, inc_taus=True)
+    run_combined(tmp_path, CONFIG, do_eval=True, do_onnx=False, train_args=args)
 
 
 @pytest.mark.filterwarnings(w)
@@ -222,4 +222,4 @@ def test_truncate_inputs_error(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_tfv2(tmp_path) -> None:
     args = [f"--config={Path(__file__).parent.parent / 'configs' / 'tv2.yaml'}"]
-    run_combined(tmp_path, CONFIG, inc_taus=True, train_args=args)
+    run_combined(tmp_path, CONFIG, train_args=args)

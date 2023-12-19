@@ -29,7 +29,6 @@ model:
             attention: { class_path: salt.models.ScaledDotProductAttention }
           dense_config:
             activation: *activation
-            dropout: &dropout 0.0
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -52,7 +51,6 @@ model:
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
               init_args:
