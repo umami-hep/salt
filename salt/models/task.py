@@ -99,7 +99,13 @@ class ClassificationTask(TaskBase):
                 self.loss.reduction == "none"
             ), "Sample weights only supported for reduction='none'"
         if self.class_names is None:
-            self.class_names = CLASS_NAMES.get(self.label)
+            self.class_names = CLASS_NAMES[self.label]
+        if len(self.class_names) != self.net.output_size:
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of outputs ({self.net.output_size}) does not match "
+                f"number of class names ({len(self.class_names)}). Class names: {self.class_names}"
+            )
         self.use_class_dict_weights = use_class_dict_weights
 
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
