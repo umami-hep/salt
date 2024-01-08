@@ -25,7 +25,7 @@ from salt.models.transformer import (
     TransformerEncoder,
     TransformerEncoderLayer,
 )
-from salt.models.transformerv2 import TransformerV2
+from salt.models.transformer_v2 import TransformerV2
 
 __all__ = [
     "Dense",

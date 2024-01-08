@@ -9,35 +9,16 @@ variables:
     paths: [.coverage*]
 
 # --------------------------- UNIT TESTS ---------------------------
-test-models:
+unit-tests:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_models.py
-
-test-union-find:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_union_find.py
-
-test-edge-features:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_edges.py
-
-test-utils:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_utils.py
-
-test-posenc:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_posenc.py
-
-test-initnet:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_initnet.py
+    - $TEST_CMD salt/tests/test_transformerv2.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-fast-dev-run:

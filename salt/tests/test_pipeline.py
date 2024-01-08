@@ -221,5 +221,5 @@ def test_truncate_inputs_error(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_tfv2(tmp_path) -> None:
-    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'tv2.yaml'}"]
+    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'encoder-v2.yaml'}"]
     run_combined(tmp_path, CONFIG, train_args=args)

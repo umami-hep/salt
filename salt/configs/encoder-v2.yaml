@@ -7,6 +7,6 @@ model:
         init_args:
           dim: 256
           num_layers: 4
-          num_heads: 8
           out_dim: 128
-          gated: true
+          attn_kwargs:
+            num_heads: 8
