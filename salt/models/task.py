@@ -64,7 +64,7 @@ class ClassificationTask(TaskBase):
         class_names: list[str] | None = None,
         label_map: Mapping | None = None,
         sample_weight: str | None = None,
-        use_class_dict_weights: bool = False,
+        use_class_dict: bool = False,
         **kwargs,
     ):
         """Classification task.
@@ -80,10 +80,10 @@ class ClassificationTask(TaskBase):
             Remap integer labels for training (e.g. 0,4,5 -> 0,1,2).
         sample_weight : str | None, optional
             Name of a per sample weighting to apply in the loss function.
-        use_class_dict_weights : bool, optional
+        use_class_dict : bool, optional
             If True, read class weights for the loss from the class_dict file.
         **kwargs
-            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
+            Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
         self.label = label
@@ -106,7 +106,7 @@ class ClassificationTask(TaskBase):
                 f"Number of outputs ({self.net.output_size}) does not match "
                 f"number of class names ({len(self.class_names)}). Class names: {self.class_names}"
             )
-        self.use_class_dict_weights = use_class_dict_weights
+        self.use_class_dict = use_class_dict
 
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
         """Apply per sample weights, if specified."""
@@ -189,7 +189,7 @@ class RegressionTaskBase(TaskBase, ABC):
             Mean and std normalization parameters for each target, used for scaling.
             Cannot be used with target_denominators.
         **kwargs
-            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
+            Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
 
@@ -277,7 +277,7 @@ class RegressionTask(RegressionTaskBase):
         ----------
         **kwargs
             Keyword arguments for
-            [`salt.modles.RegressionTaskBase`][salt.models.RegressionTaskBase].
+            [`salt.models.RegressionTaskBase`][salt.models.RegressionTaskBase].
         """
         super().__init__(**kwargs)
         if self.net.output_size != len(self.targets):
@@ -331,7 +331,7 @@ class GaussianRegressionTask(RegressionTaskBase):
         ----------
         **kwargs
             Keyword arguments for
-            [`salt.modles.RegressionTaskBase`][salt.models.RegressionTaskBase].
+            [`salt.models.RegressionTaskBase`][salt.models.RegressionTaskBase].
         """
         super().__init__(**kwargs)
         if self.net.output_size != 2 * len(self.targets):
@@ -400,7 +400,7 @@ class VertexingTask(TaskBase):
         label : str
             Label name for the target object IDs.
         **kwargs
-            Keyword arguments for [`salt.modles.TaskBase`][salt.models.TaskBase].
+            Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
         self.label = label

@@ -4,9 +4,9 @@ Updated transformer implementation based on
 https://github.com/mistralai/mistral-src
 
 Features:
-- use native pytorch sdp operators (including flash)
-- support gated linear units from https://arxiv.org/abs/2002.05202
-- RMSNorm from https://arxiv.org/abs/1910.07467
+- native SDP kernels (including flash)
+- gated linear units https://arxiv.org/abs/2002.05202
+- RMSNorm https://arxiv.org/abs/1910.07467
 """
 
 from abc import ABC
@@ -14,6 +14,7 @@ from abc import ABC
 import torch
 from torch import BoolTensor, Tensor, nn
 
+import salt.models.layernorm as layernorms
 from salt.models.attention import merge_masks
 
 
@@ -27,11 +28,14 @@ def torch_meff_attn(q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout: 
     # masking can lead to nans, see
     # - https://github.com/pytorch/pytorch/issues/110213
     # - https://github.com/pytorch/pytorch/issues/103749
+    # to get round this, can transform the mask from a bool to float
+    # mask = (1.0 - mask.to(q.dtype)) * torch.finfo(q.dtype).min
+    # but don't need this if add_zero_attn is True
+
     # TODO: change mask convention
     if mask is not None:
-        mask = mask.contiguous()
-        mask = ~mask
-        mask = (1.0 - mask.to(q.dtype)) * torch.finfo(q.dtype).min
+        mask = ~mask.contiguous()
+        # mask = (1.0 - mask.to(q.dtype)) * torch.finfo(q.dtype).min
 
     with torch.backends.cuda.sdp_kernel(
         enable_flash=False, enable_math=True, enable_mem_efficient=True
@@ -51,7 +55,7 @@ def torch_flash_attn(q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout:
         )
 
 
-ATTN_TYPES = {
+ATTN_BACKENDS = {
     "torch-meff": torch_meff_attn,
     "torch-flash": torch_flash_attn,
 }
@@ -67,6 +71,7 @@ class Attention(nn.Module, ABC):
         window_size: int | None = None,
         dropout: float = 0.0,
         bias: bool = True,
+        add_zero_attn: bool = True,
     ):
         super().__init__()
 
@@ -80,9 +85,10 @@ class Attention(nn.Module, ABC):
         self.scale = self.head_dim**-0.5
         self.dropout = dropout
         self.bias = bias
+        self.add_zero_attn = add_zero_attn
 
         self.attn_type = attn_type
-        self.attn_func = ATTN_TYPES[self.attn_type]
+        self.attn_func = ATTN_BACKENDS[self.attn_type]
         self.backend = self._flash_backend if self.attn_type == "flash" else self._torch_backend
         if window_size is None:
             self.window_size = (-1, -1)
@@ -95,7 +101,6 @@ class Attention(nn.Module, ABC):
         self.wk = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=self.bias)
         self.wv = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=self.bias)
         self.wo = nn.Linear(self.num_heads * self.head_dim, self.dim, bias=self.bias)
-        self.add_zero_attn = True
 
     def forward(
         self,
@@ -106,7 +111,35 @@ class Attention(nn.Module, ABC):
         kv_mask: BoolTensor | None = None,
         attn_mask: BoolTensor | None = None,
     ) -> Tensor:
-        # add zero attention along batch dimension (now first)
+        """Attention forward pass.
+
+        Parameters
+        ----------
+        q : Tensor
+            Queries of shape (batch, q_len, dim).
+        k : Tensor
+            Keys of shape (batch, kv_len, dim).
+        v : Tensor
+            Values of shape (batch, kv_len, dim).
+        q_mask : BoolTensor, optional
+            Mask for the queries, by default None.
+        kv_mask : BoolTensor, optional
+            Mask for the keys and values, by default None.
+        attn_mask : BoolTensor, optional
+            Full attention mask, by default None.
+
+        Returns
+        -------
+        Tensor
+            Output of shape (batch, q_len, dim).
+        """
+        # combine masks
+        attn_mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape, q.device)
+
+        # input projections
+        q, k, v = self.wq(q), self.wk(k), self.wv(v)
+
+        # add a dummy token to attend to - avoids nan when all tokens are padded
         if self.add_zero_attn:
             batch = q.shape[0]
             zero_attn_shape = (batch, 1, self.dim)
@@ -117,21 +150,17 @@ class Attention(nn.Module, ABC):
             if kv_mask is not None:
                 kv_mask = nn.functional.pad(kv_mask, (0, 1), value=False)
 
-        # combine masks
-        attn_mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape, q.device)
-
-        # input projections
-        q, k, v = self.wq(q), self.wk(k), self.wv(v)
-
         # run attention
         output = self.backend(q, k, v, attn_mask)
 
-        # return output
+        # return output projection
         return self.wo(output)
 
     def _torch_backend(self, q: Tensor, k: Tensor, v: Tensor, attn_mask: BoolTensor | None = None):
         batch, q_len, _ = q.shape
         _, kv_len, _ = k.shape
+
+        # transform tensors to (batch, num_heads, seq_len, head_dim)
         q = q.view(batch, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(batch, kv_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch, kv_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
@@ -140,34 +169,15 @@ class Attention(nn.Module, ABC):
         if self.repeats > 1:
             k, v = repeat_kv(k, v, self.repeats, dim=-2)
 
-        # reshape mask
+        # expand mask to (batch, num_heads, q_len, kv_len)
         if attn_mask is not None:
             attn_mask = attn_mask.view(batch, 1, q_len, kv_len).expand(-1, self.num_heads, -1, -1)
 
         # run attention
-        output = self.attn_func(q, k, v, mask=attn_mask, dropout=self.dropout)  # type: ignore
+        output = self.attn_func(q, k, v, mask=attn_mask, dropout=self.dropout)
 
         # reshape output and return
         return output.transpose(1, 2).contiguous().view(batch, -1, self.dim)
-
-    def _flash_backend(self, q: Tensor, k: Tensor, v: Tensor, attn_mask: BoolTensor | None = None):
-        assert attn_mask is None
-
-        batch, q_len, _ = q.shape
-        _, kv_len, _ = k.shape
-        q_p = q.view(batch, q_len, self.num_heads, self.head_dim)
-        k_p = k.view(batch, kv_len, self.n_kv_heads, self.head_dim)
-        v_p = v.view(batch, kv_len, self.n_kv_heads, self.head_dim)
-
-        # repeat keys and values to match number of query heads
-        if self.repeats > 1:
-            k_p, v_p = repeat_kv(k_p, v_p, self.repeats, dim=-2)
-
-        # run attention
-        output = self.attn_func(q_p, k_p, v_p, dropout=self.dropout, window_size=self.window_size)  # type: ignore
-
-        # reshape output and return
-        return output.view_as(q)
 
 
 class SelfAttention(nn.Module):
@@ -175,10 +185,8 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.dim = dim
         self.attention = Attention(dim=dim, **kwargs)
-        self.norm = RMSNorm(self.dim)
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
-        x = self.norm(x)
         return self.attention(x, x, x, **kwargs)
 
 
@@ -187,12 +195,8 @@ class CrossAttention(nn.Module):
         super().__init__()
         self.dim = dim
         self.attention = Attention(dim=dim, **kwargs)
-        self.norm_q = RMSNorm(self.dim)
-        self.norm_kv = RMSNorm(self.dim)
 
     def forward(self, q: Tensor, kv: Tensor, **kwargs) -> Tensor:
-        q = self.norm_q(q)
-        kv = self.norm_kv(kv)
         return self.attention(q, kv, kv, **kwargs)
 
 
@@ -201,9 +205,9 @@ class GLU(nn.Module):
         self,
         dim: int,
         hidden_dim: int | None = None,
-        activation: str = "Mish",
+        activation: str = "ReLU",
         bias: bool = True,
-        gated: bool = False,
+        gated: bool = True,
     ):
         """Gated linear unit from https://arxiv.org/abs/2002.05202."""
         super().__init__()
@@ -211,62 +215,79 @@ class GLU(nn.Module):
         if hidden_dim is None:
             hidden_dim = dim * 2
 
-        self.norm = RMSNorm(dim)
-        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
+        self.in_proj = nn.Linear(dim, hidden_dim, bias=bias)
+        self.out_proj = nn.Linear(hidden_dim, dim, bias=bias)
         self.gate = None
         if gated:
             self.gate = nn.Linear(dim, hidden_dim, bias=bias)
         self.activation = getattr(nn, activation)()
 
-    def forward(self, x) -> Tensor:
-        x = self.norm(x)
-        out = self.activation(self.w1(x))
+    def forward(self, x: Tensor) -> Tensor:
+        out = self.activation(self.in_proj(x))
         if self.gate:
             out = out * self.gate(x)
-        return self.w2(out)
+        return self.out_proj(out)
 
 
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        """RNMSNorm layer from https://arxiv.org/abs/1910.07467."""
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self.norm(x.float()).type_as(x)
-        return output * self.weight
-
-
-class TransformerLayer(nn.Module):
+class EncoderLayer(nn.Module):
     def __init__(
         self,
-        num_heads: int,
         dim: int,
-        ff_dim_scale: int = 2,
-        gated: bool = False,
-        activation: str = "Mish",
-        **attn_kwargs,
+        norm: str = "LayerNorm",
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
     ):
         super().__init__()
         if attn_kwargs is None:
             attn_kwargs = {}
-        self.num_heads = num_heads
+        if dense_kwargs is None:
+            dense_kwargs = {}
         self.dim = dim
-        self.attention = SelfAttention(dim=dim, num_heads=num_heads, **attn_kwargs)
-        self.dense = GLU(dim, dim * ff_dim_scale, activation=activation, gated=gated)
+        self.attn = SelfAttention(dim=dim, **attn_kwargs)
+        self.attn_norm = getattr(layernorms, norm)(dim)
+        self.dense = GLU(dim, **dense_kwargs)
+        self.dense_norm = getattr(layernorms, norm)(dim)
 
     def forward(self, x: Tensor, pad_mask: BoolTensor) -> Tensor:
-        x = x + self.attention(x, kv_mask=pad_mask)
-        return x + self.dense(x)
+        x = x + self.attn(self.attn_norm(x), kv_mask=pad_mask)
+        return x + self.dense(self.dense_norm(x))
+
+
+class DecoderLayer(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        norm: str = "LayerNorm",
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
+    ):
+        # TODO: add bidirectional CA and SA for maskformer
+        super().__init__()
+        if attn_kwargs is None:
+            attn_kwargs = {}
+        if dense_kwargs is None:
+            dense_kwargs = {}
+        self.dim = dim
+        self.attn = CrossAttention(dim=dim, **attn_kwargs)
+        self.q_norm = getattr(layernorms, norm)(dim)
+        self.kv_norm = getattr(layernorms, norm)(dim)
+        self.dense = GLU(dim, **dense_kwargs)
+        self.dense_norm = getattr(layernorms, norm)(dim)
+
+    def forward(self, x: Tensor, kv: Tensor, pad_mask: BoolTensor) -> Tensor:
+        x = x + self.attn(self.q_norm(x), self.kv_norm(kv), kv_mask=pad_mask)
+        return x + self.dense(self.dense_norm(x))
 
 
 class TransformerV2(nn.Module):
-    def __init__(self, num_layers: int, dim: int, out_dim: int | None = None, **layer_config):
+    def __init__(
+        self,
+        num_layers: int,
+        dim: int,
+        out_dim: int | None = None,
+        norm: str = "LayerNorm",
+        **kwargs,
+    ):
         """Transformer model consisting of a series of stacked Transformer encoder layers.
 
         Parameters
@@ -277,21 +298,22 @@ class TransformerV2(nn.Module):
             Dimension of the embeddings at each layer.
         out_dim : int | None, optional
             Optionally project the output to a different dimension.
-        layer_config : dict
-            Configuration for each layer.
+        norm : str, optional
+            Normalization style, by default "LayerNorm".
+        kwargs : dict
+            Keyword arguments for [salt.models.transformerv2.EncoderLayer].
         """
         super().__init__()
         self.num_layers = num_layers
         self.dim = dim
 
         self.layers = torch.nn.ModuleList(
-            [TransformerLayer(dim=dim, **layer_config) for _ in range(num_layers)]
+            [EncoderLayer(dim=dim, norm=norm, **kwargs) for _ in range(num_layers)]
         )
-        self.out_norm = RMSNorm(dim if out_dim is None else out_dim)
+        self.out_norm = getattr(layernorms, norm)(dim if out_dim is None else out_dim)
+        self.out_proj = None
         if out_dim is not None:
             self.out_proj = nn.Linear(self.dim, out_dim)
-        else:
-            self.out_proj = None
 
     def forward(self, x: Tensor, pad_mask: BoolTensor) -> Tensor:
         if isinstance(x, dict):

@@ -70,6 +70,9 @@ class SaltCLI(LightningCLI):
 
     def fit(self, model, **kwargs):
         if self.config[self.subcommand]["compile"]:
+            # unfortunately compiling in place doesn't work
+            # https://github.com/pytorch/pytorch/pull/97565
+            # https://github.com/pytorch/pytorch/issues/101107
             model.model = torch.compile(model.model)
         self.trainer.fit(model, **kwargs)
 
@@ -121,31 +124,26 @@ class SaltCLI(LightningCLI):
             self.add_object_class_names()
 
             # if class weights are not specified, read them from class_dict
-            for submodel in sc.model.model.init_args.tasks.init_args.modules:
-                if "ClassificationTask" in submodel["class_path"] and submodel["init_args"].get(
-                    "use_class_dict_weights"
-                ):
-                    if (class_dict_filename := sc.data.class_dict) is None:
-                        raise ValueError(
-                            "use_class_dict_weights=True requires class_dict to be specified"
-                        )
-                    if submodel["init_args"]["loss"]["init_args"]["weight"] is not None:
-                        raise ValueError(
-                            "Class weights are already specified, set use_class_dict_weights=False"
-                            " or remove class weights."
-                        )
-                    with open(class_dict_filename) as f:
-                        class_dict = yaml.safe_load(f)
-                    input_name = submodel["init_args"]["input_name"]
-                    if submodel["init_args"]["label"] in class_dict[input_name]:
-                        class_weights = class_dict[input_name][submodel["init_args"]["label"]]
-                        submodel["init_args"]["loss"]["init_args"]["weight"] = class_weights
-                    else:
-                        raise ValueError(
-                            f"Label {submodel['init_args']['label']} not found in class_dict. "
-                            "Consider setting use_class_dict_weights=False "
-                            "and specifying class weights manually."
-                        )
+            for task in sc.model.model.init_args.tasks.init_args.modules:
+                if not task["init_args"].get("use_class_dict"):
+                    continue
+                if (cd_fname := sc.data.class_dict) is None:
+                    raise ValueError("use_class_dict=True requires class_dict to be specified")
+                if task["init_args"]["loss"]["init_args"]["weight"] is not None:
+                    raise ValueError(
+                        "Class weights already specified, disable use_class_dict or remove weights."
+                    )
+                with open(cd_fname) as f:
+                    class_dict = yaml.safe_load(f)
+                input_name = task["init_args"]["input_name"]
+                if task["init_args"]["label"] in class_dict[input_name]:
+                    class_weights = class_dict[input_name][task["init_args"]["label"]]
+                    task["init_args"]["loss"]["init_args"]["weight"] = class_weights
+                else:
+                    raise ValueError(
+                        f"Label {task['init_args']['label']} not found in class_dict. "
+                        "Use use_class_dict=False and specify class weights manually."
+                    )
 
             # reduce precision to improve performance
             # don't do this during evaluation as you will get increased variation wrt Athena
