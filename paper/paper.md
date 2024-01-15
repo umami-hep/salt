@@ -65,6 +65,7 @@ bibliography: paper.bib
 
 # Summary
 
+High energy physics studies the fundamental particles and forces that constitute the universe, often through experiments conducted in large particle accelerators such as the Large Hadron Collider (LHC) [@Evans:2008].
 `Salt` is a Python package developed for the high energy physics community which streamlines the training of multimodal, multitask machine learning (ML) models.
 `Salt` simplifies the creation and deployment of advanced ML models, making them more accessible and promoting shared best practices.
 It also provides extensive customization options for model training and architecture to suit a variety of high energy physics applications.
@@ -81,11 +82,12 @@ Some key features of `Salt` are listed below:
 # Statement of need
 
 In high energy physics research the reliance on ML for data analysis and object classification is growing [@Guest:2018; @Cagnotta:2022].
-The Salt package meets this growing need by providing a versatile, formant, and user-friendly tool for developing advanced ML models.
-`Salt` was originally developed to train state of the art flavour tagging models at the ATLAS experiment [@ATLAS:2008] at the Large Hadron Collider [@Evans:2008].
+`Salt` meets this growing need by providing a versatile, performant, and user-friendly tool for developing advanced ML models.
+`Salt` was originally developed to train state of the art flavour tagging models at the ATLAS experiment [@ATLAS:2008] at the LHC.
 Flavour tagging, the identification of jets from bottom and charm quarks, plays a crucial role in analysing ATLAS collision data. This process is key for precision Standard Model measurements, particularly in the characterisation of the Higgs bosons, and for investigating new phenomena.
 The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors which can be effectively exploited by ML algorithms.
 
+While initially developed for flavour tagging, `Salt` has evolved into a flexible tool that can be used for a wide range of tasks, from object classification, regression of object properties, to vertex reconstruction and full event classification, demonstrating its broad applicability across various data analysis challenges in high energy physics.
 
 # Model Architecture
 
