@@ -1,5 +1,5 @@
 ---
-title: 'Salt: Multimodal Mutltask ML Models for High Energy Physics'
+title: 'Salt: Multimodal Multitask ML Models for High Energy Physics'
 
 tags:
   - Python
@@ -13,6 +13,7 @@ authors:
     orcid: 0000-0002-9752-9204 
     affiliation: 1
   - name: Diptaparna Biswas
+    orcid: 0000-0002-7543-3471
     affiliation: 2
   - name: Maxence Draguet
     affiliation: 3
@@ -107,7 +108,7 @@ A unified encoder jointly processes these inputs, and the encoder outputs are th
 `Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
 It can be used for preprocessing data before training models with `Salt`.
 `Umami` is missing several features provided by `Salt`, such as advanced transformer models, mutlimodal and multitask learning, and distributed training.
-`Weaver` is an alternative package developed by members of the CMS collaboration [cite].
+`Weaver` [@Qu:2020] is an alternative package developed by members of the CMS collaboration.
 
 
 # Acknowledgements
