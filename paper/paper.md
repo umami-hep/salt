@@ -102,8 +102,7 @@ A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
 
 `Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
 It can be used for preprocessing data before training models with `Salt`.
-`Umami` is missing several features provided by `Salt`, such as advanced transformer models, multimodal and multitask learning, and distributed training.
-`Weaver` [@Qu:2020] is an alternative package developed by members of the CMS collaboration.
+`Umami` is missing several features provided by `Salt`, such as advanced transformer models, multimodal and multitask learning, and distributed model training.
 
 
 # Acknowledgements
