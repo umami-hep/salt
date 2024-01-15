@@ -19,26 +19,26 @@ authors:
     affiliation: 3
   - name: Philipp Gadow
     orcid: 0000-0003-4475-6734
-    affiliation: 5
+    affiliation: 4
   - name: Dmitrii Kobylianskii
     orcid: 0009-0002-0070-5900
-    affiliation: 10
+    affiliation: 5
   - name: Ivan Oleksiyuk
     orcid: 0000-0002-4784-6340
-    affiliation: 4
+    affiliation: 6
   - name: Nikita Pond
     orcid: 0000-0002-5966-0332
     affiliation: 1
   - name: Sébastien Rettie
     orcid: 0000-0002-7092-3893
-    affiliation: 5
+    affiliation: 4
   - name: Samuel Van Stroud
     orcid: 0000-0002-7969-0301
     affiliation: 1
   - name: Andrius Vaitkus
     affiliation: 1
   - name: Johannes Wagner
-    affiliation: 13
+    affiliation: 8
 
 affiliations:
  - name: University College London, United Kingdom
@@ -47,22 +47,16 @@ affiliations:
    index: 2
  - name: University of Oxford, United Kingdom
    index: 3
- - name: Université de Genève, Switzerland
-   index: 4
  - name: European Laboratory for Particle Physics CERN, Switzerland
+   index: 4
+ - name: Department of Particle Physics and Astrophysics, Weizmann Institute of Science, Israel
    index: 5
+ - name: Université de Genève, Switzerland
+   index: 6
  - name: Technical University of Munich, Germany
    index: 7
- - name: SLAC National Accelerator Laboratory, United States of America
-   index: 8
- - name: Nikhef National Institute for Subatomic Physics and University of Amsterdam, Netherlands
-   index: 9
- - name: Department of Particle Physics and Astrophysics, Weizmann Institute of Science, Israel
-   index: 10
- - name: INFN Genova and Universita' di Genova, Italy
-   index: 12
  - name: University of California, Berkeley
-   index: 13
+   index: 8
 
 date: 15 Janurary 2024
 bibliography: paper.bib
@@ -107,7 +101,7 @@ A unified encoder jointly processes these inputs, and the encoder outputs are th
 
 `Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
 It can be used for preprocessing data before training models with `Salt`.
-`Umami` is missing several features provided by `Salt`, such as advanced transformer models, mutlimodal and multitask learning, and distributed training.
+`Umami` is missing several features provided by `Salt`, such as advanced transformer models, multimodal and multitask learning, and distributed training.
 `Weaver` [@Qu:2020] is an alternative package developed by members of the CMS collaboration.
 
 
