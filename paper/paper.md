@@ -29,7 +29,7 @@ authors:
   - name: Nikita Pond
     orcid: 0000-0002-5966-0332
     affiliation: 1
-  - name: Sebastien Rettie
+  - name: Sébastien Rettie
     orcid: 0000-0002-7092-3893
     affiliation: 5
   - name: Samuel Van Stroud
@@ -69,27 +69,26 @@ bibliography: paper.bib
 
 # Summary
 
-`Salt` is a Python [@Rossum:2009] package developed for the high energy physics community which streamlines the training of multimodal, multitask machine learning (ML) models.
-Salt aims to make the deployment of advanced ML models more straightforward and allows for extensive customization in model training and architecture, catering to a wide variety of use cases.
+`Salt` is a Python package developed for the high energy physics community which streamlines the training of multimodal, multitask machine learning (ML) models.
+`Salt` simplifies the creation and deployment of advanced ML models, making them more accessible and promoting shared best practices.
+It also provides extensive customization options for model training and architecture to suit a variety of high energy physics applications.
 
-Some key features of the package are listed below:
+Some key features of `Salt` are listed below:
 
 - Based on established frameworks: `Salt` is built upon PyTorch [@pytorch] and Lightning [@lightning] for maximum performance and scalability with minimal boilerplate code.
-- Multimodal, multitask models: `Salt` provides an efficient transformer backbone with support for multimodal inputs and edge features. It also provides various task head modules for classification, regression, and vertex reconstruction tasks. Any combination of these can be used for multitask learning problems.
-- Customisable and extensible: Salt supports full customisation of training parameters and model architecture through YAML config files. Its modular design allows for the implementation of custom dataloaders, layers, and models.
-- Train at scale: `Salt` can handle large volumes of data with efficient HDF5 [@hdf5:2023] dataloaders. It also includes multi-GPU support from Lightning [@lightning], enabling distributed training.
-- Deploy: Salt supports ONNX serialization, enabling model inference in existing software stacks based on `C++`.
+- Multimodal, multitask models: `Salt` provides an efficient transformer backbone with support for multimodal inputs and edge features. It also provides various task head modules for classification, regression, and vertex reconstruction tasks. Any combination of these can be used to flexibly define models for multitask learning problems.
+- Customisable and extensible: `Salt` supports full customisation of training and model configuration through YAML config files. Its modular design allows for the easy integration of custom dataloaders, layers, and models.
+- Train at scale: `Salt` can handle large volumes of data with efficient HDF5 [@hdf5:2023] dataloaders. It also includes multi-GPU support from Lightning, enabling distributed training.
+- Deployment ready: The package facilitates ONNX serialization for integrating models into C++ based software environments.
 
 
 # Statement of need
 
 In high energy physics research the reliance on ML for data analysis and object classification is growing [@Guest:2018; @Cagnotta:2022].
-`Salt` directly addresses this need by offering a flexible, performant, and user-friendly platform for training advanced ML models.
-`Salt` was originally developed to train state of the art flavour tagging models [@GN2X] at the ATLAS experiment [@ATLAS:2008] at the Large Hadron Collider [@Evans:2008].
-Flavour tagging is the identification jets originating from bottom and charm quarks, and a vital part of analysing collision data produced at ATLAS.
-It is essential for precision measurements of the Standard Model, particularly in characterizing the properties of the Higgs boson and in exploring new phenomena.
+The Salt package meets this growing need by providing a versatile, formant, and user-friendly tool for developing advanced ML models.
+`Salt` was originally developed to train state of the art flavour tagging models at the ATLAS experiment [@ATLAS:2008] at the Large Hadron Collider [@Evans:2008].
+Flavour tagging, the identification of jets from bottom and charm quarks, plays a crucial role in analysing ATLAS collision data. This process is key for precision Standard Model measurements, particularly in the characterisation of the Higgs bosons, and for investigating new phenomena.
 The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors which can be effectively exploited by ML algorithms.
-
 
 # Related work
 
