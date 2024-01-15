@@ -32,10 +32,10 @@ authors:
   - name: Sébastien Rettie
     orcid: 0000-0002-7092-3893
     affiliation: 4
+  - name: Andrius Vaitkus
+    affiliation: 1
   - name: Samuel Van Stroud
     orcid: 0000-0002-7969-0301
-    affiliation: 1
-  - name: Andrius Vaitkus
     affiliation: 1
   - name: Johannes Wagner
     affiliation: 8
@@ -93,6 +93,7 @@ Salt enables the training of multimodal, multitask models, as depicted in \autor
 The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global features of the jet, and constituents such as tracks, calorimeter clusters, reconstructed leptons, or inner detector hits.
 This architecture allows the model to leverage all the available detector information.
 A unified encoder jointly processes these inputs, and the encoder outputs are then used for a configurable number of tasks.
+A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
 
 ![This diagram illustrates the flow of information within a model trained using `Salt`. Global features and inputs from multiple constituents feed into a unified encoder, which processes and integrates the information. The encoder then outputs to multiple task-specific modules, each tailored to a specific objective.\label{fig:salt-arch}](salt-arch.png){ width=80% }
 
