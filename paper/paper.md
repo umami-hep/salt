@@ -94,7 +94,7 @@ The unique characteristics of hadrons containing bottom and charm quarks – suc
 # Model Architecture
 
 Salt enables the training of multimodal, multitask models, as depicted in \autoref{fig:salt-arch}.
-The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global jet features, constituents like tracks, calorimeter clusters, reconstructed leptons, or inner detector hits.
+The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global features of the jet, and constituents such as tracks, calorimeter clusters, reconstructed leptons, or inner detector hits.
 This architecture allows the model to leverage all the available detector information.
 A unified encoder jointly processes these inputs, and the encoder outputs are then used for a configurable number of tasks.
 
