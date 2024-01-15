@@ -13,8 +13,7 @@ authors:
     orcid: 0000-0002-9752-9204 
     affiliation: 1
   - name: Diptaparna Biswas
-    orcid: NA
-    affiliation: NA
+    affiliation: 2
   - name: Maxence Draguet
     affiliation: 3
   - name: Philipp Gadow
@@ -36,15 +35,15 @@ authors:
     orcid: 0000-0002-7969-0301
     affiliation: 1
   - name: Andrius Vaitkus
-    orcid: NA
     affiliation: 1
   - name: Johannes Wagner
-    orcid: NA
-    affiliation: NA
+    affiliation: 13
 
 affiliations:
  - name: University College London, United Kingdom
    index: 1
+ - name: University of Siegen
+   index: 2
  - name: University of Oxford, United Kingdom
    index: 3
  - name: Université de Genève, Switzerland
@@ -61,6 +60,8 @@ affiliations:
    index: 10
  - name: INFN Genova and Universita' di Genova, Italy
    index: 12
+ - name: University of California, Berkeley
+   index: 13
 
 date: 15 Janurary 2024
 bibliography: paper.bib
