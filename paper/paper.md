@@ -90,12 +90,24 @@ The Salt package meets this growing need by providing a versatile, formant, and 
 Flavour tagging, the identification of jets from bottom and charm quarks, plays a crucial role in analysing ATLAS collision data. This process is key for precision Standard Model measurements, particularly in the characterisation of the Higgs bosons, and for investigating new phenomena.
 The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors which can be effectively exploited by ML algorithms.
 
+
+# Model Architecture
+
+Salt enables the training of multimodal, multitask models, as depicted in \autoref{fig:salt-arch}.
+The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global jet features, constituents like tracks, calorimeter clusters, reconstructed leptons, or inner detector hits.
+This architecture allows the model to leverage all the available detector information.
+A unified encoder jointly processes these inputs, and the encoder outputs are then used for a configurable number of tasks.
+
+![This diagram illustrates the flow of information within a model trained using `Salt`. Global features and inputs from multiple constituents feed into a unified encoder, which processes and integrates the information. The encoder then outputs to multiple task-specific modules, each tailored to a specific objective.\label{fig:salt-arch}](salt-arch.png){ width=80% }
+
+
 # Related work
 
 `Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
 It can be used for preprocessing data before training models with `Salt`.
 `Umami` is missing several features provided by `Salt`, such as advanced transformer models, mutlimodal and multitask learning, and distributed training.
 `Weaver` is an alternative package developed by members of the CMS collaboration [cite].
+
 
 # Acknowledgements
 
