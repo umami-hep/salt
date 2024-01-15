@@ -13,7 +13,8 @@ These are defined in the model files, rather than the `base.yaml` config.
 ??? warning "Make sure you do not train on truth information!"
 
     The variables listed under `data.variables` are the inputs to the training.
-    You should include any truth information, but rather specify truth labels for each task in your model config.
+    You should _not_ include any truth information (unless you are testing this explicitly),
+    but rather specify truth labels for each task in your model config.
 
 For example, in [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you will find the following variables:
 
