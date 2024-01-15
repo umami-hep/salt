@@ -1,5 +1,5 @@
 ---
-title: 'Salt: Multimodal Multitask ML Models for High Energy Physics'
+title: 'Salt: Multimodal Multitask Machine Learning for High Energy Physics'
 
 tags:
   - Python
@@ -33,11 +33,13 @@ authors:
     orcid: 0000-0002-7092-3893
     affiliation: 4
   - name: Andrius Vaitkus
+    orcid: 0000-0002-0393-666X
     affiliation: 1
   - name: Samuel Van Stroud
     orcid: 0000-0002-7969-0301
     affiliation: 1
   - name: Johannes Wagner
+    orcid: 0000-0002-5588-0020
     affiliation: 8
 
 affiliations:
@@ -91,9 +93,9 @@ While initially developed for flavour tagging, `Salt` has evolved into a flexibl
 
 # Model Architecture
 
-Salt enables the training of multimodal, multitask models, as depicted in \autoref{fig:salt-arch}.
-The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global features of the jet, and constituents such as tracks, calorimeter clusters, reconstructed leptons, or inner detector hits.
-This architecture allows the model to leverage all the available detector information.
+Salt facilitates the training of multimodal and multitask models as depicted in \autoref{fig:salt-arch}.
+The architecture is designed to take advantage of multiple input modalities, which, in the context of jet classification, might include global features of the jet and constituents of the jet such as tracks, calorimeter clusters, leptons, or inner detector hits.
+This architecture allows the model to leverage all the available detector information, leading to improved performance.
 A unified encoder jointly processes these inputs, and the encoder outputs are then used for a configurable number of tasks.
 A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
 
