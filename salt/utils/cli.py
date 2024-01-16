@@ -215,17 +215,22 @@ class SaltCLI(LightningCLI):
             print("-" * 100 + "\n")
 
     def add_object_class_names(self) -> None:
-        # add flavour label class names to global object classification task, if it exists
+        # add flavour_label class names to global object classification task, if it exists
         sc = self.config[self.subcommand] if self.subcommand else self.config
         for task in sc.model.model.init_args.tasks.init_args.modules:
             t_args = task.init_args
-            if (
+            if not (
                 t_args.name == f"{sc.data.global_object}_classification"
                 and t_args.label == "flavour_label"
                 and t_args.class_names is None
             ):
-                name = (
-                    sc.data.input_map[t_args.input_name] if sc.data.input_map else t_args.input_name
-                )
-                with h5py.File(sc.data.train_file) as f:
+                return
+            name = sc.data.input_map[t_args.input_name] if sc.data.input_map else t_args.input_name
+            with h5py.File(sc.data.train_file) as f:
+                if t_args.label in f[name].attrs:
                     t_args.class_names = f[name].attrs[t_args.label]
+                else:
+                    raise ValueError(
+                        f"'{t_args.label}' not found in the h5 attrs of group '{name}' in file "
+                        f"{sc.data.train_file}. Specify class_names manually."
+                    )
