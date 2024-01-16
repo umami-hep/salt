@@ -11,7 +11,7 @@ class PositionalEncoder(nn.Module):
         Evenly share the embedding space between the different variables to be encoded.
         Any remaining dimensions are left as zeros.
 
-        # TODO: alpha should be set for each variable
+        TODO: alpha should be set for each variable
 
         Parameters
         ----------

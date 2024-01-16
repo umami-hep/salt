@@ -10,7 +10,7 @@ For example, you could use Salt to classify or regress properties of objects or 
 
 ### Features
 
-- Integrated on [Pytorch Lightning](https://lightning.ai/docs/pytorch/stable/).
+- Built on [Pytorch Lightning](https://lightning.ai/docs/pytorch/stable/).
 - Support for multiple YAML-configurable [input modalities][salt.models.InitNet] and [output tasks][task-heads].
 - ONNX export support to use trained models in [Athena](https://gitlab.cern.ch/atlas/athena/).
 - Easily extensible: you can implement your own custom dataloaders and models.
