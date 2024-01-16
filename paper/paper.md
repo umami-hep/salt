@@ -16,6 +16,7 @@ authors:
     orcid: 0000-0002-7543-3471
     affiliation: 2
   - name: Maxence Draguet
+    orcid: 0000-0003-1530-0519
     affiliation: 3
   - name: Philipp Gadow
     orcid: 0000-0003-4475-6734
