@@ -117,7 +117,7 @@ class ONNXModel(ModelWrapper):
         global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
         assert len(global_tasks) == 1, "Multi global task ONNX models are not yet supported."
         object_classes = global_tasks[0].class_names
-        outputs = [f"{self.name}_p{flav.rstrip('jets')}" for flav in object_classes]
+        outputs = [f"{self.model_name}_p{flav.rstrip('jets')}" for flav in object_classes]
 
         # aux task output names
         if self.include_aux:
