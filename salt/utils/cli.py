@@ -94,6 +94,25 @@ class SaltCLI(LightningCLI):
             task = submodel["init_args"]
             if task["input_name"] not in labels:
                 labels[task["input_name"]] = []
+            # Check if there is a merge dict and try if exists
+            if hasattr(self.config, "fit"):
+                fit_config = self.config.fit.model.model.init_args
+                if hasattr(fit_config, "merge_dict"):
+                    merge_dict = self.config.fit.model.model.init_args.merge_dict
+                    if merge_dict is not None:
+                        task_input_name = task["input_name"]
+                        if task_input_name in merge_dict:
+                            for inp in merge_dict[task["input_name"]]:
+                                if inp not in labels:
+                                    labels[inp] = []
+                                if self.subcommand == "fit":
+                                    if label := task.get("label"):
+                                        labels[inp].append(label)
+                                    if weight := task.get("sample_weight"):
+                                        labels[inp].append(weight)
+                                    if targets := task.get("targets"):
+                                        for target in listify(targets):
+                                            labels[inp].append(target)
             if self.subcommand == "fit":
                 if label := task.get("label"):
                     labels[task["input_name"]].append(label)
@@ -105,6 +124,7 @@ class SaltCLI(LightningCLI):
             if denominators := task.get("target_denominators"):
                 for denominator in listify(denominators):
                     labels[task["input_name"]].append(denominator)
+
         sc["data"]["labels"] = labels
 
         # add norm

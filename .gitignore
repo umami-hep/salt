@@ -12,6 +12,8 @@ tmp/
 env/
 plots/
 cern_configs/
+user/
+.vscode/launch.json
 
 *.pyc
 *.xml
