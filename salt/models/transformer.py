@@ -250,15 +250,20 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         key_value_mask: BoolTensor | None = None,
         context: Tensor | None = None,
     ) -> Tensor:
-        query = query + self.mha(
+        additive = self.mha(
             self.norm1(query),
             self.norm0(key_value),
             q_mask=query_mask,
             kv_mask=key_value_mask,
         )
         if self.dense:
-            query = query + self.dense(self.norm2(query), context)
-        return query
+            additive = self.dense(self.norm2(additive), context)
+        # The cross attention does not return residual+additive but only the additive
+        # It is ment to be used as Ai+1 += CA.forward(Ai, Bi) if one wants to
+        # have a residual connection
+        # and Ai+1 = CA.forward(Ai, Bi) if a simple feed forward connection is intended
+        # we also recoomend to use clones of Ai and Bi and avoid A += CA.forward(A, B)
+        return additive
 
 
 class TransformerCrossAttentionEncoder(nn.Module):
@@ -277,7 +282,6 @@ class TransformerCrossAttentionEncoder(nn.Module):
         context_dim: int = 0,
         out_dim: int = 0,
         ca_every_layer: bool = False,
-        merge_dict: dict[str, list[str]] | None = None,
         update_edges: bool = False,
         muP: bool = False,
     ):
@@ -287,15 +291,8 @@ class TransformerCrossAttentionEncoder(nn.Module):
         self.num_layers = num_layers
         self.out_dim = out_dim
         self.ca_every_layer = ca_every_layer
-        self.merge_dict = merge_dict if merge_dict else {}
         self.update_edges = update_edges
         self.muP = muP
-
-        # Generate a list of final input types, merging as necessary
-        self.final_input_names = list(
-            set(input_names) - {it for sublist in self.merge_dict.values() for it in sublist}
-        )
-        self.final_input_names.extend(self.merge_dict.keys())
 
         # Layers for each input type
         # need to use ModuleDict so device is set correctly
@@ -314,7 +311,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                         for i in range(num_layers)
                     ]
                 )
-                for input_name in self.final_input_names
+                for input_name in self.input_names
             }
         )
 
@@ -335,7 +332,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                         for _ in range(ca_layers)
                     ]
                 )
-                for input_name1, input_name2 in combinations(self.final_input_names, 2)
+                for input_name1, input_name2 in combinations(self.input_names, 2)
             }
         )
 
@@ -355,44 +352,48 @@ class TransformerCrossAttentionEncoder(nn.Module):
                 self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
 
     def forward(
-        self, x: dict[str, Tensor], mask: dict[str, Tensor], edge_x: Tensor = None, **kwargs
+        self, x: dict[str, Tensor], pad_mask: dict[str, Tensor], edge_x: Tensor = None, **kwargs
     ) -> Tensor:
         """Pass the input through all layers sequentially."""
         if edge_x is not None:
             raise ValueError("Edge updates of Cross Attention Encoder not yet supported")
 
-        # Initialise updated representations dictionary
-        updated_x = {k: 0 for k in x}
-
         # Merge inputs as specified
-        for merge_name, merge_types in self.merge_dict.items():
-            x[merge_name] = cat([x.pop(mt) for mt in merge_types], dim=1)
-
         for i in range(self.num_layers):
             # Self-attention for each type
-            for it in self.final_input_names:
-                updated_x[it] += self.type_layers[it][i](x[it], pad_mask=mask[it], **kwargs)
+            for it in self.input_names:
+                x[it] = self.type_layers[it][i](x[it], pad_mask=pad_mask[it], **kwargs)
 
             # Cross-attention between pairs of types - symmetric update
             # i % len(self.cross_layers[layer_key]) evals to 0 for first layer
             # and final layer and 1 everywhere else to give behaviour we want
-            if self.ca_every_layer or i in [0, self.num_layers - 1]:
-                for it1, it2 in combinations(self.final_input_names, 2):
+            prev_x = {k: x[k].clone() for k in x}
+            if self.ca_every_layer:
+                for it1, it2 in combinations(self.input_names, 2):
                     layer_key = f"{it1}_{it2}"
-                    updated_x[it1] += self.cross_layers[layer_key][
-                        i % len(self.cross_layers[layer_key])
-                    ](x[it1], x[it2], mask[it1], mask[it2], **kwargs)
-                    updated_x[it2] += self.cross_layers[layer_key][
-                        i % len(self.cross_layers[layer_key])
-                    ](x[it2], x[it1], mask[it2], mask[it1], **kwargs)
+                    x[it1] += self.cross_layers[layer_key][i](
+                        prev_x[it1], prev_x[it2], pad_mask[it1], pad_mask[it2], **kwargs
+                    )
+                    x[it2] += self.cross_layers[layer_key][i](
+                        prev_x[it2], prev_x[it1], pad_mask[it2], pad_mask[it1], **kwargs
+                    )
+            elif i in [0, self.num_layers - 1]:
+                for it1, it2 in combinations(self.input_names, 2):
+                    layer_key = f"{it1}_{it2}"
+                    x[it1] += self.cross_layers[layer_key][i // (self.num_layers - 1)](
+                        prev_x[it1], prev_x[it2], pad_mask[it1], pad_mask[it2], **kwargs
+                    )
+                    x[it2] += self.cross_layers[layer_key][i // (self.num_layers - 1)](
+                        prev_x[it2], prev_x[it1], pad_mask[it2], pad_mask[it1], **kwargs
+                    )
 
         # Apply final normalization
-        for it in self.final_input_names:
-            updated_x[it] = self.final_norm(updated_x[it])
+        for it in self.input_names:
+            x[it] = self.final_norm(x[it])
 
         # Optional resizing layer
         if self.out_dim:
-            for it in self.final_input_names:
-                updated_x[it] = self.final_linear(updated_x[it])
+            for it in self.input_names:
+                x[it] = self.final_linear(x[it])
 
-        return updated_x
+        return x

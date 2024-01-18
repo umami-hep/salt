@@ -1,5 +1,5 @@
 import torch
-from torch import Tensor, nn
+from torch import Tensor, cat, nn
 
 from salt.models import InitNet, Pooling
 from salt.stypes import BoolTensors, NestedTensors, Tensors
@@ -12,6 +12,7 @@ class SaltModel(nn.Module):
         tasks: nn.ModuleList,
         encoder: nn.Module = None,
         pool_net: Pooling = None,
+        merge_dict: dict[str, list[str]] | None = None,
     ):
         """A generic multi-modal, multi-task neural network.
 
@@ -40,6 +41,11 @@ class SaltModel(nn.Module):
             Pooling network which computes a global representation of the object
             by aggregating over the constituents. If not provided, assume that
             the only inputs are global features (i.e. no constituents).
+        merge_dict : dict[str, list[str]] | None
+            A dictionary that lets the salt concatenate all the input
+            representations of the inputs in list[str] and act on them
+            in following layers (e.g. transformer or tasks) as if they
+            are coming from one input type
         """
         super().__init__()
 
@@ -47,6 +53,7 @@ class SaltModel(nn.Module):
         self.tasks = tasks
         self.encoder = encoder
         self.pool_net = pool_net
+        self.merge_dict = merge_dict
 
         # checks for the global object only setup
         if self.pool_net is None:
@@ -94,6 +101,20 @@ class SaltModel(nn.Module):
         # handle edge features if present
         edge_x = xs.pop("EDGE", None)
         kwargs = {} if edge_x is None else {"edge_x": edge_x}
+
+        if isinstance(self.merge_dict, dict):
+            for merge_name, merge_types in self.merge_dict.items():
+                xs[merge_name] = cat([xs.pop(mt) for mt in merge_types], dim=1)
+            if pad_masks is not None:
+                for merge_name, merge_types in self.merge_dict.items():
+                    pad_masks[merge_name] = cat([pad_masks.pop(mt) for mt in merge_types], dim=1)
+            for merge_name, merge_types in self.merge_dict.items():
+                if labels is not None:
+                    labels[merge_name] = {}
+                    for var in labels[merge_types[0]]:
+                        labels[merge_name].update(
+                            {var: cat([labels[mt][var] for mt in merge_types], dim=1)}
+                        )
 
         # input embedding
         embed_xs = self.encoder(xs, pad_mask=pad_masks, **kwargs) if self.encoder else xs

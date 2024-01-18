@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 import torch
@@ -124,13 +126,21 @@ def test_transformer_cross_attention_encoder() -> None:
     assert not torch.isnan(out["type1"]).any()
 
     # Padding Invariance Test
-    x["type1"] = torch.rand(1, 10, 10)
+    del x
+    x = {
+        "type1": torch.rand(1, 10, 10),
+        "type2": torch.rand(1, 10, 10),
+    }
+    extended_x = copy.deepcopy(x)
+    del extended_x["type1"]
+    extended_x.update(
+        {"type1": torch.cat([copy.deepcopy(x["type1"]), torch.zeros((1, 1, 10))], dim=1)}
+    )
     mask["type1"] = get_random_mask(1, 10, p_valid=1)
     out = net(x, mask)
-    x["type1"] = torch.cat([x["type1"], torch.zeros((1, 1, 10))], dim=1)
-    mask["type1"] = torch.zeros(x["type1"].shape[:-1]).bool()
+    mask["type1"] = torch.zeros(extended_x["type1"].shape[:-1]).bool()
     mask["type1"][:, -1] = True
-    out_with_pad = net(x, mask)["type1"][:, :-1]
+    out_with_pad = net(extended_x, mask)["type1"][:, :-1]
     assert torch.all(out["type1"] == out_with_pad)
 
 
