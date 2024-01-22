@@ -12,6 +12,7 @@ class SaltModel(nn.Module):
         tasks: nn.ModuleList,
         encoder: nn.Module = None,
         pool_net: Pooling = None,
+        num_register_tokens: int = 0,
         merge_dict: dict[str, list[str]] | None = None,
     ):
         """A generic multi-modal, multi-task neural network.
@@ -41,6 +42,10 @@ class SaltModel(nn.Module):
             Pooling network which computes a global representation of the object
             by aggregating over the constituents. If not provided, assume that
             the only inputs are global features (i.e. no constituents).
+        num_register_tokens : int
+            Number of randomly initialised register tokens of the same length as
+            any other input sequences after initialiser networks (e.g. tracks).
+            See https://arxiv.org/abs/2309.16588.
         merge_dict : dict[str, list[str]] | None
             A dictionary that lets the salt concatenate all the input
             representations of the inputs in list[str] and act on them
@@ -54,6 +59,20 @@ class SaltModel(nn.Module):
         self.encoder = encoder
         self.pool_net = pool_net
         self.merge_dict = merge_dict
+        self.num_register_tokens = num_register_tokens
+
+        # init register tokens
+        if self.num_register_tokens and self.encoder:
+            self.registers = torch.nn.Parameter(
+                torch.normal(
+                    torch.zeros((self.num_register_tokens, self.encoder.embed_dim)), std=1e-4
+                )
+            )
+            self.register_mask = torch.zeros(self.num_register_tokens, dtype=torch.bool)
+            self.register_buffer("register_mask_buffer", self.register_mask)
+        else:
+            self.registers = None
+            self.register_mask = None
 
         # checks for the global object only setup
         if self.pool_net is None:
@@ -97,6 +116,12 @@ class SaltModel(nn.Module):
         xs = {}
         for init_net in self.init_nets:
             xs[init_net.input_name] = init_net(inputs)
+
+        if self.num_register_tokens:
+            batch_size = xs[next(iter(xs))].shape[0]
+            xs["REGISTERS"] = self.registers.expand(batch_size, -1, -1)
+            if pad_masks:
+                pad_masks["REGISTERS"] = self.register_mask_buffer.expand(batch_size, -1)
 
         # handle edge features if present
         edge_x = xs.pop("EDGE", None)
