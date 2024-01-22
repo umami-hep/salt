@@ -13,5 +13,10 @@
         "**/.git/objects/**": true,
         "**/.git/subtree-cache/**": true,
         "**/logs/*/**": true
-    }
+    },
+    "python.testing.pytestArgs": [
+        "salt"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
 }
