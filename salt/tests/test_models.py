@@ -133,9 +133,9 @@ def test_transformer_cross_attention_encoder() -> None:
     }
     extended_x = copy.deepcopy(x)
     del extended_x["type1"]
-    extended_x.update(
-        {"type1": torch.cat([copy.deepcopy(x["type1"]), torch.zeros((1, 1, 10))], dim=1)}
-    )
+    extended_x.update({
+        "type1": torch.cat([copy.deepcopy(x["type1"]), torch.zeros((1, 1, 10))], dim=1)
+    })
     mask["type1"] = get_random_mask(1, 10, p_valid=1)
     out = net(x, mask)
     mask["type1"] = torch.zeros(extended_x["type1"].shape[:-1]).bool()

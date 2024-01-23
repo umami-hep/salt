@@ -33,6 +33,7 @@ def torch_meff_attn(q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout: 
     # but don't need this if add_zero_attn is True
 
     # TODO: change mask convention
+    # https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues/47
     if mask is not None:
         mask = ~mask.contiguous()
         # mask = (1.0 - mask.to(q.dtype)) * torch.finfo(q.dtype).min
@@ -261,7 +262,6 @@ class DecoderLayer(nn.Module):
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
     ):
-        # TODO: add bidirectional CA and SA for maskformer
         super().__init__()
         if attn_kwargs is None:
             attn_kwargs = {}
@@ -307,9 +307,9 @@ class TransformerV2(nn.Module):
         self.num_layers = num_layers
         self.dim = dim
 
-        self.layers = torch.nn.ModuleList(
-            [EncoderLayer(dim=dim, norm=norm, **kwargs) for _ in range(num_layers)]
-        )
+        self.layers = torch.nn.ModuleList([
+            EncoderLayer(dim=dim, norm=norm, **kwargs) for _ in range(num_layers)
+        ])
         self.out_norm = getattr(layernorms, norm)(dim if out_dim is None else out_dim)
         self.out_proj = None
         if out_dim is not None:

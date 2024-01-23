@@ -24,7 +24,7 @@ def variables():
 
 
 @pytest.mark.parametrize(
-    "pos_enc, attach_global",
+    ("pos_enc", "attach_global"),
     [(None, False), (None, True), (PositionalEncoder(["x", "y"], 32), True)],
 )
 def test_init_net_forward(dense_config, variables, pos_enc, attach_global):

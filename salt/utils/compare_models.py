@@ -89,9 +89,9 @@ def main(args=None):
     jets_A = reader_A.load({"jets": vars_A}, cuts=cuts, num_jets=args.num)["jets"]
     jets_B = reader_B.load({"jets": vars_B}, cuts=cuts, num_jets=args.num)["jets"]
 
-    diff_regions = np.array(
-        [[float(f"1e-{i}"), float(f"5e-{i}")] for i in range(7, 1, -1)]
-    ).flatten()
+    diff_regions = np.array([
+        [float(f"1e-{i}"), float(f"5e-{i}")] for i in range(7, 1, -1)
+    ]).flatten()
 
     print(f'\nComparing {len(jets_A):,} jets from "{args.file_A}" and "{args.file_B}"...\n')
     for var_A, var_B in zip(vars_A, vars_B, strict=True):

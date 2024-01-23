@@ -3,7 +3,7 @@
 import pathlib
 import sys
 
-import comet_ml  # noqa F401
+import comet_ml  # noqa: F401
 from lightning.pytorch.cli import ArgsType
 from torch import save
 

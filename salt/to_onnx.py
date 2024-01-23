@@ -147,7 +147,9 @@ class ONNXModel(ModelWrapper):
                 dynamic_axes[out_name] = {0: "n_tracks"}
         return dynamic_axes
 
-    def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore
+    def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore[override]
+        _ = labels
+
         # in athena the jets have a batch dim but the tracks don't, so add it here
         tracks = tracks.unsqueeze(0)
 
@@ -250,7 +252,7 @@ def compare_outputs(pt_model, onnx_path, include_aux):
     session = ort.InferenceSession(
         str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
     )
-    for n_track in tqdm(range(0, 40), leave=False):
+    for n_track in tqdm(range(40), leave=False):
         for _ in range(10):
             compare_output(pt_model, session, include_aux, n_track)
 

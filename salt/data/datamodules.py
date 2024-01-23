@@ -24,7 +24,7 @@ class SaltDataModule(L.LightningDataModule):
         config_S3: dict | None = None,
         **kwargs,
     ):
-        """H5 datamodule, wraps a [`salt.data.SaltDataset`][salt.data.SaltDataset] for training,
+        """Datamodule wrapping a [`salt.data.SaltDataset`][salt.data.SaltDataset] for training,
         validation and testing.
 
         This datamodule will load data from h5 files. The training, validation and test files

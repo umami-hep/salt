@@ -29,7 +29,7 @@ class PerformanceWriter(Callback):
         self.metrics += add_metrics if add_metrics is not None else []
         self.stdOut = stdOut
 
-    def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
+    def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:  # noqa: ARG002
         if trainer.fast_dev_run:
             return
 

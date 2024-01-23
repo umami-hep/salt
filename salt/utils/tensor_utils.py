@@ -45,8 +45,7 @@ def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
 
 
 def attach_context(x: Tensor, context: Tensor) -> Tensor:
-    """Concatenates a context tensor to an input tensor with considerations for
-    broadcasting.
+    """Concatenate a context tensor to an input tensor with broadcasting.
 
     The idea behind this is to allow a context tensor less or equal dimensions to be
     concatenated to an input with more dimensions.
@@ -73,9 +72,7 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
 
 
 def init_method_normal(std):
-    """Init method based on N(0, std).
-    Necessary for muP initialisation.
-    """
+    """Init method based on N(0, std). Necessary for muP initialisation."""
 
     def init_(tensor):
         return torch.nn.init.normal_(tensor, mean=0.0, std=std)

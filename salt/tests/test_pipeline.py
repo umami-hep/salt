@@ -215,7 +215,7 @@ def test_truncate_inputs(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_truncate_inputs_error(tmp_path) -> None:
     args = ["--data.num_inputs.this_should_error=10"]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be a subset of"):
         run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False, train_args=args)
 
 

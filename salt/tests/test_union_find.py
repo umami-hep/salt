@@ -39,9 +39,12 @@ def test_single_vertex_2() -> None:
 def test_single_vertex_3() -> None:
     """Test union find on a 4 track jet with one three track vertex."""
     labels = torch.tensor([0, 1, 1, 1])
-    pairwise_probs = torch.tensor(
-        [[-1.0, -1.0, -1.0], [-1.0, 1.0, 1.0], [-1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]]
-    )
+    pairwise_probs = torch.tensor([
+        [-1.0, -1.0, -1.0],
+        [-1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+    ])
     mask = torch.tensor([[False, False, False, False]])
     assert torch.equal(
         get_node_assignment(pairwise_probs.flatten().unsqueeze(dim=-1), mask),
@@ -58,9 +61,12 @@ def test_mult_vertices() -> None:
     labels_jet2 = torch.tensor([0, 1, 1, 0])
     labels = torch.cat([labels_jet1.flatten(), labels_jet2.flatten()], dim=0)
     pairwise_probs_jet1 = torch.tensor([[1.0, -1.0], [1.0, -1.0], [-1.0, -1.0]])
-    pairwise_probs_jet2 = torch.tensor(
-        [[-1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, -1.0]]
-    )
+    pairwise_probs_jet2 = torch.tensor([
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [1.0, -1.0, -1.0],
+    ])
     pairwise_probs = torch.cat(
         [pairwise_probs_jet1.flatten(), pairwise_probs_jet2.flatten()], dim=0
     )

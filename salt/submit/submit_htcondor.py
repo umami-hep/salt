@@ -37,16 +37,16 @@ handler["requirements"] = 'OpSysAndVer == "CentOS7"'
 if args.environment == "singularity":
     handler["container"] = (
         '"/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/'
-        + 'atlas-flavor-tagging-tools/algorithms/salt:latest"'
+        'atlas-flavor-tagging-tools/algorithms/salt:latest"'
     )
     # check host names to determine where to mount storage
-    storage_dir = Path("/tmp")
+    storage_dir = Path("/tmp")  # noqa: S108
     if Path("/etc/hostname").read_text().startswith("lxplus"):
         storage_dir = Path("/eos")
     handler["containerargs"] = f'"--nv --bind {storage_dir}"'
 
 # Construct and submit the job command
-command = "cd ${BASEDIR} && " "export OMP_NUM_THREADS=1 && "
+command = "cd ${BASEDIR} && export OMP_NUM_THREADS=1 && "
 if args.environment == "conda":
     command += (
         "source conda/bin/activate && conda activate salt && "

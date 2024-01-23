@@ -154,16 +154,16 @@ class ModelWrapper(L.LightningModule):
             n = f"{stage}_{t}_loss" if "loss" not in t else f"{stage}_{t}"
             self.log(n, loss_value, **kwargs)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch):
         # foward pass
-        preds, labels, _, loss = self.shared_step(batch)
+        _, _, _, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="train")
 
         return loss["loss"]
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch):
         # foward pass
         _, _, _, loss = self.shared_step(batch)
 
@@ -173,8 +173,8 @@ class ModelWrapper(L.LightningModule):
         # return loss (and maybe more stuff)
         return loss
 
-    def test_step(self, batch, batch_idx):
-        inputs, pad_masks, labels = batch
+    def test_step(self, batch):
+        inputs, pad_masks, _ = batch
         batch = (inputs, pad_masks, None)
         return self.shared_step(batch, evaluation=True)[0]
 

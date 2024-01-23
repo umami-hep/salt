@@ -1,4 +1,5 @@
 """Mostly helper functions for generating random inputs."""
+
 from pathlib import Path
 
 import h5py
@@ -192,7 +193,6 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
     with open(sd_fname) as f:
         sd = yaml.safe_load(f)
 
-    # TODO: read these from the predictionwriter config
     jet_vars = [
         "pt",
         "eta",

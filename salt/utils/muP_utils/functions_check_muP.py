@@ -364,7 +364,7 @@ def get_coord_data(models, dataloader, optimizer="adamw", lr=None, mup=True, **k
     if mup:
         from mup.optim import MuAdam as Adam
         from mup.optim import MuAdamW as AdamW
-        from mup.optim import MuSGD as SGD
+        from mup.optim import MuSGD as SGD  # noqa: N814
     else:
         from torch.optim import SGD, Adam, AdamW
 
@@ -439,7 +439,7 @@ def plot_coord_data(
     Output:
         the `matplotlib` figure object
     """
-    ### preprocessing
+    # preprocessing
     df = copy(df)
     # nn.Sequential has name '', which duplicates the output layer
     df = df[df.module != ""]
@@ -454,7 +454,7 @@ def plot_coord_data(
             df = df[~(df["module"].str.contains("|".join(name_not_contains)))]
         # for nn.Sequential, module names are numerical
         df["module"] = pd.to_numeric(df["module"])
-    except Exception:
+    except Exception:  # noqa: S110, BLE001
         pass
 
     ts = df.t.unique()
@@ -467,7 +467,7 @@ def plot_coord_data(
     def tight_layout(plt):
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-    ### plot
+    # plot
     fig = plt.figure(figsize=(5 * len(ts), 4))
     if face_color is not None:
         fig.patch.set_facecolor(face_color)
@@ -610,12 +610,12 @@ def _get_training_data(
                         pbar.update(freq_bar)
                     else:
                         print(
-                            f"Step {batch_idx} / {nsteps} - loss = {myloss:.5} in time {t1-t0:.3}"
+                            f"Step {batch_idx} / {nsteps} - loss = {myloss:.5} in time {t1 - t0:.3}"
                         )
                     t0 = t1
                 if batch_idx < 10:
                     tf1 = time()
-                    print(f"Iteration number {batch_idx} done in {tf1-tf0:.3}")
+                    print(f"Iteration number {batch_idx} done in {tf1 - tf0:.3}")
 
                 if batch_idx == nsteps:
                     break
@@ -666,7 +666,7 @@ def get_training_data(models, dataloader, optimizer="adamw", lr=None, mup=True, 
     if mup:
         from mup.optim import MuAdam as Adam
         from mup.optim import MuAdamW as AdamW
-        from mup.optim import MuSGD as SGD
+        from mup.optim import MuSGD as SGD  # noqa: N814
     else:
         from torch.optim import SGD, Adam, AdamW
 
@@ -737,14 +737,14 @@ def plot_training_data(
     Output:
         the `matplotlib` figure object
     """
-    ### preprocessing
+    # preprocessing
     import numpy as np
 
     df = copy(df)
 
     # Combined the seeds
     df = df.groupby(["width", "step"], sort=False).agg({"loss": np.average})
-    df.reset_index(inplace=True)
+    df = df.reset_index()
 
     # Now put a rolling average of loss, based on step for each width
     if window_size is not None:
@@ -768,7 +768,7 @@ def plot_training_data(
     def tight_layout(plt):
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-    ### plot
+    # plot
     fig = plt.figure(figsize=(5, 4))
     if face_color is not None:
         fig.patch.set_facecolor(face_color)

@@ -37,8 +37,7 @@ class InputNorm(nn.Module):
         if input_map is None:
             input_map = {k: k for k in variables}
         keys = {input_map[k] for k in set(variables.keys())}
-        if "EDGE" in keys:
-            keys.remove("EDGE")
+        keys.discard("EDGE")
         if "GLOBAL" in keys:
             keys.remove("GLOBAL")
             keys.add(self.global_object)

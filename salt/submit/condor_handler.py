@@ -67,14 +67,13 @@ class CondorHandler:
         else:
             subprocess.call(f"condor_submit {jobfile}", shell=True)
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def __setitem__(self, key: str, value: Any) -> None:  # noqa: ANN401
         self._condor_options[key] = value
 
     def _make_bash_file(self, command: str) -> Path:
         run_file = self.batch_path / f"batch_{self._tag}.sh"
         with run_file.open("w") as fr:
-            fr.write(
-                f"""#!/bin/sh
+            fr.write(f"""#!/bin/sh
 # {self._tag} batch run script
 #$ -cwd
 #$ -j y
@@ -83,8 +82,7 @@ BASEDIR={self.base_dir}
 pwd; ls -l
 {command}
 ls -l
-"""
-            )
+""")
         run_file.chmod(0o755)
         logging.debug(f"Made run file {run_file}")
         return run_file
@@ -95,14 +93,12 @@ ls -l
             for key, value in self._condor_options.items():
                 if key in self._condor_options_dict:
                     fs.write(f"{self._condor_options_dict[key]}={value}\n")
-            fs.write(
-                f"""Executable          = {run_file}
+            fs.write(f"""Executable          = {run_file}
 Output              = {self.log_path}/stdout_{self._tag}_$(ClusterId).txt
 Error               = {self.log_path}/stderr_{self._tag}_$(ClusterId).txt
 Log                 = {self.log_path}/batch_{self._tag}_$(ClusterId).log
 
 queue
-"""
-            )
+""")
         logging.debug(f"Made job file {batch_file}")
         return batch_file

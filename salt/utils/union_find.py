@@ -19,22 +19,17 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor):
     torch.tensor_split(scores, cum_edges)
 
     # calculate opposite edge indices (assumes edges sorted by src then dest or vice versa)
-    sym_ind = torch.cat(
-        [
-            torch.arange(n - 1, n * (n - 1) ** 2 + 1, n - 1, device=node_numbers.device)
-            for n in node_numbers
-        ]
-    )
-    sym_ind += torch.cat(
-        [
-            torch.arange(0, n - 1, device=sym_ind.device).repeat(n).sort()[0] * n
-            for n in node_numbers
-        ]
-    )
+    sym_ind = torch.cat([
+        torch.arange(n - 1, n * (n - 1) ** 2 + 1, n - 1, device=node_numbers.device)
+        for n in node_numbers
+    ])
+    sym_ind += torch.cat([
+        torch.arange(0, n - 1, device=sym_ind.device).repeat(n).sort()[0] * n for n in node_numbers
+    ])
     sym_ind = sym_ind % torch.cat([n.repeat(n) for n in edge_numbers])
-    sym_ind += torch.cat(
-        [edge_offsets[i].repeat(edge_numbers[i]) for i in range(len(edge_offsets))]
-    )
+    sym_ind += torch.cat([
+        edge_offsets[i].repeat(edge_numbers[i]) for i in range(len(edge_offsets))
+    ])
 
     edge_scores = (scores + scores[sym_ind]) / 2.0
 
