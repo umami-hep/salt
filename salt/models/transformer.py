@@ -1,9 +1,8 @@
 from collections.abc import Mapping
 from itertools import combinations
 
-import torch.nn as nn
 from mup import MuReadout
-from torch import BoolTensor, Tensor, cat
+from torch import BoolTensor, Tensor, cat, nn
 
 from salt.models.attention import MultiheadAttention
 from salt.models.dense import Dense
@@ -173,20 +172,18 @@ class TransformerEncoder(nn.Module):
         self.update_edges = update_edges
         self.muP = muP
 
-        self.layers = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    embed_dim,
-                    mha_config,
-                    dense_config,
-                    context_dim,
-                    edge_embed_dim,
-                    update_edges if i != num_layers - 1 else False,
-                    self.muP,
-                )
-                for i in range(num_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(
+                embed_dim,
+                mha_config,
+                dense_config,
+                context_dim,
+                edge_embed_dim,
+                update_edges if i != num_layers - 1 else False,
+                self.muP,
+            )
+            for i in range(num_layers)
+        ])
         self.final_norm = nn.LayerNorm(embed_dim)
 
         # For resizing the output tokens
@@ -242,7 +239,7 @@ class TransformerCrossAttentionLayer(TransformerEncoderLayer):
         super().__init__(embed_dim, mha_config, dense_config, context_dim, muP)
         self.norm0 = nn.LayerNorm(embed_dim)
 
-    def forward(  # type: ignore
+    def forward(  # type: ignore[override]
         self,
         query: Tensor,
         key_value: Tensor,
@@ -296,45 +293,37 @@ class TransformerCrossAttentionEncoder(nn.Module):
 
         # Layers for each input type
         # need to use ModuleDict so device is set correctly
-        self.type_layers = nn.ModuleDict(
-            {
-                input_name: nn.ModuleList(
-                    [
-                        TransformerEncoderLayer(
-                            embed_dim,
-                            mha_config,
-                            sa_dense_config,
-                            context_dim,
-                            update_edges if i != num_layers - 1 else False,
-                            muP,
-                        )
-                        for i in range(num_layers)
-                    ]
+        self.type_layers = nn.ModuleDict({
+            input_name: nn.ModuleList([
+                TransformerEncoderLayer(
+                    embed_dim,
+                    mha_config,
+                    sa_dense_config,
+                    context_dim,
+                    update_edges if i != num_layers - 1 else False,
+                    muP,
                 )
-                for input_name in self.input_names
-            }
-        )
+                for i in range(num_layers)
+            ])
+            for input_name in self.input_names
+        })
 
         ca_layers = num_layers if ca_every_layer else 2 if num_layers > 1 else 1
 
         # module dict only supports string keys
-        self.cross_layers = nn.ModuleDict(
-            {
-                f"{input_name1}_{input_name2}": nn.ModuleList(
-                    [
-                        TransformerCrossAttentionLayer(
-                            embed_dim,
-                            mha_config,
-                            ca_dense_config,
-                            context_dim,
-                            muP,
-                        )
-                        for _ in range(ca_layers)
-                    ]
+        self.cross_layers = nn.ModuleDict({
+            f"{input_name1}_{input_name2}": nn.ModuleList([
+                TransformerCrossAttentionLayer(
+                    embed_dim,
+                    mha_config,
+                    ca_dense_config,
+                    context_dim,
+                    muP,
                 )
-                for input_name1, input_name2 in combinations(self.input_names, 2)
-            }
-        )
+                for _ in range(ca_layers)
+            ])
+            for input_name1, input_name2 in combinations(self.input_names, 2)
+        })
 
         self.final_norm = nn.LayerNorm(embed_dim)
 
@@ -377,7 +366,7 @@ class TransformerCrossAttentionEncoder(nn.Module):
                     x[it2] += self.cross_layers[layer_key][i](
                         prev_x[it2], prev_x[it1], pad_mask[it2], pad_mask[it1], **kwargs
                     )
-            elif i in [0, self.num_layers - 1]:
+            elif i in {0, self.num_layers - 1}:
                 for it1, it2 in combinations(self.input_names, 2):
                     layer_key = f"{it1}_{it2}"
                     x[it1] += self.cross_layers[layer_key][i // (self.num_layers - 1)](

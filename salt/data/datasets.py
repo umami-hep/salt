@@ -76,6 +76,7 @@ class SaltDataset(Dataset):
         self.norm_dict = norm_dict
         self.parameters = parameters
         self.stage = stage
+        self.rng = np.random.default_rng()
 
         # check that num_inputs contains valid keys
         if self.num_inputs is not None and not set(self.num_inputs).issubset(self.variables):
@@ -103,7 +104,7 @@ class SaltDataset(Dataset):
         for internal, external in self.input_map.items():
             self.dss[internal] = self.file[external]
             this_vars = self.labels[internal].copy() if internal in self.labels else []
-            this_vars += self.input_variables[internal] if internal in self.input_variables else []
+            this_vars += self.input_variables.get(internal, [])
             if internal == "EDGE":
                 dtype = get_dtype_edge(self.file[external], this_vars)
             else:
@@ -116,6 +117,7 @@ class SaltDataset(Dataset):
         self.num = self.get_num(num)
 
     def __len__(self):
+        """Return the number of samples in the dataset."""
         return int(self.num)
 
     def __getitem__(self, object_idx):
@@ -169,7 +171,7 @@ class SaltDataset(Dataset):
                         except KeyError:
                             prob = None
                         pad_masks = ~np.isin(flat_array[:, ind], self.parameters[param]["train"])
-                        random = np.random.choice(
+                        random = self.rng.choice(
                             self.parameters[param]["train"], size=np.sum(pad_masks), p=prob
                         )
                         flat_array[pad_masks, ind] = random
@@ -189,9 +191,9 @@ class SaltDataset(Dataset):
                 inputs[input_name] = torch.from_numpy(flat_array)
 
                 # apply the input padding mask
-                if "valid" in batch.dtype.names and input_name not in ["EDGE", "PARAMETERS"]:
+                if "valid" in batch.dtype.names and input_name not in {"EDGE", "PARAMETERS"}:
                     pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
-                    if input_name not in [self.global_object, "GLOBAL"]:
+                    if input_name not in {self.global_object, "GLOBAL"}:
                         inputs[input_name][pad_masks[input_name]] = 0
 
                 # check inputs are finite
@@ -266,8 +268,7 @@ def get_dtype(ds, variables=None) -> np.dtype:
     variables_flat = []
     for item in variables:
         if isinstance(item, list):
-            for subitem in item:
-                variables_flat.append(subitem)
+            variables_flat += item
         else:
             variables_flat.append(item)
 

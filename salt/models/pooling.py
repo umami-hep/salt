@@ -7,8 +7,7 @@ from salt.models.transformer import TransformerCrossAttentionLayer
 from salt.utils.tensor_utils import masked_softmax
 
 
-class Pooling(nn.Module):
-    ...
+class Pooling(nn.Module): ...
 
 
 class GlobalAttentionPooling(Pooling):
@@ -46,12 +45,10 @@ class BaseCrossAttentionPooling(Pooling):
         super().__init__()
         self.input_size = input_size
         self.num_layers = num_layers
-        self.ca_layers = nn.ModuleList(
-            [
-                TransformerCrossAttentionLayer(input_size, mha_config, dense_config, context_dim)
-                for _ in range(num_layers)
-            ]
-        )
+        self.ca_layers = nn.ModuleList([
+            TransformerCrossAttentionLayer(input_size, mha_config, dense_config, context_dim)
+            for _ in range(num_layers)
+        ])
         self.final_norm = nn.LayerNorm(input_size)
         self.class_token = nn.Parameter(randn(1, 1, input_size))
 

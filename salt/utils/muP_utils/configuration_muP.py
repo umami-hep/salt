@@ -97,7 +97,7 @@ def set_val_nestedKey(dictionary, keyTarget, valueSet):
 
 
 def update_config(muP_config, cfg_out, parameter_val):
-    for _param, param_config in muP_config.items():
+    for param_config in muP_config.values():
         assert len(param_config["apply_to"]) == len(
             param_config["parameter_name"]
         ), "Define one parameter name per module to apply to."

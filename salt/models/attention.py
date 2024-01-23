@@ -339,6 +339,7 @@ class GATv2Attention(nn.Module):
         attn_bias: Tensor | None = None,
         return_scores: bool = False,
     ) -> Tensor:
+        _ = scale
         # inputs are (B, H, Lq/k, D)
         # B, H, Lq, D = q.shape
 

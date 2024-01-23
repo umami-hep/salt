@@ -7,9 +7,10 @@ class R21Xbb(nn.Module):
     def __init__(self, tasks: ModuleList):
         super().__init__()
         self.tasks = tasks
-        self.init_nets = []  # type: ignore
+        self.init_nets: list = []
 
     def forward(self, inputs: dict, pad_masks=None, labels: dict | None = None):
+        _ = pad_masks
         x = inputs["track"]
         x = torch.flatten(x, start_dim=1)
         preds, loss = self.run_tasks(x, labels)

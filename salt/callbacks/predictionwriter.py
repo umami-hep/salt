@@ -111,9 +111,9 @@ class PredictionWriter(Callback):
         suffix = f"_{self.test_suff}" if self.test_suff is not None else ""
         return Path(out_dir / f"{out_basename}__test_{sample}{suffix}.h5")
 
-    def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):
+    def on_test_batch_end(self, trainer, module, outputs, batch, batch_idx):  # noqa: ARG002
         preds = outputs
-        inputs, pad_masks, labels = batch
+        _, pad_masks, labels = batch
         add_mask = False
         for task in self.tasks:
             if not self.write_tracks and task.input_name == "tracks":
@@ -151,7 +151,7 @@ class PredictionWriter(Callback):
                 self.pad_masks[task.input_name].append(this_pad_masks)
                 add_mask = True
 
-    def on_test_end(self, trainer, module):
+    def on_test_end(self, trainer, module):  # noqa: ARG002
         print("\n" + "-" * 100)
         if self.output_path.exists():
             print("Warning! Overwriting existing file.")
@@ -175,9 +175,9 @@ class PredictionWriter(Callback):
 
             # add mask if present
             if name in self.pad_masks:
-                pad_mask = np.concatenate(
-                    [m.cpu() for m in self.pad_masks[name]]
-                )  # concat test batches
+                pad_mask = np.concatenate([
+                    m.cpu() for m in self.pad_masks[name]
+                ])  # concat test batches
                 pad_mask = u2s(np.expand_dims(pad_mask, -1), dtype=np.dtype([("mask", "?")]))
                 this_outputs.append(maybe_pad(pad_mask, inputs))
 

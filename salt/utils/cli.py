@@ -87,7 +87,7 @@ class SaltCLI(LightningCLI):
                 sc.data = setup_S3_CLI(sc.data)
 
         # add the labels from the model config to the data config
-        labels = {}  # type: ignore
+        labels: dict = {}
         model_dict = vars(sc.model.model.init_args)
         for submodel in model_dict["tasks"]["init_args"]["modules"]:
             assert "Task" in submodel["class_path"]

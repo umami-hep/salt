@@ -176,6 +176,7 @@ class SaveConfigCallback(Callback):
 
         with contextlib.suppress(KeyError):
             # TODO: update UPP to call attribute objects instead of jets
+            # https://github.com/umami-hep/umami-preprocessing/issues/56
             meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
             meta["dsids"] = get_attr(train_dset.file, "dsids")

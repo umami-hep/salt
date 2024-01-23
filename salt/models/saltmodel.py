@@ -137,9 +137,9 @@ class SaltModel(nn.Module):
                 if labels is not None:
                     labels[merge_name] = {}
                     for var in labels[merge_types[0]]:
-                        labels[merge_name].update(
-                            {var: cat([labels[mt][var] for mt in merge_types], dim=1)}
-                        )
+                        labels[merge_name].update({
+                            var: cat([labels[mt][var] for mt in merge_types], dim=1)
+                        })
 
         # input embedding
         embed_xs = self.encoder(xs, pad_mask=pad_masks, **kwargs) if self.encoder else xs

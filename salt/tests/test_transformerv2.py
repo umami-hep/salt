@@ -2,7 +2,7 @@ import time
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from salt.models.attention import merge_masks
 from salt.models.layernorm import RMSNorm

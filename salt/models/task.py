@@ -139,7 +139,8 @@ class ClassificationTask(TaskBase):
         # use the mask to remove padded values from the loss (ignore_index=-1 is set by default)
         if pad_mask is not None and labels is not None:
             # mask out dodgey labels
-            # TODO remove when https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199 is in
+            # TODO: remove when is in the samples
+            # https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199
             pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
 
             # update the labels based on the mask (in case not done already)
@@ -222,6 +223,7 @@ class RegressionTaskBase(TaskBase, ABC):
 
     def nan_loss(self, preds: Tensor, targets: Tensor, **kwargs) -> Tensor:
         """Calculates the loss function, and excludes any NaNs.
+
         If Nans are included in the targets, then the loss should be instansiated
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
@@ -239,7 +241,7 @@ class RegressionTaskBase(TaskBase, ABC):
             if torch.isnan(loss):
                 raise ValueError(
                     "Regression loss is NaN. This may be due to NaN targets,"
-                    + " check configs/nan_regression.yaml for options to deal with this."
+                    " check configs/nan_regression.yaml for options to deal with this."
                 )
             return loss
 
@@ -354,7 +356,7 @@ class GaussianRegressionTask(RegressionTaskBase):
             )
 
         preds = self.net(x, context)
-        targets = self.get_targets(targets_dict)  # type:ignore
+        targets = self.get_targets(targets_dict)
 
         # split outputs into means and sigmas
         assert preds.shape[-1] % 2 == 0
@@ -485,7 +487,7 @@ class VertexingTask(TaskBase):
         weights = weights[adjmat]
         return 1 + weights
 
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None, precision: str = "f4"):
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None):
         preds = get_node_assignment(preds, pad_mask)
         preds = mask_fill_flattened(preds, pad_mask)
         dtype = np.dtype([("VertexIndex", "i8")])

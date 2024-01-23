@@ -100,7 +100,7 @@ def import_data_S3(config_path):
     os.environ["AWS_SECRET_ACCESS_KEY"] = config_S3["secKey"]
     os.environ["AWS_ENDPOINT_URL"] = config_S3["url"]
 
-    if "download_S3" in config_S3 and config_S3["download_S3"]:
+    if config_S3.get("download_S3"):
         local_path = Path(config_S3["download_path"])
         local_path.mkdir(parents=True, exist_ok=True)
         print("-" * 100)
@@ -133,7 +133,7 @@ def setup_S3_CLI(sc_data):
     os.environ["AWS_SECRET_ACCESS_KEY"] = config_S3["secKey"]
     os.environ["AWS_ENDPOINT_URL"] = config_S3["url"]
 
-    if "download_S3" in config_S3 and config_S3["download_S3"]:
+    if config_S3.get("download_S3"):
         local_path = Path(config_S3["download_path"])
         local_path.mkdir(parents=True, exist_ok=True)
         print("-" * 100)
@@ -174,9 +174,9 @@ def require_S3_CLI(config_S3):
     """Checking whether salt requires s3."""
     if config_S3 is None:
         return False
-    if "use_S3" in config_S3 and config_S3["use_S3"]:
+    if config_S3.get("use_S3"):
         return True
-    if "download_S3" in config_S3 and config_S3["download_S3"]:
+    if config_S3.get("download_S3"):
         return True
     return False
 
