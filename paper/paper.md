@@ -24,6 +24,9 @@ authors:
   - name: Dmitrii Kobylianskii
     orcid: 0009-0002-0070-5900
     affiliation: 5
+  - name: Matthew Leigh
+    orcid: NA
+    affiliation: 6
   - name: Ivan Oleksiyuk
     orcid: 0000-0002-4784-6340
     affiliation: 6
