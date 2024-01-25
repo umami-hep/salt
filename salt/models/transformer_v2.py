@@ -74,6 +74,27 @@ class Attention(nn.Module, ABC):
         bias: bool = True,
         add_zero_attn: bool = True,
     ):
+        """Multihead attention module.
+
+        Parameters
+        ----------
+        dim : int
+            Dimension of the input.
+        num_heads : int
+            Number of attention heads.
+        attn_type : str, optional
+            Type of backend kernel to use.
+        n_kv_heads : int | None, optional
+            Number of heads for the keys and values. If None, defaults to num_heads.
+        window_size : int | None, optional
+            Window size for flash attention kernel. If None, defaults to global attention.
+        dropout : float, optional
+            Dropout rate.
+        bias : bool, optional
+            Whether to include bias terms.
+        add_zero_attn : bool, optional
+            Whether to add a dummy token to attend to. This avoids nan when all tokens are padded.
+        """
         super().__init__()
 
         self.dim = dim
@@ -183,6 +204,16 @@ class Attention(nn.Module, ABC):
 
 class SelfAttention(nn.Module):
     def __init__(self, dim: int, **kwargs):
+        """Self attention module.
+
+        Parameters
+        ----------
+        dim : int
+            Dimension of the input.
+        kwargs : dict
+            Keyword arguments for
+            [salt.models.transformer_v2.Attention][salt.models.transformer_v2.Attention].
+        """
         super().__init__()
         self.dim = dim
         self.attention = Attention(dim=dim, **kwargs)
@@ -210,7 +241,25 @@ class GLU(nn.Module):
         bias: bool = True,
         gated: bool = True,
     ):
-        """Gated linear unit from https://arxiv.org/abs/2002.05202."""
+        """Gated linear unit from https://arxiv.org/abs/2002.05202.
+
+        TODO: combine this with the existing feed-forward layer
+        # https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues/49
+
+
+        Parameters
+        ----------
+        dim : int
+            Dimension of the input.
+        hidden_dim : int | None, optional
+            Dimension of the hidden layer. If None, defaults to dim * 2.
+        activation : str, optional
+            Activation function..
+        bias : bool, optional
+            Whether to include bias terms.
+        gated : bool, optional
+            Whether to gate the output of the hidden layer.
+        """
         super().__init__()
 
         if hidden_dim is None:
@@ -238,6 +287,20 @@ class EncoderLayer(nn.Module):
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
     ):
+        """Encoder layer consisting of a self-attention and a feed-forward layer.
+
+        Parameters
+        ----------
+        dim : int
+            Dimension of the embeddings at each layer.
+        norm : str, optional
+            Normalization style, by default "LayerNorm".
+        dense_kwargs : dict | None, optional
+            Keyword arguments for [salt.models.transformer_v2.GLU][salt.models.transformer_v2.GLU].
+        attn_kwargs : dict | None, optional
+            Keyword arguments for
+            [salt.models.transformer_v2.SelfAttention][salt.models.transformer_v2.SelfAttention].
+        """
         super().__init__()
         if attn_kwargs is None:
             attn_kwargs = {}
@@ -301,7 +364,7 @@ class TransformerV2(nn.Module):
         norm : str, optional
             Normalization style, by default "LayerNorm".
         kwargs : dict
-            Keyword arguments for [salt.models.transformerv2.EncoderLayer].
+            Keyword arguments for [salt.models.transformer_v2.EncoderLayer].
         """
         super().__init__()
         self.num_layers = num_layers

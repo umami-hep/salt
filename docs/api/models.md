@@ -1,8 +1,3 @@
-## Initialisation
-### ::: salt.models.InputNorm
-### ::: salt.models.InitNet
-### ::: salt.models.PositionalEncoder
-
 ## Components
 ### ::: salt.models.Dense
 
