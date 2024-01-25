@@ -39,8 +39,10 @@ nav:
   - Contributing: contributing.md
   - API Reference:
       - api/data.md
-      - api/tasks.md
+      - api/initialisation.md
+      - api/transformer.md
       - api/models.md
+      - api/tasks.md
 
 plugins:
   - search
