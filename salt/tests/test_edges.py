@@ -21,7 +21,6 @@ def test_transformer_edges() -> None:
         dense_config={
             "activation": "ReLU",
             "hidden_layers": [10],
-            "norm_layer": "LayerNorm",
         },
     )
     # basic test

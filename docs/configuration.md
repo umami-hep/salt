@@ -180,7 +180,6 @@ init_args:
             class_path: salt.models.ScaledDotProductAttention
         out_proj: False
     dense_config:
-        norm_layer: *norm_layer
         activation: *activation
         hidden_layers: [128]
         dropout: 0.1
@@ -211,7 +210,6 @@ init_nets:
     output_size: &embed_dim 192
     hidden_layers: [256]
     activation: &activation SiLU
-    norm_layer: &norm_layer LayerNorm
   - input_name: electrons
     dense_config:
     <<: *init
@@ -239,7 +237,6 @@ Alternatively, each input type can be updated with separate self-attention block
             class_path: salt.models.ScaledDotProductAttention
         out_proj: False
         sa_dense_config:
-        norm_layer: *norm_layer
         activation: *activation
         hidden_layers: [256]
         dropout: &dropout 0.1

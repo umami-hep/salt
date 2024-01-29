@@ -69,12 +69,3 @@ def attach_context(x: Tensor, context: Tensor) -> Tensor:
         return {key: attach_context_single(val, context) for key, val in x.items()}
 
     return attach_context_single(x, context)
-
-
-def init_method_normal(std):
-    """Init method based on N(0, std). Necessary for muP initialisation."""
-
-    def init_(tensor):
-        return torch.nn.init.normal_(tensor, mean=0.0, std=std)
-
-    return init_

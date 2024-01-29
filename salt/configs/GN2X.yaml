@@ -130,7 +130,6 @@ model:
             #        output_size: 6
             #        hidden_layers: [64, 32]
             #        activation: *activation
-            #        norm_layer: *norm_layer
             #        dropout: *dropout
 
             - class_path: salt.models.VertexingTask

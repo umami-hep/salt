@@ -241,22 +241,20 @@ class GLU(nn.Module):
         bias: bool = True,
         gated: bool = True,
     ):
-        """Gated linear unit from https://arxiv.org/abs/2002.05202.
+        """Dense update with gated linear unit.
 
-        TODO: combine this with the existing feed-forward layer
-        # https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues/49
-
+        See [2002.05202](https://arxiv.org/abs/2002.05202).
 
         Parameters
         ----------
         dim : int
-            Dimension of the input.
+            Dimension of the input and output.
         hidden_dim : int | None, optional
             Dimension of the hidden layer. If None, defaults to dim * 2.
         activation : str, optional
-            Activation function..
+            Activation function.
         bias : bool, optional
-            Whether to include bias terms.
+            Whether to include bias in the linear layers.
         gated : bool, optional
             Whether to gate the output of the hidden layer.
         """

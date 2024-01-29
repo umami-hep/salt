@@ -62,7 +62,6 @@ model:
             output_size: &embed_dim 192
             hidden_layers: [256]
             activation: &activation SiLU
-            norm_layer: &norm_layer LayerNorm
         - input_name: EDGE
           attach_global: false
           dense_config:
@@ -70,7 +69,6 @@ model:
             output_size: &edge_embed_dim 32
             hidden_layers: [32]
             activation: *activation
-            norm_layer: *norm_layer
 
       encoder:
         class_path: salt.models.TransformerEncoder
@@ -85,7 +83,6 @@ model:
             attention:
               class_path: salt.models.ScaledDotProductAttention
           dense_config:
-            norm_layer: *norm_layer
             activation: *activation
             hidden_layers: [256]
             dropout: &dropout 0.1
@@ -111,7 +108,6 @@ model:
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  norm_layer: *norm_layer
                   dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
@@ -130,7 +126,6 @@ model:
                   output_size: 8
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  norm_layer: *norm_layer
                   dropout: *dropout
 
             #- class_path: salt.models.ClassificationTask
@@ -151,7 +146,7 @@ model:
             #        output_size: 6
             #        hidden_layers: [64, 32]
             #        activation: *activation
-            #        norm_layer: *norm_layer
+
             #        dropout: *dropout
 
             - class_path: salt.models.VertexingTask

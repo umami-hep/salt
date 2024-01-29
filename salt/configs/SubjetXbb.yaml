@@ -72,7 +72,6 @@ model:
             output_size: &embed_dim 64
             hidden_layers: [64]
             activation: &activation SiLU
-            norm_layer: &norm_layer LayerNorm
 
       encoder:
         class_path: salt.models.TransformerEncoder
@@ -84,7 +83,6 @@ model:
             attention: { class_path: salt.models.ScaledDotProductAttention }
             out_proj: False
           dense_config:
-            norm_layer: *norm_layer
             activation: *activation
             hidden_layers: [128]
             dropout: &dropout 0.1
@@ -108,5 +106,4 @@ model:
                   output_size: 4
                   hidden_layers: [64, 32]
                   activation: *activation
-                  norm_layer: *norm_layer
                   dropout: *dropout
