@@ -62,7 +62,6 @@ def test_transformer() -> None:
         dense_config={
             "activation": "ReLU",
             "hidden_layers": [10],
-            "norm_layer": "LayerNorm",
         },
     )
     # basic test
@@ -98,7 +97,6 @@ def test_transformer_cross_attention_encoder() -> None:
         sa_dense_config={
             "activation": "ReLU",
             "hidden_layers": [10],
-            "norm_layer": "LayerNorm",
         },
     )
     # Basic Functionality Test

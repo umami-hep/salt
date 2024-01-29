@@ -4,10 +4,8 @@ from collections.abc import Mapping
 import torch
 from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor, nn
-from torch.nn.functional import sigmoid
-from torch.nn.init import constant_
 
-from salt.utils.tensor_utils import init_method_normal, masked_softmax
+from salt.utils.tensor_utils import masked_softmax
 
 
 def merge_masks(
@@ -158,24 +156,22 @@ class MultiheadAttention(nn.Module):
 
     def _reset_parameters(self):
         """Initialise the weights and biases for muP."""
-        constant_(self.linear_q.weight, 0)  # zero initialisation of query weights
-        init_method_normal((1.0 / self.k_dim) ** 0.5)(self.linear_k.weight)
-        init_method_normal((1.0 / self.v_dim) ** 0.5)(self.linear_v.weight)
+        nn.init.constant_(self.linear_q.weight, 0)  # zero initialisation of query weights
+        nn.init.normal_(self.linear_k.weight, std=(1.0 / self.k_dim) ** 0.5)
+        nn.init.normal_(self.linear_v.weight, std=(1.0 / self.v_dim) ** 0.5)
         linear_list = [self.linear_q, self.linear_k, self.linear_v]
         if self.edge_embed_dim > 0:
-            init_method_normal((1.0 / self.edge_embed_dim) ** 0.5)(self.linear_e.weight)
-            init_method_normal((1.0 / self.edge_embed_dim) ** 0.5)(self.linear_g.weight)
+            nn.init.normal_(self.linear_e.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
+            nn.init.normal_(self.linear_g.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
             linear_list.extend([self.linear_e, self.linear_g])
             if self.update_edges:
-                init_method_normal((1.0 / self.num_heads) ** 0.5)(self.linear_e_out.weight)
+                nn.init.normal_(self.linear_e_out.weight, std=(1.0 / self.num_heads) ** 0.5)
                 linear_list.append(self.linear_e_out)
         if self.out_proj:
-            init_method_normal((1.0 / self.embed_dim) ** 0.5)(self.linear_out.weight)
+            nn.init.normal_(self.linear_out.weight, std=(1.0 / self.embed_dim) ** 0.5)
             linear_list.append(self.linear_out)
-
-        # Also 0 initialise the bias
         for linear in linear_list:
-            constant_(linear.bias, 0.0)
+            nn.init.constant_(linear.bias, 0.0)
 
     def input_projections(self, q, k, v) -> tuple:
         """Perform input linear projections, output shapes are (B,L,H,HD)."""
@@ -241,7 +237,7 @@ class MultiheadAttention(nn.Module):
         # Calculate edge feature matrices E, G and reshape them to (B,L,L,H)
         if edges is not None:
             e = self.linear_e(edges)
-            g = sigmoid(self.linear_g(edges))
+            g = nn.functional.sigmoid(self.linear_g(edges))
             attn_bias = e if attn_bias is None else attn_bias + e
 
         # Calculate attention scores (B,H,Lq,Lk)

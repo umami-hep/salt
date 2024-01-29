@@ -11,7 +11,6 @@ model:
             output_size: &embed_dim 128
             hidden_layers: [256]
             activation: &activation SiLU
-            norm_layer: &norm_layer LayerNorm
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling

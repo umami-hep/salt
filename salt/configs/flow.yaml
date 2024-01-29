@@ -28,7 +28,6 @@ model:
             output_size: &embed_dim 128
             hidden_layers: [256]
             activation: &activation SiLU
-            norm_layer: &norm_layer LayerNorm
         - input_name: flow
           dense_config:
             <<: *init
@@ -47,7 +46,6 @@ model:
                 dropout: 0.0
             out_proj: False
           dense_config:
-            norm_layer: *norm_layer
             activation: *activation
             hidden_layers: [256]
             dropout: &dropout 0.1
@@ -71,5 +69,4 @@ model:
                   output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  norm_layer: *norm_layer
                   dropout: *dropout
