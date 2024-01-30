@@ -158,6 +158,12 @@ class ModelWrapper(L.LightningModule):
         # foward pass
         _, _, _, loss = self.shared_step(batch)
 
+        if loss["loss"].isnan():
+            raise RuntimeError(
+                "Loss is NaN - this indicates something significant has gone wrong."
+                "Check for any NaNs or infs in the input dataset. If nothing is found here, "
+                "check 'docs/training.md - NaNs' for more information"
+            )
         # log losses
         self.log_losses(loss, stage="train")
 
