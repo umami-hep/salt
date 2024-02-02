@@ -188,13 +188,20 @@ class SaltDataset(Dataset):
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
                 if self.nan_to_num:
                     flat_array = np.nan_to_num(flat_array)
+                # For occasional issue where the array is not contiguous
+                if not flat_array.flags.c_contiguous:
+                    flat_array = flat_array.copy()
                 inputs[input_name] = torch.from_numpy(flat_array)
 
                 # apply the input padding mask
-                if "valid" in batch.dtype.names and input_name not in {"EDGE", "PARAMETERS"}:
+                if "valid" in batch.dtype.names and input_name not in {
+                    "EDGE",
+                    "PARAMETERS",
+                    self.global_object,
+                    "GLOBAL",
+                }:
                     pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
-                    if input_name not in {self.global_object, "GLOBAL"}:
-                        inputs[input_name][pad_masks[input_name]] = 0
+                    inputs[input_name][pad_masks[input_name]] = 0
 
                 # check inputs are finite
                 if not torch.isfinite(inputs[input_name]).all():
