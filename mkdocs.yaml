@@ -37,6 +37,7 @@ nav:
   - Evaluation: evaluation.md
   - ONNX Export: export.md
   - Contributing: contributing.md
+  - Tutorial: tutorial.md
   - API Reference:
       - api/data.md
       - api/initialisation.md
