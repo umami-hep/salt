@@ -180,7 +180,7 @@ def test_RMSNorm():
 
 
 def test_DecoderLayer():
-    layer = DecoderLayer(dim=32, attn_kwargs={"num_heads": 2})
+    layer = DecoderLayer(embed_dim=32, attn_kwargs={"num_heads": 2})
     x = torch.randn(5, 10, 32)
     y = torch.randn(5, 10, 32)
     layer(x, y, pad_mask=None)
