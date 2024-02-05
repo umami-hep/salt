@@ -129,6 +129,11 @@ def test_GN2(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
+def test_GN3(tmp_path) -> None:
+    run_combined(tmp_path, "GN3.yaml")
+
+
+@pytest.mark.filterwarnings(w)
 def test_GN2_muP(tmp_path) -> None:
     run_combined(tmp_path, "GN2_muP.yaml", do_muP=True, do_onnx=False)
 
