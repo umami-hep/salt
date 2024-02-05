@@ -58,18 +58,13 @@ model:
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.TransformerV2
         init_args:
           embed_dim: *embed_dim
           num_layers: 4
           out_dim: &out_dim 128
-          mha_config:
+          attn_kwargs:
             num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
-            activation: *activation
-            hidden_layers: [512]
-            dropout: &dropout 0.1
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -92,7 +87,6 @@ model:
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -110,27 +104,6 @@ model:
                   output_size: 8
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
-
-            #- class_path: salt.models.ClassificationTask
-            #  init_args:
-            #    name: track_type
-            #    input_name: tracks
-            #    label: ftagTruthTypeLabel
-            #    weight: 0.4
-            #    loss:
-            #      class_path: torch.nn.CrossEntropyLoss
-            #      init_args:
-            #        weight: [2.12, 6.98, 1.0, 6.28, 22.62, 92.28]
-            #    net:
-            #      class_path: salt.models.Dense
-            #      init_args:
-            #        input_size: 128
-            #        context_size: 128
-            #        output_size: 6
-            #        hidden_layers: [64, 32]
-            #        activation: *activation
-            #        dropout: *dropout
 
             - class_path: salt.models.VertexingTask
               init_args:
@@ -147,4 +120,3 @@ model:
                   hidden_layers: [128, 64, 32]
                   output_size: 1
                   activation: *activation
-                  dropout: *dropout

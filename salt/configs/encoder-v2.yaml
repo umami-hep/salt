@@ -5,7 +5,7 @@ model:
       encoder:
         class_path: salt.models.TransformerV2
         init_args:
-          dim: 256
+          embed_dim: 256
           num_layers: 4
           out_dim: 128
           attn_kwargs:

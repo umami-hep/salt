@@ -65,7 +65,7 @@ ATTN_BACKENDS = {
 class Attention(nn.Module, ABC):
     def __init__(
         self,
-        dim: int,
+        embed_dim: int,
         num_heads: int,
         attn_type: str = "torch-meff",
         n_kv_heads: int | None = None,
@@ -78,7 +78,7 @@ class Attention(nn.Module, ABC):
 
         Parameters
         ----------
-        dim : int
+        embed_dim : int
             Dimension of the input.
         num_heads : int
             Number of attention heads.
@@ -97,9 +97,9 @@ class Attention(nn.Module, ABC):
         """
         super().__init__()
 
-        self.dim = dim
+        self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        self.head_dim = embed_dim // num_heads
 
         self.n_kv_heads = num_heads if n_kv_heads is None else n_kv_heads
         assert self.n_kv_heads is not None
@@ -119,10 +119,10 @@ class Attention(nn.Module, ABC):
             assert window_size % 2 == 0
             self.window_size = (window_size // 2, window_size // 2)
 
-        self.wq = nn.Linear(self.dim, self.num_heads * self.head_dim, bias=self.bias)
-        self.wk = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=self.bias)
-        self.wv = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=self.bias)
-        self.wo = nn.Linear(self.num_heads * self.head_dim, self.dim, bias=self.bias)
+        self.wq = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=self.bias)
+        self.wk = nn.Linear(self.embed_dim, self.n_kv_heads * self.head_dim, bias=self.bias)
+        self.wv = nn.Linear(self.embed_dim, self.n_kv_heads * self.head_dim, bias=self.bias)
+        self.wo = nn.Linear(self.num_heads * self.head_dim, self.embed_dim, bias=self.bias)
 
     def forward(
         self,
@@ -164,7 +164,7 @@ class Attention(nn.Module, ABC):
         # add a dummy token to attend to - avoids nan when all tokens are padded
         if self.add_zero_attn:
             batch = q.shape[0]
-            zero_attn_shape = (batch, 1, self.dim)
+            zero_attn_shape = (batch, 1, self.embed_dim)
             k = torch.cat([k, torch.zeros(zero_attn_shape, dtype=k.dtype, device=k.device)], dim=1)
             v = torch.cat([v, torch.zeros(zero_attn_shape, dtype=v.dtype, device=v.device)], dim=1)
             if attn_mask is not None:
@@ -199,34 +199,34 @@ class Attention(nn.Module, ABC):
         output = self.attn_func(q, k, v, mask=attn_mask, dropout=self.dropout)
 
         # reshape output and return
-        return output.transpose(1, 2).contiguous().view(batch, -1, self.dim)
+        return output.transpose(1, 2).contiguous().view(batch, -1, self.embed_dim)
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, **kwargs):
+    def __init__(self, embed_dim: int, **kwargs):
         """Self attention module.
 
         Parameters
         ----------
-        dim : int
+        embed_dim : int
             Dimension of the input.
         kwargs : dict
             Keyword arguments for
             [salt.models.transformer_v2.Attention][salt.models.transformer_v2.Attention].
         """
         super().__init__()
-        self.dim = dim
-        self.attention = Attention(dim=dim, **kwargs)
+        self.embed_dim = embed_dim
+        self.attention = Attention(embed_dim=embed_dim, **kwargs)
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
         return self.attention(x, x, x, **kwargs)
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, dim: int, **kwargs):
+    def __init__(self, embed_dim: int, **kwargs):
         super().__init__()
-        self.dim = dim
-        self.attention = Attention(dim=dim, **kwargs)
+        self.embed_dim = embed_dim
+        self.attention = Attention(embed_dim=embed_dim, **kwargs)
 
     def forward(self, q: Tensor, kv: Tensor, **kwargs) -> Tensor:
         return self.attention(q, kv, kv, **kwargs)
@@ -235,7 +235,7 @@ class CrossAttention(nn.Module):
 class GLU(nn.Module):
     def __init__(
         self,
-        dim: int,
+        embed_dim: int,
         hidden_dim: int | None = None,
         activation: str = "ReLU",
         bias: bool = True,
@@ -247,10 +247,10 @@ class GLU(nn.Module):
 
         Parameters
         ----------
-        dim : int
+        embed_dim : int
             Dimension of the input and output.
         hidden_dim : int | None, optional
-            Dimension of the hidden layer. If None, defaults to dim * 2.
+            Dimension of the hidden layer. If None, defaults to embed_dim * 2.
         activation : str, optional
             Activation function.
         bias : bool, optional
@@ -261,13 +261,13 @@ class GLU(nn.Module):
         super().__init__()
 
         if hidden_dim is None:
-            hidden_dim = dim * 2
+            hidden_dim = embed_dim * 2
 
-        self.in_proj = nn.Linear(dim, hidden_dim, bias=bias)
-        self.out_proj = nn.Linear(hidden_dim, dim, bias=bias)
+        self.in_proj = nn.Linear(embed_dim, hidden_dim, bias=bias)
+        self.out_proj = nn.Linear(hidden_dim, embed_dim, bias=bias)
         self.gate = None
         if gated:
-            self.gate = nn.Linear(dim, hidden_dim, bias=bias)
+            self.gate = nn.Linear(embed_dim, hidden_dim, bias=bias)
         self.activation = getattr(nn, activation)()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -280,7 +280,7 @@ class GLU(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(
         self,
-        dim: int,
+        embed_dim: int,
         norm: str = "LayerNorm",
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
@@ -289,7 +289,7 @@ class EncoderLayer(nn.Module):
 
         Parameters
         ----------
-        dim : int
+        embed_dim : int
             Dimension of the embeddings at each layer.
         norm : str, optional
             Normalization style, by default "LayerNorm".
@@ -304,11 +304,11 @@ class EncoderLayer(nn.Module):
             attn_kwargs = {}
         if dense_kwargs is None:
             dense_kwargs = {}
-        self.dim = dim
-        self.attn = SelfAttention(dim=dim, **attn_kwargs)
-        self.attn_norm = getattr(layernorms, norm)(dim)
-        self.dense = GLU(dim, **dense_kwargs)
-        self.dense_norm = getattr(layernorms, norm)(dim)
+        self.embed_dim = embed_dim
+        self.attn = SelfAttention(embed_dim=embed_dim, **attn_kwargs)
+        self.attn_norm = getattr(layernorms, norm)(embed_dim)
+        self.dense = GLU(embed_dim, **dense_kwargs)
+        self.dense_norm = getattr(layernorms, norm)(embed_dim)
 
     def forward(self, x: Tensor, pad_mask: BoolTensor) -> Tensor:
         x = x + self.attn(self.attn_norm(x), kv_mask=pad_mask)
@@ -318,7 +318,7 @@ class EncoderLayer(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(
         self,
-        dim: int,
+        embed_dim: int,
         norm: str = "LayerNorm",
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
@@ -328,12 +328,12 @@ class DecoderLayer(nn.Module):
             attn_kwargs = {}
         if dense_kwargs is None:
             dense_kwargs = {}
-        self.dim = dim
-        self.attn = CrossAttention(dim=dim, **attn_kwargs)
-        self.q_norm = getattr(layernorms, norm)(dim)
-        self.kv_norm = getattr(layernorms, norm)(dim)
-        self.dense = GLU(dim, **dense_kwargs)
-        self.dense_norm = getattr(layernorms, norm)(dim)
+        self.embed_dim = embed_dim
+        self.attn = CrossAttention(embed_dim=embed_dim, **attn_kwargs)
+        self.q_norm = getattr(layernorms, norm)(embed_dim)
+        self.kv_norm = getattr(layernorms, norm)(embed_dim)
+        self.dense = GLU(embed_dim, **dense_kwargs)
+        self.dense_norm = getattr(layernorms, norm)(embed_dim)
 
     def forward(self, x: Tensor, kv: Tensor, pad_mask: BoolTensor) -> Tensor:
         x = x + self.attn(self.q_norm(x), self.kv_norm(kv), kv_mask=pad_mask)
@@ -344,7 +344,7 @@ class TransformerV2(nn.Module):
     def __init__(
         self,
         num_layers: int,
-        dim: int,
+        embed_dim: int,
         out_dim: int | None = None,
         norm: str = "LayerNorm",
         **kwargs,
@@ -355,7 +355,7 @@ class TransformerV2(nn.Module):
         ----------
         num_layers : int
             Number of layers.
-        dim : int
+        embed_dim : int
             Dimension of the embeddings at each layer.
         out_dim : int | None, optional
             Optionally project the output to a different dimension.
@@ -366,15 +366,15 @@ class TransformerV2(nn.Module):
         """
         super().__init__()
         self.num_layers = num_layers
-        self.dim = dim
+        self.embed_dim = embed_dim
 
         self.layers = torch.nn.ModuleList([
-            EncoderLayer(dim=dim, norm=norm, **kwargs) for _ in range(num_layers)
+            EncoderLayer(embed_dim=embed_dim, norm=norm, **kwargs) for _ in range(num_layers)
         ])
-        self.out_norm = getattr(layernorms, norm)(dim if out_dim is None else out_dim)
+        self.out_norm = getattr(layernorms, norm)(embed_dim if out_dim is None else out_dim)
         self.out_proj = None
         if out_dim is not None:
-            self.out_proj = nn.Linear(self.dim, out_dim)
+            self.out_proj = nn.Linear(self.embed_dim, out_dim)
 
     def forward(self, x: Tensor, pad_mask: BoolTensor) -> Tensor:
         if isinstance(x, dict):
