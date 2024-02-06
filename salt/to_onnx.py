@@ -97,6 +97,7 @@ class ONNXModel(ModelWrapper):
         super().__init__(**kwargs)
         assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
         self.name = name if name else self.name
+        assert "_" not in self.name, "Model name cannot contain underscores."
         self.include_aux = include_aux
         self.const = "tracks"
         self.input_names = ["jet_features", "track_features"]
@@ -351,9 +352,12 @@ def add_metadata(
     jet_vars = config["data"]["variables"]["jets"]
     trk_vars = config["data"]["variables"]["tracks"]
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
-    metadata["output_names"] = output_names
+    metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
 
-    # add input info - needed by athena!
+    # careful - this stuff is used in athena
+    metadata["onnx_model_version"] = "v1"
+    metadata["output_names"] = output_names
+    metadata["model_name"] = model_name
     metadata["inputs"] = [
         {
             "name": "jet_var",
@@ -369,12 +373,6 @@ def add_metadata(
         }
     ]
 
-    # add model version instead of specifying outputs
-    metadata["onnx_model_version"] = "v1"
-
-    # Save the git hash of the repo used for exporting onnx model
-    metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
-
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}
     for k, v in metadata.items():
@@ -382,7 +380,7 @@ def add_metadata(
         meta.key = k
         meta.value = v
 
-    onnx_model.doc_string = f"{model_name}"
+    onnx_model.doc_string = model_name
     onnx.save(onnx_model, onnx_path)
     print("-" * 100)
 

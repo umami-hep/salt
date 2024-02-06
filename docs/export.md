@@ -10,18 +10,18 @@ The script has several arguments, you can learn about them by running
 to_onnx --help
 ```
 
-At a minimum, you need to specify the path to a checkpoint to convert, and a track selection.
+At a minimum, you should specify the path to a checkpoint to convert and a name for the exported model.
 For example
 
 ```bash
 to_onnx \
     --ckpt_path logs/<timestamp>/ckpts/checkpoint.ckpt \
-    --track_selection r22default
+    --name GN2vXX
 ```
 
 If you don't specify a config path using `--config`, the script will look for one in the parent of the `--ckpt_path`.
 
-??? warning "Track selection"
+???warning "The `r22default` track selection is used by default"
 
     The track selection you specify must correspond to one of the options defined in `trk_select_regexes` variable in
     [`DataPrepUtilities.cxx`](https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx).
