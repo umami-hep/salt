@@ -102,19 +102,21 @@ This architecture facilitates the training of multimodal and multitask models as
 In the context of jet classification, these input modalities might include global features of the jet and varying numbers of jet constituents such as charged particle trajectories, calorimeter energy depositions, reconstructed leptons, or inner detector spacepoints.
 The architecture is described briefly below.
 First, any global input features are concatentated with the features of each constituent.
+Next, an initial embedding to a shared representation space is performed separately for each type of constituent.
 The different types of constituents are then projected into a shared representation space by a series of initialisation networks.
-Next, a single unified encoder jointly processes the constituents, and the encoder outputs are then used for a configurable set of tasks.
+The embedded constituents are then combined and fed into a encoder network which processes constituents of different modalities in a unified way.
+The encoder then outputs to a set of task-specific modules, each tailored to a specific learning objective.
 This architecture allows the model to leverage all the available detector information, leading to improved performance.
 A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
 
-![This diagram illustrates the flow of information within a model trained using `Salt`. First, global features are concatenated (denoted by $\oplus$) with input features from multiple constituents). Next, an initial embedding to a shared representation space is performed separately for each type of constituent. The constituents are then combined and are then fed into a unified encoder model. The encoder then outputs to a set of task-specific modules, each tailored to a specific learning objective.\label{fig:salt-arch}](salt-arch.png){ width=80% }
+![This diagram illustrates the flow of information within a generic model trained using `Salt`. In this example, global object features are provided alongisde two types of constituents. The model is configured with three training objectives, each of which may relate to the global object or the one of the constituent modalities. Concatenation is denoted by $\oplus$.\label{fig:salt-arch}](salt-arch.png){ width=90% }
 
 
 # Related work
 
 `Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
 While `Salt` relies on similar preprocessing techniques as those provided by `Umami`, it provides several additional features which make it a more powerful and flexible tool for creating advanced ML models.
-Namely, `Salt` provides increased configurability via a multimodal and multitask model skeleton, support for optimised Transformer encoders [@2017arXiv170603762V], and distributed model training.
+Namely, `Salt` provides support for multimodal and multitask learning, optimised Transformer encoders [@2017arXiv170603762V], and distributed model training.
 
 # Acknowledgements
 
