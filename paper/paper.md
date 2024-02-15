@@ -25,6 +25,7 @@ authors:
     orcid: 0009-0002-0070-5900
     affiliation: 5
   - name: Matthew Leigh
+    orcid: 0000-0003-1406-1413
     affiliation: 6
   - name: Ivan Oleksiyuk
     orcid: 0000-0002-4784-6340
