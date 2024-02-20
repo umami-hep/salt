@@ -3,7 +3,7 @@
 Welcome to the Salt framework!
 
 Salt is a general-purpose framework to train **multi-modal**, **multi-task** models.
-It was developed for state-of-the art jet flavour tagging algorithms such as [GN1](https://ftag.docs.cern.ch/algorithms/GN1/) and [GN2](https://ftag.docs.cern.ch/algorithms/GN2/), but can be applied much more widely.
+It was developed for state-of-the art jet flavour tagging algorithms such as [GN1](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN1/) and [GN2](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN2/), but can be applied much more widely.
 For example, you could use Salt to classify or regress properties of objects or events, or all these things at once!
 
 !!! example "The code is hosted on the CERN GitLab: [https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt)"
@@ -34,7 +34,7 @@ Below are some helpful links to get you started:
 
 Salt is currently used for the following projects:
 
-- [Jet flavour tagging](https://ftag.docs.cern.ch/algorithms/GN2/)
+- [Jet flavour tagging](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN2/)
 - [Boosted $X \rightarrow bb$ tagging](https://cds.cern.ch/record/2866601)
 - [Tau ID](https://indico.cern.ch/event/1280531/timetable/?view=standard#153-new-identification-and-tag)
 - [b-jet energy calibration](https://indico.cern.ch/event/1280531/timetable/?view=standard#131-b-jet-regression-effort-su)
