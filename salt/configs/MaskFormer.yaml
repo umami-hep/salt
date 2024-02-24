@@ -1,0 +1,210 @@
+name: MaskFormer
+
+model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: tracks
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.TransformerV2
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 4
+          out_dim: *embed_dim
+          attn_kwargs:
+            num_heads: 8
+          dense_kwargs:
+            activation: *activation
+
+
+      mask_decoder:
+        class_path: salt.models.maskformer.MaskDecoder
+        init_args:
+          num_objects: 5
+          embed_dim: *embed_dim
+          num_layers: 3
+          aux_loss: false
+          md_config:
+            mask_attention: true
+            bidirectional_ca: true
+            n_heads: 8
+
+          class_net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embed_dim
+              output_size: 3 # b/c/none
+
+          mask_net:
+            class_path: salt.models.Dense
+            init_args:
+              input_size: *embed_dim
+              output_size: *embed_dim
+
+          loss_config:
+            num_classes: 2
+            loss_weights:
+              object_class_ce: 2.0
+              mask_ce: 10.0
+              mask_dice: 2.0
+              regression: 2.0
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling #pooled = embed_dim
+        init_args: { input_size: *embed_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [1.0, 1.0, 1.0] }
+                dense_config: &task_dense_config
+                  input_size: *embed_dim
+                  output_size: 3
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression
+                targets: ["pt", "Lxy", "deta", "dphi", "mass"]
+                input_name: objects
+                weight: 0.5
+                scaler:
+                  class_path: salt.utils.scalers.RegressionTargetScaler
+                  init_args:
+                    scales:
+                      pt:
+                        op: log
+                        op_scale: 0.2
+                      Lxy:
+                        op: log
+                        x_off: 1
+                      deta:
+                        op: linear
+                        x_off: 1
+                        op_scale: 10
+                      dphi:
+                        op: linear
+                        x_off: 1
+                        op_scale: 10
+                      mass:
+                        op: log
+                        op_scale: 0.1
+                loss:
+                  class_path: torch.nn.L1Loss
+                  init_args:
+                    reduction: none
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: *embed_dim
+                  output_size: 5
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  input_size: *embed_dim
+                  context_size: *embed_dim
+
+data:
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      #- numberOfTRTHits
+      #- leptonID
+
+  mf_config:
+    object:
+      name: truth_hadrons
+      id_label: barcode
+      class_label: flavour
+      object_classes:
+        b:
+          raw: 5
+          mapped: 0
+        c:
+          raw: 4
+          mapped: 1
+        null:
+          raw: -1
+          mapped: 2
+    constituent:
+      name: tracks
+      id_label: ftagTruthParentBarcode
+
+  train_file: /home/xzcappon/phd/datasets/hepformers/atlas_vertexing/ttbar/pp_output_train.h5
+  val_file: /home/xzcappon/phd/datasets/hepformers/atlas_vertexing/ttbar/pp_output_val.h5
+  norm_dict: /home/xzcappon/phd/datasets/hepformers/atlas_vertexing/ttbar/norm_dict.yaml
+  class_dict: /home/xzcappon/phd/datasets/hepformers/atlas_vertexing/ttbar/class_dict.yaml
+  #move_files_temp: /dev/shm/svanstro/salt/gn2/
+
+  batch_size: 4000
+  num_workers: 40
+
+trainer:
+  max_epochs: 40
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val_jets_classification_loss
+    - class_path: salt.callbacks.PredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args: { refresh_rate: 50 }
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+      init_args: { max_depth: 2 }
+    - class_path: salt.callbacks.MaskformerMetrics

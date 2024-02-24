@@ -21,6 +21,7 @@ unit-tests:
     - $TEST_CMD salt/tests/test_posenc.py
     - $TEST_CMD salt/tests/test_initnet.py
     - $TEST_CMD salt/tests/test_transformerv2.py
+    - $TEST_CMD salt/tests/test_masks.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-fast-dev-run:
@@ -117,3 +118,8 @@ test-tfv2:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_tfv2
+
+test-maskformer:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_maskformer

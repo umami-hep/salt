@@ -21,6 +21,7 @@ class PredictionWriter(Callback):
     def __init__(
         self,
         write_tracks: bool = False,
+        write_objects: bool = False,
         half_precision: bool = False,
         object_classes: list | None = None,
         extra_vars: Vars | None = None,
@@ -38,6 +39,9 @@ class PredictionWriter(Callback):
         ----------
         write_tracks : bool
             If False, skip any tasks with `input_name="tracks"`.
+        write_objects : bool
+            If False, skip any tasks with `input_name="objects"` and outputs of the
+            MaskDecoder. Default is False
         half_precision : bool
             If true, write outputs at half precision
         object_classes : list
@@ -52,6 +56,7 @@ class PredictionWriter(Callback):
             extra_vars = defaultdict(list)
         self.extra_vars = extra_vars
         self.write_tracks = write_tracks
+        self.write_objects = write_objects
         self.half_precision = half_precision
         self.precision = "f2" if self.half_precision else "f4"
         self.object_classes = object_classes
@@ -102,6 +107,22 @@ class PredictionWriter(Callback):
                         "Please provide a list of object classes."
                     )
 
+        if self.write_objects:
+            if not module.model.mask_decoder:
+                raise ValueError("write_objects=True but no mask decoder found in model.")
+            if not self.write_tracks:
+                print("-" * 50)
+                print("WARNING: If outputting mask objects, you probably also want tracks")
+
+            # Add objects to outputs if there are no main tasks for this
+            if "objects" not in self.outputs:
+                self.outputs["objects"] = {}
+
+            self.object_params = {
+                "class_label": self.ds.mf_config.object.class_label,
+                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
+            }
+
     @property
     def output_path(self) -> Path:
         out_dir = Path(self.trainer.ckpt_path).parent
@@ -116,7 +137,9 @@ class PredictionWriter(Callback):
         _, pad_masks, labels = batch
         add_mask = False
         for task in self.tasks:
-            if not self.write_tracks and task.input_name == "tracks":
+            if (not self.write_tracks and task.input_name == "tracks") or (
+                not self.write_objects and task.input_name == "objects"
+            ):
                 continue
 
             this_preds = preds[task.input_name][task.name]
@@ -151,6 +174,23 @@ class PredictionWriter(Callback):
                 self.pad_masks[task.input_name].append(this_pad_masks)
                 add_mask = True
 
+        if self.write_objects:
+            objects = outputs["objects"]
+
+            for out in ["object_class_probs", "object_class_targets", "mask_logits", "tgt_masks"]:
+                if out not in self.outputs["objects"]:
+                    self.outputs["objects"][out] = []
+
+            probs_dtype = np.dtype([(n, self.precision) for n in self.object_params["label_map"]])
+            self.outputs["objects"]["object_class_probs"].append(
+                u2s(objects["class_probs"].cpu().float().numpy(), dtype=probs_dtype)
+            )
+            self.outputs["objects"]["object_class_targets"].append(
+                labels["objects"][self.object_params["class_label"]].cpu().numpy()
+            )
+            self.outputs["objects"]["mask_logits"].append(objects["masks"].cpu().float().numpy())
+            self.outputs["objects"]["tgt_masks"].append(labels["objects"]["masks"].cpu().numpy())
+
     def on_test_end(self, trainer, module):  # noqa: ARG002
         print("\n" + "-" * 100)
         if self.output_path.exists():
@@ -158,6 +198,8 @@ class PredictionWriter(Callback):
         f = h5py.File(self.output_path, "w")
 
         for input_name, outputs in self.outputs.items():
+            if input_name == "objects":
+                continue
             name = self.input_map[input_name]
 
             # get input variables
@@ -186,6 +228,12 @@ class PredictionWriter(Callback):
 
             # write the dataset for this input type
             self.create_dataset(f, this_outputs, name, self.half_precision)
+
+        if "objects" in self.outputs:
+            objects = f.create_group("objects")
+            for key, preds in self.outputs["objects"].items():
+                x = np.concatenate(preds)
+                self.create_dataset(objects, x, key, self.half_precision)
 
         f.close()
         print("Created output file", self.output_path)

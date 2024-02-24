@@ -3,6 +3,7 @@ from torch import Tensor, cat, nn
 
 from salt.models import InitNet, Pooling
 from salt.stypes import BoolTensors, NestedTensors, Tensors
+from salt.utils.tensor_utils import flatten_tensor_dict, maybe_flatten_tensors
 
 
 class SaltModel(nn.Module):
@@ -11,6 +12,7 @@ class SaltModel(nn.Module):
         init_nets: list[dict],
         tasks: nn.ModuleList,
         encoder: nn.Module = None,
+        mask_decoder: nn.Module = None,
         pool_net: Pooling = None,
         num_register_tokens: int = 0,
         merge_dict: dict[str, list[str]] | None = None,
@@ -38,6 +40,9 @@ class SaltModel(nn.Module):
             Main input encoder, which takes the output of the initialisation
             networks and produces a single embedding for each constituent.
             If not provided this model is essentially a DeepSets model.
+        mask_decoder : nn.Module
+            Mask decoder, which takes the output of the encoder and produces a
+            series of learned embeddings to represent object masks
         pool_net : nn.Module
             Pooling network which computes a global representation of the object
             by aggregating over the constituents. If not provided, assume that
@@ -57,6 +62,8 @@ class SaltModel(nn.Module):
         self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
         self.tasks = tasks
         self.encoder = encoder
+        self.mask_decoder = mask_decoder
+
         self.pool_net = pool_net
         self.merge_dict = merge_dict
         self.num_register_tokens = num_register_tokens
@@ -141,42 +148,57 @@ class SaltModel(nn.Module):
                             var: cat([labels[mt][var] for mt in merge_types], dim=1)
                         })
 
-        # input embedding
-        embed_xs = self.encoder(xs, pad_mask=pad_masks, **kwargs) if self.encoder else xs
+        # Generate embedding from encoder, or by concatenating the init net outputs
+        if self.encoder:
+            preds = {"embed_xs": self.encoder(xs, pad_mask=pad_masks, **kwargs)}
+        else:
+            preds = {"embed_xs": flatten_tensor_dict(xs)}
+
+        if self.encoder:
+            preds["embed_xs"] = self.encoder(xs, pad_mask=pad_masks, **kwargs)
+        preds, labels, loss = (
+            self.mask_decoder(preds, self.tasks, pad_masks, labels)
+            if self.mask_decoder
+            else (preds, labels, {})
+        )
 
         # pooling
         if self.pool_net:
-            global_rep = self.pool_net(embed_xs, pad_mask=pad_masks)
+            global_rep = self.pool_net(preds, pad_mask=pad_masks)
         else:
-            global_rep = xs[self.global_object]
+            global_rep = preds["embed_xs"]
 
         # add global features to global representation
         if (global_feats := inputs.get("GLOBAL")) is not None:
             global_rep = torch.cat([global_rep, global_feats], dim=-1)
+        preds["global_rep"] = global_rep
 
         # run tasks
-        preds, loss = self.run_tasks(global_rep, embed_xs, pad_masks, labels)
+        task_preds, task_loss = self.run_tasks(preds, pad_masks, labels)
+        preds.update(task_preds)
+        loss.update(task_loss)
 
         return preds, loss
 
     def run_tasks(
         self,
-        global_rep: Tensor,
-        embed_x: Tensor,
+        preds: dict[str, Tensor],
         masks: BoolTensors | None,
         labels: NestedTensors | None = None,
     ):
-        preds: NestedTensors = {}
         loss = {}
 
-        if isinstance(embed_x, dict):
-            embed_x = torch.cat(list(embed_x.values()), dim=1)
+        preds["embed_xs"] = maybe_flatten_tensors(preds["embed_xs"])
 
         for task in self.tasks:
             if task.input_name == task.global_object:
-                task_preds, task_loss = task(global_rep, labels, None, context=None)
+                task_preds, task_loss = task(preds["global_rep"], labels, None, context=None)
+            elif task.input_name == "objects":
+                task_preds, task_loss = task(preds["objects"]["embed"], labels, masks, context=None)
             else:
-                task_preds, task_loss = task(embed_x, labels, masks, context=global_rep)
+                task_preds, task_loss = task(
+                    preds["embed_xs"], labels, masks, context=preds["global_rep"]
+                )
             if task.input_name not in preds:
                 preds[task.input_name] = {}
             preds[task.input_name][task.name] = task_preds

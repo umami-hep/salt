@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import h5py
 import numpy as np
 import torch
@@ -6,7 +8,10 @@ from torch.utils.data import Dataset
 
 from salt.data.edge_features import get_dtype_edge, get_inputs_edge
 from salt.stypes import Vars
+from salt.utils.array_utils import maybe_copy
+from salt.utils.configs import MaskformerConfig
 from salt.utils.inputs import as_half
+from salt.utils.mask_utils import build_target_masks
 
 
 class SaltDataset(Dataset):
@@ -18,6 +23,7 @@ class SaltDataset(Dataset):
         stage: str,
         num: int = -1,
         labels: Vars = None,
+        mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
         num_inputs: dict | None = None,
         nan_to_num: bool = False,
@@ -41,6 +47,8 @@ class SaltDataset(Dataset):
             Number of input samples to use. If `-1`, use all input samples
         labels : Vars
             List of required labels for each input type
+        mf_config : MaskformerConfig, optional
+            Config for Maskformer matching, by default None
         input_map : dict, optional
             Map names to the corresponding dataset names in the input h5 file.
             If not provided, the input names will be used as the dataset names.
@@ -55,7 +63,6 @@ class SaltDataset(Dataset):
             Variables used to parameterise the network, by default None.
         """
         super().__init__()
-
         # check labels have been configured
         self.labels = labels if labels is not None else {}
 
@@ -72,6 +79,12 @@ class SaltDataset(Dataset):
         self.num_inputs = num_inputs
         self.nan_to_num = nan_to_num
         self.global_object = global_object
+
+        # If MaskFormer matching is enabled, extract the relevent labels
+        self.mf_config = deepcopy(mf_config)
+        if self.mf_config:
+            self.input_map["objects"] = self.mf_config.object.name
+
         self.variables = variables
         self.norm_dict = norm_dict
         self.parameters = parameters
@@ -188,10 +201,7 @@ class SaltDataset(Dataset):
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
                 if self.nan_to_num:
                     flat_array = np.nan_to_num(flat_array)
-                # For occasional issue where the array is not contiguous
-                if not flat_array.flags.c_contiguous:
-                    flat_array = flat_array.copy()
-                inputs[input_name] = torch.from_numpy(flat_array)
+                inputs[input_name] = torch.from_numpy(maybe_copy(flat_array))
 
                 # apply the input padding mask
                 if "valid" in batch.dtype.names and input_name not in {
@@ -206,13 +216,19 @@ class SaltDataset(Dataset):
                 # check inputs are finite
                 if not torch.isfinite(inputs[input_name]).all():
                     raise ValueError(f"Non-finite inputs for '{input_name}' in {self.filename}.")
-
             # process labels for this input type
             if input_name in self.labels:
                 labels[input_name] = {}
                 for label in self.labels[input_name]:
                     dtype = torch.long if np.issubdtype(batch[label].dtype, np.integer) else None
-                    labels[input_name][label] = torch.as_tensor(batch[label].copy(), dtype=dtype)
+                    batch_label = maybe_copy(batch[label])
+                    labels[input_name][label] = torch.as_tensor(batch_label, dtype=dtype)
+                    x = torch.as_tensor(batch_label, dtype=dtype)
+                    if input_name == "objects" and label == self.mf_config.object.class_label:
+                        for k, v in self.mf_config.object.class_map.items():
+                            x[x == k] = v
+                            labels[input_name]["object_class"] = x
+                    labels[input_name][label] = x
 
                 # hack to handle the old umami train file format
                 if input_name == self.global_object and "/" in self.labels:
@@ -222,7 +238,11 @@ class SaltDataset(Dataset):
                         labels[input_name][label] = torch.as_tensor(
                             self.file["labels"][object_idx], dtype=torch.long
                         )
-
+        if self.mf_config:
+            labels["objects"]["masks"] = build_target_masks(
+                labels["objects"][self.mf_config.object.id_label],
+                labels[self.mf_config.constituent.name][self.mf_config.constituent.id_label],
+            )
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):

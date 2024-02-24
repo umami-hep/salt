@@ -16,6 +16,7 @@ torchmetrics==1.2.1
 onnx==1.15.0
 onnxruntime==1.15.1
 atlas-ftag-tools==0.1.13
+scipy==1.12.0
 
 # S3 and muTransfer
 mup==1.0.0

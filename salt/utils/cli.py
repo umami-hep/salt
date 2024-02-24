@@ -125,6 +125,22 @@ class SaltCLI(LightningCLI):
                 for denominator in listify(denominators):
                     labels[task["input_name"]].append(denominator)
 
+        if model_dict.get("mask_decoder"):
+            if not (mf_config := sc["data"].get("mf_config")):
+                raise ValueError("Mask decoder requires 'mf_config' in data config.")
+            if mf_config.constituent.name not in labels:
+                raise ValueError(
+                    f"The constituent name {mf_config.constituent.name} is not in the data labels. "
+                    "Ensure that the constituent name is in the input_map of the data config."
+                )
+            # Needed in case no tasks other than mask prediction/classification
+            if "objects" not in labels:
+                labels["objects"] = []
+            labels["objects"] += [
+                mf_config.object.id_label,
+                mf_config.object.class_label,
+            ]
+            labels[mf_config.constituent.name] += [mf_config.constituent.id_label]
         sc["data"]["labels"] = labels
 
         # add norm

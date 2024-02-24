@@ -55,3 +55,10 @@ def maybe_pad(src: np.ndarray, tgt: np.ndarray) -> np.ndarray:
         n_pad = seq_len - src.shape[1]
         src = np.pad(src, ((0, 0), (0, n_pad)), mode="constant")
     return src
+
+
+def maybe_copy(src: np.ndarray):
+    """Return a copy of src if it is not C-contiguous."""
+    if src.flags.c_contiguous:
+        return src
+    return src.copy()
