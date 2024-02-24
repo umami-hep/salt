@@ -2,6 +2,45 @@ import torch
 from torch import BoolTensor, Tensor
 from torch.nn.functional import softmax
 
+from salt.stypes import Tensors
+
+
+def maybe_flatten_tensors(
+    x: Tensor | Tensors,
+) -> Tensor:
+    if isinstance(x, dict):
+        return flatten_tensor_dict(x)
+    return x
+
+
+def flatten_tensor_dict(
+    x: dict[str, Tensor],
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> Tensor:
+    """Flattens a dictionary of tensors into a single tensor.
+
+    Parameters
+    ----------
+        x: Dictionary of tensors to flatten.
+        include: List of keys defining the tensors to be concatenated. If None, all tensors will be
+            concatenated unless defined by 'exclude'. Cannot be used with 'exclude'.
+        exclude: List of keys to exclude from the concatenation. If None, all tensors will be
+            concatenated unless defined by 'include'. Cannot be used with 'include'.
+
+    Returns
+    -------
+    flattened : Tensor
+        A single tensor containing the concatenated values of the input dictionary.
+    """
+    if include and exclude:
+        raise ValueError("Cannot use 'include' and 'exclude' together")
+    if include:
+        return torch.cat([x[emb] for emb in include], dim=1)
+    if exclude:
+        return torch.cat([x[emb] for emb in x if emb not in exclude], dim=1)
+    return torch.cat(list(x.values()), dim=1)
+
 
 def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
     """Applies softmax over a tensor without including padded elements."""

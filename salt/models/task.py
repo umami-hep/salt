@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from salt.models import Dense
 from salt.utils.array_utils import listify
 from salt.utils.class_names import CLASS_NAMES
+from salt.utils.scalers import RegressionTargetScaler
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import get_node_assignment
 
@@ -173,6 +174,7 @@ class RegressionTaskBase(TaskBase, ABC):
     def __init__(
         self,
         targets: list[str] | str,
+        scaler: RegressionTargetScaler | None = None,
         target_denominators: list[str] | str | None = None,
         norm_params: dict | None = None,
         **kwargs,
@@ -183,25 +185,33 @@ class RegressionTaskBase(TaskBase, ABC):
         ----------
         targets : list[str] | str
             Regression target(s).
+        scaler : RegressionTargetScaler
+            Functional scaler for regression targets
+                - cannot be used with other target scaling options.
         target_denominators : list[str] | str | None, optional
             Variables to divide regression target(s) by (i.e. for regressing a ratio).
-            Cannot be used with norm_params.
+                - cannot be used with other target scaling options.
         norm_params : dict | None, optional
             Mean and std normalization parameters for each target, used for scaling.
-            Cannot be used with target_denominators.
+                - cannot be used with other target scaling options..
         **kwargs
             Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
         """
         super().__init__(**kwargs)
-
+        self.scaler = scaler
         self.targets = listify(targets)
         self.target_denominators = listify(target_denominators)
         if norm_params:
             norm_params["mean"] = listify(norm_params["mean"])
             norm_params["std"] = listify(norm_params["std"])
         self.norm_params = norm_params
-        if self.target_denominators is not None and self.norm_params is not None:
-            raise ValueError("Cannot use target_denominators and norm_params at the same time.")
+
+        if [scaler, target_denominators, norm_params].count(None) not in {2, 3}:
+            raise ValueError("Can only use a single scaling method")
+
+        if self.scaler:
+            for target in self.targets:
+                self.scaler.scale(target, torch.Tensor(1))
         if self.target_denominators and len(self.targets) != len(self.target_denominators):
             raise ValueError(
                 f"{self.name}: "
@@ -254,10 +264,13 @@ class RegressionTaskBase(TaskBase, ABC):
         targets = None
         if targets_dict:
             targets = torch.stack(
-                [targets_dict[self.input_name][target] for target in self.targets], dim=-1
+                [targets_dict[self.input_name][target] for target in self.targets], dim=1
             )
 
         if targets is not None:
+            if self.scaler is not None:
+                for i in range(len(self.targets)):
+                    targets[:, i] = self.scaler.scale(self.targets[i], targets[:, i])
             if self.target_denominators is not None:
                 for i in range(len(self.targets)):
                     targets[:, i] = torch.div(
@@ -268,11 +281,17 @@ class RegressionTaskBase(TaskBase, ABC):
                     targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
                         self.norm_params["std"][i]
                     )
+
+            # We stack targets dict always over the first dimension to allow consistency
+            # when scaling, but for queries we want the regression target to be in the final
+            # dimension. This allows us to keep the same code for both global and query scaling
+            if len(targets.shape) == 3:
+                targets = targets.transpose(1, 2)
         return targets
 
 
 class RegressionTask(RegressionTaskBase):
-    def __init__(self, **kwargs):
+    def __init__(self, scaler=None, **kwargs):
         """Regression task.
 
         Parameters
@@ -288,6 +307,7 @@ class RegressionTask(RegressionTaskBase):
                 f"Number of outputs ({self.net.output_size}) does not match "
                 f"number of targets ({len(self.targets)})"
             )
+        self.scaler = scaler
 
     def forward(
         self,
@@ -296,18 +316,19 @@ class RegressionTask(RegressionTaskBase):
         pad_masks: Mapping | None = None,
         context: Tensor = None,
     ):
-        if x.ndim != 2 or pad_masks is not None:
+        if (x.ndim != 2 or pad_masks is not None) and self.input_name != "objects":
             raise NotImplementedError(
-                "Regression tasks are currently only supported for global object level predictions."
+                "Regression tasks are currently only supported for global object "
+                "and object query level predictions."
             )
-
+        if pad_masks is not None:
+            pass
         preds = self.net(x, context)
         targets = self.get_targets(targets_dict)
 
         loss = None
         if targets is not None:
             loss = self.nan_loss(preds, targets) * self.weight
-
         return preds, loss
 
     def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
@@ -319,7 +340,9 @@ class RegressionTask(RegressionTaskBase):
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
                 preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
-
+        elif self.scaler is not None:
+            for i in range(len(self.targets)):
+                preds[:, i] = self.scaler.inverse(self.targets[i], preds[:, i])
         dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
         return u2s(preds.float().cpu().numpy(), dtype)
 

@@ -41,7 +41,9 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False):
     # add another instance of the prediction writer callback with tracks added
     args += ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
     args += ["--trainer.callbacks.write_tracks=True"]
-
+    # Add object writer callback for MaskFormer
+    if "MaskFormer" in str(config_path):
+        args += ["--trainer.callbacks.write_objects=True"]
     if train_args:
         args += train_args
 
@@ -75,6 +77,29 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
         if "GN2" in str(train_config_path):
             assert "tracks" in f
             assert len(f["tracks"]) == 1000
+        if "maskformer" in str(train_config_path):
+            assert "objects" in f
+            tgt_masks = f["objects"]["tgt_masks"]
+            assert tgt_masks
+            assert tgt_masks.shape == (1000, 5, 40)
+
+            mask_logits = f["objects"]["mask_logits"]
+            assert mask_logits
+            assert mask_logits.shape == (1000, 5, 40)
+
+            obj_cls_tgt = f["objects"]["object_class_targets"]
+            assert obj_cls_tgt
+            assert obj_cls_tgt.shape == (1000, 5)
+
+            obj_cls_probs = f["objects"]["object_class_probs"]
+            assert obj_cls_probs
+            assert obj_cls_probs.shape == (1000, 5)
+            assert len(obj_cls_probs.dtype.names) == 3
+
+            regression = f["objects"]["regression"]
+            assert regression
+            assert regression.shape == (1000, 5)
+            assert len(regression.dtype.names) == 5
 
 
 def run_onnx(train_dir, args=None):
@@ -228,3 +253,8 @@ def test_truncate_inputs_error(tmp_path) -> None:
 def test_tfv2(tmp_path) -> None:
     args = [f"--config={Path(__file__).parent.parent / 'configs' / 'encoder-v2.yaml'}"]
     run_combined(tmp_path, CONFIG, train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_maskformer(tmp_path) -> None:
+    run_combined(tmp_path, "MaskFormer.yaml", train_args=None)

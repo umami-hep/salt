@@ -65,6 +65,7 @@ class ModelWrapper(L.LightningModule):
         self.global_object = global_object
         self.name = name
         self.muP = muP_config if muP_config else {}
+        self.last_val_batch_outs = None
         # Here the model should pick it up
         if self.muP:
             from salt.utils.muP_utils.configuration_muP import instantiate_mup
@@ -156,7 +157,7 @@ class ModelWrapper(L.LightningModule):
 
     def training_step(self, batch):
         # foward pass
-        _, _, _, loss = self.shared_step(batch)
+        preds, labels, pad_masks, loss = self.shared_step(batch)
 
         if loss["loss"].isnan():
             raise RuntimeError(
@@ -167,17 +168,29 @@ class ModelWrapper(L.LightningModule):
         # log losses
         self.log_losses(loss, stage="train")
 
-        return loss["loss"]
+        outputs = {
+            "preds": preds,
+            "labels": labels,
+            "pad_masks": pad_masks,
+        }
+
+        return {**loss, "outputs": outputs}
 
     def validation_step(self, batch):
         # foward pass
-        _, _, _, loss = self.shared_step(batch)
+        preds, labels, pad_masks, loss = self.shared_step(batch)
 
         # log losses
         self.log_losses(loss, stage="val")
 
-        # return loss (and maybe more stuff)
-        return loss
+        # Store outputs to be used by the MaskformerMetrics callback
+        outputs = {
+            "preds": preds,
+            "labels": labels,
+            "pad_masks": pad_masks,
+        }
+
+        return {**loss, "outputs": outputs}
 
     def test_step(self, batch):
         inputs, pad_masks, _ = batch

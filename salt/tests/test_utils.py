@@ -5,6 +5,7 @@ from ftag import get_mock_file
 from salt.utils import compare_models
 from salt.utils.clean_logs import delete_dirs_without_subdir, main
 from salt.utils.inputs import inputs_concat
+from salt.utils.scalers import RegressionTargetScaler
 
 
 def test_compare_models():
@@ -52,6 +53,20 @@ def test_main(temp_directory_with_subdir):
         "specified_subdirectory",
     ]
     main(args=args)
+
+
+def test_scaler():
+    dummy_scales = {
+        "var1": {"op": "log", "x_scale": 2, "x_off": 1, "op_scale": 3, "op_off": 1},
+        "var2": {"op": "exp", "x_scale": 2, "x_off": 1, "op_scale": 3, "op_off": 1},
+        "var3": {"op": "linear", "x_scale": 2, "x_off": 1, "op_scale": 3, "op_off": 1},
+    }
+    scaler = RegressionTargetScaler(dummy_scales)
+    values = torch.rand(500)
+    for var in dummy_scales:
+        scaled = scaler.scale(var, values)
+        unscaled = scaler.inverse(var, scaled)
+        assert torch.allclose(values, unscaled, atol=1e-7)
 
 
 # test inputs_concat function

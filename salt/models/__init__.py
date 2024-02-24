@@ -2,9 +2,11 @@ from salt.models.attention import GATv2Attention, MultiheadAttention, ScaledDotP
 from salt.models.dense import Dense
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
+from salt.models.maskformer_loss import MaskFormerLoss
 from salt.models.pooling import (
     DictCrossAttentionPooling,
     GlobalAttentionPooling,
+    NodeQueryGAP,
     Pooling,
     TensorCrossAttentionPooling,
 )
@@ -27,6 +29,8 @@ from salt.models.transformer import (
 )
 from salt.models.transformer_v2 import TransformerV2
 
+# from salt.models.maskformer import MaskFormer
+
 __all__ = [
     "ClassificationTask",
     "Dense",
@@ -36,7 +40,10 @@ __all__ = [
     "GlobalAttentionPooling",
     "InitNet",
     "InputNorm",
+    "MaskFormer",
+    "MaskFormerLoss",
     "MultiheadAttention",
+    "NodeQueryGAP",
     "Pooling",
     "PositionalEncoder",
     "R21Xbb",

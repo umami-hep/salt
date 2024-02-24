@@ -40,10 +40,10 @@ def test_pooling(pooling) -> None:
     else:
         net = pooling(10)
 
-    x = torch.rand(1, 5, 10)
+    x = {"emb": torch.rand(1, 5, 10)}
     out = net(x)
 
-    x = torch.cat([x, torch.zeros((1, 1, x.shape[2]))], dim=1)
+    x = {"emb": torch.cat([x["emb"], torch.zeros((1, 1, x["emb"].shape[2]))], dim=1)}
     mask = get_random_mask(1, 6, p_valid=1)
     mask[:, -1] = True
     mask = {"mask": mask}
