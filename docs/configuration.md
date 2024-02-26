@@ -285,11 +285,29 @@ A parameterised network can be configured in the following way:
 #### Compiled Models
 
 Pytorch 2.0 introduced compiled models via `torch.compile()` which improves execution times.
-In tests, compilation can decrease the time to train GN2 by 30%.
+In tests, compilation can increase the execution speed of the model by up to 1.5x.
 You can enable compilation by passing the `--compile` flag to the CLI.
 You may see some warnings printed at the start of training, and the first step will take a while as the model is JIT compiled.
 
-!!! warning "Exporting compiled models to ONNX is not currently supported."
+??? error "If you see `g++` compile errors, you may need to update your compiler"
+
+    You can check your `g++`/`gcc` version with `g++ --version`.
+    To use `torch.compile()`, you'll need `gcc` version 10 or later.
+
+    You can install a more recent version with
+    ```bash
+    conda install -c conda-forge cxx-compiler
+    ```
+
+??? info "`torch.compile()` results
+
+    The following results were obtained on a single A100 GPU
+    with a batch size of 5,000 and 40 workers.
+
+    | Model      | Eager    | `torch.compile()` | Speedup |
+    | ---------- | -------- | ----------------- | ------- |
+    | GN3 No Aux | 8.9 it/s | 15.4 it/s         | 1.73x   |
+    | GN3        | 6.4 it/s | 9.0  it/s         | 1.41x   |
 
 
 ### Hyperparameter Optimisation

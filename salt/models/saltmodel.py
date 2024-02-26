@@ -69,6 +69,8 @@ class SaltModel(nn.Module):
         self.num_register_tokens = num_register_tokens
 
         # init register tokens
+        if self.num_register_tokens and not self.encoder:
+            raise ValueError("encoder must be set if num_register_tokens is set")
         if self.num_register_tokens and self.encoder:
             self.registers = torch.nn.Parameter(
                 torch.normal(
