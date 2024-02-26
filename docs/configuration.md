@@ -299,7 +299,7 @@ You may see some warnings printed at the start of training, and the first step w
     conda install -c conda-forge cxx-compiler
     ```
 
-??? info "`torch.compile()` results
+??? info "`torch.compile()` results"
 
     The following results were obtained on a single A100 GPU
     with a batch size of 5,000 and 40 workers.
@@ -308,6 +308,9 @@ You may see some warnings printed at the start of training, and the first step w
     | ---------- | -------- | ----------------- | ------- |
     | GN3 No Aux | 8.9 it/s | 15.4 it/s         | 1.73x   |
     | GN3        | 6.4 it/s | 9.0  it/s         | 1.41x   |
+
+    Memory usage should be unaffected by compiling the model.
+    Please report any issues you may have
 
 
 ### Hyperparameter Optimisation
