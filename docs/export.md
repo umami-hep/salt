@@ -35,7 +35,7 @@ If you don't specify a config path using `--config`, the script will look for on
 You can also optionally specify a different scale dict to the one in the training config, and a model name (by default this is `salt`).
 The model name is used to construct the output probability variable names in Athena.
 
-??? tip "Exporting a model trained with `torch.compile()`.
+??? tip "Exporting a model trained with `torch.compile()`."
 
     If you trained your model with `torch.compile()`, you need to repair your checkpoint before exporting.
     You can do this by running the [`repair_ckpt.py`]({{repo_url}}-/blob/main/salt/utils/repair_ckpt.py) 
