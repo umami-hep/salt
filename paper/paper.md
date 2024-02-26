@@ -21,15 +21,18 @@ authors:
   - name: Philipp Gadow
     orcid: 0000-0003-4475-6734
     affiliation: 4
+  - name: Osama Karkout
+    orcid: 0000-0002-4907-9499
+    affiliation: 5
   - name: Dmitrii Kobylianskii
     orcid: 0009-0002-0070-5900
-    affiliation: 5
+    affiliation: 6
   - name: Matthew Leigh
     orcid: 0000-0003-1406-1413
-    affiliation: 6
+    affiliation: 7
   - name: Ivan Oleksiyuk
     orcid: 0000-0002-4784-6340
-    affiliation: 6
+    affiliation: 7
   - name: Nikita Pond
     orcid: 0000-0002-5966-0332
     affiliation: 1
@@ -44,7 +47,7 @@ authors:
     affiliation: 1
   - name: Johannes Wagner
     orcid: 0000-0002-5588-0020
-    affiliation: 8
+    affiliation: 9
 
 affiliations:
  - name: University College London, United Kingdom
@@ -55,14 +58,16 @@ affiliations:
    index: 3
  - name: European Laboratory for Particle Physics CERN, Switzerland
    index: 4
- - name: Department of Particle Physics and Astrophysics, Weizmann Institute of Science, Israel
+ - name: Nikhef
    index: 5
- - name: Université de Genève, Switzerland
+ - name: Department of Particle Physics and Astrophysics, Weizmann Institute of Science, Israel
    index: 6
- - name: Technical University of Munich, Germany
+ - name: Université de Genève, Switzerland
    index: 7
- - name: University of California, Berkeley
+ - name: Technical University of Munich, Germany
    index: 8
+ - name: University of California, Berkeley
+   index: 9
 
 date: 15 Janurary 2024
 bibliography: paper.bib
