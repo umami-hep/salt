@@ -221,6 +221,8 @@ class MultiheadAttention(nn.Module):
         # If only q and q_mask are provided then we automatically apply self attention
         if k is None:
             k = q
+            # warning: this isn't necessary or nan-safe in general
+            # however fine how we implemented it since we use a custom masked softmax
             if kv_mask is None:
                 kv_mask = q_mask
         v = v if v is not None else k

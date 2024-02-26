@@ -12,10 +12,55 @@ Features:
 from abc import ABC
 
 import torch
-from torch import BoolTensor, Tensor, nn
+from torch import BoolTensor, Size, Tensor, nn
 
 import salt.models.layernorm as layernorms
-from salt.models.attention import merge_masks
+
+
+def merge_masks(
+    q_mask: BoolTensor | None,
+    kv_mask: BoolTensor | None,
+    attn_mask: BoolTensor | None,
+    q_shape: Size,
+    k_shape: Size,
+) -> BoolTensor:
+    """Create a full attention mask which incorporates the padding information.
+
+    Using pytorch transformer convention:
+        False: Real node
+        True:  Zero padded
+
+    Parameters
+    ----------
+    q_mask : BoolTensor | None
+        Mask for the queries, of shape (batch, q_len).
+    kv_mask : BoolTensor | None
+        Mask for the keys and values, of shape (batch, kv_len).
+    attn_mask : BoolTensor | None
+        Full attention mask, of shape (batch, q_len, kv_len).
+    q_shape : Size
+        Shape of the queries tensor, (batch, q_len, dim).
+    k_shape : Size
+        Shape of the keys tensor, (batch, kv_len, dim).
+    """
+    # Create the full mask which combines the attention and padding masks
+    mask = None
+
+    # if both masks exist, combine them
+    if q_mask is not None and kv_mask is not None:
+        mask = q_mask.unsqueeze(-1) | kv_mask.unsqueeze(-2)
+
+    # if only one mask exists, expand it to the other dimension
+    if q_mask is None and kv_mask is not None:
+        mask = kv_mask.unsqueeze(-2).expand(-1, q_shape[-2], -1)
+    if kv_mask is None and q_mask is not None:
+        mask = q_mask.unsqueeze(-1).expand(-1, -1, k_shape[-2])
+
+    # include the attention mask
+    if attn_mask is not None:
+        mask = attn_mask if mask is None else attn_mask | mask
+
+    return mask
 
 
 def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int):
@@ -36,14 +81,8 @@ def torch_meff_attn(q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout: 
     # https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues/47
     if mask is not None:
         mask = ~mask.contiguous()
-        # mask = (1.0 - mask.to(q.dtype)) * torch.finfo(q.dtype).min
 
-    with torch.backends.cuda.sdp_kernel(
-        enable_flash=False, enable_math=True, enable_mem_efficient=True
-    ):
-        return nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=dropout
-        )
+    return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout)
 
 
 def torch_flash_attn(q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout: float) -> Tensor:
@@ -156,7 +195,7 @@ class Attention(nn.Module, ABC):
             Output of shape (batch, q_len, dim).
         """
         # combine masks
-        attn_mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape, q.device)
+        attn_mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape)
 
         # input projections
         q, k, v = self.wq(q), self.wk(k), self.wv(v)
@@ -198,7 +237,7 @@ class Attention(nn.Module, ABC):
         # run attention
         output = self.attn_func(q, k, v, mask=attn_mask, dropout=self.dropout)
 
-        # reshape output and return
+        # recombine heads and return
         return output.transpose(1, 2).contiguous().view(batch, -1, self.embed_dim)
 
 
@@ -239,7 +278,7 @@ class GLU(nn.Module):
         hidden_dim: int | None = None,
         activation: str = "ReLU",
         bias: bool = True,
-        gated: bool = True,
+        gated: bool = False,
     ):
         """Dense update with gated linear unit.
 
