@@ -21,6 +21,9 @@ authors:
   - name: Philipp Gadow
     orcid: 0000-0003-4475-6734
     affiliation: 4
+  - name: Emil Haines
+    orcid: 0000-0002-5417-2081
+    affiliation: 1
   - name: Osama Karkout
     orcid: 0000-0002-4907-9499
     affiliation: 5
