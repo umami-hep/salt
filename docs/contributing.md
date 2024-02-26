@@ -42,7 +42,7 @@ See also the [umami guide](https://umami-docs.web.cern.ch/setup/development/VS_c
 
 The `pre-commit` framework is used to ensure contributions follow good coding standards.
 It is installed as a package dependency.
-To set it up, just run
+To set it up, just run the following from the top level of the package.
 
 ```bash
 pre-commit install
