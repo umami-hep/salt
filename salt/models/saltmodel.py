@@ -156,8 +156,6 @@ class SaltModel(nn.Module):
         else:
             preds = {"embed_xs": flatten_tensor_dict(xs)}
 
-        if self.encoder:
-            preds["embed_xs"] = self.encoder(xs, pad_mask=pad_masks, **kwargs)
         preds, labels, loss = (
             self.mask_decoder(preds, self.tasks, pad_masks, labels)
             if self.mask_decoder
