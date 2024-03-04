@@ -22,6 +22,7 @@ unit-tests:
     - $TEST_CMD salt/tests/test_initnet.py
     - $TEST_CMD salt/tests/test_transformerv2.py
     - $TEST_CMD salt/tests/test_masks.py
+    - $TEST_CMD salt/tests/test_featurewise.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-fast-dev-run:
@@ -123,3 +124,13 @@ test-maskformer:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_maskformer
+
+test-parameterisation_concatenation:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_parameterisation_concatenation
+
+test-parameterisation_featurewise:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_parameterisation_featurewise

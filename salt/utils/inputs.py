@@ -190,7 +190,7 @@ def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_track
     return jets, tracks
 
 
-def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
+def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False, inc_params=False):
     """TODO: merge with atlas-ftag-tools test file generation."""
     with open(sd_fname) as f:
         sd = yaml.safe_load(f)
@@ -235,6 +235,8 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
         "Xbb2020v3_QCD",
     ]
 
+    params = ["mass"]
+
     track_vars = list(sd["tracks"])
     electron_vars = list(sd["electrons"])
 
@@ -267,6 +269,12 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
         "inputs": [n_jets, n_hadrons_per_jet, hadron_features + 2],
         "valid": [n_jets, n_hadrons_per_jet],
     }
+
+    # setup parameters
+    shapes_params = {
+        "inputs": [n_jets, len(params)],
+    }
+
     # setup jets
     jets_dtype = np.dtype(
         [(n, "f4") for n in jet_vars]
@@ -332,6 +340,13 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
     valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
     electrons = join_structured_arrays([electrons, valid])
 
+    # setup parameters
+    params_dtype = np.dtype([(n, "f4") for n in params])
+    params = rng.random(shapes_params["inputs"])
+    params = u2s(params, params_dtype)
+    if inc_params:
+        params["mass"] = rng.choice([5, 16, 25, 40, 55], size=(n_jets))
+
     with h5py.File(fname, "w") as f:
         f.attrs["unique_jets"] = len(jets)
         f.attrs["config"] = "{}"
@@ -346,6 +361,8 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False):
         f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
         f.create_dataset("truth_hadrons", data=hadrons)
+        if inc_params:
+            f.create_dataset("PARAMETERS", data=params)
 
 
 def as_half(typestr) -> np.dtype:

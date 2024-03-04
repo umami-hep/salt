@@ -242,19 +242,12 @@ Alternatively, each input type can be updated with separate self-attention block
         dropout: &dropout 0.1
 ```
 
-#### Parameterised GNN
+#### Parameterisation
 
-It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
+It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*. Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
 
 A parameterised network can be configured in the following way:
 
-- `inputs` section: Specify the collection containing the parameters.
-    ```yaml
-    input_names:
-        ...
-        PARAMETERS: jets
-        ...
-    ```
 - `variables` section: Add your parameters to lists of variables used in training.
     ```yaml
     data:
@@ -273,11 +266,33 @@ A parameterised network can be configured in the following way:
             prob: [0.2, 0.3, 0.5]
     ```
 
-!!! warning "Ensure `concat_jet_tracks` is set to `true` when using parameters"
+The implementation above produces the default parameterisation mechanism in which parameters are concatenated to the inputs of the model, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Alternatively, one may instead apply feature wise transformations, as described
+by [Dumoulin et al](https://distill.pub/2018/feature-wise-transformations/). Here, parameters are passed as inputs to seperate networks whose outputs can be used to scale or bias the features of a layer. To use feature transformations you must add `featurewise_nets` to your models configuration as follows:
 
 
+```yaml
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+    ...     
+      featurewise_nets:
+        - layer: input
+          dense_config_scale:
+            hidden_layers: [4]
+            output_size: 17
+          dense_config_bias:
+            hidden_layers: [4]
+            output_size: 17
+        - layer: global
+          dense_config_scale:
+            output_size: 128
+            hidden_layers: [64]
+            final_activation: Sigmoid
+    ...
+```
 
-
+Here, two instances of featurewise transformations have been added to the model. For each, you must specify the layer whose features you would
+like to transform (this can currently be either `input`, which applies the transformations to the features before they are passed into the initialisation network, or `global`, which applies them to the global track representations outputted by the encoder). For each instance, you can specify either one or both of `dense_config_scale` or `dense_config_bias`, which configure dense networks whose output scales and biases the features of the chosen layer, respectively. It is important to ensure the `output_size` of these networks matches the number of features in the layer you are transforming. In this case, the transformations are applied to a model with 17 inputs per track, and an encoder that outputs 128 features for each track representation. 
 
 
 ### Training
