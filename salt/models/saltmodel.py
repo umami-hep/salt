@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor, cat, nn
 
-from salt.models import InitNet, Pooling
+from salt.models import FeaturewiseTransformation, InitNet, Pooling
 from salt.stypes import BoolTensors, NestedTensors, Tensors
 from salt.utils.tensor_utils import flatten_tensor_dict, maybe_flatten_tensors
 
@@ -16,6 +16,7 @@ class SaltModel(nn.Module):
         pool_net: Pooling = None,
         num_register_tokens: int = 0,
         merge_dict: dict[str, list[str]] | None = None,
+        featurewise_nets: list[dict] | None = None,
     ):
         """A generic multi-modal, multi-task neural network.
 
@@ -27,7 +28,7 @@ class SaltModel(nn.Module):
 
         Parameters
         ----------
-        init_nets : nn.ModuleList
+        init_nets : list[dict]
             Keyword arguments for one or more initialisation networks.
             See [`salt.models.InitNet`][salt.models.InitNet].
             Each initialisation network produces an initial input embedding for
@@ -56,8 +57,26 @@ class SaltModel(nn.Module):
             representations of the inputs in list[str] and act on them
             in following layers (e.g. transformer or tasks) as if they
             are coming from one input type
+        featurewise_nets : list[dict]
+            Keyword arguments for featurewise transformation networks that perform
+            featurewise scaling and biasing.
         """
         super().__init__()
+
+        self.featurewise_nets = None
+        if featurewise_nets:
+            self.featurewise_nets = nn.ModuleList([
+                FeaturewiseTransformation(**featurewise_net) for featurewise_net in featurewise_nets
+            ])
+        self.featurewise_nets_map = (
+            {featurewise_net.layer: featurewise_net for featurewise_net in self.featurewise_nets}
+            if self.featurewise_nets
+            else {}
+        )
+        # if available, add featurewise net to init net config
+        if "input" in self.featurewise_nets_map:
+            for init_net in init_nets:
+                init_net["featurewise"] = self.featurewise_nets_map["input"]
 
         self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
         self.tasks = tasks
@@ -123,6 +142,7 @@ class SaltModel(nn.Module):
         """
         # initial input projections
         xs = {}
+
         for init_net in self.init_nets:
             xs[init_net.input_name] = init_net(inputs)
 
@@ -161,6 +181,10 @@ class SaltModel(nn.Module):
             if self.mask_decoder
             else (preds, labels, {})
         )
+
+        # apply featurewise transformation to global track representations if configured
+        if "global" in self.featurewise_nets_map:
+            preds["embed_xs"] = self.featurewise_nets_map["global"](inputs, preds["embed_xs"])
 
         # pooling
         if self.pool_net:

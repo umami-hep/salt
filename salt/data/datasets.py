@@ -28,7 +28,7 @@ class SaltDataset(Dataset):
         num_inputs: dict | None = None,
         nan_to_num: bool = False,
         global_object: str = "jets",
-        parameters: dict | None = None,
+        PARAMETERS: dict | None = None,
     ):
         """An efficient map-style dataset for loading data from an H5 file containing structured
         arrays.
@@ -59,7 +59,7 @@ class SaltDataset(Dataset):
         global_object : str
             Name of the global input object, as opposed to the constituent-level
             inputs
-        parameters: dict
+        PARAMETERS: dict
             Variables used to parameterise the network, by default None.
         """
         super().__init__()
@@ -72,6 +72,9 @@ class SaltDataset(Dataset):
 
         if "GLOBAL" in input_map:
             input_map["GLOBAL"] = global_object
+
+        if "PARAMETERS" in input_map:
+            input_map["PARAMETERS"] = global_object
 
         self.input_map = input_map
         self.filename = filename
@@ -87,7 +90,7 @@ class SaltDataset(Dataset):
 
         self.variables = variables
         self.norm_dict = norm_dict
-        self.parameters = parameters
+        self.PARAMETERS = PARAMETERS
         self.stage = stage
         self.rng = np.random.default_rng()
 
@@ -103,12 +106,12 @@ class SaltDataset(Dataset):
         self.input_variables = variables
         assert self.input_variables is not None
 
-        # check parameters listed in variables appear in the same order in the parameters block
+        # check parameters listed in variables appear in the same order in the PARAMETERS block
         if "PARAMETERS" in self.input_variables:
-            assert self.parameters is not None
+            assert self.PARAMETERS is not None
             assert self.input_variables["PARAMETERS"] is not None
-            assert len(self.input_variables["PARAMETERS"]) == len(self.parameters)
-            for idx, param_key in enumerate(self.parameters.keys()):
+            assert len(self.input_variables["PARAMETERS"]) == len(self.PARAMETERS)
+            for idx, param_key in enumerate(self.PARAMETERS.keys()):
                 assert self.input_variables["PARAMETERS"][idx] == param_key
 
         # setup datasets and accessor arrays
@@ -170,28 +173,28 @@ class SaltDataset(Dataset):
                     get_inputs_edge(batch, self.input_variables[input_name])
                 )
 
-            # load parameters for this input type
+            # load PARAMETERS for this input type
             elif input_name == "PARAMETERS":
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
 
-                for ind, param in enumerate(self.parameters):
+                for ind, param in enumerate(self.PARAMETERS):
                     if self.stage == "fit":
-                        # assign random values to objects with parameters not set to those in the
+                        # assign random values to inputs with parameters not set to those in the
                         # train list, values are chosen at random from those in the train list
                         # according to probabilities if given, else with equal probability
                         try:
-                            prob = self.parameters[param]["prob"]
+                            prob = self.PARAMETERS[param]["prob"]
                         except KeyError:
                             prob = None
-                        pad_masks = ~np.isin(flat_array[:, ind], self.parameters[param]["train"])
+                        mask = ~np.isin(flat_array[:, ind], self.PARAMETERS[param]["train"])
                         random = self.rng.choice(
-                            self.parameters[param]["train"], size=np.sum(pad_masks), p=prob
+                            self.PARAMETERS[param]["train"], size=np.sum(mask), p=prob
                         )
-                        flat_array[pad_masks, ind] = random
+                        flat_array[mask, ind] = random
 
                     if self.stage == "test":
                         # assign parameter values for all objects passed in the 'test' option
-                        test_arr = np.full(np.shape(flat_array)[0], self.parameters[param]["test"])
+                        test_arr = np.full(np.shape(flat_array)[0], self.PARAMETERS[param]["test"])
                         flat_array[:, ind] = test_arr
 
                 inputs[input_name] = torch.from_numpy(flat_array)
@@ -265,13 +268,15 @@ class SaltDataset(Dataset):
     def check_file(self):
         keys = {self.input_map[k] for k in self.variables}
         available = set(self.file.keys())
-        if missing := keys - available - {"EDGE", "GLOBAL"}:
+        if missing := keys - available - {"EDGE", "GLOBAL", "PARAMETERS"}:
             raise KeyError(
                 f"Input file '{self.filename}' does not contain keys {missing}."
                 f" Available keys: {available}"
             )
         for k, v in self.variables.items():
             if k == "EDGE":
+                continue
+            if k == "PARAMETERS":
                 continue
             if k == "GLOBAL":
                 k = self.global_object  # noqa: PLW2901

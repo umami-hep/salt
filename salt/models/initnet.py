@@ -1,6 +1,6 @@
 from torch import nn
 
-from salt.models import Dense
+from salt.models import Dense, FeaturewiseTransformation
 from salt.models.posenc import PositionalEncoder
 from salt.stypes import Tensors, Vars
 from salt.utils.tensor_utils import attach_context
@@ -16,6 +16,7 @@ class InitNet(nn.Module):
         attach_global: bool = True,
         pos_enc: PositionalEncoder | None = None,
         muP: bool = False,
+        featurewise: FeaturewiseTransformation | None = None,
     ):
         """Initial input embedding network.
 
@@ -40,6 +41,9 @@ class InitNet(nn.Module):
             [`salt.models.PositionalEncoder`][salt.models.PositionalEncoder] for details.
         muP: bool, optional,
             Whether to use the muP parametrisation (impacts initialisation).
+        featurewise: FeaturewiseTransformation, optional
+            Networks to apply featurewise transformations to inputs, set automatically by
+            the framework
         """
         super().__init__()
 
@@ -48,7 +52,8 @@ class InitNet(nn.Module):
             dense_config["input_size"] = len(variables[input_name])
             if attach_global and input_name != "EDGE":
                 dense_config["input_size"] += len(variables[global_object])
-                dense_config["input_size"] += len(variables.get("PARAMETERS", []))
+                if not featurewise:
+                    dense_config["input_size"] += len(variables.get("PARAMETERS", []))
 
         self.input_name = input_name
         self.net = Dense(**dense_config)
@@ -59,6 +64,7 @@ class InitNet(nn.Module):
         self.muP = muP
         if muP:
             self.net.reset_parameters()
+        self.featurewise = featurewise
 
     def forward(self, inputs: Tensors):
         # get the inputs for this init net
@@ -68,9 +74,13 @@ class InitNet(nn.Module):
         if self.attach_global:
             x = attach_context(x, inputs[self.global_object])
 
-        # add prameters
-        if "PARAMETERS" in self.variables:
+        # add parameters if not using featurewise transformations
+        if "PARAMETERS" in self.variables and not self.featurewise:
             x = attach_context(x, inputs["PARAMETERS"])
+
+        # apply featurewise transformations
+        if self.featurewise is not None:
+            x = self.featurewise(inputs, x)
 
         # inital projection
         x = self.net(x)

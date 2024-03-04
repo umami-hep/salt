@@ -1,5 +1,6 @@
 from salt.models.attention import GATv2Attention, MultiheadAttention, ScaledDotProductAttention
 from salt.models.dense import Dense
+from salt.models.featurewise import FeaturewiseTransformation
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
 from salt.models.maskformer_loss import MaskFormerLoss
@@ -35,6 +36,7 @@ __all__ = [
     "ClassificationTask",
     "Dense",
     "DictCrossAttentionPooling",
+    "FeaturewiseTransformation",
     "GATv2Attention",
     "GaussianRegressionTask",
     "GlobalAttentionPooling",

@@ -155,6 +155,10 @@ class SaltCLI(LightningCLI):
             for init_net in sc.model.model.init_args.init_nets:
                 init_net["variables"] = sc.data.variables
                 init_net["global_object"] = sc.data.global_object
+            # add variables to featurewise nets
+            if sc.model.model.init_args.featurewise_nets:
+                for featurewise_net in sc.model.model.init_args.featurewise_nets:
+                    featurewise_net["variables"] = sc.data.variables
 
             # extract object class names from h5 attrs (requires FTAG preprocessing)
             self.add_object_class_names()

@@ -13,14 +13,14 @@ w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_params=False):
     incl_taus = config_path.name == CONFIG
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
     cd_path = tmp_path / "dummy_class_dict.yaml"
     write_dummy_norm_dict(nd_path, cd_path)
-    write_dummy_file(train_h5_path, nd_path, do_xbb, incl_taus)
+    write_dummy_file(train_h5_path, nd_path, do_xbb, incl_taus, inc_params)
 
     args = ["fit"]
     args += [f"--config={config_path}"]
@@ -122,12 +122,13 @@ def run_combined(
     export_args=None,
     do_xbb=False,
     do_muP=False,
+    inc_params=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
     config_base = Path(__file__).parent.parent / "configs"
 
     # run training
-    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP)
+    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP, inc_params)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -258,3 +259,13 @@ def test_tfv2(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_maskformer(tmp_path) -> None:
     run_combined(tmp_path, "MaskFormer.yaml", train_args=None)
+
+
+@pytest.mark.filterwarnings(w)
+def test_parameterisation_concatenation(tmp_path) -> None:
+    run_combined(tmp_path, "parameterisation_concatenation.yaml", do_onnx=False, inc_params=True)
+
+
+@pytest.mark.filterwarnings(w)
+def test_parameterisation_featurewise(tmp_path) -> None:
+    run_combined(tmp_path, "parameterisation_featurewise.yaml", do_onnx=False, inc_params=True)
