@@ -304,7 +304,7 @@ In tests, compilation can increase the execution speed of the model by up to 1.5
 You can enable compilation by passing the `--compile` flag to the CLI.
 You may see some warnings printed at the start of training, and the first step will take a while as the model is JIT compiled.
 
-??? error "If you see `g++` compile errors, you may need to update your compiler"
+??? failure "If you see `g++` compile errors, you may need to update your compiler"
 
     You can check your `g++`/`gcc` version with `g++ --version`.
     To use `torch.compile()`, you'll need `gcc` version 10 or later.
@@ -314,7 +314,7 @@ You may see some warnings printed at the start of training, and the first step w
     conda install -c conda-forge cxx-compiler
     ```
 
-??? info "`torch.compile()` results"
+??? abstract "`torch.compile()` results"
 
     The following results were obtained on a single A100 GPU
     with a batch size of 5,000 and 40 workers.
@@ -326,6 +326,8 @@ You may see some warnings printed at the start of training, and the first step w
 
     Memory usage should be unaffected by compiling the model.
     Please report any issues you may have
+
+!!! warning "`torch.compile()` has not been tested with mutli GPU training"
 
 
 ### Hyperparameter Optimisation
