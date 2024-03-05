@@ -95,9 +95,10 @@ def get_probs(outputs: Tensor):
 class ONNXModel(ModelWrapper):
     def __init__(self, name: str | None = None, include_aux: bool = False, **kwargs) -> None:
         super().__init__(**kwargs)
-        assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
         self.name = name if name else self.name
+        assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
         assert "_" not in self.name, "Model name cannot contain underscores."
+        assert "-" not in self.name, "Model name cannot contain dashes."
         self.include_aux = include_aux
         self.const = "tracks"
         self.input_names = ["jet_features", "track_features"]

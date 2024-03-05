@@ -85,6 +85,12 @@ See `compare_models.py -h` for more information.
     - Enabling some runtime optimisaiton in pytorch (e.g. [here](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision))
 
 
+
+### Deploying FTAG Models in Athena
+
+Please see [this page](https://ftag.docs.cern.ch/algorithms/taggers/deploy/) in the central FTAG documentation.
+
+
 ### Viewing ONNX Model Metadata
 
 To view the metadata stored in an ONNX file, you can use
