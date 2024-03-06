@@ -38,6 +38,7 @@ nav:
   - ONNX Export: export.md
   - Contributing: contributing.md
   - Tutorial: tutorial.md
+  - Tutorial (Xbb): tutorial-Xbb.md
   - API Reference:
       - api/data.md
       - api/initialisation.md

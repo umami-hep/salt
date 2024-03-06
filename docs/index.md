@@ -24,7 +24,7 @@ Below are some helpful links to get you started:
 
 !!! question "There is a [channel](https://mattermost.web.cern.ch/aft-algs/channels/gnns) for the framework in the [FTAG Mattermost workspace](https://mattermost.web.cern.ch/signup_user_complete/?id=1wicts5csjd49kg7uymwwt9aho&md=link&sbr=su)"
 
-!!! abstract "A tutorial on how to use Salt is provided at the [FTAG docs page](https://ftag.docs.cern.ch/software/tutorials/tutorial-salt/)"
+!!! abstract "A tutorial on how to use Salt can be found [here](tutorial.md) and [here](tutorial-Xbb.md)"
 
 !!! note "[Contributions](contributing) are welcome! Check out [existing issues](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues) for inspiration, or open your own"
 
