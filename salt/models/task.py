@@ -296,6 +296,8 @@ class RegressionTask(RegressionTaskBase):
 
         Parameters
         ----------
+        scaler
+            dummy text
         **kwargs
             Keyword arguments for
             [`salt.models.RegressionTaskBase`][salt.models.RegressionTaskBase].
