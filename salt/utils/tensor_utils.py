@@ -22,11 +22,14 @@ def flatten_tensor_dict(
 
     Parameters
     ----------
-        x: Dictionary of tensors to flatten.
-        include: List of keys defining the tensors to be concatenated. If None, all tensors will be
-            concatenated unless defined by 'exclude'. Cannot be used with 'exclude'.
-        exclude: List of keys to exclude from the concatenation. If None, all tensors will be
-            concatenated unless defined by 'include'. Cannot be used with 'include'.
+    x: dict[str, Tensor]
+        Dictionary of tensors to flatten.
+    include: list[str] | None, optional
+        List of keys defining the tensors to be concatenated. If None, all tensors will be
+        concatenated unless defined by 'exclude'. Cannot be used with 'exclude'.
+    exclude: list[str] | None, optional
+        List of keys to exclude from the concatenation. If None, all tensors will be
+        concatenated unless defined by 'include'. Cannot be used with 'include'.
 
     Returns
     -------

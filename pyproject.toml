@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 line-length = 100
 preview = true
-lint.select = ["ALL"]
+lint.select = ["ALL", "D212", "D417"]
 lint.ignore = [
     "COM", "D100", "D101", "D102", "D103", "D104", "D105", "D205", "D401", "EM", "FIX", "FBT",
     "S101", "S404", "S602", "PLR2004", "PLR0912", "PLR0913", "PLR0914", "PLR0915", "PLR0917",

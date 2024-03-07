@@ -15,6 +15,8 @@ def build_target_masks(object_ids, input_ids, shuffle=False):
         The unqiue ids of the truth object labels
     input_ids : Tensor
         The ids of the per-input labels
+    shuffle: bool
+        Shuffle object ids
 
     Returns
     -------
