@@ -83,7 +83,7 @@ bibliography: paper.bib
 # Summary
 
 High energy physics studies the fundamental particles and forces that constitute the universe, often through experiments conducted in large particle accelerators such as the Large Hadron Collider (LHC) [@Evans:2008].
-`Salt` is a Python package developed for the high energy physics community which streamlines the training and deployment of advanced machine learning (ML) models, making them more accessible and promoting shared best practices.
+`Salt` is a Python application developed for the high energy physics community that streamlines the training and deployment of advanced machine learning (ML) models, making them more accessible and promoting shared best practices.
 `Salt` features a generic multimodal, multitask model skeleton which, coupled with a strong emphasis on modularity, configurabiltiy, and ease of use, can be used to tackle a wide variety of high energy physics ML applications.
 
 Some key features of `Salt` are listed below:
@@ -92,7 +92,7 @@ Some key features of `Salt` are listed below:
 - Multimodal, multitask models: `Salt` models support multimodal inputs and can be configured to perform various tasks such as classification, regression, segmentation, and edge classification tasks. Any combination of these can be used to flexibly define models for multitask learning problems.
 - Customisable and extensible: `Salt` supports full customisation of training and model configuration through YAML config files. Its modular design allows for the easy integration of custom dataloaders, layers, and models.
 - Train at scale: `Salt` can handle large volumes of data with efficient HDF5 [@hdf5:2023] dataloaders. It also includes multi-GPU support from Lightning, enabling distributed training.
-- Deployment ready: The package facilitates ONNX [@onnx] serialization for integrating models into C++ based software environments.
+- Deployment ready: `Salt` facilitates ONNX [@onnx] serialization for integrating models into C++ based software environments.
 
 
 # Statement of need
@@ -101,7 +101,7 @@ In high energy physics research the reliance on ML for data analysis and object 
 `Salt` meets this growing need by providing a versatile, performant, and user-friendly tool for developing advanced ML models.
 `Salt` was originally developed to train state of the art flavour tagging models at the ATLAS experiment [@ATLAS:2008] at the LHC.
 Flavour tagging, the identification of jets from bottom and charm quarks, plays a crucial role in analysing ATLAS collision data. This process is key for precision Standard Model measurements, particularly in the characterisation of the Higgs boson, and for investigating new phenomena.
-The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors which can be effectively exploited by ML algorithms.
+The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors that can be effectively exploited by ML algorithms.
 The presence of hadrons containing bottom and charm quarks can be inferred via the identification of approximately 3-5 reconstructed charged particle trajectories from the weak decay of the heavy flavour hadron admist several more tracks from the primary proton-proton interaction vertex.
 
 While initially developed for flavour tagging, `Salt` has evolved into a flexible tool that can be used for a wide range of tasks, from object and event classification, regression of object properties, to object reconstruction (via edge classification or input segmentation), demonstrating its broad applicability across various data analysis challenges in high energy physics.
@@ -109,14 +109,14 @@ While initially developed for flavour tagging, `Salt` has evolved into a flexibl
 
 # Model Architecture
 
-Salt is designed to be fully modular, but ships with a flexible model architecture which can be configured for a variety of use cases.
+Salt is designed to be fully modular, but ships with a flexible model architecture that can be configured for a variety of use cases.
 This architecture facilitates the training of multimodal and multitask models as depicted in \autoref{fig:salt-arch}, and is designed to take advantage of multiple input modalities.
 In the context of jet classification, these input modalities might include global features of the jet and varying numbers of jet constituents such as charged particle trajectories, calorimeter energy depositions, reconstructed leptons, or inner detector spacepoints.
 The architecture is described briefly below.
 First, any global input features are concatentated with the features of each constituent.
 Next, an initial embedding to a shared representation space is performed separately for each type of constituent.
 The different types of constituents are then projected into a shared representation space by a series of initialisation networks.
-The embedded constituents are then combined and fed into a encoder network which processes constituents of different modalities in a unified way.
+The embedded constituents are then combined and fed into a encoder network that processes constituents of different modalities in a unified way.
 The encoder then outputs to a set of task-specific modules, each tailored to a specific learning objective.
 This architecture allows the model to leverage all the available detector information, leading to improved performance.
 A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
@@ -126,13 +126,15 @@ A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
 
 # Related work
 
-`Umami` [currently under JOSS review] is a related software package in use at ATLAS. 
+`Umami` [@umami] is a related software package in use at ATLAS. 
 While `Salt` relies on similar preprocessing techniques as those provided by `Umami`, it provides several additional features which make it a more powerful and flexible tool for creating advanced ML models.
 Namely, `Salt` provides support for multimodal and multitask learning, optimised Transformer encoders [@2017arXiv170603762V], and distributed model training.
+
 
 # Acknowledgements
 
 The development of `Salt` is part of the offline software research and development programme of the ATLAS Collaboration, and we thank the collaboration for its support and cooperation.
+This work is funded in part by the UK's Science and Technology Facilities Council via University College London's Centre for Doctoral Training in Data Intensive Science, and the Royal Society.
 
 
 # References
