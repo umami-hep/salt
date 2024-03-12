@@ -8,7 +8,7 @@ variables:
   artifacts:
     paths: [.coverage*]
   rules:
-    - changes: ["*", "salt/**/*.py"]
+    - changes: ["pyproject.toml", "requirements.txt", "salt/**/*.py", "**/*.yaml"]
 
 # --------------------------- UNIT TESTS ---------------------------
 unit-tests:
