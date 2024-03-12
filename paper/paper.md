@@ -30,7 +30,7 @@ authors:
   - name: Dmitrii Kobylianskii
     orcid: 0009-0002-0070-5900
     affiliation: 6
-  - name: Wei Lai
+  - name: Wei Sheng Lai
     orcid: 0009-0001-6726-9851
     affiliation: 1
   - name: Matthew Leigh
