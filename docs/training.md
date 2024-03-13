@@ -167,14 +167,21 @@ The job parameters such as memory requirements, number of GPUs and CPUs requeste
 
 #### Slurm Batch
 
-Those at institutions with Slurm managed GPU batch queues can submit training jobs using
+Those at institutions with Slurm managed GPU batch queues can submit training jobs using a very similar script.
+
+All options described above for HTCondor and more (CPUs, GPUs, etc) are available as command line arguments. 
 
 ```bash
-sbatch submit/submit_slurm.sh
+python submit/submit_slurm.py --config configs/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2
 ```
 
-The submit script only supports running from a conda environment for now.
-There are several options in the script which need to be tailored to make sure to make a look inside.
+The script submit/submit_slurm.py script itself can be modified if a required configuration is not supported in this way.
+
+Where arguments need to agree between Slurm and Pytorch Lightning, such as ntasks-per-node for Slurm and trainer.devices for Lightning, this is handled by the script.
+
+This only supports running from a conda environment for now.
+
+There is also an older submit/submit_slurm.sh bash script that is kept around for compatibility. Users are strongly encouraged to use the python script.
 
 ??? info "Cleaning up after interruption"
 
