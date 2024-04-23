@@ -8,6 +8,7 @@ python_install/
 conda/
 condor/
 logs/
+slurm/
 tmp/
 env/
 plots/
@@ -26,6 +27,7 @@ user/
 *.h5
 *.egg-info/
 *_cache/
+*.cache/
 *.ipynb
 .coverage*
 .cometml-runs

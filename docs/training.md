@@ -179,8 +179,6 @@ The script submit/submit_slurm.py script itself can be modified if a required co
 
 Where arguments need to agree between Slurm and Pytorch Lightning, such as ntasks-per-node for Slurm and trainer.devices for Lightning, this is handled by the script.
 
-This only supports running from a conda environment for now.
-
 There is also an older submit/submit_slurm.sh bash script that is kept around for compatibility. Users are strongly encouraged to use the python script.
 
 ??? info "Cleaning up after interruption"

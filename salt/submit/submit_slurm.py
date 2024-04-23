@@ -13,7 +13,7 @@ parser.add_argument(
     "-e",
     "--environment",
     default="conda",
-    choices=["conda", "local"],
+    choices=["conda", "singularity", "local"],
     help="Environment for job to be submitted.",
 )
 parser.add_argument("-n", "--nodes", default=1, type=int, help="Nodes to split training across")
@@ -30,7 +30,16 @@ parser.add_argument("-m", "--memory", default="100G", type=str, help="Memory per
 parser.add_argument("-ex", "--exclusive", action="store_true")
 parser.add_argument("-ti", "--time", default=None, type=str, help="Job time limit e.g. '24:00:00'")
 parser.add_argument("-f", "--force", action="store_true")
+parser.add_argument(
+    "-b",
+    "--bind",
+    nargs="+",
+    help="List of binds for singularity (e.g. /path/to/upp/output:/inputs)",
+)
 args = parser.parse_args()
+
+if args.bind and args.environment != "singularity":
+    parser.error("--bind option is only allowed with --environment singularity")
 
 # Define directories
 batch_dir = Path.cwd() / "slurm"
@@ -75,17 +84,28 @@ if args.environment == "conda":
         "source conda/bin/activate && conda activate salt\n"
         'echo "Activated environment ${CONDA_DEFAULT_ENV}"\n'
     )
+elif args.environment == "singularity":
+    command += "srun singularity exec -e --nv \\\n"
+    command += " \\\n".join([f"--bind {b}" for b in args.bind]) + " \\\n"
+    command += (
+        "--home ${BASEDIR} \\\n"
+        "/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/ \\\n"  # noqa: E501
+        'sh -c "'
+    )
 command += (
-    'echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"\n'
-    "cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1\n"
-    "cd ${BASEDIR}/salt && pwd\n"
-    f"time srun salt fit --config {args.config.resolve()} "
+    "echo 'CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}' &&\n"
+    "cat /proc/cpuinfo | awk '/^processor/{print $3}' | tail -1 &&\n"
+    "cd ${BASEDIR}/salt && pwd &&\n"
+    + ("srun " if args.environment == "conda" else "")
+    + f"salt fit --config {args.config.resolve()} "
     f"--trainer.devices={gpus_per_node} "
     f"--trainer.num_nodes={nodes} "
     f"--data.num_workers={cpus_per_task} "
 )
 if args.force:
     command += "--force "
+if args.environment == "singularity":
+    command += '"'
 
 # handler.activate_testmode() # To inspect batch script before running
 handler.send_job(command, args.tag)
