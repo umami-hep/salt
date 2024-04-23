@@ -16,7 +16,7 @@ from tqdm import tqdm
 from salt.models.task import mask_fill_flattened
 from salt.modelwrapper import ModelWrapper
 from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
-from salt.utils.union_find import get_node_assignment
+from salt.utils.union_find import get_node_assignment_jit
 
 torch.manual_seed(42)
 # https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx
@@ -174,7 +174,7 @@ class ONNXModel(ModelWrapper):
             if "track_vertexing" in track_outs:
                 pad_mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
                 edge_scores = track_outs["track_vertexing"]
-                vertex_indices = get_node_assignment(edge_scores, pad_mask)
+                vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
                 vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
                 onnx_outputs += (vertex_list.reshape(-1).char(),)
 
@@ -231,7 +231,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     # test vertexing
     if include_aux:
         pred_pt_scores = outputs_pt["tracks"]["track_vertexing"].detach()
-        pred_pt_indices = get_node_assignment(pred_pt_scores, pad_mask)
+        pred_pt_indices = get_node_assignment_jit(pred_pt_scores, pad_mask)
         pred_pt_vtx = mask_fill_flattened(pred_pt_indices, pad_mask)
 
         pred_onnx_vtx = outputs_onnx[-1]

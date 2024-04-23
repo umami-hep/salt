@@ -2,7 +2,6 @@ import torch
 from torch import Tensor
 
 
-@torch.jit.script
 def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor):
     """Function to make edge scores symmetric.
 
@@ -36,7 +35,6 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor):
     return torch.sigmoid(edge_scores.float())
 
 
-@torch.jit.script
 def update_node_indices(
     scores: Tensor, node_indices: Tensor, update_indices: Tensor, node_numbers: Tensor
 ):
@@ -92,7 +90,6 @@ def update_node_indices(
     return node_indices, update_indices
 
 
-@torch.jit.script
 def get_node_assignment(output: Tensor, mask: Tensor):
     """Run edge score symmetrization and union find.
 
@@ -117,3 +114,8 @@ def get_node_assignment(output: Tensor, mask: Tensor):
         )
 
     return node_indices.unsqueeze(-1)
+
+
+@torch.jit.script
+def get_node_assignment_jit(output: Tensor, mask: Tensor):
+    return get_node_assignment(output, mask)
