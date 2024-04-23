@@ -11,7 +11,7 @@ from salt.utils.array_utils import listify
 from salt.utils.class_names import CLASS_NAMES
 from salt.utils.scalers import RegressionTargetScaler
 from salt.utils.tensor_utils import masked_softmax
-from salt.utils.union_find import get_node_assignment
+from salt.utils.union_find import get_node_assignment_jit
 
 
 class TaskBase(nn.Module, ABC):
@@ -513,7 +513,7 @@ class VertexingTask(TaskBase):
         return 1 + weights
 
     def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None):
-        preds = get_node_assignment(preds, pad_mask)
+        preds = get_node_assignment_jit(preds, pad_mask)
         preds = mask_fill_flattened(preds, pad_mask)
         dtype = np.dtype([("VertexIndex", "i8")])
         return u2s(preds.int().cpu().numpy(), dtype)
