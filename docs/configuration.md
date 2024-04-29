@@ -283,6 +283,14 @@ by [Dumoulin et al](https://distill.pub/2018/feature-wise-transformations/). Her
           dense_config_bias:
             hidden_layers: [4]
             output_size: 17
+        - layer: encoder
+          apply_norm: True
+          dense_config_scale:
+            hidden_layers: [128]
+            output_size: 256
+          dense_config_bias:
+            hidden_layers: [128]
+            output_size: 256
         - layer: global
           dense_config_scale:
             output_size: 128
@@ -292,7 +300,7 @@ by [Dumoulin et al](https://distill.pub/2018/feature-wise-transformations/). Her
 ```
 
 Here, two instances of featurewise transformations have been added to the model. For each, you must specify the layer whose features you would
-like to transform (this can currently be either `input`, which applies the transformations to the features before they are passed into the initialisation network, or `global`, which applies them to the global track representations outputted by the encoder). For each instance, you can specify either one or both of `dense_config_scale` or `dense_config_bias`, which configure dense networks whose output scales and biases the features of the chosen layer, respectively. It is important to ensure the `output_size` of these networks matches the number of features in the layer you are transforming. In this case, the transformations are applied to a model with 17 inputs per track, and an encoder that outputs 128 features for each track representation. 
+like to transform (this can currently be either `input`, which applies the transformations to the features before they are passed into the initialisation network, `encoder`, which applies the transformations to the inputs of each layer to the encoder using separate networks, or `global`, which applies them to the global track representations outputted by the encoder). For each instance, you can specify either one or both of `dense_config_scale` or `dense_config_bias`, which configure dense networks whose output scales and biases the features of the chosen layer, respectively. It is important to ensure the `output_size` of these networks matches the number of features in the layer you are transforming. In this case, the transformations are applied to a model with 17 inputs per track, the layers of an encoder with 256 features, and the output of the encoder, which has 128 features for each track representation. You can optionally apply a layer normalisation after applying the transformations by setting `apply_norm: True` for a given network, as shown above.
 
 
 ### Training

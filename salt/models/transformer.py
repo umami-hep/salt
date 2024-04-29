@@ -6,6 +6,7 @@ from torch import BoolTensor, Tensor, cat, nn
 
 from salt.models.attention import MultiheadAttention
 from salt.models.dense import Dense
+from salt.stypes import Tensors
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -171,6 +172,7 @@ class TransformerEncoder(nn.Module):
         self.out_dim = out_dim
         self.update_edges = update_edges
         self.muP = muP
+        self.featurewise = nn.ModuleList()
 
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
@@ -203,6 +205,7 @@ class TransformerEncoder(nn.Module):
         x: Tensor | dict,
         edge_x: Tensor = None,
         pad_mask: Tensor | dict | None = None,
+        inputs: Tensors = None,
         **kwargs,
     ) -> Tensor:
         """Pass the input through all layers sequentially."""
@@ -212,7 +215,9 @@ class TransformerEncoder(nn.Module):
         if isinstance(pad_mask, dict):
             pad_mask = cat(list(pad_mask.values()), dim=1)
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            if len(self.featurewise) > 0:
+                x = self.featurewise[i](inputs, x)
             if edge_x is not None:
                 x, edge_x = layer(x, edge_x, pad_mask=pad_mask, **kwargs)
             else:

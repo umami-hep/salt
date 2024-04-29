@@ -262,10 +262,14 @@ def test_maskformer(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
-def test_parameterisation_concatenation(tmp_path) -> None:
-    run_combined(tmp_path, "parameterisation_concatenation.yaml", do_onnx=False, inc_params=True)
+def test_param_concat(tmp_path) -> None:
+    args = [f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'param_concat.yaml'}"]
+    run_combined(tmp_path, CONFIG, do_onnx=False, inc_params=True, train_args=args)
 
 
 @pytest.mark.filterwarnings(w)
-def test_parameterisation_featurewise(tmp_path) -> None:
-    run_combined(tmp_path, "parameterisation_featurewise.yaml", do_onnx=False, inc_params=True)
+def test_param_featurewise(tmp_path) -> None:
+    args = [
+        f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'param_featurewise.yaml'}"
+    ]
+    run_combined(tmp_path, CONFIG, do_onnx=False, inc_params=True, train_args=args)
