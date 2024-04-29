@@ -1,4 +1,5 @@
-name: parameterisation_concatenation
+# test config for parameterisation using featurewise transformations
+name: param_featurewise
 
 model:
   lrs_config:
@@ -6,7 +7,6 @@ model:
     max: 5e-4
     end: 1e-5
     pct_start: 0.01
-    weight_decay: 1e-5
 
   model:
     class_path: salt.models.SaltModel
@@ -17,6 +17,27 @@ model:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
+
+      featurewise_nets:
+        - layer: input
+          dense_config_scale:
+            hidden_layers: [4]
+            output_size: 21
+          dense_config_bias:
+            hidden_layers: [4]
+            output_size: 21
+        - layer: encoder
+          dense_config_scale:
+            hidden_layers: [128]
+            output_size: 256
+          dense_config_bias:
+            hidden_layers: [128]
+            output_size: 256
+        - layer: global
+          dense_config_scale:
+            output_size: 128
+            hidden_layers: [64]
+            final_activation: Sigmoid
 
       encoder:
         class_path: salt.models.TransformerEncoder
@@ -47,10 +68,10 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 2.0, 2.0] }
+                  init_args: { weight: [1.0, 2.0, 2.0, 16.8] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 3
+                  output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
@@ -112,11 +133,6 @@ data:
     PARAMETERS:
       - mass
 
-  train_file: /share/lustre/ehaines/umami-preprocessing/train_test/pp_output_train.h5
-  val_file: /share/lustre/ehaines/umami-preprocessing/val_test/pp_output_val.h5
-  norm_dict: /share/lustre/ehaines/umami-preprocessing/train_test/norm_dict.yaml
-  class_dict: /share/lustre/ehaines/umami-preprocessing/train_test/class_dict.yaml
-
   PARAMETERS:
     mass:
       train: [5, 40, 55]
@@ -127,6 +143,5 @@ data:
 
 trainer:
   max_epochs: 2
-  accelerator: gpu
   devices: 1
   precision: 32

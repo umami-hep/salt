@@ -15,6 +15,7 @@ import torch
 from torch import BoolTensor, Size, Tensor, nn
 
 import salt.models.layernorm as layernorms
+from salt.stypes import Tensors
 
 
 def merge_masks(
@@ -414,14 +415,22 @@ class TransformerV2(nn.Module):
         self.out_proj = None
         if out_dim is not None:
             self.out_proj = nn.Linear(self.embed_dim, out_dim)
+        self.featurewise = nn.ModuleList()
 
-    def forward(self, x: Tensor, pad_mask: BoolTensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        pad_mask: BoolTensor,
+        inputs: Tensors = None,
+    ) -> Tensor:
         if isinstance(x, dict):
             x = torch.cat(list(x.values()), dim=1)
         if isinstance(pad_mask, dict):
             pad_mask = torch.cat(list(pad_mask.values()), dim=1)
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            if len(self.featurewise) > 0:
+                x = self.featurewise[i](inputs, x)
             x = layer(x, pad_mask)
         if self.out_proj is not None:
             x = self.out_proj(x)

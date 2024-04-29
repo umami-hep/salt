@@ -128,9 +128,9 @@ test-maskformer:
 test-parameterisation_concatenation:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_parameterisation_concatenation
+    - $TEST_CMD salt/tests/test_pipeline.py::test_param_concat
 
 test-parameterisation_featurewise:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_parameterisation_featurewise
+    - $TEST_CMD salt/tests/test_pipeline.py::test_param_featurewise

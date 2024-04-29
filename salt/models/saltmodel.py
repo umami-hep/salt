@@ -63,20 +63,9 @@ class SaltModel(nn.Module):
         """
         super().__init__()
 
-        self.featurewise_nets = None
+        # init featurewise networks
         if featurewise_nets:
-            self.featurewise_nets = nn.ModuleList([
-                FeaturewiseTransformation(**featurewise_net) for featurewise_net in featurewise_nets
-            ])
-        self.featurewise_nets_map = (
-            {featurewise_net.layer: featurewise_net for featurewise_net in self.featurewise_nets}
-            if self.featurewise_nets
-            else {}
-        )
-        # if available, add featurewise net to init net config
-        if "input" in self.featurewise_nets_map:
-            for init_net in init_nets:
-                init_net["featurewise"] = self.featurewise_nets_map["input"]
+            self.init_featurewise(featurewise_nets, init_nets, encoder)
 
         self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
         self.tasks = tasks
@@ -172,7 +161,7 @@ class SaltModel(nn.Module):
 
         # Generate embedding from encoder, or by concatenating the init net outputs
         if self.encoder:
-            preds = {"embed_xs": self.encoder(xs, pad_mask=pad_masks, **kwargs)}
+            preds = {"embed_xs": self.encoder(xs, pad_mask=pad_masks, inputs=inputs, **kwargs)}
         else:
             preds = {"embed_xs": flatten_tensor_dict(xs)}
 
@@ -182,9 +171,9 @@ class SaltModel(nn.Module):
             else (preds, labels, {})
         )
 
-        # apply featurewise transformation to global track representations if configured
-        if "global" in self.featurewise_nets_map:
-            preds["embed_xs"] = self.featurewise_nets_map["global"](inputs, preds["embed_xs"])
+        # apply featurewise transformation to global track embeddings if configured
+        if hasattr(self, "featurewise_global") and self.featurewise_global:
+            preds["embed_xs"] = self.featurewise_global(inputs, preds["embed_xs"])
 
         # pooling
         if self.pool_net:
@@ -229,3 +218,25 @@ class SaltModel(nn.Module):
             loss[task.name] = task_loss
 
         return preds, loss
+
+    def init_featurewise(
+        self, featurewise_nets: list[dict], init_nets: list[dict], encoder: nn.Module
+    ):
+        for featurewise_net in featurewise_nets:
+            if featurewise_net.get("layer") == "input":
+                for init_net in init_nets:
+                    init_net["featurewise"] = FeaturewiseTransformation(**featurewise_net)
+            elif featurewise_net.get("layer") == "encoder":
+                if encoder:
+                    for _layer in range(encoder.num_layers):
+                        encoder.featurewise.append(FeaturewiseTransformation(**featurewise_net))
+                else:
+                    raise ValueError(
+                        "Requested featurewise transforms for encoder, no encoder configured"
+                    )
+            elif featurewise_net.get("layer") == "global":
+                self.featurewise_global = FeaturewiseTransformation(**featurewise_net)
+            else:
+                raise ValueError(
+                    "Select either 'input', 'encoder' or 'global' layers for featurewise nets."
+                )
