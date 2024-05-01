@@ -29,7 +29,7 @@ Create a directory at a location with sufficient free disk space. The unpacked d
 Execute the following commands to download all files to a directory which you will need to define (replace `<path to directory>` with the path to the directory of your choice).
 
 ```bash
-export DIR_TUTORIAL_DATA=<path to directory>
+export TUTORIAL_DATA=<path to directory>
 mkdir -p $TUTORIAL_DATA
 cd $TUTORIAL_DATA
 curl -o $TUTORIAL_DATA/tutorialdata.zip "https://zenodo.org/api/records/10371998/files-archive"
