@@ -179,6 +179,12 @@ The script submit/submit_slurm.py script itself can be modified if a required co
 
 Where arguments need to agree between Slurm and Pytorch Lightning, such as ntasks-per-node for Slurm and trainer.devices for Lightning, this is handled by the script.
 
+Lightning has the ability to requeue a job if it is killed by Slurm for exceeding the system walltime. The training state is saved in a checkpoint and loaded when the new job begins. submit_slurm.py creates a single log directory holding the checkpoints for the original and any requeue-d jobs (in the below example GN2_my_requeue_job).
+
+```bash
+python submit/submit_slurm.py --config configs/GN2.yaml --requeue --salt_log_dir=my_requeue_job --signal=SIGUSR1@90
+```
+
 There is also an older submit/submit_slurm.sh bash script that is kept around for compatibility. Users are strongly encouraged to use the python script.
 
 ??? info "Cleaning up after interruption"
