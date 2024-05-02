@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 from slurm_handler import SlurmHandler
@@ -35,6 +36,20 @@ parser.add_argument(
     "--bind",
     nargs="+",
     help="List of binds for singularity (e.g. /path/to/upp/output:/inputs)",
+)
+parser.add_argument("-r", "--requeue", action="store_true")
+parser.add_argument(
+    "-s",
+    "--signal",
+    default="SIGUSR1@90",
+    type=str,
+    help="Signal from Slurm to trigger Lightning to prepare for requeue",
+)
+parser.add_argument(
+    "-sls",
+    "--salt_log_suffix",
+    default=None,
+    help="Appended to model name to create Salt log directory",
 )
 args = parser.parse_args()
 
@@ -76,6 +91,13 @@ handler["output"] = f"{log_path}/slurm-%j.out"
 handler["error"] = f"{log_path}/slurm-%j.err"
 if args.time is not None:
     handler["time"] = args.time  # Time limit of job, default is system specified
+if args.requeue:
+    handler["requeue"] = None
+    handler["signal"] = args.signal
+
+log_suffix = args.salt_log_suffix
+if args.requeue and not log_suffix:
+    log_suffix = datetime.now().strftime("%Y%m%d-T%H%M%S")
 
 # Construct and submit the job command
 command = "cd ${BASEDIR} && " "export OMP_NUM_THREADS=1\n"
@@ -102,6 +124,10 @@ command += (
     f"--trainer.num_nodes={nodes} "
     f"--data.num_workers={cpus_per_task} "
 )
+
+if args.requeue:
+    command += f"--overwrite_config --log_suffix={log_suffix} "
+
 if args.force:
     command += "--force "
 if args.environment == "singularity":

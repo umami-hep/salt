@@ -66,6 +66,16 @@ class SaltCLI(LightningCLI):
         parser.add_argument(
             "--compile", action="store_true", help="Compile the model to speed up training."
         )
+        parser.add_argument(
+            "-oc", "--overwrite_config", action="store_true", help="Overwrite config file."
+        )
+        parser.add_argument(
+            "-ls",
+            "--log_suffix",
+            default=None,
+            type=str,
+            help="Appended to model name to create the log directory.",
+        )
         self.apply_links(parser)
 
     def fit(self, model, **kwargs):
@@ -203,7 +213,11 @@ class SaltCLI(LightningCLI):
                 pass
 
             # set the timestampped dir
-            dirname = f"{name}_{timestamp}"
+            if sc["log_suffix"]:
+                log_suffix = sc["log_suffix"]
+                dirname = f"{name}_{log_suffix}"
+            else:
+                dirname = f"{name}_{timestamp}"
             if "s3:/" not in sc["trainer.default_root_dir"]:
                 log_dir_timestamp = str(Path(log_dir / dirname).resolve())
             else:
@@ -224,6 +238,9 @@ class SaltCLI(LightningCLI):
                         dirname,
                         "automated salt tag",
                     )
+
+            if sc["overwrite_config"]:
+                self.save_config_kwargs["overwrite"] = True
 
         if self.subcommand == "test":
             print("\n" + "-" * 100)
