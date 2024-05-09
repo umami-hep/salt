@@ -1,6 +1,6 @@
 import torch
 from torch import BoolTensor, Tensor
-from torch.nn.functional import softmax
+from torch.nn.functional import pad, softmax
 
 from salt.stypes import Tensors
 
@@ -57,6 +57,24 @@ def masked_softmax(x: Tensor, mask: BoolTensor, dim: int = -1) -> Tensor:
         x = x.masked_fill(mask, 0)
 
     return x
+
+
+def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple:
+    """Remove all padded elements from a tensor and return the sequence lengths."""
+    mask = ~mask  # convert the mask such that True is a valid token
+    seqlens = mask.sum(dim=-1)
+    maxlen = seqlens.max().item()
+    culens = pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+    return seq[mask], culens, maxlen
+
+
+def redo_padding(unpadded_seq: Tensor, mask: BoolTensor) -> Tensor:
+    """Redo the padding and return a zero-padded tensor."""
+    mask = ~mask  # convert the mask such that True is a valid token
+    shape = (*mask.shape, unpadded_seq.shape[-1])
+    out = torch.zeros(shape, dtype=unpadded_seq.dtype, device=unpadded_seq.device)
+    out[mask] = unpadded_seq
+    return out
 
 
 def add_dims(x: Tensor, ndim: int):

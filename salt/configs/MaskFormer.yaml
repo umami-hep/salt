@@ -28,6 +28,7 @@ model:
             num_heads: 8
           dense_kwargs:
             activation: *activation
+          drop_registers: true
 
 
       mask_decoder:

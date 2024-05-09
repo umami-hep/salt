@@ -14,6 +14,7 @@ from torch.nn.functional import softmax
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
+from salt.models.transformer_v2 import change_attn_backends
 from salt.modelwrapper import ModelWrapper
 from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
 from salt.utils.union_find import get_node_assignment_jit
@@ -293,6 +294,9 @@ def main(args=None):
             map_location=torch.device("cpu"),
         )
         onnx_model.eval()
+        change_attn_backends(
+            onnx_model.model, "torch-math"
+        )  # Only applies to transformer_v2 layers
 
     print("\n" + "-" * 100)
     print("Converting model to ONNX...")

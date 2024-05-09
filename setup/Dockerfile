@@ -1,5 +1,5 @@
 # base image
-FROM pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.2.1-cuda12.1-cudnn8-devel
 
 # local and envs
 ENV LANG C.UTF-8
@@ -23,6 +23,10 @@ RUN python -m pip install -r requirements.txt
 
 # add some other packages to the image, instead of as a package dependency
 RUN python -m pip install puma-hep umami-preprocessing
+
+# Flash attention sometimes has issues in a requirements file
+RUN python -m pip install wheel packaging ninja
+RUN python -m pip install flash-attn==2.5.7
 
 # copy and install package
 COPY . .

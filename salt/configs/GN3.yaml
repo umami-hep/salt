@@ -11,7 +11,7 @@ model:
   model:
     class_path: salt.models.SaltModel
     init_args:
-      num_register_tokens: 10
+      num_register_tokens: 0 # Registers have moved to the encoder!
 
       init_nets:
         - input_name: tracks
@@ -23,11 +23,21 @@ model:
       encoder:
         class_path: salt.models.TransformerV2
         init_args:
+          num_layers: 6
           embed_dim: *embed_dim
-          num_layers: 4
           out_dim: &out_dim 128
+          norm: LayerNorm
+          attn_type: torch-math
+          do_final_norm: true
+          ls_init: 1.0e-2
+          dense_kwargs:
+            activation: SiLU
+            dropout: 0
+            gated: True
           attn_kwargs:
             num_heads: 8
+            dropout: 0.1
+          num_registers: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
