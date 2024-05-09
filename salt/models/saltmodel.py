@@ -160,8 +160,12 @@ class SaltModel(nn.Module):
                         })
 
         # Generate embedding from encoder, or by concatenating the init net outputs
+        # We should change this such that all encoders return (x, mask)
         if self.encoder:
-            preds = {"embed_xs": self.encoder(xs, pad_mask=pad_masks, inputs=inputs, **kwargs)}
+            embed_xs = self.encoder(xs, pad_mask=pad_masks, inputs=inputs, **kwargs)
+            if isinstance(embed_xs, tuple):
+                embed_xs, pad_masks = embed_xs
+            preds = {"embed_xs": embed_xs}
         else:
             preds = {"embed_xs": flatten_tensor_dict(xs)}
 

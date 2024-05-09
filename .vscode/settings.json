@@ -3,6 +3,9 @@
     "autoDocstring.docstringFormat": "numpy",
     "[python]": {
         "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.rulers": [
+            100
+        ],
         "editor.codeActionsOnSave": {
             "source.organizeImports": "explicit",
             "source.fixAll": "explicit"

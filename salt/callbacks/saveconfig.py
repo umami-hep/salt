@@ -13,6 +13,7 @@ import yaml
 from ftag.git_check import get_git_hash
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
+from lightning.pytorch.loggers import CometLogger
 from s3fs import S3FileSystem
 from s3path import S3Path
 
@@ -138,8 +139,8 @@ class SaveConfigCallback(Callback):
         self.write_yaml_file(self.config, config_path)
 
         # log files as assets
-        #  currently cannot save log files as assests on S3
-        if self.plm.logger is not None and not self.use_S3:
+        # currently cannot save log files as assests on S3
+        if isinstance(self.plm.logger, CometLogger) and not self.use_S3:
             self.plm.logger.experiment.log_asset(config_path)
             self.plm.logger.experiment.log_asset(nd_path)
             self.plm.logger.experiment.log_asset(cd_path)

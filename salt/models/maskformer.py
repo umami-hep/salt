@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import MaskFormerLoss
-from salt.models.transformer_v2 import GLU, CrossAttention, SelfAttention
+from salt.models.transformer_v2 import GLU, Attention
 from salt.stypes import Tensors
 
 
@@ -151,11 +151,11 @@ class MaskDecoderLayer(nn.Module):
         self.mask_attention = mask_attention
         self.bidirectional_ca = bidirectional_ca
 
-        self.q_ca = CrossAttention(embed_dim=embed_dim, num_heads=n_heads)
-        self.q_sa = SelfAttention(embed_dim=embed_dim, num_heads=n_heads)
+        self.q_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
+        self.q_sa = Attention(embed_dim=embed_dim, num_heads=n_heads)
         self.q_dense = GLU(embed_dim)
         if bidirectional_ca:
-            self.kv_ca = CrossAttention(embed_dim=embed_dim, num_heads=n_heads)
+            self.kv_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
             self.kv_dense = GLU(embed_dim)
         self.mask_net = mask_net
 
@@ -164,15 +164,16 @@ class MaskDecoderLayer(nn.Module):
 
         # if we want to do mask attention
         if self.mask_attention:
-            # If a BoolTensor is provided, positions with ``True`` are not allowed
-            # to attend while ``False`` values will be unchanged.
-            attn_mask = (get_masks(kv, q, self.mask_net, kv_mask).sigmoid() < 0.1).detach()
+            # New attention masking convention with transformers 2
+            # Positions with True are allowed while False are masked
+            attn_mask = (get_masks(kv, q, self.mask_net, kv_mask).sigmoid() > 0.9).detach()
 
-            # if the attn mask is invalid for a given query, allow it to attend everywhere
-            attn_mask[torch.where(attn_mask.sum(-1) == attn_mask.shape[-1])] = False
+            # If the attention mask is False for all positions, we set it to True
+            # This is prevent NaNs in the softmax
+            attn_mask[(~attn_mask).all(-1)] = True
 
         # update queries with cross attention from nodes
-        q = q + self.q_ca(q, kv, kv_mask=kv_mask, attn_mask=attn_mask)
+        q = q + self.q_ca(q, kv=kv, kv_mask=kv_mask, attn_mask=attn_mask)
 
         # update queries with self attention
         q = q + self.q_sa(q)
@@ -184,7 +185,7 @@ class MaskDecoderLayer(nn.Module):
         if self.bidirectional_ca:
             if attn_mask is not None:
                 attn_mask = attn_mask.transpose(1, 2)
-            kv = kv + self.kv_ca(kv, q, q_mask=kv_mask, attn_mask=attn_mask)
+                attn_mask[(~attn_mask).all(-1)] = True
+            kv = kv + self.kv_ca(kv, q, attn_mask=attn_mask)
             kv = kv + self.kv_dense(kv)
-
         return q, kv
