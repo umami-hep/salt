@@ -140,9 +140,9 @@ def torch_attn(
 ) -> Tensor:
     """Torch dot product attention with a switchable backend."""
     with torch.backends.cuda.sdp_kernel(
-        enable_flash=(backend == "torch-flash"),
-        enable_math=(backend == "torch-math"),
+        enable_math=True,  # always enabled as a fallback
         enable_mem_efficient=(backend == "torch-meff"),
+        enable_flash=(backend == "torch-flash"),
     ):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout)
 
@@ -152,7 +152,7 @@ class Attention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int = 1,
-        attn_type: str = "torch-math",
+        attn_type: str = "torch-meff",
         dropout: float = 0.0,
         bias: bool = True,
     ) -> None:
@@ -475,7 +475,7 @@ class EncoderLayer(nn.Module):
             Keyword arguments for [salt.models.transformer_v2.GLU][salt.models.transformer_v2.GLU].
         attn_kwargs : dict | None, optional
             Keyword arguments for
-            [salt.models.transformer_v2.SelfAttention][salt.models.transformer_v2.SelfAttention].
+            [salt.models.transformer_v2.Attention][salt.models.transformer_v2.Attention].
         """
         super().__init__()
 
@@ -568,7 +568,9 @@ class TransformerV2(nn.Module):
         do_final_norm : bool, optional
             Whether to apply a final normalization layer, by default True.
         num_registers : int, optional
-            The number of registers to add to the END of the input sequence
+            The number of registers to add to the END of the input sequence.
+            Registers are randomly initialised tokens of the same dimension as
+            any other inputs after initialiser networks. See 2309.16588.
         drop_registers : bool, optional
             If to drop the registers from the outputs
         kwargs : dict
@@ -579,8 +581,8 @@ class TransformerV2(nn.Module):
         # Check the inputs
         if num_registers < 1:
             raise ValueError(
-                "Many jets have no tracks, which causes NaNs in the attention scores. ",
-                "To fix this, set num_registers to at least 1",
+                "Some jets have no tracks, which causes NaNs in the attention scores. ",
+                "To avoid this, set num_registers to at least 1",
             )
 
         # Attributes
@@ -605,7 +607,9 @@ class TransformerV2(nn.Module):
         if self.do_final_norm:
             self.out_norm = getattr(layernorms, norm)(self.out_dim)
         if self.num_registers:
-            self.registers = nn.Parameter(torch.randn(num_registers, embed_dim))
+            self.registers = nn.Parameter(
+                torch.normal(torch.zeros((self.num_registers, self.embed_dim)), std=1e-4)
+            )
             self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
         self.featurewise = nn.ModuleList()
 
@@ -654,7 +658,7 @@ class TransformerV2(nn.Module):
         if self.drop_registers:
             x = x[:, : -self.num_registers]
             if isinstance(pad_mask, dict):
-                del pad_mask["registers"]
+                del pad_mask["REGISTERS"]
             elif isinstance(pad_mask, Tensor):
                 pad_mask = pad_mask[:, : -self.num_registers]
 
@@ -668,7 +672,7 @@ class TransformerV2(nn.Module):
         # Add as a key or concatenate at the end
         reg = self.registers.expand(B, -1, -1)
         if isinstance(x, dict):
-            x["registers"] = reg
+            x["REGISTERS"] = reg
         else:
             x = torch.cat([x, reg], dim=1)
 
@@ -676,7 +680,7 @@ class TransformerV2(nn.Module):
         if pad_mask is not None:
             reg_mask = self.register_mask.expand(B, -1)
             if isinstance(pad_mask, dict):
-                pad_mask["registers"] = reg_mask
+                pad_mask["REGISTERS"] = reg_mask
             else:
                 pad_mask = torch.cat([pad_mask, reg_mask], dim=-1)
 
