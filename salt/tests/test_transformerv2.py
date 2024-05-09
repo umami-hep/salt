@@ -284,7 +284,7 @@ def test_transformerv2_dict_input(num_registers):
     )
     x, mask = trans(x, pad_mask=mask)
     assert x.shape == (5, 10 + 3 + 2 + num_registers, 32)
-    assert all(k in mask for k in ["m1", "m2", "m3", "registers"])
+    assert all(k in mask for k in ["m1", "m2", "m3", "REGISTERS"])
 
 
 def test_times_torch_vs_salt() -> None:
