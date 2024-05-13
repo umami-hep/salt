@@ -236,7 +236,7 @@ Go to the GitLab project page of Salt to begin with the task: <https://gitlab.ce
 
 ??? info "Hint: Saving info to environment variables"
 
-    See the Salt [logging docs](training.md#setup-logging) for info on which environment variables to use.
+    See the Salt [logging docs](setup.md#setup-logging) for info on which environment variables to use.
 
 ??? danger "Warning: If you don't set up logging, you may need to disable it in the training config file"
 
