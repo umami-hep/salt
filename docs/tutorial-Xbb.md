@@ -111,16 +111,18 @@ We'll use the tagged image for version `0.3` of the code.
     If you run on lxplus, it is advantageous to also mount the `/afs`, `/eos`, `/tmp` and `/cvmfs` directories:
 
     ```bash
-    singularity shell -e --nv --bind $PWD,/afs,/eos,/tmp,/cvmfs \
+    singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/afs,/eos,/tmp,/cvmfs,/run/user \
         /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:0-3
     ```
 
 === "other (cvmfs only)"
 
     ```
-    singularity shell -e --nv --bind $PWD,/cvmfs \
+    singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/cvmfs,/run/user \
         /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:0-3
     ```
+
+If you have issues accessing bound paths, ensure your Kerberos credentials are set with `export KRB5CCNAME=FILE:/run/user/${UID}/krb5cc`
 
 After running the [`singularity shell`](https://docs.sylabs.io/guides/latest/user-guide/cli/singularity_shell.html#singularity-shell) command, you can re-source your `.bashrc` to get some of the features of your normal terminal back by running 
 
