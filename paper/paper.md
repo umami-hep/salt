@@ -36,6 +36,9 @@ authors:
   - name: Matthew Leigh
     orcid: 0000-0003-1406-1413
     affiliation: 7
+  - name: Nicholas Luongo
+    orcid: 0000-0001-6527-0253
+    affiliation: 10
   - name: Ivan Oleksiyuk
     orcid: 0000-0002-4784-6340
     affiliation: 7
@@ -74,6 +77,8 @@ affiliations:
    index: 8
  - name: University of California, Berkeley
    index: 9
+ - name: Argonne National Laboratory
+   index: 10
 
 date: 15 Janurary 2024
 bibliography: paper.bib
