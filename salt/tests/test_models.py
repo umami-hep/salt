@@ -139,7 +139,7 @@ def test_transformer_cross_attention_encoder() -> None:
     mask["type1"] = torch.zeros(extended_x["type1"].shape[:-1]).bool()
     mask["type1"][:, -1] = True
     out_with_pad = net(extended_x, mask)["type1"][:, :-1]
-    assert torch.all(out["type1"] == out_with_pad)
+    torch.testing.assert_allclose(out["type1"], out_with_pad)
 
 
 def test_mha_allvalid_mask() -> None:

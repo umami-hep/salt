@@ -11,10 +11,11 @@ from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
+TAU_CONFIGS = {"GN2.yaml", "GN3.yaml"}
 
 
 def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_params=False):
-    incl_taus = config_path.name == CONFIG
+    incl_taus = config_path.name in TAU_CONFIGS
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
