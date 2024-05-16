@@ -17,19 +17,19 @@ model:
           dense_config:
             output_size: &embed_dim 256
             hidden_layers: [256]
-            activation: &activation ReLU
+            activation: &activation SiLU
 
       encoder:
         class_path: salt.models.TransformerV2
         init_args:
-          num_layers: 6
+          num_layers: 8
           embed_dim: *embed_dim
           out_dim: &out_dim 128
           attn_type: flash-varlen
           norm: LayerNorm
           ls_init: 1.0e-2
           dense_kwargs:
-            activation: SiLU
+            activation: *activation
             dropout: 0
             gated: True
           attn_kwargs:
@@ -50,44 +50,41 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
-                loss:
-                  class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 2.0, 2.0] }
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 3
+                  output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
-            - class_path: salt.models.ClassificationTask
-              init_args:
-                name: track_origin
-                input_name: tracks
-                label: ftagTruthOriginLabel
-                weight: 0.5
-                loss:
-                  class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
-                dense_config:
-                  <<: *task_dense_config
-                  output_size: 8
-                  context_size: *out_dim
-
-            - class_path: salt.models.VertexingTask
-              init_args:
-                name: track_vertexing
-                input_name: tracks
-                label: ftagTruthVertexIndex
-                weight: 1.5
-                loss:
-                  class_path: torch.nn.BCEWithLogitsLoss
-                  init_args: { reduction: none }
-                dense_config:
-                  <<: *task_dense_config
-                  input_size: 256
-                  output_size: 1
-                  context_size: *out_dim
+# Disabling aux tasks during R&D phase to speed up training!
+#            - class_path: salt.models.ClassificationTask
+#              init_args:
+#                name: track_origin
+#                input_name: tracks
+#                label: ftagTruthOriginLabel
+#                weight: 0.5
+#                loss: torch.nn.CrossEntropyLoss
+#                dense_config:
+#                  <<: *task_dense_config
+#                  output_size: 8
+#                  context_size: *out_dim
+#
+#            - class_path: salt.models.VertexingTask
+#              init_args:
+#                name: track_vertexing
+#                input_name: tracks
+#                label: ftagTruthVertexIndex
+#                weight: 1.5
+#                loss:
+#                  class_path: torch.nn.BCEWithLogitsLoss
+#                  init_args: { reduction: none }
+#                dense_config:
+#                  <<: *task_dense_config
+#                  input_size: 256
+#                  output_size: 1
+#                  context_size: *out_dim
 
 data:
   variables:
@@ -114,8 +111,8 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
+      - leptonID
       #- numberOfTRTHits
-      #- leptonID
 
   train_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_train.h5
   val_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_val.h5

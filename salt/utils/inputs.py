@@ -76,6 +76,7 @@ TRACK_VARS = [
     "eta",
     "phi",
     "subjetIndex",
+    "leptonID",
 ]
 
 ELECTRON_VARS = [
@@ -151,8 +152,13 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     with open(nd_path, "w") as file:
         yaml.dump(sd, file, sort_keys=False)
+
+    cd: dict = {}
+    cd["jets"] = {"HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0]}
+    cd["jets"]["flavour_label"] = cd["jets"]["HadronConeExclTruthLabelID"]
+    cd["tracks"] = {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]}
     with open(cd_path, "w") as file:
-        yaml.dump(sd, file, sort_keys=False)
+        yaml.dump(cd, file, sort_keys=False)
 
 
 def get_dummy_inputs(n_jets=1000, n_jet_features=2, n_track_features=21, n_tracks_per_jet=40):

@@ -188,6 +188,7 @@ class SaltCLI(LightningCLI):
                 input_name = task["init_args"]["input_name"]
                 if task["init_args"]["label"] in class_dict[input_name]:
                     class_weights = class_dict[input_name][task["init_args"]["label"]]
+                    class_weights = torch.Tensor(class_weights)
                     task["init_args"]["loss"]["init_args"]["weight"] = class_weights
                 else:
                     raise ValueError(
