@@ -9,6 +9,9 @@ parser = argparse.ArgumentParser(description="Submit batch jobs to Slurm.")
 parser.add_argument("-c", "--config", required=True, type=Path, help="Configuration file for job.")
 parser.add_argument("-t", "--tag", default="salt_job", help="Tag for job to be submitted.")
 parser.add_argument("-p", "--partition", default=None, type=str, help="Partition to submit job.")
+parser.add_argument(
+    "-cn", "--constraint", default=None, type=str, help="Constraint on requested resources."
+)
 parser.add_argument("-a", "--account", default=None, type=str, help="Slurm account name.")
 parser.add_argument(
     "-e",
@@ -17,6 +20,7 @@ parser.add_argument(
     choices=["conda", "singularity", "local"],
     help="Environment for job to be submitted.",
 )
+parser.add_argument("-q", "--qos", default=None, type=str, help="Quality Of Service for job")
 parser.add_argument("-n", "--nodes", default=1, type=int, help="Nodes to split training across")
 parser.add_argument("-g", "--gpus_per_node", default=1, type=int, help="GPUs for each node")
 parser.add_argument(
@@ -77,8 +81,12 @@ handler = SlurmHandler(str(batch_path), str(log_path), str(job_basedir))
 handler["job-name"] = args.tag
 if args.partition is not None:
     handler["partition"] = args.partition
+if args.constraint is not None:
+    handler["constraint"] = args.constraint
 if args.account is not None:
     handler["account"] = args.account
+if args.qos is not None:
+    handler["qos"] = args.qos
 handler["nodes"] = nodes
 handler["gres"] = gres
 handler["ntasks-per-node"] = gpus_per_node
