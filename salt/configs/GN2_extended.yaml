@@ -1,0 +1,125 @@
+name: GN2
+
+model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: tracks
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.TransformerEncoder
+        init_args:
+          embed_dim: *embed_dim
+          num_layers: 4
+          out_dim: &out_dim 128
+          mha_config:
+            num_heads: 8
+            attention: { class_path: salt.models.ScaledDotProductAttention }
+          dense_config:
+            activation: *activation
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [2.0, 2.0, 2.0, 1.0, 6.25] }
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 5
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [3.92, 83.21, 1.0, 10.22, 7.11, 7.88, 62.91, 19.42]
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+
+data:
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      #- numberOfTRTHits
+      #- leptonID
+
+  train_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_train.h5
+  val_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_val.h5
+  norm_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/norm_dict.yaml
+  class_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/class_dict.yaml
+
+  batch_size: 4000
+  num_workers: 40
+
+trainer:
+  max_epochs: 40
+  accelerator: gpu
+  devices: 2
+  precision: 16-mixed
