@@ -143,7 +143,8 @@ class SaveConfigCallback(Callback):
         if isinstance(self.plm.logger, CometLogger) and not self.use_S3:
             self.plm.logger.experiment.log_asset(config_path)
             self.plm.logger.experiment.log_asset(nd_path)
-            self.plm.logger.experiment.log_asset(cd_path)
+            if self.config.data.class_dict:
+                self.plm.logger.experiment.log_asset(cd_path)
 
     def save_metadata(self, config_path):
         trainer = self.trainer
