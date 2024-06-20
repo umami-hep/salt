@@ -91,7 +91,7 @@ data:
   train_file: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/Training_dataset.h5
   val_file: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/Validation_dataset.h5
   norm_dict: /afs/cern.ch/work/g/girupnik/public/Datasets_signal/norm_dict.yaml
-  #class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
+  class_dict: null
   #move_files_temp: /dev/shm/svanstro/salt/gn2/
   batch_size: 1000
   num_workers: 4
