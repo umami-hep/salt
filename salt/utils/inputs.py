@@ -121,12 +121,32 @@ def inputs_sep_no_pad(n_batch: int, n_track: int, n_jet_feat: int, n_track_feat:
     return jets, tracks
 
 
+def inputs_sep_no_pad_multi_sequece(
+    n_batch: int, n_seq_list: list[int], n_jet_feat: int, n_seq_feat_list: list[int]
+):
+    jets = torch.rand(n_batch, n_jet_feat)
+    sequences = []
+    for n_seq, n_seq_feat in zip(n_seq_list, n_seq_feat_list, strict=False):
+        sequences.append(torch.rand(n_batch, n_seq, n_seq_feat))
+    return jets, sequences
+
+
 def inputs_sep_with_pad(
     n_batch: int, n_track: int, n_jet_feat: int, n_track_feat: int, p_valid=0.5
 ):
     jets, tracks = inputs_sep_no_pad(n_batch, n_track, n_jet_feat, n_track_feat)
     mask = get_random_mask(n_batch, n_track, p_valid)
     return jets, tracks, mask
+
+
+def inputs_sep_with_pad_multi_sequece(
+    n_batch: int, n_seq_list: list[int], n_jet_feat: int, n_seq_feat_list: list[int], p_valid=0.5
+):
+    jets, sequences = inputs_sep_no_pad_multi_sequece(
+        n_batch, n_seq_list, n_jet_feat, n_seq_feat_list
+    )
+    masks = [get_random_mask(n_batch, n_seq, p_valid) for n_seq in n_seq_list]
+    return jets, sequences, masks
 
 
 def get_random_mask(n_batch: int, n_track: int, p_valid: float = 0.5):
