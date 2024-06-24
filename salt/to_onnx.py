@@ -16,7 +16,7 @@ from tqdm import tqdm
 from salt.models.task import mask_fill_flattened
 from salt.models.transformer_v2 import change_attn_backends
 from salt.modelwrapper import ModelWrapper
-from salt.utils.inputs import inputs_sep_no_pad, inputs_sep_with_pad
+from salt.utils.inputs import inputs_sep_with_pad_multi_sequece
 from salt.utils.union_find import get_node_assignment_jit
 
 torch.manual_seed(42)
@@ -94,19 +94,34 @@ def get_probs(outputs: Tensor):
 
 
 class ONNXModel(ModelWrapper):
-    def __init__(self, name: str | None = None, include_aux: bool = False, **kwargs) -> None:
+    def __init__(
+        self, name: str | None = None, include_aux: bool = False, onnx_feature_map=None, **kwargs
+    ) -> None:
         super().__init__(**kwargs)
         self.name = name if name else self.name
-        assert len(self.model.init_nets) == 1, "Multi input ONNX models are not yet supported."
         assert "_" not in self.name, "Model name cannot contain underscores."
         assert "-" not in self.name, "Model name cannot contain dashes."
         self.include_aux = include_aux
-        self.const = "tracks"
-        self.input_names = ["jet_features", "track_features"]
-        jets, tracks = inputs_sep_no_pad(
-            1, 40, self.input_dims[self.global_object], self.input_dims[self.const]
-        )
-        self.example_input_array = jets, tracks.squeeze(0)  # used for the tracing during export
+        self.feature_map = onnx_feature_map
+        self.aux_sequence_object = "tracks"
+
+        example_input_list = []
+        self.salt_names = []
+        self.input_names = []
+        self.aux_sequence_index = 1
+
+        for i, feature in enumerate(self.feature_map):
+            if feature["name_salt"] == self.global_object:
+                example_input_list.append(torch.rand(1, self.input_dims[self.global_object]))
+            else:
+                example_input_list.append(
+                    torch.rand(1, 40, self.input_dims[feature["name_salt"]]).squeeze(0)
+                )
+            if feature["name_salt"] == self.aux_sequence_object:
+                self.aux_sequence_index = i
+            self.salt_names.append(feature["name_salt"])
+            self.input_names.append(feature["name_athena_out"])
+        self.example_input_array = tuple(example_input_list)
 
     @property
     def model_name(self) -> str:
@@ -138,7 +153,10 @@ class ONNXModel(ModelWrapper):
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         """Let ONNX know which inputs/outputs have dynamic shape (i.e. can vary in length)."""
         # dynamic inputs
-        dynamic_axes = {"track_features": {0: "n_tracks"}}
+        dynamic_axes = {}
+        for feature in self.feature_map:
+            if not feature["is_global"]:
+                dynamic_axes.update({feature["name_athena_out"]: {0: feature["athena_num_name"]}})
 
         # dynamic outputs
         if self.include_aux:
@@ -150,14 +168,21 @@ class ONNXModel(ModelWrapper):
                 dynamic_axes[out_name] = {0: "n_tracks"}
         return dynamic_axes
 
-    def forward(self, jets: Tensor, tracks: Tensor, labels=None):  # type: ignore[override]
-        _ = labels
-
+    def forward(self, *args):  # type: ignore[override]
+        """Forward pass through the model."""
+        """ the arguments should be passed in the same order they appear in the feature map """
         # in athena the jets have a batch dim but the tracks don't, so add it here
-        tracks = tracks.unsqueeze(0)
+        assert len(args) == len(self.salt_names), "Number of inputs does not match feature map."
+        assert (
+            len(args[0].shape) == 2
+        ), "Jets should have a batch dimension, and variable dimension but not a sequence dimension"
+        input_dict = {self.global_object: args[0]}
+        input_dict.update({
+            self.salt_names[i]: args[i].unsqueeze(0) for i in range(1, len(self.salt_names))
+        })
 
         # forward pass
-        outputs = super().forward({self.global_object: jets, self.const: tracks}, None)[0]
+        outputs = super().forward(input_dict, None)[0]
 
         # get class probabilities
         onnx_outputs = get_probs(
@@ -166,7 +191,8 @@ class ONNXModel(ModelWrapper):
 
         # add aux outputs
         if self.include_aux:
-            track_outs = outputs[self.const]
+            tracks = args[self.aux_sequence_index].unsqueeze(0)
+            track_outs = outputs[self.aux_sequence_object]
             if "track_origin" in track_outs:
                 outputs_track = torch.argmax(track_outs["track_origin"], dim=-1)
                 outputs_track = outputs_track.squeeze(0).char()
@@ -182,21 +208,36 @@ class ONNXModel(ModelWrapper):
         return onnx_outputs
 
 
-def compare_output(pt_model, onnx_session, include_aux, n_track=40):
+def compare_output(
+    pt_model,
+    onnx_session,
+    include_aux,
+    seq_names_salt,
+    seq_names_onnx,
+    n_seq=40,
+):
     n_batch = 1
 
-    jets, tracks, pad_mask = inputs_sep_with_pad(
-        n_batch, n_track, pt_model.input_dims["jets"], pt_model.input_dims["tracks"], p_valid=1
+    jets, sequences, pad_masks = inputs_sep_with_pad_multi_sequece(
+        n_batch,
+        [n_seq for seqn in seq_names_salt],
+        pt_model.input_dims["jets"],
+        [pt_model.input_dims[seqn] for seqn in seq_names_salt],
+        p_valid=1,
     )
 
-    inputs_pt = {"jets": jets, "tracks": tracks}
-    outputs_pt = pt_model(inputs_pt, {"tracks": pad_mask})[0]
+    inputs_pt = {seqn: seq for seq, seqn in zip(sequences, seq_names_salt, strict=False)}
+    inputs_pt["jets"] = jets
+
+    masks_pt = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
+
+    outputs_pt = pt_model(inputs_pt, masks_pt)[0]
     pred_pt_jc = [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jets_classification"])]
 
-    inputs_onnx = {
-        "jet_features": jets.numpy(),
-        "track_features": tracks.squeeze(0).numpy(),
-    }
+    inputs_onnx = {"jet_features": jets.numpy()}
+    for seq, seqn in zip(sequences, seq_names_onnx, strict=False):
+        inputs_onnx[seqn] = seq.squeeze(0).numpy()
+
     outputs_onnx = onnx_session.run(None, inputs_onnx)
 
     # test jet classification
@@ -215,7 +256,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
 
     # test track origin
     if include_aux:
-        if n_track == 0:
+        if n_seq == 0:
             return
 
         pred_pt_origin = torch.argmax(outputs_pt["tracks"]["track_origin"], dim=-1).detach().numpy()
@@ -232,8 +273,8 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
     # test vertexing
     if include_aux:
         pred_pt_scores = outputs_pt["tracks"]["track_vertexing"].detach()
-        pred_pt_indices = get_node_assignment_jit(pred_pt_scores, pad_mask)
-        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, pad_mask)
+        pred_pt_indices = get_node_assignment_jit(pred_pt_scores, pad_masks[0])
+        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, pad_masks[0])
 
         pred_onnx_vtx = outputs_onnx[-1]
         np.testing.assert_allclose(
@@ -245,7 +286,7 @@ def compare_output(pt_model, onnx_session, include_aux, n_track=40):
         )
 
 
-def compare_outputs(pt_model, onnx_path, include_aux):
+def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_onnx):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
@@ -257,13 +298,53 @@ def compare_outputs(pt_model, onnx_path, include_aux):
     )
     for n_track in tqdm(range(40), leave=False):
         for _ in range(10):
-            compare_output(pt_model, session, include_aux, n_track)
+            compare_output(
+                pt_model,
+                session,
+                include_aux,
+                seq_names_salt,
+                seq_names_onnx,
+                n_track,
+            )
 
     print(
         "Success! Pytorch and ONNX models are consistent, but you should verify this in"
         " Athena.\nFor more info see: https://ftag-salt.docs.cern.ch/export/#athena-validation"
     )
     print("-" * 100)
+
+
+def get_default_onnx_feature_map(track_selection, inputs):
+    feature_map = [
+        {
+            "name_athena_in": "jet_var",
+            "name_athena_out": "jet_features",
+            "name_salt": "jets",
+            "is_global": True,
+        },
+    ]
+
+    if "tracks" in inputs:
+        feature_map.append({
+            "name_athena_in": f"tracks_{track_selection}_sd0sort",
+            "name_athena_out": "track_features",
+            "athena_num_name": "n_tracks",
+            "name_salt": "tracks",
+            "is_global": False,
+        })
+
+    if "neutral" in inputs:
+        feature_map.append({
+            "name_athena_in": f"neutralflows_{track_selection}_sd0sort",
+            "name_athena_out": "flow_features",
+            "athena_num_name": "n_neutrals",
+            "name_salt": "neutral",
+            "is_global": False,
+        })
+
+    assert "charged" not in inputs, "Charged flows are not supported in the default onnx config yet"
+
+    return feature_map
 
 
 def main(args=None):
@@ -276,6 +357,13 @@ def main(args=None):
     if not (config_path := args.config):
         config_path = args.ckpt_path.parents[1] / "config.yaml"
         assert config_path.is_file(), f"Could not find config file at {config_path}"
+
+    config = yaml.safe_load(config_path.read_text())
+    # Default config that only uses jets and tracks sorted in a default way
+
+    onnx_feature_map = get_default_onnx_feature_map(
+        args.track_selection, list(config["data"]["variables"].keys())
+    )
 
     # instantiate pytorch and wrapper models
     with warnings.catch_warnings():
@@ -292,6 +380,7 @@ def main(args=None):
             name=args.name,
             include_aux=args.include_aux,
             map_location=torch.device("cpu"),
+            onnx_feature_map=onnx_feature_map,
         )
         onnx_model.eval()
         change_attn_backends(
@@ -320,15 +409,29 @@ def main(args=None):
     # add metadata
     add_metadata(
         config_path,
+        config,
         args.ckpt_path,
         onnx_path,
         onnx_model.model_name,
         onnx_model.output_names,
-        args.track_selection,
+        onnx_feature_map,
     )
+    seq_names_onnx = []
+    seq_names_salt = []
+    for feature in onnx_feature_map:
+        if feature["is_global"]:
+            continue
+        seq_names_salt.append(feature["name_salt"])
+        seq_names_onnx.append(feature["name_athena_out"])
 
     # validate pytorch and exported onnx models
-    compare_outputs(pt_model, onnx_path, args.include_aux)
+    compare_outputs(
+        pt_model,
+        onnx_path,
+        args.include_aux,
+        seq_names_salt=seq_names_salt,
+        seq_names_onnx=seq_names_onnx,
+    )
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
     print("-" * 100)
@@ -337,11 +440,12 @@ def main(args=None):
 
 def add_metadata(
     config_path,
+    config,
     ckpt_path,
     onnx_path,
     model_name,
     output_names,
-    track_selection,
+    onnx_feature_map,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
@@ -352,10 +456,7 @@ def add_metadata(
 
     # add metadata
     metadata = {"ckpt_path": str(ckpt_path.resolve()), "layers": [], "nodes": []}
-    config = yaml.safe_load(config_path.read_text())
     metadata["config.yaml"] = config
-    jet_vars = config["data"]["variables"]["jets"]
-    trk_vars = config["data"]["variables"]["tracks"]
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
     metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
 
@@ -363,20 +464,29 @@ def add_metadata(
     metadata["onnx_model_version"] = "v1"
     metadata["output_names"] = output_names
     metadata["model_name"] = model_name
-    metadata["inputs"] = [
-        {
-            "name": "jet_var",
-            "variables": [
-                {"name": k.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0} for k in jet_vars
-            ],
-        }
-    ]
-    metadata["input_sequences"] = [
-        {
-            "name": f"tracks_{track_selection}_sd0sort",
-            "variables": [{"name": k, "offset": 0.0, "scale": 1.0} for k in trk_vars],
-        }
-    ]
+    metadata["inputs"] = []
+    metadata["input_sequences"] = []
+    for feature in onnx_feature_map:
+        if feature["is_global"]:  # global features similar to jet features
+            metadata["inputs"] += [
+                {
+                    "name": feature["name_athena_in"],
+                    "variables": [
+                        {"name": k.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0}
+                        for k in config["data"]["variables"][feature["name_salt"]]
+                    ],
+                }
+            ]
+        else:  # feature sequences simmilar to tracks features
+            metadata["input_sequences"] += [
+                {
+                    "name": feature["name_athena_in"],
+                    "variables": [
+                        {"name": k, "offset": 0.0, "scale": 1.0}
+                        for k in config["data"]["variables"][feature["name_salt"]]
+                    ],
+                },
+            ]
 
     # write metadata as json string
     metadata = {"gnn_config": json.dumps(metadata)}
