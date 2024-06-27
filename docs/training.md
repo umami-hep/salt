@@ -175,8 +175,6 @@ All options described above for HTCondor and more (CPUs, GPUs, etc) are availabl
 python submit/submit_slurm.py --config configs/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2
 ```
 
-The script submit/submit_slurm.py script itself can be modified if a required configuration is not supported in this way.
-
 Where arguments need to agree between Slurm and Pytorch Lightning, such as ntasks-per-node for Slurm and trainer.devices for Lightning, this is handled by the script.
 
 Lightning has the ability to requeue a job if it is killed by Slurm for exceeding the system walltime. The training state is saved in a checkpoint and loaded when the new job begins. submit_slurm.py creates a single log directory holding the checkpoints for the original and any requeue-d jobs (in the below example GN2_my_requeue_job).
@@ -184,6 +182,14 @@ Lightning has the ability to requeue a job if it is killed by Slurm for exceedin
 ```bash
 python submit/submit_slurm.py --config configs/GN2.yaml --requeue --salt_log_dir=my_requeue_job --signal=SIGUSR1@90
 ```
+
+There are many options for both Slurm and Salt, not all of which are explicitly handled but which should be available to a user if needed. To access these you can add `slurm.` (for Slurm) or `config.` (for Salt) to the beginning of an argument and it will be converted into a valid argument. Note that the "=" should be used in this case instead of a space.
+
+```bash
+python submit/submit_slurm.py --config configs/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2 --config.trainer.max_epochs=1 --slurm.dependency=afterok:1111111 
+```
+
+The submit/submit_slurm.py script itself can also be modified if necessary.
 
 There is also an older submit/submit_slurm.sh bash script that is kept around for compatibility. Users are strongly encouraged to use the python script.
 
