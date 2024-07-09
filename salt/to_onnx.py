@@ -370,7 +370,9 @@ def main(args=None):
         warnings.simplefilter("ignore")
 
         pt_model = ModelWrapper.load_from_checkpoint(
-            args.ckpt_path, map_location=torch.device("cpu")
+            args.ckpt_path,
+            map_location=torch.device("cpu"),
+            norm_config=config["model"]["norm_config"],
         )
         pt_model.eval()
         pt_model.float()
@@ -381,6 +383,7 @@ def main(args=None):
             include_aux=args.include_aux,
             map_location=torch.device("cpu"),
             onnx_feature_map=onnx_feature_map,
+            norm_config=config["model"]["norm_config"],
         )
         onnx_model.eval()
         change_attn_backends(
