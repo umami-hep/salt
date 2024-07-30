@@ -85,3 +85,9 @@ class MaskformerConfig:
 
     object: MaskformerObjectConfig
     constituent: MaskformerObjectConfig
+
+    def __post_init__(self):
+        if isinstance(self.object, dict):
+            self.object = MaskformerObjectConfig(**self.object)
+        if isinstance(self.constituent, dict):
+            self.constituent = MaskformerObjectConfig(**self.constituent)

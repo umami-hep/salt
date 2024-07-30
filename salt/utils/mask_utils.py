@@ -76,7 +76,7 @@ def mask_from_indices(indices: Tensor, num_masks: int | None = None) -> BoolTens
     return mask
 
 
-def indices_from_mask(mask: BoolTensor, noindex: int = -1) -> Tensor:
+def indices_from_mask(mask: BoolTensor, noindex: int = -2) -> Tensor:
     """Convert a sparse bool mask to a dense index tensor.
 
     Indices are arbitrary and start from 0.
@@ -110,9 +110,13 @@ def indices_from_mask(mask: BoolTensor, noindex: int = -1) -> Tensor:
     else:
         raise ValueError("mask must be 2D for single sample or 3D for batch")
 
+    idx_exist = indices >= 0
+    minval = torch.min(indices[idx_exist]).item() if idx_exist.any() else 0
+
+    neg_indices = torch.where(indices < 0)
     # ensure indices start from 0
-    indices -= indices[indices >= 0].min()
-    indices[indices < 0] = noindex
+    indices[idx_exist] -= minval
+    indices[neg_indices] = noindex
 
     return indices
 

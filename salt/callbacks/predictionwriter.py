@@ -15,6 +15,7 @@ from salt.models.task import (
 )
 from salt.stypes import Vars
 from salt.utils.array_utils import join_structured_arrays, maybe_pad
+from salt.utils.mask_utils import indices_from_mask
 
 
 class PredictionWriter(Callback):
@@ -180,6 +181,8 @@ class PredictionWriter(Callback):
             for out in ["object_class_probs", "object_class_targets", "mask_logits", "tgt_masks"]:
                 if out not in self.outputs["objects"]:
                     self.outputs["objects"][out] = []
+            if "mask_index" not in self.outputs["tracks"]:
+                self.outputs["tracks"]["mask_index"] = []
 
             probs_dtype = np.dtype([(n, self.precision) for n in self.object_params["label_map"]])
             self.outputs["objects"]["object_class_probs"].append(
@@ -189,6 +192,14 @@ class PredictionWriter(Callback):
                 labels["objects"][self.object_params["class_label"]].cpu().numpy()
             )
             self.outputs["objects"]["mask_logits"].append(objects["masks"].cpu().float().numpy())
+            mask_indices = indices_from_mask(objects["masks"].cpu().sigmoid() > 0.5)
+            dtype = np.dtype([("MaskIndex", "i8")])
+            mask_indices = mask_indices.int().cpu().numpy()
+            mask_indices = np.where(~this_pad_masks, mask_indices, -1)
+            # Get the mask index with a default mask cut value of 0.5
+            self.outputs["tracks"]["mask_index"].append(
+                u2s(np.expand_dims(mask_indices, -1), dtype)
+            )
             self.outputs["objects"]["tgt_masks"].append(labels["objects"]["masks"].cpu().numpy())
 
     def on_test_end(self, trainer, module):  # noqa: ARG002
