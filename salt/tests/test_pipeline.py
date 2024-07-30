@@ -62,6 +62,7 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
     write_dummy_file(test_h5_path, nd_path, do_xbb)
 
     args = ["test"]
+
     args += [f"--config={train_config_path}"]
     args += [f"--data.test_file={test_h5_path}"]
     args += ["--data.num_test=1000"]
@@ -109,7 +110,7 @@ def run_onnx(train_dir, args=None):
         args = []
     args += [f"--ckpt_path={ckpt_path}"]
     args += ["--track_selection=dipsLoose202102"]
-    args += args
+
     to_onnx(args)
     get_onnx_metadata([str(train_dir / "network.onnx")])
 
@@ -259,7 +260,7 @@ def test_tfv2(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_maskformer(tmp_path) -> None:
-    run_combined(tmp_path, "MaskFormer.yaml", train_args=None)
+    run_combined(tmp_path, "MaskFormer.yaml", train_args=None, export_args=["-mf=vertexing"])
 
 
 @pytest.mark.filterwarnings(w)
