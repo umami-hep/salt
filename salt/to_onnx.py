@@ -407,16 +407,14 @@ def get_default_onnx_feature_map(track_selection, inputs):
             "is_global": False,
         })
 
-    if "neutral" in inputs:
+    if "flow" in inputs:
         feature_map.append({
-            "name_athena_in": f"neutralflows_{track_selection}_sd0sort",
+            "name_athena_in": f"flows_{track_selection}_sd0sort",
             "name_athena_out": "flow_features",
-            "athena_num_name": "n_neutrals",
-            "name_salt": "neutral",
+            "athena_num_name": "n_flow",
+            "name_salt": "flow",
             "is_global": False,
         })
-
-    assert "charged" not in inputs, "Charged flows are not supported in the default onnx config yet"
 
     return feature_map
 
