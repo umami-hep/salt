@@ -268,7 +268,7 @@ class ONNXModel(ModelWrapper):
             # TODO: write all regression values, this will require work on the athena end as well
             # https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues/53
             leading_reg, indices, class_probs, regression = get_maskformer_outputs(  # noqa: F841
-                outputs["objects"]
+                outputs["objects"], apply_reorder=True
             )
 
             for r in leading_reg[0]:
