@@ -153,7 +153,7 @@ def get_masks(x: Tensor, q: Tensor, mask_net: nn.Module, input_pad_mask: Tensor 
 
 def get_maskformer_outputs(
     objects,
-    max_null=0.9,
+    max_null=0.5,
     apply_reorder=True,
 ):
     """Takes objects for a single MF global prediction and converts them to a more useful
@@ -167,7 +167,6 @@ def get_maskformer_outputs(
     masks = objects["masks"]
     class_probs = objects["class_probs"]
     regression = objects["regression"]
-    object_leading = objects["regression"]
     n_tracks = masks.shape[-1]
     n_obj = masks.shape[1]
     n_reg = regression.shape[-1]
@@ -175,30 +174,34 @@ def get_maskformer_outputs(
     # If we have a jet with no tracks,
     if n_tracks == 0:
         return (
-            torch.ones((1, n_obj)) * torch.nan,
+            torch.full((1, n_obj), torch.nan),
             None,
             class_probs,
-            torch.ones((1, n_obj, n_reg)) * torch.nan,
+            torch.full((1, n_obj, n_reg), torch.nan),
         )
     # For testing purposes - this will likely blow up our fake rate
     null_preds = class_probs[:, :, -1] > max_null
     if not null_preds.any():
         # If we have no predicted objects, we return dummy values
         return (
-            torch.ones((1, n_obj)) * torch.nan,
-            torch.zeros((1, n_obj, n_tracks), dtype=torch.bool),
+            torch.full((1, n_obj), torch.nan),
+            torch.arange(n_tracks).unsqueeze(0).expand(1, n_tracks),
             class_probs,
-            torch.ones((1, n_obj, n_reg)) * torch.nan,
+            torch.full((1, n_obj, n_reg), torch.nan),
         )
 
     masks = masks.sigmoid() > 0.5
-    object_leading[null_preds] = -999
+    expanded_null = null_preds.unsqueeze(-1).expand(-1, -1, masks.size(-1))
+    masks[expanded_null] = torch.zeros_like(masks)[expanded_null]
     regression[null_preds] = torch.nan
 
     if apply_reorder:
         # Define the leading object as the one with the highest regression[0] value
-        # in vertexing case, this is the pT
-        order = torch.argsort(object_leading[:, :, 0], descending=True)
+        # in vertexing case, this is the pT. We first set these values to non-nans, as
+        # argsort will otherwise not work correctly when in athena, and then set them back
+        regression[null_preds] = -torch.inf
+        order = torch.argsort(regression[:, :, 0], descending=True)
+        regression[null_preds] = torch.nan
         order_expanded = order.unsqueeze(-1).expand(-1, -1, masks.size(-1))
 
         # Use gather to reorder tensors along a specific dimension
