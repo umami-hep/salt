@@ -171,20 +171,22 @@ class HungarianMatcher(nn.Module):
     @torch.no_grad()
     def forward(self, preds, targets):
         """Compute the optimal assignment between the targets and the predictions of the network."""
-        batch_size, num_queries = preds["class_logits"].shape[:2]
+        batch_size = preds["class_logits"].shape[0]
 
         idxs = []
         self.default_idx = set(range(self.num_objects))
 
         # Get the full cost matrix, then run lsap on each batch element
         full_cost, batch_N = self.get_batch_cost(preds, targets)
+        full_cost = full_cost.to(torch.float32).cpu().numpy()
+
         for batch_idx in range(batch_size):
             # get the cost matrix for this batch element
             C = full_cost[batch_idx][:, : batch_N[batch_idx]]
-            C = C.reshape(num_queries, -1).to(torch.float32).cpu().numpy()
 
             # get the optimal assignment
             idx = self.lap(C)
+
             idxs.append(idx)
 
         # format indices to allow simple indexing
