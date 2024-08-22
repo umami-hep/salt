@@ -134,8 +134,9 @@ class ClassificationTask(TaskBase):
         # get labels and remap them if necessary
         labels = labels_dict[self.input_name][self.label] if labels_dict else None
         if labels is not None and self.label_map is not None:
+            labels_original = torch.clone(labels)
             for k, v in self.label_map.items():
-                labels[labels == k] = v
+                labels[labels_original == k] = v
 
         # use the mask to remove padded values from the loss (ignore_index=-1 is set by default)
         if pad_mask is not None and labels is not None:
