@@ -1,3 +1,4 @@
+import math
 import warnings
 from collections.abc import Mapping
 
@@ -23,6 +24,7 @@ class ModelWrapper(L.LightningModule):
         norm_config: dict | None = None,
         name: str = "salt",
         muP_config: dict | None = None,
+        loss_mode: str = "wsum",
     ):
         """A wrapper class for any model implemented in Salt.
 
@@ -54,6 +56,10 @@ class ModelWrapper(L.LightningModule):
             Name of the model, used for logging and inference output names
         muP_config: dict, optional
             The muP configuration.
+        loss_mode: str, optional
+            The loss mode to use. Default is "wsum" (weighted sum).
+            Other options are
+            - 'GLS' : arxiv.org/1904.08492
         """
         super().__init__()
         with warnings.catch_warnings():
@@ -90,6 +96,23 @@ class ModelWrapper(L.LightningModule):
         # create input normaliser
         assert norm_config is not None
         self.norm = InputNorm(**norm_config)
+        allowed_loss_modes = ["wsum", "GLS"]
+        assert loss_mode in allowed_loss_modes, f"Loss mode must be one of {allowed_loss_modes}"
+        self.loss_mode = loss_mode
+        if loss_mode == "GLS":
+            assert all(
+                task.weight == 1.0 for task in self.model.tasks
+            ), "GLS does not utilise task weights - remove all/set to 1"
+
+    def total_loss(self, loss: dict):
+        """Computes the final loss based on the loss mode."""
+        if self.loss_mode == "GLS":
+            # Calculate the geometric mean of the losses
+            loss_prod = math.prod(subloss for subloss in loss.values())
+            return torch.pow(loss_prod, 1.0 / len(loss))
+
+        # Return the default weighted sum
+        return sum(subloss for subloss in loss.values())
 
     def forward(self, inputs, pad_masks=None, labels=None):
         """Generic forward pass through any salt-compatible model.
@@ -144,7 +167,7 @@ class ModelWrapper(L.LightningModule):
             return preds, labels, pad_masks, None
 
         # compute total loss
-        loss["loss"] = sum(subloss for subloss in loss.values())
+        loss["loss"] = self.total_loss(loss)
 
         return preds, labels, pad_masks, loss
 
@@ -165,6 +188,7 @@ class ModelWrapper(L.LightningModule):
                 "Check for any NaNs or infs in the input dataset. If nothing is found here, "
                 "check 'docs/training.md - NaNs' for more information"
             )
+
         # log losses
         self.log_losses(loss, stage="train")
 
