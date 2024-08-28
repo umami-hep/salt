@@ -275,3 +275,20 @@ def test_param_featurewise(tmp_path) -> None:
         f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'param_featurewise.yaml'}"
     ]
     run_combined(tmp_path, CONFIG, do_onnx=False, inc_params=True, train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_gls_weighting(tmp_path) -> None:
+    # Ensure that this raises an assertion
+    args = ["--model.loss_mode=lol"]
+    with pytest.raises(AssertionError):
+        run_combined(tmp_path, "dips.yaml", train_args=args)
+    # Should fail, as we still have weights here
+
+    args = ["--model.loss_mode=GLS"]
+
+    with pytest.raises(AssertionError):
+        run_combined(tmp_path, "GN2.yaml", train_args=args)
+
+    # And this *should* work
+    run_combined(tmp_path, "dips.yaml", train_args=args)
