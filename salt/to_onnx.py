@@ -10,7 +10,7 @@ import torch
 import yaml
 from ftag.git_check import check_for_uncommitted_changes, get_git_hash
 from torch import Tensor
-from torch.nn.functional import softmax
+from torch.nn.functional import softmax, softplus
 from tqdm import tqdm
 
 from salt.models.maskformer import get_maskformer_outputs
@@ -87,6 +87,12 @@ def parse_args(args):
         "--object_name",
     )
     parser.add_argument(
+        "-gr",
+        "--gaussian_regression",
+        help="Export gaussian regression model.",
+        action="store_true",
+    )
+    parser.add_argument(
         "-f",
         "--force",
         help="Run with uncomitted changes.",
@@ -101,6 +107,15 @@ def get_probs(outputs: Tensor):
     return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
 
 
+def get_gaussian_regression(outputs: Tensor, norm_params):
+    mean = norm_params["mean"][0]
+    std = norm_params["std"][0]
+    outputs[:, 0] = outputs[:, 0] * std + mean
+    outputs[:, 1] = torch.sqrt(softplus(outputs[:, 1])) * std
+
+    return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
+
+
 class ONNXModel(ModelWrapper):
     def __init__(
         self,
@@ -109,6 +124,7 @@ class ONNXModel(ModelWrapper):
         include_aux: bool = False,
         object_name: str | None = None,
         mf_config: dict | None = None,
+        gaussian_regression: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -137,6 +153,7 @@ class ONNXModel(ModelWrapper):
         self.salt_names = []
         self.input_names = []
         self.aux_sequence_index = 1
+        self.gaussian_regression = gaussian_regression
 
         for i, feature in enumerate(self.feature_map):
             if feature["name_salt"] == self.global_object:
@@ -163,8 +180,12 @@ class ONNXModel(ModelWrapper):
         global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
         assert len(global_tasks) <= 1, "Multi global task ONNX models are not yet supported."
         if self.has_global_task:
-            object_classes = global_tasks[0].class_names
-            outputs = [f"{self.model_name}_p{flav.rstrip('jets')}" for flav in object_classes]
+            if self.gaussian_regression:
+                targets = [global_tasks[0].targets[0], global_tasks[0].targets[0] + "_stddev"]
+                outputs = [f"{self.name}_" + f"{global_tasks[0].name}_{t}" for t in targets]
+            else:
+                object_classes = global_tasks[0].class_names
+                outputs = [f"{self.model_name}_p{flav.rstrip('jets')}" for flav in object_classes]
         else:
             outputs = []
         # aux task output names
@@ -227,11 +248,21 @@ class ONNXModel(ModelWrapper):
         # forward pass
         outputs = super().forward(input_dict, None)[0]
 
-        onnx_outputs = (
-            get_probs(outputs[self.global_object][f"{self.global_object}_classification"])
-            if self.has_global_task
-            else ()
-        )
+        if self.gaussian_regression:
+            gaussian_regression_task = [
+                t for t in self.model.tasks if t.name == "gaussian_regression"
+            ]
+            onnx_outputs = get_gaussian_regression(
+                outputs[self.global_object]["gaussian_regression"],
+                gaussian_regression_task[0].norm_params,
+            )
+
+        else:
+            onnx_outputs = (
+                get_probs(outputs[self.global_object][f"{self.global_object}_classification"])
+                if self.has_global_task
+                else ()
+            )
 
         # add aux outputs
         if self.include_aux:
@@ -284,6 +315,7 @@ def compare_output(
     include_aux,
     seq_names_salt,
     seq_names_onnx,
+    gaussian_regression=False,
     n_seq=40,
 ):
     n_batch = 1
@@ -302,11 +334,20 @@ def compare_output(
     masks_pt = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
 
     outputs_pt = pt_model(inputs_pt, masks_pt)[0]
-    pred_pt_jc = (
-        [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jets_classification"])]
-        if "jets" in outputs_pt
-        else []
-    )
+
+    if gaussian_regression:
+        pred_pt_jc = [
+            p.detach().numpy()
+            for p in get_gaussian_regression(
+                outputs_pt["jets"]["gaussian_regression"], pt_model.model.tasks[0].norm_params
+            )
+        ]
+    else:
+        pred_pt_jc = (
+            [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jets_classification"])]
+            if "jets" in outputs_pt
+            else []
+        )
 
     inputs_onnx = {"jet_features": jets.numpy()}
     for seq, seqn in zip(sequences, seq_names_onnx, strict=False):
@@ -322,7 +363,7 @@ def compare_output(
         pred_onnx_jc,
         rtol=1e-04,
         atol=1e-04,
-        err_msg="Torch vs ONNX check failed for jet classification",
+        err_msg="Torch vs ONNX check failed for jet classification or gaussian regression",
     )
 
     assert not np.isnan(np.array(pred_onnx_jc)).any()  # non nans
@@ -360,7 +401,14 @@ def compare_output(
         )
 
 
-def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_onnx):
+def compare_outputs(
+    pt_model,
+    onnx_path,
+    include_aux,
+    seq_names_salt,
+    seq_names_onnx,
+    gaussian_regression=False,
+):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
@@ -378,6 +426,7 @@ def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_
                 include_aux,
                 seq_names_salt,
                 seq_names_onnx,
+                gaussian_regression,
                 n_track,
             )
 
@@ -413,6 +462,15 @@ def get_default_onnx_feature_map(track_selection, inputs):
             "name_athena_out": "flow_features",
             "athena_num_name": "n_flow",
             "name_salt": "flow",
+            "is_global": False,
+        })
+
+    if "hits" in inputs:
+        feature_map.append({
+            "name_athena_in": "hits_var",
+            "name_athena_out": "hit_features",
+            "athena_num_name": "n_hits",
+            "name_salt": "hits",
             "is_global": False,
         })
 
@@ -457,6 +515,7 @@ def main(args=None):
                 raise ValueError("No mf_config in config")
         else:
             mf_config = {}
+
         onnx_model = ONNXModel.load_from_checkpoint(
             args.ckpt_path,
             onnx_feature_map=onnx_feature_map,
@@ -466,6 +525,7 @@ def main(args=None):
             mf_config=mf_config,
             map_location=torch.device("cpu"),
             norm_config=config["model"]["norm_config"],
+            gaussian_regression=args.gaussian_regression,
         )
 
         onnx_model.eval()
@@ -517,6 +577,7 @@ def main(args=None):
         args.include_aux,
         seq_names_salt=seq_names_salt,
         seq_names_onnx=seq_names_onnx,
+        gaussian_regression=args.gaussian_regression,
     )
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")

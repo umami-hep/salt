@@ -48,6 +48,11 @@ def parse_args(args=None):
         help="Name of the second tagger (defaults to tagger_A if not provided).",
     )
     parser.add_argument(
+        "--gaussian_regression",
+        help="Export gaussian regression model.",
+        action="store_true",
+    )
+    parser.add_argument(
         "--vars",
         default=["b", "c", "u"],
         nargs="+",
@@ -79,8 +84,13 @@ def main(args=None):
     if args.file_A == args.file_B and args.tagger_A == args.tagger_B:
         raise ValueError("Attempted to compare the same model!")
 
-    vars_A = [f"{args.tagger_A}_p{v}" for v in args.vars]
-    vars_B = [f"{args.tagger_B}_p{v}" for v in args.vars]
+    if args.gaussian_regression:
+        vars_A = [f"{args.tagger_A}_{v}" for v in args.vars]
+        vars_B = [f"{args.tagger_B}_{v}" for v in args.vars]
+    else:
+        vars_A = [f"{args.tagger_A}_p{v}" for v in args.vars]
+        vars_B = [f"{args.tagger_B}_p{v}" for v in args.vars]
+
     cuts = Cuts.from_list(args.cuts)
 
     # load the data
