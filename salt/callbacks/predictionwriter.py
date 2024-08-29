@@ -138,8 +138,10 @@ class PredictionWriter(Callback):
         _, pad_masks, labels = batch
         add_mask = False
         for task in self.tasks:
-            if (not self.write_tracks and task.input_name == "tracks") or (
-                not self.write_objects and task.input_name == "objects"
+            if (
+                (not self.write_tracks and task.input_name == "tracks")
+                or (not self.write_objects and task.input_name == "objects")
+                or (issubclass(type(task), GaussianRegressionTask))
             ):
                 continue
 
@@ -159,6 +161,8 @@ class PredictionWriter(Callback):
             elif issubclass(type(task), RegressionTask):
                 this_preds = task.run_inference(this_preds, labels, self.precision)
             elif issubclass(type(task), GaussianRegressionTask):
+                if f"{module.name}_" not in task.name:
+                    task.name = f"{module.name}_" + task.name
                 means, stddevs = task.run_inference(this_preds, labels, self.precision)
             if task.name not in self.outputs[task.input_name]:
                 self.outputs[task.input_name][task.name] = []
