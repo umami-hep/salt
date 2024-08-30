@@ -27,14 +27,13 @@ model:
           out_dim: &out_dim 128
           attn_type: flash-varlen
           norm: LayerNorm
-          ls_init: 1.0e-2
           dense_kwargs:
             activation: *activation
-            dropout: 0
             gated: True
+            dropout: 0
           attn_kwargs:
             num_heads: 8
-            dropout: 0.1
+            dropout: 0
           num_registers: 8
 
       pool_net:
@@ -70,6 +69,7 @@ model:
 #                  <<: *task_dense_config
 #                  output_size: 8
 #                  context_size: *out_dim
+#                  activation: *activation
 #
 #            - class_path: salt.models.VertexingTask
 #              init_args:
@@ -85,6 +85,7 @@ model:
 #                  input_size: 256
 #                  output_size: 1
 #                  context_size: *out_dim
+#                  activation: *activation
 
 data:
   variables:
@@ -112,16 +113,14 @@ data:
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
       - leptonID
-      #- numberOfTRTHits
 
   train_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_train.h5
   val_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_val.h5
   norm_dict: /unix/atlastracking/samples/ftag_dumps/vertexing/output/norm_dict.yaml
   class_dict: /unix/atlastracking/samples/ftag_dumps/vertexing/output/class_dict.yaml
-  #move_files_temp: /dev/shm/svanstro/salt/gn2/
 
   batch_size: 1000
-  num_workers: 40
+  num_workers: 20
 
 trainer:
   max_epochs: 40
