@@ -118,9 +118,8 @@ class NodeQueryGAP(Pooling):
         pad_mask: dict | None = None,
     ):
         # Global Attention Pooling applied to both the decoder kv embeddings and
-        # the encoder embeddings. TODO: Currently a WIP - attempting to use any part of
-        # the decoder output results in an error for ONNX exports.
-        x_nodes = flatten_tensor_dict(x, flatten_tensor_dict(x, exclude=["objects"]))
+        # the encoder embeddings.
+        x_nodes = flatten_tensor_dict(x, exclude=["objects"])
 
         if pad_mask is not None:
             pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
@@ -135,7 +134,7 @@ class NodeQueryGAP(Pooling):
         pooled_nodes = (x_nodes * weights).sum(dim=1)
 
         # get pooled queries
-        emb_queries = x["objects"]["embed_queries"]
+        emb_queries = x["objects"]["embed"]
         query_pad = torch.zeros(
             (emb_queries.shape[0], 1, emb_queries.shape[2]),
             device=emb_queries.device,
