@@ -3,6 +3,7 @@ from pathlib import Path
 
 import h5py
 import pytest
+import yaml
 
 from salt.main import main
 from salt.to_onnx import main as to_onnx
@@ -39,12 +40,6 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc
     args += [f"--trainer.default_root_dir={tmp_path}"]
     args += ["--trainer.logger.offline=True"]
 
-    # add another instance of the prediction writer callback with tracks added
-    args += ["--trainer.callbacks+=salt.callbacks.PredictionWriter"]
-    args += ["--trainer.callbacks.write_tracks=True"]
-    # Add object writer callback for MaskFormer
-    if "MaskFormer" in str(config_path):
-        args += ["--trainer.callbacks.write_objects=True"]
     if train_args:
         args += train_args
 
@@ -61,11 +56,21 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
     test_h5_path = Path(tmp_path) / "dummy_test_sample_inputs.h5"
     write_dummy_file(test_h5_path, nd_path, do_xbb)
 
+    # Modify the output config to force writing tracks in the prediction writer
+    with open(train_config_path) as f:
+        config = yaml.safe_load(f)
+        for callback in config["trainer"]["callbacks"]:
+            if "PredictionWriter" in callback["class_path"]:
+                callback["init_args"]["write_tracks"] = True
+                break
+    with open(train_config_path, "w") as f:
+        yaml.dump(config, f)
     args = ["test"]
 
     args += [f"--config={train_config_path}"]
     args += [f"--data.test_file={test_h5_path}"]
     args += ["--data.num_test=1000"]
+    args += ["--data.batch_size=100"]
     main(args)
 
     # check output h5 files are produced
@@ -79,29 +84,28 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
         if "GN2" in str(train_config_path):
             assert "tracks" in f
             assert len(f["tracks"]) == 1000
+
         if "maskformer" in str(train_config_path):
-            assert "objects" in f
-            tgt_masks = f["objects"]["tgt_masks"]
-            assert tgt_masks
-            assert tgt_masks.shape == (1000, 5, 40)
+            assert "truth_hadrons" in f
+            assert len(f["truth_hadrons"]) == 1000
+            assert f["truth_hadrons"].shape[1] == 5
+            required_keys = {
+                "regression_pt",
+                "regression_deta",
+                "regression_dphi",
+                "regression_mass",
+                "regression_Lxy",
+                "MaskFormer_pb",
+                "MaskFormer_pc",
+                "MaskFormer_pnull",
+                "class_label",
+            }
+            assert all(k in f["truth_hadrons"].dtype.names for k in required_keys)
 
-            mask_logits = f["objects"]["mask_logits"]
-            assert mask_logits
-            assert mask_logits.shape == (1000, 5, 40)
-
-            obj_cls_tgt = f["objects"]["object_class_targets"]
-            assert obj_cls_tgt
-            assert obj_cls_tgt.shape == (1000, 5)
-
-            obj_cls_probs = f["objects"]["object_class_probs"]
-            assert obj_cls_probs
-            assert obj_cls_probs.shape == (1000, 5)
-            assert len(obj_cls_probs.dtype.names) == 3
-
-            regression = f["objects"]["regression"]
-            assert regression
-            assert regression.shape == (1000, 5)
-            assert len(regression.dtype.names) == 5
+            assert "object_masks" in f
+            assert f["object_masks"].shape == (1000, 5, 40)
+            assert "mask_logits" in f["object_masks"].dtype.names
+            assert "truth_mask" in f["object_masks"].dtype.names
 
 
 def run_onnx(train_dir, args=None):
