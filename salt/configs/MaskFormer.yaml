@@ -203,6 +203,7 @@ trainer:
       init_args:
         monitor_loss: val_jets_classification_loss
     - class_path: salt.callbacks.PredictionWriter
+      init_args: { write_tracks: True, write_objects: True }
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args: { refresh_rate: 50 }
