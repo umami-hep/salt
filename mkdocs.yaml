@@ -45,7 +45,6 @@ nav:
       - api/transformer.md
       - api/models.md
       - api/tasks.md
-  - test: test/test.md
 
 plugins:
   - search
