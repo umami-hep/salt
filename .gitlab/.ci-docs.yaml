@@ -5,6 +5,7 @@ pages:
   script:
     - pip install -r docs/requirements.txt
     - mkdocs build -s -d public
+    - cp .htaccess public/test/
     - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
     paths:

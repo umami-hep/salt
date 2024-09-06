@@ -1,0 +1,2 @@
+AuthType openid-connect
+Require claim cern_roles:view-papers-internal
