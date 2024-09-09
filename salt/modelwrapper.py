@@ -70,7 +70,7 @@ class ModelWrapper(L.LightningModule):
         self.lrs_config = lrs_config
         self.global_object = global_object
         self.name = name
-        self.muP = muP_config if muP_config else {}
+        self.muP = muP_config or {}
         self.last_val_batch_outs = None
         # Here the model should pick it up
         if self.muP:
@@ -81,10 +81,11 @@ class ModelWrapper(L.LightningModule):
                 load_path = self.muP["shape_path"]
             instantiate_mup(model, load_path)
 
-        # all tasks should inherit the global object type
+        # all tasks should inherit the global object type and model name
         self.model.global_object = self.global_object
         for task in self.model.tasks:
             task.global_object = self.global_object
+            task.model_name = self.name
 
         # ensure unique names for init_nets and tasks
         check_unique(self.model.init_nets, "input_name")

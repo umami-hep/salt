@@ -2,7 +2,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from ftag import Flavours as Flavs
 from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
@@ -97,18 +96,10 @@ class PredictionWriter(Callback):
         self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
         self.pad_masks: dict = {}
 
-        # get object class names for output file
+        # reformat output names for the global object classification task
         for task in self.tasks:
-            if task.name != f"{module.global_object}_classification":
-                continue
-            if self.object_classes is None:
-                if task.class_names is not None:
-                    self.object_classes = task.class_names
-                else:
-                    raise ValueError(
-                        "Couldn't infer object classes from model. "
-                        "Please provide a list of object classes."
-                    )
+            if self.object_classes and task.name == f"{module.global_object}_classification":
+                task.class_names = self.object_classes
 
         if self.write_objects:
             if not module.model.mask_decoder:
@@ -187,43 +178,29 @@ class PredictionWriter(Callback):
         preds = outputs
         _, pad_masks, labels = batch
         add_mask = False
-        to_write: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
+        to_write = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
         out_pads = {}
         for task in self.tasks:
-            if (
-                (not self.write_tracks and task.input_name == "tracks")
-                or (not self.write_objects and task.input_name == "objects")
-                or (issubclass(type(task), GaussianRegressionTask))
-            ):
+            if not self.write_tracks and task.input_name == "tracks":
+                continue
+            if not self.write_objects and task.input_name == "objects":
                 continue
 
             this_preds = preds[task.input_name][task.name]
             this_pad_masks = pad_masks.get(task.input_name)
 
-            if isinstance(task, ClassificationTask):
-                # special case for object classification output names
-                if task.name == f"{module.global_object}_classification":
-                    flavs = [
-                        f"{Flavs[c].px}" if c in Flavs else f"p{c}" for c in self.object_classes
-                    ]
-                    task.class_names = [f"{module.name}_{px}" for px in flavs]
-                this_preds = task.run_inference(this_preds, this_pad_masks, self.precision)
-            elif isinstance(task, VertexingTask):
-                this_preds = task.run_inference(this_preds, this_pad_masks)
-            elif issubclass(type(task), RegressionTask):
-                this_preds = task.run_inference(this_preds, labels, self.precision)
-            elif issubclass(type(task), GaussianRegressionTask):
-                if f"{module.name}_" not in task.name:
-                    task.name = f"{module.name}_" + task.name
-                means, stddevs = task.run_inference(this_preds, labels, self.precision)
+            # Get the outputs in the correct format
+            if isinstance(task, ClassificationTask | VertexingTask):
+                this_preds = task.get_h5(this_preds, this_pad_masks)
+            if isinstance(task, RegressionTask | GaussianRegressionTask):
+                this_preds = task.get_h5(this_preds, labels)
+
+            # Add the outputs to the dictionary
             if task.name not in to_write[task.input_name]:
                 to_write[task.input_name][task.name] = []
-            if issubclass(type(task), GaussianRegressionTask):
-                # if task.name + "_stddev" not in self.outputs[task.input_name]:
-                #     to_write[task.input_name][task.name + "_stddev"] = []
-
-                to_write[task.input_name][task.name] = means
-                to_write[task.input_name][task.name + "_stddev"] = stddevs
+            if isinstance(task, GaussianRegressionTask):
+                to_write[task.input_name][task.name] = this_preds[0]
+                to_write[task.input_name][task.name + "_stddev"] = this_preds[1]
             else:
                 to_write[task.input_name][task.name] = this_preds
 

@@ -134,3 +134,8 @@ test-parameterisation_featurewise:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_param_featurewise
+
+test-gls-weighting:
+  <<: *test-template
+  script:
+    - $TEST_CMD salt/tests/test_pipeline.py::test_gls_weighting

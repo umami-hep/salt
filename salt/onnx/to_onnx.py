@@ -3,24 +3,17 @@ import json
 import warnings
 from pathlib import Path
 
-import numpy as np
 import onnx
-import onnxruntime as ort
 import torch
 import yaml
 from ftag.git_check import check_for_uncommitted_changes, get_git_hash
-from torch import Tensor
-from torch.nn.functional import softmax, softplus
-from tqdm import tqdm
 
 from salt.models.maskformer import get_maskformer_outputs
 from salt.models.task import mask_fill_flattened
 from salt.models.transformer_v2 import change_attn_backends
 from salt.modelwrapper import ModelWrapper
+from salt.onnx.check import compare_outputs
 from salt.utils.configs import MaskformerConfig
-from salt.utils.inputs import (
-    inputs_sep_with_pad_multi_sequece,
-)
 from salt.utils.union_find import get_node_assignment_jit
 
 torch.manual_seed(42)
@@ -87,12 +80,6 @@ def parse_args(args):
         "--object_name",
     )
     parser.add_argument(
-        "-gr",
-        "--gaussian_regression",
-        help="Export gaussian regression model.",
-        action="store_true",
-    )
-    parser.add_argument(
         "-f",
         "--force",
         help="Run with uncomitted changes.",
@@ -100,20 +87,6 @@ def parse_args(args):
     )
 
     return parser.parse_args(args)
-
-
-def get_probs(outputs: Tensor):
-    outputs = softmax(outputs, dim=-1)
-    return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
-
-
-def get_gaussian_regression(outputs: Tensor, norm_params):
-    mean = norm_params["mean"][0]
-    std = norm_params["std"][0]
-    outputs[:, 0] = outputs[:, 0] * std + mean
-    outputs[:, 1] = torch.sqrt(softplus(outputs[:, 1])) * std
-
-    return tuple(output.squeeze() for output in torch.split(outputs, 1, -1))
 
 
 class ONNXModel(ModelWrapper):
@@ -124,11 +97,10 @@ class ONNXModel(ModelWrapper):
         include_aux: bool = False,
         object_name: str | None = None,
         mf_config: dict | None = None,
-        gaussian_regression: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.name = name if name else self.name
+        self.name = name or self.name
         assert "_" not in self.name, "Model name cannot contain underscores."
         assert "-" not in self.name, "Model name cannot contain dashes."
         self.include_aux = include_aux
@@ -143,9 +115,6 @@ class ONNXModel(ModelWrapper):
                 "label_map": [f"p{name}" for name in self.mf_config.object.class_names],
             }
 
-        self.has_global_task = (
-            len([t for t in self.model.tasks if t.input_name == self.global_object]) > 0
-        )
         self.feature_map = onnx_feature_map
         self.aux_sequence_object = "tracks"
 
@@ -153,7 +122,6 @@ class ONNXModel(ModelWrapper):
         self.salt_names = []
         self.input_names = []
         self.aux_sequence_index = 1
-        self.gaussian_regression = gaussian_regression
 
         for i, feature in enumerate(self.feature_map):
             if feature["name_salt"] == self.global_object:
@@ -169,6 +137,12 @@ class ONNXModel(ModelWrapper):
         self.example_input_array = tuple(example_input_list)
 
     @property
+    def global_task(self):
+        global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
+        assert len(global_tasks) <= 1, "Multi global task ONNX models are not yet supported."
+        return global_tasks[0] if global_tasks else None
+
+    @property
     def model_name(self) -> str:
         # aux variables are not allowed to have dashes in Athena
         return self.name.replace("-", "_")
@@ -176,18 +150,9 @@ class ONNXModel(ModelWrapper):
     @property
     def output_names(self) -> list[str]:
         """The output names are a list of strings, one for each output of the model."""
-        # get the global task output
-        global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
-        assert len(global_tasks) <= 1, "Multi global task ONNX models are not yet supported."
-        if self.has_global_task:
-            if self.gaussian_regression:
-                targets = [global_tasks[0].targets[0], global_tasks[0].targets[0] + "_stddev"]
-                outputs = [f"{self.name}_" + f"{global_tasks[0].name}_{t}" for t in targets]
-            else:
-                object_classes = global_tasks[0].class_names
-                outputs = [f"{self.model_name}_p{flav.rstrip('jets')}" for flav in object_classes]
-        else:
-            outputs = []
+        # get the global task output names
+        outputs = self.global_task.output_names if self.global_task else []
+
         # aux task output names
         if self.include_aux:
             if "track_origin" in [t.name for t in self.model.tasks]:
@@ -233,8 +198,10 @@ class ONNXModel(ModelWrapper):
         return dynamic_axes
 
     def forward(self, *args):  # type: ignore[override]
-        """Forward pass through the model."""
-        """ the arguments should be passed in the same order they appear in the feature map """
+        """Forward pass through the model.
+
+        The arguments must be passed in the same order they appear in the feature map.
+        """
         # in athena the jets have a batch dim but the tracks don't, so add it here
         assert len(args) == len(self.salt_names), "Number of inputs does not match feature map."
         assert (
@@ -248,21 +215,11 @@ class ONNXModel(ModelWrapper):
         # forward pass
         outputs = super().forward(input_dict, None)[0]
 
-        if self.gaussian_regression:
-            gaussian_regression_task = [
-                t for t in self.model.tasks if t.name == "gaussian_regression"
-            ]
-            onnx_outputs = get_gaussian_regression(
-                outputs[self.global_object]["gaussian_regression"],
-                gaussian_regression_task[0].norm_params,
-            )
-
-        else:
-            onnx_outputs = (
-                get_probs(outputs[self.global_object][f"{self.global_object}_classification"])
-                if self.has_global_task
-                else ()
-            )
+        # get the global task output
+        onnx_outputs = ()
+        onnx_outputs += self.global_task.get_onnx(
+            outputs[self.global_object][self.global_task.name]
+        )
 
         # add aux outputs
         if self.include_aux:
@@ -307,134 +264,6 @@ class ONNXModel(ModelWrapper):
             onnx_outputs += (indices.reshape(-1).char(),)
 
         return onnx_outputs
-
-
-def compare_output(
-    pt_model,
-    onnx_session,
-    include_aux,
-    seq_names_salt,
-    seq_names_onnx,
-    gaussian_regression=False,
-    n_seq=40,
-):
-    n_batch = 1
-
-    jets, sequences, pad_masks = inputs_sep_with_pad_multi_sequece(
-        n_batch,
-        [n_seq for seqn in seq_names_salt],
-        pt_model.input_dims["jets"],
-        [pt_model.input_dims[seqn] for seqn in seq_names_salt],
-        p_valid=1,
-    )
-
-    inputs_pt = {seqn: seq for seq, seqn in zip(sequences, seq_names_salt, strict=False)}
-    inputs_pt["jets"] = jets
-
-    masks_pt = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
-
-    outputs_pt = pt_model(inputs_pt, masks_pt)[0]
-
-    if gaussian_regression:
-        pred_pt_jc = [
-            p.detach().numpy()
-            for p in get_gaussian_regression(
-                outputs_pt["jets"]["gaussian_regression"], pt_model.model.tasks[0].norm_params
-            )
-        ]
-    else:
-        pred_pt_jc = (
-            [p.detach().numpy() for p in get_probs(outputs_pt["jets"]["jets_classification"])]
-            if "jets" in outputs_pt
-            else []
-        )
-
-    inputs_onnx = {"jet_features": jets.numpy()}
-    for seq, seqn in zip(sequences, seq_names_onnx, strict=False):
-        inputs_onnx[seqn] = seq.squeeze(0).numpy()
-
-    outputs_onnx = onnx_session.run(None, inputs_onnx)
-
-    # test jet classification
-    pred_onnx_jc = outputs_onnx[: len(pred_pt_jc)]
-
-    np.testing.assert_allclose(
-        pred_pt_jc,
-        pred_onnx_jc,
-        rtol=1e-04,
-        atol=1e-04,
-        err_msg="Torch vs ONNX check failed for jet classification or gaussian regression",
-    )
-
-    assert not np.isnan(np.array(pred_onnx_jc)).any()  # non nans
-    assert not (np.array(pred_onnx_jc) == 0).any()  # no trivial zeros
-
-    # test track origin
-    if include_aux:
-        if n_seq == 0:
-            return
-
-        pred_pt_origin = torch.argmax(outputs_pt["tracks"]["track_origin"], dim=-1).detach().numpy()
-        pred_onnx_origin = outputs_onnx[len(pred_pt_jc) : len(pred_pt_jc) + len(pred_pt_origin)][0]
-
-        np.testing.assert_allclose(
-            pred_pt_origin.squeeze(),
-            pred_onnx_origin,
-            rtol=1e-06,
-            atol=1e-06,
-            err_msg="Torch vs ONNX check failed for track origin",
-        )
-
-    # test vertexing
-    if include_aux and "track_vertexing" in outputs_pt["tracks"]:
-        pred_pt_scores = outputs_pt["tracks"]["track_vertexing"].detach()
-        pred_pt_indices = get_node_assignment_jit(pred_pt_scores, pad_masks[0])
-        pred_pt_vtx = mask_fill_flattened(pred_pt_indices, pad_masks[0])
-
-        pred_onnx_vtx = outputs_onnx[-1]
-        np.testing.assert_allclose(
-            pred_pt_vtx.squeeze(),
-            pred_onnx_vtx,
-            rtol=1e-06,
-            atol=1e-06,
-            err_msg="Torch vs ONNX check failed for vertexing",
-        )
-
-
-def compare_outputs(
-    pt_model,
-    onnx_path,
-    include_aux,
-    seq_names_salt,
-    seq_names_onnx,
-    gaussian_regression=False,
-):
-    print("\n" + "-" * 100)
-    print("Validating ONNX model...")
-
-    sess_options = ort.SessionOptions()
-    # suppress warnings due to unoptimized subgraphs - https://github.com/microsoft/onnxruntime/issues/14694
-    sess_options.log_severity_level = 3
-    session = ort.InferenceSession(
-        str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
-    )
-    for n_track in tqdm(range(40), leave=False):
-        for _ in range(10):
-            compare_output(
-                pt_model,
-                session,
-                include_aux,
-                seq_names_salt,
-                seq_names_onnx,
-                gaussian_regression,
-                n_track,
-            )
-
-    print(
-        "Success! Pytorch and ONNX models are consistent, but you should verify this in"
-        " Athena.\nFor more info see: https://ftag-salt.docs.cern.ch/export/#athena-validation"
-    )
-    print("-" * 100)
 
 
 def get_default_onnx_feature_map(track_selection, inputs):
@@ -525,7 +354,6 @@ def main(args=None):
             mf_config=mf_config,
             map_location=torch.device("cpu"),
             norm_config=config["model"]["norm_config"],
-            gaussian_regression=args.gaussian_regression,
         )
 
         onnx_model.eval()
@@ -577,7 +405,6 @@ def main(args=None):
         args.include_aux,
         seq_names_salt=seq_names_salt,
         seq_names_onnx=seq_names_onnx,
-        gaussian_regression=args.gaussian_regression,
     )
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
