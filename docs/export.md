@@ -3,7 +3,7 @@ In order to use your trained model in Athena you need to export it to [ONNX](htt
 
 ### Model Export
 
-The `to_onnx.py` python script handles the ONNX conversion process for you.
+The `onnx/to_onnx.py` python script handles the ONNX conversion process for you.
 The script has several arguments, you can learn about them by running
 
 ```bash

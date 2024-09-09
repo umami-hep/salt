@@ -3,10 +3,12 @@ from collections.abc import Mapping
 
 import numpy as np
 import torch
+from ftag import Flavours
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor, nn
 
 from salt.models import Dense
+from salt.stypes import Tensors
 from salt.utils.array_utils import listify
 from salt.utils.class_names import CLASS_NAMES
 from salt.utils.scalers import RegressionTargetScaler
@@ -109,6 +111,12 @@ class ClassificationTask(TaskBase):
             )
         self.use_class_dict = use_class_dict
 
+    @property
+    def output_names(self) -> list[str]:
+        assert self.class_names is not None
+        pxs = [f"{Flavours[c].px}" if c in Flavours else f"p{c}" for c in self.class_names]
+        return [f"{self.model_name}_{px}" for px in pxs]
+
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
         """Apply per sample weights, if specified."""
         if self.sample_weight is None:
@@ -159,16 +167,23 @@ class ClassificationTask(TaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None, precision: str = "f4"):
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
         if pad_mask is None:
             assert preds.ndim == 2
             probs = torch.softmax(preds, dim=-1)
         else:
             assert preds.ndim == 3
             probs = masked_softmax(preds, pad_mask.unsqueeze(-1))
-        assert self.class_names is not None
-        dtype = np.dtype([(n, precision) for n in self.class_names])
+        return probs
+
+    def get_h5(self, preds: Tensor, pad_mask: Tensor | None = None) -> np.ndarray:
+        probs = self.run_inference(preds, pad_mask)
+        dtype = np.dtype([(n, "f4") for n in self.output_names])
         return u2s(probs.float().cpu().numpy(), dtype)
+
+    def get_onnx(self, preds: Tensor, pad_mask: Tensor | None = None) -> tuple:
+        probs = self.run_inference(preds, pad_mask)
+        return tuple(output.squeeze() for output in torch.split(probs, 1, -1))
 
 
 class RegressionTaskBase(TaskBase, ABC):
@@ -312,6 +327,10 @@ class RegressionTask(RegressionTaskBase):
             )
         self.scaler = scaler
 
+    @property
+    def output_names(self) -> list[str]:
+        return [f"{self.model_name}_{self.name}_{x}" for x in self.targets]
+
     def forward(
         self,
         x: Tensor,
@@ -335,19 +354,22 @@ class RegressionTask(RegressionTaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
+    def run_inference(self, preds: Tensor, labels: Tensors) -> Tensor:
         if self.target_denominators is not None:
             for i in range(len(self.targets)):
-                preds[:, i] = (
-                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
-                )
+                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
-                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
+                preds[:, i] *= self.norm_params["std"][i]
+                preds[:, i] += self.norm_params["mean"][i]
         elif self.scaler is not None:
             for i in range(len(self.targets)):
                 preds[:, :, i] = self.scaler.inverse(self.targets[i], preds[:, :, i])
-        dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
+        return preds
+
+    def get_h5(self, preds: Tensor, labels: Tensors) -> np.ndarray:
+        preds = self.run_inference(preds, labels)
+        dtype = np.dtype([(x, "f4") for x in self.output_names])
         return u2s(preds.float().cpu().numpy(), dtype)
 
 
@@ -370,6 +392,11 @@ class GaussianRegressionTask(RegressionTaskBase):
                 f"number of outputs ({self.net.output_size})"
             )
 
+    @property
+    def output_names(self) -> list[str]:
+        outputs = [*self.targets, *[f"{x}_stddev" for x in self.targets]]
+        return [f"{self.model_name}_{x}" for x in outputs]
+
     def forward(
         self,
         x: Tensor,
@@ -386,7 +413,6 @@ class GaussianRegressionTask(RegressionTaskBase):
         targets = self.get_targets(targets_dict)
 
         # split outputs into means and sigmas
-        assert preds.shape[-1] % 2 == 0
         means, variances = preds.tensor_split(2, -1)
         variances = nn.functional.softplus(variances)  # ensure positiveness of variance
 
@@ -396,28 +422,35 @@ class GaussianRegressionTask(RegressionTaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, targets_dict: Mapping, precision: str = "f4"):
-        if self.target_denominators is not None:
+    def run_inference(self, preds: Tensor, labels: Tensors | None = None) -> tuple[Tensor, Tensor]:
+        if self.target_denominators is not None and labels is not None:
             for i in range(len(self.targets)):
-                preds[:, i] = (
-                    preds[:, i] * targets_dict[self.input_name][self.target_denominators[i]]
-                )
-                preds[:, i + 1] = (
-                    preds[:, i + 1] * targets_dict[self.input_name][self.target_denominators[i]]
-                )
+                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
+                preds[:, i + 1] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
-                preds[:, i] = preds[:, i] * self.norm_params["std"][i] + self.norm_params["mean"][i]
+                preds[:, i] *= self.norm_params["std"][i]
+                preds[:, i] += self.norm_params["mean"][i]
+                # return stddev as sqrt(var)
                 preds[:, i + 1] = (
                     torch.sqrt(nn.functional.softplus(preds[:, i + 1])) * self.norm_params["std"][i]
-                )  # return stddev as sqrt(var)
+                )
+        else:
+            raise ValueError("Inference for Gaussian regression requires scaling parameters.")
+        means, stds = preds.tensor_split(2, -1)
+        return means, stds
 
-        means, stddev = preds.tensor_split(2, -1)
-        mean_dtype = np.dtype([(f"{self.name}_{t}", precision) for t in self.targets])
-        stddev_dtype = np.dtype([(f"{self.name}_{t}_stddev", precision) for t in self.targets])
-        return u2s(means.float().cpu().numpy(), mean_dtype), u2s(
-            stddev.float().cpu().numpy(), stddev_dtype
-        )
+    def get_h5(self, preds: Tensor, labels: Tensors | None = None) -> np.ndarray:
+        means, stds = self.run_inference(preds, labels)
+        mean_dtype = np.dtype([(f"{self.name}_{t}", "f4") for t in self.targets])
+        stds_dtype = np.dtype([(f"{self.name}_{t}_stddev", "f4") for t in self.targets])
+        means = u2s(means.float().cpu().numpy(), mean_dtype)
+        stds = u2s(stds.float().cpu().numpy(), stds_dtype)
+        return means, stds
+
+    def get_onnx(self, preds: Tensor) -> tuple:
+        means, stds = self.run_inference(preds)
+        return means, stds
 
 
 class VertexingTask(TaskBase):
@@ -487,7 +520,7 @@ class VertexingTask(TaskBase):
         # Remove matching pairs if either of them come from the negative class
         unique_matrix = labels < 0
         unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
-        match_matrix = match_matrix * ~unique_matrix
+        match_matrix *= ~unique_matrix
 
         # Compress the matrix using the adjacenty matrix (no self connections)
         match_matrix = match_matrix[adjmat].float()
@@ -514,9 +547,12 @@ class VertexingTask(TaskBase):
         weights = weights[adjmat]
         return 1 + weights
 
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None):
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
         preds = get_node_assignment_jit(preds, pad_mask)
-        preds = mask_fill_flattened(preds, pad_mask)
+        return mask_fill_flattened(preds, pad_mask)
+
+    def get_h5(self, preds: Tensor, pad_mask: Tensor | None = None) -> np.ndarray:
+        preds = self.run_inference(preds, pad_mask)
         dtype = np.dtype([("VertexIndex", "i8")])
         return u2s(preds.int().cpu().numpy(), dtype)
 

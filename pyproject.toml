@@ -12,7 +12,7 @@ dynamic = ["dependencies"]
 
 [project.scripts]
 salt = "salt.main:main"
-to_onnx = "salt.to_onnx:main"
+to_onnx = "salt.onnx.to_onnx:main"
 get_onnx_metadata = "salt.utils.get_onnx_metadata:main"
 compare_models = "salt.utils.compare_models:main"
 repair_ckpt = "salt.utils.repair_ckpt:main"

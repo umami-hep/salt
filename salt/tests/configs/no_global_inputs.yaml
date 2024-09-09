@@ -6,12 +6,35 @@ model:
         - input_name: tracks
           attach_global: false
           dense_config:
-            output_size: &embed_dim 256
-            hidden_layers: [256]
-            activation: &activation ReLU
+            output_size: 32
+            hidden_layers: [32]
+            activation: ReLU
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: 32 }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  input_size: 32
+                  output_size: 3
+                  hidden_layers: [32]
+                  activation: ReLU
 
 data:
   variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
     tracks:
       - d0
       - z0SinTheta

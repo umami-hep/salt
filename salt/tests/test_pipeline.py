@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from salt.main import main
-from salt.to_onnx import main as to_onnx
+from salt.onnx.to_onnx import main as to_onnx
 from salt.utils.get_onnx_metadata import main as get_onnx_metadata
 from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
@@ -90,16 +90,18 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
             assert len(f["truth_hadrons"]) == 1000
             assert f["truth_hadrons"].shape[1] == 5
             required_keys = {
-                "regression_pt",
-                "regression_deta",
-                "regression_dphi",
-                "regression_mass",
-                "regression_Lxy",
+                "MaskFormer_regression_pt",
+                "MaskFormer_regression_deta",
+                "MaskFormer_regression_dphi",
+                "MaskFormer_regression_mass",
+                "MaskFormer_regression_Lxy",
                 "MaskFormer_pb",
                 "MaskFormer_pc",
                 "MaskFormer_pnull",
                 "class_label",
             }
+            print(set(required_keys) - set(f["truth_hadrons"].dtype.names))
+            print(set(f["truth_hadrons"].dtype.names) - set(required_keys))
             assert all(k in f["truth_hadrons"].dtype.names for k in required_keys)
 
             assert "object_masks" in f
@@ -131,10 +133,14 @@ def run_combined(
     inc_params=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
-    config_base = Path(__file__).parent.parent / "configs"
+
+    # look for the config
+    config_path = Path(__file__).parent.parent / "configs" / config
+    if not config_path.is_file():
+        config_path = Path(__file__).parent / "configs" / config
 
     # run training
-    run_train(tmp_path, config_base / config, train_args, do_xbb, do_muP, inc_params)
+    run_train(tmp_path, config_path, train_args, do_xbb, do_muP, inc_params)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -208,7 +214,7 @@ def test_nan_regression(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_regression_gaussian(tmp_path) -> None:
-    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=True, do_onnx=False)
+    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=True, do_onnx=True)
 
 
 @pytest.mark.filterwarnings(w)
@@ -218,8 +224,7 @@ def test_flow(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_no_global_inputs(tmp_path) -> None:
-    [f"--config={Path(__file__).parent.parent / 'tests' / 'configs' / 'no_global_inputs.yaml'}"]
-    run_combined(tmp_path, CONFIG, do_eval=False, do_onnx=False)
+    run_combined(tmp_path, "no_global_inputs.yaml", do_eval=False, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
@@ -287,10 +292,9 @@ def test_gls_weighting(tmp_path) -> None:
     args = ["--model.loss_mode=lol"]
     with pytest.raises(AssertionError):
         run_combined(tmp_path, "dips.yaml", train_args=args)
+
     # Should fail, as we still have weights here
-
     args = ["--model.loss_mode=GLS"]
-
     with pytest.raises(AssertionError):
         run_combined(tmp_path, "GN2.yaml", train_args=args)
 

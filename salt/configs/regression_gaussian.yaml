@@ -22,27 +22,15 @@ model:
           modules:
             - class_path: salt.models.GaussianRegressionTask
               init_args:
-                name: gaussian_jet_regression
+                name: gaussian_regression
                 input_name: jets
                 targets: HadronConeExclTruthLabelPt
+                # multiple targets are also supported, e.g: targets: [HadronConeExclTruthLabelPt, HadronConeExclTruthLabelEta]
+                norm_params: { mean: 1.0, std: 1.0 }
                 loss: GaussianNLLLoss
                 dense_config:
                   input_size: *embed_dim
                   output_size: 2
-                  hidden_layers: [128, 64, 32]
-                  activation: *activation
-
-            - class_path: salt.models.GaussianRegressionTask
-              init_args:
-                name: gaussian_multi_output_jet_regression
-                input_name: jets
-                targets:
-                  - R10TruthLabel_R22v1_TruthJetMass
-                  - R10TruthLabel_R22v1_TruthJetPt
-                loss: GaussianNLLLoss
-                dense_config:
-                  input_size: *embed_dim
-                  output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
