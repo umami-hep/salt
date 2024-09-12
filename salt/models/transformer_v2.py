@@ -20,6 +20,8 @@ import salt.models.layernorm as layernorms
 from salt.stypes import Tensors
 from salt.utils.tensor_utils import redo_padding, undo_padding
 
+ATTN_TYPES = ["torch-math", "torch-flash", "torch-meff", "flash-varlen"]
+
 
 def merge_masks(
     kv_mask: BoolTensor | None,
@@ -79,10 +81,14 @@ def change_attn_backends(module: nn.Module, backend: str) -> None:
 
     Used primarily for switching back to torch-math for ONNX exports.
     """
+    if isinstance(module, TransformerV2):
+        module.set_backend(backend)
+        return
+    if isinstance(module, Attention):
+        module.set_backend(backend)
+        return
     for child in module.children():
         change_attn_backends(child, backend)
-        if isinstance(child, Attention):
-            child.set_backend(backend)
 
 
 def projection_packed(
@@ -173,12 +179,7 @@ class Attention(nn.Module):
         """
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
-        assert attn_type in {
-            "torch-flash",
-            "torch-math",
-            "torch-meff",
-            "flash-varlen",
-        }, "Invalid attention type!"
+        assert attn_type in ATTN_TYPES, "Invalid attention type!"
 
         # Attributes
         self.embed_dim = embed_dim
@@ -186,6 +187,7 @@ class Attention(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.dropout = dropout
         self.bias = bias
+        self.attn_type = attn_type
 
         # Better parallelism for self-attention when using parameters directly
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
@@ -194,37 +196,30 @@ class Attention(nn.Module):
         self.reset_parameters()
         self.set_backend(attn_type)
 
-    def set_backend(self, attn_type: str) -> str:
+    def set_backend(self, attn_type: str):
         # Check the attention backend
         self.attn_type = attn_type
         if self.attn_type == "flash-varlen":
-            why_not_varlen = ""
-
-            # Try importing the flash-varlen backend
+            why_not_flash = ""
             try:
                 from flash_attn import flash_attn_varlen_qkvpacked_func
 
-                self.attn_fn = flash_attn_varlen_qkvpacked_func
+                self._flash_attn = flash_attn_varlen_qkvpacked_func
             except ImportError:
-                why_not_varlen = (
-                    "Requires the flash_attn package and CUDA 12+ which must be installed "
+                why_not_flash = (
+                    "Requires the flash_attn package, CUDA 12+, and A100+, and must be installed "
                     "separately. See salt/setup/install_flash.sh for installation instructions."
                 )
-
-            # Check if a GPU is available
             if not torch.cuda.is_available():
-                why_not_varlen = "No GPU available."
-
-            if why_not_varlen:
+                why_not_flash = "No GPU available."
+            if not next(self.parameters()).is_cuda:
+                why_not_flash = "A GPU is available but not being used."
+            if why_not_flash:
                 warnings.warn(
-                    f"Cannot use flash-varlen backend. {why_not_varlen} Reverting to torch-math.",
+                    f"Cannot use flash-varlen backend. {why_not_flash} Reverting to torch-math.",
                     stacklevel=2,
                 )
                 self.attn_type = "torch-math"
-                self.attn_fn = torch_attn
-        else:
-            self.attn_fn = torch_attn
-
         return self.attn_type
 
     def reset_parameters(self):
@@ -234,18 +229,44 @@ class Attention(nn.Module):
             nn.init.constant_(self.in_proj_bias, 0.0)
         self.out_proj.reset_parameters()
 
-    def _varlen_attention(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
-        """Attention forward pass for the flash-varlen backend."""
+    def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
+        """FlashAttention backend."""
         # Perform the packed input projection
         qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
         # Run the flash-varlen backend
         dropout = self.dropout if self.training else 0.0
-        a_out = self.attn_fn(qkv, culens, maxlen, dropout)
+        a_out = self._flash_attn(qkv, culens, maxlen, dropout)
         a_out = a_out.reshape(-1, self.embed_dim)
 
         # Mix with final linear layer
+        return self.out_proj(a_out)
+
+    def _torch_forward(
+        self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
+    ) -> Tensor:
+        """Attention using pytorch."""
+        # Otherwise perform standard attention
+        B, S, D = x.shape
+
+        # input projections -> B, S, D
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        # transform tensors to (B, Nh, S, Hd)
+        shape = (B, -1, self.num_heads, self.head_dim)  # Dont use S for cross attn
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        # run attention
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        dropout = self.dropout if self.training else 0.0
+        a_out = torch_attn(q, k, v, mask, dropout, self.attn_type)
+
+        # recombine heads
+        a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
+
+        # mix with final linear layer
         return self.out_proj(a_out)
 
     def forward(
@@ -258,7 +279,7 @@ class Attention(nn.Module):
         culens: Tensor | None = None,
         maxlen: int | None = None,
     ) -> Tensor:
-        """Attention forward pass.
+        """Attention forward pass, dispatches to the appropriate backend.
 
         Parameters
         ----------
@@ -284,35 +305,15 @@ class Attention(nn.Module):
         Tensor
             Output of shape (batch, x_len, dim).
         """
-        # the varlen attention backend is called at the begining (different args)
         if self.attn_type == "flash-varlen":
             assert kv is None, "flash-varlen only supports self attention!"
             assert attn_mask is None, "flash-varlen does not support attention masks!"
             assert culens is not None, "flash-varlen requires culens!"
             assert maxlen is not None, "flash-varlen requires maxlen!"
-            return self._varlen_attention(x, culens, maxlen)
+            return self._flash_forward(x, culens, maxlen)
 
         # Otherwise perform standard attention
-        B, S, D = x.shape
-
-        # input projections -> B, S, D
-        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
-
-        # transform tensors to (B, Nh, S, Hd)
-        shape = (B, -1, self.num_heads, self.head_dim)  # Dont use S for cross attn
-        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
-
-        # run attention
-        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
-        mask = merge_masks(s_mask, attn_mask, q.shape)
-        dropout = self.dropout if self.training else 0.0
-        a_out = torch_attn(q, k, v, mask, dropout, self.attn_type)
-
-        # recombine heads
-        a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
-
-        # mix with final linear layer
-        return self.out_proj(a_out)
+        return self._torch_forward(x, kv, mask, kv_mask, attn_mask)
 
 
 class GLU(nn.Module):
@@ -596,10 +597,14 @@ class TransformerV2(nn.Module):
         self.drop_registers = drop_registers
 
         # Submodules
+        kwargs["attn_kwargs"]["attn_type"] = self.attn_type
         self.layers = torch.nn.ModuleList([
             EncoderLayer(embed_dim=embed_dim, norm=norm, **kwargs) for _ in range(num_layers)
         ])
-        self.attn_type = self.set_backend(attn_type)
+
+        # Check and set the attention type
+        assert self.attn_type in ATTN_TYPES, "Invalid attention type!"
+        self.set_backend(self.attn_type)
 
         # Optional submodules
         if self.do_out_proj:
@@ -613,10 +618,10 @@ class TransformerV2(nn.Module):
             self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
         self.featurewise = nn.ModuleList()
 
-    def set_backend(self, attn_type: str) -> str:
+    def set_backend(self, attn_type: str):
+        self.attn_type = attn_type
         for layer in self.layers:
-            attn_type = layer.attn.fn.set_backend(attn_type)
-        return attn_type  # Might change due to library availibility
+            self.attn_type = layer.attn.fn.set_backend(self.attn_type)
 
     def forward(
         self,

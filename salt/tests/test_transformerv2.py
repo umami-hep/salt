@@ -11,6 +11,7 @@ from salt.models.transformer_v2 import (
     Attention,
     DecoderLayer,
     TransformerV2,
+    change_attn_backends,
     merge_masks,
     redo_padding,
     undo_padding,
@@ -395,3 +396,39 @@ def test_DecoderLayer():
     x = torch.randn(5, 10, 32)
     kv = torch.randn(5, 10, 32)
     layer(x, kv=kv)
+
+
+def test_change_attn_backends():
+    model = TransformerV2(
+        num_layers=3,
+        embed_dim=32,
+        attn_type="torch-math",
+        dense_kwargs={"activation": "SiLU"},
+        attn_kwargs={"num_heads": 2},
+    )
+
+    # change the backend
+    change_attn_backends(model, "torch-meff")
+    assert model.attn_type == "torch-meff"
+    for layer in model.layers:
+        assert layer.attn.fn.attn_type == "torch-meff"
+
+    # no cuda, so it should not be able to set flash-varlen, and isntead fall back to torch-math
+    if not torch.cuda.is_available():
+        with pytest.warns(UserWarning):
+            change_attn_backends(model, "flash-varlen")
+        assert model.attn_type == "torch-math"
+        for layer in model.layers:
+            assert layer.attn.fn.attn_type == "torch-math"
+
+    # check this works for a module that wraps a transformer
+    wrapper = nn.Sequential(model)
+    change_attn_backends(wrapper, "torch-flash")
+    assert model.attn_type == "torch-flash"
+    for layer in model.layers:
+        assert layer.attn.fn.attn_type == "torch-flash"
+
+    # check this works for a base attention layer
+    attn = Attention(32, num_heads=2, attn_type="torch-math")
+    change_attn_backends(attn, "torch-flash")
+    assert attn.attn_type == "torch-flash"
