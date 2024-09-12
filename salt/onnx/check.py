@@ -50,18 +50,18 @@ def compare_output(
     outputs_onnx = onnx_session.run(None, inputs_onnx)
 
     # test jet classification
-    pred_onnx_jc = outputs_onnx[: len(global_pred_pytorch)]
-
+    global_pred_onnx = outputs_onnx[: len(global_pred_pytorch)]
+    assert not np.isnan(np.array(global_pred_pytorch)).any()
+    assert not np.isnan(np.array(global_pred_onnx)).any()
+    assert not (np.array(global_pred_pytorch) == 0).any()
+    assert not (np.array(global_pred_onnx) == 0).any()
     np.testing.assert_allclose(
         global_pred_pytorch,
-        pred_onnx_jc,
+        global_pred_onnx,
         rtol=1e-04,
         atol=1e-04,
         err_msg="Torch vs ONNX check failed for global task",
     )
-
-    assert not np.isnan(np.array(pred_onnx_jc)).any()  # non nans
-    assert not (np.array(pred_onnx_jc) == 0).any()  # no trivial zeros
 
     # test track origin
     if include_aux:
