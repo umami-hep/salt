@@ -116,6 +116,12 @@ def main(args=None):
                 f"{var_B} in {args.file_B} is not float32. Please compare at full precision."
             )
 
+        # make sure there are no NaNs
+        if np.isnan(array_A).any():
+            raise ValueError(f"{var_A} in {args.file_A} contains NaNs.")
+        if np.isnan(array_B).any():
+            raise ValueError(f"{var_B} in {args.file_B} contains NaNs.")
+
         print(f"Comparing {var_A} and {var_B}...")
         diff = abs(array_A - array_B)
         for diff_region in diff_regions:
