@@ -103,6 +103,9 @@ class ONNXModel(ModelWrapper):
         self.name = name or self.name
         assert "_" not in self.name, "Model name cannot contain underscores."
         assert "-" not in self.name, "Model name cannot contain dashes."
+        for task in self.model.tasks:
+            task.model_name = self.name
+
         self.include_aux = include_aux
 
         if sum([bool(object_name), bool(mf_config)]) not in {0, 2}:
@@ -143,24 +146,19 @@ class ONNXModel(ModelWrapper):
         return global_tasks[0] if global_tasks else None
 
     @property
-    def model_name(self) -> str:
-        # aux variables are not allowed to have dashes in Athena
-        return self.name.replace("-", "_")
-
-    @property
     def output_names(self) -> list[str]:
         """The output names are a list of strings, one for each output of the model."""
         # get the global task output names
         outputs = self.global_task.output_names if self.global_task else []
 
-        # aux task output names
+        # aux task output have custom names
         if self.include_aux:
             if "track_origin" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.model_name}_TrackOrigin"
+                out_name = f"{self.name}_TrackOrigin"
                 outputs.append(out_name)
 
             if "track_vertexing" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.model_name}_VertexIndex"
+                out_name = f"{self.name}_VertexIndex"
                 outputs.append(out_name)
         if self.object:
             regression_task = [
@@ -169,9 +167,9 @@ class ONNXModel(ModelWrapper):
             assert len(regression_task) == 1, "Object outputs require a regression task"
             # First we append the leading jet regression variables
             outputs += [
-                f"{self.model_name}_leading_{self.object}_{v}" for v in regression_task[0].targets
+                f"{self.name}_leading_{self.object}_{v}" for v in regression_task[0].targets
             ]
-            outputs += [f"{self.model_name}_{self.object}Index"]
+            outputs += [f"{self.name}_{self.object}Index"]
 
         return outputs
 
@@ -187,13 +185,13 @@ class ONNXModel(ModelWrapper):
         # dynamic outputs
         if self.include_aux:
             if "track_origin" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.model_name}_TrackOrigin"
+                out_name = f"{self.name}_TrackOrigin"
                 dynamic_axes[out_name] = {0: "n_tracks"}
             if "track_vertexing" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.model_name}_VertexIndex"
+                out_name = f"{self.name}_VertexIndex"
                 dynamic_axes[out_name] = {0: "n_tracks"}
         if self.object:
-            out_name = f"{self.model_name}_{self.object}"
+            out_name = f"{self.name}_{self.object}"
             dynamic_axes[out_name] = {0: "n_tracks"}
         return dynamic_axes
 
@@ -386,7 +384,7 @@ def main(args=None):
         config,
         args.ckpt_path,
         onnx_path,
-        onnx_model.model_name,
+        onnx_model.name,
         onnx_model.output_names,
         onnx_feature_map,
     )
