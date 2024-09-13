@@ -1,5 +1,6 @@
 build_docker: &build_docker
   stage: builds
+  retry: 1
   needs: []
   image:
     # The kaniko debug image is recommended because it has a shell, and a shell is required for an image to be used with GitLab CI/CD.
