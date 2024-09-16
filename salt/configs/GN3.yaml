@@ -22,7 +22,7 @@ model:
       encoder:
         class_path: salt.models.TransformerV2
         init_args:
-          num_layers: 8
+          num_layers: 4
           embed_dim: *embed_dim
           out_dim: &out_dim 128
           attn_type: flash-varlen
@@ -30,10 +30,8 @@ model:
           dense_kwargs:
             activation: *activation
             gated: True
-            dropout: 0
           attn_kwargs:
             num_heads: 8
-            dropout: 0
           num_registers: 8
 
       pool_net:
@@ -56,36 +54,33 @@ model:
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-
-# Disabling aux tasks during R&D phase to speed up training!
-#            - class_path: salt.models.ClassificationTask
-#              init_args:
-#                name: track_origin
-#                input_name: tracks
-#                label: ftagTruthOriginLabel
-#                weight: 0.5
-#                loss: torch.nn.CrossEntropyLoss
-#                dense_config:
-#                  <<: *task_dense_config
-#                  output_size: 8
-#                  context_size: *out_dim
-#                  activation: *activation
-#
-#            - class_path: salt.models.VertexingTask
-#              init_args:
-#                name: track_vertexing
-#                input_name: tracks
-#                label: ftagTruthVertexIndex
-#                weight: 1.5
-#                loss:
-#                  class_path: torch.nn.BCEWithLogitsLoss
-#                  init_args: { reduction: none }
-#                dense_config:
-#                  <<: *task_dense_config
-#                  input_size: 256
-#                  output_size: 1
-#                  context_size: *out_dim
-#                  activation: *activation
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                weight: 0.5
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+                  activation: *activation
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+                  activation: *activation
 
 data:
   variables:
@@ -112,7 +107,7 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-      - leptonID
+      #- leptonID
 
   train_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_train.h5
   val_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_val.h5
@@ -123,7 +118,7 @@ data:
   num_workers: 20
 
 trainer:
-  max_epochs: 40
+  max_epochs: 20
   accelerator: gpu
   devices: 1
   precision: 16-mixed
