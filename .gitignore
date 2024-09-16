@@ -15,6 +15,10 @@ plots/
 cern_configs/
 user/
 .vscode/launch.json
+*log*/
+
+# Ignore files containing 'log' in their name
+*log*
 
 *.pyc
 *.xml
