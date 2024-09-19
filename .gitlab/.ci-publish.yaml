@@ -5,7 +5,6 @@ stages:
 deploy_pypi:
   stage: publish
   image: python:3.11-slim
-  needs: []
   before_script:
     - python -m pip install --upgrade pip setuptools wheel twine
   script:
@@ -13,4 +12,4 @@ deploy_pypi:
     - python -m build
     - twine upload dist/* --username $TWINE_USERNAME --password $TWINE_PASSWORD
   rules:
-    - if: $CI_COMMIT_TAG && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="atlas-flavor-tagging-tools/algorithms/salt"
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+$/ && $CI_PROJECT_PATH == "atlas-flavor-tagging-tools/algorithms/salt"'
