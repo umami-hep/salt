@@ -1,25 +1,55 @@
-build_docker: &build_docker
-  stage: builds
+.build_docker_template: &build_docker_template
   retry: 1
   needs: []
+  script: # Build and push the image
+    - /kaniko/executor --context $CI_PROJECT_DIR
+      --dockerfile $DOCKERFILE
+      --build-arg $BASE
+      --destination $IMAGE_DESTINATION
+      --cache=true
+    - echo "Image pushed successfully to ${IMAGE_DESTINATION}"
   image:
     # The kaniko debug image is recommended because it has a shell, and a shell is required for an image to be used with GitLab CI/CD.
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
+
+build_docker_base:
+  <<: *build_docker_template
+  stage: base_image_build
   variables:
+    DOCKERFILE: $CI_PROJECT_DIR/setup/docker/saltbase/Dockerfile
+    BASE: 'BASE_IMAGE=pytorch/pytorch:$PYTORCHTAG'
+    IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:latest-base
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - requirements.txt
+        - docker/saltbase/Dockerfile
+        - .gitlab-ci.yml
+    - if: $CI_COMMIT_TAG
+      variables:
+        IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-base
+
+build_docker:
+  <<: *build_docker_template
+  stage: salt_image_build
+  variables:
+    DOCKERFILE: $CI_PROJECT_DIR/setup/docker/salt/Dockerfile
+    BASE: 'BASE_IMAGE=$CI_REGISTRY_IMAGE:latest-base'
     IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:latest
-  script: # Build and push the image
-    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/setup/Dockerfile --destination $IMAGE_DESTINATION --cache=true
-    - echo "Image pushed successfully to ${IMAGE_DESTINATION}"
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
       variables:
+        BASE: 'BASE_IMAGE=$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-base'
         IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
 
 build_docker_test:
-  <<: *build_docker
+  <<: *build_docker_template
+  stage: salt_image_build
   variables:
+    DOCKERFILE: $CI_PROJECT_DIR/setup/docker/testing/Dockerfile
+    BASE: 'BASE_IMAGE=pytorch/pytorch:$PYTORCHTAG'
     IMAGE_DESTINATION: $CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
