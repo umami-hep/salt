@@ -12,7 +12,7 @@ build_docker: &build_docker
     - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/setup/Dockerfile --destination $IMAGE_DESTINATION --cache=true
     - echo "Image pushed successfully to ${IMAGE_DESTINATION}"
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH'
     - if: $CI_COMMIT_TAG
       variables:
         IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
