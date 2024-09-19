@@ -3,12 +3,14 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: never
     - when: always
+
 stages:
   - lint
   - builds
   - tests
   - coverage
   - docs
+  - publish
 
 include:
   - .gitlab/.ci-pre-commit.yaml
@@ -16,3 +18,4 @@ include:
   - .gitlab/.ci-test.yaml
   - .gitlab/.ci-coverage.yaml
   - .gitlab/.ci-docs.yaml
+  - .gitlab/.ci-publish.yaml
