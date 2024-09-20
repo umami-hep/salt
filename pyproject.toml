@@ -1,9 +1,10 @@
 [project]
 name = "salt-ml"
 description = "Multimodal and Multiclass Machine Learning for High Energy Physics"
-license = {text = "MIT"}
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10,<3.12"
-dynamic = ["version", "dependencies"]
+dynamic = ["version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 "Homepage" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt"
@@ -20,10 +21,15 @@ download_S3 = "salt.utils.file_utils:download_from_S3"
 
 [tool.setuptools]
 packages = ["salt"]
+include-package-data = true
 
 [tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
-version = {attr = "salt.__version__"}
+version = { attr = "salt.__version__" }
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.dynamic.optional-dependencies]
+muP = { file = ["requirements-muP.txt"] }
+flash = { file = ["requirements-flash.txt"] }
 
 [build-system]
 requires = ["setuptools>=62"]

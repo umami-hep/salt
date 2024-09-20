@@ -208,7 +208,7 @@ class Attention(nn.Module):
             except ImportError:
                 why_not_flash = (
                     "Requires the flash_attn package, CUDA 12+, and A100+, and must be installed "
-                    "separately. See salt/setup/install_flash.sh for installation instructions."
+                    "separately or using the [flash] extra. See requirements-flash.txt."
                 )
             if not torch.cuda.is_available():
                 why_not_flash = "No GPU available."

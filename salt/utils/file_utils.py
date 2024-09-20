@@ -3,7 +3,6 @@ import shutil
 from multiprocessing import Pool
 from pathlib import Path
 
-import boto3
 import yaml
 from tqdm import tqdm
 
@@ -82,6 +81,8 @@ def download_S3(session, bucket, file_to_load, store_path, count):
 
 
 def download_script_S3(bucket, local_path, key, file, count):
+    import boto3
+
     target_path = Path(local_path, file.split("/")[-1])
     if not target_path.is_file():
         session = boto3.client("s3")

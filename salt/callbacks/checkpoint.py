@@ -2,7 +2,6 @@ from pathlib import Path
 
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
-from s3path import S3Path
 
 
 class Checkpoint(ModelCheckpoint):
@@ -17,6 +16,8 @@ class Checkpoint(ModelCheckpoint):
                 return
 
             if "s3:/" in trainer.log_dir[:4]:
+                from s3path import S3Path
+
                 log_dir = S3Path(trainer.log_dir.replace("s3://", "").replace("s3:/", ""))
                 self.dirpath = "s3://" + str(log_dir / "ckpts")
             elif "s3:/" in trainer.log_dir:

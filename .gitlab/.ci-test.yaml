@@ -25,30 +25,23 @@ unit-tests:
     - $TEST_CMD salt/tests/test_featurewise.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
-test-fast-dev-run:
+test-dev:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_train_dev
-
-test-move-files-tmp:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_train_movefilestemp
 
 test-truncate-inputs:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs
-
-test-truncate-inputs-error:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs_error
 
 test-GN1:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_GN1
+    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1_GATv2
 
 test-GN2:
   <<: *test-template
@@ -75,45 +68,23 @@ test-GN2XE:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_GN2XE
 
-test-GN1_GATv2:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1_GATv2
-
-test-DIPS:
+test-DIPS-DL1:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_DIPS
-
-test-DL1:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_DL1
 
 test-regression:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_regression
-
-test-nan-regression:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_nan_regression
-
-test-regression_gaussian:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_regression_gaussian
 
 test-flow:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_flow
-
-test-no-global-inputs:
-  <<: *test-template
-  script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_no_global_inputs
 
 test-tfv2:
   <<: *test-template
@@ -125,17 +96,14 @@ test-maskformer:
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_maskformer
 
-test-parameterisation_concatenation:
+test-parameterisation:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_param_concat
-
-test-parameterisation_featurewise:
-  <<: *test-template
-  script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_param_featurewise
 
-test-gls-weighting:
+test-misc:
   <<: *test-template
   script:
     - $TEST_CMD salt/tests/test_pipeline.py::test_gls_weighting
+    - $TEST_CMD salt/tests/test_pipeline.py::test_no_global_inputs
