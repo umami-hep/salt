@@ -14,8 +14,6 @@ from ftag.git_check import get_git_hash
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
 from lightning.pytorch.loggers import CometLogger
-from s3fs import S3FileSystem
-from s3path import S3Path
 
 
 def get_attr(file, attribute, key=None):
@@ -78,6 +76,9 @@ class SaveConfigCallback(Callback):
 
         # get path info
         if "s3:/" in trainer.log_dir[:4]:
+            from s3fs import S3FileSystem
+            from s3path import S3Path
+
             self.use_S3 = True
             self.make_path = S3Path
             log_dir = self.make_path("/" + trainer.log_dir.replace("s3://", "").replace("s3:/", ""))

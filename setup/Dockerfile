@@ -14,19 +14,17 @@ RUN apt-get update && apt-get install -y git h5utils wget vim build-essential jq
 
 # update python pip
 RUN python -m pip install --upgrade pip
-RUN python --version
-RUN python -m pip --version
-
-# install dependencies (make use of caching)
-COPY requirements.txt .
-RUN python -m pip install -r requirements.txt
 
 # add some other packages to the image, instead of as a package dependency
 RUN python -m pip install puma-hep umami-preprocessing
 
-# Flash attention sometimes has issues in a requirements file
-RUN python -m pip install wheel packaging ninja
-RUN python -m pip install flash-attn==2.5.7
+# install dependencies (make use of caching)
+COPY requirements-flash.txt .
+RUN python -m pip install -r requirements-flash.txt
+COPY requirements-muP.txt .
+RUN python -m pip install -r requirements-muP.txt
+COPY requirements.txt .
+RUN python -m pip install -r requirements.txt
 
 # copy and install package
 COPY . .

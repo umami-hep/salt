@@ -1,7 +1,6 @@
 from collections.abc import Mapping
 from itertools import combinations
 
-from mup import MuReadout
 from torch import BoolTensor, Tensor, cat, nn
 
 from salt.models.attention import MultiheadAttention
@@ -194,6 +193,8 @@ class TransformerEncoder(nn.Module):
                 as this is the last layer of the muP-part of the model"
         if self.out_dim:
             if self.muP:
+                from mup import MuReadout
+
                 self.final_linear = MuReadout(self.embed_dim, self.out_dim)
                 self.final_linear.bias.data.zero_()
                 self.final_linear.weight.data.zero_()
@@ -339,6 +340,8 @@ class TransformerCrossAttentionEncoder(nn.Module):
         # For resizing the output tokens
         if self.out_dim:
             if muP:
+                from mup import MuReadout
+
                 self.final_linear = MuReadout(self.embed_dim, self.out_dim)
                 self.final_linear.bias.data.zero_()
                 self.final_linear.weight.data.zero_()

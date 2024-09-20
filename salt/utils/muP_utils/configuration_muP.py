@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 import yaml
-from mup import make_base_shapes, set_base_shapes
 from torch import load
 
 from salt.utils.muP_utils.functions_check_muP import (
@@ -238,6 +237,8 @@ def load_models(check=False):
 
 
 def store_shapes_mup(path=None, check=False):
+    from mup import make_base_shapes
+
     path_dict = get_paths(store_path=path)
     store_at = path_dict["shape_path"] if not check else path_dict["shape_check_path"]
     base, delta = load_models(check)
@@ -245,6 +246,8 @@ def store_shapes_mup(path=None, check=False):
 
 
 def instantiate_mup(model, load_from=None, check=False):
+    from mup import set_base_shapes
+
     rescale = not (check)
     path_dict = get_paths(store_path=load_from)
     load_from = str(path_dict["shape_path"]) if not check else str(path_dict["shape_check_path"])
