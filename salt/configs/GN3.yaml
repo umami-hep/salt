@@ -61,6 +61,7 @@ model:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
+                use_class_dict: True
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:
                   <<: *task_dense_config
