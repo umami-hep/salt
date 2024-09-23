@@ -168,6 +168,7 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd: dict = {}
     sd["jets"] = {n: {"std": 1.0, "mean": 1.0} for n in JET_VARS}
     sd["tracks"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
+    sd["tracks_dr"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     sd["electrons"] = {n: {"std": 1.0, "mean": 1.0} for n in ELECTRON_VARS}
     sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     with open(nd_path, "w") as file:
@@ -384,6 +385,7 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False, inc_params
                 ["taus"] if inc_taus else []
             )
         f.create_dataset("tracks", data=tracks)
+        f.create_dataset("tracks_dr", data=tracks)
         f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
         f.create_dataset("truth_hadrons", data=hadrons)

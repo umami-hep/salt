@@ -83,6 +83,11 @@ model:
                   activation: *activation
 
 data:
+  input_map:
+    jets: jets
+    tracks: tracks_dr
+  selections:
+    tracks: [d0 < 3.5, NSHARED < 1.1]
   variables:
     jets:
       - pt_btagJes
@@ -109,16 +114,16 @@ data:
       - numberOfSCTSharedHits
       #- leptonID
 
-  train_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_train.h5
-  val_file: /unix/atlastracking/samples/ftag_dumps/vertexing/output/pp_output_val.h5
-  norm_dict: /unix/atlastracking/samples/ftag_dumps/vertexing/output/norm_dict.yaml
-  class_dict: /unix/atlastracking/samples/ftag_dumps/vertexing/output/class_dict.yaml
+  train_file: /unix/atlastracking/samples/gn3v00/dr/output/pp_output_train.h5
+  val_file: /unix/atlastracking/samples/gn3v00/dr/output/pp_output_val.h5
+  norm_dict: /unix/atlastracking/samples/gn3v00/dr/output/norm_dict.yaml
+  class_dict: /unix/atlastracking/samples/gn3v00/dr/output/class_dict.yaml
 
-  batch_size: 1000
+  batch_size: 2000
   num_workers: 20
 
 trainer:
   max_epochs: 20
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  precision: bf16-mixed

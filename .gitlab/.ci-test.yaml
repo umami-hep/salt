@@ -23,6 +23,7 @@ unit-tests:
     - $TEST_CMD salt/tests/test_transformerv2.py
     - $TEST_CMD salt/tests/test_masks.py
     - $TEST_CMD salt/tests/test_featurewise.py
+    - $TEST_CMD salt/tests/test_datasets.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-dev:
