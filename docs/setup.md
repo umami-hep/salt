@@ -11,7 +11,7 @@ git clone https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt.git
 cd salt
 ```
 
-!!! info "You can skip this step if you install Salt directly from PyPI (see below)
+!!! info "You can skip this step if you install Salt directly from PyPI (see below)"
 
 
 ### Create Environment
