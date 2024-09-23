@@ -3,6 +3,8 @@ from copy import deepcopy
 import h5py
 import numpy as np
 import torch
+from ftag import Cuts
+from ftag.track_selector import TrackSelector
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
@@ -29,6 +31,7 @@ class SaltDataset(Dataset):
         nan_to_num: bool = False,
         global_object: str = "jets",
         PARAMETERS: dict | None = None,
+        selections: dict[str, list[str]] | None = None,
     ):
         """An efficient map-style dataset for loading data from an H5 file containing structured
         arrays.
@@ -61,12 +64,15 @@ class SaltDataset(Dataset):
             inputs
         PARAMETERS: dict
             Variables used to parameterise the network, by default None.
+        selections : dict, optional
+            Selections to apply to the input data, by default None.
         """
         super().__init__()
         # check labels have been configured
         self.labels = labels if labels is not None else {}
 
         # default input mapping: use input names as dataset names
+        # allow only partial maps to be provided
         if input_map is None:
             input_map = {k: k for k in variables}
 
@@ -82,6 +88,11 @@ class SaltDataset(Dataset):
         self.num_inputs = num_inputs
         self.nan_to_num = nan_to_num
         self.global_object = global_object
+        self.selections = selections
+        self.selectors = {}
+        if self.selections:
+            for key, value in self.selections.items():
+                self.selectors[key] = TrackSelector(Cuts.from_list(value))
 
         # If MaskFormer matching is enabled, extract the relevent labels
         self.mf_config = deepcopy(mf_config)
@@ -162,10 +173,14 @@ class SaltDataset(Dataset):
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
 
-            # truncate track-like inputs
+            # truncate constituent inputs
             if self.num_inputs is not None and input_name in self.num_inputs:
                 assert int(self.num_inputs[input_name]) <= batch.shape[1]
                 batch = batch[:, : int(self.num_inputs[input_name])]
+
+            # apply selections for constituent inputs
+            if self.selectors and (selector := self.selectors.get(input_name)):
+                batch = selector(batch)
 
             # load edge inputs for this input type
             if input_name == "EDGE":
@@ -219,6 +234,7 @@ class SaltDataset(Dataset):
                 # check inputs are finite
                 if not torch.isfinite(inputs[input_name]).all():
                     raise ValueError(f"Non-finite inputs for '{input_name}' in {self.filename}.")
+
             # process labels for this input type
             if input_name in self.labels:
                 labels[input_name] = {}
@@ -241,11 +257,13 @@ class SaltDataset(Dataset):
                         labels[input_name][label] = torch.as_tensor(
                             self.file["labels"][object_idx], dtype=torch.long
                         )
+
         if self.mf_config:
             labels["objects"]["masks"] = build_target_masks(
                 labels["objects"][self.mf_config.object.id_label],
                 labels[self.mf_config.constituent.name][self.mf_config.constituent.id_label],
             )
+
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
