@@ -212,8 +212,6 @@ class Attention(nn.Module):
                 )
             if not torch.cuda.is_available():
                 why_not_flash = "No GPU available."
-            if not next(self.parameters()).is_cuda:
-                why_not_flash = "A GPU is available but not being used."
             if why_not_flash:
                 warnings.warn(
                     f"Cannot use flash-varlen backend. {why_not_flash} Reverting to torch-math.",
