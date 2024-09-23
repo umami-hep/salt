@@ -3,18 +3,22 @@ You should set up the package from a powerful machine with access to a GPU.
 
 ### Get the Code
 
-Start by cloning the repo. If you plan to contribute to the repo, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html), rather than cloning the below link.
+Start by cloning the repo.
+If you plan to contribute to the repo, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html), **instead of** cloning the below link.
 
 ```bash
 git clone https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt.git
 cd salt
 ```
 
+!!! info "You can skip this step if you install Salt directly from PyPI (see below)
+
+
 ### Create Environment
 
 You can install salt within a virtual environment or a docker image.
 The recommended workflow is to set the package up using conda.
-Salt requires Python 3.9 or later.
+Salt requires Python 3.9, 3.10 or 3.11.
 
 === "conda"
 
@@ -135,9 +139,23 @@ Salt requires Python 3.9 or later.
 
 Once inside your container or virtual environment and in the top level directory of the cloned repo, you can install the `salt` package and it's dependencies via `pip` using
 
-```bash
-python -m pip install -e .
-```
+=== "From source (recommended)"
+
+    Cloning the repo and installing the package from source is the recommended way to install Salt.
+    This allows you to easily modify configs and code and have the changes reflected in the package.
+
+    ```bash
+    python -m pip install -e .
+    ```
+
+=== "From PyPI"
+
+    Salt is [available on PyPI](https://pypi.org/project/salt-ml/),
+    so you can also install with
+
+    ```bash
+    python -m pip install salt-ml
+    ```
 
 To verify your installation, you can run the [test suite](contributing.md#test-suite).
 
