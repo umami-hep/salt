@@ -1,10 +1,12 @@
 name: GN3-dev
 
 model:
+  optimizer: lion
+  loss_mode: GLS
   lrs_config:
-    initial: 1e-7
-    max: 5e-4
-    end: 1e-5
+    initial: 2e-8
+    max: 1e-4
+    end: 2e-6
     pct_start: 0.01
     weight_decay: 1e-5
 
@@ -59,7 +61,6 @@ model:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
-                weight: 0.5
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:
                   <<: *task_dense_config
@@ -71,7 +72,6 @@ model:
                 name: track_vertexing
                 input_name: tracks
                 label: ftagTruthVertexIndex
-                weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args: { reduction: none }
