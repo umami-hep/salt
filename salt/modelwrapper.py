@@ -25,6 +25,7 @@ class ModelWrapper(L.LightningModule):
         name: str = "salt",
         muP_config: dict | None = None,
         loss_mode: str = "wsum",
+        optimizer: str = "AdamW",
     ):
         """A wrapper class for any model implemented in Salt.
 
@@ -60,6 +61,10 @@ class ModelWrapper(L.LightningModule):
             The loss mode to use. Default is "wsum" (weighted sum).
             Other options are
             - 'GLS' : arxiv.org/1904.08492
+        optimizer: str, optional
+            Optimizer used. Default if "AdamW"
+            Other options are
+            - 'lion': https://github.com/lucidrains/lion-pytorch
         """
         super().__init__()
         with warnings.catch_warnings():
@@ -104,6 +109,11 @@ class ModelWrapper(L.LightningModule):
             assert all(
                 task.weight == 1.0 for task in self.model.tasks
             ), "GLS does not utilise task weights - remove all/set to 1"
+        allowed_optimizers = ["lion", "AdamW"]
+        assert (
+            optimizer in allowed_optimizers
+        ), f"Optimizer {optimizer} not implemented, please choose from {allowed_optimizers}"
+        self.optimizer = optimizer
 
     def total_loss(self, loss: dict):
         """Computes the final loss based on the loss mode."""
@@ -223,15 +233,24 @@ class ModelWrapper(L.LightningModule):
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self):
-        if self.muP:
-            from mup import MuAdamW as AdamW
-        else:
-            from torch.optim import AdamW
-        opt = AdamW(
-            self.parameters(),
-            lr=self.lrs_config["initial"],
-            weight_decay=self.lrs_config.get("weight_decay", 1e-5),
-        )
+        if self.optimizer == "lion":
+            from lion_pytorch import Lion
+
+            opt = Lion(
+                self.parameters(),
+                lr=self.lrs_config["initial"],
+                weight_decay=self.lrs_config.get("weight_decay", 1e-5),
+            )
+        elif self.optimizer == "AdamW":
+            if self.muP:
+                from mup import MuAdamW as AdamW
+            else:
+                from torch.optim import AdamW
+            opt = AdamW(
+                self.parameters(),
+                lr=self.lrs_config["initial"],
+                weight_decay=self.lrs_config.get("weight_decay", 1e-5),
+            )
 
         # 1cycle
         sch = torch.optim.lr_scheduler.OneCycleLR(
