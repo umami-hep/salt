@@ -12,7 +12,7 @@ from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
-TAU_CONFIGS = {"GN2.yaml", "GN3.yaml"}
+TAU_CONFIGS = {"GN2.yaml", "GN3_baseline.yaml"}
 
 
 def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_params=False):
@@ -168,7 +168,7 @@ def test_GN2(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_GN3(tmp_path) -> None:
-    run_combined(tmp_path, "GN3.yaml")
+    run_combined(tmp_path, "GN3_dev/GN3_baseline.yaml")
 
 
 @pytest.mark.filterwarnings(w)
