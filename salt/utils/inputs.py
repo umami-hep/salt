@@ -169,6 +169,7 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     sd["jets"] = {n: {"std": 1.0, "mean": 1.0} for n in JET_VARS}
     sd["tracks"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     sd["tracks_dr"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
+    sd["tracks_ghost"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     sd["electrons"] = {n: {"std": 1.0, "mean": 1.0} for n in ELECTRON_VARS}
     sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     with open(nd_path, "w") as file:
@@ -178,6 +179,7 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path):
     cd["jets"] = {"HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0]}
     cd["jets"]["flavour_label"] = cd["jets"]["HadronConeExclTruthLabelID"]
     cd["tracks"] = {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]}
+    cd["tracks_ghost"] = {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]}
     with open(cd_path, "w") as file:
         yaml.dump(cd, file, sort_keys=False)
 
@@ -386,6 +388,7 @@ def write_dummy_file(fname, sd_fname, make_xbb=False, inc_taus=False, inc_params
             )
         f.create_dataset("tracks", data=tracks)
         f.create_dataset("tracks_dr", data=tracks)
+        f.create_dataset("tracks_ghost", data=tracks)
         f.create_dataset("electrons", data=electrons)
         f.create_dataset("flow", data=tracks)
         f.create_dataset("truth_hadrons", data=hadrons)

@@ -1,0 +1,11 @@
+name: GN3_dR
+
+data:
+  input_map:
+    jets: jets
+    tracks: tracks_dr
+
+  train_file: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/pp_output_train.h5
+  val_file: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/pp_output_val.h5
+  norm_dict: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/norm_dict.yaml
+  class_dict: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/class_dict.yaml

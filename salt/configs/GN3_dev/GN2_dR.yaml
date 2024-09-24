@@ -1,40 +1,34 @@
-name: GN3-dev
+name: GN2_dR
 
 model:
-  optimizer: lion
-  loss_mode: GLS
   lrs_config:
-    initial: 2e-8
-    max: 1e-4
-    end: 2e-6
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
     pct_start: 0.01
     weight_decay: 1e-5
 
   model:
     class_path: salt.models.SaltModel
     init_args:
-
       init_nets:
         - input_name: tracks
           dense_config:
             output_size: &embed_dim 256
             hidden_layers: [256]
-            activation: &activation SiLU
+            activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.TransformerEncoder
         init_args:
-          num_layers: 4
           embed_dim: *embed_dim
+          num_layers: 4
           out_dim: &out_dim 128
-          attn_type: flash-varlen
-          norm: LayerNorm
-          dense_kwargs:
-            activation: *activation
-            gated: True
-          attn_kwargs:
+          mha_config:
             num_heads: 8
-          num_registers: 8
+            attention: { class_path: salt.models.ScaledDotProductAttention }
+          dense_config:
+            activation: *activation
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -49,30 +43,36 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
-                use_class_dict: True
-                loss: torch.nn.CrossEntropyLoss
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args: { weight: [1.0, 1.0, 1.0, 3.0] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
+
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
-                use_class_dict: True
-                loss: torch.nn.CrossEntropyLoss
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [3.46, 52.41, 1.0, 13.51, 9.56, 9.56, 40.49, 21.52]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
                   context_size: *out_dim
-                  activation: *activation
+
             - class_path: salt.models.VertexingTask
               init_args:
                 name: track_vertexing
                 input_name: tracks
                 label: ftagTruthVertexIndex
+                weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args: { reduction: none }
@@ -81,7 +81,6 @@ model:
                   input_size: 256
                   output_size: 1
                   context_size: *out_dim
-                  activation: *activation
 
 data:
   input_map:
@@ -115,16 +114,16 @@ data:
       - numberOfSCTSharedHits
       #- leptonID
 
-  train_file: /unix/atlastracking/samples/gn3v00/dr/output/pp_output_train.h5
-  val_file: /unix/atlastracking/samples/gn3v00/dr/output/pp_output_val.h5
-  norm_dict: /unix/atlastracking/samples/gn3v00/dr/output/norm_dict.yaml
-  class_dict: /unix/atlastracking/samples/gn3v00/dr/output/class_dict.yaml
+  train_file: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/pp_output_train.h5
+  val_file: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/pp_output_val.h5
+  norm_dict: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/norm_dict.yaml
+  class_dict: /share/lustre/wlai/datasets/atlas/gn3v00/dr/output/class_dict.yaml
 
   batch_size: 2000
   num_workers: 20
 
 trainer:
-  max_epochs: 20
+  max_epochs: 30
   accelerator: gpu
   devices: 1
-  precision: bf16-mixed
+  precision: 16-mixed

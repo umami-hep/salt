@@ -186,6 +186,8 @@ class SaltCLI(LightningCLI):
                 with open(cd_fname) as f:
                     class_dict = yaml.safe_load(f)
                 input_name = task["init_args"]["input_name"]
+                if sc.data.input_map:
+                    input_name = sc.data.input_map[input_name]
                 if task["init_args"]["label"] in class_dict[input_name]:
                     class_weights = class_dict[input_name][task["init_args"]["label"]]
                     class_weights = torch.Tensor(class_weights)
