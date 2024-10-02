@@ -38,7 +38,7 @@ class PredictionWriter(Callback):
         Parameters
         ----------
         write_tracks : bool
-            If False, skip any tasks with `input_name="tracks"`.
+            If False, skip any tasks with `"tracks" in input_name`.
         write_objects : bool
             If False, skip any tasks with `input_name="objects"` and outputs of the
             MaskDecoder. Default is False
@@ -181,7 +181,7 @@ class PredictionWriter(Callback):
         to_write = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
         out_pads = {}
         for task in self.tasks:
-            if not self.write_tracks and task.input_name == "tracks":
+            if not self.write_tracks and "tracks" in task.input_name:
                 continue
             if not self.write_objects and task.input_name == "objects":
                 continue
