@@ -182,8 +182,10 @@ class PredictionWriter(Callback):
         out_pads = {}
         for task in self.tasks:
             if not self.write_tracks and "tracks" in task.input_name:
+                to_write.pop(task.input_name, None)
                 continue
             if not self.write_objects and task.input_name == "objects":
+                to_write.pop(task.input_name, None)
                 continue
 
             this_preds = preds[task.input_name][task.name]
