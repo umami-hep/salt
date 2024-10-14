@@ -2,8 +2,10 @@ pages:
   image: python:3.11.2
   stage: docs
   needs: []
-  script:
+  before_script:
     - pip install -r docs/requirements.txt
+  script:
+    - indicomb2 --config docs/indicomb.yaml
     - mkdocs build -s -d public
     - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
