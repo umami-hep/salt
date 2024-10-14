@@ -1,0 +1,15 @@
+scrape:
+  - category: 9120
+    years: 2
+    groups:
+      plenary:
+        include: [plenary]
+      algorithms:
+        include: [algorithms]
+      software:
+        include: [software]
+
+topical_contributions:
+  - target: docs/index.md
+    groups: [algorithms, plenary, software]
+    include: [salt]
