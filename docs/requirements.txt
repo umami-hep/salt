@@ -4,4 +4,4 @@ mkdocstrings[python]
 mkdocs-markdownextradata-plugin>=0.2.5
 mkdocs-git-revision-date-localized-plugin
 mkdocs-autorefs==0.5.0
-indicomb==0.2
+indicomb2==0.2
