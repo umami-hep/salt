@@ -1,3 +1,7 @@
+# To be use on top of
+# GN3_baseline.yaml
+# GN3_baseline_loose.yaml
+# GN3_flow.yaml
 name: GN3_LepID_SMT
 
 data:
