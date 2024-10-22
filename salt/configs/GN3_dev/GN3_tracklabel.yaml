@@ -1,0 +1,81 @@
+# To be use on top of
+# GN3_baseline.yaml
+# GN3_baseline_loose.yaml
+# GN3_flow.yaml
+# GN3_LepID_SMT.yaml
+name: GN3_tracklabel
+
+model:
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config: &task_dense_config
+                  input_size: &out_dim 128
+                  output_size: 4
+                  hidden_layers: [128, 64, 32]
+                  activation: &activation SiLU
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+                  activation: *activation
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+                  activation: *activation
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_type
+                input_name: tracks
+                label: ftagTruthTypeLabel
+                label_map: { -6: 0, -5: 1, -3: 2, -2: 3, 0: 4, 1: 5, 2: 6, 3: 7, 5: 8, 6: 9}
+                class_names: [NegMuon, NegElectron, NegKaon, NegPion, NoTruth, Other, Pion, Kaon, Electron, Muon]
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 10
+                  context_size: *out_dim
+                  activation: *activation
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_source
+                input_name: tracks
+                label: ftagTruthSourceLabel
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 7
+                  context_size: *out_dim
+                  activation: *activation

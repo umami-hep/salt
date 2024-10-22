@@ -17,4 +17,13 @@ CLASS_NAMES = {
         "Electron",
         "Muon",
     ],
+    "ftagTruthSourceLabel": [
+        "NoTruth",
+        "NotSecondary",
+        "HadronicInteraction",
+        "StrangeMesonDecay",
+        "StrangeBaryonDecay",
+        "GammaConversion",
+        "Other",
+    ],
 }
