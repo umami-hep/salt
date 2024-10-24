@@ -14,6 +14,7 @@ from salt.models.transformer_v2 import change_attn_backends
 from salt.modelwrapper import ModelWrapper
 from salt.onnx.check import compare_outputs
 from salt.utils.configs import MaskformerConfig
+from salt.utils.get_structured_input_dict import get_structured_input_dict
 from salt.utils.union_find import get_node_assignment_jit
 
 torch.manual_seed(42)
@@ -93,6 +94,7 @@ class ONNXModel(ModelWrapper):
     def __init__(
         self,
         onnx_feature_map: list[dict],
+        variable_map: dict,
         name: str | None = None,
         include_aux: bool = False,
         object_name: str | None = None,
@@ -120,6 +122,7 @@ class ONNXModel(ModelWrapper):
 
         self.feature_map = onnx_feature_map
         self.aux_sequence_object = "tracks"
+        self.variable_map = variable_map
 
         example_input_list = []
         self.salt_names = []
@@ -140,16 +143,14 @@ class ONNXModel(ModelWrapper):
         self.example_input_array = tuple(example_input_list)
 
     @property
-    def global_task(self):
-        global_tasks = [t for t in self.model.tasks if t.input_name == self.global_object]
-        assert len(global_tasks) <= 1, "Multi global task ONNX models are not yet supported."
-        return global_tasks[0] if global_tasks else None
+    def global_tasks(self):
+        return [t for t in self.model.tasks if t.input_name == self.global_object]
 
     @property
     def output_names(self) -> list[str]:
         """The output names are a list of strings, one for each output of the model."""
         # get the global task output names
-        outputs = self.global_task.output_names if self.global_task else []
+        outputs = sum([t.output_names for t in self.global_tasks], [])  # type: list[str]
 
         # aux task output have custom names
         if self.include_aux:
@@ -210,13 +211,20 @@ class ONNXModel(ModelWrapper):
             self.salt_names[i]: args[i].unsqueeze(0) for i in range(1, len(self.salt_names))
         })
 
+        structured_input_dict = get_structured_input_dict(
+            input_dict, self.variable_map, self.global_object
+        )
+
         # forward pass
         outputs = super().forward(input_dict, None)[0]
 
-        # get the global task output
-        onnx_outputs = ()
-        onnx_outputs += self.global_task.get_onnx(
-            outputs[self.global_object][self.global_task.name]
+        # get the global tasks outputs
+        onnx_outputs = sum(
+            (
+                t.get_onnx(outputs[self.global_object][t.name], labels=structured_input_dict)
+                for t in self.global_tasks
+            ),
+            (),
         )
 
         # add aux outputs
@@ -301,6 +309,15 @@ def get_default_onnx_feature_map(track_selection, inputs):
             "is_global": False,
         })
 
+    if "tracks_loose" in inputs:
+        feature_map.append({
+            "name_athena_in": f"tracks_{track_selection}_sd0sort",
+            "name_athena_out": "track_features",
+            "athena_num_name": "n_tracks",
+            "name_salt": "tracks_loose",
+            "is_global": False,
+        })
+
     return feature_map
 
 
@@ -346,6 +363,7 @@ def main(args=None):
         onnx_model = ONNXModel.load_from_checkpoint(
             args.ckpt_path,
             onnx_feature_map=onnx_feature_map,
+            variable_map=config["data"]["variables"],
             name=args.name,
             include_aux=args.include_aux,
             object_name=args.object_name,
@@ -403,6 +421,7 @@ def main(args=None):
         args.include_aux,
         seq_names_salt=seq_names_salt,
         seq_names_onnx=seq_names_onnx,
+        variable_map=config["data"]["variables"],
     )
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")

@@ -90,11 +90,11 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
             assert len(f["truth_hadrons"]) == 1000
             assert f["truth_hadrons"].shape[1] == 5
             required_keys = {
-                "MaskFormer_regression_pt",
-                "MaskFormer_regression_deta",
-                "MaskFormer_regression_dphi",
-                "MaskFormer_regression_mass",
-                "MaskFormer_regression_Lxy",
+                "MaskFormer_pt",
+                "MaskFormer_deta",
+                "MaskFormer_dphi",
+                "MaskFormer_mass",
+                "MaskFormer_Lxy",
                 "MaskFormer_pb",
                 "MaskFormer_pc",
                 "MaskFormer_pnull",
@@ -204,7 +204,7 @@ def test_DL1(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_regression(tmp_path) -> None:
-    run_combined(tmp_path, "regression.yaml", do_eval=True, do_onnx=False)
+    run_combined(tmp_path, "regression.yaml", do_eval=True, do_onnx=True)
 
 
 @pytest.mark.filterwarnings(w)

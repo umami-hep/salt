@@ -181,8 +181,8 @@ class ClassificationTask(TaskBase):
         dtype = np.dtype([(n, "f4") for n in self.output_names])
         return u2s(probs.float().cpu().numpy(), dtype)
 
-    def get_onnx(self, preds: Tensor, pad_mask: Tensor | None = None) -> tuple:
-        probs = self.run_inference(preds, pad_mask)
+    def get_onnx(self, preds: Tensor, **kwargs) -> tuple:
+        probs = self.run_inference(preds, kwargs.get("pad_mask", None))
         return tuple(output.squeeze() for output in torch.split(probs, 1, -1))
 
 
@@ -193,6 +193,7 @@ class RegressionTaskBase(TaskBase, ABC):
         scaler: RegressionTargetScaler | None = None,
         target_denominators: list[str] | str | None = None,
         norm_params: dict | None = None,
+        custom_output_names: list[str] | str | None = None,
         **kwargs,
     ):
         """Base class for regression tasks.
@@ -209,7 +210,9 @@ class RegressionTaskBase(TaskBase, ABC):
                 - cannot be used with other target scaling options.
         norm_params : dict | None, optional
             Mean and std normalization parameters for each target, used for scaling.
-                - cannot be used with other target scaling options..
+                - cannot be used with other target scaling options.
+        custom_output_names : list[str] | str | None, optional
+            Name(s) of regression output(s), overwrites the standard "model name + numerator"
         **kwargs
             Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
         """
@@ -217,6 +220,7 @@ class RegressionTaskBase(TaskBase, ABC):
         self.scaler = scaler
         self.targets = listify(targets)
         self.target_denominators = listify(target_denominators)
+        self.custom_output_names = listify(custom_output_names)
         if norm_params:
             norm_params["mean"] = listify(norm_params["mean"])
             norm_params["std"] = listify(norm_params["std"])
@@ -329,7 +333,10 @@ class RegressionTask(RegressionTaskBase):
 
     @property
     def output_names(self) -> list[str]:
-        return [f"{self.model_name}_{self.name}_{x}" for x in self.targets]
+        if self.custom_output_names is not None:
+            assert len(self.custom_output_names) == len(self.targets)
+            return [f"{self.model_name}_{x}" for x in self.custom_output_names]
+        return [f"{self.model_name}_{x}" for x in self.targets]
 
     def forward(
         self,
@@ -354,8 +361,9 @@ class RegressionTask(RegressionTaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, labels: Tensors) -> Tensor:
-        if self.target_denominators is not None:
+    def run_inference(self, preds: Tensor, labels: Tensors | None = None) -> Tensor:
+        preds = preds.float()
+        if self.target_denominators is not None and labels is not None:
             for i in range(len(self.targets)):
                 preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
@@ -371,6 +379,10 @@ class RegressionTask(RegressionTaskBase):
         preds = self.run_inference(preds, labels)
         dtype = np.dtype([(x, "f4") for x in self.output_names])
         return u2s(preds.float().cpu().numpy(), dtype)
+
+    def get_onnx(self, preds: Tensor, **kwargs) -> tuple:
+        means = self.run_inference(preds, kwargs.get("label", None))
+        return tuple(output.squeeze() for output in torch.split(means, 1, -1))
 
 
 class GaussianRegressionTask(RegressionTaskBase):
@@ -448,8 +460,10 @@ class GaussianRegressionTask(RegressionTaskBase):
         stds = u2s(stds.float().cpu().numpy(), stds_dtype)
         return means, stds
 
-    def get_onnx(self, preds: Tensor) -> tuple:
-        means, stds = self.run_inference(preds)
+    def get_onnx(self, preds: Tensor, **kwargs) -> tuple:
+        # This might need to be fixed
+        # to run inference correctly with denominators
+        means, stds = self.run_inference(preds, kwargs.get("labels", None))
         return means.squeeze(), stds.squeeze()
 
 

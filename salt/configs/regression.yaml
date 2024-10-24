@@ -58,6 +58,7 @@ model:
                 input_name: jets
                 targets: HadronConeExclTruthLabelPt
                 target_denominators: pt_btagJes
+                custom_output_names: pt
                 loss: MSELoss
                 dense_config:
                   input_size: *embed_dim
@@ -68,6 +69,7 @@ model:
             - class_path: salt.models.RegressionTask
               init_args:
                 name: regression_multi_output_with_ratio_norm
+                custom_output_names: [truthMass, truthPt]
                 input_name: jets
                 targets:
                   [
