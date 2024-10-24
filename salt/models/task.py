@@ -450,7 +450,7 @@ class GaussianRegressionTask(RegressionTaskBase):
 
     def get_onnx(self, preds: Tensor) -> tuple:
         means, stds = self.run_inference(preds)
-        return means, stds
+        return means.squeeze(), stds.squeeze()
 
 
 class VertexingTask(TaskBase):
