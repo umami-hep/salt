@@ -25,6 +25,7 @@ model:
                 name: regression_with_mean_std_norm
                 input_name: jets
                 targets: HadronConeExclTruthLabelLxy
+                custom_output_names: output_std_norm
                 norm_params: { mean: 1.0, std: 1.0 }
                 loss:
                   class_path: torch.nn.MSELoss
@@ -41,6 +42,7 @@ model:
                 input_name: jets
                 targets: HadronConeExclTruthLabelLxy
                 target_denominators: pt_btagJes
+                custom_output_names: output_ratio
                 loss:
                   class_path: torch.nn.MSELoss
                   init_args: { reduction: none }

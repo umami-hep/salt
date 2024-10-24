@@ -4,6 +4,7 @@ import torch
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
+from salt.utils.get_structured_input_dict import get_structured_input_dict
 from salt.utils.inputs import (
     inputs_sep_with_pad_multi_sequece,
 )
@@ -18,6 +19,7 @@ def compare_output(
     include_aux,
     seq_names_salt,
     seq_names_onnx,
+    variable_map,
     n_seq=40,
 ):
     n_batch = 1
@@ -35,10 +37,13 @@ def compare_output(
 
     masks_pytorch = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
 
+    global_object = "jets"
+    structured_input_dict = get_structured_input_dict(inputs_pytorch, variable_map, global_object)
+
     outputs_pytorch = pt_model(inputs_pytorch, masks_pytorch)[0]
     if "jets" in outputs_pytorch:
         out = list(outputs_pytorch["jets"].values())[0]
-        out = pt_model.model.tasks[0].get_onnx(out)
+        out = pt_model.model.tasks[0].get_onnx(out, labels=structured_input_dict)
         global_pred_pytorch = [p.detach().numpy() for p in out]
     else:
         global_pred_pytorch = []
@@ -99,7 +104,7 @@ def compare_output(
         )
 
 
-def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_onnx):
+def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_onnx, variable_map):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
@@ -117,6 +122,7 @@ def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_
                 include_aux,
                 seq_names_salt,
                 seq_names_onnx,
+                variable_map,
                 n_track,
             )
 
