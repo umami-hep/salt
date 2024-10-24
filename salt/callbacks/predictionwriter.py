@@ -94,6 +94,8 @@ class PredictionWriter(Callback):
         # place to store intermediate outputs
         self.tasks = module.model.tasks
         self.outputs: dict = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
+        if self.extra_vars:
+            self.outputs.update({input_name: {} for input_name in self.extra_vars})
         self.pad_masks: dict = {}
 
         # reformat output names for the global object classification task
@@ -137,7 +139,9 @@ class PredictionWriter(Callback):
                 name = self.input_map[input_name]
 
                 # get input variables
-                input_variables = self.extra_vars[name]
+                input_variables = None
+                if name in self.extra_vars:
+                    input_variables = self.extra_vars[name]
                 if not input_variables:
                     input_variables = self.file[name].dtype.names
                 if name in self.file:
@@ -179,6 +183,8 @@ class PredictionWriter(Callback):
         _, pad_masks, labels = batch
         add_mask = False
         to_write = {input_name: {} for input_name in {t.input_name for t in self.tasks}}
+        if self.extra_vars:
+            to_write.update({input_name: {} for input_name in self.extra_vars})
         out_pads = {}
         for task in self.tasks:
             if not self.write_tracks and "tracks" in task.input_name:
