@@ -43,5 +43,6 @@ Salt is currently used for the following projects:
 - [Prompt lepton veto](https://indico.cern.ch/event/1341494/contributions/5647850/attachments/2742923/4771964/PLIV_ftagTPLT_20231030_pgadow.pdf)
 - [multitop analysis](https://indico.cern.ch/event/1344154/contributions/5657769/subcontributions/452377/attachments/2754554/4795867/metsai_20231115.pdf)
 - [PU rejection using hits](https://its.cern.ch/jira/browse/ATR-28390)
+- [e/gamma calibration](https://atlas.web.cern.ch/Atlas/GROUPS/PHYSICS/PLOTS/EGAM-2023-01/)
 
 The framework is originally based on work from two previously existing projects: [[1]](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger) [[2]](https://gitlab.cern.ch/mleigh/flavour_tagging/).
