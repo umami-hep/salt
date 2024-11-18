@@ -89,7 +89,7 @@ bibliography: paper.bib
 
 High energy physics studies the fundamental particles and forces that constitute the universe, often through experiments conducted in large particle accelerators such as the Large Hadron Collider (LHC) [@Evans:2008].
 `Salt` is a Python application developed for the high energy physics community that streamlines the training and deployment of advanced machine learning (ML) models, making them more accessible and promoting shared best practices.
-`Salt` features a generic multimodal, multitask model skeleton which, coupled with a strong emphasis on modularity, configurabiltiy, and ease of use, can be used to tackle a wide variety of high energy physics ML applications.
+`Salt` features a generic multimodal, multitask model skeleton which, coupled with a strong emphasis on modularity, configurability, and ease of use, can be used to tackle a wide variety of high energy physics ML applications.
 
 Some key features of `Salt` are listed below:
 
@@ -107,7 +107,7 @@ In high energy physics research the reliance on ML for data analysis and object 
 `Salt` was originally developed to train state of the art flavour tagging models at the ATLAS experiment [@ATLAS:2008] at the LHC.
 Flavour tagging, the identification of jets from bottom and charm quarks, plays a crucial role in analysing ATLAS collision data. This process is key for precision Standard Model measurements, particularly in the characterisation of the Higgs boson, and for investigating new phenomena.
 The unique characteristics of hadrons containing bottom and charm quarks – such as their long lifetimes, high mass, and high decay multiplicity – create distinct signatures in particle detectors that can be effectively exploited by ML algorithms.
-The presence of hadrons containing bottom and charm quarks can be inferred via the identification of approximately 3-5 reconstructed charged particle trajectories from the weak decay of the heavy flavour hadron admist several more tracks from the primary proton-proton interaction vertex.
+The presence of hadrons containing bottom and charm quarks can be inferred via the identification of approximately 3-5 reconstructed charged particle trajectories from the weak decay of the heavy flavour hadron amidst several more tracks from the primary proton-proton interaction vertex.
 
 While initially developed for flavour tagging, `Salt` has evolved into a flexible tool that can be used for a wide range of tasks, from object and event classification, regression of object properties, to object reconstruction (via edge classification or input segmentation), demonstrating its broad applicability across various data analysis challenges in high energy physics.
 
@@ -118,7 +118,7 @@ Salt is designed to be fully modular, but ships with a flexible model architectu
 This architecture facilitates the training of multimodal and multitask models as depicted in \autoref{fig:salt-arch}, and is designed to take advantage of multiple input modalities.
 In the context of jet classification, these input modalities might include global features of the jet and varying numbers of jet constituents such as charged particle trajectories, calorimeter energy depositions, reconstructed leptons, or inner detector spacepoints.
 The architecture is described briefly below.
-First, any global input features are concatentated with the features of each constituent.
+First, any global input features are concatenated with the features of each constituent.
 Next, an initial embedding to a shared representation space is performed separately for each type of constituent.
 The different types of constituents are then projected into a shared representation space by a series of initialisation networks.
 The embedded constituents are then combined and fed into a encoder network that processes constituents of different modalities in a unified way.
