@@ -9,6 +9,7 @@ Features:
 - RMSNorm https://arxiv.org/abs/1910.07467
 """
 
+import math
 import warnings
 from functools import partial
 
@@ -161,6 +162,8 @@ class Attention(nn.Module):
         attn_type: str = "torch-meff",
         dropout: float = 0.0,
         bias: bool = True,
+        diff_attention: bool = False,
+        depth: int = 1,
     ) -> None:
         """Multihead attention module.
 
@@ -176,6 +179,10 @@ class Attention(nn.Module):
             Dropout rate.
         bias : bool, optional
             Whether to include bias terms.
+        diff_attention : bool, optional
+            Use differential attention or not
+        depth : int, optional
+            Number of current attention layer
         """
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
@@ -188,6 +195,26 @@ class Attention(nn.Module):
         self.dropout = dropout
         self.bias = bias
         self.attn_type = attn_type
+        self.diff_attention = diff_attention
+        self.depth = depth
+
+        if self.diff_attention:
+            self.head_dim = self.head_dim // 2
+            self.lambda_init = 0.8 - 0.6 * math.exp(-0.3 * depth)
+            self.lambda_q1 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+            )
+            self.lambda_k1 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+            )
+            self.lambda_q2 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+            )
+            self.lambda_k2 = nn.Parameter(
+                torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+            )
+
+            self.subln = layernorms.RMSNorm(2 * self.head_dim)
 
         # Better parallelism for self-attention when using parameters directly
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
@@ -227,6 +254,18 @@ class Attention(nn.Module):
             nn.init.constant_(self.in_proj_bias, 0.0)
         self.out_proj.reset_parameters()
 
+    def _weight_by_lambda(self, attn1: Tensor, attn2: Tensor) -> Tensor:
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(
+            attn1
+        )
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(
+            attn1
+        )
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+        attn = attn1 - lambda_full * attn2
+
+        return self.subln(attn) * (1 - self.lambda_init)
+
     def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
         """FlashAttention backend."""
         # Perform the packed input projection
@@ -236,6 +275,37 @@ class Attention(nn.Module):
         # Run the flash-varlen backend
         dropout = self.dropout if self.training else 0.0
         a_out = self._flash_attn(qkv, culens, maxlen, dropout)
+        a_out = a_out.reshape(-1, self.embed_dim)
+
+        # Mix with final linear layer
+        return self.out_proj(a_out)
+
+    def _flash_diff_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
+        """FlashAttention backend."""
+        # Perform the packed input projection
+        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
+        qkv = qkv.view(-1, 3, self.num_heads, 2, self.head_dim)
+
+        q1, q2 = qkv[:, 0, :, 0], qkv[:, 0, :, 1]
+        k1, k2 = qkv[:, 1, :, 0], qkv[:, 1, :, 1]
+        v1, v2 = qkv[:, 2, :, 0], qkv[:, 2, :, 1]
+
+        qkv11 = torch.stack([q1, k1, v1], dim=1)
+        qkv12 = torch.stack([q1, k1, v2], dim=1)
+        qkv21 = torch.stack([q2, k2, v1], dim=1)
+        qkv22 = torch.stack([q2, k2, v2], dim=1)
+
+        # Run the flash-varlen backend
+        dropout = self.dropout if self.training else 0.0
+        a_out11 = self._flash_attn(qkv11, culens, maxlen, dropout)
+        a_out12 = self._flash_attn(qkv12, culens, maxlen, dropout)
+        a_out1 = torch.cat([a_out11, a_out12], dim=-1)
+
+        a_out21 = self._flash_attn(qkv21, culens, maxlen, dropout)
+        a_out22 = self._flash_attn(qkv22, culens, maxlen, dropout)
+        a_out2 = torch.cat([a_out21, a_out22], dim=-1)
+
+        a_out = self._weight_by_lambda(a_out1, a_out2)
         a_out = a_out.reshape(-1, self.embed_dim)
 
         # Mix with final linear layer
@@ -260,6 +330,46 @@ class Attention(nn.Module):
         mask = merge_masks(s_mask, attn_mask, q.shape)
         dropout = self.dropout if self.training else 0.0
         a_out = torch_attn(q, k, v, mask, dropout, self.attn_type)
+
+        # recombine heads
+        a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
+
+        # mix with final linear layer
+        return self.out_proj(a_out)
+
+    def _torch_diff_forward(
+        self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
+    ) -> Tensor:
+        """Attention using pytorch."""
+        # Otherwise perform standard attention
+        B, S, D = x.shape
+
+        # input projections -> B, S, D
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        # transform tensors to (B, Nh, S, Hd)
+        shape = (B, -1, self.num_heads, 2, self.head_dim)  # Dont use S for cross attn
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        # Split q, k, v into two parts
+        q1, q2 = q[:, :, :, 0], q[:, :, :, 1]
+        k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
+        v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
+
+        # run attention
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        dropout = self.dropout if self.training else 0.0
+
+        a_out11 = torch_attn(q1, k1, v1, mask, dropout, self.attn_type)
+        a_out12 = torch_attn(q1, k1, v2, mask, dropout, self.attn_type)
+        a_out1 = torch.cat([a_out11, a_out12], dim=-1)
+
+        a_out21 = torch_attn(q2, k2, v1, mask, dropout, self.attn_type)
+        a_out22 = torch_attn(q2, k2, v2, mask, dropout, self.attn_type)
+        a_out2 = torch.cat([a_out21, a_out22], dim=-1)
+
+        a_out = self._weight_by_lambda(a_out1, a_out2)
 
         # recombine heads
         a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
@@ -308,9 +418,13 @@ class Attention(nn.Module):
             assert attn_mask is None, "flash-varlen does not support attention masks!"
             assert culens is not None, "flash-varlen requires culens!"
             assert maxlen is not None, "flash-varlen requires maxlen!"
+            if self.diff_attention:
+                return self._flash_diff_forward(x, culens, maxlen)
             return self._flash_forward(x, culens, maxlen)
 
         # Otherwise perform standard attention
+        if self.diff_attention:
+            return self._torch_diff_forward(x, kv, mask, kv_mask, attn_mask)
         return self._torch_forward(x, kv, mask, kv_mask, attn_mask)
 
 
@@ -455,6 +569,7 @@ class EncoderLayer(nn.Module):
         norm: str = "LayerNorm",
         ls_init: float | None = None,
         drop_path: float = 0.0,
+        depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
     ) -> None:
@@ -470,6 +585,8 @@ class EncoderLayer(nn.Module):
             Drop path rate, by default 0.0.
         ls_init : float | None, optional
             Initial value for the layerscale, by default 1e-3.
+        depth : int, optional
+            The depth of the layer, by default 1.
         dense_kwargs : dict | None, optional
             Keyword arguments for [salt.models.transformer_v2.GLU][salt.models.transformer_v2.GLU].
         attn_kwargs : dict | None, optional
@@ -489,7 +606,7 @@ class EncoderLayer(nn.Module):
 
         # Submodules
         residual = partial(PreNormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path)
-        self.attn = residual(Attention(embed_dim, **attn_kwargs))
+        self.attn = residual(Attention(embed_dim, depth=depth, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
@@ -503,6 +620,7 @@ class DecoderLayer(nn.Module):
         norm: str = "LayerNorm",
         ls_init: float | None = 1e-3,
         drop_path: float = 0.0,
+        depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
     ):
@@ -519,8 +637,8 @@ class DecoderLayer(nn.Module):
 
         # Submodules
         residual = partial(PreNormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path)
-        self.self_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
-        self.cross_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
+        self.self_attn = residual(Attention(embed_dim=embed_dim, depth=depth, **attn_kwargs))
+        self.cross_attn = residual(Attention(embed_dim=embed_dim, depth=depth, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(
@@ -597,7 +715,8 @@ class TransformerV2(nn.Module):
         # Submodules
         kwargs["attn_kwargs"]["attn_type"] = self.attn_type
         self.layers = torch.nn.ModuleList([
-            EncoderLayer(embed_dim=embed_dim, norm=norm, **kwargs) for _ in range(num_layers)
+            EncoderLayer(embed_dim=embed_dim, norm=norm, depth=depth, **kwargs)
+            for depth in range(num_layers)
         ])
 
         # Check and set the attention type
