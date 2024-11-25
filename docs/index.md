@@ -2,9 +2,10 @@
 
 Welcome to the Salt framework!
 
-Salt is a general-purpose framework to train **multi-modal**, **multi-task** models.
-It was developed for state-of-the art jet flavour tagging algorithms such as [GN1](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN1/) and [GN2](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN2/), but can be applied much more widely.
-For example, you could use Salt to classify or regress properties of objects or events, or all these things at once!
+Salt is a general-purpose framework for training **multi-modal**, **multi-task** models for high energy physics.
+
+Salt supports arbitrary combinations of tasks including object classification and regression, and set-to-set reconstruction via edge classification and segmentation.
+Salt was developed for state-of-the art jet flavour tagging algorithms such as [GN1](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN1/) and [GN2](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN2/), but can be applied much more widely, as seen [below](#current-usage).
 
 !!! example "The code is hosted on the CERN GitLab: [https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt)"
 
@@ -12,7 +13,7 @@ For example, you could use Salt to classify or regress properties of objects or 
 
 - Built on [Pytorch Lightning](https://lightning.ai/docs/pytorch/stable/).
 - Support for multiple YAML-configurable [input modalities][salt.models.InitNet] and [output tasks][task-heads].
-- ONNX export support to use trained models in [Athena](https://gitlab.cern.ch/atlas/athena/).
+- ONNX export support to use trained models in C++ environments like [Athena](https://gitlab.cern.ch/atlas/athena/).
 - Easily extensible: you can implement your own custom dataloaders and models.
 - Documented and tested.
 
@@ -45,4 +46,7 @@ Salt is currently used for the following projects:
 - [PU rejection using hits](https://its.cern.ch/jira/browse/ATR-28390)
 - [e/gamma calibration](https://atlas.web.cern.ch/Atlas/GROUPS/PHYSICS/PLOTS/EGAM-2023-01/)
 
-The framework is originally based on work from two previously existing projects: [[1]](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/GNNJetTagger) [[2]](https://gitlab.cern.ch/mleigh/flavour_tagging/).
+
+## Statement of Need
+
+High energy physics research increasingly requires sophisticated machine learning tools to address complex data analysis challenges, for example identifying jets from bottom and charm quarks through their distinctive decay signatures in particle detectors. Salt meets this need by providing a versatile and high-performance machine learning framework that supports various tasks including object classification, regression, and set-to-set reconstruction, enabling physicists to effectively analyse complex particle collision signatures such as charged particle trajectories, decay vertices, and jets.
