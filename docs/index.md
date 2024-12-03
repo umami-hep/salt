@@ -43,8 +43,9 @@ Salt is currently used for the following projects:
 - [LLP vertexing](https://indico.cern.ch/event/1311519/timetable/?view=standard#25-leveraging-the-ftag-softwar)
 - [Prompt lepton veto](https://indico.cern.ch/event/1341494/contributions/5647850/attachments/2742923/4771964/PLIV_ftagTPLT_20231030_pgadow.pdf)
 - [multitop analysis](https://indico.cern.ch/event/1344154/contributions/5657769/subcontributions/452377/attachments/2754554/4795867/metsai_20231115.pdf)
-- [PU rejection using hits](https://its.cern.ch/jira/browse/ATR-28390)
+- [Pileup rejection using hits](https://its.cern.ch/jira/browse/ATR-28390)
 - [e/gamma calibration](https://atlas.web.cern.ch/Atlas/GROUPS/PHYSICS/PLOTS/EGAM-2023-01/)
+- [Pileup jet rejection with GNJVT](https://indico.cern.ch/event/1465013/contributions/6168106/attachments/2962190/5210357/GN-JVT%20Nov%206th%202024.pdf)
 
 
 ## Statement of Need
