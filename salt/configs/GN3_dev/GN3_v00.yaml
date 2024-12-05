@@ -111,7 +111,7 @@ model:
               init_args:
                 name: jet_pt_regression
                 input_name: jets
-                targets: ptFromTruthJet
+                targets: ptFromTruthDressedWZJet
                 target_denominators: pt_btagJes
                 loss: L1Loss
                 dense_config:
