@@ -16,6 +16,37 @@ from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import get_node_assignment_jit
 
 
+def mask_nan_pred(preds: Tensor, targets: Tensor) -> tuple[Tensor, Tensor]:
+    """Masks invalid (NaN/Inf) elements in predictions.
+
+    Parameters
+    ----------
+    preds : Tensor
+        Model predictions.
+    targets : Tensor
+        Ground truth targets.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        Valid predictions, valid targets.
+    """
+    # Identify invalid predictions
+    invalid_preds = ~torch.isfinite(preds)  # NaN or Inf in predictions
+
+    # Replace invalid predictions with zeros
+    preds = torch.where(invalid_preds, torch.zeros_like(preds), preds)
+
+    # Replace targets with zeros according to invalid prediction
+    if preds.shape == targets.shape:
+        targets = torch.where(invalid_preds, torch.zeros_like(targets), targets)
+    else:
+        row_invalid_mask = invalid_preds.any(dim=preds.ndim - 1)
+        targets = torch.where(row_invalid_mask, torch.zeros_like(targets), targets)
+
+    return preds, targets
+
+
 class TaskBase(nn.Module, ABC):
     def __init__(
         self,
@@ -24,6 +55,7 @@ class TaskBase(nn.Module, ABC):
         dense_config: dict,
         loss: nn.Module,
         weight: float = 1.0,
+        mask_invalid_pred: bool = False,
     ):
         """Task head base class.
 
@@ -42,6 +74,8 @@ class TaskBase(nn.Module, ABC):
             Loss function applied to the dense network outputs.
         weight : float
             Weight in the overall loss.
+        mask_invalid_pred: bool
+            Flag to mask non-finite prediction
         """
         super().__init__()
 
@@ -50,6 +84,7 @@ class TaskBase(nn.Module, ABC):
         self.net = Dense(**dense_config)
         self.loss = loss
         self.weight = weight
+        self.mask_invalid_pred = mask_invalid_pred
 
     def input_name_mask(self, pad_masks: Mapping):
         return torch.cat(
@@ -159,6 +194,8 @@ class ClassificationTask(TaskBase):
 
         loss = None
         if labels is not None:
+            if self.mask_invalid_pred:
+                preds, labels = mask_nan_pred(preds, labels)
             if preds.ndim == 3:
                 loss = self.loss(preds.permute(0, 2, 1), labels)
             else:
@@ -259,6 +296,8 @@ class RegressionTaskBase(TaskBase, ABC):
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
         """
+        if self.mask_invalid_pred:
+            preds, targets = mask_nan_pred(preds, targets)
         invalid = torch.isnan(targets)
         preds = torch.where(invalid, torch.zeros_like(preds), preds)
         targets = torch.where(invalid, torch.zeros_like(targets), targets)
@@ -539,6 +578,10 @@ class VertexingTask(TaskBase):
 
         # Compress the matrix using the adjacenty matrix (no self connections)
         match_matrix = match_matrix[adjmat].float()
+
+        # Mask NaN or invalid predictions and targets
+        if self.mask_invalid_pred:
+            pred, match_matrix = mask_nan_pred(pred, match_matrix)
 
         # Compare the match_matrix to the vertx predictions using the BCE loss
         loss = self.loss(pred.squeeze(-1), match_matrix)

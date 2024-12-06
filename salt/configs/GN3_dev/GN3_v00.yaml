@@ -56,6 +56,7 @@ model:
                 input_name: jets
                 label: flavour_label
                 use_class_dict: True
+                mask_invalid_pred: True
                 loss: torch.nn.CrossEntropyLoss
                 dense_config: &task_dense_config
                   input_size: *out_dim
@@ -69,6 +70,7 @@ model:
                 input_name: tracks
                 label: ftagTruthOriginLabel
                 use_class_dict: True
+                mask_invalid_pred: True
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:
                   <<: *task_dense_config
@@ -80,6 +82,7 @@ model:
                 name: track_vertexing
                 input_name: tracks
                 label: ftagTruthVertexIndex
+                mask_invalid_pred: True
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args: { reduction: none }
@@ -97,10 +100,11 @@ model:
                 label: ftagTruthTypeLabel
                 label_map: {-2 : 2, -3 : 3, 5 : 4, -5 : 4, 6 : 5, -6 : 5}
                 class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
+                mask_invalid_pred: True
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   init_args:
-                    weight: [3.64, 13.24, 1.0, 6.64, 22.6, 136.58]
+                    weight: [3.5, 13.34, 1.0, 6.47, 21.5, 112.1]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 6
@@ -113,7 +117,10 @@ model:
                 input_name: jets
                 targets: ptFromTruthDressedWZJet
                 target_denominators: pt_btagJes
-                loss: L1Loss
+                mask_invalid_pred: True
+                loss:
+                  class_path: torch.nn.L1Loss
+                  init_args: { reduction: none }
                 dense_config:
                   <<: *task_dense_config
                   output_size: 1
