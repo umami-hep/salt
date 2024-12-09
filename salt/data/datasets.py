@@ -1,3 +1,4 @@
+import warnings
 from copy import deepcopy
 
 import h5py
@@ -32,6 +33,7 @@ class SaltDataset(Dataset):
         global_object: str = "jets",
         PARAMETERS: dict | None = None,
         selections: dict[str, list[str]] | None = None,
+        ignore_finite_checks: bool = False,
     ):
         """An efficient map-style dataset for loading data from an H5 file containing structured
         arrays.
@@ -66,6 +68,8 @@ class SaltDataset(Dataset):
             Variables used to parameterise the network, by default None.
         selections : dict, optional
             Selections to apply to the input data, by default None.
+        ignore_finite_checks: bool, optional
+            Ignoring check for non-finite inputs
         """
         super().__init__()
         # check labels have been configured
@@ -142,6 +146,7 @@ class SaltDataset(Dataset):
 
         # set number of objects
         self.num = self.get_num(num)
+        self.ignore_finite_checks = ignore_finite_checks
 
     def __len__(self):
         """Return the number of samples in the dataset."""
@@ -233,7 +238,16 @@ class SaltDataset(Dataset):
 
                 # check inputs are finite
                 if not torch.isfinite(inputs[input_name]).all():
-                    raise ValueError(f"Non-finite inputs for '{input_name}' in {self.filename}.")
+                    if self.ignore_finite_checks:
+                        warnings.warn(
+                            f"Non-finite inputs for '{input_name}' in {self.filename}."
+                            "But ignore finite flag is on, make sure this is intentional.",
+                            stacklevel=2,
+                        )
+                    else:
+                        raise ValueError(
+                            f"Non-finite inputs for '{input_name}' in {self.filename}."
+                        )
 
             # process labels for this input type
             if input_name in self.labels:

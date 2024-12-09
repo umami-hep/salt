@@ -133,6 +133,7 @@ data:
     flows: flows
   # loose tracks
   selections: null
+  ignore_finite_checks: True
   variables:
     jets:
       - pt_btagJes
