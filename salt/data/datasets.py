@@ -29,7 +29,7 @@ class SaltDataset(Dataset):
         mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
         num_inputs: dict | None = None,
-        nan_to_num: bool = False,
+        non_finite_to_num: bool = False,
         global_object: str = "jets",
         PARAMETERS: dict | None = None,
         selections: dict[str, list[str]] | None = None,
@@ -59,8 +59,8 @@ class SaltDataset(Dataset):
             If not provided, the input names will be used as the dataset names.
         num_inputs : dict, optional
             Truncate the number of constituent inputs to this number, to speed up training
-        nan_to_num : bool, optional
-            Convert nans to zeros when loading inputs
+        non_finite_to_num : bool, optional
+            Convert nans and infs to zeros when loading inputs
         global_object : str
             Name of the global input object, as opposed to the constituent-level
             inputs
@@ -90,7 +90,7 @@ class SaltDataset(Dataset):
         self.filename = filename
         self.file = h5py.File(self.filename, "r")
         self.num_inputs = num_inputs
-        self.nan_to_num = nan_to_num
+        self.non_finite_to_num = non_finite_to_num
         self.global_object = global_object
         self.selections = selections
         self.selectors = {}
@@ -222,8 +222,8 @@ class SaltDataset(Dataset):
             # load standard inputs for this input type
             elif self.input_variables.get(input_name):
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
-                if self.nan_to_num:
-                    flat_array = np.nan_to_num(flat_array)
+                if self.non_finite_to_num:
+                    flat_array = np.nan_to_num(flat_array, posinf=0, neginf=0)
                 inputs[input_name] = torch.from_numpy(maybe_copy(flat_array))
 
                 # apply the input padding mask

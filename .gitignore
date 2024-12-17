@@ -17,8 +17,12 @@ user/
 .vscode/launch.json
 *log*/
 
+
 # Ignore files containing 'log' in their name
 *log*
+# But don't ignore these two...
+!gradient_logger
+!weight_logger
 
 *.pyc
 *.xml
