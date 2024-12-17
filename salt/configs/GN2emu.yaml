@@ -192,7 +192,7 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  nan_to_num: true
+  non_finite_to_num: true
 
 trainer:
   max_epochs: 40
