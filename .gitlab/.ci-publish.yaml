@@ -4,7 +4,7 @@ stages:
 
 deploy_pypi:
   stage: publish
-  image: python:3.11-slim
+  image: registry.cern.ch/docker.io/library/python:3.11-slim
   before_script:
     - python -m pip install --upgrade pip setuptools wheel twine
   script:
