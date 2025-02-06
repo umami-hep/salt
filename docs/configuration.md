@@ -143,7 +143,7 @@ For example you can concatenate jet features after the gnn model with:
 ```yaml
 data:
     variables:
-        GOBAL:
+        GLOBAL:
         - pt_btagJes
         - eta_btagJes
         ...
