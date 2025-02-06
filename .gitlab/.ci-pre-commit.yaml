@@ -1,7 +1,7 @@
 pre-commit:
   stage: lint
   needs: []
-  image: python:3.11.2
+  image: registry.cern.ch/docker.io/library/python:3.11.2
   script:
     - pip install pre-commit
     - pre-commit run --all-files

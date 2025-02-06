@@ -1,5 +1,5 @@
 pages:
-  image: python:3.11.2
+  image: registry.cern.ch/docker.io/library/python:3.11.2
   stage: docs
   needs: []
   before_script:
