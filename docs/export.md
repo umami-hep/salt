@@ -45,6 +45,25 @@ The model name is used to construct the output probability variable names in Ath
     repair_ckpt <path_to_checkpoint>
     ```
 
+### Combining outputs
+For compatability, or just ease, it might be required to combine outputs. This can be done via the 'combine_outputs' argument, which takes the form
+
+```
+--combine_outputs plight,pquark,pgluon pquark,0.5*pud,1.5*pgluon
+```
+
+In the above, we define two combinations:
+- The first, we define `plight = 1.0 * pquark + 1.0 * pgluon`
+- The second, we define `pquark = 0.5*pud + 1.5*pgluon`
+
+### Renaming outputs
+Renaming of global task outputs can be performed via the `--rename` argument:
+
+```
+--rename poldnamebjet:pb poldnamecjet:pc
+```
+
+Which will rename `{name}_poldnamebjet` to `{name}_pb`, and `{name}_poldnamecjet` to `{name}_pc`
 
 ### Athena Validation
 
