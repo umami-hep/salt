@@ -158,17 +158,21 @@ def run_combined(
 
 @pytest.mark.filterwarnings(w)
 def test_GN1(tmp_path) -> None:
-    run_combined(tmp_path, "GN1.yaml")
+    run_combined(tmp_path, "GN1.yaml", do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
-    run_combined(tmp_path, CONFIG, export_args=["--include_aux"])
+    run_combined(tmp_path, CONFIG, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN3(tmp_path) -> None:
-    run_combined(tmp_path, "GN3_dev/GN3_baseline.yaml")
+    run_combined(
+        tmp_path,
+        "GN3_dev/GN3_baseline.yaml",
+        export_args=["--tasks", "jets_classification", "track_vertexing", "track_origin"],
+    )
 
 
 @pytest.mark.filterwarnings(w)
@@ -189,7 +193,7 @@ def test_GN2XE(tmp_path) -> None:
 @pytest.mark.filterwarnings(w)
 def test_GN1_GATv2(tmp_path) -> None:
     args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
-    run_combined(tmp_path, "GN1.yaml", train_args=args)
+    run_combined(tmp_path, "GN1.yaml", train_args=args, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)

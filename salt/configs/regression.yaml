@@ -7,7 +7,7 @@ model:
       init_nets:
         - input_name: tracks
           dense_config:
-            input_size: 21
+            input_size: 22
             output_size: &embed_dim 128
             hidden_layers: [256]
             activation: &activation SiLU
@@ -76,7 +76,7 @@ model:
                     R10TruthLabel_R22v1_TruthJetMass,
                     R10TruthLabel_R22v1_TruthJetPt,
                   ]
-                target_denominators: [mass, pt]
+                target_denominators: [mass, pt_btagJes]
                 loss: MSELoss
                 dense_config:
                   input_size: *embed_dim
@@ -89,6 +89,7 @@ data:
     jets:
       - pt_btagJes
       - eta_btagJes
+      - mass
     tracks:
       - d0
       - z0SinTheta

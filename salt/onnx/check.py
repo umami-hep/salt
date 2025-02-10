@@ -16,10 +16,10 @@ torch.manual_seed(42)
 def compare_output(
     pt_model,
     onnx_session,
-    include_aux,
     seq_names_salt,
     seq_names_onnx,
     variable_map,
+    tasks_to_output,
     n_seq=40,
 ):
     n_batch = 1
@@ -41,10 +41,17 @@ def compare_output(
     structured_input_dict = get_structured_input_dict(inputs_pytorch, variable_map, global_object)
 
     outputs_pytorch = pt_model(inputs_pytorch, masks_pytorch)[0]
+
     if "jets" in outputs_pytorch:
-        out = list(outputs_pytorch["jets"].values())[0]
-        out = pt_model.model.tasks[0].get_onnx(out, labels=structured_input_dict)
-        global_pred_pytorch = [p.detach().numpy() for p in out]
+        global_pred_pytorch = []
+        global_tasks = [t for t in pt_model.model.tasks if t.input_name == "jets"]
+
+        for i, out in enumerate(list(outputs_pytorch["jets"].values())):
+            if global_tasks[i].name not in tasks_to_output:
+                continue
+            onnx_out = global_tasks[i].get_onnx(out, labels=structured_input_dict)
+            global_pred_pytorch += [p.detach().numpy() for p in onnx_out]
+
     else:
         global_pred_pytorch = []
 
@@ -68,18 +75,20 @@ def compare_output(
         err_msg="Torch vs ONNX check failed for global task",
     )
 
-    # test track origin
-    if include_aux:
-        if n_seq == 0:
-            return
+    # Now do the track checks...
+    if n_seq == 0:
+        return
 
+    # test track origin
+    if "track_origin" in tasks_to_output:
         pred_pytorch_origin = (
             torch.argmax(outputs_pytorch["tracks"]["track_origin"], dim=-1).detach().numpy()
         )
-        pred_onnx_origin = outputs_onnx[
-            len(global_pred_pytorch) : len(global_pred_pytorch) + len(pred_pytorch_origin)
-        ][0]
-
+        onnx_index = tasks_to_output.index("track_origin") - len(tasks_to_output)
+        pred_onnx_origin = outputs_onnx[onnx_index]
+        assert (
+            len(pred_onnx_origin.shape) == 1
+        ), "ONNX output for track origin should be a single tensor"
         np.testing.assert_allclose(
             pred_pytorch_origin.squeeze(),
             pred_onnx_origin,
@@ -89,12 +98,13 @@ def compare_output(
         )
 
     # test vertexing
-    if include_aux and "track_vertexing" in outputs_pytorch["tracks"]:
+    if "track_vertexing" in tasks_to_output:
         pred_pytorch_scores = outputs_pytorch["tracks"]["track_vertexing"].detach()
         pred_pytorch_indices = get_node_assignment_jit(pred_pytorch_scores, pad_masks[0])
         pred_pytorch_vtx = mask_fill_flattened(pred_pytorch_indices, pad_masks[0])
 
-        pred_onnx_vtx = outputs_onnx[-1]
+        onnx_index = tasks_to_output.index("track_vertexing") - len(tasks_to_output)
+        pred_onnx_vtx = outputs_onnx[onnx_index]
         np.testing.assert_allclose(
             pred_pytorch_vtx.squeeze(),
             pred_onnx_vtx,
@@ -103,8 +113,29 @@ def compare_output(
             err_msg="Torch vs ONNX check failed for vertexing",
         )
 
+    # test track type
+    if "track_type" in tasks_to_output:
+        pred_pytorch_type = (
+            torch.argmax(outputs_pytorch["tracks"]["track_type"], dim=-1).detach().numpy()
+        )
+        onnx_index = tasks_to_output.index("track_type") - len(tasks_to_output)
+        pred_onnx_type = outputs_onnx[onnx_index]
 
-def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_onnx, variable_map):
+        assert (
+            len(pred_onnx_type.shape) == 1
+        ), "ONNX output for track origin should be a single tensor"
+        np.testing.assert_allclose(
+            pred_pytorch_type.squeeze(),
+            pred_onnx_type,
+            rtol=1e-06,
+            atol=1e-06,
+            err_msg="Torch vs ONNX check failed for track type",
+        )
+
+
+def compare_outputs(
+    pt_model, onnx_path, seq_names_salt, seq_names_onnx, variable_map, tasks_to_output
+):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
 
@@ -119,10 +150,10 @@ def compare_outputs(pt_model, onnx_path, include_aux, seq_names_salt, seq_names_
             compare_output(
                 pt_model,
                 session,
-                include_aux,
                 seq_names_salt,
                 seq_names_onnx,
                 variable_map,
+                tasks_to_output,
                 n_track,
             )
 

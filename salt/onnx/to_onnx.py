@@ -71,14 +71,33 @@ def parse_args(args):
         action="store_true",
     )
     parser.add_argument(
-        "-a",
-        "--include_aux",
-        help="Include auxiliary task outputs (if available)",
-        action="store_true",
+        "--tasks",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Space separated list of tasks to include in the ONNX model. "
+            "By default all global tasks are included.",
+        ),
     )
     parser.add_argument(
         "-mf",
         "--object_name",
+    )
+    parser.add_argument(
+        "--combine_outputs",
+        type=str,
+        nargs="+",
+        default=[],
+        help="Space seperated list of items described in 'parse_output_combination'",
+    )
+    parser.add_argument(
+        "-r",
+        "--rename",
+        type=str,
+        nargs="+",
+        default=[],
+        help="Space seperated list of them form 'oldname1:newname1 oldname2:newname2'",
     )
     parser.add_argument(
         "-f",
@@ -96,9 +115,11 @@ class ONNXModel(ModelWrapper):
         onnx_feature_map: list[dict],
         variable_map: dict,
         name: str | None = None,
-        include_aux: bool = False,
+        tasks_to_output: list[str] | None = None,
         object_name: str | None = None,
         mf_config: dict | None = None,
+        combine_outputs: list[tuple] | None = None,
+        rename_outputs: dict[str, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -107,9 +128,21 @@ class ONNXModel(ModelWrapper):
         assert "-" not in self.name, "Model name cannot contain dashes."
         for task in self.model.tasks:
             task.model_name = self.name
+        self.tasks_to_output = tasks_to_output or []
+        if not self.tasks_to_output:
+            self.tasks_to_output = [
+                t.name for t in self.model.tasks if t.input_name == self.global_object
+            ]
+            print("No tasks specified, dumping all global tasks: ", self.tasks_to_output)
+        else:
+            # Need aux tasks to be after global tasks, and in the following order for checks to work
+            for t in ["track_origin", "track_vertexing", "track_type"]:
+                if t in self.tasks_to_output:
+                    self.tasks_to_output.remove(t)
+                    self.tasks_to_output.append(t)
 
-        self.include_aux = include_aux
-
+        self.combine_outputs = combine_outputs or []
+        self.rename_outputs = rename_outputs or {}
         if sum([bool(object_name), bool(mf_config)]) not in {0, 2}:
             raise ValueError("If one of object name or mf config is defined, so must the other.")
         self.object = object_name
@@ -125,6 +158,7 @@ class ONNXModel(ModelWrapper):
         self.variable_map = variable_map
 
         example_input_list = []
+        num_tracks = 40
         self.salt_names = []
         self.input_names = []
         self.aux_sequence_index = 1
@@ -134,7 +168,7 @@ class ONNXModel(ModelWrapper):
                 example_input_list.append(torch.rand(1, self.input_dims[self.global_object]))
             else:
                 example_input_list.append(
-                    torch.rand(1, 40, self.input_dims[feature["name_salt"]]).squeeze(0)
+                    torch.rand(1, num_tracks, self.input_dims[feature["name_salt"]]).squeeze(0)
                 )
             if feature["name_salt"] == self.aux_sequence_object:
                 self.aux_sequence_index = i
@@ -149,18 +183,39 @@ class ONNXModel(ModelWrapper):
     @property
     def output_names(self) -> list[str]:
         """The output names are a list of strings, one for each output of the model."""
-        # get the global task output names
-        outputs = sum([t.output_names for t in self.global_tasks], [])  # type: list[str]
+        outputs = []
+        for t in self.global_tasks:
+            if t.name in self.tasks_to_output:
+                outputs += t.output_names
 
-        # aux task output have custom names
-        if self.include_aux:
-            if "track_origin" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.name}_TrackOrigin"
-                outputs.append(out_name)
+        # Allow renaming and combining of global tasks
+        if self.rename_outputs:
+            for oldname, newname in self.rename_outputs.items():
+                full_oldname = f"{self.name}_{oldname}"
+                full_newname = f"{self.name}_{newname}"
+                assert full_oldname in outputs, f"Output {oldname} not found in outputs"
+                idx = outputs.index(full_oldname)
+                outputs[idx] = full_newname
 
-            if "track_vertexing" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.name}_VertexIndex"
-                outputs.append(out_name)
+        if self.combine_outputs:
+            for output_name, parsed_inputs in self.combine_outputs:
+                for _, input_name in parsed_inputs:
+                    assert (
+                        f"{self.name}_{input_name}" in outputs
+                    ), f"Output {input_name} not found in outputs"
+                outputs.append(f"{self.name}_{output_name}")
+
+        if "track_origin" in self.tasks_to_output:
+            out_name = f"{self.name}_TrackOrigin"
+            outputs.append(out_name)
+
+        if "track_vertexing" in self.tasks_to_output:
+            out_name = f"{self.name}_VertexIndex"
+            outputs.append(out_name)
+
+        if "track_type" in self.tasks_to_output:
+            out_name = f"{self.name}_TrackType"
+            outputs.append(out_name)
         if self.object:
             regression_task = [
                 t for t in self.model.tasks if t.input_name == "objects" and t.name == "regression"
@@ -182,15 +237,16 @@ class ONNXModel(ModelWrapper):
         for feature in self.feature_map:
             if not feature["is_global"]:
                 dynamic_axes.update({feature["name_athena_out"]: {0: feature["athena_num_name"]}})
-
         # dynamic outputs
-        if self.include_aux:
-            if "track_origin" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.name}_TrackOrigin"
-                dynamic_axes[out_name] = {0: "n_tracks"}
-            if "track_vertexing" in [t.name for t in self.model.tasks]:
-                out_name = f"{self.name}_VertexIndex"
-                dynamic_axes[out_name] = {0: "n_tracks"}
+        if "track_origin" in self.tasks_to_output:
+            out_name = f"{self.name}_TrackOrigin"
+            dynamic_axes[out_name] = {0: "n_tracks"}
+        if "track_vertexing" in self.tasks_to_output:
+            out_name = f"{self.name}_VertexIndex"
+            dynamic_axes[out_name] = {0: "n_tracks"}
+        if "track_type" in self.tasks_to_output:
+            out_name = f"{self.name}_TrackType"
+            dynamic_axes[out_name] = {0: "n_tracks"}
         if self.object:
             out_name = f"{self.name}_{self.object}"
             dynamic_axes[out_name] = {0: "n_tracks"}
@@ -215,8 +271,13 @@ class ONNXModel(ModelWrapper):
             input_dict, self.variable_map, self.global_object
         )
 
-        # forward pass
-        outputs = super().forward(input_dict, None)[0]
+        masks = {
+            k: torch.zeros((1, args[i].shape[0]), dtype=torch.bool)
+            for i, k in enumerate(self.salt_names)
+            if k != self.global_object
+        }
+
+        outputs = super().forward(input_dict, masks)[0]
 
         # get the global tasks outputs
         onnx_outputs = sum(
@@ -227,21 +288,45 @@ class ONNXModel(ModelWrapper):
             (),
         )
 
-        # add aux outputs
-        if self.include_aux:
-            tracks = args[self.aux_sequence_index].unsqueeze(0)
-            track_outs = outputs[self.aux_sequence_object]
-            if "track_origin" in track_outs:
-                outputs_track = torch.argmax(track_outs["track_origin"], dim=-1)
-                outputs_track = outputs_track.squeeze(0).char()
-                onnx_outputs += (outputs_track,)
+        if self.combine_outputs:
+            onnx_out_names = self.output_names
+            for _, parsed_inputs in self.combine_outputs:
+                output = sum([
+                    scale * onnx_outputs[onnx_out_names.index(f"{self.name}_{input_name}")]
+                    for scale, input_name in parsed_inputs
+                ])
+                onnx_outputs += (output,)
 
-            if "track_vertexing" in track_outs:
-                pad_mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
-                edge_scores = track_outs["track_vertexing"]
-                vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
-                vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
-                onnx_outputs += (vertex_list.reshape(-1).char(),)
+        # add aux outputs
+        if "track_origin" in self.tasks_to_output:
+            track_origins = outputs[self.aux_sequence_object]["track_origin"]
+            track_origins = torch.concatenate(
+                [track_origins, torch.zeros((1, 1, track_origins.shape[-1]))], dim=1
+            )
+
+            outputs_track = torch.argmax(track_origins, dim=-1)[:, :-1]
+            outputs_track = outputs_track.squeeze(0).char()
+
+            onnx_outputs += (outputs_track,)
+
+        if "track_vertexing" in self.tasks_to_output:
+            tracks = args[self.aux_sequence_index].unsqueeze(0)
+            pad_mask = torch.zeros(tracks.shape[:-1], dtype=torch.bool)
+            edge_scores = outputs[self.aux_sequence_object]["track_vertexing"]
+
+            vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
+            vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
+            onnx_outputs += (vertex_list.reshape(-1).char(),)
+
+        if "track_type" in self.tasks_to_output:
+            track_type = outputs[self.aux_sequence_object]["track_type"]
+            track_type = torch.concatenate(
+                [track_type, torch.zeros((1, 1, track_type.shape[-1]))], dim=1
+            )
+
+            outputs_track = torch.argmax(track_type, dim=-1)[:, :-1]
+            outputs_track = outputs_track.squeeze(0).char()
+            onnx_outputs += (outputs_track,)
 
         if self.object:
             assert "objects" in outputs, "No MF objects in outputs"
@@ -291,12 +376,12 @@ def get_default_onnx_feature_map(track_selection, inputs):
             "is_global": False,
         })
 
-    if "flow" in inputs:
+    if "flows" in inputs:
         feature_map.append({
             "name_athena_in": f"flows_{track_selection}_sd0sort",
             "name_athena_out": "flow_features",
             "athena_num_name": "n_flow",
-            "name_salt": "flow",
+            "name_salt": "flows",
             "is_global": False,
         })
 
@@ -321,6 +406,41 @@ def get_default_onnx_feature_map(track_selection, inputs):
     return feature_map
 
 
+def parse_output_combination(arg_str):
+    """Parses a string which represents combinations of outputs to be included in the final
+    onnx model.
+
+    Parameters
+    ----------
+    arg_str : str
+        String of the form:
+            - light,0.5*q,0.1*g,0.7*s
+                Represents p_light=0.5*p_q + 0.1*p_g + 0.7*p_s
+            - light,q,g,s
+                Represents p_light=p_q + p_g + p_s
+        A commar separated list of where the first is the output name, and each other item
+        represents a scaled sum
+
+    Returns
+    -------
+    output_name : str
+        The name of the output
+    parsed_inputs : list[tuple[float, str]]
+        A list of tuples where the first element is the scale and the second is the input name
+    """
+    all_terms = arg_str.split(",")
+    output_name = all_terms[0]
+    terms = all_terms[1:]
+    parsed_inputs = []
+    for term in terms:
+        if "*" in term:
+            scale, input_name = term.split("*")
+            parsed_inputs.append((float(scale), input_name))
+        else:
+            parsed_inputs.append((1, term))
+    return output_name, parsed_inputs
+
+
 def main(args=None):
     # parse args
     args = parse_args(args)
@@ -334,11 +454,17 @@ def main(args=None):
 
     config = yaml.safe_load(config_path.read_text())
     # Default config that only uses jets and tracks sorted in a default way
-
     onnx_feature_map = get_default_onnx_feature_map(
         args.track_selection, list(config["data"]["variables"].keys())
     )
 
+    combine_outputs = []
+    if args.combine_outputs:
+        for output in args.combine_outputs:
+            output_name, parsed_inputs = parse_output_combination(output)
+            combine_outputs.append((output_name, parsed_inputs))
+
+    rename_outputs = dict(x.split(":") for x in args.rename)
     # instantiate pytorch and wrapper models
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -350,6 +476,7 @@ def main(args=None):
         )
         pt_model.eval()
         pt_model.float()
+        change_attn_backends(pt_model.model, "torch-math")
 
         if args.object_name:
             with open(config_path) as f:
@@ -365,14 +492,17 @@ def main(args=None):
             onnx_feature_map=onnx_feature_map,
             variable_map=config["data"]["variables"],
             name=args.name,
-            include_aux=args.include_aux,
+            tasks_to_output=args.tasks,
             object_name=args.object_name,
             mf_config=mf_config,
             map_location=torch.device("cpu"),
             norm_config=config["model"]["norm_config"],
+            combine_outputs=combine_outputs,
+            rename_outputs=rename_outputs,
         )
 
         onnx_model.eval()
+        onnx_model.float()
         change_attn_backends(
             onnx_model.model, "torch-math"
         )  # Only applies to transformer_v2 layers
@@ -387,7 +517,6 @@ def main(args=None):
     if onnx_path.exists() and not args.overwrite:
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
 
-    # export
     onnx_model.to_onnx(
         onnx_path,
         opset_version=16,
@@ -405,6 +534,8 @@ def main(args=None):
         onnx_model.name,
         onnx_model.output_names,
         onnx_feature_map,
+        combine_outputs,
+        rename_outputs,
     )
     seq_names_onnx = []
     seq_names_salt = []
@@ -418,10 +549,10 @@ def main(args=None):
     compare_outputs(
         pt_model,
         onnx_path,
-        args.include_aux,
         seq_names_salt=seq_names_salt,
         seq_names_onnx=seq_names_onnx,
         variable_map=config["data"]["variables"],
+        tasks_to_output=onnx_model.tasks_to_output,
     )
     print("\n" + "-" * 100)
     print(f"Done! Saved ONNX model at {onnx_path}")
@@ -437,6 +568,8 @@ def add_metadata(
     model_name,
     output_names,
     onnx_feature_map,
+    combine_outputs,
+    rename_outputs,
 ):
     print("\n" + "-" * 100)
     print("Adding Metadata...")
@@ -457,6 +590,8 @@ def add_metadata(
     metadata["model_name"] = model_name
     metadata["inputs"] = []
     metadata["input_sequences"] = []
+    metadata["combine_outputs"] = combine_outputs
+    metadata["rename_outputs"] = rename_outputs
     for feature in onnx_feature_map:
         if feature["is_global"]:  # global features similar to jet features
             metadata["inputs"] += [

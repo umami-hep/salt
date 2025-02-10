@@ -54,7 +54,7 @@ class TaskBase(nn.Module, ABC):
     def input_name_mask(self, pad_masks: Mapping):
         return torch.cat(
             [
-                torch.ones(m.shape[1], device=m.device) * (t == self.input_name)
+                torch.ones(m.shape[1], device=m.device) * (1 if (t == self.input_name) else 0)
                 for t, m in pad_masks.items()
             ],
         ).bool()
@@ -382,7 +382,7 @@ class RegressionTask(RegressionTaskBase):
         return u2s(preds.float().cpu().numpy(), dtype)
 
     def get_onnx(self, preds: Tensor, **kwargs) -> tuple:
-        means = self.run_inference(preds, kwargs.get("label", None))
+        means = self.run_inference(preds, kwargs.get("labels", None))
         return tuple(output.squeeze() for output in torch.split(means, 1, -1))
 
 
