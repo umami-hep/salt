@@ -228,6 +228,13 @@ class ModelWrapper(L.LightningModule):
         return {**loss, "outputs": outputs}
 
     def test_step(self, batch):
+        if (
+            type(self.model.encoder).__name__ == "TransformerV2"
+            and self.trainer.precision == "32-true"
+        ):
+            from salt.models.transformer_v2 import change_attn_backends
+
+            change_attn_backends(self, backend="torch-math")
         inputs, pad_masks, _ = batch
         batch = (inputs, pad_masks, None)
         return self.shared_step(batch, evaluation=True)[0]
