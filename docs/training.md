@@ -230,6 +230,7 @@ If you are not producing a "final" version of your model (i.e. with maximum poss
 Other things you can always do:
 
 - Use bfloat16 precision
+- Use the flash attention backend for the [`TransformerV2` class](https://gitlab.cern.ch/svanstro/hepformer/-/blob/main/hepformer/models/transformerV2.py)
 - Use the maximum possible [batch size](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.BatchSizeFinder.html)
 - Increase your effective batch size by [accumulating gradients](https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html#accumulate-gradients)
 - Ensure you have enough [workers for dataloading](worker-counts)
