@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import yaml
 from ftag.git_check import check_for_uncommitted_changes, create_and_push_tag
+from jsonargparse import Namespace as JsonNamespace
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
@@ -88,209 +89,216 @@ class SaltCLI(LightningCLI):
 
     def before_instantiate_classes(self) -> None:
         """A lot of automatic configuration is done here."""
-        sc = self.config[self.subcommand] if self.subcommand else self.config
+        config = self.config[self.subcommand] if self.subcommand else self.config
+        sc_tasks = config.model.model.init_args.tasks.init_args.modules
 
-        if "config_S3" in sc.data:
-            from salt.utils.file_utils import require_S3_CLI, setup_S3_CLI
-
-            if require_S3_CLI(sc.data["config_S3"]):
-                sc.data = setup_S3_CLI(sc.data)
-
-        # add the labels from the model config to the data config
         labels: dict = {}
-        model_dict = vars(sc.model.model.init_args)
-        for submodel in model_dict["tasks"]["init_args"]["modules"]:
-            assert "Task" in submodel["class_path"]
-            task = submodel["init_args"]
-            if task["input_name"] not in labels:
-                labels[task["input_name"]] = []
-            # Check if there is a merge dict and try if exists
-            if hasattr(self.config, "fit"):
-                fit_config = self.config.fit.model.model.init_args
-                if hasattr(fit_config, "merge_dict"):
-                    merge_dict = self.config.fit.model.model.init_args.merge_dict
-                    if merge_dict is not None:
-                        task_input_name = task["input_name"]
-                        if task_input_name in merge_dict:
-                            for inp in merge_dict[task["input_name"]]:
-                                if inp not in labels:
-                                    labels[inp] = []
-                                if self.subcommand == "fit":
-                                    if label := task.get("label"):
-                                        labels[inp].append(label)
-                                    if weight := task.get("sample_weight"):
-                                        labels[inp].append(weight)
-                                    if targets := task.get("targets"):
-                                        for target in listify(targets):
-                                            labels[inp].append(target)
-            if self.subcommand == "fit":
-                if label := task.get("label"):
-                    labels[task["input_name"]].append(label)
-                if weight := task.get("sample_weight"):
-                    labels[task["input_name"]].append(weight)
-                if targets := task.get("targets"):
-                    for target in listify(targets):
-                        labels[task["input_name"]].append(target)
-            if denominators := task.get("target_denominators"):
-                for denominator in listify(denominators):
-                    labels[task["input_name"]].append(denominator)
+        for task in sc_tasks:
+            assert "Task" in task["class_path"]
+            self.collect_labels_from_task(
+                task["init_args"], config.model.model.init_args.get("merge_dict"), labels
+            )
 
-        if model_dict.get("mask_decoder"):
-            if not (mf_config := sc["data"].get("mf_config")):
+        if config.model.model.init_args.get("mask_decoder"):
+            if not (maskformer_config := config.data.get("mf_config")):
                 raise ValueError("Mask decoder requires 'mf_config' in data config.")
-            if mf_config.constituent.name not in labels:
+            if maskformer_config.constituent.name not in labels:
                 raise ValueError(
-                    f"The constituent name {mf_config.constituent.name} is not in the data labels. "
-                    "Ensure that the constituent name is in the input_map of the data config."
+                    f"The constituent name {maskformer_config.constituent.name} is not in the"
+                    " data labels. Ensure that the constituent name is in the input_map of the"
+                    " data config."
                 )
+
             # Needed in case no tasks other than mask prediction/classification
             if "objects" not in labels:
                 labels["objects"] = []
             labels["objects"] += [
-                mf_config.object.id_label,
-                mf_config.object.class_label,
+                maskformer_config.object.id_label,
+                maskformer_config.object.class_label,
             ]
-            labels[mf_config.constituent.name] += [mf_config.constituent.id_label]
-        sc["data"]["labels"] = labels
+            labels[maskformer_config.constituent.name] += [maskformer_config.constituent.id_label]
+
+        config.data.labels = labels
 
         # add norm
-        sc["model"]["norm_config"] = {}
-        sc["model"]["norm_config"]["norm_dict"] = sc.data.norm_dict
-        sc["model"]["norm_config"]["variables"] = sc.data.variables
-        sc["model"]["norm_config"]["global_object"] = sc.data.global_object
-        sc["model"]["norm_config"]["input_map"] = sc.data.input_map
+        config.model.norm_config = {
+            "norm_dict": config.data.norm_dict,
+            "variables": config.data.variables,
+            "global_object": config.data.global_object,
+            "input_map": config.data.input_map,
+        }
 
         if self.subcommand == "fit" or self.subcommand is None:
-            # add variables to init nets
-            for init_net in sc.model.model.init_args.init_nets:
-                init_net["variables"] = sc.data.variables
-                init_net["global_object"] = sc.data.global_object
-            # add variables to featurewise nets
-            if sc.model.model.init_args.featurewise_nets:
-                for featurewise_net in sc.model.model.init_args.featurewise_nets:
-                    featurewise_net["variables"] = sc.data.variables
+            # add variables to inititialization networks
+            for init_net in config.model.model.init_args.init_nets:
+                init_net["variables"] = config.data.variables
+                init_net["global_object"] = config.data.global_object
 
-            # extract object class names from h5 attrs (requires FTAG preprocessing)
-            self.add_object_class_names()
+            # add variables to feature-wise networks
+            if config.model.model.init_args.featurewise_nets:
+                for featurewise_net in config.model.model.init_args.featurewise_nets:
+                    featurewise_net["variables"] = config.data.variables
 
-            # if class weights are not specified, read them from class_dict
-            for task in sc.model.model.init_args.tasks.init_args.modules:
-                if not task["init_args"].get("use_class_dict"):
-                    continue
-                if (cd_fname := sc.data.class_dict) is None:
-                    raise ValueError("use_class_dict=True requires class_dict to be specified")
-                if task["init_args"]["loss"]["init_args"]["weight"] is not None:
-                    raise ValueError(
-                        "Class weights already specified, disable use_class_dict or remove weights."
-                    )
-                with open(cd_fname) as f:
-                    class_dict = yaml.safe_load(f)
-                input_name = task["init_args"]["input_name"]
-                if sc.data.input_map:
-                    input_name = sc.data.input_map[input_name]
-                if task["init_args"]["label"] in class_dict[input_name]:
-                    class_weights = class_dict[input_name][task["init_args"]["label"]]
-                    class_weights = torch.Tensor(class_weights)
-                    task["init_args"]["loss"]["init_args"]["weight"] = class_weights
-                else:
-                    raise ValueError(
-                        f"Label {task['init_args']['label']} not found in class_dict. "
-                        "Use use_class_dict=False and specify class weights manually."
-                    )
+            for task in sc_tasks:
+                # extract object class names from h5 attrs (requires FTAG preprocessing)
+                if class_names := self.get_object_class_names(task, config.data):
+                    task.init_args.class_names = class_names
+
+                # if class weights are not specified read them from class_dict
+                if task.init_args.get("use_class_dict") and (
+                    class_weights := self.get_class_weights_from_class_dict(task, config.data)
+                ):
+                    task.init_args.loss.init_args.weight = torch.Tensor(class_weights)
 
             # reduce precision to improve performance
             # don't do this during evaluation as you will get increased variation wrt Athena
             torch.set_float32_matmul_precision("medium")
 
-            # get timestamped output dir for this run
-            timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
-            log = "trainer.logger"
-            name = sc["name"]
-            log_dir = sc["trainer.default_root_dir"]
-            log_dir = Path(log_dir) if "s3://" not in log_dir else Path(log_dir[5:])
-            # handle case where we re-use an existing config: use parent of timestampped dir
-            try:
-                datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")
-                log_dir = log_dir.parent
-            except ValueError:
-                pass
-
-            # set the timestampped dir
-            if sc["log_suffix"]:
-                log_suffix = sc["log_suffix"]
-                dirname = f"{name}_{log_suffix}"
-            else:
-                dirname = f"{name}_{timestamp}"
-            if "s3:/" not in sc["trainer.default_root_dir"]:
-                log_dir_timestamp = str(Path(log_dir / dirname).resolve())
-            else:
-                log_dir_timestamp = str(Path(log_dir / dirname))
-                log_dir_timestamp = "s3://" + log_dir_timestamp
-            sc["trainer.default_root_dir"] = log_dir_timestamp
-            if sc[log]:
-                sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
+            output_dir_path = self.get_output_dir_path(
+                config.trainer.default_root_dir, config.name, config.log_suffix
+            )
+            config.trainer.default_root_dir = output_dir_path
+            if config.trainer.logger:
+                config.trainer.logger.init_args.save_dir = output_dir_path
 
             # run git checks
-            if not sc["force"] and not sc.trainer.fast_dev_run:
+            if not config.force and not config.trainer.fast_dev_run:
                 path = Path(__file__).parent
                 check_for_uncommitted_changes(path)
-                if sc["tag"]:
+                if config.tag:
                     create_and_push_tag(
                         path,
                         "atlas-flavor-tagging-tools/algorithms/salt",
-                        dirname,
+                        Path(output_dir_path).stem,
                         "automated salt tag",
                     )
 
-            if sc["overwrite_config"]:
+            if config.overwrite_config:
                 self.save_config_kwargs["overwrite"] = True
 
         if self.subcommand == "test":
             print("\n" + "-" * 100)
 
-            # modify callbacks when testing
+            # no logger, callback refresh rate 1 for testing
             self.save_config_callback = None
-            sc["trainer.logger"] = False
-            for c in sc["trainer.callbacks"]:
-                if hasattr(c, "init_args") and hasattr(c.init_args, "refresh_rate"):
-                    c.init_args.refresh_rate = 1
+            config.trainer.logger = False
+            for callback in config.trainer.callbacks:
+                if hasattr(callback, "init_args") and hasattr(callback.init_args, "refresh_rate"):
+                    callback.init_args.refresh_rate = 1
 
-            # use the best epoch for testing
-            if sc["ckpt_path"] is None:
-                config = sc["config"]
-                assert len(config) == 1
-                sc["ckpt_path"] = get_best_epoch(Path(config[0].rel_path))
+            # use best epoch for testing
+            if not config.ckpt_path:
+                assert len(config.config) == 1
+                config.ckpt_path = get_best_epoch(Path(config.config[0].rel_path))
 
-            # ensure only one device is used for testing
-            n_devices = sc["trainer.devices"]
-            if (isinstance(n_devices, str | int)) and int(n_devices) > 1:
+            if isinstance(config.trainer.devices, str | int) and int(config.trainer.devices) > 1:
                 print("Setting --trainer.devices=1")
-                sc["trainer.devices"] = "1"
-            if isinstance(n_devices, list) and len(n_devices) > 1:
+                config.trainer.devices = "1"
+            elif isinstance(config.trainer.devices, list) and len(config.trainer.devices) > 1:
                 raise ValueError("Testing requires --trainer.devices=1")
 
-            # disable move_files_temp
-            sc["data.move_files_temp"] = None
+            config.data.move_files_temp = None
 
             print("-" * 100 + "\n")
 
-    def add_object_class_names(self) -> None:
-        # add flavour_label class names to global object classification task, if it exists
-        sc = self.config[self.subcommand] if self.subcommand else self.config
-        for task in sc.model.model.init_args.tasks.init_args.modules:
-            t_args = task.init_args
-            if not (
-                t_args.name == f"{sc.data.global_object}_classification"
-                and t_args.label == "flavour_label"
-                and t_args.class_names is None
-            ):
-                return
-            name = sc.data.input_map[t_args.input_name] if sc.data.input_map else t_args.input_name
-            with h5py.File(sc.data.train_file) as f:
-                if t_args.label in f[name].attrs:
-                    t_args.class_names = f[name].attrs[t_args.label]
-                else:
-                    raise ValueError(
-                        f"'{t_args.label}' not found in the h5 attrs of group '{name}' in file "
-                        f"{sc.data.train_file}. Specify class_names manually."
-                    )
+    @staticmethod
+    def collect_labels_from_task(
+        task: JsonNamespace,
+        merge_dict: JsonNamespace | None,
+        labels: dict,
+    ) -> None:
+        def collect_labels(task: JsonNamespace):
+            labels = []
+            if label := task.get("label"):
+                labels.append(label)
+            if weight := task.get("sample_weight"):
+                labels.append(weight)
+            if targets := task.get("targets"):
+                labels.extend(listify(targets))
+
+            if denominators := task.get("target_denominators"):
+                labels.extend(listify(denominators))
+
+            return labels
+
+        if task["input_name"] in labels:
+            labels[task["input_name"]].extend(collect_labels(task))
+        else:
+            labels[task["input_name"]] = collect_labels(task)
+
+        if not merge_dict or task["input_name"] not in merge_dict:
+            return
+
+        for label_name in merge_dict[task["input_name"]]:
+            if label_name in labels:
+                labels[label_name].extend(collect_labels(task))
+            else:
+                labels[label_name] = collect_labels(task)
+
+    @staticmethod
+    def get_object_class_names(task: JsonNamespace, data: JsonNamespace) -> list | None:
+        if not (
+            task.init_args.name == f"{data.global_object}_classification"
+            and task.init_args.label == "flavour_label"
+            and task.init_args.class_names is None
+        ):
+            return None
+
+        name = (
+            data.input_map[task.init_args.input_name]
+            if data.input_map
+            else task.init_args.input_name
+        )
+        with h5py.File(data.train_file) as f:
+            if task.init_args.label not in f[name].attrs:
+                raise ValueError(
+                    f"'{task.init_args.label}' not found in the h5 attrs of group '{name}' in file "
+                    f"{data.train_file}. Specify class_names manually."
+                )
+
+            return list(f[name].attrs[task.init_args.label])
+
+    @staticmethod
+    def get_class_weights_from_class_dict(
+        task: JsonNamespace,
+        data: JsonNamespace,
+    ) -> list:
+        if (class_dict_path := data.class_dict) is None:
+            raise ValueError("use_class_dict=True requires class_dict to be specified")
+
+        if task.init_args.loss.init_args.weight is not None:
+            raise ValueError(
+                "Class weights already specified, disable use_class_dict or remove weights."
+            )
+
+        with open(class_dict_path) as f:
+            class_dict = yaml.safe_load(f)
+
+        input_name = task.init_args.input_name
+        if data.input_map is not None:
+            input_name = data.input_map[input_name]
+
+        if task.init_args.label not in class_dict[input_name]:
+            raise ValueError(
+                f"Label {task.init_args.label} not found in class_dict. "
+                "Use use_class_dict=False and specify class weights manually."
+            )
+
+        return class_dict[task.init_args.input_name][task.init_args.label]
+
+    @staticmethod
+    def get_output_dir_path(default_output_dir_path: str, name: str, log_suffix: str | None) -> str:
+        log_dir = Path(default_output_dir_path)
+        try:
+            datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")
+            log_dir = log_dir.parent
+        except ValueError:
+            pass
+
+        if log_suffix is not None:
+            dirname = f"{name}_{log_suffix}"
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d-T%H%M%S")
+            dirname = f"{name}_{timestamp}"
+
+        return str(Path(log_dir / dirname).resolve())
