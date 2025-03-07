@@ -284,7 +284,7 @@ class SaltCLI(LightningCLI):
                 "Use use_class_dict=False and specify class weights manually."
             )
 
-        return class_dict[task.init_args.input_name][task.init_args.label]
+        return class_dict[input_name][task.init_args.label]
 
     @staticmethod
     def get_output_dir_path(default_output_dir_path: str, name: str, log_suffix: str | None) -> str:
