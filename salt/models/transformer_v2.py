@@ -164,6 +164,8 @@ class Attention(nn.Module):
         bias: bool = True,
         diff_attention: bool = False,
         depth: int = 1,
+        do_qk_norm: bool = False,
+        do_v_norm: bool = False,
     ) -> None:
         """Multihead attention module.
 
@@ -183,6 +185,10 @@ class Attention(nn.Module):
             Use differential attention or not
         depth : int, optional
             Number of current attention layer
+        do_qk_norm : bool, optional
+            Whether to apply norm to q and k
+        do_v_norm : bool, optional
+            Whether to apply norm to v
         """
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
@@ -197,6 +203,8 @@ class Attention(nn.Module):
         self.attn_type = attn_type
         self.diff_attention = diff_attention
         self.depth = depth
+        self.do_qk_norm = do_qk_norm
+        self.do_v_norm = do_v_norm
 
         if self.diff_attention:
             self.head_dim = self.head_dim // 2
@@ -215,6 +223,12 @@ class Attention(nn.Module):
             )
 
             self.subln = layernorms.RMSNorm(2 * self.head_dim)
+
+        if self.do_qk_norm:
+            self.q_norm = layernorms.RMSNorm(self.head_dim)
+            self.k_norm = layernorms.RMSNorm(self.head_dim)
+        if self.do_v_norm:
+            self.v_norm = layernorms.RMSNorm(self.head_dim)
 
         # Better parallelism for self-attention when using parameters directly
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
@@ -272,6 +286,20 @@ class Attention(nn.Module):
         qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
+        if self.do_qk_norm:
+            dtype = qkv.dtype
+            if self.do_v_norm:
+                q, k, v = qkv.unbind(1)
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+                v = self.v_norm(v)
+                qkv = torch.stack([q, k, v], dim=1).to(dtype)
+            else:
+                q, k, v = qkv.unbind(1)
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+                qkv = torch.stack([q, k, v], dim=1).to(dtype)
+
         # Run the flash-varlen backend
         dropout = self.dropout if self.training else 0.0
         a_out = self._flash_attn(qkv, culens, maxlen, dropout)
@@ -324,6 +352,12 @@ class Attention(nn.Module):
         # transform tensors to (B, Nh, S, Hd)
         shape = (B, -1, self.num_heads, self.head_dim)  # Dont use S for cross attn
         q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        if self.do_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.do_v_norm:
+            v = self.v_norm(v)
 
         # run attention
         s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
@@ -516,15 +550,17 @@ class DropPath(nn.Module):
         return x.div(keep_prob) * random_tensor
 
 
-class PreNormResidual(nn.Module):
-    """Wraps a module with pre-norm with a residual connection.
+class NormResidual(nn.Module):
+    """Wraps a module with norm with a residual connection.
 
     Optionally also applies:
     - LayerScale
     - DropPath (Stochastic Depth)
 
-    Neat way of doing the most common transformer pattern:
-    - x = x + drop(scale * fn(norm(x)))
+    Can represent the most common transformer patterns:
+    - PostNorm: x = norm(x + drop(scale * fn(x)))
+    - PreNorm: x = x + drop(scale * fn(norm(x)))
+    - NoNorm x = x + drop(scale * fn(x))
     """
 
     def __init__(
@@ -534,6 +570,7 @@ class PreNormResidual(nn.Module):
         ls_init: float | None = None,
         drop_path: float = 0.0,
         embed_dim: int = 0,
+        norm_type: str = "pre",
     ) -> None:
         """Parameters
         ----------
@@ -549,17 +586,25 @@ class PreNormResidual(nn.Module):
         embed_dim : int
             The dimension of the input and output.
             If zero we will try get it from the fn's own embed_dim attribute.
+        norm_type : str, optional
+            The type of normalization, by default "pre". Can be ['pre', 'post', 'none'].
         """
         super().__init__()
+        self.norm_type = norm_type
         dim = embed_dim or fn.embed_dim
         assert dim > 0, "Could not determine embed_dim from fn"
         self.fn = fn
-        self.norm = getattr(layernorms, norm)(dim)
+        if self.norm_type != "none":
+            self.norm = getattr(layernorms, norm)(dim)
         self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
         self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
 
     def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
-        return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
+        if self.norm_type == "pre":
+            return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
+        if self.norm_type == "post":
+            return self.norm(x + self.drop_path(self.ls(self.fn(x, *args, **kwargs))))
+        return x + self.drop_path(self.ls(self.fn(x, *args, **kwargs)))
 
 
 class EncoderLayer(nn.Module):
@@ -572,6 +617,7 @@ class EncoderLayer(nn.Module):
         depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
     ) -> None:
         """Encoder layer consisting of a self-attention and a feed-forward layer.
 
@@ -592,6 +638,8 @@ class EncoderLayer(nn.Module):
         attn_kwargs : dict | None, optional
             Keyword arguments for
             [salt.models.transformer_v2.Attention][salt.models.transformer_v2.Attention].
+        norm_type : str, optional
+            Normalization type, can be ['pre', 'post', 'hybrid'], by default 'pre'.
         """
         super().__init__()
 
@@ -603,14 +651,33 @@ class EncoderLayer(nn.Module):
 
         # Attributes
         self.embed_dim = embed_dim
+        self.norm_type = norm_type
+        if norm_type == "hybrid":
+            attn_kwargs["do_qk_norm"] = True
+            attn_kwargs["do_v_norm"] = True
+            residual_norm_type = "pre" if depth == 0 else "none"
+            self.norm = (
+                nn.Identity(embed_dim) if depth == 0 else getattr(layernorms, norm)(embed_dim)
+            )
+        else:
+            residual_norm_type = norm_type
 
         # Submodules
-        residual = partial(PreNormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path)
+        residual = partial(
+            NormResidual,
+            norm=norm,
+            ls_init=ls_init,
+            drop_path=drop_path,
+            norm_type=residual_norm_type,
+        )
         self.attn = residual(Attention(embed_dim, depth=depth, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
-        return self.dense(self.attn(x, **kwargs))
+        x = self.attn(x, **kwargs)
+        if self.norm_type == "hybrid":
+            return self.dense(self.norm(x))
+        return self.dense(x)
 
 
 class DecoderLayer(nn.Module):
@@ -623,6 +690,7 @@ class DecoderLayer(nn.Module):
         depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
     ):
         super().__init__()
 
@@ -636,7 +704,9 @@ class DecoderLayer(nn.Module):
         self.embed_dim = embed_dim
 
         # Submodules
-        residual = partial(PreNormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path)
+        residual = partial(
+            NormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path, norm_type=norm_type
+        )
         self.self_attn = residual(Attention(embed_dim=embed_dim, depth=depth, **attn_kwargs))
         self.cross_attn = residual(Attention(embed_dim=embed_dim, depth=depth, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
