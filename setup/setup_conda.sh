@@ -12,13 +12,13 @@ if [[ ! -d "${CONDA_INSTALL}" ]]; then
   if [[ $OSTYPE == 'darwin'* ]]; then
     MAC_TYPE="$(uname -m)"
     if [[ $MAC_TYPE == 'arm64' ]]; then
-      CONDA_INSTALLER="Mambaforge-MacOSX-arm64.sh"
+      CONDA_INSTALLER="Miniforge3-MacOSX-arm64.sh"
     else
-      CONDA_INSTALLER="Mambaforge-MacOSX-x86_64.sh"
+      CONDA_INSTALLER="Miniforge3-MacOSX-x86_64.sh"
     fi
   # installation for linux
   elif [[ $OSTYPE == 'linux'* ]]; then
-    CONDA_INSTALLER="Mambaforge-Linux-x86_64.sh"
+    CONDA_INSTALLER="Miniforge3-Linux-x86_64.sh"
   # other operating system not supported
   else
     echo "Operating system not supported. Setup not possible."

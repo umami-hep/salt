@@ -17,7 +17,7 @@ cd salt
 ### Create Environment
 
 You can install salt within a virtual environment or a docker image.
-The recommended workflow is to set the package up using conda.
+The recommended workflow is to set the package up using conda/mamba.
 Salt requires Python 3.9, 3.10 or 3.11.
 
 === "conda"
@@ -32,9 +32,8 @@ Salt requires Python 3.9, 3.10 or 3.11.
         If already present you should skip the installation, and instead just create a new environment.
 
     You can either perform a manual installation by following the
-    [conda](https://docs.conda.io/)/[mamba](https://mamba.readthedocs.io/) documentation,
-    or use the provided script is provided which will install mamba (a faster, drop-in replacement for conda).
-    You can run the script with
+    [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html) documentation,
+    or use the provided setup script, which can be run with
 
     ```bash
     source setup/setup_conda.sh
@@ -49,7 +48,7 @@ Salt requires Python 3.9, 3.10 or 3.11.
     To activate it, just run
 
     ```bash
-    conda activate salt
+    mamba activate salt
     ```
 
 === "venv"
