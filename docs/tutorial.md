@@ -1,6 +1,11 @@
 # Tutorial: Using the Software Package
 
 In this tutorial, we will walk through the steps to use the salt software package. 
+This tutorial has been given a few times, in
+[2023](https://indico.cern.ch/event/1311519/contributions/5577998/attachments/2721103/4727424/salt_tutorial.pdf), 
+[2024](https://indico.cern.ch/event/1352459/contributions/5860483/attachments/2854884/4992618/Salt_tutorial_GN2_ftag.pdf), and
+[2025](https://indico.cern.ch/event/1488957/contributions/6403390/).
+
 We will be using the `tutorial.yaml` configuration file for steering the training and an open dataset as input for the training.
 In a production context you will create the pre-processed data for training and evaluation yourself using the [umami-preprocessing](https://github.com/umami-hep/umami-preprocessing) (UPP) software. For the context of this tutorial, we will use already preprocessed data which are separated into training, validation and test datasets.
 
