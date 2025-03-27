@@ -18,8 +18,8 @@ model:
       init_nets:
         - input_name: tracks
           dense_config: &init
-            output_size: &embed_dim 256
-            hidden_layers: [256]
+            output_size: &embed_dim 512
+            hidden_layers: [512]
             activation: &activation SiLU
         # Adding flows
         - input_name: flows
@@ -31,7 +31,7 @@ model:
         init_args:
           num_layers: 4
           embed_dim: *embed_dim
-          out_dim: &out_dim 128
+          out_dim: &out_dim 256
           # flash attention
           attn_type: flash-varlen
           norm: LayerNorm
@@ -85,7 +85,7 @@ model:
                   init_args: { reduction: none }
                 dense_config:
                   <<: *task_dense_config
-                  input_size: 256
+                  input_size: 512
                   output_size: 1
                   context_size: *out_dim
                   activation: *activation
@@ -166,12 +166,12 @@ data:
       - dphi
       - isCharged
 
-  train_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat/output/pp_output_train.h5
-  val_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat/output/pp_output_val.h5
-  norm_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat/output/norm_dict.yaml
-  class_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat/output/class_dict.yaml
+  train_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_train.h5
+  val_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_val.h5
+  norm_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/norm_dict.yaml
+  class_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/class_dict.yaml
 
-  batch_size: 2000
+  batch_size: 4000
   num_workers: 20
 
 trainer:
