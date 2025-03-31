@@ -160,6 +160,9 @@ class SaltCLI(LightningCLI):
             config.trainer.default_root_dir = output_dir_path
             if config.trainer.logger:
                 config.trainer.logger.init_args.save_dir = output_dir_path
+                # Create the directory if it doesn't exist
+                # Bug fix for comet logger in offline mode
+                Path(config.trainer.logger.init_args.save_dir).mkdir(parents=True, exist_ok=True)
 
             # run git checks
             if not config.force and not config.trainer.fast_dev_run:
