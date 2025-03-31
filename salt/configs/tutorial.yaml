@@ -12,23 +12,25 @@ model:
     class_path: salt.models.SaltModel
     init_args:
       init_nets:
-        - input_name: consts
+        - input_name: tracks
           dense_config:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.TransformerV2
         init_args:
           embed_dim: *embed_dim
           num_layers: 2
           out_dim: &out_dim 128
-          mha_config:
+          attn_type: torch-math
+          attn_kwargs:
             num_heads: 4
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          dense_kwargs:
             activation: *activation
+            gated: True
+          num_registers: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -55,7 +57,7 @@ model:
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: const_origin
-                input_name: consts
+                input_name: tracks
                 label: truth_origin_label
                 class_names: [pileup, primary, fromBC, fromB, fromC, fromS, fromTau*, secondary]
                 weight: 0.5
@@ -71,7 +73,7 @@ model:
             - class_path: salt.models.VertexingTask
               init_args:
                 name: const_vertexing
-                input_name: consts
+                input_name: tracks
                 label: truth_vertex_idx
                 weight: 1.5
                 loss:
@@ -84,12 +86,15 @@ model:
                   context_size: *out_dim
 
 data:
+  input_map:
+    jets: jets
+    tracks: consts
   global_object: jets
   variables:
     jets:
       - pt
       - eta
-    consts:
+    tracks:
       - d0
       - z0
       - phi_rel

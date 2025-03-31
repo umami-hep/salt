@@ -38,7 +38,7 @@ export TUTORIAL_DATA=<path to directory>
 mkdir -p $TUTORIAL_DATA
 cd $TUTORIAL_DATA
 curl -o $TUTORIAL_DATA/tutorialdata.zip "https://zenodo.org/api/records/10371998/files-archive"
-unzip $TUTORIAL_DATA -d $TUTORIAL_DATA/tutorialdata.zip
+unzip $TUTORIAL_DATA/tutorialdata.zip -d $TUTORIAL_DATA
 rm $TUTORIAL_DATA/tutorialdata.zip
 ```
 
@@ -80,6 +80,8 @@ git commit -m "update tutorial.yaml"
 ```
 
 Read the documentation for [training](training.md) with salt.
+
+Salt provides the option to use [Comet.ml](https://www.comet.com/) as an online ML logging tool. To set it up you should take a look at [(Optional) Set up logging](tutorial-Xbb.md#2-optional-set-up-logging).
 
 First, you should run a test training which will run over a small number of training and validation batches and then exit without writing any output. This will show you if you have everything set up correctly.
 Assuming you start in the `salt` main directory, you first need to navigate to the `salt` subdirectory which hosts the configuration file directory `configs`.
@@ -358,3 +360,23 @@ Now you can compare the performance between the two models with the following sc
     plot_roc.draw()
     plot_roc.savefig("roc_ablation.png", transparent=False)
     ```
+
+## Step 6: Exporting model to ONNX format
+
+Once you have selected your ideal trained model, the model has to be converted into ONNX format before implementing it into Athena for inference.
+
+ONNX (Open Neural Network Exchange) is a common open-source format for AI models, which enables them to be used across various frameworks and hardware accelerators.
+Read the documentation for [onnx export](export.md) with salt.
+
+To do this, run
+```
+to_onnx --ckpt_path logs/GN2_<timestamp>/<best_checkpoint>.ckpt --name MyModel
+```
+
+Once completed, your ONNX model will be saved in `logs/GN2_<timestamp>/network.onnx`. 
+To obtain the metadata of your onnx model, do
+```
+get_onnx_metadata logs/GN2_<timestamp>/network.onnx
+```
+The script already includes a quick validation test between the scores produced by the PyTorch model and the ONNX model. 
+We also recommend you to verify your ONNX model in Athena. More information about this can be found in [Athena Validation](export.md#athena-validation)
