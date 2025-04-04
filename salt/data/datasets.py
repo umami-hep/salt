@@ -178,14 +178,14 @@ class SaltDataset(Dataset):
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
 
+            # apply selections for constituent inputs
+            if self.selectors and (selector := self.selectors.get(input_name)):
+                batch = selector(batch)
+
             # truncate constituent inputs
             if self.num_inputs is not None and input_name in self.num_inputs:
                 assert int(self.num_inputs[input_name]) <= batch.shape[1]
                 batch = batch[:, : int(self.num_inputs[input_name])]
-
-            # apply selections for constituent inputs
-            if self.selectors and (selector := self.selectors.get(input_name)):
-                batch = selector(batch)
 
             # load edge inputs for this input type
             if input_name == "EDGE":
