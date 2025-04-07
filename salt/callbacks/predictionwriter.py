@@ -25,6 +25,7 @@ class PredictionWriter(Callback):
         half_precision: bool = False,
         object_classes: list | None = None,
         extra_vars: Vars | None = None,
+        global_object: str = "jets",
     ) -> None:
         """Write test outputs to h5 file.
 
@@ -50,6 +51,9 @@ class PredictionWriter(Callback):
         extra_vars : Vars
             Extra variables to write to file for each input type. If not specified for a given input
             type, all variables in the test file will be written.
+        global_object : str
+            Name of the global object the model is trained on (usually the target for
+            classification). By default "jets".
         """
         super().__init__()
         if extra_vars is None:
@@ -60,6 +64,7 @@ class PredictionWriter(Callback):
         self.half_precision = half_precision
         self.precision = "f2" if self.half_precision else "f4"
         self.object_classes = object_classes
+        self.global_object = global_object
 
     def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
         if stage != "test":
@@ -174,6 +179,7 @@ class PredictionWriter(Callback):
                 dtypes=dtypes,
                 shapes=shapes,
                 shuffle=False,
+                jets_name=self.global_object,
                 precision="half" if self.half_precision else "full",
             )
         self.writer.write(to_write)
