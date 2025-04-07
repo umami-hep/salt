@@ -1,7 +1,7 @@
 # infra
 pytest==7.4.2
 pytest-cov==4.1.0
-comet_ml==3.35.3
+comet_ml==3.49.7
 tqdm==4.66.1
 rich==13.6.0
 pre-commit==3.5.0
