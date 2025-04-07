@@ -357,51 +357,34 @@ class ONNXModel(ModelWrapper):
         return onnx_outputs
 
 
-def get_default_onnx_feature_map(track_selection, inputs):
-    feature_map = [
-        {
-            "name_athena_in": "jet_var",
-            "name_athena_out": "jet_features",
-            "name_salt": "jets",
-            "is_global": True,
-        },
-    ]
+def get_default_onnx_feature_map(track_selection, inputs, global_name):
+    feature_map = []
 
-    if "tracks" in inputs:
-        feature_map.append({
-            "name_athena_in": f"tracks_{track_selection}_sd0sort",
-            "name_athena_out": "track_features",
-            "athena_num_name": "n_tracks",
-            "name_salt": "tracks",
-            "is_global": False,
-        })
-
-    if "flows" in inputs:
-        feature_map.append({
-            "name_athena_in": f"flows_{track_selection}_sd0sort",
-            "name_athena_out": "flow_features",
-            "athena_num_name": "n_flow",
-            "name_salt": "flows",
-            "is_global": False,
-        })
-
-    if "hits" in inputs:
-        feature_map.append({
-            "name_athena_in": "hits_var",
-            "name_athena_out": "hit_features",
-            "athena_num_name": "n_hits",
-            "name_salt": "hits",
-            "is_global": False,
-        })
-
-    if "tracks_loose" in inputs:
-        feature_map.append({
-            "name_athena_in": f"tracks_{track_selection}_sd0sort",
-            "name_athena_out": "track_features",
-            "athena_num_name": "n_tracks",
-            "name_salt": "tracks_loose",
-            "is_global": False,
-        })
+    for input_name in inputs:
+        if input_name == global_name:
+            feature_map.append({
+                "name_athena_in": f"{global_name.removesuffix('s')}_var",
+                "name_athena_out": f"{global_name.removesuffix('s')}_features",
+                "name_salt": global_name,
+                "is_global": True,
+            })
+        elif "tracks" in input_name or "flows" in input_name:
+            base_name = input_name.split("_")[0]
+            feature_map.append({
+                "name_athena_in": f"{base_name}_{track_selection}_sd0sort",
+                "name_athena_out": f"{base_name.removesuffix('s')}_features",
+                "athena_num_name": f"n_{base_name}",
+                "name_salt": base_name,
+                "is_global": False,
+            })
+        else:
+            feature_map.append({
+                "name_athena_in": f"{input_name}_var",
+                "name_athena_out": f"{input_name.removesuffix('s')}_features",
+                "athena_num_name": f"n_{input_name}",
+                "name_salt": input_name,
+                "is_global": False,
+            })
 
     return feature_map
 
@@ -455,7 +438,9 @@ def main(args=None):
     config = yaml.safe_load(config_path.read_text())
     # Default config that only uses jets and tracks sorted in a default way
     onnx_feature_map = get_default_onnx_feature_map(
-        args.track_selection, list(config["data"]["variables"].keys())
+        args.track_selection,
+        list(config["data"]["variables"].keys()),
+        config["data"]["global_object"],
     )
 
     combine_outputs = []
@@ -549,6 +534,7 @@ def main(args=None):
     compare_outputs(
         pt_model,
         onnx_path,
+        global_object=config["data"]["global_object"],
         seq_names_salt=seq_names_salt,
         seq_names_onnx=seq_names_onnx,
         variable_map=config["data"]["variables"],

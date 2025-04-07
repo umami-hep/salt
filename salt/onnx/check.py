@@ -16,6 +16,7 @@ torch.manual_seed(42)
 def compare_output(
     pt_model,
     onnx_session,
+    global_object,
     seq_names_salt,
     seq_names_onnx,
     variable_map,
@@ -27,26 +28,25 @@ def compare_output(
     jets, sequences, pad_masks = inputs_sep_with_pad_multi_sequece(
         n_batch,
         [n_seq for seqn in seq_names_salt],
-        pt_model.input_dims["jets"],
+        pt_model.input_dims[global_object],
         [pt_model.input_dims[seqn] for seqn in seq_names_salt],
         p_valid=1,
     )
 
     inputs_pytorch = {seqn: seq for seq, seqn in zip(sequences, seq_names_salt, strict=False)}
-    inputs_pytorch["jets"] = jets
+    inputs_pytorch[global_object] = jets
 
     masks_pytorch = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
 
-    global_object = "jets"
     structured_input_dict = get_structured_input_dict(inputs_pytorch, variable_map, global_object)
 
     outputs_pytorch = pt_model(inputs_pytorch, masks_pytorch)[0]
 
-    if "jets" in outputs_pytorch:
+    if global_object in outputs_pytorch:
         global_pred_pytorch = []
-        global_tasks = [t for t in pt_model.model.tasks if t.input_name == "jets"]
+        global_tasks = [t for t in pt_model.model.tasks if t.input_name == global_object]
 
-        for i, out in enumerate(list(outputs_pytorch["jets"].values())):
+        for i, out in enumerate(list(outputs_pytorch[global_object].values())):
             if global_tasks[i].name not in tasks_to_output:
                 continue
             onnx_out = global_tasks[i].get_onnx(out, labels=structured_input_dict)
@@ -55,7 +55,7 @@ def compare_output(
     else:
         global_pred_pytorch = []
 
-    inputs_onnx = {"jet_features": jets.numpy()}
+    inputs_onnx = {f"{global_object.removesuffix('s')}_features": jets.numpy()}
     for seq, seqn in zip(sequences, seq_names_onnx, strict=False):
         inputs_onnx[seqn] = seq.squeeze(0).numpy()
 
@@ -134,7 +134,13 @@ def compare_output(
 
 
 def compare_outputs(
-    pt_model, onnx_path, seq_names_salt, seq_names_onnx, variable_map, tasks_to_output
+    pt_model,
+    onnx_path,
+    global_object,
+    seq_names_salt,
+    seq_names_onnx,
+    variable_map,
+    tasks_to_output,
 ):
     print("\n" + "-" * 100)
     print("Validating ONNX model...")
@@ -150,6 +156,7 @@ def compare_outputs(
             compare_output(
                 pt_model,
                 session,
+                global_object,
                 seq_names_salt,
                 seq_names_onnx,
                 variable_map,
