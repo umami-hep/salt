@@ -1,4 +1,5 @@
 import warnings
+from collections.abc import Callable
 from copy import deepcopy
 
 import h5py
@@ -34,6 +35,7 @@ class SaltDataset(Dataset):
         PARAMETERS: dict | None = None,
         selections: dict[str, list[str]] | None = None,
         ignore_finite_checks: bool = False,
+        transforms: list[Callable] | None = None,
     ):
         """An efficient map-style dataset for loading data from an H5 file containing structured
         arrays.
@@ -70,6 +72,8 @@ class SaltDataset(Dataset):
             Selections to apply to the input data, by default None.
         ignore_finite_checks: bool, optional
             Ignoring check for non-finite inputs
+        transforms: list, optional
+            Transformations to apply to the data, by default None.
         """
         super().__init__()
         # check labels have been configured
@@ -94,6 +98,7 @@ class SaltDataset(Dataset):
         self.global_object = global_object
         self.selections = selections
         self.selectors = {}
+        self.transforms = transforms
         if self.selections:
             for key, value in self.selections.items():
                 self.selectors[key] = TrackSelector(Cuts.from_list(value))
@@ -221,7 +226,14 @@ class SaltDataset(Dataset):
 
             # load standard inputs for this input type
             elif self.input_variables.get(input_name):
-                flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
+                # Apply transforms while variable names are still accessible
+                struct_array = batch[self.input_variables[input_name]]
+                if self.transforms:
+                    for transform in self.transforms:
+                        struct_array = transform(struct_array, input_name)
+
+                flat_array = s2u(struct_array, dtype=np.float32)
+
                 if self.non_finite_to_num:
                     flat_array = np.nan_to_num(flat_array, posinf=0, neginf=0)
                 inputs[input_name] = torch.from_numpy(maybe_copy(flat_array))
