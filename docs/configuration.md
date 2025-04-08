@@ -83,7 +83,28 @@ init_args:
 Note, when using `label_map` you also need to provide `class_names`.
 When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
 
+#### Input Augmentation
 
+Different transformations ("transforms") can be applied to input data after being loaded but before training. You can choose from the classes defined in `salt.data.transforms` and they are applied in the same order that they are defined in the configuration file. Transforms are specified under the `data` configuration block.
+
+The `GaussianNoise` class is available for applying noise to the input features of your choice. The input type (usually `jets` or `tracks`), variable name, and mean and standard deviation of the desired noise are specified. The mean and standard deviation are fractions of the input values. An example config for this is shown below.
+
+```yaml
+transforms:
+  - class_path: salt.data.transforms.GaussianNoise
+    init_args:
+      noise_params:
+        - input_type: jets
+          variable: pt_btagJes
+          mean: 0.0
+          std: 0.1
+        - input_type: tracks
+          variable: d0
+          mean: 0.1
+          std: 0.05
+```
+
+This will add noise with mean 0 and standard deviation 0.1 to the `pt_btagJes` jet feature and separately add noise with mean 0.1 and standard deviation 0.05 to the `d0` track feature.
 
 #### Data From S3
 
