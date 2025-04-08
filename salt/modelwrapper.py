@@ -184,9 +184,9 @@ class ModelWrapper(L.LightningModule):
 
     def log_losses(self, loss, stage):
         kwargs = {"sync_dist": len(self.trainer.device_ids) > 1}
-        self.log(f"{stage}_loss", loss["loss"], **kwargs)
+        self.log(f"{stage}/loss", loss["loss"], **kwargs)
         for t, loss_value in loss.items():
-            n = f"{stage}_{t}_loss" if "loss" not in t else f"{stage}_{t}"
+            n = f"{stage}/{t}_loss" if "loss" not in t else f"{stage}/{t}"
             self.log(n, loss_value, **kwargs)
 
     def training_step(self, batch):

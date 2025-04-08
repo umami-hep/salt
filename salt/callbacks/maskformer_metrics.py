@@ -45,8 +45,7 @@ class MaskformerMetrics(Callback):
 
         def log(metrics, stage):
             for t, loss_value in metrics.items():
-                n = f"{stage}_{t}"
-                module.log(n, loss_value, **kwargs)
+                module.log(f"{stage}/{t}", loss_value, **kwargs)
 
         self.log = log
         # make Not hard-coded
