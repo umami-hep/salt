@@ -134,24 +134,32 @@ class SaltDataset(Dataset):
             for idx, param_key in enumerate(self.PARAMETERS.keys()):
                 assert self.input_variables["PARAMETERS"][idx] == param_key
 
-        # setup datasets and accessor arrays
-        self.dss = {}
-        self.arrays = {}
-        for internal, external in self.input_map.items():
-            self.dss[internal] = self.file[external]
-            this_vars = self.labels[internal].copy() if internal in self.labels else []
-            this_vars += self.input_variables.get(internal, [])
-            if internal == "EDGE":
-                dtype = get_dtype_edge(self.file[external], this_vars)
-            else:
-                dtype = get_dtype(self.file[external], this_vars)
-            self.arrays[internal] = np.array(0, dtype=dtype)
-        if self.global_object not in self.dss:
-            self.dss[self.global_object] = self.file[self.global_object]
-
         # set number of objects
         self.num = self.get_num(num)
         self.ignore_finite_checks = ignore_finite_checks
+
+        self._is_setup = False
+
+    def _setup(self):
+        """Setup the dataset."""
+        # setup datasets and accessor arrays
+        self.dss = {}
+        self.arrays = {}
+        file = h5py.File(self.filename, "r")
+
+        for internal, external in self.input_map.items():
+            self.dss[internal] = file[external]
+            this_vars = self.labels[internal].copy() if internal in self.labels else []
+            this_vars += self.input_variables.get(internal, [])
+            if internal == "EDGE":
+                dtype = get_dtype_edge(file[external], this_vars)
+            else:
+                dtype = get_dtype(file[external], this_vars)
+            self.arrays[internal] = np.array(0, dtype=dtype)
+        if self.global_object not in self.dss:
+            self.dss[self.global_object] = file[self.global_object]
+
+        self._is_setup = True
 
     def __len__(self):
         """Return the number of samples in the dataset."""
@@ -175,6 +183,10 @@ class SaltDataset(Dataset):
         labels = {}
         pad_masks = {}
 
+        # Some weird bug seem to occur due to hdf5 not being thread safe. The below ensures
+        # that each worker has its own copy of the file to prevent
+        if not self._is_setup:
+            self._setup()
         # loop over input types
         for input_name in self.input_map:
             # load data (inputs + labels) for this input type
@@ -293,7 +305,7 @@ class SaltDataset(Dataset):
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
-        num_available = len(self.dss[self.global_object])
+        num_available = len(self.file[self.global_object])
 
         # not enough objects
         if num_requested > num_available:
