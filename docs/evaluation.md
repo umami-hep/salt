@@ -50,7 +50,7 @@ The variables can be configured as follows within the `PredictionWriter` callbac
 callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
-        monitor_loss: val_jet_classification_loss
+        monitor_loss: val/jet_classification_loss
     - class_path: salt.callbacks.PredictionWriter
       init_args:
         write_tracks: False
