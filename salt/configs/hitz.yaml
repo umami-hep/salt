@@ -88,7 +88,7 @@ trainer:
   callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
-        monitor_loss: val_gaussian_regression_loss
+        monitor_loss: val/gaussian_regression_loss
     - class_path: salt.callbacks.PredictionWriter
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar

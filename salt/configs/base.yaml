@@ -30,7 +30,7 @@ trainer:
   callbacks:
     - class_path: salt.callbacks.Checkpoint
       init_args:
-        monitor_loss: val_jets_classification_loss
+        monitor_loss: val/jets_classification_loss
     - class_path: salt.callbacks.PredictionWriter
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
