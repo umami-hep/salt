@@ -25,6 +25,10 @@ model:
         - input_name: flows
           dense_config:
             <<: *init
+        # Adding electrons
+        - input_name: electrons
+          dense_config:
+            <<: *init
 
       encoder:
         class_path: salt.models.TransformerV2
@@ -34,7 +38,8 @@ model:
           out_dim: &out_dim 256
           # flash attention
           attn_type: flash-varlen
-          norm: LayerNorm
+          norm: RMSNorm
+          norm_type: hybrid
           dense_kwargs:
             activation: *activation
             gated: True
@@ -143,6 +148,7 @@ data:
     jets: jets
     tracks: tracks_ghost
     flows: flows
+    electrons: electrons
   # loose tracks
   selections: null
   non_finite_to_num: True
@@ -182,6 +188,35 @@ data:
       - deta
       - dphi
       - isCharged
+    electrons:
+      - pt
+      - ptfrac
+      - ptrel
+      - dr
+      - abs_eta
+      - eta
+      - phi
+      - ftag_et
+      - qOverP
+      - d0RelativeToBeamspot
+      - d0RelativeToBeamspotSignificance
+      - ftag_ptVarCone30OverPt
+      - numberOfPixelHits
+      - numberOfSCTHitsInclDead
+      - ftag_deltaPOverP
+      - eProbabilityHT
+      - deltaEta1
+      - deltaPhiRescaled2
+      - ftag_energyOverP
+      - Rhad
+      - Rhad1
+      - Eratio
+      - weta2
+      - Rphi
+      - Reta
+      - wtots1
+      - f1
+      - f3
 
   train_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_train.h5
   val_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_val.h5
