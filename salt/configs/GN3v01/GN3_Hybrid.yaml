@@ -1,0 +1,12 @@
+# Adds hybrid norm to the encoder
+name: GN3_Hybrid
+
+model:
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      encoder:
+        class_path: salt.models.TransformerV2
+        init_args:
+          norm: RMSNorm
+          norm_type: hybrid
