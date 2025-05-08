@@ -1,5 +1,5 @@
 # On top of GN3_Hybrid or GN3_Charge
-# Adds electrons
+# Adds electrons and concatenates jet features to global jet representation
 name: GN3_SoftE
 
 model:
@@ -23,11 +23,15 @@ model:
 
 data:
   input_map:
+    GLOBAL: GLOBAL
     jets: jets
     tracks: tracks_ghost
     flows: flows
     electrons: electrons
   variables:
+    GLOBAL:
+      - pt_btagJes
+      - eta_btagJes
     jets:
       - pt_btagJes
       - eta_btagJes
