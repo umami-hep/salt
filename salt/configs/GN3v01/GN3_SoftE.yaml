@@ -41,8 +41,8 @@ data:
       - dphi
       - deta
       - qOverP
-      - IP3D_signed_d0_significance
-      - IP3D_signed_z0_significance
+      - lifetimeSignedD0Significance
+      - lifetimeSignedZ0SinThetaSignificance
       - phiUncertainty
       - thetaUncertainty
       - qOverPUncertainty
