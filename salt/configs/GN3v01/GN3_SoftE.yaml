@@ -21,6 +21,83 @@ model:
           dense_config:
             <<: *init
 
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config: &task_dense_config
+                  input_size: &pooled_dim 258
+                  # split light classes
+                  output_size: 6
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                use_class_dict: True
+                loss: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: &out_dim 256
+                  output_size: 8
+                  context_size: *pooled_dim
+                  activation: *activation
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 512
+                  output_size: 1
+                  context_size: *pooled_dim
+                  activation: *activation
+            # TrackType task
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_type
+                input_name: tracks
+                label: ftagTruthTypeLabel
+                label_map: { -2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5 }
+                class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                  init_args:
+                    weight: [3.56, 13.3, 1.0, 6.49, 21.48, 109.72]
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: *out_dim
+                  output_size: 6
+                  context_size: *pooled_dim
+                  activation: *activation
+            # Jet pT regression task
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: jet_pt_regression
+                input_name: jets
+                targets: ptFromTruthDressedWZJet
+                target_denominators: pt_btagJes
+                loss:
+                  class_path: torch.nn.L1Loss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 1
+                  activation: *activation
+
 data:
   input_map:
     GLOBAL: GLOBAL

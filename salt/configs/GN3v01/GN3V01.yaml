@@ -63,7 +63,7 @@ model:
                 use_class_dict: True
                 loss: torch.nn.CrossEntropyLoss
                 dense_config: &task_dense_config
-                  input_size: *out_dim
+                  input_size: &pooled_dim 258
                   # split light classes
                   output_size: 6
                   hidden_layers: [128, 64, 32]
@@ -77,8 +77,9 @@ model:
                 loss: torch.nn.CrossEntropyLoss
                 dense_config:
                   <<: *task_dense_config
+                  input_size: *out_dim
                   output_size: 8
-                  context_size: *out_dim
+                  context_size: *pooled_dim
                   activation: *activation
             - class_path: salt.models.VertexingTask
               init_args:
@@ -92,7 +93,7 @@ model:
                   <<: *task_dense_config
                   input_size: 512
                   output_size: 1
-                  context_size: *out_dim
+                  context_size: *pooled_dim
                   activation: *activation
             # TrackType task
             - class_path: salt.models.ClassificationTask
@@ -108,8 +109,9 @@ model:
                     weight: [3.56, 13.3, 1.0, 6.49, 21.48, 109.72]
                 dense_config:
                   <<: *task_dense_config
+                  input_size: *out_dim
                   output_size: 6
-                  context_size: *out_dim
+                  context_size: *pooled_dim
                   activation: *activation
             # Jet pT regression task
             - class_path: salt.models.RegressionTask
@@ -141,7 +143,6 @@ model:
                 dense_config:
                   <<: *task_dense_config
                   output_size: 3
-                  input_size: *out_dim
 
 data:
   input_map:
