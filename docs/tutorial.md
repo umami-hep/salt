@@ -1,4 +1,4 @@
-# Tutorial: Using the Software Package
+# Open Data Tutorial
 
 In this tutorial, we will walk through the steps to use the salt software package. 
 This tutorial has been given a few times, in
@@ -128,7 +128,7 @@ You can use the [puma](https://github.com/umami-hep/puma) plotting software and 
 
 An example script is provided here. You should have installed the dependencies `numpy`, `pandas`, `atlas-ftag-tools`, and `puma-hep` as part of the `salt` installation.
 
-???+ info "Example plotting script to obtain ROC curve `plot_roc.py` "
+??? info "Example plotting script to obtain ROC curve `plot_roc.py` "
 
     ```python
     import numpy as np
@@ -260,7 +260,7 @@ salt test --config logs/GN2_<new timestamp>/config.yaml --data.test_file <path t
 Again, you will find the output `h5` file in the corresponding `ckpts` directory.
 Now you can compare the performance between the two models with the following script. The type of comparison is called "Ablation study" because it removes some parts of the model to study their significance for the model.
 
-???+ info "Example plotting script to compare ROC curves `plot_roc_ablation.py` "
+??? info "Example plotting script to compare ROC curves `plot_roc_ablation.py` "
 
     ```python
     import numpy as np
