@@ -118,15 +118,15 @@ Salt is designed to be fully modular, but ships with a flexible model architectu
 This architecture facilitates the training of multimodal and multitask models as depicted in \autoref{fig:salt-arch}, and is designed to take advantage of multiple input modalities.
 In the context of jet classification, these input modalities might include global features of the jet and varying numbers of jet constituents such as charged particle trajectories, calorimeter energy depositions, reconstructed leptons, or inner detector spacepoints.
 The architecture is described briefly below.
-First, any global input features are concatenated with the features of each constituent.
-Next, an initial embedding to a shared representation space is performed separately for each type of constituent.
-The different types of constituents are then projected into a shared representation space by a series of initialisation networks.
-The embedded constituents are then combined and fed into a encoder network that processes constituents of different modalities in a unified way.
+First, each input type (e.g., tracks, calorimeter deposits) is independently projected into a common embedding space of fixed dimension  using separate initialisation networks.
+These initialisation networks can optionally concatenate global features with constituent features and apply positional encoding to certain features (for example azimuthal angle).
+Once embedded, the different types of constituents are considered to be in the same semantic space and are processed together by a transformer encoder that allows them to interact through stacked multi-head attention layers.
+The encoder maintains the same embedding dimension throughout its layers and can optionally update edge features if they are present.
 The encoder then outputs to a set of task-specific modules, each tailored to a specific learning objective.
 This architecture allows the model to leverage all the available detector information, leading to improved performance.
-A concrete example of this architecture is in use at ATLAS [@GN1; @GN2X].
+Concrete examples of this architecture are in use at ATLAS [@GN1; @GN2X].
 
-![This diagram illustrates the flow of information within a generic model trained using `Salt`. In this example, global object features are provided alongisde two types of constituents. The model is configured with three training objectives, each of which may relate to the global object or the one of the constituent modalities. Concatenation is denoted by $\oplus$.\label{fig:salt-arch}](salt-arch.png){ width=90% }
+![This diagram illustrates the flow of information within a generic model trained using `Salt`. In this example, global object features are provided alongisde two types of constituents, "Type A" and "Type B", which represent different input modalities such as charged particle trajectories or calorimeter energy depositions. The model is configured with three training objectives, each of which may relate to the global object or the one of the constituent modalities. Concatenation is denoted by $\oplus$.\label{fig:salt-arch}](salt-arch.png){ width=90% }
 
 
 # Related work

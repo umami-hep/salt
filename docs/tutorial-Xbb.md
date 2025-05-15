@@ -1,4 +1,6 @@
-# Salt framework for $X \rightarrow bb$ tagger tutorial
+# Internal Tutorial
+
+!!!warning "This tutorial is for CERN users. If you don't have a CERN account, you can following the [open tutorial](tutorial.md) instead."
 
 ## Introduction
 
