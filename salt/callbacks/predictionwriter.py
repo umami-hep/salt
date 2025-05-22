@@ -133,6 +133,8 @@ class PredictionWriter(Callback):
         to_write = {}
         blow = batch_idx * self.batch_size
         bhigh = (batch_idx + 1) * self.batch_size
+        if bhigh > self.num:
+            bhigh = self.num
         for input_name, outputs in batch_outputs.items():
             this_outputs = []
 
