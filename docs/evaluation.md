@@ -72,3 +72,36 @@ If you want to study the track aux task performance, you need to specify `write_
 The full API for the `PredictionWriter` callback is found below.
 
 ### ::: salt.callbacks.PredictionWriter
+
+### Integrated Gradients 
+
+Integrated gradients is a method for attributing contributions from each input feature to model outputs. Further details
+can be found [here](https://indico.cern.ch/event/1526345/contributions/6446806/attachments/3044515/5379104/IG_PUB-1.pdf).
+A callback can be added to the config after training has been completed, before evaluation is run. 
+An example can be found below:
+
+
+```yaml
+callbacks:
+  - class_path: salt.callbacks.IntegratedGradientWriter
+    init_args:
+      add_softmax: true
+      n_baselines: 5
+      min_allowed_track_sizes: 5
+      max_allowed_track_sizes: 25
+      n_steps: 50
+      n_jets: 100_000
+      internal_batch_size: 10_000
+      input_keys:
+        inputs: 
+          - jets
+          - tracks
+        pad_masks:
+          - tracks
+      output_keys: [jets, jets_classification]
+      overwrite: true
+```
+
+decriptions of the parameters can be found below:
+
+### ::: salt.callbacks.IntegratedGradientWriter
