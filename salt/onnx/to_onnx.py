@@ -18,7 +18,7 @@ from salt.utils.get_structured_input_dict import get_structured_input_dict
 from salt.utils.union_find import get_node_assignment_jit
 
 torch.manual_seed(42)
-# https://gitlab.cern.ch/atlas/athena/-/blob/master/PhysicsAnalysis/JetTagging/FlavorTagDiscriminants/Root/DataPrepUtilities.cxx
+# https://gitlab.cern.ch/atlas/athena/-/blob/main/PhysicsAnalysis/JetTagging/FlavorTagInference/Root/TracksLoader.cxx#L74
 TRACK_SELECTIONS = [
     "all",
     "ip3d",
