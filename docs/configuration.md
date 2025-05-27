@@ -83,6 +83,23 @@ init_args:
 Note, when using `label_map` you also need to provide `class_names`.
 When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
 
+#### Relabelling on the fly
+
+Similarly, it is possible to modify the labels available from the dataloading to use different ones during training. In particular, if a set of flavour labels has been used during preprocessing, these can be changed by relabelling on-the-fly to a new set of classes. These will typically be a more granular breakdown of the inital classes.
+For example, if in preprocessing the classes `hbb`, `hcc`, `top`, `qcd`, have been used, one may want to breakdown the qcd class into its subclasses `qcdbb`, `qcdbx`, `qcdcx`, `qcdll`.
+To do so, the following config can be used:
+
+```yaml
+data:
+
+  use_labeller: True
+  class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
+    ...
+```
+The list of classes in class_names is different from the ones available in the preprocessing output.
+Note, when using `use_labeller: True` you also need to provide `class_names`. The model output size for the ClassificationTask will also need to be modified accordingly to match the new number of output classes.
+At present, this feature is only available for jets and for the `flavour_label` label in the ClassificationTask.
+
 #### Input Augmentation
 
 Different transformations ("transforms") can be applied to input data after being loaded but before training. You can choose from the classes defined in `salt.data.transforms` and they are applied in the same order that they are defined in the configuration file. Transforms are specified under the `data` configuration block.
