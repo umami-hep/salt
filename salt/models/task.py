@@ -87,6 +87,13 @@ class ClassificationTask(TaskBase):
             If True, read class weights for the loss from the class_dict file.
         **kwargs
             Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
+
+        Raises
+        ------
+        ValueError
+            If label map is defined but corresponding class names are not.
+        ValueError
+            If the defined number of outputs does not match the defined number of classes.
         """
         super().__init__(**kwargs)
         self.label = label
@@ -118,7 +125,12 @@ class ClassificationTask(TaskBase):
         return [f"{self.model_name}_{px}" for px in pxs]
 
     def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
-        """Apply per sample weights, if specified."""
+        """Apply per sample weights, if specified.
+
+        Returns
+        -------
+            The simple or weighted loss
+        """
         if self.sample_weight is None:
             return loss
         return (loss * labels_dict[self.input_name][self.sample_weight]).mean()
@@ -216,6 +228,12 @@ class RegressionTaskBase(TaskBase, ABC):
             Name(s) of regression output(s), overwrites the standard "model name + numerator"
         **kwargs
             Keyword arguments for [`salt.models.TaskBase`][salt.models.TaskBase].
+
+        Raises
+        ------
+        ValueError
+            If multiple flags for scaling methods are defined.
+            If number of computed parameters does not match number of regression targets.
         """
         super().__init__(**kwargs)
         self.scaler = scaler
@@ -258,6 +276,15 @@ class RegressionTaskBase(TaskBase, ABC):
         If Nans are included in the targets, then the loss should be instansiated
         with the `reduction="none"` option, and this function will take the mean
         excluding any nans.
+
+        Returns
+        -------
+            The computed mean for the loss.
+
+        Raises
+        ------
+        ValueError
+            If model predictions are NaN.
         """
         invalid = torch.isnan(targets)
         preds = torch.where(invalid, torch.zeros_like(preds), preds)
@@ -322,6 +349,11 @@ class RegressionTask(RegressionTaskBase):
         **kwargs
             Keyword arguments for
             [`salt.models.RegressionTaskBase`][salt.models.RegressionTaskBase].
+
+        Raises
+        ------
+        ValueError
+            If number of outputs does not match number of regression targets.
         """
         super().__init__(**kwargs)
         if self.net.output_size != len(self.targets):
@@ -396,6 +428,11 @@ class GaussianRegressionTask(RegressionTaskBase):
         **kwargs
             Keyword arguments for
             [`salt.models.RegressionTaskBase`][salt.models.RegressionTaskBase].
+
+        Raises
+        ------
+        ValueError
+            If number of regression targets is not twice the number of class outputs.
         """
         super().__init__(**kwargs)
         if self.net.output_size != 2 * len(self.targets):

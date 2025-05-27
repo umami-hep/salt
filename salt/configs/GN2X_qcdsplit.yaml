@@ -1,4 +1,4 @@
-name: GN2X
+name: GN2X_qcdsplit
 
 model:
   lrs_config:
@@ -22,6 +22,12 @@ model:
             output_size: *embed_dim
             hidden_layers: [256]
             activation: *activation
+        - input_name: truth_hadrons
+          dense_config:
+            output_size: *embed_dim
+            hidden_layers: [256]
+            activation: *activation
+
 
       encoder:
         class_path: salt.models.TransformerV2
@@ -54,12 +60,13 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
+                class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdxx']
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0, 1.0, 1.5]}
+                  init_args: { weight: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5, 1.5]}
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 4
+                  output_size: 7
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
@@ -94,6 +101,10 @@ model:
                   context_size: *out_dim
 
 data:
+
+  use_labeller: True
+  class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdxx']
+
   num_inputs:
     tracks: 100
     flow: 100
@@ -128,18 +139,32 @@ data:
       - flow_energy
       - flow_deta
       - flow_dphi
+    truth_hadrons:
+      - charge
+      - pt
+      - mass
+      - energy
+      - eta
+      - phi
+      - deta
+      - dphi
+      - dr
+      - Lxy
+  num_train: 30000000
+  num_val: 3000000
+  num_test: 3000000
 
 
-  train_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_train.h5
-  val_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_val.h5
-  norm_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/norm_dict.yaml
-  class_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/class_dict.yaml
+  train_file: /share/lustre/ecritelli/xbb_preprocessing_v2/output/pp_output_train.h5
+  val_file: /share/lustre/ecritelli/xbb_preprocessing_v2/output/pp_output_val.h5
+  norm_dict: /share/lustre/ecritelli/xbb_preprocessing_v2/output/norm_dict.yaml
+  class_dict: /share/lustre/ecritelli/xbb_preprocessing_v2/output/class_dict.yaml
 
-  batch_size: 2000
-  num_workers: 40
+  batch_size: 500
+  num_workers: 20
 
 trainer:
   max_epochs: 20
   accelerator: gpu
   devices: 3
-  precision: bf16-mixed
+  precision: bf16 #bf16-mixed

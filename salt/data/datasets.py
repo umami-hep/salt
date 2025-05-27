@@ -5,7 +5,7 @@ from copy import deepcopy
 import h5py
 import numpy as np
 import torch
-from ftag import Cuts
+from ftag import Cuts, Labeller
 from ftag.track_selector import TrackSelector
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
@@ -26,6 +26,8 @@ class SaltDataset(Dataset):
         variables: Vars,
         stage: str,
         num: int = -1,
+        use_labeller: bool = False,
+        class_names: list[str] | None = None,
         labels: Vars = None,
         mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
@@ -52,6 +54,12 @@ class SaltDataset(Dataset):
             Stage of the training process
         num : int, optional
             Number of input samples to use. If `-1`, use all input samples
+        use_labeller : bool
+            If True, allows to manually specify the flavour label classes,
+            so they can differ from those read from the batch output
+        class_names : list, optional
+            List of the new flavour label classes to target,
+            if use_labeller is true
         labels : Vars
             List of required labels for each input type
         mf_config : MaskformerConfig, optional
@@ -74,6 +82,11 @@ class SaltDataset(Dataset):
             Ignoring check for non-finite inputs
         transforms: list, optional
             Transformations to apply to the data, by default None.
+
+        Raises
+        ------
+        ValueError
+            if use_labeller is set to true but the classes for relabelling are not supplied.
         """
         super().__init__()
         # check labels have been configured
@@ -112,6 +125,15 @@ class SaltDataset(Dataset):
         self.norm_dict = norm_dict
         self.PARAMETERS = PARAMETERS
         self.stage = stage
+        self.use_labeller = use_labeller
+        self.class_names = class_names
+        if self.use_labeller and self.class_names is None:
+            raise ValueError("Specify target classes for relabelling")
+        if self.use_labeller is True and self.class_names is not None:
+            self.labeller = Labeller(self.class_names)
+        else:
+            self.labeller = None
+
         self.rng = np.random.default_rng()
 
         # check that num_inputs contains valid keys
@@ -149,8 +171,11 @@ class SaltDataset(Dataset):
 
         for internal, external in self.input_map.items():
             self.dss[internal] = file[external]
-            this_vars = self.labels[internal].copy() if internal in self.labels else []
-            this_vars += self.input_variables.get(internal, [])
+            if (internal == external) and internal == "jets":
+                this_vars = list(self.file[internal].dtype.fields.keys())
+            else:
+                this_vars = self.labels[internal].copy() if internal in self.labels else []
+                this_vars += self.input_variables.get(internal, [])
             if internal == "EDGE":
                 dtype = get_dtype_edge(file[external], this_vars)
             else:
@@ -162,7 +187,13 @@ class SaltDataset(Dataset):
         self._is_setup = True
 
     def __len__(self):
-        """Return the number of samples in the dataset."""
+        """Return the number of samples in the dataset.
+
+        Returns
+        -------
+        int
+            Number of samples in the dataset
+        """
         return int(self.num)
 
     def __getitem__(self, object_idx):
@@ -178,6 +209,11 @@ class SaltDataset(Dataset):
         tuple
             Dict of tensor for each of the inputs, pad_masks, and labels.
             Each tensor will contain a batch of samples.
+
+        Raises
+        ------
+        ValueError
+            If non finite input values are found in the jets.
         """
         inputs = {}
         labels = {}
@@ -274,34 +310,13 @@ class SaltDataset(Dataset):
                         )
 
             # process labels for this input type
-            if input_name in self.labels:
-                labels[input_name] = {}
-                for label in self.labels[input_name]:
-                    dtype = torch.long if np.issubdtype(batch[label].dtype, np.integer) else None
-                    batch_label = maybe_copy(batch[label])
-                    labels[input_name][label] = torch.as_tensor(batch_label, dtype=dtype)
-                    x = torch.as_tensor(batch_label, dtype=dtype)
-                    if input_name == "objects" and label == self.mf_config.object.class_label:
-                        for k, v in self.mf_config.object.class_map.items():
-                            x[x == k] = v
-                            labels[input_name]["object_class"] = x
-                    labels[input_name][label] = x
-
-                # hack to handle the old umami train file format
-                if input_name == self.global_object and "/" in self.labels:
-                    if self.global_object not in labels:
-                        labels[self.global_object] = {}
-                    for label in self.labels["/"]:
-                        labels[input_name][label] = torch.as_tensor(
-                            self.file["labels"][object_idx], dtype=torch.long
-                        )
+            self.process_labels(labels, batch, input_name)
 
         if self.mf_config:
             labels["objects"]["masks"] = build_target_masks(
                 labels["objects"][self.mf_config.object.id_label],
                 labels[self.mf_config.constituent.name][self.mf_config.constituent.id_label],
             )
-
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
@@ -345,14 +360,46 @@ class SaltDataset(Dataset):
                     f" '{self.filename}'."
                 )
 
+    def process_labels(self, labels, batch, input_name):
+        if (len(self.labels) != 0) and (input_name in self.labels):
+            labels[input_name] = {}
+            for label in self.labels[input_name]:
+                if self.use_labeller and input_name == "jets" and label == "flavour_label":
+                    self.labeller = Labeller(self.class_names)
+                    all_train_vars = list(self.file["jets"].dtype.fields.keys())
+                    for var in self.labeller.variables:
+                        if var not in all_train_vars:
+                            raise ValueError("Not enough fields to apply labelling cuts.")
+                    labels[input_name][label] = self.class_names
+                    labels_on_the_fly = self.labeller.get_labels(batch)
+                    labels_np = labels_on_the_fly
+                else:
+                    batch_labels = maybe_copy(batch[label])
+                    labels_np = batch_labels
+                dtype = torch.long if np.issubdtype(labels_np.dtype, np.integer) else None
+                labels[input_name][label] = torch.as_tensor(labels_np, dtype=dtype)
+                x = torch.as_tensor(labels_np, dtype=dtype)
+                if input_name == "objects" and label == self.mf_config.object.class_label:
+                    for k, v in self.mf_config.object.class_map.items():
+                        x[x == k] = v
+                        labels[input_name]["object_class"] = x
+                labels[input_name][label] = x
+            return labels[input_name]
+        return None
+
 
 def get_dtype(ds, variables=None) -> np.dtype:
-    """Return a dtype based on an existing dataset and requested variables."""
+    """Return a dtype based on an existing dataset and requested variables.
+
+    Returns
+    -------
+    np.dtype
+        Numpy dtype based on input dataset
+    """
     if variables is None:
         variables = ds.dtype.names
     if "valid" in ds.dtype.names and "valid" not in variables:
         variables.append("valid")
-
     variables_flat = []
     for item in variables:
         if isinstance(item, list):
