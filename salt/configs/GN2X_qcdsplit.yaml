@@ -102,8 +102,10 @@ model:
 
 data:
 
-  use_labeller: True
-  class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdxx']
+  labeller_config:
+    use_labeller: True
+    class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdxx']
+    require_labels: False
 
   num_inputs:
     tracks: 100
