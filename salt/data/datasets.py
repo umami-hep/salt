@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from salt.data.edge_features import get_dtype_edge, get_inputs_edge
 from salt.stypes import Vars
 from salt.utils.array_utils import maybe_copy
-from salt.utils.configs import MaskformerConfig
+from salt.utils.configs import LabellerConfig, MaskformerConfig
 from salt.utils.inputs import as_half
 from salt.utils.mask_utils import build_target_masks
 
@@ -26,8 +26,7 @@ class SaltDataset(Dataset):
         variables: Vars,
         stage: str,
         num: int = -1,
-        use_labeller: bool = False,
-        class_names: list[str] | None = None,
+        labeller_config: LabellerConfig | None = None,
         labels: Vars = None,
         mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
@@ -54,12 +53,8 @@ class SaltDataset(Dataset):
             Stage of the training process
         num : int, optional
             Number of input samples to use. If `-1`, use all input samples
-        use_labeller : bool
-            If True, allows to manually specify the flavour label classes,
-            so they can differ from those read from the batch output
-        class_names : list, optional
-            List of the new flavour label classes to target,
-            if use_labeller is true
+        labeller_config : LabellerConfig, optional
+            Configuration to apply relabelling on-the-fly for jet classification
         labels : Vars
             List of required labels for each input type
         mf_config : MaskformerConfig, optional
@@ -125,15 +120,11 @@ class SaltDataset(Dataset):
         self.norm_dict = norm_dict
         self.PARAMETERS = PARAMETERS
         self.stage = stage
-        self.use_labeller = use_labeller
-        self.class_names = class_names
-        if self.use_labeller and self.class_names is None:
-            raise ValueError("Specify target classes for relabelling")
-        if self.use_labeller is True and self.class_names is not None:
-            self.labeller = Labeller(self.class_names)
+        self.labeller_config = labeller_config
+        if labeller_config and labeller_config.use_labeller:
+            self.labeller = Labeller(labeller_config.class_names, labeller_config.require_labels)
         else:
             self.labeller = None
-
         self.rng = np.random.default_rng()
 
         # check that num_inputs contains valid keys
@@ -364,13 +355,18 @@ class SaltDataset(Dataset):
         if (len(self.labels) != 0) and (input_name in self.labels):
             labels[input_name] = {}
             for label in self.labels[input_name]:
-                if self.use_labeller and input_name == "jets" and label == "flavour_label":
-                    self.labeller = Labeller(self.class_names)
+                if (
+                    self.labeller_config
+                    and self.labeller_config.use_labeller
+                    and input_name == self.global_object
+                    and label == "flavour_label"
+                ):
+                    labeller = self.labeller
                     all_train_vars = list(self.file["jets"].dtype.fields.keys())
-                    for var in self.labeller.variables:
+                    for var in labeller.variables:
                         if var not in all_train_vars:
                             raise ValueError("Not enough fields to apply labelling cuts.")
-                    labels[input_name][label] = self.class_names
+                    labels[input_name][label] = self.labeller_config.class_names
                     labels_on_the_fly = self.labeller.get_labels(batch)
                     labels_np = labels_on_the_fly
                 else:

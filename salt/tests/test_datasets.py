@@ -1,8 +1,10 @@
 import h5py
+import pytest
 import torch
 from ftag import get_mock_file
 
 from salt.data import SaltDataset
+from salt.utils.configs import LabellerConfig
 
 
 def test_salt_dataset():
@@ -43,8 +45,9 @@ def test_input_batch():
     }
     labels = {"jets": ["flavour_label"], "tracks": ["numberOfSCTSharedHits"]}
     cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
-        f, norm_dict, variables, "train", labels=labels, use_labeller=False, class_names=cn
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf
     )
     input_map = {k: k for k in variables}
     for i in range(0, len(dataset), 10):
@@ -71,8 +74,9 @@ def test_process_labels():
     }
     labels = {"jets": ["flavour_label"]}
     cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
-        f, norm_dict, variables, "train", labels=labels, use_labeller=True, class_names=cn
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf
     )
     input_map = {k: k for k in variables}
     for i in range(0, len(dataset), 10):
@@ -93,8 +97,9 @@ def test_file_vars_for_cuts():
     all_file_vars = list(file_open["jets"].dtype.fields.keys())
     labels = {"jets": ["flavour_label"]}
     cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
-        f, norm_dict, input_variables, "train", labels=labels, use_labeller=True, class_names=cn
+        f, norm_dict, input_variables, "train", labels=labels, labeller_config=labellerConf
     )
     all_unique_cuts = list(
         set(sum((label.cuts.variables for label in dataset.labeller.labels), []))
@@ -117,10 +122,16 @@ def test_process_labels_size_check():
     }
     labels = {"jets": ["flavour_label"]}
     class_names = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
-    ds_labeller = SaltDataset(
-        f, norm_dict, variables, "train", labels=labels, use_labeller=True, class_names=class_names
+    labellerConf_true = LabellerConfig(
+        use_labeller=True, class_names=class_names, require_labels=True
     )
-    ds_batch = SaltDataset(f, norm_dict, variables, "train", labels=labels, use_labeller=False)
+    ds_labeller = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf_true
+    )
+    labellerConf_false = LabellerConfig(use_labeller=False)
+    ds_batch = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf_false
+    )
     input_map = {k: k for k in variables}
     for i in range(0, len(ds_labeller), 10):
         ds_labeller[i : i + 10]
@@ -135,3 +146,32 @@ def test_process_labels_size_check():
             labels_batch[input_name] = {}
             batch_output = ds_batch.process_labels(labels_batch, batch_batch, input_name)
             assert batch_output["flavour_label"].size() == on_the_fly_output["flavour_label"].size()
+
+
+def test_process_labels_some_unlabelled():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {
+        "jets": [
+            "pt",
+            "eta",
+            "R10TruthLabel_R22v1",
+            "GhostBHadronsFinalCount",
+            "GhostCHadronsFinalCount",
+        ]
+    }
+    labels = {"jets": ["flavour_label"]}
+    class_names = ["hbb", "top", "qcdbb", "qcdbx", "qcdll"]
+    labellerConf_true = LabellerConfig(
+        use_labeller=True, class_names=class_names, require_labels=True
+    )
+    ds_labeller_requireTrue = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf_true
+    )
+    labellerConf_false = LabellerConfig(use_labeller=False)
+    ds_labeller_requireFalse = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf_false
+    )
+    ds_labeller_requireFalse[0:10]
+    with pytest.raises(ValueError, match="Some objects were not labelled"):
+        ds_labeller_requireTrue[0:10]

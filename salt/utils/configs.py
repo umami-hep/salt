@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass
 
 
@@ -56,14 +57,26 @@ class MaskformerObjectConfig:
 
     @property
     def class_map(self) -> dict[int, int]:
-        """Returns a dictionary mapping raw class labels to mapped class labels."""
+        """Returns a dictionary mapping raw class labels to mapped class labels.
+
+        Raises
+        ------
+        ValueError
+            If object classes are not defined
+        """
         if not self.object_classes:
             raise ValueError("No object classes defined")
         return {v["raw"]: v["mapped"] for v in self.object_classes.values()}
 
     @property
     def class_names(self) -> list[str]:
-        """Returns a list of each class name, ordered by the mapped value."""
+        """Returns a list of each class name, ordered by the mapped value.
+
+        Raises
+        ------
+        ValueError
+            If object classes are not defined
+        """
         if not self.object_classes:
             raise ValueError("No object classes defined")
         sortedmap = sorted(self.object_classes.items(), key=lambda x: x[1]["mapped"])
@@ -91,3 +104,46 @@ class MaskformerConfig:
             self.object = MaskformerObjectConfig(**self.object)
         if isinstance(self.constituent, dict):
             self.constituent = MaskformerObjectConfig(**self.constituent)
+
+
+@dataclass
+class LabellerConfig:
+    """Sub-config for the Labeller config.
+
+    Attributes
+    ----------
+    use_labeller: boolean
+        Confirms if user wants to use the labeller on-the-fly
+    class_names: list
+        Names of the new output classes
+    require_labels: boolean
+        Confirms if all jets are required to be relabelled,
+        or if it is fine for some to remain unlabelled
+    """
+
+    use_labeller: bool
+    require_labels: bool
+    class_names: list[str]
+
+    def __init__(self, use_labeller, class_names=None, require_labels=True):
+        self.use_labeller = use_labeller
+        self.class_names = class_names
+        self.require_labels = require_labels
+        if not self.use_labeller:
+            warnings.warn(
+                "Use Labeller set to False. "
+                "If you've setup other labeller config parameters those will be ignored",
+                stacklevel=2,
+            )
+            self.require_labels = False
+            self.class_names = []
+        if self.use_labeller and not self.class_names:
+            raise ValueError("Specify target classes for relabelling")
+        if self.use_labeller and self.class_names:
+            self.class_names = class_names
+            warnings.warn(
+                "Use Labeller set to True." f"Relabelling to target classes {class_names}",
+                stacklevel=2,
+            )
+            if self.require_labels:
+                self.require_labels = require_labels
