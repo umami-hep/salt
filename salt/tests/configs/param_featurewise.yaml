@@ -66,9 +66,9 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
+                use_class_dict: True
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 2.0, 2.0, 16.8] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 4
@@ -80,11 +80,10 @@ model:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
+                use_class_dict: True
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
