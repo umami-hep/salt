@@ -36,6 +36,7 @@ class SaltDataset(Dataset):
         PARAMETERS: dict | None = None,
         selections: dict[str, list[str]] | None = None,
         ignore_finite_checks: bool = False,
+        recover_malformed: bool = False,
         transforms: list[Callable] | None = None,
     ):
         """An efficient map-style dataset for loading data from an H5 file containing structured
@@ -74,7 +75,9 @@ class SaltDataset(Dataset):
         selections : dict, optional
             Selections to apply to the input data, by default None.
         ignore_finite_checks: bool, optional
-            Ignoring check for non-finite inputs
+            Ignoring check for non-finite inputs.
+        recover_malformed: bool, optional
+            Converts to invalid tracks from malformed inputs in truthOriginLabel.
         transforms: list, optional
             Transformations to apply to the data, by default None.
 
@@ -150,6 +153,7 @@ class SaltDataset(Dataset):
         # set number of objects
         self.num = self.get_num(num)
         self.ignore_finite_checks = ignore_finite_checks
+        self.recover_malformed = recover_malformed
 
         self._is_setup = False
 
@@ -162,7 +166,7 @@ class SaltDataset(Dataset):
 
         for internal, external in self.input_map.items():
             self.dss[internal] = file[external]
-            if (internal == external) and internal == "jets":
+            if (internal == external) and internal == self.global_object:
                 this_vars = list(self.file[internal].dtype.fields.keys())
             else:
                 this_vars = self.labels[internal].copy() if internal in self.labels else []
@@ -336,12 +340,13 @@ class SaltDataset(Dataset):
                 f" Available keys: {available}"
             )
         for k, v in self.variables.items():
-            if k == "EDGE":
-                continue
-            if k == "PARAMETERS":
-                continue
-            if k == "GLOBAL":
-                k = self.global_object  # noqa: PLW2901
+            match k:
+                case "EDGE" | "PARAMETERS":
+                    continue
+                case "GLOBAL":
+                    k = self.global_object  # noqa: PLW2901
+                case _:
+                    pass
             name = self.input_map[k]
             if not isinstance(self.file[name], h5py.Dataset):
                 raise KeyError(f"The object '{name}' in file '{self.filename}' is not a dataset.")
@@ -372,6 +377,8 @@ class SaltDataset(Dataset):
                 else:
                     batch_labels = maybe_copy(batch[label])
                     labels_np = batch_labels
+                if label == "ftagTruthOriginLabel" and len(np.unique(labels_np)) > 9:
+                    labels_np = malformed_truthorigin_check(self, labels_np)
                 dtype = torch.long if np.issubdtype(labels_np.dtype, np.integer) else None
                 labels[input_name][label] = torch.as_tensor(labels_np, dtype=dtype)
                 x = torch.as_tensor(labels_np, dtype=dtype)
@@ -404,3 +411,20 @@ def get_dtype(ds, variables=None) -> np.dtype:
             variables_flat.append(item)
 
     return np.dtype([(n, as_half(x)) for n, x in ds.dtype.descr if n in variables])
+
+
+def malformed_truthorigin_check(ds, input_batch_label):
+    if ds.recover_malformed:
+        warnings.warn(
+            "Malformed truthOriginLabels found with values and counts: "
+            f"{np.unique(input_batch_label, return_counts=True)}"
+            "Recover flag is on, converting to invalid and continuing."
+            "You may still want to check these tracks.",
+            stacklevel=2,
+        )
+        return np.where((input_batch_label > 7) | (input_batch_label < -1), -1, input_batch_label)
+    raise ValueError(
+        f"Malformed truthOriginLabels found with values and counts: "
+        f"{np.unique(input_batch_label, return_counts=True)}"
+        "Recover flag is off, failing."
+    )
