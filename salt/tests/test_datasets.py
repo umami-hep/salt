@@ -1,9 +1,11 @@
 import h5py
+import numpy as np
 import pytest
 import torch
 from ftag import get_mock_file
 
 from salt.data import SaltDataset
+from salt.data.datasets import malformed_truthorigin_check
 from salt.utils.configs import LabellerConfig
 
 
@@ -175,3 +177,29 @@ def test_process_labels_some_unlabelled():
     ds_labeller_requireFalse[0:10]
     with pytest.raises(ValueError, match="Some objects were not labelled"):
         ds_labeller_requireTrue[0:10]
+
+
+def test_malformed_check_pass():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0"]}
+    labels = {"tracks": ["ftagTruthOriginLabel"]}
+    ds = SaltDataset(f, norm_dict, variables, "train", labels=labels, recover_malformed=True)
+    malformed_truthOrigin = np.array([-457384, -3, -2, -1, 0, 1, 5, 7, 8, 7892])
+    recovered_truthOrigin = malformed_truthorigin_check(ds, malformed_truthOrigin)
+    expected = np.array([-1, -1, -1, -1, 0, 1, 5, 7, -1, -1])
+    assert np.array_equal(recovered_truthOrigin, expected)
+    counts = np.unique(recovered_truthOrigin, return_counts=True)
+    expected_counts = (np.array([-1, 0, 1, 5, 7]), np.array([6, 1, 1, 1, 1]))
+    assert np.array_equal(counts, expected_counts)
+
+
+def test_malformed_check_fail():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0"]}
+    labels = {"tracks": ["ftagTruthOriginLabel"]}
+    ds = SaltDataset(f, norm_dict, variables, "train", labels=labels, recover_malformed=False)
+    malformed_truthOrigin = np.array([-457384, -3, -2, -1, 0, 1, 5, 7, 8, 7892])
+    with pytest.raises(ValueError, match="Recover flag is off, failing"):
+        malformed_truthorigin_check(ds, malformed_truthOrigin)

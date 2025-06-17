@@ -85,19 +85,24 @@ When using `flavour_label` as the target, the class names are automatically dete
 
 #### Relabelling on the fly
 
-Similarly, it is possible to modify the labels available from the dataloading to use different ones during training. In particular, if a set of flavour labels has been used during preprocessing, these can be changed by relabelling on-the-fly to a new set of classes. These will typically be a more granular breakdown of the inital classes.
+Similarly, it is possible to modify the labels available from the dataloading to use different ones during training. If a set of flavour labels has been used during preprocessing, these can be changed by relabelling on-the-fly to a new set of classes. These will typically be a more granular breakdown of the inital classes.
 For example, if in preprocessing the classes `hbb`, `hcc`, `top`, `qcd`, have been used, one may want to breakdown the qcd class into its subclasses `qcdbb`, `qcdbx`, `qcdcx`, `qcdll`.
-To do so, the following config can be used:
+Another use case occurs when evaluating a test file which does not contain the `flavour_label` field; this typically happens when the test file has not been processed via UPP. In this case, the classification task (which would otherwise fail with an error on the missing flavour label), runs and the `flavour_label` is generated on-the-fly.
+To apply the relabelling on-the-fly, the following config can be used:
 
 ```yaml
 data:
 
-  use_labeller: True
-  class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
+  labeller_config:
+    use_labeller: True
+    class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdll']
+    require_labels: False
     ...
 ```
-The list of classes in class_names is different from the ones available in the preprocessing output.
+The option `class_names` will contain the list of new target classes to apply the relabelling scheme; these will be different from the ones available in the preprocessing output.
+The option `require_labels` controls whether all the jets will be relabelled to the new target classes. If set to `True` (default), the job will fail if some jets do not verify the selection criteria of any of the new target classes; if set to `False`, a warning is thrown and some jets will not be relabelled.
 Note, when using `use_labeller: True` you also need to provide `class_names`. The model output size for the ClassificationTask will also need to be modified accordingly to match the new number of output classes.
+The labeller is disabled either by removing the `labeller_config` block entirely, or by setting `use_labeller: False`.
 At present, this feature is only available for jets and for the `flavour_label` label in the ClassificationTask.
 
 #### Input Augmentation
