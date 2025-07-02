@@ -382,7 +382,11 @@ class SaltDataset(Dataset):
                 dtype = torch.long if np.issubdtype(labels_np.dtype, np.integer) else None
                 labels[input_name][label] = torch.as_tensor(labels_np, dtype=dtype)
                 x = torch.as_tensor(labels_np, dtype=dtype)
-                if input_name == "objects" and label == self.mf_config.object.class_label:
+                if (
+                    input_name == "objects"
+                    and self.mf_config
+                    and label == self.mf_config.object.class_label
+                ):
                     for k, v in self.mf_config.object.class_map.items():
                         x[x == k] = v
                         labels[input_name]["object_class"] = x
