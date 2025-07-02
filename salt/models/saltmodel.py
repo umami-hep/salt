@@ -183,7 +183,7 @@ class SaltModel(nn.Module):
         for task in self.tasks:
             if task.input_name == task.global_object:
                 task_preds, task_loss = task(preds["global_rep"], labels, None, context=None)
-            elif task.input_name == "objects":
+            elif self.mask_decoder and task.input_name == "objects":
                 task_preds, task_loss = task(preds["objects"]["embed"], labels, masks, context=None)
             else:
                 task_preds, task_loss = task(
