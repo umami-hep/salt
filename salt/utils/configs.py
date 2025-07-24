@@ -27,19 +27,25 @@ class MaskformerObjectConfig:
     name: str
     id_label: str
     class_label: str | None = None
-    object_classes: dict[str | None, dict[str, int]] | None = None
+    object_classes: dict[str | None, dict[str, float | int | list[int]]] | None = None
 
     def __post_init__(self) -> None:
         """Ensure that the object_classes dictionary is valid."""
         if self.object_classes:
             # When reading in 'null', jsonargparse may cast it to None, so cast back
-            assert None in self.object_classes, "Null class must be present"
-            self.object_classes["null"] = self.object_classes.pop(None)
+            if None in self.object_classes:
+                self.object_classes["null"] = self.object_classes.pop(None)
+            elif "null" not in self.object_classes:
+                raise ValueError("Null class must be present in object_classes")
 
             assert self.object_classes["null"]["mapped"] == len(self.object_classes) - 1, (
                 "Null class must be last"
             )
             assert set(self.class_map.values()) == set(range(len(self.object_classes)))
+
+            for k, v in self.object_classes.items():
+                if isinstance(v["raw"], float):
+                    v["raw"] = int(v["raw"])
 
     @property
     def num_classes(self) -> int:
@@ -58,6 +64,19 @@ class MaskformerObjectConfig:
         if not self.object_classes:
             raise ValueError("No object classes defined")
         return len(self.object_classes)
+
+    @property
+    def object_weights(self) -> list[float]:
+        """Returns a list of weights for each class, ordered by the mapped value.
+
+        Raises
+        ------
+        ValueError
+            If object classes are not defined
+        """
+        if not self.object_classes:
+            raise ValueError("No object classes defined")
+        return [v.get("weight", 1.0) for v in self.object_classes.values()]
 
     @property
     def num_not_null_classes(self) -> int:
@@ -104,7 +123,17 @@ class MaskformerObjectConfig:
         """
         if not self.object_classes:
             raise ValueError("No object classes defined")
-        return {v["raw"]: v["mapped"] for v in self.object_classes.values()}
+        def make_tuple(v):
+            if isinstance(v, (list, tuple)):
+                assert all(isinstance(i, int) for i in v), "All values must be integers"
+                return tuple(v)
+            elif isinstance(v, int):
+                return (v,)
+            
+            else:
+
+                return (int(v),)
+        return {make_tuple(v["raw"]): v["mapped"] for v in self.object_classes.values()}
 
     @property
     def class_names(self) -> list[str]:

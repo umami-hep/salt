@@ -639,8 +639,9 @@ class SaltDataset(Dataset):
                     and label == self.mf_config.object.class_label
                 ):
                     for k, v in self.mf_config.object.class_map.items():
-                        x[x == k] = v
-                        labels[input_name]["object_class"] = x
+                        for kk in k:
+                            x[x == kk] = v
+                labels[input_name]["object_class"] = x
                 labels[input_name][label] = x
             return labels[input_name]
         return None

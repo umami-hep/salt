@@ -159,11 +159,17 @@ class HungarianMatcher(nn.Module):
         num_classes: int,
         num_objects: int,
         loss_weights: dict[str, float],
+        object_weights: list[float] | None = None,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_objects = num_objects
         self.loss_weights = loss_weights
+        if object_weights is not None:
+            assert len(object_weights) == num_classes + 1, "Object weights must match number of classes"
+            self.object_weights = torch.tensor(object_weights, dtype=torch.float32)
+        else:
+            self.object_weights = torch.ones(num_classes + 1, dtype=torch.float32)
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
 
         self.global_step = 0
@@ -204,6 +210,7 @@ class HungarianMatcher(nn.Module):
         obj_class_tgt = targets["object_class"].detach()
         obj_class_pred = preds["class_probs"].detach()
         mask_pred = preds["masks"].detach()
+        mask_pred = mask_pred.clamp(min=-1e4, max=1e4)
         mask_tgt = targets["masks"].detach().to(mask_pred.dtype)
 
         valid_obj_idx = obj_class_tgt != self.num_classes
@@ -214,6 +221,8 @@ class HungarianMatcher(nn.Module):
             obj_class_tgt[:, : self.num_classes].unsqueeze(1).expand(-1, obj_class_pred.size(1), -1)
         )
         valid_obj_mask = obj_class_tgt != self.num_classes
+
+
         output = torch.gather(obj_class_pred, 2, obj_class_tgt * valid_obj_mask) * valid_obj_mask
         obj_class_cost = torch.zeros((bs, self.num_objects, self.num_objects), device=dev)
         obj_class_cost[:, :, : self.num_classes] = -output
@@ -224,19 +233,38 @@ class HungarianMatcher(nn.Module):
         # add mask costs
         if self.loss_weights.get("mask_dice"):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
+            if torch.isinf(cost_mask_dice).any() or torch.isnan(cost_mask_dice).any():
+                print("Nans in cost matrix, DICE this is probably due to the mask dice targets being inf.")
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
             cost_matrix += self.loss_weights["mask_dice"] * cost_mask_dice
         if self.loss_weights.get("mask_ce"):
             cost_mask_ce = batch_sigmoid_ce_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_ce"] * cost_mask_ce
+            if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
+                print("Nans in cost matrix, CE this is probably due to the mask ce targets being inf.")
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
+                print("Mask cost:", cost_mask_ce)
         if self.loss_weights.get("mask_focal"):
             cost_mask_focal = batch_sigmoid_focal_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_focal"] * cost_mask_focal
+            if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
+                print("Nans in cost matrix, FOCAL this is probably due to the mask focal loss targets being inf.")
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
 
         # add regression costs
         if "regression" in preds and self.loss_weights.get("regression"):
             reg_pred = preds["regression"]
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
-            cost_matrix += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
+            reg_tgt = torch.nan_to_num(reg_tgt, nan=0.0, posinf=0.0, neginf=0.0)
+            reg_cost = batch_mae_loss(reg_pred, reg_tgt)
+            # TODO figure out why we have nans in the targets...
+            if torch.isnan(reg_cost).any() or torch.isinf(reg_cost).any():
+                print("Nans or infs in cost matrix, REG, this is probably due to the regression targets being nan.")
+                print("Regression targets:", reg_cost)
+            cost_matrix += self.loss_weights["regression"] * reg_cost
 
         # set entries corresponding to invalid objects to nan
         # (these are removed later when running LSAP)
@@ -312,6 +340,10 @@ class HungarianMatcher(nn.Module):
             Ordered list of selected target indices ``idx`` aligned with sources,
             extended by appending any remaining indices to cover all ``num_objects``.
         """
-        src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
+        try:
+            src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
+        except ValueError:
+            print(cost)
+            raise
         idx = src_idx[tgt_idx]
         return list(idx) + sorted(self.default_idx - set(idx))

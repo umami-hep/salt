@@ -12,7 +12,7 @@ from ftag.git_check import check_for_uncommitted_changes, create_and_push_tag
 from jsonargparse import Namespace as JsonNamespace
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
-
+from salt.utils.configs import MaskformerObjectConfig
 from salt.utils.array_utils import listify
 
 
@@ -175,6 +175,9 @@ class SaltCLI(LightningCLI):
         sc_tasks = config.model.model.init_args.tasks.init_args.modules
 
         labels: dict = {}
+        if 'labels' in config.data:
+            labels = config.data.labels
+        # print("Labels are", labels)
         for task in sc_tasks:
             assert "Task" in task["class_path"]
             self.collect_labels_from_task(
@@ -204,6 +207,11 @@ class SaltCLI(LightningCLI):
                 maskformer_config.object.class_label,
             ]
             labels[maskformer_config.constituent.name] += [maskformer_config.constituent.id_label]
+            if config.model.model.init_args.get("mask_decoder").get('init_args',  {}).get('class_weights') is None:
+                config.model.model.init_args.mask_decoder.init_args.class_weights = (
+                    MaskformerObjectConfig(**maskformer_config.object).object_weights
+                )
+                print("OBJECT WEIGHTS", config.model.model.init_args.mask_decoder.init_args.class_weights)
 
         config.data.labels = labels
 
