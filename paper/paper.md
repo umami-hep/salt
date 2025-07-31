@@ -125,7 +125,7 @@ The encoder maintains the same embedding dimension throughout its layers and can
 The encoder then outputs to a set of task-specific modules, each tailored to a specific learning objective.
 The initialisation networks, transformer encoder, and task-specific networks are trained together.
 This approach allows the model to leverage all the available detector information, leading to improved performance.
-Concrete examples of this architecture are in use at ATLAS [@GN1; @GN2X].
+Concrete examples of this architecture are in use at ATLAS [@GN1; @GN2X; @GN2].
 
 ![This diagram illustrates the flow of information within a generic model trained using `Salt`. In this example, global object features are provided alongisde two types of constituents, "Type A" and "Type B", which represent different input modalities such as charged particle trajectories or calorimeter energy depositions. The model is configured with three training objectives, each of which may relate to the global object or the one of the constituent modalities. Concatenation is denoted by $\oplus$.\label{fig:salt-arch}](salt-arch.png){ width=90% }
 
