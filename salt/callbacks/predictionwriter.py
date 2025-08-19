@@ -106,19 +106,14 @@ class PredictionWriter(Callback):
 
         if self.write_objects:
             if not module.model.mask_decoder:
-                raise ValueError("write_objects=True but no mask decoder found in model.")
-            if not self.write_tracks:
                 print("-" * 50)
+                print("WARNING: write_objects=True but no mask decoder found in model.")
+            if not self.write_tracks:
                 print("WARNING: If outputting mask objects, you probably also want tracks")
 
             # Add objects to outputs if there are no main tasks for this
             if "objects" not in self.outputs:
                 self.outputs["objects"] = {}
-
-            self.object_params = {
-                "class_label": self.ds.mf_config.object.class_label,
-                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
-            }
 
     @property
     def output_path(self) -> Path:
@@ -220,7 +215,12 @@ class PredictionWriter(Callback):
                 out_pads[task.input_name] = this_pad_masks
                 add_mask = True
 
-        if self.write_objects:
+        if self.write_objects and self.ds.mf_config:
+            self.object_params = {
+                "class_label": self.ds.mf_config.object.class_label,
+                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
+            }
+
             # Generate the object outputs of the form (B, N) where N is the number of objects
             objects = outputs["objects"]
 
