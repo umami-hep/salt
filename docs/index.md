@@ -51,3 +51,22 @@ Salt is currently used for the following projects:
 ## Statement of Need
 
 High energy physics research increasingly requires sophisticated machine learning tools to address complex data analysis challenges, for example identifying jets from bottom and charm quarks through their distinctive decay signatures in particle detectors. Salt meets this need by providing a versatile and high-performance machine learning framework that supports various tasks including object classification, regression, and set-to-set reconstruction, enabling physicists to effectively analyse complex particle collision signatures such as charged particle trajectories, decay vertices, and jets.
+
+
+## Citing
+
+If you use this software, please cite our article in the Journal of Open Source Software: [10.21105/joss.07217](https://joss.theoj.org/papers/10.21105/joss.07217).
+
+```bibtex
+@article{salt2025,
+  author = {Jackson Barr and Diptaparna Biswas and Maxence Draguet and Philipp Gadow and Emil Haines and Osama Karkout and Dmitrii Kobylianskii and Wei Sheng Lai and Matthew Leigh and Nicholas Luongo and Ivan Oleksiyuk and Nikita Pond and Sébastien Rettie and Andrius Vaitkus and Samuel Van Stroud and Johannes Wagner},
+  title = {Salt: Multimodal Multitask Machine Learning for High Energy Physics},
+  journal = {Journal of Open Source Software},
+  volume = {10},
+  issue = {112},
+  year = {2025},
+  doi = {10.21105/joss.07217},
+  url = {https://joss.theoj.org/papers/10.21105/joss.07217},
+  issn = {2475-9066}
+}
+```
