@@ -1,7 +1,3 @@
-stages:
-  - builds
-  - publish
-
 deploy_pypi:
   stage: publish
   image: registry.cern.ch/docker.io/library/python:3.11-slim
@@ -12,4 +8,4 @@ deploy_pypi:
     - python -m build
     - twine upload dist/* --username $TWINE_USERNAME --password $TWINE_PASSWORD
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+$/ && $CI_PROJECT_PATH == "atlas-flavor-tagging-tools/algorithms/salt"'
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+(?:[.-].+)?$/ && $CI_PROJECT_PATH == "atlas-flavor-tagging-tools/algorithms/salt"'

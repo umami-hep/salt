@@ -7,8 +7,6 @@ variables:
   image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
   artifacts:
     paths: [.coverage*]
-  rules:
-    - changes: ["pyproject.toml", "requirements.txt", "salt/**/*.py", "**/*.yaml"]
 
 # --------------------------- UNIT TESTS ---------------------------
 unit-tests:
