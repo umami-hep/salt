@@ -6,6 +6,30 @@ from salt.stypes import Vars
 
 
 class FeaturewiseTransformation(nn.Module):
+    """Perform feature wise transformations on the features of a layer.
+    https://distill.pub/2018/feature-wise-transformations/.
+
+    Parameters
+    ----------
+    layer : str
+        layer to scale/bias (either "input", "encoder", or "global")
+    variables : Vars
+        Input variables used in the forward pass, set automatically by the framework
+    dense_config_scale : dict | None
+        Keyword arguments for [salt.models.Dense][salt.models.Dense],
+        the dense network performing the scaling, by default None
+    dense_config_bias : dict | None
+        Keyword arguments for [salt.models.Dense][salt.models.Dense],
+        the dense network performing the biasing, by default None
+    apply_norm : bool
+        Apply layer normalisation to the transformed features. By default false.
+
+    Raises
+    ------
+    ValueError
+        If the given layer is not allowed
+    """
+
     def __init__(
         self,
         layer: str,
@@ -14,24 +38,6 @@ class FeaturewiseTransformation(nn.Module):
         dense_config_bias: dict | None = None,
         apply_norm: bool = False,
     ):
-        """Perform feature wise transformations on the features of a layer.
-        https://distill.pub/2018/feature-wise-transformations/.
-
-        Parameters
-        ----------
-        layer : str
-            layer to scale/bias (either "input", "encoder", or "global")
-        variables : Vars
-            Input variables used in the forward pass, set automatically by the framework
-        dense_config_scale : dict
-            Keyword arguments for [salt.models.Dense][salt.models.Dense],
-            the dense network performing the scaling.
-        dense_config_bias : dict
-            Keyword arguments for [salt.models.Dense][salt.models.Dense],
-            the dense network performing the biasing.
-        apply_norm : bool
-            Apply layer normalisation to the transformed features. By default false.
-        """
         super().__init__()
 
         self.layer = layer
@@ -46,11 +52,11 @@ class FeaturewiseTransformation(nn.Module):
         self.norm = None
 
         if dense_config_scale:
-            dense_config_scale["input_size"] = len(variables.get("PARAMETERS", []))
+            dense_config_scale["input_size"] = len(variables.get("parameters", []))
             self.scale_net = Dense(**dense_config_scale)
             self.num_features = self.scale_net.output_size
         if dense_config_bias:
-            dense_config_bias["input_size"] = len(variables.get("PARAMETERS", []))
+            dense_config_bias["input_size"] = len(variables.get("parameters", []))
             self.bias_net = Dense(**dense_config_bias)
             self.num_features = self.bias_net.output_size
 
@@ -63,9 +69,9 @@ class FeaturewiseTransformation(nn.Module):
             self.norm = nn.LayerNorm(self.num_features)
 
     def forward(self, inputs: dict, features: Tensor):
-        if "PARAMETERS" not in inputs:
-            raise ValueError("Featurewise transformations require 'PARAMETERS'.")
-        x = inputs["PARAMETERS"]
+        if "parameters" not in inputs:
+            raise ValueError("Featurewise transformations require 'parameters'.")
+        x = inputs["parameters"]
         if self.scale_net:
             features = self.scale_net(x).unsqueeze(1) * features
         if self.bias_net:

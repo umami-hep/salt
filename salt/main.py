@@ -11,7 +11,14 @@ from salt.modelwrapper import ModelWrapper
 from salt.utils.cli import SaltCLI
 
 
-def main(args: ArgsType = None) -> None:
+def main(args: ArgsType | None = None) -> None:
+    """Run main salt CLI.
+
+    Parameters
+    ----------
+    args : ArgsType | None, optional
+        Command line arguments, by default None
+    """
     config_dir = pathlib.Path(__file__).parent / "configs"
 
     SaltCLI(

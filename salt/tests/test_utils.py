@@ -13,7 +13,7 @@ from salt.utils.scalers import RegressionTargetScaler
 def test_compare_models():
     fname_A = get_mock_file()[0]
     fname_B = get_mock_file()[0]
-    args = ["--file_A", fname_A, "--file_B", fname_B, "--tagger_A", "MockTagger"]
+    args = ["--file_a", fname_A, "--file_b", fname_B, "--tagger_a", "MockTagger"]
     compare_models.main(args)
 
 

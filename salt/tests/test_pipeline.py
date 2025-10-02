@@ -15,7 +15,7 @@ CONFIG = "GN2.yaml"
 TAU_CONFIGS = {"GN2.yaml", "GN3_baseline.yaml"}
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc_params=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc_params=False):
     incl_taus = config_path.name in TAU_CONFIGS
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
@@ -43,11 +43,11 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_muP=False, inc
     if train_args:
         args += train_args
 
-    if do_muP:
-        from salt.utils.muP_utils.main_muP import main as main_muP
+    if do_mup:
+        from salt.utils.muP_utils.main_muP import main as main_mup
 
         # skip fit and callbacks
-        main_muP(args=args[1:-2])
+        main_mup(args=args[1:-2])
 
     main(args)
 
@@ -129,7 +129,7 @@ def run_combined(
     train_args=None,
     export_args=None,
     do_xbb=False,
-    do_muP=False,
+    do_mup=False,
     inc_params=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
@@ -140,7 +140,7 @@ def run_combined(
         config_path = Path(__file__).parent / "configs" / config
 
     # run training
-    run_train(tmp_path, config_path, train_args, do_xbb, do_muP, inc_params)
+    run_train(tmp_path, config_path, train_args, do_xbb, do_mup, inc_params)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -177,7 +177,7 @@ def test_GN3(tmp_path) -> None:
 
 @pytest.mark.filterwarnings(w)
 def test_GN2_muP(tmp_path) -> None:
-    run_combined(tmp_path, "GN2_muP.yaml", do_muP=True, do_onnx=False)
+    run_combined(tmp_path, "GN2_muP.yaml", do_mup=True, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)

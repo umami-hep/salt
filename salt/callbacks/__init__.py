@@ -1,3 +1,7 @@
+"""Callbacks used by SALT during training, validation, and inference."""
+
+from __future__ import annotations
+
 from salt.callbacks.checkpoint import Checkpoint
 from salt.callbacks.gradient_logger import GradientLoggerCallback
 from salt.callbacks.integrated_gradients_writer import IntegratedGradientWriter

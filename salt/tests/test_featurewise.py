@@ -11,7 +11,7 @@ def dense_config():
 
 @pytest.fixture
 def variables():
-    return {"PARAMETERS": ["x"]}
+    return {"parameters": ["x"]}
 
 
 def test_featurewise_forward(dense_config, variables):
@@ -24,7 +24,7 @@ def test_featurewise_forward(dense_config, variables):
         dense_config_bias=dense_config,
     )
 
-    inputs = {"PARAMETERS": torch.randn(1, 1)}
+    inputs = {"parameters": torch.randn(1, 1)}
     features = torch.rand(1, 10, 5)
     transformed_features = featurewise(inputs, features)
 

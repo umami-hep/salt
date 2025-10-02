@@ -116,7 +116,7 @@ model:
 
 data:
   variables:
-    GLOBAL:
+    global:
       - softMuon_pt
       - softMuon_dR
       - softMuon_eta

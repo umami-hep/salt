@@ -40,7 +40,7 @@ if args.environment == "singularity":
         'atlas-flavor-tagging-tools/algorithms/salt:latest"'
     )
     # check host names to determine where to mount storage
-    storage_dir = Path("/tmp")  # noqa: S108
+    storage_dir = Path("/tmp")
     if Path("/etc/hostname").read_text().startswith("lxplus"):
         storage_dir = Path("/eos")
     handler["containerargs"] = f'"--nv --bind {storage_dir}"'

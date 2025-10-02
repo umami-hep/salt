@@ -1,1 +1,0 @@
-git+ssh://git@gitlab.cern.ch:7999/atlas-flavourtagging-algorithms/salt-attribution.git@master#egg=salt-attribution

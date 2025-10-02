@@ -4,7 +4,32 @@ description = "Multimodal and Multiclass Machine Learning for High Energy Physic
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10,<3.12"
-dynamic = ["version", "dependencies", "optional-dependencies"]
+dynamic = ["version"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "atlas-ftag-tools==0.2.8",
+  "comet_ml==3.49.7",
+  "h5py==3.10.0",
+  "jsonargparse[signatures,argcomplete]==4.32.0",
+  "lightning==2.2.0",
+  "lion-pytorch==0.2.2",
+  "numpy==1.24.2",
+  "onnx==1.16.0",
+  "onnxruntime==1.15.1",
+  "rich==13.6.0",
+  "scipy==1.12.0",
+  "torch==2.2.1",
+  "torchmetrics==1.2.1",
+  "tqdm==4.66.1",
+]
 
 [project.urls]
 "Homepage" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt"
@@ -16,7 +41,7 @@ to_onnx = "salt.onnx.to_onnx:main"
 get_onnx_metadata = "salt.utils.get_onnx_metadata:main"
 compare_models = "salt.utils.compare_models:main"
 repair_ckpt = "salt.utils.repair_ckpt:main"
-setup_muP = "salt.utils.muP_utils.main_muP:main"
+setup_mup = "salt.utils.mup_utils.main_mup:main"
 download_S3 = "salt.utils.file_utils:download_from_S3"
 
 [tool.setuptools]
@@ -25,11 +50,32 @@ include-package-data = true
 
 [tool.setuptools.dynamic]
 version = { attr = "salt.__version__" }
-dependencies = { file = ["requirements.txt"] }
 
-[tool.setuptools.dynamic.optional-dependencies]
-muP = { file = ["requirements-muP.txt"] }
-flash = { file = ["requirements-flash.txt"] }
+[project.optional-dependencies]
+dev = [
+  "mypy==1.11.2",
+  "pre-commit==3.5.0",
+  "pydoclint==0.6.6",
+  "ruff==0.6.2",
+]
+test = [
+  "coverage>=7.0",
+  "pytest-cov==4.1.0",
+  "pytest==7.4.2",
+]
+muP = [
+  "boto3==1.28.17",
+  "mup==1.0.0",
+  "s3fs==2023.9.2",
+  "s3path==0.5.0",
+  "tensorboard==2.14.1",
+]
+flash = [
+  "flash-attn==2.5.7",
+  "ninja==1.11.1.1",
+  "packaging",
+  "wheel",
+]
 
 [build-system]
 requires = ["setuptools>=62"]
@@ -38,60 +84,20 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 line-length = 100
 preview = true
-lint.select = ["ALL", "D212", "D417"]
+lint.select = ["ALL"]
 lint.ignore = [
-    "COM",
-    "D100",
-    "D101",
-    "D102",
-    "D103",
-    "D104",
-    "D105",
-    "D205",
-    "D401",
-    "EM",
-    "FIX",
-    "FBT",
-    "S101",
-    "S404",
-    "S602",
-    "PLR2004",
-    "PLR0912",
-    "PLR0913",
-    "PLR0914",
-    "PLR0915",
-    "PLR0917",
-    "PLC0415",
-    "G004",
-    "PD901",
-    "N802",
-    "C901",
-    "DTZ005",
-    "DTZ007",
-    "INP",
-    "EXE002",
-    "TD002",
-    "ANN001",
-    "ANN002",
-    "ANN003",
-    "ANN101",
-    "ANN201",
-    "ANN202",
-    "ANN204",
-    "CPY001",
-    "TRY003",
-    "PLR1702",
-    "N803",
-    "N806",
-    "N812",
-    "T201",
-    "PLW1514",
-    "PTH123",
-    "RUF015",
-    "RUF017",
-    "PLR6301",
-    "ERA",
-    "ISC001",
+  "COM", "D100", "D102", "D105", "D205", "D401", "EM", "FIX", "FBT",
+  "S101", "S404", "S602", "PLR2004", "PLR0912", "PLR0914", "CPY001", "TRY003",
+  "G004", "PD901", "N802", "C901", "DTZ005", "DTZ007", "INP", "EXE002",
+  "ANN001", "ANN002", "ANN003", "ANN101", "ANN201", "ANN202", "ANN204",
+  "T201", "PLW1514", "PTH123", "RUF017", "PLR6301", "ISC001", "S307",
+  "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
+  "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",
+  "PLR0917", "A005", "ANN401", "PLR0915", "RUF015", "PLR6104", "TD003",
+]
+exclude = [
+  "salt/tests/*",
+  "salt/utils/muP_utils/*",
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -101,10 +107,16 @@ convention = "numpy"
 fixture-parentheses = false
 mark-parentheses = false
 
+[tool.ruff.lint.per-file-ignores]
+"salt/tests/**" = ["D100", "D101", "D102", "D103", "D104", "D105", "PT019"]
+
+[tool.mypy]
+exclude = '^salt/tests/.*\.py$'
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "CRITICAL"
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.coverage.report]
-omit = ["**/muP_utils/*"]
+omit = ["**/mup_utils/*"]

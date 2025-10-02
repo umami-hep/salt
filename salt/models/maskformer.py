@@ -10,13 +10,38 @@ from salt.utils.mask_utils import indices_from_mask
 
 
 class MaskDecoder(nn.Module):
-    """Mask decoder for Salt - Uses constituent embeddings to generate object queries,
-    from which a classification task and mask prediction task, as well as any further object
-    level tasks, are performed.
+    """Mask decoder for Salt.
 
-    Based on
-    - https://github.com/facebookresearch/MaskFormer
-    - https://github.com/facebookresearch/Mask2Former
+    Uses constituent/node embeddings to generate a fixed number of object
+    queries. From these queries, it produces (i) classification logits/probabilities
+    and (ii) mask logits over the input sequence. Optional auxiliary outputs at
+    intermediate layers can be returned for deep supervision. If labels are
+    provided, the loss is computed via a MaskFormer-style matching/loss.
+
+    The design takes inspiration from:
+      * https://github.com/facebookresearch/MaskFormer
+      * https://github.com/facebookresearch/Mask2Former
+
+    Parameters
+    ----------
+    embed_dim : int
+        Dimensionality of the query and node embeddings.
+    num_layers : int
+        Number of decoder layers.
+    md_config : Mapping
+        Configuration mapping passed to each :class:`MaskDecoderLayer`
+        (e.g. ``n_heads``, ``mask_attention``, ``bidirectional_ca``).
+    class_net : nn.Module
+        Head mapping query embeddings to class logits (shape ``[B, M, C]`` or ``[B, M, 1]``).
+    mask_net : nn.Module
+        Head mapping query embeddings to mask tokens (used to build attention/masks).
+    num_objects : int
+        Number of object queries ``M``.
+    loss_config : Mapping
+        Configuration mapping forwarded to :class:`MaskFormerLoss`.
+    aux_loss : bool, optional
+        If ``True``, store intermediate predictions after each decoder layer
+        for auxiliary losses, by default ``False``.
     """
 
     def __init__(
@@ -48,7 +73,34 @@ class MaskDecoder(nn.Module):
 
         self.mask_loss = MaskFormerLoss(**loss_config, num_objects=num_objects)
 
-    def get_preds(self, queries: Tensor, mask_tokens: Tensor, pad_mask: Tensor | None = None):
+    def get_preds(
+        self,
+        queries: Tensor,
+        mask_tokens: Tensor,
+        pad_mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """Compute class probabilities/logits and mask logits from queries.
+
+        Parameters
+        ----------
+        queries : Tensor
+            Query embeddings of shape ``[B, M, E]``.
+        mask_tokens : Tensor
+            Input/node embeddings ``x`` over which masks are predicted,
+            of shape ``[B, L, E]`` (often the encoder outputs).
+        pad_mask : Tensor | None , optional
+            Boolean/byte mask for padded positions in ``mask_tokens`` of
+            shape ``[B, L]``; padded positions are suppressed in mask logits,
+            by default ``None``.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            Dictionary with:
+            - ``"class_logits"``: logits of shape ``[B, M, C]`` (or ``[B, M, 1]``).
+            - ``"class_probs"``: probabilities of shape ``[B, M, C]`` (sigmoid-expanded if binary).
+            - ``"masks"``: mask logits over input positions of shape ``[B, M, L]``.
+        """
         # get class predictions from queries
         class_logits = self.class_net(queries)
         if class_logits.shape[-1] == 1:
@@ -69,35 +121,47 @@ class MaskDecoder(nn.Module):
         pad_mask: Tensor = None,
         labels: Tensors | None = None,
     ):
-        """Forward pass through the MaskDecoder. Utilises the encoder embeddings to
-        generate M query vectors, from which a classification task and mask prediction are
-        performed. If labels are provided, the HungarianMatcher algorithm is implemented
-        to find the optimal match between predictions and labels. The model predictions are
-        then re-ordered to match the labels, and a final loss is calculated.
+        """Run the decoder and optionally compute the loss.
+
+        Utilises the encoder embeddings to generate ``M`` query vectors, from which
+        a classification and mask prediction are performed. If ``labels`` are provided,
+        a Hungarian-style matching and loss computation is applied via
+        :class:`MaskFormerLoss`. Intermediate outputs can be stored when ``aux_loss=True``.
 
         Parameters
         ----------
-        preds : dict[str, Tensor]
-            Dictionary containing existing predictions from the encoder, should contain the
-            key 'embed_xs' which is the encoder embeddings.
+        preds : Tensors
+            Existing predictions containing at least ``"embed_xs"`` with encoder
+            embeddings of shape ``[B, L, E]``.
         tasks : nn.ModuleList
-            The tasks for the model to perform, excluding the object mask prediction and
-            classification. Any tasks that use the input stream 'objects' will be used
+            Additional task heads. Any heads consuming the ``"objects"`` stream
+            will be invoked inside the loss object.
         pad_mask : Tensor, optional
-            Masks for input padding, by default None
-        labels : dict[str, Tensor] | None, optional
-            Dict containing labels, by default None
+            Padding mask for encoder embeddings of shape ``[B, L]``; ``True``/``1``
+            denotes padded positions, by default ``None``.
+        labels : Tensors | None, optional
+            Ground-truth labels used by the loss, by default ``None``.
 
         Returns
         -------
-        preds : dict[str, Tensor]
-            Dictionary containing the updated model predictions, with all object predictions
-            stored in preds["objects"]
-        labels : dict[str, Tensor] | None
-            Updated labels, containing all default labels and any additional labels generated
-            by the model (e.g. regression targets). If input labels are None, returns None.
-        loss :
-            Loss value if labels are provided, otherwise returns an empty dict.
+        tuple
+            If ``labels is None``:
+                ``(preds, labels, {})`` where
+                - ``preds["objects"]`` contains keys
+                  ``"embed"`` (``[B, M, E]``), ``"x"`` (unpadded ``[B, L, E]``),
+                  ``"class_logits"``, ``"class_probs"``, ``"masks"``.
+                - ``labels`` is ``None``.
+                - Third element is an empty dict.
+            If ``labels is not None``:
+                Return value of :meth:`MaskFormerLoss.__call__`, typically
+                ``(preds, labels, loss_dict)``.
+
+        Notes
+        -----
+        - A dummy padded token is appended to the inputs to maintain ONNX
+          compatibility; it is removed again before returning.
+        - When ``aux_loss`` is enabled, intermediate predictions after each
+          decoder layer are stored in ``preds["intermediate_outputs"]``.
         """
         # MF only supports one input, if we have multiple then we have no way of knowing
         # what section of the embedding relates to objects we want to generate masks for
@@ -139,7 +203,33 @@ class MaskDecoder(nn.Module):
         return preds, labels, {}
 
 
-def get_masks(x: Tensor, q: Tensor, mask_net: nn.Module, input_pad_mask: Tensor | None = None):
+def get_masks(
+    x: Tensor,
+    q: Tensor,
+    mask_net: nn.Module,
+    input_pad_mask: Tensor | None = None,
+) -> Tensor:
+    """Compute mask logits over input tokens conditioned on queries.
+
+    Parameters
+    ----------
+    x : Tensor
+        Input/node embeddings of shape ``[B, L, E]``.
+    q : Tensor
+        Query embeddings of shape ``[B, M, E]``.
+    mask_net : nn.Module
+        Module mapping queries to mask tokens; expected to output
+        ``mask_tokens = mask_net(q)`` with shape ``[B, M, E]``.
+    input_pad_mask : Tensor | None, optional
+        Padding mask for inputs of shape ``[B, L]``; padded positions are set
+        to the minimum representable value in the output, by default ``None``.
+
+    Returns
+    -------
+    Tensor
+        Mask logits of shape ``[B, M, L]`` computed as
+        ``einsum('bqe,ble->bql')`` between mask tokens and inputs.
+    """
     mask_tokens = mask_net(q)
     pred_masks = torch.einsum("bqe,ble->bql", mask_tokens, x)
 
@@ -152,16 +242,54 @@ def get_masks(x: Tensor, q: Tensor, mask_net: nn.Module, input_pad_mask: Tensor 
 
 
 def get_maskformer_outputs(
-    objects,
-    max_null=0.5,
-    apply_reorder=True,
-):
-    """Takes objects for a single MF global prediction and converts them to a more useful
-    form.
+    objects: Mapping[str, Tensor],
+    max_null: float = 0.5,
+    apply_reorder: bool = True,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Convert raw MaskFormer-style outputs to convenient per-object tensors.
 
-        -  Keep only objects which have `pnull < max_null`
-        - Converts the mask logits to mask indices, see salt.utils.mask_utils.indices_from_mask
+    This helper:
+      1. Thresholds the "null" class probability and suppresses masks/regression
+         for objects with ``p_null > max_null``.
+      2. Converts per-position mask logits into sparse mask indices via
+         :func:`salt.utils.mask_utils.indices_from_mask`.
+      3. Optionally reorders objects so that the "leading" object is first
+         (highest regression[0], e.g. pT in vertexing).
 
+    Parameters
+    ----------
+    objects : Mapping[str, Tensor]
+        Dictionary with keys at least:
+        - ``"masks"``: mask logits of shape ``[B, M, L]``.
+        - ``"class_probs"``: class probabilities of shape ``[B, M, C]`` (last class is null).
+        - ``"regression"``: regression targets/predictions of shape ``[B, M, R]``.
+    max_null : float, optional
+        Maximum allowed null probability ``p_null`` for an object to be kept,
+        by default ``0.5``.
+    apply_reorder : bool, optional
+        If ``True``, reorder objects in descending order of ``regression[..., 0]``,
+        by default ``True``.
+
+    Returns
+    -------
+    leading_regression : torch.Tensor
+        Tensor of shape ``[B, R]`` for the leading object (after optional reordering).
+    obj_indices : torch.Tensor | None
+        Sparse indices of masks per object with shape ``[B, M]``; values are
+        positions in ``[0, L)`` (or ``NaN`` when undefined). May be ``None``
+        if there are no tracks (``L == 0``).
+    class_probs : torch.Tensor
+        Possibly-reordered class probabilities of shape ``[B, M, C]``.
+    regression : torch.Tensor
+        Possibly-reordered regression tensor of shape ``[B, M, R]`` with ``NaN``
+        for objects deemed null.
+
+    Notes
+    -----
+    - If there are no input tracks/tokens (``L == 0``), dummy tensors filled with
+      ``NaN`` are returned for indices and regression.
+    - Masks are thresholded at ``0.5`` after a sigmoid to produce boolean masks
+      prior to conversion to indices.
     """
     # Convert the (N,M) -> (M,) mask indices
     masks = objects["masks"]
@@ -222,6 +350,28 @@ def get_maskformer_outputs(
 
 
 class MaskDecoderLayer(nn.Module):
+    """Single decoder layer used in :class:`MaskDecoder`.
+
+    Applies (1) cross-attention from queries to inputs, (2) self-attention
+    among queries, (3) a gated feed-forward (GLU) update, and optionally
+    (4) a bidirectional cross-attention update from inputs to queries.
+    Mask-guided attention can be enabled to sparsify cross-attention.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension ``E``.
+    n_heads : int
+        Number of attention heads.
+    mask_attention : bool
+        If ``True``, build a boolean attention mask from predicted masks to
+        restrict cross-attention to confident positions.
+    bidirectional_ca : bool
+        If ``True``, also update inputs via cross-attention from queries.
+    mask_net : nn.Module
+        Module mapping queries to mask tokens used when ``mask_attention=True``.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -243,9 +393,31 @@ class MaskDecoderLayer(nn.Module):
             self.kv_dense = GLU(embed_dim)
         self.mask_net = mask_net
 
-    def forward(self, q: Tensor, kv: Tensor, kv_mask: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        q: Tensor,
+        kv: Tensor,
+        kv_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply one decoder layer step.
+
+        Parameters
+        ----------
+        q : Tensor
+            Query embeddings of shape ``[B, M, E]``.
+        kv : Tensor
+            Input/key-value embeddings of shape ``[B, L, E]``.
+        kv_mask : Tensor | None, optional
+            Padding mask for ``kv`` of shape ``[B, L]``, by default ``None``.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Tuple ``(q, kv)`` with updated query and (optionally) updated
+            input embeddings, each maintaining their original shapes.
+        """
         attn_mask = None
-        # return q, kv
+        # Return the q, kv
         # if we want to do mask attention
         if self.mask_attention:
             # New attention masking convention with transformers 2

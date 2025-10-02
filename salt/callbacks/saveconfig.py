@@ -4,9 +4,10 @@ import shutil
 import socket
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import h5py
-import lightning as L
+import lightning
 import numpy as np
 import torch
 import yaml
@@ -15,19 +16,77 @@ from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
 from lightning.pytorch.loggers import CometLogger
 
+try:  # pragma: no cover
+    from s3fs import S3FileSystem
+    from s3path import S3Path
 
-def get_attr(file, attribute, key=None):
+    _HAS_S3 = True
+except ImportError:  # pragma: no cover
+    _HAS_S3 = False
+
+
+def get_attr(file: h5py.File, attribute: str, key: str | None = None) -> Any:
+    """Retrieve an HDF5 attribute from a file or one of its datasets.
+
+    Parameters
+    ----------
+    file : h5py.File
+        An open HDF5 file handle.
+    attribute : str
+        Name of the attribute to fetch.
+    key : str | None, optional
+        Dataset key within the file. If provided, the attribute is read
+        from ``file[key]`` instead of the file root.
+
+    Returns
+    -------
+    Any
+        The attribute value, converted where possible:
+
+        * NumPy integer scalars are cast to built-in ``int``.
+        * If the value is a string containing JSON, it is parsed
+          into a Python object (list/dict/etc.) with graceful failure.
+
+        ``None`` if the attribute is not present.
+
+    Examples
+    --------
+    >>> with h5py.File("example.h5", "r") as f:
+    ...     n_jets = get_attr(f, "n_jets")
+    ...     config = get_attr(f, "config_json", key="my_dataset")
+    """
     obj = file if key is None else file[key]
-    value = dict(obj.attrs).get(attribute)
-    if np.issubdtype(type(value), np.integer):
-        value = int(value)
+    value: Any = dict(obj.attrs).get(attribute)
+
+    # Only cast if we actually have a NumPy/integer scalar
+    if isinstance(value, (np.integer | int)):
+        return int(value)
+
+    # Try to parse JSON-encoded strings
     if isinstance(value, str):
         with suppress(json.decoder.JSONDecodeError, TypeError):
-            value = json.loads(value)
+            return json.loads(value)
+
     return value
 
 
 class SaveConfigCallback(Callback):
+    """Saves a LightningCLI config to the log_dir when training starts.
+
+    Parameters
+    ----------
+    parser : LightningArgumentParser
+        The parser object used to parse the configuration.
+    config : Namespace
+        The parsed configuration that will be saved.
+    config_filename : str, optional
+        Filename for the config file, by default "config.yaml"
+    overwrite : bool, optional
+        Whether to overwrite an existing config file, by default False
+    multifile : bool, optional
+        When input is multiple config files, saved config, by default False
+    """
+
     def __init__(
         self,
         parser: LightningArgumentParser,
@@ -36,28 +95,6 @@ class SaveConfigCallback(Callback):
         overwrite: bool = False,
         multifile: bool = False,
     ) -> None:
-        """Saves a LightningCLI config to the log_dir when training starts.
-
-        Parameters
-        ----------
-        parser : LightningArgumentParser
-            The parser object used to parse the configuration.
-        config : Namespace
-            The parsed configuration that will be saved.
-        config_filename : str, optional
-            Filename for the config file.
-        overwrite : bool, optional
-            Whether to overwrite an existing config file.
-        multifile : bool, optional
-            When input is multiple config files, saved config
-
-        Raises
-        ------
-        RuntimeError:
-            If the config file already exists in the directory
-            to avoid overwriting a previous run
-
-        """
         super().__init__()
         self.parser = parser
         self.config = config
@@ -67,6 +104,27 @@ class SaveConfigCallback(Callback):
         self.already_saved = False
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Setup the config callback.
+
+        Parameters
+        ----------
+        trainer : Trainer
+            Trainer instance that is used
+        pl_module : LightningModule
+            Pytorch lightning module that is trained
+        stage : str
+            Stage in which the config is stored
+
+        Raises
+        ------
+        ImportError
+            S3FileSystem and S3Path not found
+        ValueError
+            If the trainer.log_dir is not starting with "s3:/"
+        RuntimeError
+            If the config file already exists in the directory
+            to avoid overwriting a previous run
+        """
         # save only on rank zero to avoid race conditions.
         if stage != "fit" or self.already_saved:
             return
@@ -76,8 +134,8 @@ class SaveConfigCallback(Callback):
 
         # get path info
         if "s3:/" in trainer.log_dir[:4]:
-            from s3fs import S3FileSystem
-            from s3path import S3Path
+            if not _HAS_S3:
+                raise ImportError("S3FileSystem and S3Path not found!")
 
             self.use_S3 = True
             self.make_path = S3Path
@@ -116,7 +174,14 @@ class SaveConfigCallback(Callback):
 
         self.already_saved = trainer.strategy.broadcast(self.already_saved)
 
-    def save_config(self, config_path):
+    def save_config(self, config_path: Path) -> None:
+        """Save the config file.
+
+        Parameters
+        ----------
+        config_path : Path
+            Path under which the config file will be stored
+        """
         # the `log_dir` needs to be created as we rely on the logger
         # to do it usually but it hasn't logged anything at this point
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +212,14 @@ class SaveConfigCallback(Callback):
             if self.config.data.class_dict:
                 self.plm.logger.experiment.log_asset(cd_path)
 
-    def save_metadata(self, config_path):
+    def save_metadata(self, config_path: Path):
+        """Save the metadata.
+
+        Parameters
+        ----------
+        config_path : Path
+            Path under which the metadata will be stored
+        """
         trainer = self.trainer
         logger = self.plm.logger
 
@@ -160,7 +232,7 @@ class SaveConfigCallback(Callback):
         if input_map := self.config["data"]["input_map"]:
             global_object = input_map[global_object]
 
-        meta = {}
+        meta: dict[str, Any] = {}
 
         meta["train_file"] = str(train_dset.filename)
         meta["val_file"] = str(val_dset.filename)
@@ -169,7 +241,7 @@ class SaveConfigCallback(Callback):
         meta["available_train"] = len(train_dset.file[global_object])
         meta["available_val"] = len(val_dset.file[global_object])
         batch_size = train_loader.batch_size
-        batch_size = batch_size if batch_size else train_loader.sampler.batch_size
+        batch_size = batch_size or train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
         params = sum(p.numel() for p in self.plm.parameters() if p.requires_grad)
         meta["trainable_params"] = params
@@ -178,7 +250,7 @@ class SaveConfigCallback(Callback):
         meta["num_workers"] = train_loader.num_workers
 
         with contextlib.suppress(KeyError):
-            # TODO: update UPP to call attribute objects instead of jets
+            # TODO(@jabarr): update UPP to call attribute objects instead of jets
             # https://github.com/umami-hep/umami-preprocessing/issues/56
             meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
             meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
@@ -193,7 +265,7 @@ class SaveConfigCallback(Callback):
         if hasattr(self.trainer, "timestamp"):
             meta["timestamp"] = trainer.timestamp
         meta["torch_version"] = str(torch.__version__)
-        meta["lightning_version"] = str(L.__version__)
+        meta["lightning_version"] = str(lightning.__version__)
         meta["cuda_version"] = torch.version.cuda
         meta["hostname"] = socket.gethostname()
 
@@ -220,8 +292,21 @@ class SaveConfigCallback(Callback):
         meta_path = self.make_path(config_path.parent / "metadata.yaml")
         self.write_dump_yaml_file(meta, meta_path)
 
-    def write_file(self, file, store_path):
-        """Writes the file on S3 at the store_path."""
+    def write_file(self, file: str, store_path: Path) -> str:
+        """Writes the file on S3 at the store_path.
+
+        Parameters
+        ----------
+        file : str
+            Local path of the file
+        store_path : Path
+            Path to which the file is written
+
+        Returns
+        -------
+        str
+            The output path
+        """
         if self.use_S3:
             self.S3_session.put(file, store_path)
             outpath = file
@@ -230,7 +315,7 @@ class SaveConfigCallback(Callback):
             outpath = str(store_path.resolve())
         return outpath
 
-    def write_yaml_file(self, yaml_file, store_path):
+    def write_yaml_file(self, yaml_file: str, store_path: Path) -> None:
         """Writes the file on S3 at the store_path."""
         if self.use_S3:
             local_path = Path("local_config.yaml")

@@ -8,10 +8,24 @@ from salt.stypes import Tensors
 from salt.utils.tensor_utils import flatten_tensor_dict, masked_softmax
 
 
-class Pooling(nn.Module): ...
+class Pooling(nn.Module):
+    """Base class for pooling modules."""
 
 
 class GlobalAttentionPooling(Pooling):
+    """Global attention pooling over concatenated node embeddings.
+
+    Uses a learned gating network to produce attention weights over the
+    flattened inputs (concatenated along the sequence dimension), then
+    computes the weighted sum. A padded token is appended to avoid ONNX
+    issues when there are no tracks.
+
+    Parameters
+    ----------
+    input_size : int
+        Dimensionality of each node embedding feature vector.
+    """
+
     def __init__(self, input_size: int):
         super().__init__()
         self.gate_nn = nn.Linear(input_size, 1)
@@ -20,7 +34,25 @@ class GlobalAttentionPooling(Pooling):
         self,
         x: dict[str, Tensor] | dict,
         pad_mask: dict | None = None,
-    ):
+    ) -> Tensor:
+        """Apply global attention pooling.
+
+        Parameters
+        ----------
+        x : dict[str, Tensor] | dict
+            Mapping from input stream name to tensor with shape ``[B, L_i, D]``.
+            All non-``"objects"`` entries are concatenated along the sequence
+            dimension to form a single ``[B, L, D]`` tensor.
+        pad_mask : dict | None, optional
+            Mapping from input stream name to boolean/byte mask of shape
+            ``[B, L_i]``. Masks are concatenated along the sequence dimension
+            and used to suppress padded positions. The default is ``None``.
+
+        Returns
+        -------
+        Tensor
+            Pooled tensor of shape ``[B, D]``.
+        """
         x_flat = flatten_tensor_dict(x, exclude=["objects"])
 
         if pad_mask is not None:
@@ -37,6 +69,29 @@ class GlobalAttentionPooling(Pooling):
 
 
 class BaseCrossAttentionPooling(Pooling):
+    """Base class for cross-attention pooling variants.
+
+    Maintains a learnable class token that is repeatedly updated via
+    cross-attention from inputs. After a stack of cross-attention layers,
+    the class token is normalized and returned (pooled representation).
+
+    Parameters
+    ----------
+    input_size : int
+        Embedding dimensionality ``D`` for inputs and class token.
+    num_layers : int
+        Number of cross-attention layers.
+    mha_config : Mapping
+        Configuration mapping for multi-head attention in
+        :class:`TransformerCrossAttentionLayer`.
+    dense_config : Mapping | None, optional
+        Configuration mapping for the dense/FFN block in
+        :class:`TransformerCrossAttentionLayer`. The default is ``None``.
+    context_dim : int, optional
+        Optional context dimensionality supplied to the cross-attention
+        layers. The default is ``0``.
+    """
+
     def __init__(
         self,
         input_size: int,
@@ -55,7 +110,20 @@ class BaseCrossAttentionPooling(Pooling):
         self.final_norm = nn.LayerNorm(input_size)
         self.class_token = nn.Parameter(randn(1, 1, input_size))
 
-    def expand_class_token(self, x: Tensor | dict):
+    def expand_class_token(self, x: Tensor | dict) -> Tensor:
+        """Expand the class token to the current batch size.
+
+        Parameters
+        ----------
+        x : Tensor | dict
+            Either a tensor of shape ``[B, L, D]`` or a mapping from stream
+            name to tensor (any entry is used to infer ``B``).
+
+        Returns
+        -------
+        Tensor
+            Expanded class token of shape ``[B, 1, D]``.
+        """
         if isinstance(x, dict):
             return self.class_token.expand(x[list(x.keys())[0]].shape[0], 1, self.input_size)
 
@@ -63,12 +131,35 @@ class BaseCrossAttentionPooling(Pooling):
 
 
 class DictCrossAttentionPooling(BaseCrossAttentionPooling):
+    """Cross-attention pooling that iterates over input streams individually.
+
+    For each layer, the class token attends to each provided stream (except
+    ``"objects"``) separately and the updates are summed before proceeding to
+    the next layer.
+
+    Parameters
+    ----------
+    x : Tensors
+        Mapping from input stream name to tensor of shape ``[B, L_i, D]``.
+    pad_mask : dict | None, optional
+        Mapping from stream name to boolean/byte padding mask of shape
+        ``[B, L_i]`` for each stream. The default is ``None``.
+    context : Tensor | None, optional
+        Optional context tensor consumed by the cross-attention layers.
+        The default is ``None``.
+
+    Returns
+    -------
+    Tensor
+        Pooled representation from the class token of shape ``[B, D]``.
+    """
+
     def forward(
         self,
         x: Tensors,
         pad_mask: dict | None = None,
         context: Tensor | None = None,
-    ):
+    ) -> Tensor:
         class_token = self.expand_class_token(x)
         for layer in self.ca_layers:
             new_class_token = torch.zeros_like(class_token)
@@ -88,12 +179,37 @@ class DictCrossAttentionPooling(BaseCrossAttentionPooling):
 
 
 class TensorCrossAttentionPooling(BaseCrossAttentionPooling):
+    """Cross-attention pooling over a single concatenated input tensor.
+
+    All non-``"objects"`` streams are concatenated along the sequence dimension,
+    and the class token attends to the resulting tensor at each layer.
+    """
+
     def forward(
         self,
         x: Tensors,
         pad_mask: dict | None = None,
         context: Tensor | None = None,
-    ):
+    ) -> Tensor:
+        """Apply cross-attention pooling over a flattened tensor.
+
+        Parameters
+        ----------
+        x : Tensors
+            Mapping from input stream name to tensor of shape ``[B, L_i, D]``;
+            non-``"objects"`` entries are concatenated into ``[B, L, D]``.
+        pad_mask : dict | None, optional
+            Mapping from stream name to padding mask ``[B, L_i]``; masks are
+            concatenated to ``[B, L]`` when provided. The default is ``None``.
+        context : Tensor | None, optional
+            Optional context tensor consumed by cross-attention layers.
+            The default is ``None``.
+
+        Returns
+        -------
+        Tensor
+            Pooled representation from the class token of shape ``[B, D]``.
+        """
         x_flat = flatten_tensor_dict(x, exclude=["objects"])
         class_token = self.expand_class_token(x_flat)
         if pad_mask is not None:
@@ -107,6 +223,18 @@ class TensorCrossAttentionPooling(BaseCrossAttentionPooling):
 
 
 class NodeQueryGAP(Pooling):
+    """Global attention pooling over nodes and queries, then concatenation.
+
+    Applies global attention pooling separately to (1) the concatenated node
+    embeddings and (2) the object query embeddings, then concatenates both pooled
+    vectors along the feature dimension.
+
+    Parameters
+    ----------
+    input_size : int
+        Dimensionality of each node/query embedding feature vector.
+    """
+
     def __init__(self, input_size: int):
         super().__init__()
         self.gate_nn_1 = nn.Linear(input_size, 1)
@@ -116,7 +244,25 @@ class NodeQueryGAP(Pooling):
         self,
         x: Tensors,
         pad_mask: dict | None = None,
-    ):
+    ) -> Tensor:
+        """Apply global attention pooling to nodes and queries, then concatenate.
+
+        Parameters
+        ----------
+        x : Tensors
+            Mapping with at least:
+            - non-``"objects"`` streams of shape ``[B, L_i, D]`` (nodes),
+            - ``x["objects"]["embed"]`` of shape ``[B, M, D]`` (queries).
+        pad_mask : dict | None, optional
+            Mapping from stream name to padding mask ``[B, L_i]`` for node streams.
+            The default is ``None``.
+
+        Returns
+        -------
+        Tensor
+            Concatenated pooled tensor of shape ``[B, 2D]`` consisting of
+            ``[pooled_nodes, pooled_queries]``.
+        """
         # Global Attention Pooling applied to both the decoder kv embeddings and
         # the encoder embeddings.
         x_nodes = flatten_tensor_dict(x, exclude=["objects"])

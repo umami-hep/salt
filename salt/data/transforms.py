@@ -1,67 +1,87 @@
+from __future__ import annotations
+
+from typing import TypedDict
+
 import numpy as np
 
 
+class NoiseSpec(TypedDict):
+    """Specification for applying Gaussian noise to one field.
+
+    Attributes
+    ----------
+    variable : str
+        Name of the field within the structured array that should receive noise
+        (e.g., ``"pt"``, ``"eta"``).
+    mean : float
+        Mean of the Gaussian noise distribution.
+    std : float
+        Standard deviation of the Gaussian noise distribution.
+    """
+
+    variable: str
+    mean: float
+    std: float
+
+
 class GaussianNoise:
-    def __init__(self, noise_params=None):
-        """Initializes the Gaussian noise generator with customizable parameters.
+    """Gaussian noise generator with per-input/variable specifications.
+
+    Parameters
+    ----------
+    noise_params : dict[str, list[NoiseSpec]] | None, optional
+        Mapping from an input type (e.g. ``"tracks"``, ``"jets"``) to a list of
+        :class:`NoiseSpec` entries. If ``None``, no noise is applied.
+    """
+
+    def __init__(self, noise_params: dict[str, list[NoiseSpec]] | None = None) -> None:
+        self.noise_params: dict[str, list[NoiseSpec]] = noise_params or {}
+
+    def add_noise(self, data: np.ndarray, mean: float, std: float) -> np.ndarray:
+        """Add multiplicative Gaussian noise to an array.
 
         Parameters
         ----------
-        noise_params : dict, optional
-            A dictionary where keys are input names (e.g., "tracks", "jets") and values are
-            dictionaries with "mean", "std", and optionally a "mask" array for selective noise.
-        """
-        self.noise_params = noise_params if noise_params is not None else {}
-
-    def add_noise(self, data, mean, std):
-        """Add Gaussian noise to specified subfields of a dataset.
-
-        Parameters
-        ----------
-        data : Numpy array
-            Array containing data to which noise will be added
+        data : np.ndarray
+            Array to which noise will be applied. This array is **not** modified in-place;
+            a noisy copy is returned.
         mean : float
-            Mean of noise to be added
-        std: : float
-            Standard deviation of noise to be added
+            Mean of the Gaussian noise distribution.
+        std : float
+            Standard deviation of the Gaussian noise distribution.
 
         Returns
         -------
-        data : Numpy array
-            Data with noise added
+        np.ndarray
+            A new array with multiplicative noise applied: ``data * N(mean, std)``.
         """
-        # Generate noise
         rng = np.random.default_rng()
-        noise = rng.normal(mean, std, data.shape)
+        noise: np.ndarray = rng.normal(mean, std, size=data.shape)
+        return data * noise
 
-        # Scale noise based on data and apply it
-        data_noise = data * noise
-        data += data_noise
-
-        return data
-
-    def __call__(self, data, input_type):
-        """Applies Gaussian noise to all variables of the given type as specified in `noise_params`.
+    def __call__(self, data: np.ndarray, input_type: str) -> np.ndarray:
+        """Apply Gaussian noise to all variables for the given input type.
 
         Parameters
         ----------
-        data : Numpy array
-            Array containing data for input variables
+        data : np.ndarray
+            Structured/record array containing the input variables for ``input_type``.
+            Fields are accessed as ``data[variable]``.
         input_type : str
-            Name of the input variable type e.g. jets or tracks
+            Name of the input group (e.g. ``"jets"`` or ``"tracks"``) whose variables
+            should receive noise according to the stored specifications.
 
         Returns
         -------
-        data : Numpy array
-            The modified data array with noise applied
+        np.ndarray
+            The modified data array with noise applied to the specified fields.
         """
-        for noise_dict in self.noise_params:
-            # Skip if wrong input type
-            if noise_dict["input_type"] != input_type:
-                continue
-            var = noise_dict["variable"]
-            mean = noise_dict["mean"]
-            std = noise_dict["std"]
-            noise_data = data[var]
-            data[var] = self.add_noise(noise_data, mean, std)
+        for spec in self.noise_params.get(input_type, []):
+            var = spec["variable"]
+            mean = spec["mean"]
+            std = spec["std"]
+
+            # Apply noise to this field and write back
+            noisy = self.add_noise(data[var].astype(np.float32, copy=False), mean, std)
+            data[var] = noisy
         return data

@@ -12,12 +12,17 @@ import torch
 
 
 def repair_checkpoint(path: str | Path) -> None:
-    """Repair a PyTorch checkpoint file by removing specific prefixes from state_dict keys.
+    """Repair a PyTorch checkpoint by stripping compile-time prefixes in keys.
+
+    Specifically, removes the ``"_orig_mod."`` prefix from all entries in
+    ``state_dict`` (as produced by some ``torch.compile`` workflows), writing
+    the corrected checkpoint back to the same path. A ``.bak`` backup is
+    created if any changes are applied.
 
     Parameters
     ----------
-    path : str
-        The path to the checkpoint file to repair.
+    path : str | Path
+        Path to the checkpoint file to repair.
     """
     path = Path(path)
     ckpt = torch.load(path)
@@ -41,13 +46,23 @@ def repair_checkpoint(path: str | Path) -> None:
     print(f"Repaired {path}")
 
 
-def main(args=None):
+def main(args: list[str] | None = None) -> None:
+    """CLI entry point for repairing one or more checkpoints.
+
+    Parameters
+    ----------
+    args : list[str] | None, optional
+        Argument list to parse (mainly for testing). If ``None``, uses
+        ``sys.argv``. Expected syntax:
+
+        - ``paths`` (positional): one or more checkpoint file paths.
+    """
     parser = argparse.ArgumentParser(
         description="Repair PyTorch checkpoint files trained with torch.compile()."
     )
     parser.add_argument("paths", nargs="+", help="The file paths of the checkpoints to repair.")
-    args = parser.parse_args(args)
-    for path in args.paths:
+    parsed = parser.parse_args(args)
+    for path in parsed.paths:
         repair_checkpoint(path)
 
 

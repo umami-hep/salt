@@ -84,10 +84,10 @@ Finally, you can then the `compare_models` command to compare the scores of the 
 
 ```bash
 compare_models \
-    --file_A tdd/output.h5 \
-    --tagger_A name \
-    --file_B salt/eval.h5 \
-    --tagger_B name
+    --file_a tdd/output.h5 \
+    --tagger_a name \
+    --file_b salt/eval.h5 \
+    --tagger_b name
 ```
 
 See `compare_models.py -h` for more information.

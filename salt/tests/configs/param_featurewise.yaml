@@ -129,10 +129,10 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-    PARAMETERS:
+    parameters:
       - mass
 
-  PARAMETERS:
+  parameters:
     mass:
       train: [5, 40, 55]
       test: 16

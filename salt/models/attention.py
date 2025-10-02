@@ -16,11 +16,47 @@ def merge_masks(
     k_shape: Size,
     device: torch.device,
 ) -> BoolTensor:
-    """Create a full attention mask which incoporates the padding information.
+    """Combine query, key/value, and attention masks into a single boolean mask.
 
-    Using pytorch transformer convention:
-        False: Real node
-        True:  Zero padded
+    This utility follows the PyTorch transformer convention where:
+
+    * ``False`` indicates a **real (valid) token/node**.
+    * ``True`` indicates a **padded/invalid token/node**.
+
+    Parameters
+    ----------
+    q_mask : BoolTensor | None
+        Padding mask for the query sequence with shape matching ``q_shape[:-1]``
+        (batch and query length). If ``None``, a mask of all ``False`` (no padding)
+        is assumed.
+    kv_mask : BoolTensor | None
+        Padding mask for the key/value sequence with shape matching ``k_shape[:-1]``.
+        If ``None``, a mask of all ``False`` (no padding) is assumed.
+    attn_mask : BoolTensor | None
+        Pre-computed attention mask (e.g., from a causal mask) to be merged with the
+        padding masks. If ``None``, no additional attention masking is applied.
+    q_shape : Size
+        Shape tuple for the query input (e.g., ``(batch_size, q_len, d_model)``). Only
+        the first two dimensions are used to infer default mask size.
+    k_shape : Size
+        Shape tuple for the key/value input (e.g., ``(batch_size, k_len, d_model)``).
+    device : torch.device
+        Device on which to allocate any default masks.
+
+    Returns
+    -------
+    BoolTensor
+        A combined boolean mask of shape ``(batch_size, q_len, k_len)`` (if padding
+        masks are provided) or the shape of ``attn_mask`` if only that is provided.
+        ``True`` entries mark positions to **mask out**; ``False`` entries mark valid
+        positions.
+
+    Notes
+    -----
+    - If both padding masks and an ``attn_mask`` are supplied, the result is the
+      elementwise OR of all masks.
+    - If one of ``q_mask`` or ``kv_mask`` is missing, it is replaced by an all-``False``
+      mask of appropriate size.
     """
     # Create the full mask which combines the attention and padding masks
     merged_mask = None
@@ -41,6 +77,67 @@ def merge_masks(
 
 
 class MultiheadAttention(nn.Module):
+    """Generic multihead attention.
+
+    Takes in three sequences with dim: (batch, sqeuence, features)
+    - q: The primary sequence queries (determines output sequence length)
+    - k: The attending sequence keys (determines incoming information)
+    - v: The attending sequence values
+
+    In a message passing sense you can think of q as your receiver nodes, v and k
+    are the information coming from the sender nodes.
+
+    When q == k(and v) this is a SELF attention operation
+    When q != k(and v) this is a CROSS attention operation
+
+    Block operations:
+
+    1) Uses three linear layers to embed the sequences.
+    - q = q_linear * q
+    - k = k_linear * k
+    - v = v_linear * v
+
+    2) Outputs are reshaped to add a head dimension, and transposed for matmul.
+    - dim becomes: batch, heads, sequence, features
+
+    3) Passes these through to the attention module (message passing)
+    - In standard transformers this is the scaled dot product attention
+    - Also takes additional dropout layer to mask the attention
+
+    4) Flatten out the head dimension, and optionally one more linear layer
+    - results are same as if attention was done seperately for each head and concat
+    - dim: batch, sequence, features*heads
+
+    Parameters
+    ----------
+    embed_dim : int
+        Model embedding dimension (query dim only if k_dim and v_dim also provided).
+    num_heads : int
+        Number of attention heads. The embed_dim is split into num_heads chunks.
+    attention : nn.Module | Mapping
+        Type of attention (pooling operation) to use.
+    edge_embed_dim: int, optional
+        Model embedding dimension for edge features, by default 0
+    k_dim : int | None, optional
+        Key dimension, by default None where it assumes embed_dim
+    v_dim : int | None, optional
+        Value dimension, by default None where it assumes embed_dim
+    out_proj : bool, optional
+        An optional output linear layer, by default True
+    update_edges : bool, optional
+        Indicate whether to update edge features, by default False
+    mup: bool, optional
+        Whether to use the muP parametrisation, by default False
+        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
+        Ref: https://arxiv.org/abs/2203.03466
+
+    Raises
+    ------
+    ValueError
+        If the embed_dim is not divisible by the num_heads
+        If the edge_embed_dim is not divisible by the num_heads
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -51,62 +148,8 @@ class MultiheadAttention(nn.Module):
         v_dim: int | None = None,
         out_proj: bool = True,
         update_edges: bool = False,
-        muP: bool = False,
+        mup: bool = False,
     ) -> None:
-        """Generic multihead attention.
-
-        Takes in three sequences with dim: (batch, sqeuence, features)
-        - q: The primary sequence queries (determines output sequence length)
-        - k: The attending sequence keys (determines incoming information)
-        - v: The attending sequence values
-
-        In a message passing sense you can think of q as your receiver nodes, v and k
-        are the information coming from the sender nodes.
-
-        When q == k(and v) this is a SELF attention operation
-        When q != k(and v) this is a CROSS attention operation
-
-        Block operations:
-
-        1) Uses three linear layers to embed the sequences.
-        - q = q_linear * q
-        - k = k_linear * k
-        - v = v_linear * v
-
-        2) Outputs are reshaped to add a head dimension, and transposed for matmul.
-        - dim becomes: batch, heads, sequence, features
-
-        3) Passes these through to the attention module (message passing)
-        - In standard transformers this is the scaled dot product attention
-        - Also takes additional dropout layer to mask the attention
-
-        4) Flatten out the head dimension, and optionally one more linear layer
-        - results are same as if attention was done seperately for each head and concat
-        - dim: batch, sequence, features*heads
-
-        Parameters
-        ----------
-        embed_dim : int
-            Model embedding dimension (query dim only if k_dim and v_dim also provided).
-        num_heads : int
-            Number of attention heads. The embed_dim is split into num_heads chunks.
-        attention : nn.Module
-            Type of attention (pooling operation) to use.
-        edge_embed_dim: int, optional
-            Model embedding dimension for edge features.
-        k_dim : int, optional
-            Key dimension, by default None where it assumes embed_dim
-        v_dim : int, optional
-            Value dimension, by default None where it assumes embed_dim
-        out_proj : bool
-            An optional output linear layer
-        update_edges : bool, optional
-            Indicate whether to update edge features.
-        muP: bool, optional,
-            Whether to use the muP parametrisation.
-            Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
-            Ref: https://arxiv.org/abs/2203.03466
-        """
         super().__init__()
 
         # Check that the dimension of each heads makes internal sense
@@ -126,9 +169,9 @@ class MultiheadAttention(nn.Module):
         self.edge_head_dim = edge_embed_dim // num_heads
         self.k_dim = k_dim or embed_dim
         self.v_dim = v_dim or embed_dim
-        self.scale = self.head_dim if muP else math.sqrt(self.head_dim)
+        self.scale = self.head_dim if mup else math.sqrt(self.head_dim)
         self.update_edges = update_edges
-        self.muP = muP
+        self.mup = mup
 
         # Explicitly instantiate the attention class if passed as a dictionary
         if isinstance(attention, Mapping):
@@ -151,11 +194,15 @@ class MultiheadAttention(nn.Module):
         else:
             self.register_buffer("linear_out", None)
 
-        if self.muP:
+        if self.mup:
             self._reset_parameters()
 
-    def _reset_parameters(self):
-        """Initialise the weights and biases for muP."""
+    def _reset_parameters(self) -> None:
+        """Initialise the weights and biases of all linear projections.
+
+        This sets up the learnable parameters for the MuP (mu-parameterization)
+        attention block.
+        """
         nn.init.constant_(self.linear_q.weight, 0)  # zero initialisation of query weights
         nn.init.normal_(self.linear_k.weight, std=(1.0 / self.k_dim) ** 0.5)
         nn.init.normal_(self.linear_v.weight, std=(1.0 / self.v_dim) ** 0.5)
@@ -173,8 +220,41 @@ class MultiheadAttention(nn.Module):
         for linear in linear_list:
             nn.init.constant_(linear.bias, 0.0)
 
-    def input_projections(self, q, k, v) -> tuple:
-        """Perform input linear projections, output shapes are (B,L,H,HD)."""
+    def input_projections(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the query/key/value linear projections and reshape to multi-head format.
+
+        This is typically used inside a multi-head attention block. Each of
+        ``q``, ``k`` and ``v`` is first passed through its corresponding linear
+        layer, reshaped to ``(batch_size, seq_len, num_heads, head_dim)`` and then
+        transposed to ``(batch_size, num_heads, seq_len, head_dim)`` to get the
+        standard multi-head layout.
+
+        Parameters
+        ----------
+        q : torch.Tensor
+            Query input tensor of shape ``(batch_size, seq_len_q, embed_dim)``.
+        k : torch.Tensor
+            Key input tensor of shape ``(batch_size, seq_len_k, embed_dim)``.
+        v : torch.Tensor
+            Value input tensor of shape ``(batch_size, seq_len_v, embed_dim)``.
+
+        Returns
+        -------
+        tuple of torch.Tensor
+            A 3-tuple ``(q_proj, k_proj, v_proj)``, where each tensor has shape
+            ``(batch_size, num_heads, seq_len, head_dim)``.
+
+        Notes
+        -----
+        - The attributes ``self.linear_q``, ``self.linear_k``, ``self.linear_v``,
+        ``self.num_heads`` and ``self.head_dim`` must be defined on ``self``.
+        - This method does not apply any scaling or masking to the projections.
+        """
         shape = (k.shape[0], -1, self.num_heads, self.head_dim)
         q_proj = self.linear_q(q).view(shape).transpose(1, 2)
         k_proj = self.linear_k(k).view(shape).transpose(1, 2)
@@ -198,19 +278,19 @@ class MultiheadAttention(nn.Module):
         ----------
         q : Tensor
             The main sequence used to generate the queries.
-        k : Optional[Tensor], optional
+        k : Tensor | None, optional
             Seperate sequence from which to generate the keys, by default None
-        v : Optional[Tensor], optional
+        v : Tensor | None, optional
             Seperate sequence from which to generate the values, by default None
-        edges : Optional[Tensor], optional
+        edges : Tensor | None, optional
             Main sequence for edge features (used to calculate E and G)
-        q_mask : Optional[BoolTensor], optional
+        q_mask : BoolTensor | None, optional
             Shows which elements of q are real verses padded, by default None
-        kv_mask : Optional[BoolTensor], optional
+        kv_mask : BoolTensor | None, optional
             Shows which elements of k and v are real verses padded, by default None
-        attn_mask : Optional[BoolTensor], optional
+        attn_mask : BoolTensor | None, optional
             Extra mask for the attention (adjacency) matrix, by default None
-        attn_bias : Optional[Tensor], optional
+        attn_bias : Tensor | None, optional
             Extra values to further augment the attention matrix, by default None
 
         Returns
@@ -339,14 +419,14 @@ class GATv2Attention(nn.Module):
     ) -> Tensor:
         _ = scale
         # inputs are (B, H, Lq/k, D)
-        # B, H, Lq, D = q.shape
+        # B, H, Lq, D, which equal q.shape
 
         # sum each pair of tracks within a batch
-        # shape: (B, H, Lq, Lk, D)
+        # The shape is: (B, H, Lq, Lk, D)
         summed = q.unsqueeze(-2) + k.unsqueeze(-3)
 
         # after activation, dot product with learned vector
-        # shape: (B, H, Lq, Lk)
+        # The shape is: (B, H, Lq, Lk)
         scores = (self.activation(summed) * self.attention).sum(dim=-1)
 
         # add the optional bias

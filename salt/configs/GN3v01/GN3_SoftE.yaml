@@ -100,13 +100,13 @@ model:
 
 data:
   input_map:
-    GLOBAL: GLOBAL
+    global: global
     jets: jets
     tracks: tracks_ghost
     flows: flows
     electrons: electrons
   variables:
-    GLOBAL:
+    global:
       - pt_btagJes
       - eta_btagJes
     jets:

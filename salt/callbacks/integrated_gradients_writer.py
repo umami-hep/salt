@@ -30,6 +30,59 @@ except ImportError as e:
 
 
 class IntegratedGradientWriter(Callback):
+    """Callback to run Integrated Gradients on the test set and save the results to a file.
+
+    Parameters
+    ----------
+    input_keys : dict
+        Dictionary of input keys to be used for the model. This should take the form:
+        input_keys:
+            inputs: ["jets", "tracks", ... [any other inputs]]
+        pad_masks: ["tracks", ... [any other pad masks]]
+    output_keys : list
+        A list of keys representing the nested output of the model we wish to use. E.g., if
+        the model returns {'jets' : {'jets_classification' : [predictions ]}} then
+        'output_keys' should be : ['jets', 'jets_classification']
+    add_softmax : bool, optional
+        Whether to add softmax to the model outputs, by default True.
+    n_baselines : int, optional
+        Number of baselines to use for each jet, by default 5.
+    min_allowed_track_sizes : int, optional
+        Only calculate attributions for jets with at least this many tracks, by default 5.
+    max_allowed_track_sizes : int, optional
+        Only calculate attributions for jets with at most this many tracks, by default 15.
+    min_allowed_flow_sizes : int | None, optional
+        Only calculate attributions for jets with at least this many tracks, by default None,
+        meaning no minimum flow size is applied.
+    max_allowed_flow_sizes : int | None, optional
+        Only calculate attributions for jets with at most this many tracks, by default None,
+        meaning no maximum flow size is applied
+    tracks_name : str, optional
+        Name of the tracks in the output file, by default "tracks".
+    flows_name : str, optional
+        Name of the flows in the output file, by default "flows".
+    n_jets : int, optional
+        Number of jets to use for the attribution calculation, by default -1, which means
+        half of jets in the test set are used.
+    n_steps : int, optional
+        Number of steps to use for the estimation of the integrated gradients integral.
+        Default is 50.
+    internal_batch_size : int, optional
+        Batch size that Captum uses when calculating integrated gradients, by default -1, which
+        means the same batch size as the dataloader is used.
+    normalize_deltas : bool, optional
+        Whether to normalize the convergence deltas, by default True.
+    overwrite : bool, optional
+        Whether to overwrite the output file if it already exists, by default False.
+
+    Raises
+    ------
+    ImportError
+        When captum and salt-attribution are not available
+    ValueError
+        If neither min/max flow count was set or both
+    """
+
     def __init__(
         self,
         input_keys: dict,
@@ -48,51 +101,6 @@ class IntegratedGradientWriter(Callback):
         normalize_deltas: bool = True,
         overwrite: bool = False,
     ) -> None:
-        """Callback to run Integrated Gradients on the test set and save the results to a file.
-
-        Parameters
-        ----------
-        input_keys : dict
-            Dictionary of input keys to be used for the model. This should take the form:
-            input_keys:
-                inputs: ["jets", "tracks", ... [any other inputs]]
-            pad_masks: ["tracks", ... [any other pad masks]]
-        output_keys : list
-            A list of keys representing the nested output of the model we wish to use. E.g., if
-            the model returns {'jets' : {'jets_classification' : [predictions ]}} then
-            'output_keys' should be : ['jets', 'jets_classification']
-        add_softmax : bool
-            Whether to add softmax to the model outputs. Default is True.
-        n_baselines : int
-            Number of baselines to use for each jet. Default is 5.
-        min_allowed_track_sizes : int
-            Only calculate attributions for jets with at least this many tracks. Default is 5.
-        max_allowed_track_sizes : int
-            Only calculate attributions for jets with at most this many tracks. Default is 15.
-        min_allowed_flow_sizes : int | None
-            Only calculate attributions for jets with at least this many tracks. Default is None,
-            meaning no minimum flow size is applied.
-        max_allowed_flow_sizes : int | None
-            Only calculate attributions for jets with at most this many tracks. Default is None,
-            meaning no maximum flow size is applied
-        tracks_name : str
-            Name of the tracks in the output file. Default is "tracks".
-        flows_name : str
-            Name of the flows in the output file. Default is "flows".
-        n_jets : int
-            Number of jets to use for the attribution calculation. Default is -1, which means
-            half of jets in the test set are used.
-        n_steps : int
-            Number of steps to use for the estimation of the integrated gradients integral.
-            Default is 50.
-        internal_batch_size : int
-            Batch size that Captum uses when calculating integrated gradients. Default is -1, which
-            means the same batch size as the dataloader is used.
-        normalize_deltas : bool
-            Whether to normalize the convergence deltas. Default is True.
-        overwrite : bool
-            Whether to overwrite the output file if it already exists. Default is False.
-        """
         super().__init__()
         self.verbose = True
         if not HAS_IG:

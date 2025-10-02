@@ -4,6 +4,23 @@ from torch.utils.data import Sampler
 
 
 class RandomBatchSampler(Sampler):
+    """Batch sampler for an h5 dataset.
+
+    The batch sampler performs weak shuffling. Objects are batched first,
+    and then batches are shuffled.
+
+    Parameters
+    ----------
+    dataset : torch.utils.data.Dataset
+        Input dataset
+    batch_size : int
+        Number of objects to batch
+    shuffle : bool, optional
+        Shuffle the batches, by default False
+    drop_last : bool, optional
+        Drop the last incomplete batch (if present), by default False
+    """
+
     def __init__(
         self,
         dataset: torch.utils.data.Dataset,
@@ -11,22 +28,6 @@ class RandomBatchSampler(Sampler):
         shuffle: bool = False,
         drop_last: bool = False,
     ):
-        """Batch sampler for an h5 dataset.
-
-        The batch sampler performs weak shuffling. Objects are batched first,
-        and then batches are shuffled.
-
-        Parameters
-        ----------
-        dataset : torch.data.Dataset
-            Input dataset
-        batch_size : int
-            Number of objects to batch
-        shuffle : bool
-            Shuffle the batches
-        drop_last : bool
-            Drop the last incomplete batch (if present)
-        """
         self.batch_size = batch_size
         self.dataset_length = len(dataset)
         self.n_batches = self.dataset_length / self.batch_size

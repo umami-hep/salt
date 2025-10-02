@@ -10,23 +10,26 @@ ARG DEBIAN_FRONTEND=noninteractive
 WORKDIR /salt
 
 # add some packages
-RUN apt-get update && apt-get install -y git h5utils wget vim build-essential jq
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git h5utils wget vim nano build-essential jq \
+    && rm -rf /var/lib/apt/lists/*
 
 # update python pip
-RUN python -m pip install --upgrade pip
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# --- deps layer (only files needed to compute metadata/deps) ---
+# pyproject + init so setuptools can read __version__
+COPY pyproject.toml README.md ./
+COPY salt/__init__.py salt/__init__.py
 
 # add some other packages to the image, instead of as a package dependency
 RUN python -m pip install puma-hep umami-preprocessing
 
 # install dependencies (make use of caching)
-COPY requirements-flash.txt .
-RUN python -m pip install -r requirements-flash.txt
-COPY requirements-muP.txt .
-RUN python -m pip install -r requirements-muP.txt
-COPY requirements.txt .
-RUN python -m pip install -r requirements.txt
+RUN python -m pip install ".[dev,test,muP,flash]"
 
-# copy and install package
+# Copy and install package (Source layer)
 COPY . .
-RUN python -m pip install -e .
 
+# Editable install without re-resolving deps
+RUN python -m pip install -e . --no-deps

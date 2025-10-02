@@ -1,3 +1,5 @@
+"""Model definitions from the SALT framework."""
+
 from salt.models.attention import GATv2Attention, MultiheadAttention, ScaledDotProductAttention
 from salt.models.dense import Dense
 from salt.models.featurewise import FeaturewiseTransformation
@@ -30,8 +32,6 @@ from salt.models.transformer import (
 )
 from salt.models.transformer_v2 import TransformerV2
 
-# from salt.models.maskformer import MaskFormer
-
 __all__ = [
     "ClassificationTask",
     "Dense",
@@ -42,7 +42,6 @@ __all__ = [
     "GlobalAttentionPooling",
     "InitNet",
     "InputNorm",
-    "MaskFormer",
     "MaskFormerLoss",
     "MultiheadAttention",
     "NodeQueryGAP",
@@ -55,7 +54,6 @@ __all__ = [
     "ScaledDotProductAttention",
     "TaskBase",
     "TensorCrossAttentionPooling",
-    "Transformer",
     "TransformerCrossAttentionEncoder",
     "TransformerCrossAttentionLayer",
     "TransformerEncoder",

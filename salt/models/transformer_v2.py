@@ -3,7 +3,8 @@
 Updated transformer implementation based on
 https://github.com/mistralai/mistral-src
 
-Features:
+Features
+--------
 - native SDP kernels (including flash)
 - gated linear units https://arxiv.org/abs/2002.05202
 - RMSNorm https://arxiv.org/abs/1910.07467
@@ -12,14 +13,20 @@ Features:
 import math
 import warnings
 from functools import partial
+from typing import Any
 
 import torch
-import torch.nn.functional as F
-from torch import BoolTensor, Tensor, nn
+from torch import BoolTensor, Size, Tensor, nn
+from torch.nn import functional
 
 import salt.models.layernorm as layernorms
 from salt.stypes import Tensors
 from salt.utils.tensor_utils import redo_padding, undo_padding
+
+try:
+    from flash_attn import flash_attn_varlen_qkvpacked_func as _flash_attn_func
+except ImportError:
+    _flash_attn_func = None
 
 ATTN_TYPES = ["torch-math", "torch-flash", "torch-meff", "flash-varlen"]
 
@@ -27,60 +34,88 @@ ATTN_TYPES = ["torch-math", "torch-flash", "torch-meff", "flash-varlen"]
 def merge_masks(
     kv_mask: BoolTensor | None,
     attn_mask: BoolTensor | None,
-    q_shape: Tensor,
+    q_shape: Size,
 ) -> BoolTensor | None:
-    """Create a full attention mask which incorporates the padding information.
+    """Create a full attention mask which incorporates padding information.
 
-    Using pytorch transformer convention for padding
-        False: Real node
-        True:  Zero padded
+    Using PyTorch transformer convention for padding:
+        ``False``: real token
+        ``True``: zero padded
 
-    Using pytorch transformer convention for attention mask
-        False:  Not allowed in attention mechanism
-        True:   Allowed in attention mechanism
+    Using PyTorch transformer convention for attention mask:
+        ``False``: not allowed in attention
+        ``True``: allowed in attention
 
-    Designing attention mask such that padded tokens can't send information.
-    But they can receive them.
-    This prevents Nans in the attention scores caused by the softmax
+    We design the mask such that padded tokens can't **send** information, but
+    they can **receive** it. This prevents NaNs in attention scores due to softmax.
 
     Parameters
     ----------
     kv_mask : BoolTensor | None
-        Mask for the keys and values, of shape (batch, kv_len).
+        Mask for keys/values of shape ``[B, L_kv]`` where padded positions are ``True``.
     attn_mask : BoolTensor | None
-        Full attention mask, of shape (batch, q_len, kv_len).
+        Full attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
     q_shape : Size
-        Shape of the queries tensor, (batch, q_len, dim).
+        Shape of the query tensor, expected as ``(B, L_q, D)``.
+
+    Returns
+    -------
+    BoolTensor | None
+        Combined mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable over heads), or ``None``.
     """
-    # Create the full mask which combines the attention and padding masks
     mask = None
 
-    # if the kv_mask mask exists, ensure that padded tokens never send information
+    # If the kv_mask exists, ensure padded tokens never send information
     if kv_mask is not None:
         mask = kv_mask.unsqueeze(-2).expand(-1, q_shape[-2], -1)
-        mask = ~mask  # convert the mask such that True is a valid token
+        mask = ~mask  # convert the mask so that True indicates a valid token
 
-    # include the attention mask
+    # Combine with the explicit attention mask if present
     if attn_mask is not None:
         mask = attn_mask if mask is None else attn_mask & mask
 
-    # Unsqueeze the mask to give it a dimension for num_head broadcasting
+    # Unsqueeze for head broadcasting
     if mask is not None:
         mask = mask.unsqueeze(1)
 
     return mask
 
 
-def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int):
+def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
+    """Repeat keys and values along a dimension.
+
+    Parameters
+    ----------
+    keys : Tensor
+        Key tensor.
+    values : Tensor
+        Value tensor.
+    repeats : int
+        Number of repeats.
+    dim : int
+        Dimension along which to repeat.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        Repeated ``(keys, values)`` tensors.
+    """
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
     values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
     return keys, values
 
 
 def change_attn_backends(module: nn.Module, backend: str) -> None:
-    """Recursively change the attention backend of a module and all its children.
+    """Recursively change the attention backend on a module and its children.
 
-    Used primarily for switching back to torch-math for ONNX exports.
+    Used primarily to switch back to ``torch-math`` for ONNX exports.
+
+    Parameters
+    ----------
+    module : nn.Module
+        Root module to traverse.
+    backend : str
+        Backend name, one of ``{"torch-math", "torch-flash", "torch-meff", "flash-varlen"}``.
     """
     if isinstance(module, TransformerV2):
         module.set_backend(backend)
@@ -97,64 +132,100 @@ def projection_packed(
     kv: Tensor | None,
     weight: Tensor,
     bias: Tensor | None = None,
-) -> tuple:
-    """Efficient input projection for MHA when using a single linear layer.
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Efficient input projection for MHA using a single packed linear layer.
 
-    Essentially the same as torch.nn.functional._in_projection_packed
-    But here we use chunk which is 40x faster than unflatten
-    Not sure why they don't use chunk in the original implementation...
+    Essentially the same as ``torch.nn.functional._in_projection_packed`` but uses
+    ``chunk`` (substantially faster than ``unflatten`` here).
 
     Parameters
     ----------
     q : Tensor
-        The queries tensor of shape (batch, q_len, dim).
+        Queries tensor of shape ``[B, L_q, D]``.
     kv : Tensor | None
-        The keys and values tensor of shape (batch, kv_len, dim).
+        Keys/values tensor for cross-attention of shape ``[B, L_kv, D]``. If ``None``,
+        self-attention is assumed.
     weight : Tensor
-        The packed weight tensor of the input lienar projection with shape (3 * dim, dim).
-    bias : Tensor | None
-        The optional packed bias tensor of the input linear projection with shape (3 * dim).
+        Packed projection weight of shape ``[3D, D]``.
+    bias : Tensor | None, optional
+        Packed projection bias of shape ``[3D]``. The default is ``None``.
 
     Returns
     -------
-    q_proj, k_proj, v_proj : tuple
-        The projected queries, keys, and values tensors.
+    tuple[Tensor, Tensor, Tensor]
+        Projected queries, keys, and values: ``(Q, K, V)``.
     """
-    # If the q tensor is the only input, then we assume we are doing self-attention.
-    # This is made (slightly) faster by using a single linear layer, then chunking rather than
-    # three seperate linear layers processed one at a time.
     if kv is None:
-        return F.linear(q, weight, bias).chunk(3, dim=-1)
+        return functional.linear(q, weight, bias).chunk(3, dim=-1)
 
-    # If the kv tensor is present, then we are doing cross-attention.
-    # This means we must project the q and kv tensors seperately.
-    # The kv linear layer can remain packed, allowing us to project together then chunk,
-    # using the same trick as above. We must however first seperate weights (and biases if present)
-    # of the linear layers for the q and kv parts. We use torch.split which returns a veiw of the
-    # original tensor so this step doesnt required any extra memory or much time.
     dim = q.size(-1)
     w_q, w_kv = weight.split([dim, dim * 2])
     b_q, b_kv = bias.split([dim, dim * 2]) if bias is not None else (None, None)
 
-    # Now we can do the seperate projections
-    q_proj = F.linear(q, w_q, b_q)
-    k_proj, v_proj = F.linear(kv, w_kv, b_kv).chunk(2, dim=-1)
+    q_proj = functional.linear(q, w_q, b_q)
+    k_proj, v_proj = functional.linear(kv, w_kv, b_kv).chunk(2, dim=-1)
     return q_proj, k_proj, v_proj
 
 
 def torch_attn(
-    q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor, dropout: float, backend: str
+    q: Tensor, k: Tensor, v: Tensor, mask: BoolTensor | None, dropout: float, backend: str
 ) -> Tensor:
-    """Torch dot product attention with a switchable backend."""
+    """Scaled dot-product attention with a switchable torch backend.
+
+    Parameters
+    ----------
+    q : Tensor
+        Query tensor of shape ``[B, H, L_q, D_h]``.
+    k : Tensor
+        Key tensor of shape ``[B, H, L_kv, D_h]``.
+    v : Tensor
+        Value tensor of shape ``[B, H, L_kv, D_h]``.
+    mask : BoolTensor | None
+        Attention mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable), or ``None``.
+    dropout : float
+        Dropout probability applied inside attention.
+    backend : str
+        One of ``{"torch-math", "torch-flash", "torch-meff"}`` (flash-varlen handled elsewhere).
+
+    Returns
+    -------
+    Tensor
+        Attention output of shape ``[B, H, L_q, D_h]``.
+    """
     with torch.backends.cuda.sdp_kernel(
         enable_math=True,  # always enabled as a fallback
         enable_mem_efficient=(backend == "torch-meff"),
         enable_flash=(backend == "torch-flash"),
     ):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout)
+        return functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout)
 
 
 class Attention(nn.Module):
+    """Multihead attention module with optional differential attention and norms.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input (and output) embedding dimension.
+    num_heads : int, optional
+        Number of attention heads. The default is ``1``.
+    attn_type : str, optional
+        Backend kernel to use. One of ``{"torch-math", "torch-flash", "torch-meff",
+        "flash-varlen"}``. The default is ``"torch-meff"``.
+    dropout : float, optional
+        Dropout rate applied in attention. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms in projections. The default is ``True``.
+    diff_attention : bool, optional
+        Enable differential attention (splits heads in two branches). The default is ``False``.
+    depth : int, optional
+        Layer depth index (used to set differential attention weights). The default is ``1``.
+    do_qk_norm : bool, optional
+        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
+    do_v_norm : bool, optional
+        Whether to apply RMSNorm to V per head. The default is ``False``.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -167,29 +238,6 @@ class Attention(nn.Module):
         do_qk_norm: bool = False,
         do_v_norm: bool = False,
     ) -> None:
-        """Multihead attention module.
-
-        Parameters
-        ----------
-        embed_dim : int
-            Dimension of the input.
-        num_heads : int
-            Number of attention heads.
-        attn_type : str, optional
-            Name of backend kernel to use.
-        dropout : float, optional
-            Dropout rate.
-        bias : bool, optional
-            Whether to include bias terms.
-        diff_attention : bool, optional
-            Use differential attention or not
-        depth : int, optional
-            Number of current attention layer
-        do_qk_norm : bool, optional
-            Whether to apply norm to q and k
-        do_v_norm : bool, optional
-            Whether to apply norm to v
-        """
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
         assert attn_type in ATTN_TYPES, "Invalid attention type!"
@@ -237,21 +285,29 @@ class Attention(nn.Module):
         self.reset_parameters()
         self.set_backend(attn_type)
 
-    def set_backend(self, attn_type: str):
+    def set_backend(self, attn_type: str) -> str:
+        """Set and validate the attention backend.
+
+        Parameters
+        ----------
+        attn_type : str
+            Backend name.
+
+        Returns
+        -------
+        str
+            Effective backend set (may fall back to ``"torch-math"``).
+        """
         # Check the attention backend
         self.attn_type = attn_type
         if self.attn_type == "flash-varlen":
             why_not_flash = ""
-            try:
-                from flash_attn import flash_attn_varlen_qkvpacked_func
-
-                self._flash_attn = flash_attn_varlen_qkvpacked_func
-            except ImportError:
+            if _flash_attn_func is None:
                 why_not_flash = (
                     "Requires the flash_attn package, CUDA 12+, and A100+, and must be installed "
                     "separately or using the [flash] extra. See requirements-flash.txt."
                 )
-            if not torch.cuda.is_available():
+            elif not torch.cuda.is_available():
                 why_not_flash = "No GPU available."
             if why_not_flash:
                 warnings.warn(
@@ -259,9 +315,11 @@ class Attention(nn.Module):
                     stacklevel=2,
                 )
                 self.attn_type = "torch-math"
+            else:
+                self._flash_attn = _flash_attn_func
         return self.attn_type
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
         """Initialize the parameters."""
         nn.init.xavier_uniform_(self.in_proj_weight)
         if self.bias:
@@ -281,9 +339,24 @@ class Attention(nn.Module):
         return self.subln(attn) * (1 - self.lambda_init)
 
     def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
-        """FlashAttention backend."""
+        """FlashAttention backend.
+
+        Parameters
+        ----------
+        x : Tensor
+            Packed sequence of shape ``[N_total, D]``.
+        culens : Tensor
+            Cumulative sequence lengths (for varlen flash).
+        maxlen : int
+            Maximum sequence length.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[N_total, D]``.
+        """
         # Perform the packed input projection
-        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
+        qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
         if self.do_qk_norm:
@@ -309,9 +382,24 @@ class Attention(nn.Module):
         return self.out_proj(a_out)
 
     def _flash_diff_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
-        """FlashAttention backend."""
+        """FlashAttention backend (differential attention variant).
+
+        Parameters
+        ----------
+        x : Tensor
+            Inputs as Tensor
+        culens : Tensor
+            Culens as Tensor
+        maxlen : int
+            Max length as int
+
+        Returns
+        -------
+        Tensor
+            Tensor output of the flash diff
+        """
         # Perform the packed input projection
-        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
+        qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, 2, self.head_dim)
 
         q1, q2 = qkv[:, 0, :, 0], qkv[:, 0, :, 1]
@@ -342,15 +430,31 @@ class Attention(nn.Module):
     def _torch_forward(
         self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
     ) -> Tensor:
-        """Attention using pytorch."""
-        # Otherwise perform standard attention
-        B, S, D = x.shape
+        """Attention using PyTorch SDPA backends.
 
-        # input projections -> B, S, D
+        Parameters
+        ----------
+        x : Tensor
+            Query input of shape ``[B, L_q, D]``.
+        kv : Tensor
+            Key/value input of shape ``[B, L_kv, D]`` (use ``x`` for self-attention).
+        mask : BoolTensor
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : BoolTensor
+            Padding mask for ``kv`` where padded positions are ``True``.
+        attn_mask : BoolTensor
+            Attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[B, L_q, D]``.
+        """
+        b, s, d = x.shape
+
         q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
 
-        # transform tensors to (B, Nh, S, Hd)
-        shape = (B, -1, self.num_heads, self.head_dim)  # Dont use S for cross attn
+        shape = (b, -1, self.num_heads, self.head_dim)
         q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
 
         if self.do_qk_norm:
@@ -359,30 +463,47 @@ class Attention(nn.Module):
         if self.do_v_norm:
             v = self.v_norm(v)
 
-        # run attention
         s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
         mask = merge_masks(s_mask, attn_mask, q.shape)
         dropout = self.dropout if self.training else 0.0
         a_out = torch_attn(q, k, v, mask, dropout, self.attn_type)
 
-        # recombine heads
-        a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
-
-        # mix with final linear layer
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
         return self.out_proj(a_out)
 
     def _torch_diff_forward(
-        self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
+        self,
+        x: Tensor,
+        kv: Tensor,
+        mask: BoolTensor,
+        kv_mask: BoolTensor,
+        attn_mask: BoolTensor,
     ) -> Tensor:
-        """Attention using pytorch."""
-        # Otherwise perform standard attention
-        B, S, D = x.shape
+        """Attention using PyTorch SDPA backends (differential attention variant).
 
-        # input projections -> B, S, D
+        Parameters
+        ----------
+        x : Tensor
+            Input as Tensor
+        kv : Tensor
+            kv as Tensor
+        mask : BoolTensor
+            Mask as BoolTensor
+        kv_mask : BoolTensor
+            kv Mask as BoolTensor
+        attn_mask : BoolTensor
+            Attention mask as BoolTensor
+
+        Returns
+        -------
+        Tensor
+            Attention as Tensor
+        """
+        b, s, d = x.shape
+
         q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
 
-        # transform tensors to (B, Nh, S, Hd)
-        shape = (B, -1, self.num_heads, 2, self.head_dim)  # Dont use S for cross attn
+        shape = (b, -1, self.num_heads, 2, self.head_dim)
         q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
 
         # Split q, k, v into two parts
@@ -390,8 +511,7 @@ class Attention(nn.Module):
         k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
         v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
 
-        # run attention
-        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        s_mask = mask if kv is None else kv_mask
         mask = merge_masks(s_mask, attn_mask, q.shape)
         dropout = self.dropout if self.training else 0.0
 
@@ -405,10 +525,7 @@ class Attention(nn.Module):
 
         a_out = self._weight_by_lambda(a_out1, a_out2)
 
-        # recombine heads
-        a_out = a_out.transpose(1, 2).contiguous().view(B, S, D)
-
-        # mix with final linear layer
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
         return self.out_proj(a_out)
 
     def forward(
@@ -421,31 +538,30 @@ class Attention(nn.Module):
         culens: Tensor | None = None,
         maxlen: int | None = None,
     ) -> Tensor:
-        """Attention forward pass, dispatches to the appropriate backend.
+        """Attention forward pass, dispatching to the appropriate backend.
 
         Parameters
         ----------
         x : Tensor
-            The pointcloud of shape (batch, x_len, dim).
-        kv : Tensor
-            Optional second pointcloud for cross-attn with shape (batch, kv_len, dim).
-        mask : BoolTensor, optional
-            Mask for the pointcloud x, by default None.
-        kv_mask : BoolTensor, optional
-            Mask the kv pointcloud, by default None.
-        attn_mask : BoolTensor, optional
-            Full attention mask, by default None.
-        culens : Tensor, optional
-            Cumulative lengths of the sequences in x, by default None.
-            Only used for the flash-varlen backend.
-        maxlen : int, optional
-            Maximum length of a sequence in the x, by default None.
-            Only used for the flash-varlen backend.
+            Query input of shape ``[B, L_q, D]``.
+        kv : Tensor | None, optional
+            Optional key/value input of shape ``[B, L_kv, D]`` for cross-attention.
+            If ``None``, self-attention is used.
+        mask : BoolTensor | None, optional
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : BoolTensor | None, optional
+            Padding mask for ``kv`` where padded positions are ``True``.
+        attn_mask : BoolTensor | None, optional
+            Attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+        culens : Tensor | None, optional
+            Cumulative lengths for varlen flash. Required for ``attn_type="flash-varlen"``.
+        maxlen : int | None, optional
+            Maximum sequence length. Required for ``attn_type="flash-varlen"``.
 
         Returns
         -------
         Tensor
-            Output of shape (batch, x_len, dim).
+            Output of shape ``[B, L_q, D]``.
         """
         if self.attn_type == "flash-varlen":
             assert kv is None, "flash-varlen only supports self attention!"
@@ -456,13 +572,32 @@ class Attention(nn.Module):
                 return self._flash_diff_forward(x, culens, maxlen)
             return self._flash_forward(x, culens, maxlen)
 
-        # Otherwise perform standard attention
         if self.diff_attention:
             return self._torch_diff_forward(x, kv, mask, kv_mask, attn_mask)
         return self._torch_forward(x, kv, mask, kv_mask, attn_mask)
 
 
 class GLU(nn.Module):
+    """Dense update with a (gated) linear unit.
+
+    See https://arxiv.org/abs/2002.05202.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input/output embedding dimension.
+    hidden_dim : int | None, optional
+        Hidden dimension. If ``None``, defaults to ``2 * embed_dim``.
+    activation : str, optional
+        Name of the activation class in ``torch.nn`` (e.g., ``"SiLU"``).
+    dropout : float, optional
+        Dropout probability. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms. The default is ``True``.
+    gated : bool, optional
+        If ``True``, uses a gated branch (splits hidden in two). The default is ``False``.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -472,25 +607,6 @@ class GLU(nn.Module):
         bias: bool = True,
         gated: bool = False,
     ):
-        """Dense update with gated linear unit.
-
-        See [2002.05202](https://arxiv.org/abs/2002.05202).
-
-        Parameters
-        ----------
-        embed_dim : int
-            Dimension of the input and output.
-        hidden_dim : int | None, optional
-            Dimension of the hidden layer. If None, defaults to embed_dim * 2.
-        activation : str, optional
-            Activation function.
-        dropout : float, optional
-            Dropout rate.
-        bias : bool, optional
-            Whether to include bias in the linear layers.
-        gated : bool, optional
-            Whether to gate the output of the hidden layer.
-        """
         super().__init__()
 
         if hidden_dim is None:
@@ -504,6 +620,18 @@ class GLU(nn.Module):
         self.activation = getattr(nn, activation)()
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the GLU block.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor of shape ``[B, L, D]``.
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape ``[B, L, D]``.
+        """
         x = self.in_proj(x)
         if self.gated:
             x1, x2 = x.chunk(2, dim=-1)
@@ -515,11 +643,9 @@ class GLU(nn.Module):
 
 
 class LayerScale(nn.Module):
-    """Applies the LayerScale operation from the Cait vision transformer.
+    """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
 
-    Effective at improving stability and speed of deep transformers.
-    Now the standard for vision transformers
-    https://arxiv.org/abs/2103.17239
+    Reference: https://arxiv.org/abs/2103.17239
     """
 
     def __init__(self, dim: int, init_value: float = 1e-3) -> None:
@@ -527,20 +653,41 @@ class LayerScale(nn.Module):
         self.gamma = nn.Parameter(init_value * torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
+        """Scale the input by a learnable vector ``gamma``.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input as Tensor
+
+        Returns
+        -------
+        Tensor
+            Scaled inputs as Tensor
+        """
         return x * self.gamma
 
 
 class DropPath(nn.Module):
-    """Drop paths for a stochastic depth neural network.
-
-    Used for regularisation when applied to the main path of a residual block.
-    """
+    """Stochastic depth / drop-path regularization."""
 
     def __init__(self, drop_prob: float = 0.0):
         super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x: Tensor) -> Tensor:
+        """Randomly drop residual paths during training.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor.
+
+        Returns
+        -------
+        Tensor
+            Output tensor with stochastic depth applied when training.
+        """
         if self.drop_prob == 0.0 or not self.training:
             return x
         keep_prob = 1 - self.drop_prob
@@ -551,16 +698,28 @@ class DropPath(nn.Module):
 
 
 class NormResidual(nn.Module):
-    """Wraps a module with norm with a residual connection.
+    """Residual wrapper with normalization, LayerScale, and DropPath.
 
-    Optionally also applies:
-    - LayerScale
-    - DropPath (Stochastic Depth)
+    Can represent common transformer patterns:
 
-    Can represent the most common transformer patterns:
-    - PostNorm: x = norm(x + drop(scale * fn(x)))
-    - PreNorm: x = x + drop(scale * fn(norm(x)))
-    - NoNorm x = x + drop(scale * fn(x))
+    - PostNorm: ``x = norm(x + drop(scale * fn(x)))``
+    - PreNorm: ``x = x + drop(scale * fn(norm(x)))``
+    - NoNorm:  ``x = x + drop(scale * fn(x))``
+
+    Parameters
+    ----------
+    fn : nn.Module
+        The wrapped non-resizing module.
+    norm : str, optional
+        Normalization class name from :mod:`salt.models.layernorm`. The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial value for LayerScale. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate for stochastic depth. The default is ``0.0``.
+    embed_dim : int, optional
+        Input/output dimension. If ``0``, attempts to read ``fn.embed_dim``.
+    norm_type : str, optional
+        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
     """
 
     def __init__(
@@ -572,23 +731,6 @@ class NormResidual(nn.Module):
         embed_dim: int = 0,
         norm_type: str = "pre",
     ) -> None:
-        """Parameters
-        ----------
-        fn : nn.Module
-            The module to wrap. Must be non-resizing.
-        norm : str, optional
-            The normalization method, by default "LayerNorm".
-        ls_init : float | None, optional
-            The initial value for the layerscale, by default 1e-3.
-            If None, then no layerscale is applied.
-        drop_path : float, optional
-            The drop path rate, by default 0.0.
-        embed_dim : int
-            The dimension of the input and output.
-            If zero we will try get it from the fn's own embed_dim attribute.
-        norm_type : str, optional
-            The type of normalization, by default "pre". Can be ['pre', 'post', 'none'].
-        """
         super().__init__()
         self.norm_type = norm_type
         dim = embed_dim or fn.embed_dim
@@ -599,7 +741,23 @@ class NormResidual(nn.Module):
         self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
         self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
 
-    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
+        """Apply residual wrapper around ``fn``.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor.
+        *args : Any
+            Positional arguments forwarded to ``fn``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``fn``.
+
+        Returns
+        -------
+        Tensor
+            Output tensor with residual, normalization (if enabled), LayerScale, and DropPath.
+        """
         if self.norm_type == "pre":
             return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
         if self.norm_type == "post":
@@ -608,6 +766,29 @@ class NormResidual(nn.Module):
 
 
 class EncoderLayer(nn.Module):
+    """Transformer encoder layer: self-attention + feed-forward.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial LayerScale value. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate. The default is ``0.0``.
+    depth : int, optional
+        Layer depth index, used for differential attention weighting. The default is ``1``.
+    dense_kwargs : dict | None, optional
+        Keyword args for :class:`GLU`.
+    attn_kwargs : dict | None, optional
+        Keyword args for :class:`Attention`.
+    norm_type : str, optional
+        One of ``{"pre", "post", "hybrid"}``. The default is ``"pre"``.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -619,28 +800,6 @@ class EncoderLayer(nn.Module):
         attn_kwargs: dict | None = None,
         norm_type: str = "pre",
     ) -> None:
-        """Encoder layer consisting of a self-attention and a feed-forward layer.
-
-        Parameters
-        ----------
-        embed_dim : int
-            Dimension of the embeddings at each layer.
-        norm : str, optional
-            Normalization style, by default "LayerNorm".
-        drop_path : float, optional
-            Drop path rate, by default 0.0.
-        ls_init : float | None, optional
-            Initial value for the layerscale, by default 1e-3.
-        depth : int, optional
-            The depth of the layer, by default 1.
-        dense_kwargs : dict | None, optional
-            Keyword arguments for [salt.models.transformer_v2.GLU][salt.models.transformer_v2.GLU].
-        attn_kwargs : dict | None, optional
-            Keyword arguments for
-            [salt.models.transformer_v2.Attention][salt.models.transformer_v2.Attention].
-        norm_type : str, optional
-            Normalization type, can be ['pre', 'post', 'hybrid'], by default 'pre'.
-        """
         super().__init__()
 
         # Safe defaults
@@ -673,7 +832,22 @@ class EncoderLayer(nn.Module):
         self.attn = residual(Attention(embed_dim, depth=depth, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
-    def forward(self, x: Tensor, **kwargs) -> Tensor:
+    def forward(self, x: Tensor, **kwargs: Any) -> Tensor:
+        """Apply self-attention and feed-forward.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor of shape ``[B, L, D]``.
+        **kwargs : Any
+            Extra arguments forwarded to the :class:`Attention` module
+            (e.g., ``mask``, ``attn_mask``, etc.).
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape ``[B, L, D]``.
+        """
         x = self.attn(x, **kwargs)
         if self.norm_type == "hybrid":
             return self.dense(self.norm(x))
@@ -681,6 +855,29 @@ class EncoderLayer(nn.Module):
 
 
 class DecoderLayer(nn.Module):
+    """Transformer decoder layer with self- and cross-attention.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial LayerScale value. The default is ``1e-3``.
+    drop_path : float, optional
+        Drop-path rate. The default is ``0.0``.
+    depth : int, optional
+        Layer depth index. The default is ``1``.
+    dense_kwargs : dict | None, optional
+        Keyword args for :class:`GLU`.
+    attn_kwargs : dict | None, optional
+        Keyword args for :class:`Attention`.
+    norm_type : str, optional
+        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
+    """
+
     def __init__(
         self,
         embed_dim: int,
@@ -719,12 +916,62 @@ class DecoderLayer(nn.Module):
         mask: Tensor | None = None,
         kv_mask: Tensor | None = None,
     ) -> Tensor:
+        """Apply self-attention, cross-attention, and feed-forward.
+
+        Parameters
+        ----------
+        x : Tensor
+            Decoder input of shape ``[B, L, D]``.
+        kv : Tensor
+            Encoder memory of shape ``[B, L_enc, D]``.
+        mask : Tensor | None, optional
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : Tensor | None, optional
+            Padding mask for ``kv`` where padded positions are ``True``.
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape ``[B, L, D]``.
+        """
         x = self.self_attn(x, kv_mask=mask)
         x = self.cross_attn(x, kv=kv, kv_mask=kv_mask)
         return self.dense(x)
 
 
 class TransformerV2(nn.Module):
+    """Transformer encoder stack with optional registers and output projection.
+
+    Parameters
+    ----------
+    num_layers : int
+        Number of encoder layers.
+    embed_dim : int
+        Embedding dimension.
+    out_dim : int | None, optional
+        Optional output projection dimension. If ``None``, equals ``embed_dim``.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    attn_type : str, optional
+        Attention backend, one of ``{"torch-math", "torch-flash", "torch-meff", "flash-varlen"}``.
+        The default is ``"torch-math"``.
+    do_final_norm : bool, optional
+        Whether to apply a final normalization layer. The default is ``True``.
+    num_registers : int, optional
+        Number of learned register tokens appended to the end of the sequence. The default is ``1``.
+    drop_registers : bool, optional
+        If ``True``, registers are dropped from outputs. The default is ``False``.
+    **kwargs : Any
+        Extra keyword arguments forwarded to :class:`EncoderLayer` (e.g., ``attn_kwargs``,
+        ``dense_kwargs``, ``ls_init``, etc.).
+
+    Raises
+    ------
+    ValueError
+        If ``num_registers < 1``.
+    """
+
     def __init__(
         self,
         num_layers: int,
@@ -735,40 +982,14 @@ class TransformerV2(nn.Module):
         do_final_norm: bool = True,
         num_registers: int = 1,
         drop_registers: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
-        """Transformer model consisting of a stack of Transformer encoder layers.
-
-        Parameters
-        ----------
-        num_layers : int
-            Number of layers.
-        embed_dim : int
-            Dimension of the embeddings at each layer.
-        out_dim : int | None, optional
-            Optionally project the output to a different dimension.
-        norm : str, optional
-            Normalization style, by default "LayerNorm".
-        attn_type : str, optional
-            The backend for the attention mechanism, by default "torch-flash".
-            Provided here because the varlen backend requires pre/post processing.
-        do_final_norm : bool, optional
-            Whether to apply a final normalization layer, by default True.
-        num_registers : int, optional
-            The number of registers to add to the END of the input sequence.
-            Registers are randomly initialised tokens of the same dimension as
-            any other inputs after initialiser networks. See 2309.16588.
-        drop_registers : bool, optional
-            If to drop the registers from the outputs
-        kwargs : dict
-            Keyword arguments for [salt.models.transformer_v2.EncoderLayer].
-        """
         super().__init__()
 
         # Check the inputs
         if num_registers < 1:
             raise ValueError(
-                "Some jets have no tracks, which causes NaNs in the attention scores. ",
+                "Some jets have no tracks, which causes NaNs in the attention scores. "
                 "To avoid this, set num_registers to at least 1",
             )
 
@@ -805,18 +1026,44 @@ class TransformerV2(nn.Module):
             self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
         self.featurewise = nn.ModuleList()
 
-    def set_backend(self, attn_type: str):
+    def set_backend(self, attn_type: str) -> None:
+        """Set the attention backend for all layers.
+
+        Parameters
+        ----------
+        attn_type : str
+            Backend name to apply to all encoder layers.
+        """
         self.attn_type = attn_type
         for layer in self.layers:
             self.attn_type = layer.attn.fn.set_backend(self.attn_type)
 
     def forward(
         self,
-        x: Tensor,
-        pad_mask: BoolTensor,
+        x: Tensor | dict[str, Tensor],
+        pad_mask: BoolTensor | dict[str, BoolTensor],
         inputs: Tensors | None = None,
-        **kwargs,
-    ) -> Tensor:
+        **kwargs: Any,
+    ) -> tuple[Tensor, BoolTensor | dict[str, BoolTensor]]:
+        """Run the encoder stack.
+
+        Parameters
+        ----------
+        x : Tensor | dict[str, Tensor]
+            Input sequence(s) of shape ``[B, L, D]`` or dict of such tensors.
+        pad_mask : BoolTensor | dict[str, BoolTensor]
+            Padding mask(s) aligned with ``x``; padded positions are ``True``.
+        inputs : Tensors | None, optional
+            Original input dictionary for featurewise transforms (if any).
+        **kwargs : Any
+            Extra arguments forwarded to encoder layers (e.g., attention masks or
+            varlen flash arguments).
+
+        Returns
+        -------
+        tuple[Tensor, BoolTensor | dict[str, BoolTensor]]
+            Tuple of ``(encoded, pad_mask)`` where ``encoded`` has shape ``[B, L, D_out]``.
+        """
         # Add the registers to the sequence and the mask
         if self.num_registers:
             x, pad_mask = self._add_registers(x, pad_mask)
@@ -856,13 +1103,28 @@ class TransformerV2(nn.Module):
 
         return x, pad_mask
 
-    def _add_registers(self, x: Tensor | dict, pad_mask: BoolTensor | dict | None) -> tuple:
-        """Add the learnable registers to the end of the input sequence."""
+    def _add_registers(
+        self, x: Tensor | dict[str, Tensor], pad_mask: BoolTensor | dict[str, BoolTensor] | None
+    ) -> tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]:
+        """Add the learnable registers to the end of the input sequence (and mask).
+
+        Parameters
+        ----------
+        x : Tensor | dict[str, Tensor]
+            Input sequence(s) of shape ``[B, L, D]`` or dict of such tensors.
+        pad_mask : BoolTensor | dict[str, BoolTensor] | None
+            Padding mask(s) aligned with ``x``; padded positions are ``True``.
+
+        Returns
+        -------
+        tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]
+            Updated ``(x, pad_mask)`` including appended registers.
+        """
         # Get the batch size and expand the registers to match
-        B = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
+        batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
 
         # Add as a key or concatenate at the end
-        reg = self.registers.expand(B, -1, -1)
+        reg = self.registers.expand(batch_size, -1, -1)
         if isinstance(x, dict):
             x["REGISTERS"] = reg
         else:
@@ -870,7 +1132,7 @@ class TransformerV2(nn.Module):
 
         # Also include a mask for the registers
         if pad_mask is not None:
-            reg_mask = self.register_mask.expand(B, -1)
+            reg_mask = self.register_mask.expand(batch_size, -1)
             if isinstance(pad_mask, dict):
                 pad_mask["REGISTERS"] = reg_mask
             else:

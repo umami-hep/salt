@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -16,10 +17,34 @@ from salt.utils.array_utils import listify
 
 # add support for converting yaml lists to tensors
 def serializer(x: torch.Tensor) -> list:
+    """Serialize a PyTorch tensor to a plain Python list (for YAML/JSON).
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Tensor to serialize.
+
+    Returns
+    -------
+    list
+        The tensor converted to a nested Python list.
+    """
     return x.tolist()
 
 
 def deserializer(x: list) -> torch.Tensor:
+    """Deserialize a plain Python list into a PyTorch tensor.
+
+    Parameters
+    ----------
+    x : list
+        Nested list representation of a tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor reconstructed from the list.
+    """
     return torch.tensor(x)
 
 
@@ -27,17 +52,20 @@ register_type(torch.Tensor, serializer, deserializer)
 
 
 def get_best_epoch(config_path: Path) -> str:
-    """Find the best perfoming epoch.
+    """Find the checkpoint with the lowest validation loss for a training run.
+
+    This scans the sibling ``ckpts/`` directory of ``config_path`` for ``*.ckpt`` files and
+    picks the one with the smallest ``loss=...`` value embedded in the filename.
 
     Parameters
     ----------
     config_path : Path
-        Path to saved training config file.
+        Path to the saved training config file (``config.yaml``).
 
     Returns
     -------
-    Path
-        Path to best checkpoint for the training run.
+    str
+        Absolute or relative string path to the best checkpoint file.
     """
     ckpt_dir = Path(config_path.parent / "ckpts")
     print("No --ckpt_path specified, looking for best checkpoint in", ckpt_dir)
@@ -50,13 +78,38 @@ def get_best_epoch(config_path: Path) -> str:
 
 
 class SaltCLI(LightningCLI):
-    def apply_links(self, parser) -> None:
+    """Lightning CLI wrapper that wires SALT configuration conveniences.
+
+    This class adds:
+    - Argument links between high-level fields and nested config fields.
+    - Automatic label collection for tasks (including MaskFormer object/constituent support).
+    - Optional model compilation for speed.
+    - Git cleanliness checks and optional tagging on training starts.
+    - Output directory normalization and timestamping.
+    - Best-epoch checkpoint selection for testing.
+    """
+
+    def apply_links(self, parser: Any) -> None:
+        """Link top-level CLI arguments to nested config entries.
+
+        Parameters
+        ----------
+        parser : Any
+            The Lightning/JsonArg parser instance whose arguments should be linked.
+        """
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
         parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
         parser.link_arguments("data.global_object", "model.global_object")
 
-    def add_arguments_to_parser(self, parser) -> None:
+    def add_arguments_to_parser(self, parser: Any) -> None:
+        """Add SALT-specific CLI arguments to the parser.
+
+        Parameters
+        ----------
+        parser : Any
+            The Lightning/JsonArg parser instance to extend with additional arguments.
+        """
         parser.add_argument("-n", "--name", default="salt", help="Name for this training run.")
         parser.add_argument(
             "-f", "--force", action="store_true", help="Run with uncomitted changes."
@@ -79,7 +132,19 @@ class SaltCLI(LightningCLI):
         )
         self.apply_links(parser)
 
-    def fit(self, model, **kwargs):
+    def fit(self, model: Any, **kwargs: Any) -> None:
+        """Run training with optional compilation.
+
+        If ``--compile`` is set, the wrapped model module (``model.model``) is compiled
+        before training.
+
+        Parameters
+        ----------
+        model : Any
+            The LightningModule wrapper instance created by the CLI.
+        **kwargs : Any
+            Additional keyword arguments forwarded to :meth:`pytorch_lightning.Trainer.fit`.
+        """
         if self.config[self.subcommand]["compile"]:
             # unfortunately compiling in place doesn't work
             # https://github.com/pytorch/pytorch/pull/97565
@@ -88,7 +153,24 @@ class SaltCLI(LightningCLI):
         self.trainer.fit(model, **kwargs)
 
     def before_instantiate_classes(self) -> None:
-        """A lot of automatic configuration is done here."""
+        """Perform automatic configuration/patches prior to class instantiation.
+
+        This hook:
+        - Collects all labels required by configured tasks (including MaskFormer).
+        - Populates normalization config onto the model section.
+        - Injects variable/global object info into init nets and featurewise nets.
+        - Optionally loads class names from HDF5 attributes and class weights from a class dict.
+        - Adjusts precision and output directories.
+        - Runs git checks and optional tagging for training runs.
+        - Normalizes test-time configuration and selects the best checkpoint automatically.
+
+        Raises
+        ------
+        ValueError
+            If the mf_config is not in the data config
+            If the constituent name is not in the data labels
+            If no trainer device is set
+        """
         config = self.config[self.subcommand] if self.subcommand else self.config
         sc_tasks = config.model.model.init_args.tasks.init_args.modules
 
@@ -210,18 +292,41 @@ class SaltCLI(LightningCLI):
         merge_dict: JsonNamespace | None,
         labels: dict,
     ) -> None:
-        def collect_labels(task: JsonNamespace):
-            labels = []
+        """Accumulate label field names required by a task into ``labels``.
+
+        Parameters
+        ----------
+        task : JsonNamespace
+            The task configuration namespace (``init_args`` of the task).
+        merge_dict : JsonNamespace | None
+            Optional mapping of merged input names. If provided, labels are also
+            replicated to these merged inputs.
+        labels : dict
+            Mutable dictionary mapping input stream name → list of label field names.
+        """
+
+        def collect_labels(task: JsonNamespace) -> list:
+            """Collect label-like fields from a task config (helper).
+
+            Parameters
+            ----------
+            task : JsonNamespace
+                Task as json namespace instance
+
+            Returns
+            -------
+            list
+                List with the labels
+            """
+            labels: list = []
             if label := task.get("label"):
                 labels.append(label)
             if weight := task.get("sample_weight"):
                 labels.append(weight)
             if targets := task.get("targets"):
                 labels.extend(listify(targets))
-
             if denominators := task.get("target_denominators"):
                 labels.extend(listify(denominators))
-
             return labels
 
         if task["input_name"] in labels:
@@ -240,6 +345,28 @@ class SaltCLI(LightningCLI):
 
     @staticmethod
     def get_object_class_names(task: JsonNamespace, data: JsonNamespace) -> list | None:
+        """Read class names for object classification from HDF5 attributes if applicable.
+
+        Only applies when the task targets ``flavour_label`` on the global object and
+        the task has ``class_names=None``.
+
+        Parameters
+        ----------
+        task : JsonNamespace
+            Task configuration namespace (contains ``init_args``).
+        data : JsonNamespace
+            Data configuration namespace (contains ``train_file``, ``input_map`` etc.).
+
+        Returns
+        -------
+        list or None
+            List of class names if discovered; otherwise ``None``.
+
+        Raises
+        ------
+        ValueError
+            If the init_args label is not in the h5 attrs.
+        """
         if not (
             task.init_args.name == f"{data.global_object}_classification"
             and task.init_args.label == "flavour_label"
@@ -266,6 +393,26 @@ class SaltCLI(LightningCLI):
         task: JsonNamespace,
         data: JsonNamespace,
     ) -> list:
+        """Load class weights for a classification task from a class-dict YAML.
+
+        Parameters
+        ----------
+        task : JsonNamespace
+            Task configuration namespace (contains ``init_args`` and a loss block).
+        data : JsonNamespace
+            Data configuration namespace; must contain ``class_dict`` and optionally
+            an ``input_map``.
+
+        Returns
+        -------
+        list
+            List of class weights aligned with the task's class order.
+
+        Raises
+        ------
+        ValueError
+            If the class dict path is missing, weights already provided, or label is absent.
+        """
         if (class_dict_path := data.class_dict) is None:
             raise ValueError("use_class_dict=True requires class_dict to be specified")
 
@@ -291,6 +438,25 @@ class SaltCLI(LightningCLI):
 
     @staticmethod
     def get_output_dir_path(default_output_dir_path: str, name: str, log_suffix: str | None) -> str:
+        """Build the run output directory path with either a suffix or a timestamp.
+
+        If ``default_output_dir_path`` already ends with a timestamp-like suffix, strip it.
+
+        Parameters
+        ----------
+        default_output_dir_path : str
+            Base path (from trainer config) where logs/checkpoints should be written.
+        name : str
+            The run name (typically the model name).
+        log_suffix : str | None
+            Optional suffix to append. If ``None``, a timestamp of the form
+            ``YYYYMMDD-THHMMSS`` is appended.
+
+        Returns
+        -------
+        str
+            Absolute path to the resulting output directory.
+        """
         log_dir = Path(default_output_dir_path)
         try:
             datetime.strptime(log_dir.name.split("_")[-1], "%Y%m%d-T%H%M%S")

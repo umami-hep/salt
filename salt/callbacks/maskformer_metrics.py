@@ -8,28 +8,32 @@ from salt.utils.mask_utils import mask_from_logits, reco_metrics
 
 
 class MaskformerMetrics(Callback):
-    def __init__(self, only_val=True, mask_criteria: dict[str, tuple] | None = None):
-        """Callback to log metrics for Maskformer model.
+    """Callback to log metrics for Maskformer model.
 
-        The following metrics are logged.
-            - class_exact_match
-            - not null class efficiency and purity
-            - per class efficiency and purity
-            - mean absolute error for regression tasks
-            - mask match efficiency and fake rate, for different criteria
+    The following metrics are logged.
+        - class_exact_match
+        - not null class efficiency and purity
+        - per class efficiency and purity
+        - mean absolute error for regression tasks
+        - mask match efficiency and fake rate, for different criteria
 
-        Parameters
-        ----------
-        only_val: bool
-            Whether to log metrics only on validation step. Default is true. It is not recommended
-            to log metrics on training step, as it will slow down the training process.
-        mask_criteria: dict[str, tuple] | None
-            Dictionary with the criteria to evaluate the mask match. The keys are the name of the
-            criteria, and the values are tuples (R, P) where R is the mimimum recall and P is the
-            minimum purity for the criteria to be met. Default is None, which will define the
-            'perfect' critera as (1, 1) and the 'loose' criteria as (0.5, 0.5).
+    Parameters
+    ----------
+    only_val: bool, optional
+        Whether to log metrics only on validation step. It is not recommended to log metrics on
+        training step, as it will slow down the training process. By default True
+    mask_criteria: dict[str, tuple] | None, optional
+        Dictionary with the criteria to evaluate the mask match. The keys are the name of the
+        criteria, and the values are tuples (R, P) where R is the mimimum recall and P is the
+        minimum purity for the criteria to be met. By default None, which will define the 'perfect'
+        critera as (1, 1) and the 'loose' criteria as (0.5, 0.5).
+    """
 
-        """
+    def __init__(
+        self,
+        only_val: bool = True,
+        mask_criteria: dict[str, tuple] | None = None,
+    ) -> None:
         self.mask_criteria = mask_criteria
         if not self.mask_criteria:
             self.mask_criteria = {"perfect": (1, 1), "loose": (0.5, 0.5)}
