@@ -7,6 +7,36 @@ from salt.utils.tensor_utils import attach_context
 
 
 class InitNet(nn.Module):
+    """Initial input embedding network.
+
+    This class can handle global input concatenation and positional encoding.
+
+    Parameters
+    ----------
+    input_name : str
+        Name of the input, must match the input types in the data config
+    dense_config : dict
+        Keyword arguments for [`salt.models.Dense`][salt.models.Dense],
+        the dense network producing the initial embedding. The `input_size`
+        argument is inferred automatically by the framework
+    variables : Vars
+        Input variables used in the forward pass, set automatically by the framework
+    global_object : str
+        Name of the global object, set automatically by the framework
+    attach_global : bool, optional
+        Concatenate global-level inputs with constituent-level inputs before embedding,
+        by default True
+    pos_enc : PositionalEncoder | None, optional
+        Positional encoder module to use. See
+        [`salt.models.PositionalEncoder`][salt.models.PositionalEncoder] for details.
+        By default None
+    mup: bool, optional
+        Whether to use the muP parametrisation (impacts initialisation), by default False
+    featurewise: FeaturewiseTransformation | None, optional
+        Networks to apply featurewise transformations to inputs, set automatically by
+        the framework. By default None
+    """
+
     def __init__(
         self,
         input_name: str,
@@ -15,36 +45,9 @@ class InitNet(nn.Module):
         global_object: str,
         attach_global: bool = True,
         pos_enc: PositionalEncoder | None = None,
-        muP: bool = False,
+        mup: bool = False,
         featurewise: FeaturewiseTransformation | None = None,
     ):
-        """Initial input embedding network.
-
-        This class can handle global input concatenation and positional encoding.
-
-        Parameters
-        ----------
-        input_name : str
-            Name of the input, must match the input types in the data config
-        dense_config : dict
-            Keyword arguments for [`salt.models.Dense`][salt.models.Dense],
-            the dense network producing the initial embedding. The `input_size`
-            argument is inferred automatically by the framework
-        variables : Vars
-            Input variables used in the forward pass, set automatically by the framework
-        global_object : str
-            Name of the global object, set automatically by the framework
-        attach_global : str, optional
-            Concatenate global-level inputs with constituent-level inputs before embedding
-        pos_enc : PositionalEncoder, optional
-            Positional encoder module to use. See
-            [`salt.models.PositionalEncoder`][salt.models.PositionalEncoder] for details.
-        muP: bool, optional,
-            Whether to use the muP parametrisation (impacts initialisation).
-        featurewise: FeaturewiseTransformation, optional
-            Networks to apply featurewise transformations to inputs, set automatically by
-            the framework
-        """
         super().__init__()
 
         # set input size
@@ -53,7 +56,7 @@ class InitNet(nn.Module):
             if attach_global and input_name != "EDGE":
                 dense_config["input_size"] += len(variables[global_object])
                 if not featurewise:
-                    dense_config["input_size"] += len(variables.get("PARAMETERS", []))
+                    dense_config["input_size"] += len(variables.get("parameters", []))
 
         self.input_name = input_name
         self.net = Dense(**dense_config)
@@ -61,8 +64,8 @@ class InitNet(nn.Module):
         self.attach_global = attach_global
         self.global_object = global_object
         self.pos_enc = pos_enc
-        self.muP = muP
-        if muP:
+        self.mup = mup
+        if mup:
             self.net.reset_parameters()
         self.featurewise = featurewise
 
@@ -75,8 +78,8 @@ class InitNet(nn.Module):
             x = attach_context(x, inputs[self.global_object])
 
         # add parameters if not using featurewise transformations
-        if "PARAMETERS" in self.variables and not self.featurewise:
-            x = attach_context(x, inputs["PARAMETERS"])
+        if "parameters" in self.variables and not self.featurewise:
+            x = attach_context(x, inputs["parameters"])
 
         # apply featurewise transformations
         if self.featurewise is not None:

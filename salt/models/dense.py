@@ -4,6 +4,36 @@ from salt.utils.tensor_utils import attach_context
 
 
 class Dense(nn.Module):
+    """A fully connected feed forward neural network, which can take
+    in additional contextual information.
+
+    Parameters
+    ----------
+    input_size : int
+        Input size
+    output_size : int | None, optional
+        Output size. If not specified this will be the same as the input size, by default None
+    hidden_layers : list[int] | None, optional
+        Number of nodes per layer, if not specified, the network will have
+        a single hidden layer with size `input_size * hidden_dim_scale`, by default None
+    hidden_dim_scale : int, optional
+        Scale factor for the hidden layer size, by default 2
+    activation : str, optional
+        Activation function for hidden layers. Must be a valid torch.nn activation function.
+        By default "ReLU"
+    final_activation : str | None, optional
+        Activation function for the output layer. Must be a valid torch.nn activation function.
+        By default None
+    dropout : float, optional
+        Apply dropout with the supplied probability, by default 0.0
+    bias : bool, optional
+        Whether to use bias in the linear layers, by default True
+    context_size : int, optional
+        Size of the context tensor, 0 means no context information is provided, by default 0
+    mup : bool, optional
+        Whether to use the muP parametrisation (impacts initialisation), by default None
+    """
+
     def __init__(
         self,
         input_size: int,
@@ -15,37 +45,8 @@ class Dense(nn.Module):
         dropout: float = 0.0,
         bias: bool = True,
         context_size: int = 0,
-        muP: bool = False,
+        mup: bool = False,
     ) -> None:
-        """A fully connected feed forward neural network, which can take
-        in additional contextual information.
-
-        Parameters
-        ----------
-        input_size : int
-            Input size
-        output_size : int
-            Output size. If not specified this will be the same as the input size.
-        hidden_layers : list, optional
-            Number of nodes per layer, if not specified, the network will have
-            a single hidden layer with size `input_size * hidden_dim_scale`.
-        hidden_dim_scale : int, optional
-            Scale factor for the hidden layer size.
-        activation : str
-            Activation function for hidden layers.
-            Must be a valid torch.nn activation function.
-        final_activation : str, optional
-            Activation function for the output layer.
-            Must be a valid torch.nn activation function.
-        dropout : float, optional
-            Apply dropout with the supplied probability.
-        bias : bool, optional
-            Whether to use bias in the linear layers.
-        context_size : int
-            Size of the context tensor, 0 means no context information is provided.
-        muP: bool, optional,
-            Whether to use the muP parametrisation (impacts initialisation).
-        """
         super().__init__()
 
         if output_size is None:
@@ -57,7 +58,7 @@ class Dense(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.context_size = context_size
-        self.muP = muP
+        self.mup = mup
 
         # build nodelist
         self.node_list = [input_size + context_size, *hidden_layers, output_size]
@@ -84,7 +85,7 @@ class Dense(nn.Module):
         # build the net
         self.net = nn.Sequential(*layers)
 
-        if self.muP:
+        if self.mup:
             self._reset_parameters()
 
     def forward(self, x: Tensor, context: Tensor | None = None) -> Tensor:

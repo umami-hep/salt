@@ -1,13 +1,30 @@
+from typing import Any
+
 import scipy
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn import functional
 
 
 @torch.jit.script
 def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
-    """Compute the DICE loss for the entire batch, similar to generalized IOU for masks,
-    over all permutations of the inputs and targets.
+    """Compute batched DICE loss for all input-target permutations.
+
+    The loss is computed for every pair of prediction and target within each
+    batch element, analogous to a generalized IoU for masks.
+
+    Parameters
+    ----------
+    inputs : Tensor
+        Predicted mask logits of shape ``[B, N, C]``.
+    targets : Tensor
+        Target masks (0/1) of shape ``[B, M, C]``.
+
+    Returns
+    -------
+    Tensor
+        Pairwise DICE loss matrix of shape ``[B, N, M]`` where entry ``(b, n, m)``
+        is the DICE loss between prediction ``n`` and target ``m`` for batch ``b``.
     """
     inputs = inputs.sigmoid()
 
@@ -24,9 +41,26 @@ def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
 
 @torch.jit.script
 def batch_sigmoid_ce_cost(inputs: Tensor, targets: Tensor) -> Tensor:
-    """Compute the cross entropy loss over all permutations of the inputs and targets."""
-    pos = F.binary_cross_entropy_with_logits(inputs, torch.ones_like(inputs), reduction="none")
-    neg = F.binary_cross_entropy_with_logits(inputs, torch.zeros_like(inputs), reduction="none")
+    """Compute batched sigmoid cross-entropy cost for all permutations.
+
+    Parameters
+    ----------
+    inputs : Tensor
+        Predicted mask logits of shape ``[B, N, C]``.
+    targets : Tensor
+        Target masks (0/1) of shape ``[B, M, C]``.
+
+    Returns
+    -------
+    Tensor
+        Pairwise cross-entropy cost matrix of shape ``[B, N, M]``.
+    """
+    pos = functional.binary_cross_entropy_with_logits(
+        inputs, torch.ones_like(inputs), reduction="none"
+    )
+    neg = functional.binary_cross_entropy_with_logits(
+        inputs, torch.zeros_like(inputs), reduction="none"
+    )
     loss = torch.einsum("bnc,bmc->bnm", pos, targets) + torch.einsum(
         "bnc,bmc->bnm", neg, (1 - targets)
     )
@@ -37,13 +71,36 @@ def batch_sigmoid_ce_cost(inputs: Tensor, targets: Tensor) -> Tensor:
 def batch_sigmoid_focal_cost(
     inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2
 ) -> Tensor:
-    """Compute the focal loss over all permutations of the inputs and targets for batches."""
+    """Compute batched focal loss for all input-target permutations.
+
+    Parameters
+    ----------
+    inputs : Tensor
+        Predicted mask logits of shape ``[B, N, C]``.
+    targets : Tensor
+        Target masks (0/1) of shape ``[B, M, C]``.
+    alpha : float, optional
+        Class balancing factor. If negative, no reweighting is applied.
+        The default is ``-1``.
+    gamma : float, optional
+        Focusing parameter controlling down-weighting of easy examples.
+        The default is ``2``.
+
+    Returns
+    -------
+    Tensor
+        Pairwise focal loss matrix of shape ``[B, N, M]``.
+    """
     prob = inputs.sigmoid()
-    focal_pos = ((1 - prob) ** gamma) * F.binary_cross_entropy_with_logits(
-        inputs, torch.ones_like(inputs), reduction="none"
+    focal_pos = ((1 - prob) ** gamma) * functional.binary_cross_entropy_with_logits(
+        inputs,
+        torch.ones_like(inputs),
+        reduction="none",
     )
-    focal_neg = (prob**gamma) * F.binary_cross_entropy_with_logits(
-        inputs, torch.zeros_like(inputs), reduction="none"
+    focal_neg = (prob**gamma) * functional.binary_cross_entropy_with_logits(
+        inputs,
+        torch.zeros_like(inputs),
+        reduction="none",
     )
     if alpha >= 0:
         focal_pos = focal_pos * alpha
@@ -56,43 +113,53 @@ def batch_sigmoid_focal_cost(
 
 @torch.jit.script
 def batch_mae_loss(inputs: Tensor, targets: Tensor) -> Tensor:
-    """Compute the mean average error over all permutations of the inputs and targets
-    for batches.
+    """Compute batched mean absolute error for all permutations.
+
+    Parameters
+    ----------
+    inputs : Tensor
+        Predicted values of shape ``[B, N, C]``.
+    targets : Tensor
+        Target values of shape ``[B, M, C]``.
+
+    Returns
+    -------
+    Tensor
+        Pairwise MAE matrix of shape ``[B, N, M]`` computed by averaging over
+        the last dimension ``C``.
     """
     return (inputs[:, :, None] - targets[:, None, :]).abs().mean(-1)
 
 
 class HungarianMatcher(nn.Module):
-    """Module to compute the matching cost and solve the corresponding LSAP using the
-    Hungarian algorithm.
+    """Solve LSAP matching between predictions and targets via Hungarian algorithm.
 
-    Based on
-    - https://github.com/facebookresearch/MaskFormer
-    - https://github.com/facebookresearch/Mask2Former
+    The module aggregates multiple cost terms (classification, mask losses, optional
+    regression) into a single cost matrix per batch element and solves the linear
+    sum assignment problem to obtain a 1-to-1 matching.
+
+    Parameters
+    ----------
+    num_classes : int
+        Number of object classes, excluding the special ``no_object`` class.
+    num_objects : int
+        Number of object slots (typically ``num_classes + 1`` including ``no_object``).
+    loss_weights : dict[str, float]
+        Weights for individual loss components, e.g.
+        ``{"object_class_ce": 1.0, "mask_dice": 1.0, "mask_ce": 0.0, "mask_focal": 0.0,
+        "regression": 0.0}``.
+
+    Notes
+    -----
+    The sum of ``loss_weights`` must be positive.
     """
 
     def __init__(
         self,
         num_classes: int,
         num_objects: int,
-        loss_weights: dict,
+        loss_weights: dict[str, float],
     ):
-        """Compute the optimal assignment between the targets and the predictions of the network.
-
-        For efficiency reasons, the targets don't include the no_object null class. Because of this,
-        in general, there are more predictions than targets. In this case, we do a 1-to-1 matching
-        of the best predictions, while the others are un-matched (and thus treated as
-        non-objects).
-
-        Parameters
-        ----------
-        num_classes: int
-            Number of object classes, omitting the special no_object class
-        num_objects: int
-            Number of object classes + 1 (the no_object class)
-        loss_weights: dict
-            Dictionary containing the weights for the different losses
-        """
         super().__init__()
         self.num_classes = num_classes
         self.num_objects = num_objects
@@ -101,22 +168,34 @@ class HungarianMatcher(nn.Module):
 
         self.global_step = 0
 
-    def get_batch_cost(self, preds, targets):
-        """Gets the cost matrix for the whole batch.
+    def get_batch_cost(
+        self,
+        preds: dict[str, Tensor],
+        targets: dict[str, Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        """Build the pairwise cost matrix for the whole batch.
 
         Parameters
         ----------
-        preds : dict of tensors
-            The predictions from the model
-        targets : dict of tensors
-            The targets for the model
+        preds : dict[str, Tensor]
+            Model predictions with keys:
+            - ``"class_probs"``: class probabilities of shape ``[B, N, C]``.
+            - ``"masks"``: mask logits of shape ``[B, N, L]``.
+            - ``"regression"`` (optional): regression predictions of shape ``[B, N, R]``.
+        targets : dict[str, Tensor]
+            Ground-truth targets with keys:
+            - ``"object_class"``: class indices of shape ``[B, M]`` where ``num_classes``
+              denotes ``no_object``.
+            - ``"masks"``: target masks of shape ``[B, M, L]``.
+            - ``"regression"`` (optional): regression targets of shape ``[B, M, R]``.
 
         Returns
         -------
-        C : tensor
-            The cost matrix for the whole batch, with a large value set in the input pad region
-        batch_obj_lengths : tensor
-            The number of inputs in each batch element
+        Tensor
+            Cost tensor ``C`` of shape ``[B, N, M]``. Entries corresponding to invalid
+            target objects are set to ``NaN`` and ignored later in LSAP.
+        Tensor
+            Tensor of shape ``[B, 1]`` with the valid number of target objects per batch element.
         """
         # get some useful things
         bs = len(targets["object_class"])
@@ -140,64 +219,99 @@ class HungarianMatcher(nn.Module):
         obj_class_cost[:, :, : self.num_classes] = -output
 
         # initialize the cost matrix with the object class loss
-        C = self.loss_weights["object_class_ce"] * obj_class_cost
+        cost_matrix = self.loss_weights["object_class_ce"] * obj_class_cost
 
         # add mask costs
         if self.loss_weights.get("mask_dice"):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
-            C += self.loss_weights["mask_dice"] * cost_mask_dice
+            cost_matrix += self.loss_weights["mask_dice"] * cost_mask_dice
         if self.loss_weights.get("mask_ce"):
             cost_mask_ce = batch_sigmoid_ce_cost(mask_pred, mask_tgt)
-            C += self.loss_weights["mask_ce"] * cost_mask_ce
+            cost_matrix += self.loss_weights["mask_ce"] * cost_mask_ce
         if self.loss_weights.get("mask_focal"):
             cost_mask_focal = batch_sigmoid_focal_cost(mask_pred, mask_tgt)
-            C += self.loss_weights["mask_focal"] * cost_mask_focal
+            cost_matrix += self.loss_weights["mask_focal"] * cost_mask_focal
 
         # add regression costs
         if "regression" in preds and self.loss_weights.get("regression"):
             reg_pred = preds["regression"]
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
-            C += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
+            cost_matrix += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
 
         # set entries corresponding to invalid objects to nan
         # (these are removed later when running LSAP)
         batch_obj_lengths = batch_obj_lengths.unsqueeze(-1)
         col_indices = torch.arange(obj_class_cost.size(-1), device=dev).unsqueeze(0)
-        null_obj_cost_mask = (col_indices < batch_obj_lengths).unsqueeze(1).expand_as(C)
-        C[~null_obj_cost_mask] = torch.nan
+        null_obj_cost_mask = (col_indices < batch_obj_lengths).unsqueeze(1).expand_as(cost_matrix)
+        cost_matrix[~null_obj_cost_mask] = torch.nan
 
-        return C, batch_obj_lengths
+        return cost_matrix, batch_obj_lengths
 
     @torch.no_grad()
-    def forward(self, preds, targets):
-        """Compute the optimal assignment between the targets and the predictions of the network."""
+    def forward(
+        self,
+        preds: dict[str, Tensor],
+        targets: dict[str, Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        """Compute optimal assignments for each batch element.
+
+        Parameters
+        ----------
+        preds : dict[str, Tensor]
+            Model predictions; see :meth:`get_batch_cost` for required keys/shapes.
+        targets : dict[str, Tensor]
+            Ground-truth targets; see :meth:`get_batch_cost` for required keys/shapes.
+
+        Returns
+        -------
+        Tensor
+            Batch indices of shape ``[B, M]`` suitable for advanced indexing.
+        Tensor
+            Assigned target indices per batch of shape ``[B, M]``; unassigned
+            slots are filled to cover all ``num_objects`` by appending remaining indices.
+        """
         batch_size = preds["class_logits"].shape[0]
 
-        idxs = []
+        idxs: list[list[int]] = []
         self.default_idx = set(range(self.num_objects))
 
         # Get the full cost matrix, then run lsap on each batch element
-        full_cost, batch_N = self.get_batch_cost(preds, targets)
+        full_cost, n_batch = self.get_batch_cost(preds, targets)
         full_cost = full_cost.to(torch.float32).cpu().numpy()
 
         for batch_idx in range(batch_size):
             # get the cost matrix for this batch element
-            C = full_cost[batch_idx][:, : batch_N[batch_idx]]
+            cost_matrix = full_cost[batch_idx][:, : n_batch[batch_idx]]
 
             # get the optimal assignment
-            idx = self.lap(C)
+            idx = self.lap(cost_matrix)
 
             idxs.append(idx)
 
         # get the device so we can put the indices on the same device as the predictions
         d = preds["class_logits"].device
         # format indices to allow simple indexing
-        idxs = torch.tensor(idxs).to(d)
-        idxs = (torch.arange(len(idxs)).unsqueeze(1).to(d), idxs)
-        self.global_step += 1
-        return idxs
+        idxs_tensor = torch.tensor(idxs).to(d)
+        batch_arange = torch.arange(len(idxs)).unsqueeze(1).to(d)
+        idxs_tuple = (batch_arange, idxs_tensor)  # shape-compatible indexing tuple
 
-    def lap(self, cost):
+        self.global_step += 1
+        return idxs_tuple
+
+    def lap(self, cost: Any) -> list[int]:
+        """Solve the linear sum assignment problem for a single cost matrix.
+
+        Parameters
+        ----------
+        cost : Any
+            Cost matrix of shape ``[N, M]``.
+
+        Returns
+        -------
+        list[int]
+            Ordered list of selected target indices ``idx`` aligned with sources,
+            extended by appending any remaining indices to cover all ``num_objects``.
+        """
         src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
         idx = src_idx[tgt_idx]
         return list(idx) + sorted(self.default_idx - set(idx))

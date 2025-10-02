@@ -63,15 +63,15 @@ def main(args=None):
     # Load the models and save the shapes in filename
     store_shapes_mup(path=store_path)
 
-    # If you want to check muP works
+    # If you want to check mup works
     if check:
         from salt.utils.muP_utils.configuration_muP import (
-            check_muP,
-            generate_config_muPtest,
-            get_models_muPtest,
+            check_mup,
+            generate_config_muptest,
+            get_models_muptest,
         )
 
-        print("Instantiating muP check models")
+        print("Instantiating mup check models")
 
         # Need also base and delta without wrapper for local training
         generateModel(
@@ -85,10 +85,10 @@ def main(args=None):
 
         # Create the variations
         variations = [32, 64, 128, 256, 512, 1024, 2056]
-        configs = generate_config_muPtest(config, variations)
-        configs.extend(generate_config_muPtest(config, variations, muP=False))
+        configs = generate_config_muptest(config, variations)
+        configs.extend(generate_config_muptest(config, variations, mup=False))
         for enum, mod_config in enumerate(configs):
-            temp_add = "muP" if "muP" in str(mod_config.name) else "sP"
+            temp_add = "mup" if "mup" in str(mod_config.name) else "sP"
 
             generateModel(
                 args=[
@@ -102,20 +102,20 @@ def main(args=None):
 
         if runFit:
             print("-" * 100)
-            print("Running muP checks")
+            print("Running mup checks")
             assert train_file is not None, "You must give a valid train_file path"
             assert norm_dict is not None, "You must give a valid norm_dict path"
 
-            # Retrieve the muP and SP models
-            models_muP, models_sP = get_models_muPtest(variations)
+            # Retrieve the mup and SP models
+            models_mup, models_sP = get_models_muptest(variations)
 
             # Perform checks:
             #   - Warning, will train the models!
             #       Recommended to use a script to separately do the training
             #   - requires to manually pass the train_file and norm_dict.
             #       The "variables" dictionary is set in
-            check_muP(
-                models_muP,
+            check_mup(
+                models_mup,
                 models_sP,
                 num_train=2000,
                 nsteps_training=1500,
@@ -137,7 +137,7 @@ def main(args=None):
         print("Starting main training")
         main_salt(["fit", *full_args])
 
-    # To cleam the muP produced files
+    # To cleam the mup produced files
     # clean_environment()
 
 

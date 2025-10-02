@@ -172,5 +172,8 @@ if args.force:
 if args.environment == "singularity":
     command += '"'
 
-# handler.activate_testmode() # To inspect batch script before running
+# To inspect batch script before running
+# handler.activate_testmode() # noqa: ERA001
+
+# Submit the job
 handler.send_job(command, args.tag)

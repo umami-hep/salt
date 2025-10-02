@@ -1,4 +1,4 @@
-"""Helper functions for muP."""
+"""Helper functions for mup."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -15,7 +15,7 @@ from salt.utils.muP_utils.functions_check_muP import (
 )
 
 # Paths are hard-coded as the lifetime of these files should last 1 execution
-folder_path = "./temp_muP/"
+folder_path = "./temp_mup/"
 MODEL_MAIN_PATH = "main_model.pt"
 MODEL_BASE_PATH = "base_model.pt"
 MODEL_DELTA_PATH = "delta_model.pt"
@@ -95,8 +95,8 @@ def set_val_nestedKey(dictionary, keyTarget, valueSet):
     raise KeyError(f"Key {keyTarget} not found in the (nested) dictionary {dictionary}")
 
 
-def update_config(muP_config, cfg_out, parameter_val):
-    for param_config in muP_config.values():
+def update_config(mup_config, cfg_out, parameter_val):
+    for param_config in mup_config.values():
         assert len(param_config["apply_to"]) == len(
             param_config["parameter_name"]
         ), "Define one parameter name per module to apply to."
@@ -122,8 +122,8 @@ def generate_base_delta_config(main_config, mod_type):
         cfg = yaml.safe_load(file)
     cfg_out = deepcopy(cfg)
 
-    assert "muP_config" in cfg["model"], "To use the muP, you need to define it in the model config"
-    muP_config = cfg["model"]["muP_config"]
+    assert "mup_config" in cfg["model"], "To use the mup, you need to define it in the model config"
+    mup_config = cfg["model"]["mup_config"]
 
     path_dict = get_paths()
     cfg_out_path = (
@@ -134,19 +134,19 @@ def generate_base_delta_config(main_config, mod_type):
     parameter_val = "parameter_base" if mod_type == "base" else "parameter_delta"
 
     shape_path = None
-    if "shape_path" in muP_config:
-        shape_path = muP_config.pop("shape_path")
+    if "shape_path" in mup_config:
+        shape_path = mup_config.pop("shape_path")
 
-    cfg_out = update_config(muP_config, cfg_out, parameter_val)
+    cfg_out = update_config(mup_config, cfg_out, parameter_val)
 
-    # clean out the muP config
-    cfg_out["model"]["muP_config"] = {}
+    # clean out the mup config
+    cfg_out["model"]["mup_config"] = {}
     with open(cfg_out_path, "w") as file:
         yaml.dump(cfg_out, file, sort_keys=False)
     return cfg_out_path, shape_path
 
 
-def generate_config_muPtest(main_config, variations, muP=True):
+def generate_config_muptest(main_config, variations, mup=True):
     """Creates configs with varying dimensions in variations."""
     with open(main_config) as file:
         cfg = yaml.safe_load(file)
@@ -155,28 +155,28 @@ def generate_config_muPtest(main_config, variations, muP=True):
     path_dict = get_paths()
     for i, var in enumerate(variations):
         cfg_out = deepcopy(cfg)
-        muP_config = {
+        mup_config = {
             "embed_dim": {
                 "apply_to": ["init_nets", "encoder"],
                 "parameter_name": ["output_size", "embed_dim"],
                 "parameter": var,
             }
         }
-        cfg_out = update_config(muP_config, cfg_out, "parameter")
-        if not muP:
-            cfg_out["model"].pop("muP_config")
-            remove_muP = {
-                "muP": {
+        cfg_out = update_config(mup_config, cfg_out, "parameter")
+        if not mup:
+            cfg_out["model"].pop("mup_config")
+            remove_mup = {
+                "mup": {
                     "apply_to": ["encoder"],
-                    "parameter_name": ["muP"],
+                    "parameter_name": ["mup"],
                     "parameter": False,
                 }
             }
-            cfg_out = update_config(remove_muP, cfg_out, "parameter")
+            cfg_out = update_config(remove_mup, cfg_out, "parameter")
 
         cfg_out_path = (
-            Path(path_dict["store_path"]) / f"config_muP_{i}.yaml"
-            if muP
+            Path(path_dict["store_path"]) / f"config_mup_{i}.yaml"
+            if mup
             else Path(path_dict["store_path"]) / f"config_sP_{i}.yaml"
         )
         configs.append(cfg_out_path)
@@ -192,9 +192,11 @@ def get_model_path(mod_type, path_dict=None):
         return (
             path_dict["model_base_check_path"]
             if "base" in mod_type
-            else path_dict["model_delta_check_path"]
-            if "delta" in mod_type
-            else Path(path_dict["store_path"]) / f"./{mod_type}.pt"
+            else (
+                path_dict["model_delta_check_path"]
+                if "delta" in mod_type
+                else Path(path_dict["store_path"]) / f"./{mod_type}.pt"
+            )
         )
     return (
         path_dict["model_base_path"]
@@ -205,28 +207,28 @@ def get_model_path(mod_type, path_dict=None):
     )
 
 
-def get_models_muPtest(variations, modInd=None, modType=None):
-    models_muP, models_sP = {}, {}
+def get_models_muptest(variations, modInd=None, modType=None):
+    models_mup, models_sP = {}, {}
     path_dict = get_paths()
     if modInd is not None:
         if modType is not None:
             if modType:
-                models_muP[variations[modInd]] = (
-                    Path(path_dict["store_path"]) / f"temp_muP_{modInd}.pt"
+                models_mup[variations[modInd]] = (
+                    Path(path_dict["store_path"]) / f"temp_mup_{modInd}.pt"
                 )
             else:
                 models_sP[variations[modInd]] = (
                     Path(path_dict["store_path"]) / f"temp_sP_{modInd}.pt"
                 )
         else:
-            models_muP[variations[modInd]] = Path(path_dict["store_path"]) / f"temp_muP_{modInd}.pt"
+            models_mup[variations[modInd]] = Path(path_dict["store_path"]) / f"temp_mup_{modInd}.pt"
             models_sP[variations[modInd]] = Path(path_dict["store_path"]) / f"temp_sP_{modInd}.pt"
-        return models_muP, models_sP
+        return models_mup, models_sP
 
     for i, var in enumerate(variations):
-        models_muP[var] = Path(path_dict["store_path"]) / f"temp_muP_{i}.pt"
+        models_mup[var] = Path(path_dict["store_path"]) / f"temp_mup_{i}.pt"
         models_sP[var] = Path(path_dict["store_path"]) / f"temp_sP_{i}.pt"
-    return models_muP, models_sP
+    return models_mup, models_sP
 
 
 def load_models(check=False):
@@ -260,7 +262,7 @@ def clean_environment():
 
 
 def coord_check(
-    muP,
+    mup,
     models,
     dataloaders,
     optimiser,
@@ -274,13 +276,13 @@ def coord_check(
     save_df=True,
     doPlots=True,
 ):
-    """Coord check for muP. Advised to use a large LR.
-    Based on the muP GitHub repo.
+    """Coord check for mup. Advised to use a large LR.
+    Based on the mup GitHub repo.
     """
     df = get_coord_data(
         models,
         dataloaders,
-        mup=muP,
+        mup=mup,
         optimizer=optimiser,
         fix_data=True,
         lr=lr,
@@ -289,23 +291,23 @@ def coord_check(
         cuda=False,
     )
     if save_df:
-        df.to_csv(save_path / "mup.csv" if muP else save_path / "sp.csv")
+        df.to_csv(save_path / "mup.csv" if mup else save_path / "sp.csv")
 
     if doPlots:
-        prm = "μP" if muP else "SP"
+        prm = "μP" if mup else "SP"
         return plot_coord_data(
             df,
             legend=legend,
             name_contains=name_contains,
-            save_to=save_path / "mup.png" if muP else save_path / "sp.png",
+            save_to=save_path / "mup.png" if mup else save_path / "sp.png",
             suptitle=f"{prm} {mod} with {optimiser} lr={lr} nseeds={nseeds}",
-            face_color="xkcd:light grey" if not muP else None,
+            face_color="xkcd:light grey" if not mup else None,
         )
     return None
 
 
 def training_check(
-    muP,
+    mup,
     models,
     dataloaders,
     optimiser,
@@ -321,14 +323,14 @@ def training_check(
     noTQDM=True,
     load_data=None,
 ):
-    """Coord check for muP. Advised to use a large LR.
-    Based on the muP GitHub repo.
+    """Coord check for mup. Advised to use a large LR.
+    Based on the mup GitHub repo.
     """
     if load_data is None:
         df = get_training_data(
             models,
             dataloaders,
-            mup=muP,
+            mup=mup,
             optimizer=optimiser,
             lr=lr,
             nseeds=nseeds,
@@ -342,24 +344,24 @@ def training_check(
                 width = list(models.keys())[0]
                 df.to_csv(save_model / f"width_{width}.csv")
             else:
-                df.to_csv(save_path / "mup.csv" if muP else save_path / "sp.csv")
+                df.to_csv(save_path / "mup.csv" if mup else save_path / "sp.csv")
     else:
         df = pd.read_csv(load_data)
     if not doPlots:
         return None
 
-    prm = "μP" if muP else "SP"
+    prm = "μP" if mup else "SP"
     return plot_training_data(
         df,
         legend=legend,
-        save_to=save_path / "mup_train.png" if muP else save_path / "sp_train.png",
+        save_to=save_path / "mup_train.png" if mup else save_path / "sp_train.png",
         suptitle=f"{prm} {mod} with {optimiser} lr={lr} nseeds={nseeds}",
-        face_color="xkcd:light grey" if not muP else None,
+        face_color="xkcd:light grey" if not mup else None,
     )
 
 
-def check_muP(
-    models_muP: dict,
+def check_mup(
+    models_mup: dict,
     models_sP: dict,
     lr: float = 1e-2,
     nsteps_training: int = 1500,
@@ -376,45 +378,6 @@ def check_muP(
     doTraining: bool = True,
     doTrainingPlots: bool = True,
 ):
-    """Script to check muP is well set.
-
-    Parameters
-    ----------
-    models_muP : dict,
-        Dictionary of muP models
-        Format: {width: path to model}
-    models_sP: dict,
-        Dictionary of sP models
-        Format: {width: path to model}
-    lr : float, default: 1e-2,
-        learning rate to use for the tests
-    nsteps_training : int, default: 1500,
-        nsteps of training check
-    nsteps_coocheck : int, default: 3,
-        nsteps of coordinate check
-    nseeds : int, default: 5,
-        number of seeds to use
-    batch_size : int, default: 2000,
-        mini batch size to use
-    num_workers : int, default: 10,
-        number of parallel dataloaders to use
-    num_train : int, default: -1,
-        number of data points to use (-1: all)
-    train_file : str, default: "./pp_output_train.h
-        path to the training file
-    norm_dict : str, default: "./norm_dict.yaml",
-        path to the normalisation dictionary
-    save_path : str, default: "./plots_mu",
-        path to save the results
-    doCoord : bool, default: True,
-        whether to do the coordinate check
-    doCoordPlots : bool, default: True,
-        whether to plot the coordinate check results
-    doTraining : bool, default: True,
-        whether to do the training check
-    doTrainingPlots : bool, default: True,
-        whether to plot the training check results
-    """
     from salt.data.datamodules import SaltDataModule, SaltDataset
 
     datamodule = SaltDataModule(
@@ -465,7 +428,7 @@ def check_muP(
     if doCoord:
         coord_check(
             True,
-            models_muP,
+            models_mup,
             dataloader,
             "adamw",
             plot_dir,
@@ -487,18 +450,18 @@ def check_muP(
             name_contains=["init_nets", "encoder"],
             doPlots=doCoordPlots,
         )
-    if doTraining and models_muP:
-        save_muP_models = plot_dir / "trained_muP_models"
+    if doTraining and models_mup:
+        save_mup_models = plot_dir / "trained_mup_models"
         training_check(
             True,
-            models_muP,
+            models_mup,
             dataloader,
             "adamw",
             lr=lr,
             nsteps=nsteps_training,
             nseeds=nseeds,
             save_path=plot_dir,
-            save_model=save_muP_models,
+            save_model=save_mup_models,
             doPlots=doTrainingPlots,
         )
     if doTraining and models_sP:

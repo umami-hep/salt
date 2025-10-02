@@ -146,7 +146,7 @@ model:
 
 data:
   input_map:
-    GLOBAL: GLOBAL
+    global: global
     jets: jets
     tracks: tracks_ghost
     flows: flows
@@ -155,7 +155,7 @@ data:
   selections: null
   non_finite_to_num: True
   variables:
-    GLOBAL:
+    global:
       - pt_btagJes
       - eta_btagJes
     jets:

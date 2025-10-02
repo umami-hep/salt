@@ -7,8 +7,8 @@ model:
     end: 1e-5
     pct_start: 0.01
     weight_decay: 1e-5
-  muP_config:
-    shape_path: ./shape_muP
+  mup_config:
+    shape_path: ./shape_mup
     embed_dim:
       apply_to: [init_nets, encoder]
       parameter_name: [output_size, embed_dim]
@@ -24,7 +24,7 @@ model:
             output_size: *embed_dim
             hidden_layers: [256]
             activation: &activation ReLU
-            muP: True
+            mup: True
 
       encoder:
         class_path: salt.models.TransformerEncoder
@@ -38,7 +38,7 @@ model:
           dense_config:
             activation: *activation
             dropout: &dropout 0.1
-          muP: True
+          mup: True
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling

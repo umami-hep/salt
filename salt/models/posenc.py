@@ -5,23 +5,24 @@ SYM_VARS = {"phi"}
 
 
 class PositionalEncoder(nn.Module):
+    """Positional encoder.
+
+    Evenly share the embedding space between the different variables to be encoded.
+    Any remaining dimensions are left as zeros.
+
+    TODO: alpha should be set for each variable
+
+    Parameters
+    ----------
+    variables : list[str]
+        List of variables to apply the positional encoding to.
+    dim : int
+        Dimension of the positional encoding.
+    alpha : int, optional
+        Scaling factor for the positional encoding, by default 100.
+    """
+
     def __init__(self, variables: list[str], dim: int, alpha: int = 100):
-        """Positional encoder.
-
-        Evenly share the embedding space between the different variables to be encoded.
-        Any remaining dimensions are left as zeros.
-
-        TODO: alpha should be set for each variable
-
-        Parameters
-        ----------
-        variables : list[str]
-            List of variables to apply the positional encoding to.
-        dim : int
-            Dimension of the positional encoding.
-        alpha : int, optional
-            Scaling factor for the positional encoding, by default 100.
-        """
         super().__init__()
         self.variables = variables
         self.dim = dim

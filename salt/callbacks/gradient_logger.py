@@ -2,12 +2,15 @@ from lightning import Callback, LightningModule, Trainer
 
 
 class GradientLoggerCallback(Callback):
-    def __init__(self, log_every_n_steps=50):
-        """Callback to log model gradients during training.
+    """Callback to log model gradients during training.
 
-        Args:
-            log_every_n_steps (int): Frequency of logging gradients. Logs every `n` steps.
-        """
+    Parameters
+    ----------
+    log_every_n_steps : int, optional
+        Frequency of logging gradients. Logs every `n` steps, by default 50
+    """
+
+    def __init__(self, log_every_n_steps: int = 50) -> None:
         self.log_every_n_steps = log_every_n_steps
 
     def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:

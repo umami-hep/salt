@@ -2,26 +2,33 @@ import torch
 from torch import BoolTensor, Tensor
 
 
-def build_target_masks(object_ids, input_ids, shuffle=False):
-    """Get the truth masks from the object ids and input_ids.
+def build_target_masks(
+    object_ids: Tensor,
+    input_ids: Tensor,
+    shuffle: bool = False,
+) -> BoolTensor:
+    """Build boolean target masks by matching IDs between objects and inputs.
 
-    The difference between this function and mask_from_indices is that mask_from_indices
-    expects the indices to start from zero, and here we match based on arbitrary IDs,
-    such as barcodes.
+    Unlike :func:`mask_from_indices`, this matches arbitrary (possibly non-contiguous)
+    identifiers such as barcodes rather than contiguous indices starting at 0.
 
     Parameters
     ----------
     object_ids : Tensor
-        The unqiue ids of the truth object labels
+        Tensor of shape ``[B, N_obj]`` containing the unique IDs for truth objects.
+        Entries equal to ``-1`` are treated as invalid and ignored.
     input_ids : Tensor
-        The ids of the per-input labels
-    shuffle: bool
-        Shuffle object ids
+        Tensor of shape ``[B, N_inp]`` containing the IDs for per-input labels.
+        The mask is built by testing equality against ``object_ids``.
+    shuffle : bool, optional
+        If ``True``, randomly permute the object dimension of ``object_ids`` on each batch,
+        by default ``False``.
 
     Returns
     -------
-    Tensor
-        The truth masks
+    BoolTensor
+        Boolean mask of shape ``[B, N_obj, N_inp]`` where entry ``(b, i, j)`` is ``True`` iff
+        ``input_ids[b, j] == object_ids[b, i]``. Invalid object IDs (``-1``) never match.
     """
     # shuffling doesn't seem to be needed here
     if shuffle:
@@ -31,26 +38,35 @@ def build_target_masks(object_ids, input_ids, shuffle=False):
 
 
 def mask_from_indices(indices: Tensor, num_masks: int | None = None) -> BoolTensor:
-    """Convert a dense index tensor to a sparse bool mask.
+    """Convert dense indices to a sparse boolean mask.
 
-    Indices are arbitrary and start from 0.
+    Indices are assumed to be non-negative integers starting at 0. Negative entries
+    are treated as "no index" and will be masked out (all-False in their column).
 
     Examples
     --------
-    [0, 1, 1] -> [[True, False, False], [False, True, True]]
-    [0, 1, 2]] -> [[True, False, False], [False, True, False], [False, False, True]]
+    >>> mask_from_indices(torch.tensor([0, 1, 1]), num_masks=3)
+    tensor([[ True, False, False],
+            [False,  True,  True]])
+
+    >>> mask_from_indices(torch.tensor([0, 1, 2]))
+    tensor([[ True, False, False],
+            [False,  True, False],
+            [False, False,  True]])
 
     Parameters
     ----------
     indices : Tensor
-        The dense indices
-    num_masks : int
-        The maximum number of masks
+        1D tensor of shape ``[L]`` or 2D tensor of shape ``[B, L]`` with integer indices.
+    num_masks : int | None, optional
+        The number of mask rows (i.e., maximum index + 1). If ``None``, it is inferred
+        as ``indices.max() + 1``, by default ``None``.
 
     Returns
     -------
     BoolTensor
-        The sparse mask
+        If ``indices.ndim == 1``: mask of shape ``[num_masks, L]``.
+        If ``indices.ndim == 2``: mask of shape ``[B, num_masks, L]``.
     """
     assert indices.ndim in {1, 2}, "indices must be 1D for single sample or 2D for batch"
     if num_masks is None:
@@ -64,12 +80,14 @@ def mask_from_indices(indices: Tensor, num_masks: int | None = None) -> BoolTens
     kwargs = {"dtype": torch.bool, "device": indices.device}
     if indices.ndim == 1:
         mask = torch.zeros((num_masks, indices.shape[-1]), **kwargs)
-        mask[indices, torch.arange(indices.shape[-1])] = True
+        mask[indices, torch.arange(indices.shape[-1], device=indices.device)] = True
         mask.transpose(0, 1)[indices < 0] = False  # handle negative indices
     else:
         mask = torch.zeros((indices.shape[0], num_masks, indices.shape[-1]), **kwargs)
         mask[
-            torch.arange(indices.shape[0]).unsqueeze(-1), indices, torch.arange(indices.shape[-1])
+            torch.arange(indices.shape[0], device=indices.device).unsqueeze(-1),
+            indices,
+            torch.arange(indices.shape[-1], device=indices.device),
         ] = True
         mask.transpose(1, 2)[indices < 0] = False  # handle negative indices
 
@@ -77,25 +95,35 @@ def mask_from_indices(indices: Tensor, num_masks: int | None = None) -> BoolTens
 
 
 def indices_from_mask(mask: BoolTensor, noindex: int = -2) -> Tensor:
-    """Convert a sparse bool mask to a dense index tensor.
+    """Convert a sparse boolean mask to dense indices.
 
-    Indices are arbitrary and start from 0.
+    The inverse of :func:`mask_from_indices` for masks with exactly one ``True`` per
+    column (or all ``False`` for "no index").
 
     Examples
     --------
-    [[True, False, False], [False, True, True]] -> [0, 1, 1]
+    >>> m = torch.tensor([[True, False, False],
+    ...                   [False, True,  True]])
+    >>> indices_from_mask(m)
+    tensor([0, 1, 1])
 
     Parameters
     ----------
     mask : BoolTensor
-        The sparse mask
-    noindex : int
-        The value to use for no index
+        Mask of shape ``[K, L]`` or ``[B, K, L]`` (``K`` masks over ``L`` columns).
+    noindex : int, optional
+        Value used where a column has no ``True`` entry, by default ``-2``.
 
     Returns
     -------
     Tensor
-        The dense indices
+        If ``mask.ndim == 2``: tensor of shape ``[L]``.
+        If ``mask.ndim == 3``: tensor of shape ``[B, L]``.
+
+    Raises
+    ------
+    ValueError
+        If ``mask`` is not 2D or 3D.
     """
     mask = torch.as_tensor(mask)
     kwargs = {"dtype": torch.long, "device": mask.device}
@@ -126,16 +154,24 @@ def sanitise_mask(
     input_pad_mask: BoolTensor | None = None,
     object_class_preds: Tensor | None = None,
 ) -> BoolTensor:
-    """Sanitise predicted masks by removing padded inputs and null class predictions.
+    """Sanitise predicted masks by removing padded inputs and null-class predictions.
 
     Parameters
     ----------
     mask : BoolTensor
-        The predicted mask
-    input_pad_mask : BoolTensor, optional
-        The input pad mask, where a value of True respresents a padded input, by default None
-    object_class_preds : Tensor, optional
-        Object class predictions, by default None
+        Predicted mask of shape ``[B, N_obj, N_inp]``.
+    input_pad_mask : BoolTensor | None, optional
+        Boolean padding mask over inputs with shape ``[B, N_inp]`` where ``True`` marks
+        padded inputs to be removed, by default ``None``.
+    object_class_preds : Tensor | None, optional
+        Class logits or probabilities of shape ``[B, N_obj, C]``. If provided,
+        the null class is assumed to be the last index (``C-1``) and masks for
+        objects predicted as null are zeroed out, by default ``None``.
+
+    Returns
+    -------
+    BoolTensor
+        Sanitised mask with the same shape as ``mask``.
     """
     if input_pad_mask is not None:
         mask.transpose(1, 2)[input_pad_mask] = False
@@ -150,16 +186,22 @@ def sigmoid_mask(
     threshold: float = 0.5,
     **kwargs,
 ) -> BoolTensor:
-    """Get a mask by thresholding the mask logits.
+    """Compute a mask by thresholding mask logits with a sigmoid.
 
     Parameters
     ----------
     mask_logits : Tensor
-        The mask logits
+        Logits of shape ``[B, N_obj, N_inp]``.
     threshold : float, optional
-        The threshold, by default 0.5
+        Threshold applied after ``sigmoid``, by default ``0.5``.
     **kwargs
-        Additional keyword arguments to pass to sanitise_mask
+        Forwarded to :func:`sanitise_mask` (e.g. ``input_pad_mask=...``,
+        ``object_class_preds=...``).
+
+    Returns
+    -------
+    BoolTensor
+        Boolean mask of shape ``[B, N_obj, N_inp]``.
     """
     mask = mask_logits.sigmoid() > threshold
     return sanitise_mask(mask, **kwargs)
@@ -170,16 +212,32 @@ def argmax_mask(
     weighted: bool = False,
     **kwargs,
 ) -> BoolTensor:
-    """Get a mask by taking the argmax of the mask logits.
+    """Compute a mask by taking the argmax over objects for each input.
+
+    If ``weighted`` is ``True``, logits are first converted to probabilities (softmax
+    over the object dimension) and multiplied by per-object class confidence
+    (maximum over classes), following the MaskFormer-style weighting.
 
     Parameters
     ----------
     mask_logits : Tensor
-        The mask logits
+        Logits of shape ``[B, N_obj, N_inp]``.
     weighted : bool, optional
-        Weight logits according to object class confidence, as in MaskFormer, by default False
+        If ``True``, weight by per-object class confidence. Requires
+        ``object_class_preds`` in ``kwargs``, by default ``False``.
     **kwargs
-        Additional keyword arguments to pass to sanitise_mask
+        Forwarded to :func:`sanitise_mask`. When ``weighted=True``, must include
+        ``object_class_preds: Tensor`` with shape ``[B, N_obj, C]``.
+
+    Returns
+    -------
+    BoolTensor
+        Boolean mask of shape ``[B, N_obj, N_inp]``.
+
+    Raises
+    ------
+    ValueError
+        If ``weighted=True`` and ``object_class_preds`` is not supplied.
     """
     if weighted and kwargs.get("object_class_preds") is None:
         raise ValueError("weighted argmax requires object_class_preds")
@@ -202,7 +260,31 @@ def mask_from_logits(
     mode: str,
     input_pad_mask: BoolTensor | None = None,
     object_class_preds: Tensor | None = None,
-):
+) -> BoolTensor:
+    """Dispatch helper to convert logits to a mask by different strategies.
+
+    Parameters
+    ----------
+    logits : Tensor
+        Logits of shape ``[B, N_obj, N_inp]``.
+    mode : str
+        One of ``{"sigmoid", "argmax", "weighted_argmax"}``.
+    input_pad_mask : BoolTensor | None, optional
+        Input padding mask (``[B, N_inp]``), by default ``None``.
+    object_class_preds : Tensor | None, optional
+        Object class logits/probs (``[B, N_obj, C]``) required for
+        ``mode="weighted_argmax"``, by default ``None``.
+
+    Returns
+    -------
+    BoolTensor
+        Boolean mask of shape ``[B, N_obj, N_inp]``.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not supported.
+    """
     modes = {"sigmoid", "argmax", "weighted_argmax"}
     if mode == "sigmoid":
         return sigmoid_mask(
@@ -224,12 +306,56 @@ def mask_from_logits(
 
 
 def mask_effs_purs(m_pred: BoolTensor, m_tgt: BoolTensor) -> tuple[Tensor, Tensor]:
+    """Compute per-object efficiency and purity tensors.
+
+    Parameters
+    ----------
+    m_pred : BoolTensor
+        Predicted mask of shape ``[B, N_obj, N_inp]``.
+    m_tgt : BoolTensor
+        Target mask of shape ``[B, N_obj, N_inp]``.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        ``(eff, pur)`` where each has shape ``[B, N_obj]``.
+        Efficiency is ``(m_pred & m_tgt).sum(-1) / m_tgt.sum(-1)``.
+        Purity is     ``(m_pred & m_tgt).sum(-1) / m_pred.sum(-1)``.
+    """
     eff = (m_pred & m_tgt).sum(-1) / m_tgt.sum(-1)
     pur = (m_pred & m_tgt).sum(-1) / m_pred.sum(-1)
     return eff, pur
 
 
-def mask_eff_pur(m_pred: BoolTensor, m_tgt: BoolTensor, flat: bool = False, reduce: bool = False):
+def mask_eff_pur(
+    m_pred: BoolTensor,
+    m_tgt: BoolTensor,
+    flat: bool = False,
+    reduce: bool = False,
+) -> tuple[Tensor, Tensor]:
+    """Compute efficiency and purity, either per object or globally.
+
+    Parameters
+    ----------
+    m_pred : BoolTensor
+        Predicted mask of shape ``[B, N_obj, N_inp]``.
+    m_tgt : BoolTensor
+        Target mask of shape ``[B, N_obj, N_inp]``.
+    flat : bool, optional
+        If ``True``, compute a single global efficiency/purity across all objects
+        (edgewise). If ``False``, compute per-object and optionally reduce with
+        ``nanmean``, by default ``False``.
+    reduce : bool, optional
+        When ``flat=False``, if ``True`` reduce to scalars using ``nanmean``,
+        by default ``False``.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        If ``flat=True``: two 0-D tensors (scalars).
+        If ``flat=False`` and ``reduce=False``: two tensors of shape ``[B, N_obj]``.
+        If ``flat=False`` and ``reduce=True``: two 0-D tensors (scalars).
+    """
     if flat:
         # per assignment metric (i.e. edgewise)
         eff = (m_pred & m_tgt).sum() / m_tgt.sum()
@@ -250,8 +376,44 @@ def reco_metrics(
     min_recall: float = 1.0,
     min_purity: float = 1.0,
     min_constituents: int = 0,
-):
-    """Calculate the efficiency and purity of the predicted objects."""
+) -> tuple[Tensor, Tensor]:
+    """Compute object-level reconstruction metrics (efficiency and fake rate).
+
+    An object is considered **valid** if it has at least one predicted constituent
+    (or as provided by ``pred_valid``) and, optionally, if it has at least
+    ``min_constituents`` constituents. A valid object passes if both its efficiency
+    and purity meet the provided thresholds; otherwise it is counted as fake.
+
+    Parameters
+    ----------
+    pred_mask : BoolTensor
+        Predicted mask of shape ``[B, N_obj, N_inp]``.
+    tgt_mask : BoolTensor
+        Target mask of shape ``[B, N_obj, N_inp]``.
+    pred_valid : Tensor | None, optional
+        Optional boolean tensor ``[B, N_obj]`` indicating which predictions are considered
+        valid before thresholding. If ``None``, validity is ``pred_mask.sum(-1) > 0``,
+        by default ``None``.
+    reduce : bool, optional
+        If ``True``, return mean values (over valid targets/predictions). If ``False``,
+        return per-object boolean tensors, by default ``False``.
+    min_recall : float, optional
+        Minimum per-object efficiency to be considered correct, by default ``1.0``.
+    min_purity : float, optional
+        Minimum per-object purity to be considered correct, by default ``1.0``.
+    min_constituents : int, optional
+        Minimum number of predicted constituents required for an object to be valid,
+        by default ``0``.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        If ``reduce=False``: two boolean tensors ``(eff, fake)`` of shape ``[B, N_obj]``,
+        where ``eff[b, i]`` is ``True`` if object ``i`` in batch ``b`` passes both
+        thresholds, and ``fake[b, i]`` indicates a valid but failed prediction.
+        If ``reduce=True``: two 0-D tensors (scalars) giving the mean efficiency over
+        targets with at least one constituent and the mean fake rate over valid predictions.
+    """
     if pred_valid is None:
         pred_valid = pred_mask.sum(-1) > 0
     else:

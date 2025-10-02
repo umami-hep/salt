@@ -7,55 +7,51 @@ from salt.utils.tensor_utils import flatten_tensor_dict, maybe_flatten_tensors
 
 
 class SaltModel(nn.Module):
+    """Generic multi-modal, multi-task neural network.
+
+    This model can implement a wide range of architectures such as
+    [DL1](https://ftag.docs.cern.ch/algorithms/taggers/dips/),
+    [DIPS](https://ftag.docs.cern.ch/algorithms/taggers/dl1/),
+    [GN2](https://ftag.docs.cern.ch/algorithms/taggers/GN2/) and more.
+
+    Parameters
+    ----------
+    init_nets : list[dict]
+        Keyword arguments for one or more initialisation networks. Each
+        initialisation network produces an initial input embedding for a
+        single input type. See :class:`salt.models.InitNet`.
+    tasks : nn.ModuleList
+        Task heads to apply to the encoded/poolled features. See
+        :class:`salt.models.TaskBase`.
+    encoder : nn.Module | None, optional
+        Main input encoder which takes the outputs of the init nets and
+        produces per-constituent embeddings. If not provided, the model is
+        effectively a DeepSets model. The default is ``None``.
+    mask_decoder : nn.Module | None, optional
+        Mask decoder which takes the encoder output and produces learned
+        embeddings to represent object masks. The default is ``None``.
+    pool_net : Pooling | None, optional
+        Pooling network computing a global representation by aggregating
+        over the constituents. If not provided, assume only global features
+        are present. The default is ``None``.
+    merge_dict : dict[str, list[str]] | None, optional
+        Dictionary specifying which input types should be concatenated into
+        a single stream (e.g., transformer input). The default is ``None``.
+    featurewise_nets : list[dict] | None, optional
+        Keyword arguments for featurewise transformation networks that
+        perform per-feature scaling and biasing. The default is ``None``.
+    """
+
     def __init__(
         self,
         init_nets: list[dict],
         tasks: nn.ModuleList,
-        encoder: nn.Module = None,
-        mask_decoder: nn.Module = None,
-        pool_net: Pooling = None,
+        encoder: nn.Module | None = None,
+        mask_decoder: nn.Module | None = None,
+        pool_net: Pooling | None = None,
         merge_dict: dict[str, list[str]] | None = None,
         featurewise_nets: list[dict] | None = None,
     ):
-        """A generic multi-modal, multi-task neural network.
-
-        This model can be used to implement a wide range of models, including
-        [DL1](https://ftag.docs.cern.ch/algorithms/taggers/dips/),
-        [DIPS](https://ftag.docs.cern.ch/algorithms/taggers/dl1/),
-        [GN2](https://ftag.docs.cern.ch/algorithms/taggers/GN2/)
-        and more.
-
-        Parameters
-        ----------
-        init_nets : list[dict]
-            Keyword arguments for one or more initialisation networks.
-            See [`salt.models.InitNet`][salt.models.InitNet].
-            Each initialisation network produces an initial input embedding for
-            a single input type.
-        tasks : nn.ModuleList
-            Task heads, see [`salt.models.TaskBase`][salt.models.TaskBase].
-            These can be used to implement object tagging, vertexing, regression,
-            classification, etc.
-        encoder : nn.Module
-            Main input encoder, which takes the output of the initialisation
-            networks and produces a single embedding for each constituent.
-            If not provided this model is essentially a DeepSets model.
-        mask_decoder : nn.Module
-            Mask decoder, which takes the output of the encoder and produces a
-            series of learned embeddings to represent object masks
-        pool_net : nn.Module
-            Pooling network which computes a global representation of the object
-            by aggregating over the constituents. If not provided, assume that
-            the only inputs are global features (i.e. no constituents).
-        merge_dict : dict[str, list[str]] | None
-            A dictionary that lets the salt concatenate all the input
-            representations of the inputs in list[str] and act on them
-            in following layers (e.g. transformer or tasks) as if they
-            are coming from one input type
-        featurewise_nets : list[dict]
-            Keyword arguments for featurewise transformation networks that perform
-            featurewise scaling and biasing.
-        """
         super().__init__()
 
         # init featurewise networks
@@ -82,31 +78,28 @@ class SaltModel(nn.Module):
         pad_masks: BoolTensors | None = None,
         labels: NestedTensors | None = None,
     ) -> tuple[NestedTensors, Tensors]:
-        """Forward pass through the `SaltModel`.
-
-        Don't call this method directy, instead use `__call__`.
+        """Forward pass through the model.
 
         Parameters
         ----------
         inputs : Tensors
-            Dict of input tensors for each modality. Each tensor is of shape
-            `(batch_size, num_inputs, input_size)`.
-        pad_masks : BoolTensors
-            Dict of input padding mask tensors for each modality. Each tensor is of
-            shape `(batch_size, num_inputs)`.
-        labels : Tensors, optional
-            Nested dict of label tensors. The outer dict is keyed by input modality,
-            the inner dict is keyed by label variable name. Each tensor is of shape
-            `(batch_size, num_inputs)`. If not specified, assume we are running model
-            inference (i.e. no loss computation).
+            Dict of input tensors for each modality of shape
+            ``(batch_size, num_inputs, input_size)``.
+        pad_masks : BoolTensors | None, optional
+            Dict of input padding mask tensors for each modality of shape
+            ``(batch_size, num_inputs)``. The default is ``None``.
+        labels : NestedTensors | None, optional
+            Nested dict of label tensors. Outer dict keyed by input modality,
+            inner dict keyed by label variable. Each tensor has shape
+            ``(batch_size, num_inputs)``. If ``None``, run inference without
+            loss computation.
 
         Returns
         -------
         preds : NestedTensors
-            Dict of model predictions for each task, separated by input modality.
-            Tensors have varying shapes depending on the task.
+            Dict of model predictions for each task separated by input modality.
         loss : Tensors
-            Dict of losses for each task, aggregated over the batch.
+            Dict of losses for each task aggregated over the batch.
         """
         # initial input projections
         xs = {}
@@ -118,6 +111,7 @@ class SaltModel(nn.Module):
         edge_x = xs.pop("EDGE", None)
         kwargs = {} if edge_x is None else {"edge_x": edge_x}
 
+        # merge multiple streams if requested
         if isinstance(self.merge_dict, dict):
             for merge_name, merge_types in self.merge_dict.items():
                 xs[merge_name] = cat([xs.pop(mt) for mt in merge_types], dim=1)
@@ -132,8 +126,7 @@ class SaltModel(nn.Module):
                             var: cat([labels[mt][var] for mt in merge_types], dim=1)
                         })
 
-        # Generate embedding from encoder, or by concatenating the init net outputs
-        # We should change this such that all encoders return (x, mask)
+        # encode
         if self.encoder:
             embed_xs = self.encoder(xs, pad_mask=pad_masks, inputs=inputs, **kwargs)
             if isinstance(embed_xs, tuple):
@@ -159,7 +152,7 @@ class SaltModel(nn.Module):
             global_rep = preds["embed_xs"]
 
         # add global features to global representation
-        if (global_feats := inputs.get("GLOBAL")) is not None:
+        if (global_feats := inputs.get("global")) is not None:
             global_rep = torch.cat([global_rep, global_feats], dim=-1)
         preds["global_rep"] = global_rep
 
@@ -175,8 +168,27 @@ class SaltModel(nn.Module):
         preds: dict[str, Tensor],
         masks: BoolTensors | None,
         labels: NestedTensors | None = None,
-    ):
-        loss = {}
+    ) -> tuple[dict, dict]:
+        """Run all configured tasks given encoded/poolled features.
+
+        Parameters
+        ----------
+        preds : dict[str, Tensor]
+            Predictions dict with at least ``"embed_xs"`` and ``"global_rep"``.
+            Updated with task predictions keyed by input name and task name.
+        masks : BoolTensors | None
+            Padding masks passed to tasks requiring per-constituent masks.
+        labels : NestedTensors | None, optional
+            Nested dict of label tensors. The default is ``None``.
+
+        Returns
+        -------
+        dict
+            Updated predictions dict including per-task outputs.
+        dict
+            Loss dict mapping task name to loss tensor.
+        """
+        loss: dict = {}
 
         preds["embed_xs"] = maybe_flatten_tensors(preds["embed_xs"])
 
@@ -197,8 +209,36 @@ class SaltModel(nn.Module):
         return preds, loss
 
     def init_featurewise(
-        self, featurewise_nets: list[dict], init_nets: list[dict], encoder: nn.Module
-    ):
+        self,
+        featurewise_nets: list[dict],
+        init_nets: list[dict],
+        encoder: nn.Module,
+    ) -> None:
+        """Initialize featurewise transformation modules.
+
+        Depending on the ``layer`` key in each featurewise net config, attach
+        :class:`FeaturewiseTransformation` modules to input init nets, encoder
+        layers, or to the global representation.
+
+        Parameters
+        ----------
+        featurewise_nets : list[dict]
+            Config dicts for each featurewise transformation specifying at least
+            ``"layer"``. Accepted values are ``"input"``, ``"encoder"``,
+            or ``"global"``.
+        init_nets : list[dict]
+            Same list passed to ``__init__`` containing init net configurations.
+            Modified in place when ``layer=="input"``.
+        encoder : nn.Module
+            Encoder module; must have ``num_layers`` and ``featurewise`` list
+            attributes when ``layer=="encoder"``.
+
+        Raises
+        ------
+        ValueError
+            If featurewise transform is requested for the encoder, but no encoder is defined
+            If the given type of layer for the featurewise net is not allowed
+        """
         for featurewise_net in featurewise_nets:
             if featurewise_net.get("layer") == "input":
                 for init_net in init_nets:

@@ -1,6 +1,0 @@
-# S3 and muTransfer
-mup==1.0.0
-boto3==1.28.17
-s3fs==2023.9.2
-s3path==0.5.0
-tensorboard==2.14.1

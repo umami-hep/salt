@@ -1,4 +1,6 @@
-import lightning as L
+from pathlib import Path
+
+import lightning
 from torch.utils.data import DataLoader
 
 import salt.utils.file_utils as fu
@@ -6,11 +8,54 @@ from salt.data.datasets import SaltDataset
 from salt.data.samplers import RandomBatchSampler
 
 
-class SaltDataModule(L.LightningDataModule):
+class SaltDataModule(lightning.LightningDataModule):
+    """Datamodule wrapping a [`salt.data.SaltDataset`][salt.data.SaltDataset] for training,
+    validation and testing.
+
+    This datamodule will load data from h5 files. The training, validation and test files
+    are specified by the `train_file`, `val_file` and `test_file` arguments.
+
+    The arguments of this class can be set from the YAML config file or from the command line
+    using the `data` key. For example, to set the `batch_size` from the command line, use
+    `--data.batch_size=1000`.
+
+    Parameters
+    ----------
+    train_file : str | Path
+        Training file path
+    val_file : str | Path
+        Validation file path
+    batch_size : int
+        Number of samples to process in each training step
+    num_workers : int
+        Number of CPU worker processes to load batches from disk
+    num_train : int
+        Total number of training samples
+    num_val : int
+        Total number of validation samples
+    num_test : int
+        Total number of testing samples
+    move_files_temp : str | None, optional
+        Directory to move training files to, by default None,
+        which will result in no copying of files
+    class_dict : str | None, optional
+        Path to umami preprocessing scale dict file, by default None
+    test_file : str | None, optional
+        Test file path, by default None
+    test_suff : str | None, optional
+        Test file suffix, by default None
+    pin_memory : bool, optional
+        Pin memory for faster GPU transfer, by default True
+    config_s3 : dict | None, optional
+        Some parameters for the S3 access, by default None
+    **kwargs
+        Keyword arguments for [`salt.data.SaltDataset`][salt.data.SaltDataset]
+    """
+
     def __init__(
         self,
-        train_file: str,
-        val_file: str,
+        train_file: str | Path,
+        val_file: str | Path,
         batch_size: int,
         num_workers: int,
         num_train: int,
@@ -21,54 +66,12 @@ class SaltDataModule(L.LightningDataModule):
         test_file: str | None = None,
         test_suff: str | None = None,
         pin_memory: bool = True,
-        config_S3: dict | None = None,
+        config_s3: dict | None = None,
         **kwargs,
     ):
-        """Datamodule wrapping a [`salt.data.SaltDataset`][salt.data.SaltDataset] for training,
-        validation and testing.
-
-        This datamodule will load data from h5 files. The training, validation and test files
-        are specified by the `train_file`, `val_file` and `test_file` arguments.
-
-        The arguments of this class can be set from the YAML config file or from the command line
-        using the `data` key. For example, to set the `batch_size` from the command line, use
-        `--data.batch_size=1000`.
-
-        Parameters
-        ----------
-        train_file : str
-            Training file path
-        val_file : str
-            Validation file path
-        batch_size : int
-            Number of samples to process in each training step
-        num_workers : int
-            Number of CPU worker processes to load batches from disk
-        num_train : int
-            Total number of training samples
-        num_val : int
-            Total number of validation samples
-        num_test : int
-            Total number of testing samples
-        move_files_temp : str
-            Directory to move training files to, default is None,
-            which will result in no copying of files
-        class_dict : str
-            Path to umami preprocessing scale dict file
-        test_file : str
-            Test file path, default is None
-        test_suff : str
-            Test file suffix, default is None
-        pin_memory: bool
-            Pin memory for faster GPU transfer, default is True
-        config_S3: dict, optional
-            Some parameters for the S3 access
-        **kwargs
-            Keyword arguments for [`salt.data.SaltDataset`][salt.data.SaltDataset]
-        """
         super().__init__()
-        self.train_file = train_file
-        self.val_file = val_file
+        self.train_file = Path(train_file)
+        self.val_file = Path(val_file)
         self.test_file = test_file
         self.test_suff = test_suff
         self.batch_size = batch_size
@@ -79,7 +82,7 @@ class SaltDataModule(L.LightningDataModule):
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
         self.pin_memory = pin_memory
-        self.config_S3 = config_S3
+        self.config_s3 = config_s3
         self.kwargs = kwargs
 
     def prepare_data(self):
@@ -161,5 +164,5 @@ class SaltDataModule(L.LightningDataModule):
         ):
             print("-" * 100)
             print(f"Removing training files: \n\t{self.train_file}\n\t{self.val_file}")
-            fu.remove_files_temp(self.train_file, self.val_file)
+            fu.remove_files_temp(Path(self.train_file), Path(self.val_file))
             print("-" * 100)

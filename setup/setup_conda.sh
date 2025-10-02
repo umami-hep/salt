@@ -1,34 +1,49 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# borrowed from:
-# https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/ftag-tracking-studies/-/blob/master/setup_conda.sh
+# Local install prefix (change if you prefer)
+CONDA_INSTALL="${PWD}/conda"
 
-# install mamba locally if it doesn't already exist
-CONDA_INSTALL=$PWD/conda/
+if [[ ! -d "$CONDA_INSTALL" ]]; then
+  CONDA_REPO="https://github.com/conda-forge/miniforge/releases/latest/download"
 
-if [[ ! -d "${CONDA_INSTALL}" ]]; then
-  CONDA_REPOSITORY=https://github.com/conda-forge/miniforge/releases/latest/download
-  # installation for macOS (including support for M1 MacBooks)
-  if [[ $OSTYPE == 'darwin'* ]]; then
-    MAC_TYPE="$(uname -m)"
-    if [[ $MAC_TYPE == 'arm64' ]]; then
-      CONDA_INSTALLER="Miniforge3-MacOSX-arm64.sh"
-    else
-      CONDA_INSTALLER="Miniforge3-MacOSX-x86_64.sh"
-    fi
-  # installation for linux
-  elif [[ $OSTYPE == 'linux'* ]]; then
-    CONDA_INSTALLER="Miniforge3-Linux-x86_64.sh"
-  # other operating system not supported
-  else
-    echo "Operating system not supported. Setup not possible."
-    exit 1
-  fi
-  # install mamba to local directory
-  curl -L -O ${CONDA_REPOSITORY}/${CONDA_INSTALLER}
-  bash ${CONDA_INSTALLER} -b -p ${CONDA_INSTALL}
-  rm ${CONDA_INSTALLER}
+  # Select installer
+  case "${OSTYPE:-}" in
+    darwin*)  # macOS
+      case "$(uname -m)" in
+        arm64)  CONDA_INSTALLER="Miniforge3-MacOSX-arm64.sh"   ;;
+        x86_64) CONDA_INSTALLER="Miniforge3-MacOSX-x86_64.sh" ;;
+        *) echo "Unsupported macOS arch: $(uname -m)"; exit 1 ;;
+      esac
+      ;;
+    linux*)
+      case "$(uname -m)" in
+        x86_64)  CONDA_INSTALLER="Miniforge3-Linux-x86_64.sh"  ;;
+        aarch64) CONDA_INSTALLER="Miniforge3-Linux-aarch64.sh" ;;
+        *) echo "Unsupported Linux arch: $(uname -m)"; exit 1  ;;
+      esac
+      ;;
+    *)
+      echo "Operating system not supported. Setup not possible."
+      exit 1
+      ;;
+  esac
+
+  # Download installer
+  echo "Downloading ${CONDA_INSTALLER}…"
+  curl -fsSL -o "${CONDA_INSTALLER}" "${CONDA_REPO}/${CONDA_INSTALLER}"
+
+  # Install non-interactively to local prefix
+  bash "${CONDA_INSTALLER}" -b -p "${CONDA_INSTALL}"
+
+  # Cleanup installer
+  rm -f "${CONDA_INSTALLER}"
 fi
 
-# set up conda environment
-source ${CONDA_INSTALL}/bin/activate
+# Activate base environment
+# (Miniforge ships mamba by default; conda activation works the same)
+# Either of these works; keep one:
+# shellcheck disable=SC1091
+source "${CONDA_INSTALL}/bin/activate"
+# Alternatively:
+# source "${CONDA_INSTALL}/etc/profile.d/conda.sh" && conda activate

@@ -1,6 +1,8 @@
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -19,73 +21,74 @@ from salt.utils.mask_utils import build_target_masks
 
 
 class SaltDataset(Dataset):
+    """An efficient map-style dataset for loading data from an H5 file containing structured
+    arrays.
+
+    Parameters
+    ----------
+    filename : str | Path
+        Input h5 filepath containing structured arrays
+    norm_dict : str | Path
+        Path to file containing normalisation parameters
+    variables : Vars
+        Input variables used in the forward pass for each input type
+    stage : str
+        Stage of the training process
+    num : int, optional
+        Number of input samples to use. If `-1`, use all input samples
+    labeller_config : LabellerConfig | None, optional
+        Configuration to apply relabelling on-the-fly for jet classification
+    labels : Vars | None, optional
+        List of required labels for each input type
+    mf_config : MaskformerConfig | None, optional
+        Config for Maskformer matching, by default None
+    input_map : dict[str, str] | None, optional
+        Map names to the corresponding dataset names in the input h5 file.
+        If not provided, the input names will be used as the dataset names.
+    num_inputs : dict | None, optional
+        Truncate the number of constituent inputs to this number, to speed up training
+    non_finite_to_num : bool, optional
+        Convert nans and infs to zeros when loading inputs
+    global_object : str, optional
+        Name of the global input object, as opposed to the constituent-level
+        inputs
+    parameters : dict | None, optional
+        Variables used to parameterise the network, by default None.
+    selections : dict[str, list[str]] | None, optional
+        Selections to apply to the input data, by default None.
+    ignore_finite_checks : bool, optional
+        Ignoring check for non-finite inputs.
+    recover_malformed : bool, optional
+        Converts to invalid tracks from malformed inputs in truthOriginLabel.
+    transforms : list[Callable] | None, optional
+        Transformations to apply to the data, by default None.
+
+    Raises
+    ------
+    ValueError
+        if use_labeller is set to true but the classes for relabelling are not supplied.
+    """
+
     def __init__(
         self,
-        filename: str,
-        norm_dict: str,
+        filename: str | Path,
+        norm_dict: str | Path,
         variables: Vars,
         stage: str,
         num: int = -1,
         labeller_config: LabellerConfig | None = None,
-        labels: Vars = None,
+        labels: Vars | None = None,
         mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
         num_inputs: dict | None = None,
         non_finite_to_num: bool = False,
         global_object: str = "jets",
-        PARAMETERS: dict | None = None,
+        parameters: dict | None = None,
         selections: dict[str, list[str]] | None = None,
         ignore_finite_checks: bool = False,
         recover_malformed: bool = False,
         transforms: list[Callable] | None = None,
     ):
-        """An efficient map-style dataset for loading data from an H5 file containing structured
-        arrays.
-
-        Parameters
-        ----------
-        filename : str
-            Input h5 filepath containing structured arrays
-        norm_dict : str
-            Path to file containing normalisation parameters
-        variables : Vars
-            Input variables used in the forward pass for each input type
-        stage : str
-            Stage of the training process
-        num : int, optional
-            Number of input samples to use. If `-1`, use all input samples
-        labeller_config : LabellerConfig, optional
-            Configuration to apply relabelling on-the-fly for jet classification
-        labels : Vars
-            List of required labels for each input type
-        mf_config : MaskformerConfig, optional
-            Config for Maskformer matching, by default None
-        input_map : dict, optional
-            Map names to the corresponding dataset names in the input h5 file.
-            If not provided, the input names will be used as the dataset names.
-        num_inputs : dict, optional
-            Truncate the number of constituent inputs to this number, to speed up training
-        non_finite_to_num : bool, optional
-            Convert nans and infs to zeros when loading inputs
-        global_object : str
-            Name of the global input object, as opposed to the constituent-level
-            inputs
-        PARAMETERS: dict
-            Variables used to parameterise the network, by default None.
-        selections : dict, optional
-            Selections to apply to the input data, by default None.
-        ignore_finite_checks: bool, optional
-            Ignoring check for non-finite inputs.
-        recover_malformed: bool, optional
-            Converts to invalid tracks from malformed inputs in truthOriginLabel.
-        transforms: list, optional
-            Transformations to apply to the data, by default None.
-
-        Raises
-        ------
-        ValueError
-            if use_labeller is set to true but the classes for relabelling are not supplied.
-        """
         super().__init__()
         # check labels have been configured
         self.labels = labels if labels is not None else {}
@@ -95,14 +98,14 @@ class SaltDataset(Dataset):
         if input_map is None:
             input_map = {k: k for k in variables}
 
-        if "GLOBAL" in input_map:
-            input_map["GLOBAL"] = global_object
+        if "global" in input_map:
+            input_map["global"] = global_object
 
-        if "PARAMETERS" in input_map:
-            input_map["PARAMETERS"] = global_object
+        if "parameters" in input_map:
+            input_map["parameters"] = global_object
 
         self.input_map = input_map
-        self.filename = filename
+        self.filename = Path(filename)
         self.file = h5py.File(self.filename, "r")
         self.num_inputs = num_inputs
         self.non_finite_to_num = non_finite_to_num
@@ -121,7 +124,7 @@ class SaltDataset(Dataset):
 
         self.variables = variables
         self.norm_dict = norm_dict
-        self.PARAMETERS = PARAMETERS
+        self.parameters = parameters
         self.stage = stage
         self.labeller_config = labeller_config
         if labeller_config and labeller_config.use_labeller:
@@ -142,13 +145,13 @@ class SaltDataset(Dataset):
         self.input_variables = variables
         assert self.input_variables is not None
 
-        # check parameters listed in variables appear in the same order in the PARAMETERS block
-        if "PARAMETERS" in self.input_variables:
-            assert self.PARAMETERS is not None
-            assert self.input_variables["PARAMETERS"] is not None
-            assert len(self.input_variables["PARAMETERS"]) == len(self.PARAMETERS)
-            for idx, param_key in enumerate(self.PARAMETERS.keys()):
-                assert self.input_variables["PARAMETERS"][idx] == param_key
+        # check parameters listed in variables appear in the same order in the parameters block
+        if "parameters" in self.input_variables:
+            assert self.parameters is not None
+            assert self.input_variables["parameters"] is not None
+            assert len(self.input_variables["parameters"]) == len(self.parameters)
+            for idx, param_key in enumerate(self.parameters.keys()):
+                assert self.input_variables["parameters"][idx] == param_key
 
         # set number of objects
         self.num = self.get_num(num)
@@ -191,28 +194,40 @@ class SaltDataset(Dataset):
         """
         return int(self.num)
 
-    def __getitem__(self, object_idx):
-        """Return on sample or batch from the dataset.
+    def __getitem__(
+        self, object_idx: slice
+    ) -> tuple[
+        dict[str, torch.Tensor],
+        dict[str, torch.Tensor],
+        dict[str, dict[str, torch.Tensor]],
+    ]:
+        """Return one batch from the dataset.
 
         Parameters
         ----------
-        object_idx
-            A numpy slice corresponding to a batch of objects.
+        object_idx : slice
+            A Python slice selecting a contiguous batch of objects. Must have
+            ``start`` and ``stop`` set (used to size reads).
 
         Returns
         -------
         tuple
-            Dict of tensor for each of the inputs, pad_masks, and labels.
-            Each tensor will contain a batch of samples.
+            A tuple ``(inputs, pad_masks, labels)``:
+            - **inputs** : dict[str, torch.Tensor]
+            Mapping from input name to a tensor batch.
+            - **pad_masks** : dict[str, torch.Tensor]
+            Masks for padded entries (True = padded/invalid) per input that supports it.
+            - **labels** : dict[str, dict[str, torch.Tensor]]
+            Nested mapping ``labels[input_name][label_name] -> tensor``.
 
         Raises
         ------
         ValueError
             If non finite input values are found in the jets.
         """
-        inputs = {}
-        labels = {}
-        pad_masks = {}
+        inputs: dict[str, torch.Tensor] = {}
+        labels: dict[str, dict[str, torch.Tensor]] = {}
+        pad_masks: dict[str, torch.Tensor] = {}
 
         # Some weird bug seem to occur due to hdf5 not being thread safe. The below ensures
         # that each worker has its own copy of the file to prevent
@@ -241,28 +256,32 @@ class SaltDataset(Dataset):
                     get_inputs_edge(batch, self.input_variables[input_name])
                 )
 
-            # load PARAMETERS for this input type
-            elif input_name == "PARAMETERS":
+            # load parameters for this input type
+            elif input_name == "parameters":
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
 
-                for ind, param in enumerate(self.PARAMETERS):
+                # Ensure parameters is a dict here for mypy (and logic)
+                assert (
+                    self.parameters is not None
+                ), "self.parameters must be provided when using 'parameters' input"
+                params: dict[str, dict[str, Any]] = self.parameters
+
+                for ind, param in enumerate(params):
                     if self.stage == "fit":
                         # assign random values to inputs with parameters not set to those in the
                         # train list, values are chosen at random from those in the train list
                         # according to probabilities if given, else with equal probability
                         try:
-                            prob = self.PARAMETERS[param]["prob"]
+                            prob = params[param]["prob"]
                         except KeyError:
                             prob = None
-                        mask = ~np.isin(flat_array[:, ind], self.PARAMETERS[param]["train"])
-                        random = self.rng.choice(
-                            self.PARAMETERS[param]["train"], size=np.sum(mask), p=prob
-                        )
+                        mask = ~np.isin(flat_array[:, ind], params[param]["train"])
+                        random = self.rng.choice(params[param]["train"], size=np.sum(mask), p=prob)
                         flat_array[mask, ind] = random
 
                     if self.stage == "test":
                         # assign parameter values for all objects passed in the 'test' option
-                        test_arr = np.full(np.shape(flat_array)[0], self.PARAMETERS[param]["test"])
+                        test_arr = np.full(np.shape(flat_array)[0], params[param]["test"])
                         flat_array[:, ind] = test_arr
 
                 inputs[input_name] = torch.from_numpy(flat_array)
@@ -284,9 +303,9 @@ class SaltDataset(Dataset):
                 # apply the input padding mask
                 if "valid" in batch.dtype.names and input_name not in {
                     "EDGE",
-                    "PARAMETERS",
+                    "parameters",
                     self.global_object,
-                    "GLOBAL",
+                    "global",
                 }:
                     pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
                     inputs[input_name][pad_masks[input_name]] = 0
@@ -295,13 +314,13 @@ class SaltDataset(Dataset):
                 if not torch.isfinite(inputs[input_name]).all():
                     if self.ignore_finite_checks:
                         warnings.warn(
-                            f"Non-finite inputs for '{input_name}' in {self.filename}."
+                            f"Non-finite inputs for '{input_name}' in {self.filename.name}."
                             "But ignore finite flag is on, make sure this is intentional.",
                             stacklevel=2,
                         )
                     else:
                         raise ValueError(
-                            f"Non-finite inputs for '{input_name}' in {self.filename}."
+                            f"Non-finite inputs for '{input_name}' in {self.filename.name}."
                         )
 
             # process labels for this input type
@@ -321,7 +340,7 @@ class SaltDataset(Dataset):
         if num_requested > num_available:
             raise ValueError(
                 f"Requested {num_requested:,} from {self.global_object}, but only"
-                f" {num_available:,} are available in the file {self.filename}."
+                f" {num_available:,} are available in the file {self.filename.name}."
             )
 
         # use all objects
@@ -334,26 +353,28 @@ class SaltDataset(Dataset):
     def check_file(self):
         keys = {self.input_map[k] for k in self.variables}
         available = set(self.file.keys())
-        if missing := keys - available - {"EDGE", "GLOBAL", "PARAMETERS"}:
+        if missing := keys - available - {"EDGE", "global", "parameters"}:
             raise KeyError(
-                f"Input file '{self.filename}' does not contain keys {missing}."
+                f"Input file '{self.filename.name}' does not contain keys {missing}."
                 f" Available keys: {available}"
             )
         for k, v in self.variables.items():
             match k:
-                case "EDGE" | "PARAMETERS":
+                case "EDGE" | "parameters":
                     continue
-                case "GLOBAL":
+                case "global":
                     k = self.global_object  # noqa: PLW2901
                 case _:
                     pass
             name = self.input_map[k]
             if not isinstance(self.file[name], h5py.Dataset):
-                raise KeyError(f"The object '{name}' in file '{self.filename}' is not a dataset.")
+                raise KeyError(
+                    f"The object '{name}' in file '{self.filename.name}' is not a dataset."
+                )
             if missing := set(v) - set(self.file[name].dtype.names):
                 raise KeyError(
                     f"Variables {missing} are missing from dataset '{name}' in input file"
-                    f" '{self.filename}'."
+                    f" '{self.filename.name}'."
                 )
 
     def process_labels(self, labels, batch, input_name):
@@ -395,29 +416,83 @@ class SaltDataset(Dataset):
         return None
 
 
-def get_dtype(ds, variables=None) -> np.dtype:
-    """Return a dtype based on an existing dataset and requested variables.
+def get_dtype(ds: h5py.Dataset, variables: Iterable[str] | None = None) -> np.dtype:
+    """Return a structured dtype based on an existing dataset and requested variables.
+
+    Parameters
+    ----------
+    ds : h5py.Dataset
+        Input dataset providing the source structured dtype (``ds.dtype``).
+    variables : Iterable[str] | None, optional
+        Variable names to include in the returned dtype. If ``None``, use
+        ``ds.dtype.names``. If the dataset contains a ``"valid"`` field and
+        it is not listed, it will be appended automatically.
 
     Returns
     -------
-    np.dtype
-        Numpy dtype based on input dataset
+    numpy.dtype
+        Structured dtype consisting of the requested fields. Each field's
+        element dtype is converted via :func:`salt.utils.inputs.as_half`.
     """
+    # Normalize to a concrete, mutable list
     if variables is None:
-        variables = ds.dtype.names
-    if "valid" in ds.dtype.names and "valid" not in variables:
-        variables.append("valid")
-    variables_flat = []
-    for item in variables:
+        variables_list: list[str] = list(ds.dtype.names or [])
+    else:
+        variables_list = list(variables)
+
+    if "valid" in (ds.dtype.names or ()) and "valid" not in variables_list:
+        variables_list.append("valid")
+
+    variables_flat: list[str] = []
+    for item in variables_list:
         if isinstance(item, list):
-            variables_flat += item
+            variables_flat.extend(item)
         else:
             variables_flat.append(item)
 
-    return np.dtype([(n, as_half(x)) for n, x in ds.dtype.descr if n in variables])
+    return np.dtype([(n, as_half(x)) for n, x in ds.dtype.descr if n in variables_flat])
 
 
-def malformed_truthorigin_check(ds, input_batch_label):
+def malformed_truthorigin_check(
+    ds: Any,
+    input_batch_label: np.ndarray,
+) -> np.ndarray:
+    """Check and optionally correct malformed ``truthOriginLabels`` in a batch.
+
+    Parameters
+    ----------
+    ds : Any
+        An object with a boolean attribute ``recover_malformed``.
+        If ``True``, malformed labels are converted to ``-1``.
+        If ``False``, a ``ValueError`` is raised.
+    input_batch_label : np.ndarray
+        Array of truth origin labels for the current batch.
+
+    Returns
+    -------
+    np.ndarray
+        Either the original labels or a corrected array with all
+        invalid labels replaced by ``-1`` if ``ds.recover_malformed`` is ``True``.
+
+    Raises
+    ------
+    ValueError
+        If malformed labels are detected and ``ds.recover_malformed`` is ``False``.
+
+    Notes
+    -----
+    Valid truth origin labels are assumed to be in the inclusive range
+    ``[-1, 7]``. Any value outside this range is considered malformed.
+
+    Examples
+    --------
+    >>> class Dummy:
+    ...     recover_malformed = True
+    >>> ds = Dummy()
+    >>> labels = np.array([0, 1, 99, -5])
+    >>> malformed_truthorigin_check(ds, labels)
+    array([ 0,  1, -1, -1])
+    """
     if ds.recover_malformed:
         warnings.warn(
             "Malformed truthOriginLabels found with values and counts: "
@@ -426,9 +501,13 @@ def malformed_truthorigin_check(ds, input_batch_label):
             "You may still want to check these tracks.",
             stacklevel=2,
         )
-        return np.where((input_batch_label > 7) | (input_batch_label < -1), -1, input_batch_label)
+        return np.where(
+            (input_batch_label > 7) | (input_batch_label < -1),
+            -1,
+            input_batch_label,
+        )
     raise ValueError(
-        f"Malformed truthOriginLabels found with values and counts: "
+        "Malformed truthOriginLabels found with values and counts: "
         f"{np.unique(input_batch_label, return_counts=True)}"
         "Recover flag is off, failing."
     )

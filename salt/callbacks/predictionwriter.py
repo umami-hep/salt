@@ -18,6 +18,32 @@ from salt.utils.mask_utils import indices_from_mask
 
 
 class PredictionWriter(Callback):
+    """Write test outputs to h5 file.
+
+    This callback will write the outputs of the model to an h5 evaluation file. The outputs
+    are produced by calling the `run_inference` method of each task. The output file
+    is written to the same directory as the checkpoint file, and has the same name
+    as the checkpoint file, but with the suffix `__test_<sample><suffix>.h5`. The file will
+    contain one dataset for each input type, with the same name as the input type in the test
+    file.
+
+    Parameters
+    ----------
+    write_tracks : bool, optional
+        If False, skip any tasks with `"tracks" in input_name`, by default False
+    write_objects : bool, optional
+        If False, skip any tasks with `input_name="objects"` and outputs of the
+        MaskDecoder, by default False
+    half_precision : bool, optional
+        If true, write outputs at half precision, by default False
+    object_classes : list | None, optional
+        List of flavour names with the index corresponding to the label values. This is used
+        to construct the global object classification probability output names, by default None
+    extra_vars : Vars | None, optional
+        Extra variables to write to file for each input type. If not specified for a given input
+        type, all variables in the test file will be written, by default None
+    """
+
     def __init__(
         self,
         write_tracks: bool = False,
@@ -26,31 +52,6 @@ class PredictionWriter(Callback):
         object_classes: list | None = None,
         extra_vars: Vars | None = None,
     ) -> None:
-        """Write test outputs to h5 file.
-
-        This callback will write the outputs of the model to an h5 evaluation file. The outputs
-        are produced by calling the `run_inference` method of each task. The output file
-        is written to the same directory as the checkpoint file, and has the same name
-        as the checkpoint file, but with the suffix `__test_<sample><suffix>.h5`. The file will
-        contain one dataset for each input type, with the same name as the input type in the test
-        file.
-
-        Parameters
-        ----------
-        write_tracks : bool
-            If False, skip any tasks with `"tracks" in input_name`.
-        write_objects : bool
-            If False, skip any tasks with `input_name="objects"` and outputs of the
-            MaskDecoder. Default is False
-        half_precision : bool
-            If true, write outputs at half precision
-        object_classes : list
-            List of flavour names with the index corresponding to the label values. This is used
-            to construct the global object classification probability output names.
-        extra_vars : Vars
-            Extra variables to write to file for each input type. If not specified for a given input
-            type, all variables in the test file will be written.
-        """
         super().__init__()
         if extra_vars is None:
             extra_vars = defaultdict(list)
@@ -133,8 +134,7 @@ class PredictionWriter(Callback):
         to_write = {}
         blow = batch_idx * self.batch_size
         bhigh = (batch_idx + 1) * self.batch_size
-        if bhigh > self.num:
-            bhigh = self.num
+        bhigh = min(bhigh, self.num)
         for input_name, outputs in batch_outputs.items():
             this_outputs = []
 
