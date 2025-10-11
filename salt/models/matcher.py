@@ -2,8 +2,11 @@ from typing import Any
 
 import scipy
 import torch
+from py_lap_solver.solvers import Solvers
 from torch import Tensor, nn
 from torch.nn import functional
+
+SOLVER_REGISTRY = Solvers.get_available_solvers()
 
 
 @torch.jit.script
@@ -166,13 +169,16 @@ class HungarianMatcher(nn.Module):
         self.num_objects = num_objects
         self.loss_weights = loss_weights
         if object_weights is not None:
-            assert len(object_weights) == num_classes + 1, "Object weights must match number of classes"
+            assert len(object_weights) == num_classes + 1, (
+                "Object weights must match number of classes"
+            )
             self.object_weights = torch.tensor(object_weights, dtype=torch.float32)
         else:
             self.object_weights = torch.ones(num_classes + 1, dtype=torch.float32)
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
 
         self.global_step = 0
+        self.solver_name = "BatchedScipyOMP"
 
     def get_batch_cost(
         self,
@@ -222,7 +228,6 @@ class HungarianMatcher(nn.Module):
         )
         valid_obj_mask = obj_class_tgt != self.num_classes
 
-
         output = torch.gather(obj_class_pred, 2, obj_class_tgt * valid_obj_mask) * valid_obj_mask
         obj_class_cost = torch.zeros((bs, self.num_objects, self.num_objects), device=dev)
         obj_class_cost[:, :, : self.num_classes] = -output
@@ -234,7 +239,9 @@ class HungarianMatcher(nn.Module):
         if self.loss_weights.get("mask_dice"):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
             if torch.isinf(cost_mask_dice).any() or torch.isnan(cost_mask_dice).any():
-                print("Nans in cost matrix, DICE this is probably due to the mask dice targets being inf.")
+                print(
+                    "Nans in cost matrix, DICE this is probably due to the mask dice targets being inf."
+                )
                 print("Mask targets:", mask_tgt)
                 print("Mask predictions:", mask_pred)
             cost_matrix += self.loss_weights["mask_dice"] * cost_mask_dice
@@ -262,7 +269,9 @@ class HungarianMatcher(nn.Module):
             reg_cost = batch_mae_loss(reg_pred, reg_tgt)
             # TODO figure out why we have nans in the targets...
             if torch.isnan(reg_cost).any() or torch.isinf(reg_cost).any():
-                print("Nans or infs in cost matrix, REG, this is probably due to the regression targets being nan.")
+                print(
+                    "Nans or infs in cost matrix, REG, this is probably due to the regression targets being nan."
+                )
                 print("Regression targets:", reg_cost)
             cost_matrix += self.loss_weights["regression"] * reg_cost
 
@@ -303,28 +312,23 @@ class HungarianMatcher(nn.Module):
         idxs: list[list[int]] = []
         self.default_idx = set(range(self.num_objects))
 
-        # Get the full cost matrix, then run lsap on each batch element
-        full_cost, n_batch = self.get_batch_cost(preds, targets)
-        full_cost = full_cost.to(torch.float32).cpu().numpy()
+        # Get the full cost matrix, then run batched LSAP
+        full_cost, batch_N = self.get_batch_cost(preds, targets)
+        full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
+        batch_N = batch_N.squeeze(-1).cpu().numpy()
 
-        for batch_idx in range(batch_size):
-            # get the cost matrix for this batch element
-            cost_matrix = full_cost[batch_idx][:, : n_batch[batch_idx]]
-
-            # get the optimal assignment
-            idx = self.lap(cost_matrix)
-
-            idxs.append(idx)
-
-        # get the device so we can put the indices on the same device as the predictions
-        d = preds["class_logits"].device
-        # format indices to allow simple indexing
-        idxs_tensor = torch.tensor(idxs).to(d)
-        batch_arange = torch.arange(len(idxs)).unsqueeze(1).to(d)
-        idxs_tuple = (batch_arange, idxs_tensor)  # shape-compatible indexing tuple
+        solver = SOLVER_REGISTRY[self.solver_name]
+        assignments = solver.batch_solve(full_cost, num_valid=batch_N)
+        assignments = torch.from_numpy(assignments).to(torch.int64)
+        # Fill in any -1 entries with remaining prediction indices
+        default_ind = torch.arange(full_cost.shape[1])
+        for b in range(len(full_cost)):
+            if (assignments[b] < 0).any():
+                unmatched = default_ind[~torch.isin(default_ind, assignments[b])]
+                assignments[b, assignments[b] < 0] = unmatched[: torch.sum(assignments[b] < 0)]
 
         self.global_step += 1
-        return idxs_tuple
+        return (torch.arange(len(assignments)).unsqueeze(1).to(assignments.device), assignments)
 
     def lap(self, cost: Any) -> list[int]:
         """Solve the linear sum assignment problem for a single cost matrix.
