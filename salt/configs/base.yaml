@@ -24,8 +24,8 @@ trainer:
   default_root_dir: logs
 
   logger:
-    class_path: lightning.pytorch.loggers.CometLogger
-    init_args: { project_name: salt, display_summary_level: 0 }
+    class_path: lightning.pytorch.loggers.comet.CometLogger
+    init_args: { project: salt }
 
   callbacks:
     - class_path: salt.callbacks.Checkpoint

@@ -36,9 +36,9 @@ class MaskformerObjectConfig:
             assert None in self.object_classes, "Null class must be present"
             self.object_classes["null"] = self.object_classes.pop(None)
 
-            assert (
-                self.object_classes["null"]["mapped"] == len(self.object_classes) - 1
-            ), "Null class must be last"
+            assert self.object_classes["null"]["mapped"] == len(self.object_classes) - 1, (
+                "Null class must be last"
+            )
             assert set(self.class_map.values()) == set(range(len(self.object_classes)))
 
     @property

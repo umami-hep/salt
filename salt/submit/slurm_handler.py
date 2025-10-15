@@ -3,7 +3,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("Slurm Handler")
 
 
 class SlurmHandler:
@@ -30,12 +34,12 @@ class SlurmHandler:
 
     def activate_testmode(self) -> None:
         """Activate the testmode for submission."""
-        logging.debug("Activated test mode: not submitting any jobs.")
+        logger.debug("Activated test mode: not submitting any jobs.")
         self._test_mode = True
 
     def deactivate_testmode(self) -> None:
         """Deactivate the testmode for submission."""
-        logging.debug("Deactivated test mode: submitting jobs.")
+        logger.debug("Deactivated test mode: submitting jobs.")
         self._test_mode = False
 
     def send_job(self, command: str, tag: str = "salt_job") -> None:
@@ -51,7 +55,7 @@ class SlurmHandler:
         self._tag = tag
         batchfile = self._make_batch_file(command)
         if self._test_mode:
-            logging.debug(f"Created batch file {batchfile}")
+            logger.debug(f"Created batch file {batchfile}")
         else:
             subprocess.call(f"sbatch {batchfile}", shell=True)
 
@@ -94,5 +98,5 @@ class SlurmHandler:
             bf.write(f"""BASEDIR={self.base_dir};pwd; ls -l\n""")
             bf.write(f"""{command}""")
         batch_file.chmod(0o755)
-        logging.debug(f"Made batch file {batch_file}")
+        logger.debug(f"Made batch file {batch_file}")
         return batch_file

@@ -1,5 +1,5 @@
 # base image
-FROM pytorch/pytorch:2.2.1-cuda12.1-cudnn8-devel
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 # local and envs
 ENV LANG C.UTF-8
@@ -11,7 +11,7 @@ WORKDIR /salt
 
 # add some packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git h5utils wget vim nano build-essential jq \
+    git openssh-client ca-certificates h5utils wget vim nano build-essential jq \
     && rm -rf /var/lib/apt/lists/*
 
 # update python pip
@@ -22,11 +22,8 @@ RUN python -m pip install --upgrade pip setuptools wheel
 COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
-# add some other packages to the image, instead of as a package dependency
-RUN python -m pip install puma-hep umami-preprocessing
-
 # install dependencies (make use of caching)
-RUN python -m pip install ".[dev,test,muP,flash]"
+RUN python -m pip install ".[dev,muP,flash]"
 
 # Copy and install package (Source layer)
 COPY . .

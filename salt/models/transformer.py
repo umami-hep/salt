@@ -222,8 +222,10 @@ class TransformerEncoder(nn.Module):
 
         # For resizing the output tokens
         if self.mup:
-            assert self.out_dim, "Need the out_dim layer for muP, \
+            assert self.out_dim, (
+                "Need the out_dim layer for muP, \
                 as this is the last layer of the muP-part of the model"
+            )
         if self.out_dim:
             if self.mup and _MuReadout:
                 self.final_linear = _MuReadout(self.embed_dim, self.out_dim)
@@ -461,8 +463,10 @@ class TransformerCrossAttentionEncoder(nn.Module):
         self.final_norm = nn.LayerNorm(embed_dim)
 
         if self.mup:
-            assert self.out_dim, "Need the out_dim layer for mup, \
+            assert self.out_dim, (
+                "Need the out_dim layer for mup, \
                 as this is the last layer of the mup-part of the model"
+            )
 
         # For resizing the output tokens
         if self.out_dim:

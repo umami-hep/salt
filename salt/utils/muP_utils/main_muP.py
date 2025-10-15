@@ -57,8 +57,24 @@ def main(args=None):
     delta_config, _ = generate_base_delta_config(config, "delta")
 
     # Execute generateModel to get base_model saved at a path in base_config
-    generateModel(args=["base", "--trainer.callbacks", "", f"--config={base_config}", *restargs])
-    generateModel(args=["delta", "--trainer.callbacks", "", f"--config={delta_config}", *restargs])
+    generateModel(
+        args=[
+            "base",
+            "--trainer.callbacks=[]",
+            "--trainer.logger.init_args.online=False",
+            f"--config={base_config}",
+            *restargs,
+        ]
+    )
+    generateModel(
+        args=[
+            "delta",
+            "--trainer.callbacks=[]",
+            "--trainer.logger.init_args.online=False",
+            f"--config={delta_config}",
+            *restargs,
+        ]
+    )
 
     # Load the models and save the shapes in filename
     store_shapes_mup(path=store_path)
@@ -75,10 +91,22 @@ def main(args=None):
 
         # Need also base and delta without wrapper for local training
         generateModel(
-            args=["temp_base", "--trainer.callbacks", "", f"--config={base_config}", *restargs]
+            args=[
+                "temp_base",
+                "--trainer.callbacks=[]",
+                "--trainer.logger.init_args.online=False",
+                f"--config={base_config}",
+                *restargs,
+            ]
         )
         generateModel(
-            args=["temp_delta", "--trainer.callbacks", "", f"--config={delta_config}", *restargs]
+            args=[
+                "temp_delta",
+                "--trainer.callbacks=[]",
+                "--trainer.logger.init_args.online=False",
+                f"--config={delta_config}",
+                *restargs,
+            ]
         )
 
         store_shapes_mup(path=store_path, check=check)

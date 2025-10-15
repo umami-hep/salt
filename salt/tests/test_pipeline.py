@@ -38,7 +38,7 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc
     args += ["--trainer.accelerator=cpu"]
     args += ["--trainer.devices=1"]
     args += [f"--trainer.default_root_dir={tmp_path}"]
-    args += ["--trainer.logger.offline=True"]
+    args += ["--trainer.logger.init_args.online=False"]
 
     if train_args:
         args += train_args

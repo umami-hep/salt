@@ -97,9 +97,9 @@ def compare_output(
         )
         onnx_index = tasks_to_output.index("track_origin") - len(tasks_to_output)
         pred_onnx_origin = outputs_onnx[onnx_index]
-        assert (
-            len(pred_onnx_origin.shape) == 1
-        ), "ONNX output for track origin should be a single tensor"
+        assert len(pred_onnx_origin.shape) == 1, (
+            "ONNX output for track origin should be a single tensor"
+        )
         np.testing.assert_allclose(
             pred_pytorch_origin.squeeze(),
             pred_onnx_origin,
@@ -133,9 +133,9 @@ def compare_output(
         onnx_index = tasks_to_output.index("track_type") - len(tasks_to_output)
         pred_onnx_type = outputs_onnx[onnx_index]
 
-        assert (
-            len(pred_onnx_type.shape) == 1
-        ), "ONNX output for track origin should be a single tensor"
+        assert len(pred_onnx_type.shape) == 1, (
+            "ONNX output for track origin should be a single tensor"
+        )
         np.testing.assert_allclose(
             pred_pytorch_type.squeeze(),
             pred_onnx_type,

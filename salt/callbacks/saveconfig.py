@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import shutil
 import socket
 from contextlib import suppress
@@ -14,7 +15,7 @@ import yaml
 from ftag.git_check import get_git_hash
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.cli import LightningArgumentParser, Namespace
-from lightning.pytorch.loggers import CometLogger
+from lightning.pytorch.loggers.comet import CometLogger
 
 try:  # pragma: no cover
     from s3fs import S3FileSystem
@@ -258,7 +259,7 @@ class SaveConfigCallback(Callback):
 
         meta["salt_hash"] = get_git_hash(Path(__file__).parent)
         if logger:
-            meta["out_dir"] = logger.save_dir
+            meta["out_dir"] = os.environ["COMET_OFFLINE_DIRECTORY"]
             if not self.use_S3:
                 # Currently not available on S3
                 meta["log_url"] = logger.experiment.url

@@ -132,7 +132,7 @@ if args.requeue and not log_suffix:
     log_suffix = datetime.now().strftime("%Y%m%d-T%H%M%S")
 
 # Construct and submit the job command
-command = "cd ${BASEDIR} && " "export OMP_NUM_THREADS=1\n"
+command = "cd ${BASEDIR} && export OMP_NUM_THREADS=1\n"
 if args.environment == "conda":
     command += (
         "source conda/bin/activate && conda activate salt\n"
@@ -158,7 +158,7 @@ command += (
 )
 
 if args.requeue:
-    command += f"      --overwrite_config \\\n" f"      --log_suffix={log_suffix} \\\n"
+    command += f"      --overwrite_config \\\n      --log_suffix={log_suffix} \\\n"
 
 # Fill extra args to Salt config
 for arg, value in extra_config_args.items():
