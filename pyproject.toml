@@ -15,20 +15,52 @@ classifiers = [
 ]
 
 dependencies = [
-  "atlas-ftag-tools==0.2.8",
-  "comet_ml==3.49.7",
-  "h5py==3.10.0",
-  "jsonargparse[signatures,argcomplete]==4.32.0",
-  "lightning==2.2.0",
-  "lion-pytorch==0.2.2",
-  "numpy==1.24.2",
-  "onnx==1.16.0",
-  "onnxruntime==1.15.1",
-  "rich==13.6.0",
-  "scipy==1.12.0",
-  "torch==2.2.1",
-  "torchmetrics==1.2.1",
-  "tqdm==4.66.1",
+  "atlas-ftag-tools==0.2.17",
+  "comet_ml>=3.49.7",
+  "h5py>=3.14.0",
+  "jsonargparse[signatures,argcomplete]>=4.32.0",
+  "lightning==2.5.3",
+  "lion-pytorch>=0.2.2",
+  "numpy>=2.2.6",
+  "onnx==1.16.2",
+  "onnxruntime==1.20.1",
+  "puma-hep==0.4.11",
+  "rich>=14.1.0",
+  "scipy>=1.15.3",
+  "torch==2.5.1",
+  "torchmetrics==1.5.2",
+  "torchvision==0.20.1",
+  "tqdm>=4.66.1",
+  "umami-preprocessing==0.2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "coverage>=7.10.6",
+  "ipykernel>=6.30.1",
+  "mypy>=1.18.1",
+  "pre-commit>=4.3.0",
+  "pydoclint>=0.7.3",
+  "pytest_notebook>=0.10.0",
+  "pytest-cov>=7.0.0",
+  "pytest-randomly>=4.0.1",
+  "pytest>=8.4.2",
+  "ruff>=0.13.0",
+]
+muP = [
+  "aiobotocore==2.24.2",
+  "boto3==1.40.18",
+  "botocore==1.40.18",
+  "mup>=1.0.0",
+  "s3fs==2024.10.0",
+  "s3path>=0.5.0",
+  "tensorboard>=2.14.1",
+]
+flash = [
+  "flash-attn>=2.5.7",
+  "ninja>=1.11.1.1",
+  "packaging",
+  "wheel",
 ]
 
 [project.urls]
@@ -51,32 +83,6 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = { attr = "salt.__version__" }
 
-[project.optional-dependencies]
-dev = [
-  "mypy==1.11.2",
-  "pre-commit==3.5.0",
-  "pydoclint==0.6.6",
-  "ruff==0.6.2",
-]
-test = [
-  "coverage>=7.0",
-  "pytest-cov==4.1.0",
-  "pytest==7.4.2",
-]
-muP = [
-  "boto3==1.28.17",
-  "mup==1.0.0",
-  "s3fs==2023.9.2",
-  "s3path==0.5.0",
-  "tensorboard==2.14.1",
-]
-flash = [
-  "flash-attn==2.5.7",
-  "ninja==1.11.1.1",
-  "packaging",
-  "wheel",
-]
-
 [build-system]
 requires = ["setuptools>=62"]
 build-backend = "setuptools.build_meta"
@@ -88,8 +94,8 @@ lint.select = ["ALL"]
 lint.ignore = [
   "COM", "D100", "D102", "D105", "D205", "D401", "EM", "FIX", "FBT",
   "S101", "S404", "S602", "PLR2004", "PLR0912", "PLR0914", "CPY001", "TRY003",
-  "G004", "PD901", "N802", "C901", "DTZ005", "DTZ007", "INP", "EXE002",
-  "ANN001", "ANN002", "ANN003", "ANN101", "ANN201", "ANN202", "ANN204",
+  "G004", "N802", "C901", "DTZ005", "DTZ007", "INP", "EXE002",
+  "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204",
   "T201", "PLW1514", "PTH123", "RUF017", "PLR6301", "ISC001", "S307",
   "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
   "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",

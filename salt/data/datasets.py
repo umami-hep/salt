@@ -237,7 +237,7 @@ class SaltDataset(Dataset):
         for input_name in self.input_map:
             # load data (inputs + labels) for this input type
             batch = self.arrays[input_name]
-            shape = (object_idx.stop - object_idx.start,) + self.dss[input_name].shape[1:]
+            shape = (object_idx.stop - object_idx.start, *self.dss[input_name].shape[1:])
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
 
@@ -261,9 +261,9 @@ class SaltDataset(Dataset):
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
 
                 # Ensure parameters is a dict here for mypy (and logic)
-                assert (
-                    self.parameters is not None
-                ), "self.parameters must be provided when using 'parameters' input"
+                assert self.parameters is not None, (
+                    "self.parameters must be provided when using 'parameters' input"
+                )
                 params: dict[str, dict[str, Any]] = self.parameters
 
                 for ind, param in enumerate(params):

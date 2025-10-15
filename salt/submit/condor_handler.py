@@ -3,7 +3,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("Condor Handler")
 
 
 class CondorHandler:
@@ -42,12 +46,12 @@ class CondorHandler:
 
     def activate_testmode(self) -> None:
         """Activate the testmode for submission."""
-        logging.debug("Activated test mode: not submitting any jobs.")
+        logger.debug("Activated test mode: not submitting any jobs.")
         self._test_mode = True
 
     def deactivate_testmode(self) -> None:
         """Deactivate the testmode for submission."""
-        logging.debug("Deactivated test mode: submitting jobs.")
+        logger.debug("Deactivated test mode: submitting jobs.")
         self._test_mode = False
 
     def send_job(self, command: str, tag: str = "salt_job") -> None:
@@ -64,7 +68,7 @@ class CondorHandler:
         bashfile = self._make_bash_file(command)
         jobfile = self._make_job_file(bashfile)
         if self._test_mode:
-            logging.debug(f"Created job file {jobfile}")
+            logger.debug(f"Created job file {jobfile}")
         else:
             subprocess.call(f"condor_submit {jobfile}", shell=True)
 
@@ -108,7 +112,7 @@ ls -l
 """
             )
         run_file.chmod(0o755)
-        logging.debug(f"Made run file {run_file}")
+        logger.debug(f"Made run file {run_file}")
         return run_file
 
     def _make_job_file(self, run_file: Path) -> Path:
@@ -138,5 +142,5 @@ Log                 = {self.log_path}/batch_{self._tag}_$(ClusterId).log
 queue
 """
             )
-        logging.debug(f"Made job file {batch_file}")
+        logger.debug(f"Made job file {batch_file}")
         return batch_file

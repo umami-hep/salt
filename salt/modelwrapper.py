@@ -39,9 +39,9 @@ def check_unique(modules: nn.ModuleList, attr_name: str) -> None:
     attr_name : str
         Name of the attribute to check.
     """
-    assert len({getattr(m, attr_name) for m in modules}) == len(
-        modules
-    ), f"Attribute '{attr_name}' must be unique for class {modules[0].__class__.__name__}"
+    assert len({getattr(m, attr_name) for m in modules}) == len(modules), (
+        f"Attribute '{attr_name}' must be unique for class {modules[0].__class__.__name__}"
+    )
 
 
 class ModelWrapper(lightning.LightningModule):
@@ -123,13 +123,13 @@ class ModelWrapper(lightning.LightningModule):
         assert loss_mode in allowed_loss_modes, f"Loss mode must be one of {allowed_loss_modes}"
         self.loss_mode = loss_mode
         if loss_mode == "GLS":
-            assert all(
-                task.weight == 1.0 for task in self.model.tasks
-            ), "GLS does not utilise task weights - set all weights to 1"
+            assert all(task.weight == 1.0 for task in self.model.tasks), (
+                "GLS does not utilise task weights - set all weights to 1"
+            )
 
         allowed_optimizers = ["lion", "AdamW"]
         assert optimizer in allowed_optimizers, (
-            f"Optimizer {optimizer} not implemented, " f"please choose from {allowed_optimizers}"
+            f"Optimizer {optimizer} not implemented, please choose from {allowed_optimizers}"
         )
         self.optimizer = optimizer
 

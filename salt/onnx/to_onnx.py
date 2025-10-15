@@ -273,9 +273,9 @@ class ONNXModel(ModelWrapper):
         if self.combine_outputs:
             for output_name, parsed_inputs in self.combine_outputs:
                 for _, input_name in parsed_inputs:
-                    assert (
-                        f"{self.name}_{input_name}" in outputs
-                    ), f"Output {input_name} not found in outputs"
+                    assert f"{self.name}_{input_name}" in outputs, (
+                        f"Output {input_name} not found in outputs"
+                    )
                 outputs.append(f"{self.name}_{output_name}")
 
         # Append auxiliary per-track outputs if requested
@@ -360,9 +360,10 @@ class ONNXModel(ModelWrapper):
         """
         # Basic input checks for shape/order consistency
         assert len(args) == len(self.salt_names), "Number of inputs does not match feature map."
-        assert (
-            len(args[0].shape) == 2
-        ), "Jets should have a batch dimension, and variable dimension but not a sequence dimension"
+        assert len(args[0].shape) == 2, (
+            "Jets should have a batch dimension, "
+            "and variable dimension but not a sequence dimension"
+        )
 
         # Build SALT-style input dict: add a batch dimension for sequences
         input_dict = {self.global_object: args[0]}
@@ -452,7 +453,7 @@ class ONNXModel(ModelWrapper):
                 outputs["objects"]["regression"][:, :, i] = unscaled_preds
 
             # Convert masks/logits to usable outputs (leading reg, indices, class probs, full reg)
-            leading_reg, indices, class_probs, regression = get_maskformer_outputs(  # noqa: F841
+            leading_reg, indices, _, _ = get_maskformer_outputs(
                 outputs["objects"], apply_reorder=True
             )
 

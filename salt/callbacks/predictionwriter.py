@@ -171,7 +171,7 @@ class PredictionWriter(Callback):
         # If the writer hasn't been created yet, create it now that we have the dtypes and shapes
         if self.writer is None:
             dtypes = {k: v.dtype for k, v in to_write.items()}
-            shapes = {k: (self.num,) + v.shape[1:] for k, v in to_write.items()}
+            shapes = {k: (self.num, *v.shape[1:]) for k, v in to_write.items()}
             self.writer = H5Writer(
                 dst=self.output_path,
                 dtypes=dtypes,

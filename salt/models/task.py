@@ -124,9 +124,9 @@ class ClassificationTask(TaskBase):
             self.loss.ignore_index = -1
         self.sample_weight = sample_weight
         if self.sample_weight is not None:
-            assert (
-                self.loss.reduction == "none"
-            ), "Sample weights only supported for reduction='none'"
+            assert self.loss.reduction == "none", (
+                "Sample weights only supported for reduction='none'"
+            )
         if self.class_names is None:
             self.class_names = CLASS_NAMES[self.label]
         if len(self.class_names) != self.net.output_size:
@@ -297,7 +297,7 @@ class ClassificationTask(TaskBase):
         tuple
             Per-class probability tensors, each squeezed along the last dimension.
         """
-        probs = self.run_inference(preds, kwargs.get("pad_mask", None))
+        probs = self.run_inference(preds, kwargs.get("pad_mask"))
         return tuple(output.squeeze() for output in torch.split(probs, 1, -1))
 
 
@@ -607,7 +607,7 @@ class RegressionTask(RegressionTaskBase):
         tuple
             Tuple of per-target tensors.
         """
-        means = self.run_inference(preds, kwargs.get("labels", None))
+        means = self.run_inference(preds, kwargs.get("labels"))
         return tuple(output.squeeze() for output in torch.split(means, 1, -1))
 
 
@@ -768,7 +768,7 @@ class GaussianRegressionTask(RegressionTaskBase):
             Tuple of the means and the stds.
         """
         # This might need to be fixed to run inference correctly with denominators
-        means, stds = self.run_inference(preds, kwargs.get("labels", None))
+        means, stds = self.run_inference(preds, kwargs.get("labels"))
         return means.squeeze(), stds.squeeze()
 
 

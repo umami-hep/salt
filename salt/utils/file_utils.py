@@ -132,9 +132,9 @@ def convert_path_to_S3url(path: Path | str) -> str:
 
     # If there's something before the "s3:/", remove it
     if s3_inc_start in path and s3_inc_start != path[: len(s3_inc_start)]:
-        assert (
-            len(path.split(s3_inc_start)) <= 2
-        ), "path is invalid: do not set 's3:/' in the paths!"
+        assert len(path.split(s3_inc_start)) <= 2, (
+            "path is invalid: do not set 's3:/' in the paths!"
+        )
         path = path.split(s3_inc_start)[-1]
 
     if s3_start == path[: len(s3_start)]:
@@ -216,7 +216,7 @@ def download_script_S3(
         If boto3 is not available
     """
     if _boto3:
-        target_path = Path(local_path, file.split("/")[-1])
+        target_path = Path(local_path, file.rsplit("/", maxsplit=1)[-1])
         if not target_path.is_file():
             session = _boto3.client("s3")
             download_S3(session, bucket, file, target_path, count)
@@ -265,7 +265,7 @@ def import_data_S3(config_path: str | Path) -> str:
         with Pool() as pool:
             output = pool.starmap(download_script_S3, args)
         for file, result in output:  # type: ignore[assignment]
-            print(f'Downloaded {file} as {result.split("/")[-1]} at local path')
+            print(f"Downloaded {file} as {result.split('/')[-1]} at local path")
             cfg["data"][file] = str(result)
 
         local_config = Path(local_path, "local_base.yaml")
@@ -317,7 +317,7 @@ def setup_S3_CLI(sc_data: dict) -> dict:
 
         # Update the config
         for file, result in output:
-            print(f'Downloaded {file} as {result.split("/")[-1]} at local path')
+            print(f"Downloaded {file} as {result.split('/')[-1]} at local path")
             sc_data[file] = str(result)
 
         print("Data part of the config updated to track the downloaded files.")

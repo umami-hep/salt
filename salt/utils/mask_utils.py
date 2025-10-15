@@ -72,9 +72,9 @@ def mask_from_indices(indices: Tensor, num_masks: int | None = None) -> BoolTens
     if num_masks is None:
         num_masks = indices.max() + 1
     else:
-        assert (
-            num_masks > indices.max()
-        ), "num_masks must be greater than the maximum value in indices"
+        assert num_masks > indices.max(), (
+            "num_masks must be greater than the maximum value in indices"
+        )
 
     indices = torch.as_tensor(indices)
     kwargs = {"dtype": torch.bool, "device": indices.device}

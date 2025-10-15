@@ -2,7 +2,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
-from ftag import get_mock_file
+from ftag import get_mock_file, Flavours
 
 from salt.data import SaltDataset
 from salt.data.datasets import malformed_truthorigin_check
@@ -46,7 +46,7 @@ def test_input_batch():
         "tracks": ["d0"],
     }
     labels = {"jets": ["flavour_label"], "tracks": ["numberOfSCTSharedHits"]}
-    cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    cn = list(Flavours.by_category("xbb").labels.keys())
     labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
         f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf
@@ -75,7 +75,7 @@ def test_process_labels():
         ]
     }
     labels = {"jets": ["flavour_label"]}
-    cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    cn = list(Flavours.by_category("xbb").labels.keys())
     labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
         f, norm_dict, variables, "train", labels=labels, labeller_config=labellerConf
@@ -98,7 +98,7 @@ def test_file_vars_for_cuts():
     input_variables = {"jets": ["pt", "eta", "R10TruthLabel_R22v1", "GhostCHadronsFinalCount"]}
     all_file_vars = list(file_open["jets"].dtype.fields.keys())
     labels = {"jets": ["flavour_label"]}
-    cn = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    cn = list(Flavours.by_category("xbb").labels.keys())
     labellerConf = LabellerConfig(use_labeller=True, class_names=cn, require_labels=False)
     dataset = SaltDataset(
         f, norm_dict, input_variables, "train", labels=labels, labeller_config=labellerConf
@@ -123,7 +123,7 @@ def test_process_labels_size_check():
         ]
     }
     labels = {"jets": ["flavour_label"]}
-    class_names = ["hbb", "hcc", "top", "qcdbb", "qcdbx", "qcdcx", "qcdll"]
+    class_names = list(Flavours.by_category("xbb").labels.keys())
     labellerConf_true = LabellerConfig(
         use_labeller=True, class_names=class_names, require_labels=True
     )

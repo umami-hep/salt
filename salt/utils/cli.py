@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -99,7 +100,6 @@ class SaltCLI(LightningCLI):
         """
         parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
         parser.link_arguments("name", "model.name")
-        parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
         parser.link_arguments("data.global_object", "model.global_object")
 
     def add_arguments_to_parser(self, parser: Any) -> None:
@@ -241,10 +241,12 @@ class SaltCLI(LightningCLI):
             )
             config.trainer.default_root_dir = output_dir_path
             if config.trainer.logger:
-                config.trainer.logger.init_args.save_dir = output_dir_path
-                # Create the directory if it doesn't exist
-                # Bug fix for comet logger in offline mode
-                Path(config.trainer.logger.init_args.save_dir).mkdir(parents=True, exist_ok=True)
+                # If tests/CI set online=false, put Comet into offline mode and
+                # choose the cache dir via env.
+                online = getattr(config.trainer.logger.init_args, "online", None)
+                if online is False:
+                    os.environ["COMET_OFFLINE_DIRECTORY"] = output_dir_path
+                    Path(output_dir_path).mkdir(parents=True, exist_ok=True)
 
             # run git checks
             if not config.force and not config.trainer.fast_dev_run:
