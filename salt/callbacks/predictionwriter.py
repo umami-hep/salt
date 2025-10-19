@@ -6,7 +6,7 @@ import numpy as np
 from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
-
+import h5py
 from salt.models.task import (
     ClassificationTask,
     GaussianRegressionTask,
@@ -130,6 +130,12 @@ class PredictionWriter(Callback):
             if "objects" not in self.outputs:
                 self.outputs["objects"] = {}
 
+            self.object_params = {
+                "class_label": self.ds.mf_config.object.class_label,
+                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
+                "constituent_name": self.ds.mf_config.constituent.name,
+            }
+
     def _read_inputs_slice(
         self,
         dataset_name: str,
@@ -243,6 +249,7 @@ class PredictionWriter(Callback):
                 continue
 
             this_preds = preds[task.input_name][task.name]
+            print(task.input_name)
             this_pad_masks = pad_masks.get(task.input_name)
 
             # Get the outputs in the correct format
@@ -272,7 +279,8 @@ class PredictionWriter(Callback):
 
             # Generate the object outputs of the form (B, N) where N is the number of objects
             objects = outputs["objects"]
-
+            constituent_name = self.object_params["constituent_name"]
+            obj_pad_masks = pad_masks[constituent_name].cpu().numpy()
             probs_dtype = np.dtype([
                 (f"{module.name}_{n}", self.precision) for n in self.object_params["label_map"]
             ])
@@ -288,13 +296,10 @@ class PredictionWriter(Callback):
             mask_indices = indices_from_mask(objects["masks"].cpu().sigmoid() > 0.5)
             dtype = np.dtype([(f"{module.name}_MaskIndex", "i8")])
             mask_indices = mask_indices.int().cpu().numpy()
-
-            tracks_pad = pad_masks.get("tracks")
-            if tracks_pad is not None:
-                tracks_pad_np = tracks_pad.cpu().numpy()
-                mask_indices = np.where(~tracks_pad_np, mask_indices, -1)
-
-            to_write["tracks"]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
+            mask_indices = np.where(~obj_pad_masks, mask_indices, -1)
+            if constituent_name not in to_write:
+                to_write[constituent_name] = {}
+            to_write[constituent_name]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
 
             # Write the truth mask and mask logits to their own dset
             to_write["object_masks"] = {}
@@ -306,6 +311,10 @@ class PredictionWriter(Callback):
                 objects["masks"].cpu().float().unsqueeze(-1).numpy(),
                 dtype=np.dtype([("mask_logits", self.precision)]),
             )
+            # Exapnd the pad mask from (B, N_constituents) to (B, N_objects, N_constituents) 
+            # and set the invalid entries to -inf
+            # expanded_pad_mask = 
+            # to_write["object_masks"]["mask_logits"][]
 
         self._write_batch_outputs(to_write, out_pads, batch_idx)
 

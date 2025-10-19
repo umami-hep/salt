@@ -11,7 +11,7 @@ from salt.callbacks.performancewriter import PerformanceWriter
 from salt.callbacks.predictionwriter import PredictionWriter
 from salt.callbacks.saveconfig import SaveConfigCallback
 from salt.callbacks.weight_logger import WeightLoggerCallback
-
+from salt.callbacks.maskformer_confusion_matrix import MaskformerConfusionMatrix
 __all__ = [
     "Checkpoint",
     "ConfusionMatrixCallback",
@@ -22,4 +22,5 @@ __all__ = [
     "PredictionWriter",
     "SaveConfigCallback",
     "WeightLoggerCallback",
+    "MaskformerConfusionMatrix",
 ]

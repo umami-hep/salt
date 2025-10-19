@@ -7,6 +7,101 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 SOLVER_REGISTRY = Solvers.get_available_solvers()
+def fill_default_indices_loop(assignments: torch.Tensor) -> torch.Tensor:
+    """
+    Fill -1s with ascending unused indices; if not enough, keep filling with
+    ascending indices (duplicates allowed). Matches the vectorized version below.
+    """
+    out = assignments.long().clone()
+    B, N = out.shape
+    device = out.device
+    default = torch.arange(N, device=device)
+
+    for b in range(B):
+        row = out[b]
+        neg = row.eq(-1)
+        k = int(neg.sum().item())
+        if k == 0:
+            continue
+        used = torch.zeros(N, dtype=torch.bool, device=device)
+        pos_vals = row[~neg]
+        if pos_vals.numel():
+            used[pos_vals.clamp_min(0)] = True
+        unused = default[~used]                       # ascending
+        # pad with 0..N-1 if we still need more (allows duplicates)
+        if unused.numel() < k:
+            pad = default[: k - unused.numel()]
+            fill = torch.cat([unused, pad], dim=0)
+        else:
+            fill = unused[:k]
+        row[neg] = fill
+    return out
+
+
+def fill_unmatched_assignments_vectorized(
+    assignments: Tensor, num_predictions: int
+) -> Tensor:
+    """Fill unmatched assignments (-1 values) with remaining prediction indices (vectorized).
+
+    Parameters
+    ----------
+    assignments : Tensor
+        Tensor of shape (batch_size, num_objects) containing assignment indices.
+        Values of -1 indicate unmatched objects.
+    num_predictions : int
+        Total number of predictions available.
+
+    Returns
+    -------
+    Tensor
+        Assignments with -1 values replaced by unused prediction indices.
+    """
+    batch_size, num_objects = assignments.shape
+    device = assignments.device
+
+    # Create mask for unmatched assignments
+    unmatched_mask = assignments < 0
+
+    # Early exit if no unmatched assignments
+    if not unmatched_mask.any():
+        return assignments
+
+    # Create a boolean mask for all possible prediction indices
+    # Shape: (batch_size, num_predictions)
+    all_indices = torch.arange(num_predictions, device=device).unsqueeze(0).expand(batch_size, -1)
+
+    # Mark which indices are already used
+    # We need to create a mask where True means the index is used
+    used_mask = torch.zeros(batch_size, num_predictions, dtype=torch.bool, device=device)
+
+    # For valid assignments (>= 0), mark them as used
+    valid_mask = assignments >= 0
+    if valid_mask.any():
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand_as(assignments)
+        used_mask[batch_indices[valid_mask], assignments[valid_mask]] = True
+
+    # Get unused indices (available for assignment)
+    available_mask = ~used_mask  # Shape: (batch_size, num_predictions)
+
+    # Sort available indices per batch to get them in order
+    # For each batch element, we want to extract available indices in sorted order
+    # Use a trick: multiply by large number to push non-available to the end
+    sort_keys = all_indices.float() + (~available_mask).float() * 1e10
+    sorted_indices = torch.argsort(sort_keys, dim=1)
+    sorted_available = torch.gather(all_indices, 1, sorted_indices)
+
+    # Now sorted_available has all available indices at the beginning of each row
+
+    # Get cumulative position of each unmatched slot within its batch
+    # This tells us which available index to use (0th, 1st, 2nd, ...)
+    unmatched_ranks = torch.cumsum(unmatched_mask.long(), dim=1) - 1
+
+    # For each unmatched position, gather the corresponding available index
+    # unmatched_ranks tells us which position in sorted_available to use
+    filled_indices = torch.gather(sorted_available, 1, unmatched_ranks.clamp(min=0))
+
+    # Replace -1 values with the filled indices (only where unmatched_mask is True)
+    return torch.where(unmatched_mask, filled_indices, assignments)
 
 
 @torch.jit.script
@@ -308,25 +403,17 @@ class HungarianMatcher(nn.Module):
             slots are filled to cover all ``num_objects`` by appending remaining indices.
         """
         batch_size = preds["class_logits"].shape[0]
-
-        idxs: list[list[int]] = []
-        self.default_idx = set(range(self.num_objects))
+        device = preds["class_logits"].device
 
         # Get the full cost matrix, then run batched LSAP
         full_cost, batch_N = self.get_batch_cost(preds, targets)
-        full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
         batch_N = batch_N.squeeze(-1).cpu().numpy()
 
         solver = SOLVER_REGISTRY[self.solver_name]
+        full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
         assignments = solver.batch_solve(full_cost, num_valid=batch_N)
-        assignments = torch.from_numpy(assignments).to(torch.int64)
-        # Fill in any -1 entries with remaining prediction indices
-        default_ind = torch.arange(full_cost.shape[1])
-        for b in range(len(full_cost)):
-            if (assignments[b] < 0).any():
-                unmatched = default_ind[~torch.isin(default_ind, assignments[b])]
-                assignments[b, assignments[b] < 0] = unmatched[: torch.sum(assignments[b] < 0)]
-
+        assignments = torch.from_numpy(assignments).to(torch.int64).to(device)
+        assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
         self.global_step += 1
         return (torch.arange(len(assignments)).unsqueeze(1).to(assignments.device), assignments)
 

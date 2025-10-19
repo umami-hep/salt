@@ -333,8 +333,8 @@ class ModelWrapper(lightning.LightningModule):
             and self.trainer.precision == "32-true"
         ):
             change_attn_backends(self, backend="torch-math")
-        inputs, pad_masks, _ = batch
-        batch = (inputs, pad_masks, None)
+        inputs, pad_masks, labels = batch
+        batch = (inputs, pad_masks, labels)
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
