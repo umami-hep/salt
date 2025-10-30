@@ -24,6 +24,8 @@ def compare_output(
     seq_names_onnx: Sequence[str],
     variable_map: Mapping[str, list[str]],
     tasks_to_output: Sequence[str],
+    edge_name_salt: str | None = None,
+    edge_name_onnx: str | None = None,
     n_seq: int = 40,
 ) -> None:
     """Compare PyTorch vs ONNX outputs for a single synthetic batch/config."""
@@ -37,9 +39,16 @@ def compare_output(
         p_valid=1,
     )
 
+    if edge_name_salt and not edge_name_onnx:
+        edge_name_onnx = edge_name_salt
+
     # Build input dict for PyTorch
     inputs_pytorch = {seqn: seq for seq, seqn in zip(sequences, seq_names_salt, strict=False)}
     inputs_pytorch[global_object] = jets
+
+    if edge_name_salt:
+        edges = torch.rand(n_batch, n_seq, n_seq, pt_model.input_dims[edge_name_salt])
+        inputs_pytorch[edge_name_salt] = edges
 
     # Build padding mask dict for PyTorch
     masks_pytorch = {seqn: mask for mask, seqn in zip(pad_masks, seq_names_salt, strict=False)}
@@ -68,6 +77,9 @@ def compare_output(
     inputs_onnx = {f"{global_object.removesuffix('s')}_features": jets.numpy()}
     for seq, seqn in zip(sequences, seq_names_onnx, strict=False):
         inputs_onnx[seqn] = seq.squeeze(0).numpy()
+
+    if edge_name_onnx:
+        inputs_onnx[edge_name_onnx] = edges.squeeze(0).numpy()
 
     # Run ONNX model inference
     outputs_onnx = onnx_session.run(None, inputs_onnx)
@@ -153,6 +165,8 @@ def compare_outputs(
     seq_names_onnx: Sequence[str],
     variable_map: Mapping[str, list[str]],
     tasks_to_output: Sequence[str],
+    edge_name_salt: str | None = None,
+    edge_name_onnx: str | None = None,
 ) -> None:
     """Validate that PyTorch and ONNX models match across many synthetic cases."""
     print("\n" + "-" * 100)
@@ -178,6 +192,8 @@ def compare_outputs(
                 seq_names_onnx,
                 variable_map,
                 tasks_to_output,
+                edge_name_salt,
+                edge_name_onnx,
                 n_track,
             )
 

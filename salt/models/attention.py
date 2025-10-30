@@ -331,7 +331,9 @@ class MultiheadAttention(nn.Module):
 
         # Apply gating to attention scores
         if edges is not None:
-            attn_weights = attn_weights * g.permute(0, 3, 1, 2)
+            attn_weights = attn_weights * g.transpose(-3, -1).transpose(
+                -2, -1
+            )  # Reshape to (0, 3, 1, 2)
 
         # Use the scores for pooling and reshape (B, Lv, F)
         out = torch.matmul(attn_weights, v_proj)
@@ -340,7 +342,9 @@ class MultiheadAttention(nn.Module):
         # update edges with dot product attention scores (if desired)
         edge_out = None
         if self.update_edges:
-            edge_out = self.linear_e_out(attn_scores.permute(0, 2, 3, 1))
+            edge_out = self.linear_e_out(
+                attn_scores.transpose(-3, -2).transpose(-2, -1)
+            )  # Reshape to (0, 2, 3, 1)
 
         # Optional output layer
         if self.out_proj:
@@ -382,7 +386,9 @@ class ScaledDotProductAttention(nn.Module):
 
         # add the bias terms if present
         if attn_bias is not None:  # Move the head dimension to the first
-            scores = scores + attn_bias.permute(0, 3, 1, 2)
+            scores = scores + attn_bias.transpose(-3, -1).transpose(
+                -2, -1
+            )  # Reshape to (0, 3, 1, 2)
 
         # apply the dropout to the scores
         scores = self.dropout(scores)

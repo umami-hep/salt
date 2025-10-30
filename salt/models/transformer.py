@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from itertools import combinations
 
+import torch
 from torch import BoolTensor, Tensor, cat, nn
 
 from salt.models.attention import MultiheadAttention
@@ -274,6 +275,20 @@ class TransformerEncoder(nn.Module):
         if isinstance(pad_mask, dict):
             pad_mask = cat(list(pad_mask.values()), dim=1)
 
+        # pad track to ensure ONNX compatibility
+        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]))], dim=1)
+        if pad_mask is not None and not isinstance(pad_mask, dict):
+            pad_mask = torch.cat(
+                [pad_mask, torch.ones((pad_mask.shape[0], 1), dtype=torch.bool)], dim=1
+            )
+        if edge_x is not None:
+            edge_x = torch.cat(
+                [edge_x, torch.zeros((edge_x.shape[0], 1, edge_x.shape[2], edge_x.shape[3]))], dim=1
+            )
+            edge_x = torch.cat(
+                [edge_x, torch.zeros((edge_x.shape[0], edge_x.shape[1], 1, edge_x.shape[3]))], dim=2
+            )
+
         for i, layer in enumerate(self.layers):
             if len(self.featurewise) > 0:
                 x = self.featurewise[i](inputs, x)
@@ -286,6 +301,14 @@ class TransformerEncoder(nn.Module):
         # optional resizing layer
         if self.out_dim:
             x = self.final_linear(x)
+
+        # remove extra padded track
+        x = x[:, :-1, :]
+        if pad_mask is not None and not isinstance(pad_mask, dict):
+            pad_mask = pad_mask[:, :-1]
+        if edge_x is not None:
+            edge_x = edge_x[:, :-1, :-1, :]
+
         return x
 
 

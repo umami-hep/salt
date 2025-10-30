@@ -48,8 +48,7 @@ def test_transformer_edges() -> None:
     mask = torch.zeros(tracks.shape[:-1]).bool()
     mask[:, -1] = True
     out_with_pad = net(tracks, edges, pad_mask=mask)[:, :-1]
-    tensor_check = out.data.half() == out_with_pad.data.half()
-    assert torch.all(tensor_check)
+    assert torch.allclose(out.data, out_with_pad.data, atol=1e-4, rtol=1e-4)
 
 
 def test_mha_edges_allvalid_mask() -> None:
