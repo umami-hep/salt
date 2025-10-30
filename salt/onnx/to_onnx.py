@@ -216,6 +216,12 @@ class ONNXModel(ModelWrapper):
         for i, feature in enumerate(self.feature_map):
             if feature["name_salt"] == self.global_object:
                 example_input_list.append(torch.rand(1, self.input_dims[self.global_object]))
+            elif feature["name_salt"] == "EDGE":
+                example_input_list.append(
+                    torch.rand(
+                        1, num_tracks, num_tracks, self.input_dims[feature["name_salt"]]
+                    ).squeeze(0)
+                )
             else:
                 example_input_list.append(
                     torch.rand(1, num_tracks, self.input_dims[feature["name_salt"]]).squeeze(0)
@@ -319,7 +325,14 @@ class ONNXModel(ModelWrapper):
         # Mark variable-length input sequences as dynamic along axis 0
         dynamic_axes: dict[str, dict[int, str]] = {}
         for feature in self.feature_map:
-            if not feature["is_global"]:
+            if "EDGE" in feature["name_athena_out"]:
+                dynamic_axes.update({
+                    feature["name_athena_out"]: {
+                        0: feature["athena_num_name"],
+                        1: feature["athena_num_name"],
+                    }
+                })
+            elif not feature["is_global"]:
                 dynamic_axes.update({feature["name_athena_out"]: {0: feature["athena_num_name"]}})
 
         # Mark variable-length per-track outputs as dynamic along axis 0
@@ -380,7 +393,7 @@ class ONNXModel(ModelWrapper):
         masks = {
             k: torch.zeros((1, args[i].shape[0]), dtype=torch.bool)
             for i, k in enumerate(self.salt_names)
-            if k != self.global_object
+            if k != self.global_object and "EDGE" not in k
         }
 
         # Run the wrapped model forward (returns predictions dict and losses)
@@ -467,7 +480,7 @@ class ONNXModel(ModelWrapper):
 
 
 def get_default_onnx_feature_map(
-    track_selection: str, inputs: list[str], global_name: str
+    track_selection: str, inputs: list[str], global_name: str, input_map: dict
 ) -> list[dict]:
     """Build a default Athena↔SALT feature mapping (typical jets+tracks setup).
 
@@ -485,6 +498,8 @@ def get_default_onnx_feature_map(
         Training-time input names used in SALT (e.g., ``["jets", "tracks"]``).
     global_name : str
         Name of the global input stream (e.g., ``"jets"``).
+    input_map: dict
+        Dictionary containing underlying feature mapping (relevant for edge features).
 
     Returns
     -------
@@ -510,6 +525,15 @@ def get_default_onnx_feature_map(
                 "name_athena_out": f"{base_name.removesuffix('s')}_features",
                 "athena_num_name": f"n_{base_name}",
                 "name_salt": base_name,
+                "is_global": False,
+            })
+        elif "EDGE" in input_name:
+            base_name = input_map[input_name].split("_")[0]
+            feature_map.append({
+                "name_athena_in": f"{input_name}_{base_name}",
+                "name_athena_out": f"{input_name}_{base_name.removesuffix('s')}_features",
+                "athena_num_name": f"n_{base_name}",
+                "name_salt": input_name,
                 "is_global": False,
             })
         else:
@@ -596,6 +620,7 @@ def main(args: list[str] | None = None) -> None:
         parsed_args.track_selection,
         list(config["data"]["variables"].keys()),
         config["data"]["global_object"],
+        config["data"]["input_map"],
     )
 
     # Parse output combination specs into a list of (name, [(scale, term), ...])
@@ -689,8 +714,14 @@ def main(args: list[str] | None = None) -> None:
     # Prepare sequence names for ONNX runtime validation
     seq_names_onnx: list[str] = []
     seq_names_salt: list[str] = []
+    edge_name_onnx = None
+    edge_name_salt = None
     for feature in onnx_feature_map:
         if feature["is_global"]:
+            continue
+        if "EDGE" in feature["name_salt"]:
+            edge_name_salt = feature["name_salt"]
+            edge_name_onnx = feature["name_athena_out"]
             continue
         seq_names_salt.append(feature["name_salt"])
         seq_names_onnx.append(feature["name_athena_out"])
@@ -704,6 +735,8 @@ def main(args: list[str] | None = None) -> None:
         seq_names_onnx=seq_names_onnx,
         variable_map=config["data"]["variables"],
         tasks_to_output=onnx_model.tasks_to_output,
+        edge_name_salt=edge_name_salt,
+        edge_name_onnx=edge_name_onnx,
     )
 
     # Final success message with path of saved model
