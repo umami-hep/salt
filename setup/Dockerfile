@@ -2,10 +2,11 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 # local and envs
-ENV LANG C.UTF-8
-ENV LC_ALL C.UTF-8
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV PIP_NO_CACHE_DIR=false
+ENV PIP_PREFER_BINARY=1
 ARG DEBIAN_FRONTEND=noninteractive
 WORKDIR /salt
 
@@ -22,8 +23,11 @@ RUN python -m pip install --upgrade pip setuptools wheel
 COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
-# install dependencies (make use of caching)
-RUN python -m pip install ".[dev,muP,flash]"
+# Build/Install flash-attn so it can import the already-installed torch
+RUN python -m pip install --no-build-isolation --no-deps "flash-attn>=2.5.7"
+
+# Install dependencies (make use of caching)
+RUN python -m pip install ".[dev,muP]"
 
 # Copy and install package (Source layer)
 COPY . .
