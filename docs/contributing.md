@@ -6,7 +6,7 @@ You can read about forking workflows [here](https://www.atlassian.com/git/tutori
 After creating a fork, clone the fork and add the upstream repository.
 ```
 git clone ssh://git@gitlab.cern.ch:7999/<cern_username>/salt.git
-git remote add upstream ssh://git@gitlab.cern.ch:7999/atlas-flavor-tagging-tools/algorithms/salt.git
+git remote add upstream ssh://git@gitlab.cern.ch:7999/aft/algorithms/salt.git
 ```
 
 ??? info "Ensure your fork is not set to private"

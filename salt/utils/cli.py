@@ -255,7 +255,7 @@ class SaltCLI(LightningCLI):
                 if config.tag:
                     create_and_push_tag(
                         path,
-                        "atlas-flavor-tagging-tools/algorithms/salt",
+                        "aft/algorithms/salt",
                         Path(output_dir_path).stem,
                         "automated salt tag",
                     )

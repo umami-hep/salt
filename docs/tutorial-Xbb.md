@@ -4,7 +4,7 @@
 
 ## Introduction
 
-In this tutorial, you will learn to setup and use the [Salt framework](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/) in the context of $X \rightarrow bb$ tagging.
+In this tutorial, you will learn to setup and use the [Salt framework](https://gitlab.cern.ch/aft/algorithms/salt/) in the context of $X \rightarrow bb$ tagging.
 Salt is a high-level framework for training state-of-the-art flavour tagging algorithms.
 In addition, plotting scripts are provided to plot the results of the evaluation using the [`puma`](https://github.com/umami-hep/puma) package.
 
@@ -114,14 +114,14 @@ We'll use the tagged image for version `0.3` of the code.
 
     ```bash
     singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/afs,/eos,/tmp,/cvmfs,/run/user \
-        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:0-3
+        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0-3
     ```
 
 === "other (cvmfs only)"
 
     ```
     singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/cvmfs,/run/user \
-        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:0-3
+        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0-3
     ```
 
 If you have issues accessing bound paths, ensure your Kerberos credentials are set with `export KRB5CCNAME=FILE:/run/user/${UID}/krb5cc`
@@ -147,7 +147,7 @@ To do so, you need to do the following steps:
 4. (Optional) Run the setup to switch to development mode.
 5. Run the test suite
 
-Go to the GitLab project page of Salt to begin with the task: <https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt>
+Go to the GitLab project page of Salt to begin with the task: <https://gitlab.cern.ch/aft/algorithms/salt>
 
 ??? info "Hint: Create a personal fork of Salt in Gitlab"
 
@@ -180,14 +180,14 @@ Go to the GitLab project page of Salt to begin with the task: <https://gitlab.ce
 
 ??? warning "Solution"
 
-    Open the website <https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt> in a browser. You may need to authenticate with your CERN login credentials. In the top right corner of the Salt project you see three buttons which show a bell (notifications), a star (to favourite the project) next to a number, and a forking graph (to fork the project) with the text "Fork" next to a number. Click on the word "Fork" to open a new website, allowing you to specify the namespace of your fork. Click on "Select a namespace", choose your CERN username, and create the fork by clicking on "Fork project".
+    Open the website <https://gitlab.cern.ch/aft/algorithms/salt> in a browser. You may need to authenticate with your CERN login credentials. In the top right corner of the Salt project you see three buttons which show a bell (notifications), a star (to favourite the project) next to a number, and a forking graph (to fork the project) with the text "Fork" next to a number. Click on the word "Fork" to open a new website, allowing you to specify the namespace of your fork. Click on "Select a namespace", choose your CERN username, and create the fork by clicking on "Fork project".
 
     Next, you need to clone the project using `git`. Open a fresh terminal on the cluster your are working on, create a new folder and proceed with the cloning. To do so, open your forked project in a browser. The address typically is `https://gitlab.cern.ch/<your CERN username>/salt`. When clicking on the blue "Clone" button at the right hand-side of the page, a drop-down mini-page appears with the ssh path to the forked git project. Let's check out your personal fork and add the original project as upstream:
 
     ```bash
     git clone ssh://git@gitlab.cern.ch:7999/<your CERN username>/salt.git
     cd salt
-    git remote add upstream ssh://git@gitlab.cern.ch:7999/atlas-flavor-tagging-tools/algorithms/salt.git
+    git remote add upstream ssh://git@gitlab.cern.ch:7999/aft/algorithms/salt.git
     git checkout 0.3
     ```
 
@@ -198,7 +198,7 @@ Go to the GitLab project page of Salt to begin with the task: <https://gitlab.ce
 
     ```bash
     singularity shell -e --nv --bind $PWD,/afs,/eos,/tmp,/cvmfs \
-    /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:0-3
+    /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0-3
     ```
 
     If you want to modify the salt code and contribute to development, you need to install the salt package to switch to development mode:

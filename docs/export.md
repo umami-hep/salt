@@ -29,7 +29,7 @@ If you don't specify a config path using `--config`, the script will look for on
     The selection you use must also match the selection applied in your training samples.
     Track selection is applied when dumping using the TDD.
     The current default FTAG selection is called `r22default`, but you should take note of the changes described in
-    [training-dataset-dumper!427](https://gitlab.cern.ch/atlas-flavor-tagging-tools/training-dataset-dumper/-/merge_requests/427)
+    [training-dataset-dumper!427](https://gitlab.cern.ch/aft/algorithms/training-dataset-dumper/-/merge_requests/427)
     to make sure you are using the correct selection.
 
 You can also optionally specify a different scale dict to the one in the training config, and a model name (by default this is `salt`).

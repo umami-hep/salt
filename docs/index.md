@@ -7,7 +7,7 @@ Salt is a general-purpose framework for training **multi-modal**, **multi-task**
 Salt supports arbitrary combinations of tasks including object classification and regression, and set-to-set reconstruction via edge classification and segmentation.
 Salt was developed for state-of-the art jet flavour tagging algorithms such as [GN1](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN1/) and [GN2](https://ftag-docs.docs.cern.ch/algorithms/taggers/GN2/), but can be applied much more widely, as seen [below](#current-usage).
 
-!!! example "The code is hosted on the CERN GitLab: [https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt)"
+!!! example "The code is hosted on the CERN GitLab: [https://gitlab.cern.ch/aft/algorithms/salt](https://gitlab.cern.ch/aft/algorithms/salt)"
 
 ### Features
 
@@ -27,7 +27,7 @@ Below are some helpful links to get you started:
 
 !!! abstract "A tutorial on using Salt with open data can be found [here](tutorial.md). A tutorial using internal CERN data is [also available](tutorial-Xbb.md)"
 
-!!! note "[Contributions](contributing) are welcome! Check out [existing issues](https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues) for inspiration, or open your own"
+!!! note "[Contributions](contributing) are welcome! Check out [existing issues](https://gitlab.cern.ch/aft/algorithms/salt/-/issues) for inspiration, or open your own"
 
 !!! tip "You can become a Salt expert by checking out the [API reference](api/data)"
 

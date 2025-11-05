@@ -143,7 +143,7 @@ elif args.environment == "singularity":
     command += " \\\n".join([f"--bind {b}" for b in args.bind]) + " \\\n"
     command += (
         "--home ${BASEDIR} \\\n"
-        "/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/ \\\n"  # noqa: E501
+        "/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/ \\\n"
         'sh -c "'
     )
 command += (
