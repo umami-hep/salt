@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Label mapping for MR label bot
+#
+# Each label key corresponds to a GitLab label name.
+# Each entry underneath lists directory prefixes or glob patterns.
+# Matching is substring/glob based:
+#   - entries ending with "/" match everything under that directory
+#   - others are treated as shell-style globs (e.g. *.md)
+#
+# Only the "Changes::..." categories are automatically applied.
+# "Needs Review::Level 1" is added once per MR by the bot itself.
+# "Bug::Fix", "Bug::Report", and "Needs Review::Expert" are manual labels.
+# ---------------------------------------------------------------------------
+
+CI/CD::Changed:
+  - .gitlab-ci.yml
+  - .gitlab/
+
+Documentation::Changed:
+  - docs/
+  - README.md
+  - mkdocs.yaml
+
+Setup/Dependencies::Changed:
+  - setup/
+  - MANIFEST.in
+  - pyproject.toml
+  - .pre-commit-config.yaml
