@@ -64,8 +64,8 @@ flash = [
 ]
 
 [project.urls]
-"Homepage" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt"
-"Issue Tracker" = "https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/-/issues"
+"Homepage" = "https://gitlab.cern.ch/aft/algorithms/salt"
+"Issue Tracker" = "https://gitlab.cern.ch/aft/algorithms/salt/-/issues"
 
 [project.scripts]
 salt = "salt.main:main"

@@ -36,8 +36,7 @@ handler["requirements"] = 'OpSysAndVer == "CentOS7"'
 # Run in singularity container?
 if args.environment == "singularity":
     handler["container"] = (
-        '"/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/'
-        'atlas-flavor-tagging-tools/algorithms/salt:latest"'
+        '"/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest"'
     )
     # check host names to determine where to mount storage
     storage_dir = Path("/tmp")

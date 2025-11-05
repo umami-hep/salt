@@ -16,5 +16,5 @@ pages:
     GIT_DEPTH: 0
     GIT_STRATEGY: clone
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="atlas-flavor-tagging-tools/algorithms/salt"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="aft/algorithms/salt"
       when: always

@@ -7,7 +7,7 @@ Start by cloning the repo.
 If you plan to contribute to the repo, you should work from a [fork](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html), **instead of** cloning the below link.
 
 ```bash
-git clone https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt.git
+git clone https://gitlab.cern.ch/aft/algorithms/salt.git
 cd salt
 ```
 
@@ -77,13 +77,13 @@ Salt requires Python 3.9, 3.10 or 3.11.
         The Salt singularity images are hosted on CVMFS.
         If you have a good connection to CVMFS, using this option can be faster than manually pulling the image.
         The images are located in
-        `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/`
+        `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/`
 
         You can run the latest image using
 
         ```bash
         singularity shell -e --nv --bind $PWD \
-            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest/
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/
         ```
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
@@ -105,7 +105,7 @@ Salt requires Python 3.9, 3.10 or 3.11.
         ```bash
         singularity pull --docker-login \
             $SINGULARITY_CACHEDIR/salt.simg \
-            docker://gitlab-registry.cern.ch/atlas-flavor-tagging-tools/algorithms/salt:latest
+            docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest
         ```
 
         You can then run the image

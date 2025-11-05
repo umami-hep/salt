@@ -4,7 +4,7 @@ site_author: Salt Team
 site_url: http://ftag-salt.docs.cern.ch/
 
 repo_name: GitLab
-repo_url: https://gitlab.cern.ch/atlas-flavor-tagging-tools/algorithms/salt/
+repo_url: https://gitlab.cern.ch/aft/algorithms/salt/
 edit_uri: tree/main/docs
 
 theme:
