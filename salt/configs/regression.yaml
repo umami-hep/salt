@@ -84,6 +84,23 @@ model:
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_multi_output_no_global_object
+                custom_output_names: [dummyOutput_dPhi, dummyOutput_dEta]
+                input_name: tracks
+                targets:
+                  [
+                    dphi,
+                    deta,
+                  ]
+                loss: MSELoss
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
 data:
   variables:
     jets:

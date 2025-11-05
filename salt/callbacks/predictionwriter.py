@@ -200,7 +200,7 @@ class PredictionWriter(Callback):
             if isinstance(task, ClassificationTask | VertexingTask):
                 this_preds = task.get_h5(this_preds, this_pad_masks)
             if isinstance(task, RegressionTask | GaussianRegressionTask):
-                this_preds = task.get_h5(this_preds, labels)
+                this_preds = task.get_h5(this_preds, labels, this_pad_masks)
 
             # Add the outputs to the dictionary
             if task.name not in to_write[task.input_name]:
