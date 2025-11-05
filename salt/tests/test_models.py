@@ -52,6 +52,7 @@ def test_pooling(pooling) -> None:
 
 
 def test_transformer() -> None:
+    torch.manual_seed(0)
     net = TransformerEncoder(
         embed_dim=10,
         num_layers=2,

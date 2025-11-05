@@ -52,6 +52,21 @@ model:
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_no_global_object
+                custom_output_names: dummyOutput_dPhi
+                input_name: tracks
+                targets: dphi
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args: { reduction: none }
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
 data:
   variables:
     jets:

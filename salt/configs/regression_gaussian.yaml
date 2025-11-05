@@ -34,6 +34,20 @@ model:
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
+            - class_path: salt.models.GaussianRegressionTask
+              init_args:
+                name: gaussian_regression_no_global_object
+                custom_output_names: dummyOutput_dPhi
+                input_name: tracks
+                targets: dphi
+                norm_params: { mean: 1.0, std: 1.0 }
+                loss: GaussianNLLLoss
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
 data:
   variables:
     jets:

@@ -513,7 +513,8 @@ class RegressionTask(RegressionTaskBase):
         targets_dict : Mapping
             Mapping that provides target tensors.
         pad_masks : Mapping | None, optional
-            Currently unused for regression unless operating on queries.
+            Per-stream padding masks used to select positions and to mask labels.
+            The default is ``None``.
         context : Tensor | None, optional
             Optional context tensor. The default is ``None``.
 
@@ -523,21 +524,20 @@ class RegressionTask(RegressionTaskBase):
             Predicted values of shape ``[B, R]`` (or ``[B, L, R]`` for queries).
         Tensor | None
             Loss tensor if targets are provided; otherwise ``None``.
-
-        Raises
-        ------
-        NotImplementedError
-            If called on non-supported shapes/inputs.
         """
-        if (x.ndim != 2 or pad_masks is not None) and self.input_name != "objects":
-            raise NotImplementedError(
-                "Regression tasks are currently only supported for global object "
-                "and object query level predictions."
-            )
-        if pad_masks is not None:
-            pass
-        preds = self.net(x, context)
+        if pad_masks is not None and self.input_name != "objects":
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
         targets = self.get_targets(targets_dict)
+
+        # fill targets with nan where invalid to remove them from loss calculation
+        if pad_mask is not None and targets is not None:
+            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
 
         loss: Tensor | None = None
         if targets is not None:
@@ -545,7 +545,9 @@ class RegressionTask(RegressionTaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, labels: Tensors | None = None) -> Tensor:
+    def run_inference(
+        self, preds: Tensor, labels: Tensors | None = None, pad_mask: Tensor | None = None
+    ) -> Tensor:
         """Invert target scaling to obtain values in the original space.
 
         Parameters
@@ -554,11 +556,13 @@ class RegressionTask(RegressionTaskBase):
             Predicted values.
         labels : Tensors | None, optional
             Optional labels used to re-apply denominators when configured.
+        pad_mask : Tensor | None, optional
+            If provided, padded predictions are replaced with nan.
 
         Returns
         -------
         Tensor
-            De-scaled predictions in the original target space.
+            De-scaled predictions in the original target space with nan padding.
         """
         preds = preds.float()
         if self.target_denominators is not None and labels is not None:
@@ -571,9 +575,14 @@ class RegressionTask(RegressionTaskBase):
         elif self.scaler is not None:
             for i in range(len(self.targets)):
                 preds[:, :, i] = self.scaler.inverse(self.targets[i], preds[:, :, i])
+
+        # apply mask if available
+        if pad_mask is not None:
+            preds = torch.masked_fill(preds, pad_mask.unsqueeze(-1), np.nan)
+
         return preds
 
-    def get_h5(self, preds: Tensor, labels: Tensors) -> np.ndarray:
+    def get_h5(self, preds: Tensor, labels: Tensors, pad_mask: Tensor | None = None) -> np.ndarray:
         """Convert predictions to a structured NumPy array suitable for HDF5.
 
         Parameters
@@ -582,13 +591,15 @@ class RegressionTask(RegressionTaskBase):
             Predictions as Tensor.
         labels : Tensors
             Labels as Tensors.
+        pad_mask : Tensor | None, optional
+            If provided, predictions will be padded with nan.
 
         Returns
         -------
         np.ndarray
             Predictions as np.ndarray.
         """
-        preds = self.run_inference(preds, labels)
+        preds = self.run_inference(preds, labels, pad_mask)
         dtype = np.dtype([(x, "f4") for x in self.output_names])
         return u2s(preds.float().cpu().numpy(), dtype)
 
@@ -600,14 +611,15 @@ class RegressionTask(RegressionTaskBase):
         preds : Tensor
             Predictions as Tensor.
         **kwargs
-            Additional keyword arguments (e.g., ``labels`` for de-scaling).
+            Additional keyword arguments (e.g., ``labels`` for de-scaling,
+            ``pad_mask`` for padding).
 
         Returns
         -------
         tuple
             Tuple of per-target tensors.
         """
-        means = self.run_inference(preds, kwargs.get("labels"))
+        means = self.run_inference(preds, kwargs.get("labels"), kwargs.get("pad_mask"))
         return tuple(output.squeeze() for output in torch.split(means, 1, -1))
 
 
@@ -659,7 +671,8 @@ class GaussianRegressionTask(RegressionTaskBase):
         targets_dict : Mapping
             Mapping providing regression targets.
         pad_masks : Mapping | None, optional
-            Not supported; if provided for non-query global predictions, raises.
+            Per-stream padding masks used to select positions and to mask labels.
+            The default is ``None``.
         context : Tensor | None, optional
             Optional context tensor. The default is ``None``.
 
@@ -669,23 +682,24 @@ class GaussianRegressionTask(RegressionTaskBase):
             Concatenated means and variances of shape ``[B, 2R]``.
         Tensor | None
             Loss tensor if targets are provided; otherwise ``None``.
-
-        Raises
-        ------
-        NotImplementedError
-            If called with unsupported shapes/inputs.
         """
-        if x.ndim != 2 or pad_masks is not None:
-            raise NotImplementedError(
-                "Regression tasks are currently only supported for global object level predictions."
-            )
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
 
-        preds = self.net(x, context)
         targets = self.get_targets(targets_dict)
 
         # split outputs into means and sigmas
         means, variances = preds.tensor_split(2, -1)
         variances = nn.functional.softplus(variances)  # ensure positiveness of variance
+
+        # fill targets with nan where padded to remove them from loss calculation
+        if pad_mask is not None and targets is not None:
+            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
 
         loss: Tensor | None = None
         if targets is not None:
@@ -693,7 +707,9 @@ class GaussianRegressionTask(RegressionTaskBase):
 
         return preds, loss
 
-    def run_inference(self, preds: Tensor, labels: Tensors | None = None) -> tuple[Tensor, Tensor]:
+    def run_inference(
+        self, preds: Tensor, labels: Tensors | None = None, pad_mask: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
         """Invert scaling for means and (sqrt of) variances to stddevs.
 
         Parameters
@@ -702,6 +718,8 @@ class GaussianRegressionTask(RegressionTaskBase):
             Concatenated means/variances of shape ``[B, 2R]``.
         labels : Tensors | None, optional
             Optional labels for denominator-based scaling.
+        pad_mask : Tensor | None, optional
+            If provided, de-scaled predictions are replaced with nan where there should be padding.
 
         Returns
         -------
@@ -728,9 +746,17 @@ class GaussianRegressionTask(RegressionTaskBase):
         else:
             raise ValueError("Inference for Gaussian regression requires scaling parameters.")
         means, stds = preds.tensor_split(2, -1)
+
+        # apply mask if available
+        if pad_mask is not None:
+            means = torch.masked_fill(means, pad_mask.unsqueeze(-1), np.nan)
+            stds = torch.masked_fill(stds, pad_mask.unsqueeze(-1), np.nan)
+
         return means, stds
 
-    def get_h5(self, preds: Tensor, labels: Tensors | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def get_h5(
+        self, preds: Tensor, labels: Tensors | None = None, pad_mask: Tensor | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Convert Gaussian outputs to structured NumPy arrays (means and stddevs).
 
         Parameters
@@ -739,13 +765,16 @@ class GaussianRegressionTask(RegressionTaskBase):
             Predictions as Tensor.
         labels : Tensors | None, optional
             Labels as Tensors, by default None.
+        pad_mask : Tensor | None, optional
+            If provided, predictions will be padded with nan.
+            The default is None.
 
         Returns
         -------
         tuple[np.ndarray, np.ndarray]
             Tuple with the means and the stds.
         """
-        means, stds = self.run_inference(preds, labels)
+        means, stds = self.run_inference(preds, labels, pad_mask)
         mean_dtype = np.dtype([(f"{self.name}_{t}", "f4") for t in self.targets])
         stds_dtype = np.dtype([(f"{self.name}_{t}_stddev", "f4") for t in self.targets])
         means = u2s(means.float().cpu().numpy(), mean_dtype)
@@ -760,7 +789,8 @@ class GaussianRegressionTask(RegressionTaskBase):
         preds : Tensor
             Predictions as Tensor.
         **kwargs
-            Additional keyword arguments (e.g., ``labels`` for de-scaling).
+            Additional keyword arguments (e.g., ``labels`` for de-scaling,
+            ``pad_mask`` for padding).
 
         Returns
         -------
@@ -768,7 +798,7 @@ class GaussianRegressionTask(RegressionTaskBase):
             Tuple of the means and the stds.
         """
         # This might need to be fixed to run inference correctly with denominators
-        means, stds = self.run_inference(preds, kwargs.get("labels"))
+        means, stds = self.run_inference(preds, kwargs.get("labels"), kwargs.get("pad_mask"))
         return means.squeeze(), stds.squeeze()
 
 
