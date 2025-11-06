@@ -4,7 +4,12 @@ workflow:
       when: always
     - if: $CI_PIPELINE_SOURCE == "push"
       when: always
+    - if: $CI_PIPELINE_SOURCE == "merged_result"
+      when: always
     - when: never
+
+default:
+  interruptible: true
 
 stages:
   - lint
