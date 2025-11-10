@@ -1,108 +1,129 @@
 variables:
-  TEST_CMD: coverage run -p --source salt -m pytest --show-capture=stdout
+  TEST_CMD: 'coverage run -p --source salt -m pytest --show-capture=stdout --junitxml=${JUNIT_FILE:-report.xml}'
 
 .test-template: &test-template
   stage: tests
   needs: [build_docker_test]
   image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
   artifacts:
-    paths: [.coverage*]
+    when: always
+    paths:
+      - .coverage*
+      - reports/
+    reports:
+      junit: reports/*.xml
 
 # --------------------------- UNIT TESTS ---------------------------
 unit-tests:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_models.py
-    - $TEST_CMD salt/tests/test_union_find.py
-    - $TEST_CMD salt/tests/test_edges.py
-    - $TEST_CMD salt/tests/test_utils.py
-    - $TEST_CMD salt/tests/test_posenc.py
-    - $TEST_CMD salt/tests/test_initnet.py
-    - $TEST_CMD salt/tests/test_transformerv2.py
-    - $TEST_CMD salt/tests/test_masks.py
-    - $TEST_CMD salt/tests/test_featurewise.py
-    - $TEST_CMD salt/tests/test_datasets.py
+    - mkdir -p reports
+    - JUNIT_FILE=reports/unit-models.xml $TEST_CMD salt/tests/test_models.py
+    - JUNIT_FILE=reports/unit-union_find.xml $TEST_CMD salt/tests/test_union_find.py
+    - JUNIT_FILE=reports/unit-edges.xml $TEST_CMD salt/tests/test_edges.py
+    - JUNIT_FILE=reports/unit-utils.xml $TEST_CMD salt/tests/test_utils.py
+    - JUNIT_FILE=reports/unit-posenc.xml $TEST_CMD salt/tests/test_posenc.py
+    - JUNIT_FILE=reports/unit-initnet.xml $TEST_CMD salt/tests/test_initnet.py
+    - JUNIT_FILE=reports/unit-transformerv2.xml $TEST_CMD salt/tests/test_transformerv2.py
+    - JUNIT_FILE=reports/unit-masks.xml $TEST_CMD salt/tests/test_masks.py
+    - JUNIT_FILE=reports/unit-featurewise.xml $TEST_CMD salt/tests/test_featurewise.py
+    - JUNIT_FILE=reports/unit-datasets.xml $TEST_CMD salt/tests/test_datasets.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-dev:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_train_dev
-    - $TEST_CMD salt/tests/test_pipeline.py::test_train_movefilestemp
+    - mkdir -p reports
+    - JUNIT_FILE=reports/dev.xml $TEST_CMD salt/tests/test_pipeline.py::test_train_dev
+    - JUNIT_FILE=reports/dev-move.xml $TEST_CMD salt/tests/test_pipeline.py::test_train_movefilestemp
 
 test-truncate-inputs:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs
-    - $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs_error
+    - mkdir -p reports
+    - JUNIT_FILE=reports/truncate.xml $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs
+    - JUNIT_FILE=reports/truncate-error.xml $TEST_CMD salt/tests/test_pipeline.py::test_truncate_inputs_error
 
 test-GN1:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN1_GATv2
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn1.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN1
+    - JUNIT_FILE=reports/gn1-gatv2.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN1_GATv2
 
 test-GN2:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn2.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN2
 
 test-GN3:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN3
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn3.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN3
 
 test-GN2_muP:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2_muP
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn2-mup.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN2_muP
 
 test-GN2emu:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2emu
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn2emu.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN2emu
 
 test-GN2XE:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_GN2XE
+    - mkdir -p reports
+    - JUNIT_FILE=reports/gn2xe.xml $TEST_CMD salt/tests/test_pipeline.py::test_GN2XE
 
 test-DIPS-DL1:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_DIPS
-    - $TEST_CMD salt/tests/test_pipeline.py::test_DL1
+    - mkdir -p reports
+    - JUNIT_FILE=reports/dips.xml $TEST_CMD salt/tests/test_pipeline.py::test_DIPS
+    - JUNIT_FILE=reports/dl1.xml $TEST_CMD salt/tests/test_pipeline.py::test_DL1
 
 test-regression:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_regression
-    - $TEST_CMD salt/tests/test_pipeline.py::test_nan_regression
-    - $TEST_CMD salt/tests/test_pipeline.py::test_regression_gaussian
+    - mkdir -p reports
+    - JUNIT_FILE=reports/regression.xml $TEST_CMD salt/tests/test_pipeline.py::test_regression
+    - JUNIT_FILE=reports/regression-nan.xml $TEST_CMD salt/tests/test_pipeline.py::test_nan_regression
+    - JUNIT_FILE=reports/regression-gauss.xml $TEST_CMD salt/tests/test_pipeline.py::test_regression_gaussian
 
 test-flow:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_flow
+    - mkdir -p reports
+    - JUNIT_FILE=reports/flow.xml $TEST_CMD salt/tests/test_pipeline.py::test_flow
 
 test-tfv2:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_tfv2
+    - mkdir -p reports
+    - JUNIT_FILE=reports/tfv2.xml $TEST_CMD salt/tests/test_pipeline.py::test_tfv2
 
 test-maskformer:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_maskformer
+    - mkdir -p reports
+    - JUNIT_FILE=reports/maskformer.xml $TEST_CMD salt/tests/test_pipeline.py::test_maskformer
 
 test-parameterisation:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_param_concat
-    - $TEST_CMD salt/tests/test_pipeline.py::test_param_featurewise
+    - mkdir -p reports
+    - JUNIT_FILE=reports/param-concat.xml $TEST_CMD salt/tests/test_pipeline.py::test_param_concat
+    - JUNIT_FILE=reports/param-featurewise.xml $TEST_CMD salt/tests/test_pipeline.py::test_param_featurewise
 
 test-misc:
   <<: *test-template
   script:
-    - $TEST_CMD salt/tests/test_pipeline.py::test_gls_weighting
-    - $TEST_CMD salt/tests/test_pipeline.py::test_no_global_inputs
+    - mkdir -p reports
+    - JUNIT_FILE=reports/misc-gls.xml $TEST_CMD salt/tests/test_pipeline.py::test_gls_weighting
+    - JUNIT_FILE=reports/misc-noglobal.xml $TEST_CMD salt/tests/test_pipeline.py::test_no_global_inputs

@@ -5,13 +5,18 @@ coverage:
     - coverage combine
     - coverage report --precision=2 -m
     - coverage xml
+    - coverage html -d htmlcov
   coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
   artifacts:
+    when: always
     reports:
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
     paths:
       - coverage.xml
+      - htmlcov/
   rules:
-    - changes: ["*", "salt/**/*.py"]
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "merged_result"'
