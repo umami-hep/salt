@@ -276,17 +276,33 @@ class TransformerEncoder(nn.Module):
             pad_mask = cat(list(pad_mask.values()), dim=1)
 
         # pad track to ensure ONNX compatibility
-        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]))], dim=1)
+        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]), device=x.device)], dim=1)
         if pad_mask is not None and not isinstance(pad_mask, dict):
             pad_mask = torch.cat(
-                [pad_mask, torch.ones((pad_mask.shape[0], 1), dtype=torch.bool)], dim=1
+                [
+                    pad_mask,
+                    torch.ones((pad_mask.shape[0], 1), dtype=torch.bool, device=pad_mask.device),
+                ],
+                dim=1,
             )
         if edge_x is not None:
             edge_x = torch.cat(
-                [edge_x, torch.zeros((edge_x.shape[0], 1, edge_x.shape[2], edge_x.shape[3]))], dim=1
+                [
+                    edge_x,
+                    torch.zeros(
+                        (edge_x.shape[0], 1, edge_x.shape[2], edge_x.shape[3]), device=edge_x.device
+                    ),
+                ],
+                dim=1,
             )
             edge_x = torch.cat(
-                [edge_x, torch.zeros((edge_x.shape[0], edge_x.shape[1], 1, edge_x.shape[3]))], dim=2
+                [
+                    edge_x,
+                    torch.zeros(
+                        (edge_x.shape[0], edge_x.shape[1], 1, edge_x.shape[3]), device=edge_x.device
+                    ),
+                ],
+                dim=2,
             )
 
         for i, layer in enumerate(self.layers):
