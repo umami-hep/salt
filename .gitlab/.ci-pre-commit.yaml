@@ -10,7 +10,26 @@ label-bot:
   stage: lint
   image: registry.cern.ch/docker.io/library/python:3.11.2
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_EVENT_TYPE != "merge_train"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_EVENT_TYPE == "merged_result"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_EVENT_TYPE != "merge_train" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+      when: on_success
+    - when: never
+  variables:
+    GITLAB_API_TOKEN: $BOT_TOKEN
+  before_script:
+    - python -m pip install --upgrade pip setuptools wheel
+    - python -m pip install "python-gitlab>=4.4,<5" pyyaml
+  script:
+    - python .gitlab/workflow/label_bot.py
+
+label-bot-scheduled:
+  stage: lint
+  image: registry.cern.ch/docker.io/library/python:3.11.2
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: on_success
+    - when: never
   variables:
     GITLAB_API_TOKEN: $BOT_TOKEN
   before_script:
