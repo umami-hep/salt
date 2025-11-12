@@ -2,6 +2,10 @@ pre-commit:
   stage: lint
   needs: []
   image: registry.cern.ch/docker.io/library/python:3.11.2
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
   script:
     - pip install pre-commit
     - pre-commit run --all-files

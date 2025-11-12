@@ -14,6 +14,10 @@
       run_test() {
         coverage run -p --source salt -m pytest --show-capture=stdout --junitxml="${JUNIT_FILE:-report.xml}" "$@"
       }
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
 
 # --------------------------- UNIT TESTS ---------------------------
 unit-tests:
