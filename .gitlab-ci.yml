@@ -4,7 +4,7 @@ workflow:
       when: always
     - if: $CI_PIPELINE_SOURCE == "push"
       when: always
-    - if: $CI_PIPELINE_SOURCE == "merged_result"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       when: always
     - when: never
 
