@@ -1,253 +1,130 @@
 #!/usr/bin/env python3
 """
-Automatic MR labeler for GitLab CI pipelines.
+Automatic MR labeler for GitLab CI pipelines (modern API).
 
-- Applies labels based on `.gitlab/workflow/label_mapping.yaml`.
-- Adds a one-time "first-run" label (`Needs Review::Level 1`) the first time it
-  ever runs on a given MR. If a user later removes that label, it will NOT be
-  re-added on subsequent runs.
-
-Environment Variables
----------------------
-GITLAB_API_TOKEN : str
-    API token with `api` scope (Project Access Token recommended).
-CI_PROJECT_ID : str
-    ID of the current GitLab project.
-CI_MERGE_REQUEST_IID : str
-    Internal ID (IID) of the current merge request.
-CI_SERVER_URL : str, optional
-    Base URL of the GitLab instance (defaults to https://gitlab.cern.ch).
+- Applies labels based on .gitlab/workflow/label_mapping.yaml.
+- Adds reviewers based on .gitlab/workflow/reviewers_mapping.yaml.
+- Adds "Needs Review::Level 1" the first time it runs.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
-from collections.abc import Iterable
 from pathlib import Path
 
 import gitlab
 import yaml
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 MAPPING_PATH = Path(".gitlab/workflow/label_mapping.yaml")
-FIRST_TIME_LABEL = "Needs Review::Level 1"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _need(var: str) -> str:
-    """Retrieve a required environment variable or raise an error.
-
-    Parameters
-    ----------
-    var : str
-        Name of the environment variable.
-
-    Returns
-    -------
-    str
-        Value of the variable.
-
-    Raises
-    ------
-    RuntimeError
-        If the environment variable is not defined.
-    """
-    v = os.getenv(var)
-    if not v:
-        raise RuntimeError(f"Missing environment variable: {var}")
-    return v
-
-
-def load_mapping() -> dict[str, list[str]]:
-    """Load the label mapping from the YAML file.
-
-    Returns
-    -------
-    dict of str to list of str
-        Dictionary mapping label names to path/glob patterns.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the mapping file does not exist.
-    """
-    if not MAPPING_PATH.exists():
-        raise FileNotFoundError(f"Mapping file not found: {MAPPING_PATH}")
-
-    with MAPPING_PATH.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-
-    mapping: dict[str, list[str]] = {}
-    for label, entries in data.items():
-        if entries is None:
-            mapping[label] = []
-        elif isinstance(entries, list):
-            mapping[label] = [str(e) for e in entries]
-        else:
-            mapping[label] = [str(entries)]
-    return mapping
-
-
-def path_matches(entry: str, changed_path: str) -> bool:
-    """Check whether a changed path matches a mapping entry.
-
-    Matching logic
-    --------------
-    - If ``entry`` ends with a slash, treat it as a directory prefix.
-    - Otherwise, treat it as a shell-style glob pattern.
-
-    Parameters
-    ----------
-    entry : str
-        Mapping entry from the YAML file.
-    changed_path : str
-        Path of the changed file in the MR.
-
-    Returns
-    -------
-    bool
-        True if the entry matches the changed path.
-    """
-    entry = entry.strip()
-    if entry.endswith("/"):
-        return changed_path.startswith(entry)
-    return fnmatch.fnmatch(changed_path, entry)
-
-
-def labels_for_changes(mapping: dict[str, list[str]], changed_paths: Iterable[str]) -> set[str]:
-    """Compute all labels that should be applied to the MR from file changes.
-
-    Parameters
-    ----------
-    mapping : dict of str to list of str
-        Mapping of labels to path or glob patterns.
-    changed_paths : iterable of str
-        List of file paths changed in the merge request.
-
-    Returns
-    -------
-    set of str
-        Labels that should be added based on the changed files.
-    """
-    labels: set[str] = set()
-    for path in changed_paths:
-        for label, patterns in mapping.items():
-            for pat in patterns:
-                if path_matches(pat, path):
-                    labels.add(label)
-                    break
-    return labels
-
-
-def label_was_ever_added(mr, label_name: str) -> bool:
-    """Check MR label event history to see if a label was ever added.
-
-    Parameters
-    ----------
-    mr : gitlab.v4.objects.ProjectMergeRequest
-        Merge request object.
-    label_name : str
-        Label to check.
-
-    Returns
-    -------
-    bool
-        True if the label has an 'add' event at any point in this MR's history.
-    """
-    events = mr.resourcelabelevents.list(all=True)
-    for ev in events:
-        # python-gitlab exposes both 'action' and 'label'
-        action = getattr(ev, "action", ev.attributes.get("action"))
-        label = getattr(ev, "label", ev.attributes.get("label", {}))
-        ev_name = (label.get("name") if isinstance(label, dict) else None) or ""
-        if ev_name == label_name and action == "add":
-            return True
-    return False
-
-
-def add_first_time_label_if_needed(mr, current_labels: set[str], label_name: str) -> set[str]:
-    """Add a special label only on the very first run for this MR.
-
-    Logic
-    -----
-    - If the label is already present: do nothing.
-    - Else if the label has *ever* been added before (per MR label events): do nothing.
-    - Else: add it (first run).
-
-    Parameters
-    ----------
-    mr : gitlab.v4.objects.ProjectMergeRequest
-        Merge request object.
-    current_labels : set of str
-        Labels currently on the MR (pre-update).
-    label_name : str
-        Special label to add once.
-
-    Returns
-    -------
-    set of str
-        Updated label set (may be unchanged).
-    """
-    if label_name in current_labels:
-        return current_labels
-    if label_was_ever_added(mr, label_name):
-        print(f"Not re-adding '{label_name}' (was added previously and likely removed).")
-        return current_labels
-    print(f"Adding first-run label: '{label_name}'")
-    return set(current_labels) | {label_name}
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+REVIEWERS_MAPPING_PATH = Path(".gitlab/workflow/reviewers_mapping.yaml")
+FIRST_TIME_LABELS = ["Needs Review::Level 1"]
 
 
 def main() -> None:
-    """Run the label bot logic."""
-    # --- GitLab authentication ---
-    base_url = os.getenv("CI_SERVER_URL", "https://gitlab.cern.ch")
-    token = _need("GITLAB_API_TOKEN")
+    """Label MRs and add Reviewers based on the Labels added."""
+    # Get all envrionment variables needed
+    base_url = os.environ["CI_SERVER_URL"]
+    token = os.environ["GITLAB_API_TOKEN"]
+    project_id = os.environ["CI_PROJECT_ID"]
 
+    # Using get because in scheduled mode there could be no open MRs
+    mr_iid = os.environ.get("CI_MERGE_REQUEST_IID")
+
+    # Authenticate to Gitlab
     gl = gitlab.Gitlab(base_url, private_token=token)
     gl.auth()
 
-    project_id = _need("CI_PROJECT_ID")
-    mr_iid = _need("CI_MERGE_REQUEST_IID")
-
+    # Get the project (and possibly MRs)
     project = gl.projects.get(project_id)
-    mr = project.mergerequests.get(mr_iid)
 
-    # --- Load mapping and collect changed files ---
-    mapping = load_mapping()
-    changes = mr.changes()
-    changed_files = [c["new_path"] for c in changes.get("changes", [])]
-    print(f"Found {len(changed_files)} changed files.")
+    # Load the label mapping
+    with MAPPING_PATH.open("r", encoding="utf-8") as f:
+        mapping = yaml.safe_load(f)
 
-    # --- Determine labels to add from mapping ---
-    to_add = labels_for_changes(mapping, changed_files)
+    # Get the reviewer map
+    with REVIEWERS_MAPPING_PATH.open("r", encoding="utf-8") as f:
+        reviewers_map = yaml.safe_load(f)
 
-    # --- Compute final labels (never remove existing) ---
-    current = set(mr.labels or [])
-    # First-run label policy
-    current = add_first_time_label_if_needed(mr, current, FIRST_TIME_LABEL)
-    # Add mapped labels
-    new_labels = sorted(current | to_add)
+    # Decide which MRs to process
+    if mr_iid:
+        mrs = [project.mergerequests.get(mr_iid)]
+        print(f"Running in MR mode for !{mr_iid}")
 
-    if set(new_labels) == set(mr.labels or []):
-        print(f"Labels unchanged: {sorted(new_labels)}")
-        return
+    else:
+        mrs = project.mergerequests.list(state="opened", all=True)
+        print(f"Running in scheduled mode over {len(mrs)} open MRs")
 
-    mr.labels = new_labels
-    mr.save()
-    print(f"✅ Updated MR labels: {new_labels}")
+    # Process each MR
+    for mr in mrs:
+        # Get the list of file changes
+        changes = mr.changes()
+        changed_files = [c["new_path"] for c in changes["changes"]]
+        print(f"!{mr.iid}: Found {len(changed_files)} changed files.")
+
+        # Define a set for the labels which should be added
+        to_add: set[str] = set()
+
+        # Check the changed files and add the labels accordingly
+        for changed_path in changed_files:
+            for label, patterns in mapping.items():
+                for entry in patterns:
+                    stripped_entry = str(entry).strip()
+                    if (
+                        stripped_entry.endswith("/") and changed_path.startswith(stripped_entry)
+                    ) or fnmatch.fnmatch(changed_path, stripped_entry):
+                        to_add.add(label)
+                        break
+
+        # Get the current labels and check if the FIRST_TIME_LABELS were ever added
+        current = set(mr.labels)
+        did_add_first_run_labels = False
+        for iter_first_time_label in FIRST_TIME_LABELS:
+            if iter_first_time_label not in current:
+                was_ever_added = any(
+                    ev.label["name"] == iter_first_time_label and ev.action == "add"
+                    for ev in mr.resourcelabelevents.list(all=True)
+                )
+                if not was_ever_added:
+                    print(f"!{mr.iid}: Adding first-run label: '{iter_first_time_label}'")
+                    current.add(iter_first_time_label)
+                    did_add_first_run_labels = True
+
+        # Get one set of labels from the existing labels on the MR and the ones of the changed files
+        effective_labels = set(to_add) | current
+
+        # Collect reviewer usernames (skip labels not in mapping)
+        reviewer_usernames = [
+            u for lbl in sorted(effective_labels) for u in (reviewers_map.get(lbl, []))
+        ]
+
+        # Resolve usernames to GitLab user IDs
+        reviewer_ids = []
+        for uname in reviewer_usernames:
+            stripped_uname = str(uname).lstrip("@")
+            users = gl.users.list(username=stripped_uname)
+            reviewer_ids.append(users[0].id)
+
+        # Set reviewers if first-run label was added and reviewers are not already set
+        if did_add_first_run_labels and reviewer_ids:
+            existing_ids = [u["id"] for u in mr.reviewers]
+            if not existing_ids:
+                mr.reviewer_ids = sorted({*existing_ids, *reviewer_ids})
+                mr.save()
+                reloaded_mr = project.mergerequests.get(mr.iid)
+                print(
+                    f"!{reloaded_mr.iid}: Set MR reviewers: "
+                    f"{[u['username'] for u in reloaded_mr.reviewers]}"
+                )
+
+        # Get the final labels that need to be added
+        final_labels = sorted(current | to_add)
+        if set(final_labels) != set(mr.labels):
+            mr.labels = final_labels
+            mr.save()
+            print(f"!{mr.iid}: Updated MR labels: {final_labels}")
+        else:
+            print(f"!{mr.iid}: Labels unchanged: {final_labels}")
 
 
 if __name__ == "__main__":
