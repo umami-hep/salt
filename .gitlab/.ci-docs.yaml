@@ -16,5 +16,7 @@ pages:
     GIT_DEPTH: 0
     GIT_STRATEGY: clone
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="aft/algorithms/salt"
       when: always
