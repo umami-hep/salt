@@ -236,17 +236,26 @@ class SaltCLI(LightningCLI):
             # don't do this during evaluation as you will get increased variation wrt Athena
             torch.set_float32_matmul_precision("medium")
 
+            # Ensure that the output dir path has a suffix or a timestemp
             output_dir_path = self.get_output_dir_path(
                 config.trainer.default_root_dir, config.name, config.log_suffix
             )
+
+            # Set the default root dir to the output path
             config.trainer.default_root_dir = output_dir_path
+
+            # Check the status of the logger in the config
             if config.trainer.logger:
-                # If tests/CI set online=false, put Comet into offline mode and
-                # choose the cache dir via env.
-                online = getattr(config.trainer.logger.init_args, "online", None)
-                if online is False:
-                    os.environ["COMET_OFFLINE_DIRECTORY"] = output_dir_path
-                    Path(output_dir_path).mkdir(parents=True, exist_ok=True)
+                # Check if the comet api key is available
+                comet_api_key = os.getenv("COMET_API_KEY")
+
+                # If online is true but no API key is given, set offline to False
+                if not comet_api_key:
+                    config.trainer.logger.init_args["online"] = False
+
+                # Setup the offline output directory
+                os.environ["COMET_OFFLINE_DIRECTORY"] = output_dir_path
+                Path(output_dir_path).mkdir(parents=True, exist_ok=True)
 
             # run git checks
             if not config.force and not config.trainer.fast_dev_run:
@@ -260,6 +269,7 @@ class SaltCLI(LightningCLI):
                         "automated salt tag",
                     )
 
+            # Set config overwrite
             if config.overwrite_config:
                 self.save_config_kwargs["overwrite"] = True
 
