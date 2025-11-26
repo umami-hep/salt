@@ -527,6 +527,17 @@ def get_default_onnx_feature_map(
                 "name_salt": base_name,
                 "is_global": False,
             })
+        # For backwards compatibility, due to mismatching
+        # naming convention flow/flows between athena and TDD
+        elif input_name == "flow":
+            base_name = input_name.split("_")[0]
+            feature_map.append({
+                "name_athena_in": f"flows_{track_selection}_sd0sort",
+                "name_athena_out": f"{base_name.removesuffix('s')}_features",
+                "athena_num_name": f"n_{base_name}",
+                "name_salt": base_name,
+                "is_global": False,
+            })
         elif "EDGE" in input_name:
             base_name = input_map[input_name].split("_")[0]
             feature_map.append({
