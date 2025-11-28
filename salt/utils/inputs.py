@@ -61,6 +61,8 @@ TRACK_VARS = [
     "qOverP",
     "IP3D_signed_d0_significance",
     "IP3D_signed_z0_significance",
+    "lifetimeSignedD0Significance",
+    "lifetimeSignedZ0SinThetaSignificance",
     "phiUncertainty",
     "thetaUncertainty",
     "qOverPUncertainty",
@@ -80,6 +82,19 @@ TRACK_VARS = [
     "phi",
     "subjetIndex",
     "leptonID",
+    # Soft muon specific
+    "muon_quality",
+    "muon_qOverPratio",
+    "muon_momentumBalanceSignificance",
+    "muon_scatteringNeighbourSignificance",
+]
+
+FLOW_VARS = [
+    "pt",
+    "energy",
+    "deta",
+    "dphi",
+    "isCharged",
 ]
 
 ELECTRON_VARS = [
@@ -92,6 +107,7 @@ ELECTRON_VARS = [
     "phi",
     "ftag_et",
     "qOverP",
+    "d0RelativeToBeamspot",
     "d0RelativeToBeamspotSignificance",
     "ftag_z0AlongBeamspotSignificance",
     "ftag_ptVarCone30OverPt",
@@ -316,7 +332,7 @@ def inputs_concat(
     return inputs, mask
 
 
-def write_dummy_norm_dict(nd_path: Path, cd_path: Path) -> None:
+def write_dummy_norm_dict(nd_path: Path, cd_path: Path, is_gn3: bool = False) -> None:
     """Write dummy normalization and class dictionaries to YAML files.
 
     Parameters
@@ -325,6 +341,8 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path) -> None:
         Output path for the normalization dictionary YAML.
     cd_path : Path
         Output path for the class dictionary YAML.
+    is_gn3 : bool, optional
+        If ``True``, write GN3-style class labels, by default ``False``.
     """
     sd: dict[str, dict[str, dict[str, float]]] = {}
     sd["jets"] = {n: {"std": 1.0, "mean": 1.0} for n in JET_VARS}
@@ -332,13 +350,18 @@ def write_dummy_norm_dict(nd_path: Path, cd_path: Path) -> None:
     sd["tracks_dr"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     sd["tracks_ghost"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
     sd["electrons"] = {n: {"std": 1.0, "mean": 1.0} for n in ELECTRON_VARS}
-    sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in TRACK_VARS}
+    sd["flows"] = {n: {"std": 1.0, "mean": 1.0} for n in FLOW_VARS}
+    # Duplicate "flows" to "flow" to support old naming
+    sd["flow"] = {n: {"std": 1.0, "mean": 1.0} for n in FLOW_VARS}
     with open(nd_path, "w") as file:
         yaml.dump(sd, file, sort_keys=False)
 
     cd: dict[str, dict[str, list[float]]] = {}
-    cd["jets"] = {"HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0]}
-    cd["jets"]["flavour_label"] = cd["jets"]["HadronConeExclTruthLabelID"]
+    if is_gn3:
+        cd["jets"] = {"flavour_label": [1.0, 2.0, 2.0, 2.0, 1.0, 1.0]}
+    else:
+        cd["jets"] = {"HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0]}
+        cd["jets"]["flavour_label"] = cd["jets"]["HadronConeExclTruthLabelID"]
     cd["tracks"] = {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]}
     cd["tracks_ghost"] = {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]}
     with open(cd_path, "w") as file:
@@ -410,6 +433,7 @@ def write_dummy_file(
     make_xbb: bool = False,
     inc_taus: bool = False,
     inc_params: bool = False,
+    is_gn3: bool = False,
 ) -> None:
     """Create a synthetic HDF5 file with structured groups for tests.
 
@@ -425,6 +449,8 @@ def write_dummy_file(
         If ``True``, include a tau class name in jet labels, by default ``False``.
     inc_params : bool, optional
         If ``True``, add a ``parameters`` dataset with simple values, by default ``False``.
+    is_gn3 : bool, optional
+        If ``True``, write GN3-style class labels, by default ``False``.
     """
     with open(sd_fname) as f:
         sd = yaml.safe_load(f)
@@ -435,6 +461,7 @@ def write_dummy_file(
         "mass",
         "pt_btagJes",
         "eta_btagJes",
+        "ptFromTruthDressedWZJet",
         "HadronConeExclTruthLabelPt",
         "HadronConeExclTruthLabelLxy",
         "n_tracks",
@@ -479,6 +506,8 @@ def write_dummy_file(
     jet_features = len(jet_vars)
     n_tracks_per_jet = 40
     track_features = len(track_vars)
+    n_flows_per_jet = 40
+    flow_features = len(FLOW_VARS)
     n_electrons_per_jet = 10
     electron_features = len(electron_vars)
     n_hadrons_per_jet = 5
@@ -486,20 +515,28 @@ def write_dummy_file(
 
     # setup jets
     shapes_jets = {
-        "inputs": [n_jets, jet_features + 2],
+        "inputs": [n_jets, jet_features + 3],
     }
 
     # setup tracks
     shapes_tracks = {
-        "inputs": [n_jets, n_tracks_per_jet, track_features + 3],
+        "inputs": [n_jets, n_tracks_per_jet, track_features + 4],
         "valid": [n_jets, n_tracks_per_jet],
     }
 
+    # setup flow
+    shapes_flow = {
+        "inputs": [n_jets, n_flows_per_jet, flow_features],
+        "valid": [n_jets, n_flows_per_jet],
+    }
+
+    # setup electrons
     shapes_electrons = {
         "inputs": [n_jets, n_electrons_per_jet, electron_features + 2],
         "valid": [n_jets, n_electrons_per_jet],
     }
 
+    # setup hadrons
     shapes_hadrons = {
         "inputs": [n_jets, n_hadrons_per_jet, hadron_features + 2],
         "valid": [n_jets, n_hadrons_per_jet],
@@ -513,17 +550,27 @@ def write_dummy_file(
     # setup jets
     jets_dtype = np.dtype(
         [(n, "f4") for n in jet_vars]
-        + [("flavour_label", "i4"), ("HadronConeExclTruthLabelID", "i4")]
+        + [
+            ("flavour_label", "i4"),
+            ("HadronConeExclTruthLabelID", "i4"),
+            ("HadronGhostInitialTruthLabelPdgId", "i4"),
+        ]
     )
     jets = rng.random(shapes_jets["inputs"])
     jets = u2s(jets, jets_dtype)
     if make_xbb:
         jets["flavour_label"] = rng.choice([0, 1, 2, 3], size=n_jets)
+    elif is_gn3:
+        jets["flavour_label"] = rng.choice([0, 1, 2, 3, 4, 5], size=n_jets)
     else:
         jets["flavour_label"] = rng.choice([0, 1, 2], size=n_jets)
 
     jets["HadronConeExclTruthLabelID"] = rng.choice([0, 4, 5], size=n_jets)
     jets["HadronConeExclTruthLabelLxy"][jets["flavour_label"] == 0] = np.nan
+    jets["HadronGhostInitialTruthLabelPdgId"] = rng.choice(
+        [0, 15, -511, 521, 10511, 441],
+        size=n_jets,
+    )
 
     # setup hadrons
     hadrons_dtype = np.dtype(
@@ -546,6 +593,7 @@ def write_dummy_file(
         [(n, "f4") for n in track_vars]
         + [
             ("ftagTruthOriginLabel", "i4"),
+            ("ftagTruthTypeLabel", "i4"),
             ("ftagTruthVertexIndex", "i4"),
             ("ftagTruthParentBarcode", "i4"),
         ]
@@ -560,6 +608,20 @@ def write_dummy_file(
     track_barcodes = hadrons["barcode"][np.arange(n_jets)[:, None], hadron_track_select]
     tracks["ftagTruthParentBarcode"] = track_barcodes
     tracks["ftagTruthParentBarcode"][~tracks["valid"]] = -1
+    tracks["ftagTruthTypeLabel"] = rng.choice(
+        [-2, -3, 5, -5, 6, -6],
+        size=(n_jets, n_tracks_per_jet),
+    )
+    tracks["ftagTruthTypeLabel"][~tracks["valid"]] = 0
+
+    # setup flow
+    flow_dtype = np.dtype([(n, "f4") for n in FLOW_VARS])
+    flows = rng.random(shapes_flow["inputs"])
+    valid = rng.choice([True, False], size=shapes_flow["valid"])
+    valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
+    flows[~valid["valid"]] = np.nan
+    flows = u2s(flows, flow_dtype)
+    flows = join_structured_arrays([flows, valid])
 
     # setup electrons
     electrons_dtype = np.dtype(
@@ -586,6 +648,15 @@ def write_dummy_file(
         f.create_dataset("jets", data=jets)
         if make_xbb:
             f["jets"].attrs["flavour_label"] = ["hbb", "hcc", "top", "qcd"]
+        elif is_gn3:
+            f["jets"].attrs["flavour_label"] = [
+                "ghostsplitbjets",
+                "ghostsplitcjets",
+                "ghostsplitsjets",
+                "ghostsplitudjets",
+                "ghostsplitgjets",
+                "ghostsplittaujets",
+            ]
         else:
             f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"] + (
                 ["taus"] if inc_taus else []
@@ -594,7 +665,9 @@ def write_dummy_file(
         f.create_dataset("tracks_dr", data=tracks)
         f.create_dataset("tracks_ghost", data=tracks)
         f.create_dataset("electrons", data=electrons)
-        f.create_dataset("flow", data=tracks)
+        f.create_dataset("flows", data=flows)
+        # Duplicate "flows" to "flow" to support old naming
+        f.create_dataset("flow", data=flows)
         f.create_dataset("truth_hadrons", data=hadrons)
         if inc_params:
             f.create_dataset("parameters", data=params_arr)

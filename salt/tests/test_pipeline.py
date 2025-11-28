@@ -12,17 +12,21 @@ from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
 CONFIG = "GN2.yaml"
-TAU_CONFIGS = {"GN2.yaml", "GN3_baseline.yaml"}
+TAU_CONFIGS = {"GN2.yaml"}
+
+GN3_TASKS = [
+    "jet_pt_regression", "jets_classification", "track_vertexing", "track_origin", "track_type"
+]
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc_params=False):
+def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc_params=False, is_gn3=False):
     incl_taus = config_path.name in TAU_CONFIGS
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
     nd_path = tmp_path / "dummy_norm_dict.yaml"
     cd_path = tmp_path / "dummy_class_dict.yaml"
-    write_dummy_norm_dict(nd_path, cd_path)
-    write_dummy_file(train_h5_path, nd_path, do_xbb, incl_taus, inc_params)
+    write_dummy_norm_dict(nd_path, cd_path, is_gn3=is_gn3)
+    write_dummy_file(train_h5_path, nd_path, do_xbb, incl_taus, inc_params, is_gn3=is_gn3)
 
     args = ["fit"]
     args += [f"--config={config_path}"]
@@ -31,8 +35,8 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc
     args += [f"--data.train_file={train_h5_path}"]
     args += [f"--data.val_file={train_h5_path}"]
     args += ["--data.num_train=500"]
-    args += ["--data.num_val=200"]
-    args += ["--data.batch_size=100"]
+    args += ["--data.num_val=100"]
+    args += ["--data.batch_size=20"]
     args += ["--data.num_workers=0"]
     args += ["--trainer.max_epochs=1"]
     args += ["--trainer.accelerator=cpu"]
@@ -52,9 +56,9 @@ def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc
     main(args)
 
 
-def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False):
+def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False, is_gn3=False):
     test_h5_path = Path(tmp_path) / "dummy_test_sample_inputs.h5"
-    write_dummy_file(test_h5_path, nd_path, do_xbb)
+    write_dummy_file(test_h5_path, nd_path, do_xbb, is_gn3=is_gn3)
 
     # Modify the output config to force writing tracks in the prediction writer
     with open(train_config_path) as f:
@@ -131,6 +135,7 @@ def run_combined(
     do_xbb=False,
     do_mup=False,
     inc_params=False,
+    is_gn3=False,
 ):
     sys.argv = [sys.argv[0]]  # ignore pytest cli args when running salt cli
 
@@ -140,7 +145,7 @@ def run_combined(
         config_path = Path(__file__).parent / "configs" / config
 
     # run training
-    run_train(tmp_path, config_path, train_args, do_xbb, do_mup, inc_params)
+    run_train(tmp_path, config_path, train_args, do_xbb, do_mup, inc_params, is_gn3=is_gn3)
 
     if do_eval:
         train_dir = [x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists()]
@@ -151,7 +156,7 @@ def run_combined(
         nd_path = [x for x in train_dir.iterdir() if x.suffix == ".yaml" and "norm" in str(x)]
         assert len(nd_path) == 1
         nd_path = nd_path[0]
-        run_eval(tmp_path, train_config_path, nd_path, do_xbb)
+        run_eval(tmp_path, train_config_path, nd_path, do_xbb, is_gn3=is_gn3)
     if do_onnx:
         run_onnx(train_dir, export_args)
 
@@ -167,13 +172,22 @@ def test_GN2(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
-def test_GN3(tmp_path) -> None:
+def test_GN3V00(tmp_path) -> None:
     run_combined(
         tmp_path,
-        "GN3_dev/GN3_baseline.yaml",
-        export_args=["--tasks", "jets_classification", "track_vertexing", "track_origin"],
+        "GN3v01/GN3V00.yaml",
+        export_args=["--tasks", *GN3_TASKS],
+        is_gn3=True
     )
 
+@pytest.mark.filterwarnings(w)
+def test_GN3V01(tmp_path) -> None:
+    run_combined(
+        tmp_path,
+        "GN3v01/GN3V01.yaml",
+        export_args=["--tasks", "jets_charge", *GN3_TASKS],
+        is_gn3=True,
+    )
 
 @pytest.mark.filterwarnings(w)
 def test_GN2_muP(tmp_path) -> None:
