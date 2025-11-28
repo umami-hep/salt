@@ -61,7 +61,8 @@ test-GN2:
 test-GN3:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/gn3.xml run_test salt/tests/test_pipeline.py::test_GN3
+    - JUNIT_FILE=reports/gn3-v00.xml run_test salt/tests/test_pipeline.py::test_GN3V00
+    - JUNIT_FILE=reports/gn3-v01.xml run_test salt/tests/test_pipeline.py::test_GN3V01
 
 test-GN2_muP:
   extends: .test-template

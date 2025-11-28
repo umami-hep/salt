@@ -7,6 +7,7 @@ import torch
 from tqdm import tqdm
 
 from salt.models.task import mask_fill_flattened
+from salt.modelwrapper import ModelWrapper
 from salt.utils.get_structured_input_dict import get_structured_input_dict
 from salt.utils.inputs import (
     inputs_sep_with_pad_multi_sequece,
@@ -17,7 +18,7 @@ torch.manual_seed(42)
 
 
 def compare_output(
-    pt_model: torch.nn.Module,
+    pt_model: ModelWrapper,
     onnx_session: ort.InferenceSession,
     global_object: str,
     seq_names_salt: Sequence[str],
@@ -45,6 +46,10 @@ def compare_output(
     # Build input dict for PyTorch
     inputs_pytorch = {seqn: seq for seq, seqn in zip(sequences, seq_names_salt, strict=False)}
     inputs_pytorch[global_object] = jets
+
+    # Add global as a duplicate of the global_object input if it's required
+    if "global" in variable_map:
+        inputs_pytorch["global"] = jets.clone()
 
     if edge_name_salt:
         edges = torch.rand(n_batch, n_seq, n_seq, pt_model.input_dims[edge_name_salt])
@@ -158,7 +163,7 @@ def compare_output(
 
 
 def compare_outputs(
-    pt_model: torch.nn.Module,
+    pt_model: ModelWrapper,
     onnx_path: str | Path,
     global_object: str,
     seq_names_salt: Sequence[str],

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import warnings
 from pathlib import Path
@@ -211,7 +212,6 @@ class ONNXModel(ModelWrapper):
         self.salt_names = []
         self.input_names = []
         self.aux_sequence_index = 1
-
         # Iterate in feature-map order to create per-input placeholders
         for i, feature in enumerate(self.feature_map):
             if feature["name_salt"] == self.global_object:
@@ -373,16 +373,22 @@ class ONNXModel(ModelWrapper):
         """
         # Basic input checks for shape/order consistency
         assert len(args) == len(self.salt_names), "Number of inputs does not match feature map."
-        assert len(args[0].shape) == 2, (
-            "Jets should have a batch dimension, "
-            "and variable dimension but not a sequence dimension"
-        )
 
-        # Build SALT-style input dict: add a batch dimension for sequences
-        input_dict = {self.global_object: args[0]}
-        input_dict.update({
-            self.salt_names[i]: args[i].unsqueeze(0) for i in range(1, len(self.salt_names))
-        })
+        input_dict = {}
+
+        for i, name in enumerate(self.salt_names):
+            if name == self.global_object:
+                # Keep original global input
+                assert len(args[i].shape) == 2, (
+                    "Jets should have a batch dimension and variable dimension"
+                )
+                input_dict[name] = args[i]
+            else:
+                input_dict[name] = args[i].unsqueeze(0)
+
+        # Add global features to input_dict if needed
+        if "global" in self.variable_map:
+            input_dict["global"] = input_dict[self.global_object].clone()
 
         # Construct structured inputs (variable mapping, etc.) for tasks
         structured_input_dict = get_structured_input_dict(
@@ -518,13 +524,23 @@ def get_default_onnx_feature_map(
                 "name_salt": global_name,
                 "is_global": True,
             })
+        elif input_name == "global":
+            continue
         elif "tracks" in input_name or "flows" in input_name:
             base_name = input_name.split("_")[0]
             feature_map.append({
                 "name_athena_in": f"{base_name}_{track_selection}_sd0sort",
                 "name_athena_out": f"{base_name.removesuffix('s')}_features",
                 "athena_num_name": f"n_{base_name}",
-                "name_salt": base_name,
+                "name_salt": input_name,
+                "is_global": False,
+            })
+        elif "electrons" in input_name:
+            feature_map.append({
+                "name_athena_in": f"{input_name}_r22default",
+                "name_athena_out": f"{input_name.removesuffix('s')}_features",
+                "athena_num_name": f"n_{input_name}",
+                "name_salt": input_name,
                 "is_global": False,
             })
         # For backwards compatibility, due to mismatching
@@ -596,6 +612,19 @@ def parse_output_combination(arg_str: str) -> tuple[str, list[tuple[float, str]]
     return output_name, parsed_inputs
 
 
+def update_config(config):
+    """Update config in-place to be compatible with ONNX export."""
+    for task in config["model"]["init_args"]["tasks"]["init_args"]["modules"]:
+        if task["init_args"]["loss"]["init_args"].get("weight", None) is not None:
+            task["init_args"]["loss"]["init_args"]["weight"] = torch.Tensor(
+                task["init_args"]["loss"]["init_args"]["weight"]
+            )
+        if "size_average" in task["init_args"]["loss"]["init_args"]:
+            task["init_args"]["loss"]["init_args"].pop("size_average")
+        if "reduce" in task["init_args"]["loss"]["init_args"]:
+            task["init_args"]["loss"]["init_args"].pop("reduce")
+
+
 def main(args: list[str] | None = None) -> None:
     """CLI entrypoint: load model, export to ONNX, attach metadata, and validate.
 
@@ -643,6 +672,11 @@ def main(args: list[str] | None = None) -> None:
 
     # Parse renames specified as "old:new" pairs
     rename_outputs = dict(x.split(":") for x in parsed_args.rename)
+    # Prepare a copy of the config for metadata attachment later
+    metadata_config = copy.deepcopy(config)
+
+    # Update config in-place for ONNX export compatibility
+    update_config(config["model"])
 
     # Load the PyTorch model and switch attention backend for stable export
     with warnings.catch_warnings():
@@ -651,7 +685,7 @@ def main(args: list[str] | None = None) -> None:
         pt_model = ModelWrapper.load_from_checkpoint(
             parsed_args.ckpt_path,
             map_location=torch.device("cpu"),
-            norm_config=config["model"]["norm_config"],
+            **config["model"],
         )
         pt_model.eval()
         pt_model.float()
@@ -677,9 +711,9 @@ def main(args: list[str] | None = None) -> None:
             object_name=parsed_args.object_name,
             mf_config=mf_config,
             map_location=torch.device("cpu"),
-            norm_config=config["model"]["norm_config"],
             combine_outputs=combine_outputs,
             rename_outputs=rename_outputs,
+            **config["model"],
         )
 
         # Set to eval/float and ensure attention uses torch-math kernels
@@ -712,7 +746,7 @@ def main(args: list[str] | None = None) -> None:
     # Attach metadata (config, hashes, IO schema) to the ONNX file
     add_metadata(
         config_path=config_path,
-        config=config,
+        config=metadata_config,
         ckpt_path=parsed_args.ckpt_path,
         onnx_path=onnx_path,
         model_name=onnx_model.name,
