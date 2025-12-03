@@ -178,7 +178,7 @@ In order to this you should add a `global` key under `data.variables` and specif
 
 ??? warning "Don't forget to change pooling and task input size accordingly"
 
-    If you concatenate 2 global variables you should increase the `input_size` by 2 for `pool_net` and all tasks (except vertexing, here you should increase by 4).
+    If you concatenate 2 global variables you should increase the `input_size` by 2 for all tasks (except vertexing, here you should increase by 4).
 
 For example you can concatenate jet features after the gnn model with:
 

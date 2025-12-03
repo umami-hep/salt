@@ -101,3 +101,19 @@ trainer:
   accelerator: gpu
   devices: 1
   #precision: 16-mixed
+  callbacks:
+    - class_path: salt.callbacks.Checkpoint
+      init_args:
+        monitor_loss: val/events_classification_loss
+    - class_path: salt.callbacks.ConfusionMatrixCallback
+      init_args:
+        task_name: events_classification
+        class_names_override: # can be a list also
+          ggF: Gluon-gluon fusion
+          VBF: Vector-boson fusion
+    - class_path: salt.callbacks.PredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args: { refresh_rate: 50 }
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+      init_args: { max_depth: 2 }

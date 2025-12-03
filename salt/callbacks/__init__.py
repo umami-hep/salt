@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from salt.callbacks.checkpoint import Checkpoint
+from salt.callbacks.confusion_matrix import ConfusionMatrixCallback
 from salt.callbacks.gradient_logger import GradientLoggerCallback
 from salt.callbacks.integrated_gradients_writer import IntegratedGradientWriter
 from salt.callbacks.maskformer_metrics import MaskformerMetrics
@@ -13,6 +14,7 @@ from salt.callbacks.weight_logger import WeightLoggerCallback
 
 __all__ = [
     "Checkpoint",
+    "ConfusionMatrixCallback",
     "GradientLoggerCallback",
     "IntegratedGradientWriter",
     "MaskformerMetrics",
