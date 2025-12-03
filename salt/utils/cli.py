@@ -227,8 +227,10 @@ class SaltCLI(LightningCLI):
                     task.init_args.class_names = class_names
 
                 # if class weights are not specified read them from class_dict
-                if task.init_args.get("use_class_dict") and (
-                    class_weights := self.get_class_weights_from_class_dict(task, config.data)
+                if (
+                    task.init_args.get("use_class_dict")
+                    and (config.ckpt_path is None)
+                    and (class_weights := self.get_class_weights_from_class_dict(task, config.data))
                 ):
                     task.init_args.loss.init_args.weight = torch.Tensor(class_weights)
 
