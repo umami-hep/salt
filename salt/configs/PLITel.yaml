@@ -19,17 +19,20 @@ model:
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
-          embed_dim: *embed_dim
           num_layers: 3
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 4
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          # flash attention
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
             activation: *activation
-            dropout: &dropout 0.0
+            gated: False
+          attn_kwargs:
+            num_heads: 4
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -47,13 +50,12 @@ model:
                 class_names: [elxprompt, npxall]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.9] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 2
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
+                  dropout: 0.0
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -63,8 +65,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [1.52, 963.55, 1.0, 13.32, 9.4, 34.65, 112.99, 25.84]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
@@ -118,7 +118,6 @@ data:
       - numberOfPixelSplitHits
       - numberOfSCTHits
       - numberOfSCTSharedHits
-
 
   train_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/pp_output_train.h5
   val_file: /nfs/dust/atlas/user/pgadow/plit/data/preprocessed/electrons_38M/pp_output_val.h5

@@ -11,7 +11,7 @@ from ftag.git_check import check_for_uncommitted_changes, get_git_hash
 
 from salt.models.maskformer import get_maskformer_outputs
 from salt.models.task import mask_fill_flattened
-from salt.models.transformer_v2 import change_attn_backends
+from salt.models.transformer import change_attn_backends
 from salt.modelwrapper import ModelWrapper
 from salt.onnx.check import compare_outputs
 from salt.utils.configs import MaskformerConfig
@@ -719,9 +719,7 @@ def main(args: list[str] | None = None) -> None:
         # Set to eval/float and ensure attention uses torch-math kernels
         onnx_model.eval()
         onnx_model.float()
-        change_attn_backends(
-            onnx_model.model, "torch-math"
-        )  # Only applies to transformer_v2 layers
+        change_attn_backends(onnx_model.model, "torch-math")  # Only applies to transformer layers
 
     # Announce export start
     print("\n" + "-" * 100)

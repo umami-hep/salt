@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.models import MaskFormerLoss
-from salt.models.transformer_v2 import GLU, Attention
+from salt.models.transformer import GLU, Attention
 from salt.stypes import Tensors
 from salt.utils.mask_utils import indices_from_mask
 

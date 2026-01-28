@@ -19,17 +19,20 @@ model:
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
-          embed_dim: *embed_dim
           num_layers: 3
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 2
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          # flash attention
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
             activation: *activation
-            dropout: &dropout 0.1
+            gated: False
+          attn_kwargs:
+            num_heads: 2
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -48,13 +51,12 @@ model:
                 class_names: [muxprompt, npxall]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 2
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
+                  dropout: 0.1
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -64,8 +66,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
@@ -100,7 +100,6 @@ model:
             #       <<: *task_dense_config
             #       output_size: 7
             #       context_size: *out_dim
-
 
 data:
   global_object: muons

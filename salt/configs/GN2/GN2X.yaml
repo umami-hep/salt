@@ -1,10 +1,10 @@
-name: GN2_tracks_neutral_SA_aux
+name: GN2X
 
 model:
   lrs_config:
     initial: 1e-7
-    max: 5e-4
-    end: 1e-5
+    max: 3e-4
+    end: 5e-5
     pct_start: 0.01
     weight_decay: 1e-5
 
@@ -17,24 +17,28 @@ model:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
-        - input_name: neutral
+        - input_name: flow
           dense_config:
             output_size: *embed_dim
             hidden_layers: [256]
             activation: *activation
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
+          num_layers: 8
           embed_dim: *embed_dim
-          num_layers: 4
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          attn_type: flash-varlen
+          norm: LayerNorm
+          dense_kwargs:
             activation: *activation
-            dropout: &dropout 0.1
+            dropout: 0.1
+            gated: True
+          attn_kwargs:
+            num_heads: 8
+            dropout: 0.1
+          num_registers: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -51,10 +55,9 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0, 1.0] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 3
+                  output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
@@ -63,11 +66,9 @@ model:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
-                weight: 0.5
+                weight: 0.33
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
@@ -78,7 +79,7 @@ model:
                 name: track_vertexing
                 input_name: tracks
                 label: ftagTruthVertexIndex
-                weight: 1.5
+                weight: 0.75
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args: { reduction: none }
@@ -89,10 +90,14 @@ model:
                   context_size: *out_dim
 
 data:
+  num_inputs:
+    tracks: 100
+    flow: 100
+
   variables:
     jets:
-      - pt_btagJes
-      - eta_btagJes
+      - pt
+      - eta
     tracks:
       - d0
       - z0SinTheta
@@ -113,25 +118,23 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-      #- numberOfTRTHits
-      #- leptonID
-    neutral:
+      - leptonID
+    flow:
       - flow_pt
       - flow_energy
       - flow_deta
       - flow_dphi
 
-  train_file: /home/users/o/oleksiyu/scratch/DATA/UPP/user_large_equal_allvar_GN2/output/pp_output_train.h5
-  val_file: /home/users/o/oleksiyu/scratch/DATA/UPP/user_large_equal_allvar_GN2/output/pp_output_val.h5
-  norm_dict: /home/users/o/oleksiyu/scratch/DATA/UPP/user_large_equal_allvar_GN2/output/norm_dict.yaml
-  class_dict: /home/users/o/oleksiyu/scratch/DATA/UPP/user_large_equal_allvar_GN2/output/class_dict.yaml
-  #move_files_temp: /dev/shm/svanstro/salt/gn2/
+  train_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_train.h5
+  val_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_val.h5
+  norm_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/norm_dict.yaml
+  class_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/class_dict.yaml
 
   batch_size: 2000
-  num_workers: 16
+  num_workers: 40
 
 trainer:
-  max_epochs: 50
+  max_epochs: 20
   accelerator: gpu
-  devices: 1
-  precision: 32
+  devices: 3
+  precision: bf16-mixed

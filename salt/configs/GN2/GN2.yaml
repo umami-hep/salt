@@ -1,4 +1,4 @@
-name: GN2_tracks_neutral_CA
+name: GN2
 
 model:
   lrs_config:
@@ -17,28 +17,22 @@ model:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
-        - input_name: neutral
-          dense_config:
-            output_size: *embed_dim
-            hidden_layers: [256]
-            activation: *activation
 
       encoder:
-        class_path: salt.models.TransformerCrossAttentionEncoder
+        class_path: salt.models.Transformer
         init_args:
-          input_names: [tracks, neutral]
-          embed_dim: *embed_dim
           num_layers: 4
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
+          # flash attention
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
+            activation: *activation
+            gated: False
+          attn_kwargs:
             num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          sa_dense_config:
-            activation: *activation
-            dropout: &dropout 0.1
-          ca_dense_config:
-            activation: *activation
-            dropout: *dropout
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -53,15 +47,43 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
+                use_class_dict: True
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0, 1.0] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 3
+                  output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                use_class_dict: True
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
 
 data:
   variables:
@@ -90,23 +112,18 @@ data:
       - numberOfSCTSharedHits
       #- numberOfTRTHits
       #- leptonID
-    neutral:
-      - flow_pt
-      - flow_energy
-      - flow_deta
-      - flow_dphi
 
-  train_file: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/pp_output_train.h5
-  val_file: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/pp_output_val.h5
-  norm_dict: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/norm_dict.yaml
-  class_dict: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/class_dict.yaml
+  train_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_train.h5
+  val_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_val.h5
+  norm_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/norm_dict.yaml
+  class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
   #move_files_temp: /dev/shm/svanstro/salt/gn2/
 
-  batch_size: 400
-  num_workers: 16
+  batch_size: 4000
+  num_workers: 40
 
 trainer:
-  max_epochs: 25
+  max_epochs: 40
   accelerator: gpu
   devices: 1
-  precision: 32
+  precision: 16-mixed

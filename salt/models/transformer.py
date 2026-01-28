@@ -1,12 +1,25 @@
-from collections.abc import Mapping
-from itertools import combinations
+"""Efficient Transformer implementation.
+
+Updated transformer implementation based on
+https://github.com/mistralai/mistral-src
+
+Features
+--------
+- native SDP kernels (including flash)
+- gated linear units https://arxiv.org/abs/2002.05202
+- RMSNorm https://arxiv.org/abs/1910.07467
+"""
+
+from functools import partial
+from typing import Any, final
 
 import torch
-from torch import BoolTensor, Tensor, cat, nn
+from torch import BoolTensor, Tensor, nn
 
-from salt.models.attention import MultiheadAttention
-from salt.models.dense import Dense
+import salt.models.layernorm as layernorms
+from salt.models.attention import ATTN_TYPES, Attention, EdgeAttention
 from salt.stypes import Tensors
+from salt.utils.tensor_utils import redo_padding, undo_padding
 
 try:
     from mup import MuReadout as _MuReadout
@@ -15,35 +28,47 @@ except ImportError:
     _MuReadout = None
 
 
-class TransformerEncoderLayer(nn.Module):
-    """Transformer encoder layer with optional edge updates and context FFN.
+def change_attn_backends(module: nn.Module, backend: str) -> None:
+    """Recursively change the attention backend on a module and its children.
 
-    This layer applies:
-    - Multi-head self-attention (optionally reading/updating edge features),
-    - a feed-forward network (optionally conditioned on a context vector),
-    - LayerNorm (pre-LN),
-    - residual connections.
+    Used primarily to switch back to ``torch-math`` for ONNX exports.
 
-    Notes
-    -----
-    Switched from NormFormer-style to pre-LN in MR !132.
+    Parameters
+    ----------
+    module : nn.Module
+        Root module to traverse.
+    backend : str
+        Backend name, one of ``{"torch-math", "torch-flash", "torch-meff", "flash-varlen"}``.
+    """
+    if isinstance(module, Transformer):
+        module.set_backend(backend)
+        return
+    if isinstance(module, Attention):
+        module.set_backend(backend)
+        return
+    for child in module.children():
+        change_attn_backends(child, backend)
+
+
+class GLU(nn.Module):
+    """Dense update with a (gated) linear unit.
+
+    See https://arxiv.org/abs/2002.05202.
 
     Parameters
     ----------
     embed_dim : int
-        Token embedding dimension for inputs/outputs and attention projections.
-    mha_config : Mapping
-        Keyword arguments forwarded to :class:`salt.models.attention.MultiheadAttention`.
-    dense_config : Mapping | None, optional
-        Keyword arguments forwarded to :class:`salt.models.dense.Dense`. If ``None``,
-        the dense block is omitted. The default is ``None``.
-    context_dim : int, optional
-        Dimensionality of the optional context vector used by the dense block.
-        The default is ``0``.
-    edge_embed_dim : int, optional
-        Edge embedding dimensionality (if using edge features). The default is ``0``.
-    update_edges : bool, optional
-        If ``True``, edge features are updated in the attention block. The default is ``False``.
+        Input/output embedding dimension.
+    hidden_dim : int | None, optional
+        Hidden dimension. If ``None``, defaults to ``2 * embed_dim``.
+    activation : str, optional
+        Name of the activation class in ``torch.nn`` (e.g., ``"SiLU"``).
+    dropout : float, optional
+        Dropout probability. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms. The default is ``True``.
+    gated : bool, optional
+        If ``True``, uses a gated branch (splits hidden in two). The default is ``False``.
     mup : bool, optional
         Whether to use μP parameterization. The default is ``False``.
     """
@@ -51,75 +76,323 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
         embed_dim: int,
-        mha_config: Mapping,
-        dense_config: Mapping | None = None,
-        context_dim: int = 0,
+        hidden_dim: int | None = None,
+        activation: str = "SiLU",
+        dropout: float = 0.0,
+        bias: bool = True,
+        gated: bool = False,
+        mup: bool = False,
+    ):
+        super().__init__()
+        self.mup = mup
+
+        if hidden_dim is None:
+            hidden_dim = embed_dim * 2
+
+        self.gated = gated
+        self.embed_dim = embed_dim
+        self.in_proj = nn.Linear(embed_dim, hidden_dim + hidden_dim * gated, bias=bias)
+        self.out_proj = nn.Linear(hidden_dim, embed_dim, bias=bias)
+        self.drop = nn.Dropout(dropout)
+        self.activation = getattr(nn, activation)()
+
+        if self.mup:
+            for proj in [self.in_proj, self.out_proj]:
+                nn.init.normal_(proj.weight, mean=0.0, std=1.0 / (proj.weight.shape[0] ** 0.5))
+                if bias:
+                    nn.init.zeros_(proj.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply the GLU block.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor of shape ``[B, L, D]``.
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape ``[B, L, D]``.
+        """
+        x = self.in_proj(x)
+        if self.gated:
+            x1, x2 = x.chunk(2, dim=-1)
+            x = self.activation(x1) * x2
+        else:
+            x = self.activation(x)
+        x = self.drop(x)
+        return self.out_proj(x)
+
+
+class LayerScale(nn.Module):
+    """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
+
+    Reference: https://arxiv.org/abs/2103.17239
+    """
+
+    def __init__(self, dim: int, init_value: float = 1e-3) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(init_value * torch.ones(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Scale the input by a learnable vector ``gamma``.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input as Tensor
+
+        Returns
+        -------
+        Tensor
+            Scaled inputs as Tensor
+        """
+        return x * self.gamma
+
+
+class DropPath(nn.Module):
+    """Stochastic depth / drop-path regularization."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Randomly drop residual paths during training.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor.
+
+        Returns
+        -------
+        Tensor
+            Output tensor with stochastic depth applied when training.
+        """
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()  # binarize
+        return x.div(keep_prob) * random_tensor
+
+
+class NormResidual(nn.Module):
+    """Residual wrapper with normalization, LayerScale, and DropPath.
+
+    Can represent common transformer patterns:
+
+    - PostNorm: ``x = norm(x + drop(scale * fn(x)))``
+    - PreNorm: ``x = x + drop(scale * fn(norm(x)))``
+    - NoNorm:  ``x = x + drop(scale * fn(x))``
+
+    Parameters
+    ----------
+    fn : GLU | Attention | EdgeAttention
+        The wrapped non-resizing module.
+    norm : str, optional
+        Normalization class name from :mod:`salt.models.layernorm`. The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial value for LayerScale. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate for stochastic depth. The default is ``0.0``.
+    embed_dim : int, optional
+        Input/output dimension. If ``0``, attempts to read ``fn.embed_dim``.
+    norm_type : str, optional
+        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
+    """
+
+    def __init__(
+        self,
+        fn: GLU | Attention | EdgeAttention,
+        norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
+        embed_dim: int = 0,
+        norm_type: str = "pre",
+    ) -> None:
+        super().__init__()
+        self.norm_type = norm_type
+        dim = embed_dim or fn.embed_dim
+        assert dim > 0, "Could not determine embed_dim from fn"
+        self.fn = fn
+        if self.norm_type != "none":
+            self.norm = getattr(layernorms, norm)(dim)
+        self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
+
+        self.edges = bool(isinstance(fn, EdgeAttention))
+
+    def _forward_edges(self, x: Tensor, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]:
+        """Apply residual wrapper around ``fn`` that returns edge features.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor.
+        *args : Any
+            Positional arguments forwarded to ``fn``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``fn``.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            Output tensor with residual, normalization (if enabled), LayerScale, and DropPath.
+            Also returns edge features from ``fn``.
+        """
+        if self.norm_type == "pre":
+            fn_out, edge_out = self.fn(self.norm(x), *args, **kwargs)
+            res_out = x + self.drop_path(self.ls(fn_out))
+            return res_out, edge_out
+        if self.norm_type == "post":
+            fn_out, edge_out = self.fn(x, *args, **kwargs)
+            res_out = self.norm(x + self.drop_path(self.ls(fn_out)))
+            return res_out, edge_out
+        fn_out, edge_out = self.fn(x, *args, **kwargs)
+        res_out = x + self.drop_path(self.ls(fn_out))
+        return res_out, edge_out
+
+    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]:
+        """Apply residual wrapper around ``fn``.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input tensor.
+        *args : Any
+            Positional arguments forwarded to ``fn``.
+        **kwargs : Any
+            Keyword arguments forwarded to ``fn``.
+
+        Returns
+        -------
+        Tensor | tuple[Tensor, Tensor]
+            Output tensor with residual, normalization (if enabled), LayerScale, and DropPath.
+            If ``fn`` is an :class:`EdgeAttention`, returns a tuple of ``(output, edge_out)``.
+        """
+        if self.edges:
+            return self._forward_edges(x, *args, **kwargs)
+        if self.norm_type == "pre":
+            return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
+        if self.norm_type == "post":
+            return self.norm(x + self.drop_path(self.ls(self.fn(x, *args, **kwargs))))
+        return x + self.drop_path(self.ls(self.fn(x, *args, **kwargs)))
+
+
+@final
+class EncoderLayer(nn.Module):
+    """Transformer encoder layer: self-attention + feed-forward.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial LayerScale value. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate. The default is ``0.0``.
+    depth : int, optional
+        Layer depth index, used for differential attention weighting. The default is ``1``.
+    dense_kwargs : dict | None, optional
+        Keyword args for :class:`GLU`.
+    attn_kwargs : dict | None, optional
+        Keyword args for :class:`Attention`.
+    norm_type : str, optional
+        One of ``{"pre", "post", "hybrid"}``. The default is ``"pre"``.
+    edge_embed_dim : int, optional
+        Model embedding dimension for edge features. The default is ``0``.
+    update_edges : bool, optional
+        If ``True``, edge features are updated after attention. The default is ``False``
+    mup: bool, optional
+        Whether to use μP parameterization. The default is ``False``.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
+        depth: int = 1,
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
         edge_embed_dim: int = 0,
         update_edges: bool = False,
         mup: bool = False,
     ) -> None:
         super().__init__()
-        self.embed_dim = embed_dim
-        self.edge_embed_dim = edge_embed_dim
-        self.update_edges = update_edges
         self.mup = mup
+        self.update_edges = update_edges
 
-        # The main blocks in the transformer
-        self.mha = MultiheadAttention(
-            embed_dim,
-            edge_embed_dim=edge_embed_dim,
-            update_edges=update_edges,
-            mup=self.mup,
-            **mha_config,
-        )
-        if dense_config:
-            self.dense = Dense(
-                input_size=embed_dim,
-                output_size=embed_dim,
-                context_size=context_dim,
-                mup=self.mup,
-                **dense_config,
+        # Safe defaults
+        if attn_kwargs is None:
+            attn_kwargs = {}
+        if dense_kwargs is None:
+            dense_kwargs = {}
+
+        # Attributes
+        self.embed_dim = embed_dim
+        self.norm_type = norm_type
+        if norm_type == "hybrid":
+            attn_kwargs["do_qk_norm"] = True
+            attn_kwargs["do_v_norm"] = True
+            residual_norm_type = "pre" if depth == 0 else "none"
+            self.norm = (
+                nn.Identity(embed_dim) if depth == 0 else getattr(layernorms, norm)(embed_dim)
             )
         else:
-            self.register_buffer("dense", None)
+            residual_norm_type = norm_type
 
-        # The multiple normalisation layers to keep it all stable
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        if self.edge_embed_dim > 0:
-            self.enorm1 = nn.LayerNorm(edge_embed_dim)
+        if self.mup:
+            attn_kwargs["mup"] = True
+            dense_kwargs["mup"] = True
+
+        # Choose attention type
+        attn_class: type[Attention | EdgeAttention]
+        if edge_embed_dim > 0:
+            attn_class = EdgeAttention
+            attn_kwargs["edge_embed_dim"] = edge_embed_dim
+            attn_kwargs["update_edges"] = update_edges
+
+            self.edge_prenorm = getattr(layernorms, norm)(edge_embed_dim)
             if self.update_edges:
-                self.enorm2 = nn.LayerNorm(edge_embed_dim)
+                self.edge_postnorm = getattr(layernorms, norm)(edge_embed_dim)
+        else:
+            attn_class = Attention
+
+        # Submodules
+        residual = partial(
+            NormResidual,
+            norm=norm,
+            ls_init=ls_init,
+            drop_path=drop_path,
+            norm_type=residual_norm_type,
+        )
+        self.attn = residual(attn_class(embed_dim, **attn_kwargs))
+        self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(
-        self,
-        x: Tensor,
-        edge_x: Tensor | None = None,
-        pad_mask: BoolTensor | None = None,
-        context: Tensor | None = None,
-        attn_mask: BoolTensor | None = None,
-        attn_bias: Tensor | None = None,
+        self, x: Tensor, edge_x: Tensor | None = None, **kwargs: Any
     ) -> Tensor | tuple[Tensor, Tensor]:
-        """Apply attention (and optional edge update) + feed-forward with residuals.
+        """Apply self-attention and feed-forward.
 
         Parameters
         ----------
         x : Tensor
-            Node/track embeddings of shape ``[B, N, D]`` (``D = embed_dim``).
+            Input tensor of shape ``[B, L, D]``.
         edge_x : Tensor | None, optional
-            Edge embeddings of shape ``[B, N, N, E]`` (``E = edge_embed_dim``). If provided,
-            the attention block can read/update edge features. The default is ``None``.
-        pad_mask : BoolTensor | None, optional
-            Boolean padding mask of shape ``[B, N]`` where padded positions are ``True``.
-            The default is ``None``.
-        context : Tensor | None, optional
-            Optional context vector of shape ``[B, C]`` passed into the dense block.
-            The default is ``None``.
-        attn_mask : BoolTensor | None, optional
-            Attention mask of shape ``[B, N, N]`` where allowed positions are ``True``.
-            The default is ``None``.
-        attn_bias : Tensor | None, optional
-            Optional attention bias (broadcastable to attention logits). The default is ``None``.
+            Edge feature tensor of shape ``[B, L, L, D_edge]`` (if using edge features).
+        **kwargs : Any
+            Extra arguments forwarded to the :class:`Attention` module
+            (e.g., ``mask``, ``attn_mask``, etc.).
 
         Returns
         -------
@@ -128,169 +401,286 @@ class TransformerEncoderLayer(nn.Module):
             If ``edge_x`` is provided: ``(x, edge_x)`` with updated tokens and edges.
         """
         if edge_x is not None:
-            xi, edge_xi = self.mha(
-                self.norm1(x),
-                edges=self.enorm1(edge_x),
-                q_mask=pad_mask,
-                attn_mask=attn_mask,
-                attn_bias=attn_bias,
-            )
+            x, edge_x = self.attn(x, edge_x=edge_x, **kwargs)
+            if self.update_edges:
+                edge_x = edge_x + self.edge_postnorm(edge_x)
         else:
-            xi = self.mha(
-                self.norm1(x),
-                q_mask=pad_mask,
-                attn_mask=attn_mask,
-                attn_bias=attn_bias,
-            )
+            x = self.attn(x, **kwargs)
 
-        x = x + xi
-        if self.update_edges:
-            edge_x = edge_x + self.enorm2(edge_xi)
-        if self.dense:
-            x = x + self.dense(self.norm2(x), context)
+        x = self.dense(self.norm(x)) if self.norm_type == "hybrid" else self.dense(x)
 
         if edge_x is not None:
             return x, edge_x
-
         return x
 
 
-class TransformerEncoder(nn.Module):
-    """Stack of transformer encoder layers with final normalization (and optional projection).
-
-    A message-passing encoder that preserves token dimensionality across layers and
-    uses multi-head attention for token-token interactions.
+@final
+class DecoderLayer(nn.Module):
+    """Transformer decoder layer with self- and cross-attention.
 
     Parameters
     ----------
     embed_dim : int
-        Token embedding dimension for inputs/outputs and attention projections.
-    num_layers : int
-        Number of encoder layers.
-    mha_config : Mapping
-        Keyword arguments forwarded to :class:`salt.models.attention.MultiheadAttention`
-        (used inside each :class:`TransformerEncoderLayer`).
-    dense_config : Mapping | None, optional
-        Keyword arguments forwarded to :class:`salt.models.dense.Dense` (per-layer).
-        If ``None``, the dense block in each layer is omitted. The default is ``None``.
-    context_dim : int, optional
-        Dimensionality of the optional context vector for dense blocks. The default is ``0``.
-    out_dim : int, optional
-        If non-zero, apply a final linear projection from ``embed_dim`` to ``out_dim``.
-        The default is ``0``.
-    edge_embed_dim : int, optional
-        Edge embedding dimension (if using edge features). The default is ``0``.
-    update_edges : bool, optional
-        If ``True``, layers update edges (except the last layer). The default is ``False``.
-    mup : bool, optional
-        Whether to use μP parameterization. The default is ``False``.
+        Embedding dimension.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial LayerScale value. The default is ``1e-3``.
+    drop_path : float, optional
+        Drop-path rate. The default is ``0.0``.
+    dense_kwargs : dict | None, optional
+        Keyword args for :class:`GLU`.
+    attn_kwargs : dict | None, optional
+        Keyword args for :class:`Attention`.
+    norm_type : str, optional
+        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
     """
 
     def __init__(
         self,
         embed_dim: int,
-        num_layers: int,
-        mha_config: Mapping,
-        dense_config: Mapping | None = None,
-        context_dim: int = 0,
-        out_dim: int = 0,
-        edge_embed_dim: int = 0,
-        update_edges: bool = False,
-        mup: bool = False,
-    ) -> None:
+        norm: str = "LayerNorm",
+        ls_init: float | None = 1e-3,
+        drop_path: float = 0.0,
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
+    ):
         super().__init__()
+
+        # Safe defaults
+        if attn_kwargs is None:
+            attn_kwargs = {}
+        if dense_kwargs is None:
+            dense_kwargs = {}
+
+        # Attributes
         self.embed_dim = embed_dim
-        self.edge_embed_dim = edge_embed_dim
-        self.num_layers = num_layers
-        self.out_dim = out_dim
-        self.update_edges = update_edges
-        self.mup = mup
-        self.featurewise = nn.ModuleList()
 
-        self.layers = nn.ModuleList([
-            TransformerEncoderLayer(
-                embed_dim,
-                mha_config,
-                dense_config,
-                context_dim,
-                edge_embed_dim,
-                update_edges if i != num_layers - 1 else False,
-                self.mup,
-            )
-            for i in range(num_layers)
-        ])
-        self.final_norm = nn.LayerNorm(embed_dim)
-
-        # For resizing the output tokens
-        if self.mup:
-            assert self.out_dim, (
-                "Need the out_dim layer for muP, \
-                as this is the last layer of the muP-part of the model"
-            )
-        if self.out_dim:
-            if self.mup and _MuReadout:
-                self.final_linear = _MuReadout(self.embed_dim, self.out_dim)
-                self.final_linear.bias.data.zero_()
-                self.final_linear.weight.data.zero_()
-            else:
-                self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
+        # Submodules
+        residual = partial(
+            NormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path, norm_type=norm_type
+        )
+        self.self_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
+        self.cross_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
+        self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(
         self,
-        x: Tensor | dict,
-        edge_x: Tensor | None = None,
-        pad_mask: Tensor | dict | None = None,
-        inputs: Tensors | None = None,
-        **kwargs,
+        x: Tensor,
+        *,  # Indicates that kv is required
+        kv: Tensor,
+        mask: Tensor | None = None,
+        kv_mask: Tensor | None = None,
     ) -> Tensor:
-        """Encode a sequence (optionally with edges) through all layers.
+        """Apply self-attention, cross-attention, and feed-forward.
 
         Parameters
         ----------
-        x : Tensor | dict
-            Input token embeddings. If a dict, values are concatenated along the
-            sequence dimension: each ``Tensor`` of shape ``[B, N_i, D]`` leading to
-            concatenated ``[B, sum_i N_i, D]``.
-        edge_x : Tensor | None, optional
-            Optional edge embeddings of shape ``[B, N, N, E]``. The default is ``None``.
-        pad_mask : Tensor | dict | None, optional
-            Padding mask(s). If a dict, values (``[B, N_i]``) are concatenated to ``[B, N]``.
-            The default is ``None``.
-        inputs : Tensors | None, optional
-            Original per-stream inputs passed to any configured featurewise transforms.
-            The default is ``None``.
-        **kwargs
-            Extra keyword arguments forwarded to each layer's attention/FFN (e.g. ``attn_mask``,
-            ``attn_bias``, etc.).
+        x : Tensor
+            Decoder input of shape ``[B, L, D]``.
+        kv : Tensor
+            Encoder memory of shape ``[B, L_enc, D]``.
+        mask : Tensor | None, optional
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : Tensor | None, optional
+            Padding mask for ``kv`` where padded positions are ``True``.
 
         Returns
         -------
         Tensor
-            Encoded token embeddings of shape ``[B, N, D_out]``, where ``D_out = out_dim``
-            if a final projection is configured, else ``embed_dim``.
+            Output tensor of shape ``[B, L, D]``.
         """
-        if isinstance(x, dict):
-            x = cat(list(x.values()), dim=1)
+        x = self.self_attn(x, kv_mask=mask)
+        x = self.cross_attn(x, kv=kv, kv_mask=kv_mask)
+        return self.dense(x)
 
-        if isinstance(pad_mask, dict):
-            pad_mask = cat(list(pad_mask.values()), dim=1)
 
-        # pad track to ensure ONNX compatibility
-        x = torch.cat([x, torch.zeros((x.shape[0], 1, x.shape[2]), device=x.device)], dim=1)
-        if pad_mask is not None and not isinstance(pad_mask, dict):
-            pad_mask = torch.cat(
-                [
-                    pad_mask,
-                    torch.ones((pad_mask.shape[0], 1), dtype=torch.bool, device=pad_mask.device),
-                ],
-                dim=1,
+@final
+class Transformer(nn.Module):
+    """Transformer encoder stack with optional registers and output projection.
+
+    Parameters
+    ----------
+    num_layers : int
+        Number of encoder layers.
+    embed_dim : int
+        Embedding dimension.
+    out_dim : int | None, optional
+        Optional output projection dimension. If ``None``, equals ``embed_dim``.
+    norm : str, optional
+        Normalization style (class name from :mod:`salt.models.layernorm`).
+        The default is ``"LayerNorm"``.
+    attn_type : str, optional
+        Attention backend, one of ``{"torch-math", "torch-flash", "torch-meff", "flash-varlen"}``.
+        The default is ``"torch-math"``.
+    do_final_norm : bool, optional
+        Whether to apply a final normalization layer. The default is ``True``.
+    num_registers : int, optional
+        Number of learned register tokens appended to the end of the sequence. The default is ``1``.
+    drop_registers : bool, optional
+        If ``True``, registers are dropped from outputs. The default is ``False``.
+    edge_embed_dim : int, optional
+        Model embedding dimension for edge features. The default is ``0``.
+    update_edges : bool, optional
+        If ``True``, edge features are updated after attention. The default is ``False``
+    mup: bool, optional
+        Whether to use μP parameterization. The default is ``False``.
+    **kwargs : Any
+        Extra keyword arguments forwarded to :class:`EncoderLayer` (e.g., ``attn_kwargs``,
+        ``dense_kwargs``, ``ls_init``, etc.).
+
+    Raises
+    ------
+    ValueError
+        If ``num_registers < 1``.
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        embed_dim: int,
+        out_dim: int | None = None,
+        norm: str = "LayerNorm",
+        attn_type: str = "torch-math",
+        do_final_norm: bool = True,
+        num_registers: int = 1,
+        drop_registers: bool = False,
+        edge_embed_dim: int = 0,
+        update_edges: bool = False,
+        mup: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+
+        # Check the inputs
+        if num_registers < 1:
+            raise ValueError(
+                "Some jets have no tracks, which causes NaNs in the attention scores. "
+                "To avoid this, set num_registers to at least 1",
             )
+
+        # Attributes
+        self.num_layers = num_layers
+        self.embed_dim = embed_dim
+        self.out_dim = out_dim or embed_dim
+        self.do_final_norm = do_final_norm
+        self.do_out_proj = out_dim is not None
+        self.attn_type = attn_type
+        self.num_registers = num_registers
+        self.drop_registers = drop_registers
+        self.edge_embed_dim = edge_embed_dim
+        self.update_edges = update_edges
+        self.mup = mup
+
+        if self.update_edges:
+            assert edge_embed_dim > 0, "Cannot update edges with edge_embed_dim=0"
+
+        if self.mup:
+            assert _MuReadout is not None, "mup is not installed!"
+            assert self.do_out_proj, (
+                "Need the out_dim layer for muP, \
+                as this is the last layer of the muP-part of the model"
+            )
+
+        # Set the attention type if no edge features are used
+        if edge_embed_dim == 0:
+            kwargs["attn_kwargs"]["attn_type"] = self.attn_type
+
+        # Submodules
+        self.layers = torch.nn.ModuleList([
+            EncoderLayer(
+                embed_dim=embed_dim,
+                norm=norm,
+                depth=depth,
+                edge_embed_dim=edge_embed_dim,
+                update_edges=update_edges,
+                **kwargs,
+            )
+            for depth in range(num_layers)
+        ])
+
+        # Only set the attention type if no edge features are used
+        if self.edge_embed_dim == 0:
+            # Check and set the attention type
+            assert self.attn_type in ATTN_TYPES, "Invalid attention type!"
+            self.set_backend(self.attn_type)
+
+        # Optional submodules
+        if self.do_out_proj:
+            self.out_proj = nn.Linear(self.embed_dim, self.out_dim)
+            if self.mup and _MuReadout is not None:
+                self.out_proj = _MuReadout(embed_dim, self.out_dim)
+                self.out_proj.bias.data.zero_()
+                self.out_proj.weight.data.zero_()
+        if self.do_final_norm:
+            self.out_norm = getattr(layernorms, norm)(self.out_dim)
+        if self.num_registers:
+            self.registers = nn.Parameter(
+                torch.normal(torch.zeros((self.num_registers, self.embed_dim)), std=1e-4)
+            )
+            self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
+        self.featurewise = nn.ModuleList()
+
+    def set_backend(self, attn_type: str) -> None:
+        """Set the attention backend for all layers.
+
+        Parameters
+        ----------
+        attn_type : str
+            Backend name to apply to all encoder layers.
+        """
+        self.attn_type = attn_type
+        for layer in self.layers:
+            self.attn_type = layer.attn.fn.set_backend(self.attn_type)
+
+    def forward(
+        self,
+        x: Tensor | dict[str, Tensor],
+        pad_mask: BoolTensor | dict[str, BoolTensor],
+        inputs: Tensors | None = None,
+        edge_x: Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[Tensor, BoolTensor | dict[str, BoolTensor]]:
+        """Run the encoder stack.
+
+        Parameters
+        ----------
+        x : Tensor | dict[str, Tensor]
+            Input sequence(s) of shape ``[B, L, D]`` or dict of such tensors.
+        pad_mask : BoolTensor | dict[str, BoolTensor]
+            Padding mask(s) aligned with ``x``; padded positions are ``True``.
+        inputs : Tensors | None, optional
+            Original input dictionary for featurewise transforms (if any).
+        edge_x : Tensor | None, optional
+            Edge feature tensor of shape ``[B, L, L, D_edge]`` (if using edge features).
+        **kwargs : Any
+            Extra arguments forwarded to encoder layers (e.g., attention masks or
+            varlen flash arguments).
+
+        Returns
+        -------
+        tuple[Tensor, BoolTensor | dict[str, BoolTensor]]
+            Tuple of ``(encoded, pad_mask)`` where ``encoded`` has shape ``[B, L, D_out]``.
+        """
+        # Add the registers to the sequence and the mask
+        if self.num_registers:
+            x, pad_mask = self._add_registers(x, pad_mask)
+
+        # Combine the input sequences if they are dictionaries (don't overwrite pad_mask)
+        if isinstance(x, dict):
+            x = torch.cat(list(x.values()), dim=1)
+        mask = torch.cat(list(pad_mask.values()), dim=1) if isinstance(pad_mask, dict) else pad_mask
+
+        # Pad edges by num_registers if using edge features
         if edge_x is not None:
             edge_x = torch.cat(
                 [
                     edge_x,
                     torch.zeros(
-                        (edge_x.shape[0], 1, edge_x.shape[2], edge_x.shape[3]), device=edge_x.device
+                        (edge_x.shape[0], self.num_registers, edge_x.shape[2], edge_x.shape[3]),
+                        device=edge_x.device,
                     ),
                 ],
                 dim=1,
@@ -299,296 +689,79 @@ class TransformerEncoder(nn.Module):
                 [
                     edge_x,
                     torch.zeros(
-                        (edge_x.shape[0], edge_x.shape[1], 1, edge_x.shape[3]), device=edge_x.device
+                        (edge_x.shape[0], edge_x.shape[1], self.num_registers, edge_x.shape[3]),
+                        device=edge_x.device,
                     ),
                 ],
                 dim=2,
             )
 
+        # If using the varlen backend, pack the sequence and store the cumulative lengths
+        if self.attn_type == "flash-varlen":
+            x, kwargs["culens"], kwargs["maxlen"] = undo_padding(x, mask)
+
+        # Run through the main transformer encoder layers
         for i, layer in enumerate(self.layers):
             if len(self.featurewise) > 0:
                 x = self.featurewise[i](inputs, x)
             if edge_x is not None:
-                x, edge_x = layer(x, edge_x, pad_mask=pad_mask, **kwargs)
+                x, edge_x = layer(x, edge_x=edge_x, mask=mask, **kwargs)
             else:
-                x = layer(x, pad_mask=pad_mask, **kwargs)
-        x = self.final_norm(x)
+                x = layer(x, mask=mask, **kwargs)
 
-        # optional resizing layer
-        if self.out_dim:
-            x = self.final_linear(x)
+        # Run through the optional layers
+        if self.do_out_proj:
+            x = self.out_proj(x)
+        if self.do_final_norm:
+            x = self.out_norm(x)
 
-        # remove extra padded track
-        x = x[:, :-1, :]
-        if pad_mask is not None and not isinstance(pad_mask, dict):
-            pad_mask = pad_mask[:, :-1]
-        if edge_x is not None:
-            edge_x = edge_x[:, :-1, :-1, :]
+        # If using the varlen backend, unpack the sequence
+        if self.attn_type == "flash-varlen":
+            x = redo_padding(x, mask)
 
-        return x
+        # Optionally drop the registers from the output
+        if self.drop_registers:
+            x = x[:, : -self.num_registers]
+            if isinstance(pad_mask, dict):
+                del pad_mask["REGISTERS"]
+            elif isinstance(pad_mask, Tensor):
+                pad_mask = pad_mask[:, : -self.num_registers]
 
+        return x, pad_mask
 
-class TransformerCrossAttentionLayer(TransformerEncoderLayer):
-    """Transformer layer that computes **additive** cross-attention updates.
-
-    Unlike a standard encoder layer, this module returns *only* the additive update
-    (no residual is applied internally). Use it as:
-
-    - residual style: ``A_{i+1} = A_i + CA(A_i, B_i)``
-    - feed-forward style: ``A_{i+1} = CA(A_i, B_i)``
-
-    Parameters
-    ----------
-    embed_dim : int
-        Token embedding dimension for inputs/outputs and attention projections.
-    mha_config : Mapping
-        Keyword arguments forwarded to :class:`salt.models.attention.MultiheadAttention`.
-    dense_config : Mapping | None, optional
-        Keyword arguments forwarded to :class:`salt.models.dense.Dense`. If ``None``,
-        the dense block is omitted. The default is ``None``.
-    context_dim : int, optional
-        Dimensionality of the optional context vector for the dense block. The default is ``0``.
-    mup : bool, optional
-        Whether to use μP parameterization. The default is ``False``.
-    """
-
-    def __init__(
-        self,
-        embed_dim: int,
-        mha_config: Mapping,
-        dense_config: Mapping | None = None,
-        context_dim: int = 0,
-        mup: bool = False,
-    ) -> None:
-        super().__init__(embed_dim, mha_config, dense_config, context_dim, mup)
-        self.norm0 = nn.LayerNorm(embed_dim)
-
-    def forward(  # type: ignore[override]
-        self,
-        query: Tensor,
-        key_value: Tensor,
-        query_mask: BoolTensor | None = None,
-        key_value_mask: BoolTensor | None = None,
-        context: Tensor | None = None,
-    ) -> Tensor:
-        """Compute the **additive** cross-attention update.
+    def _add_registers(
+        self, x: Tensor | dict[str, Tensor], pad_mask: BoolTensor | dict[str, BoolTensor] | None
+    ) -> tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]:
+        """Add the learnable registers to the end of the input sequence (and mask).
 
         Parameters
         ----------
-        query : Tensor
-            Query sequence of shape ``[B, N_q, D]``.
-        key_value : Tensor
-            Key/value sequence of shape ``[B, N_kv, D]``.
-        query_mask : BoolTensor | None, optional
-            Padding mask for the query sequence of shape ``[B, N_q]``. The default is ``None``.
-        key_value_mask : BoolTensor | None, optional
-            Padding mask for the key/value sequence of shape ``[B, N_kv]``.
-            The default is ``None``.
-        context : Tensor | None, optional
-            Optional context vector for the dense block of shape ``[B, C]``.
-            The default is ``None``.
+        x : Tensor | dict[str, Tensor]
+            Input sequence(s) of shape ``[B, L, D]`` or dict of such tensors.
+        pad_mask : BoolTensor | dict[str, BoolTensor] | None
+            Padding mask(s) aligned with ``x``; padded positions are ``True``.
 
         Returns
         -------
-        Tensor
-            Additive update tensor of shape ``[B, N_q, D]``. No residual is added internally.
+        tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]
+            Updated ``(x, pad_mask)`` including appended registers.
         """
-        additive = self.mha(
-            self.norm1(query),
-            self.norm0(key_value),
-            q_mask=query_mask,
-            kv_mask=key_value_mask,
-        )
-        if self.dense:
-            additive = self.dense(self.norm2(additive), context)
-        # The cross attention does not return residual+additive but only the additive.
-        # Recommended usage: A_{i+1} = A_i + CA(A_i, B_i) for residual style.
-        return additive
+        # Get the batch size and expand the registers to match
+        batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
 
+        # Add as a key or concatenate at the end
+        reg = self.registers.expand(batch_size, -1, -1)
+        if isinstance(x, dict):
+            x["REGISTERS"] = reg
+        else:
+            x = torch.cat([x, reg], dim=1)
 
-class TransformerCrossAttentionEncoder(nn.Module):
-    """Interleaved self-attention encoders with symmetric cross-attention updates.
-
-    For each input stream, a stack of self-attention layers is applied. Between
-    streams, symmetric cross-attention updates are optionally applied either at
-    every layer (``ca_every_layer=True``) or only at the first/last layer.
-
-    Parameters
-    ----------
-    input_names : list[str]
-        Ordered list of input stream names (used to key the dictionaries).
-    embed_dim : int
-        Token embedding dimension for inputs/outputs and attention projections.
-    num_layers : int
-        Number of self-attention layers per input stream.
-    mha_config : Mapping
-        Keyword arguments forwarded to :class:`salt.models.attention.MultiheadAttention`.
-    sa_dense_config : Mapping | None, optional
-        Keyword arguments for the self-attention layers' dense blocks. The default is ``None``.
-    ca_dense_config : Mapping | None, optional
-        Keyword arguments for the cross-attention layers' dense blocks. The default is ``None``.
-    context_dim : int, optional
-        Dimensionality of the optional context vector for dense blocks. The default is ``0``.
-    out_dim : int, optional
-        If non-zero, apply a final linear projection from ``embed_dim`` to ``out_dim``.
-        The default is ``0``.
-    ca_every_layer : bool, optional
-        If ``True``, apply cross-attention after **every** self-attention layer;
-        otherwise only on the first and last layers. The default is ``False``.
-    update_edges : bool, optional
-        Reserved for parity with other encoders; edge updates are not supported here.
-        The default is ``False``.
-    mup : bool, optional
-        Whether to use μP parameterization. The default is ``False``.
-    """
-
-    def __init__(
-        self,
-        input_names: list[str],
-        embed_dim: int,
-        num_layers: int,
-        mha_config: Mapping,
-        sa_dense_config: Mapping | None = None,
-        ca_dense_config: Mapping | None = None,
-        context_dim: int = 0,
-        out_dim: int = 0,
-        ca_every_layer: bool = False,
-        update_edges: bool = False,
-        mup: bool = False,
-    ):
-        super().__init__()
-        self.input_names = input_names
-        self.embed_dim = embed_dim
-        self.num_layers = num_layers
-        self.out_dim = out_dim
-        self.ca_every_layer = ca_every_layer
-        self.update_edges = update_edges
-        self.mup = mup
-
-        # Layers for each input type
-        # need to use ModuleDict so device is set correctly
-        self.type_layers = nn.ModuleDict({
-            input_name: nn.ModuleList([
-                TransformerEncoderLayer(
-                    embed_dim,
-                    mha_config,
-                    sa_dense_config,
-                    context_dim,
-                    update_edges if i != num_layers - 1 else False,
-                    mup,
-                )
-                for i in range(num_layers)
-            ])
-            for input_name in self.input_names
-        })
-
-        ca_layers = num_layers if ca_every_layer else 2 if num_layers > 1 else 1
-
-        # module dict only supports string keys
-        self.cross_layers = nn.ModuleDict({
-            f"{input_name1}_{input_name2}": nn.ModuleList([
-                TransformerCrossAttentionLayer(
-                    embed_dim,
-                    mha_config,
-                    ca_dense_config,
-                    context_dim,
-                    mup,
-                )
-                for _ in range(ca_layers)
-            ])
-            for input_name1, input_name2 in combinations(self.input_names, 2)
-        })
-
-        self.final_norm = nn.LayerNorm(embed_dim)
-
-        if self.mup:
-            assert self.out_dim, (
-                "Need the out_dim layer for mup, \
-                as this is the last layer of the mup-part of the model"
-            )
-
-        # For resizing the output tokens
-        if self.out_dim:
-            if mup and _MuReadout:
-                self.final_linear = _MuReadout(self.embed_dim, self.out_dim)
-                self.final_linear.bias.data.zero_()
-                self.final_linear.weight.data.zero_()
+        # Also include a mask for the registers
+        if pad_mask is not None:
+            reg_mask = self.register_mask.expand(batch_size, -1)
+            if isinstance(pad_mask, dict):
+                pad_mask["REGISTERS"] = reg_mask
             else:
-                self.final_linear = nn.Linear(self.embed_dim, self.out_dim)
+                pad_mask = torch.cat([pad_mask, reg_mask], dim=-1)
 
-    def forward(
-        self,
-        x: dict[str, Tensor],
-        pad_mask: dict[str, Tensor],
-        edge_x: Tensor | None = None,
-        **kwargs,
-    ) -> dict[str, Tensor]:
-        """Run interleaved self-attention per stream with symmetric cross-attention updates.
-
-        Parameters
-        ----------
-        x : dict[str, Tensor]
-            Mapping from input name to token embeddings of shape ``[B, N_i, D]``.
-            The set of keys must match ``input_names``.
-        pad_mask : dict[str, Tensor]
-            Mapping from input name to boolean padding masks of shape ``[B, N_i]``.
-        edge_x : Tensor | None, optional
-            Unused (edge updates are not supported). If provided, a ``ValueError`` is raised.
-        **kwargs
-            Extra keyword arguments forwarded to layers (e.g. ``attn_mask``, ``attn_bias``,
-            and/or ``context`` for dense blocks).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            Mapping with the same keys as ``x``, each containing the encoded sequence of shape
-            ``[B, N_i, D_out]``, where ``D_out = out_dim`` if a final projection is configured,
-            else ``embed_dim``.
-
-        Raises
-        ------
-        ValueError
-            If edge_x is given (Edge updates of Cross Attention are not yet supported)
-        """
-        if edge_x is not None:
-            raise ValueError("Edge updates of Cross Attention Encoder not yet supported")
-
-        # Merge inputs as specified
-        for i in range(self.num_layers):
-            # Self-attention for each type
-            for it in self.input_names:
-                x[it] = self.type_layers[it][i](x[it], pad_mask=pad_mask[it], **kwargs)
-
-            # Cross-attention between pairs of types - symmetric update
-            # i % len(self.cross_layers[layer_key]) evals to 0 for first layer
-            # and final layer and 1 everywhere else to give behaviour we want
-            prev_x = {k: x[k].clone() for k in x}
-            if self.ca_every_layer:
-                for it1, it2 in combinations(self.input_names, 2):
-                    layer_key = f"{it1}_{it2}"
-                    x[it1] += self.cross_layers[layer_key][i](
-                        prev_x[it1], prev_x[it2], pad_mask[it1], pad_mask[it2], **kwargs
-                    )
-                    x[it2] += self.cross_layers[layer_key][i](
-                        prev_x[it2], prev_x[it1], pad_mask[it2], pad_mask[it1], **kwargs
-                    )
-            elif i in {0, self.num_layers - 1}:
-                for it1, it2 in combinations(self.input_names, 2):
-                    layer_key = f"{it1}_{it2}"
-                    x[it1] += self.cross_layers[layer_key][i // (self.num_layers - 1)](
-                        prev_x[it1], prev_x[it2], pad_mask[it1], pad_mask[it2], **kwargs
-                    )
-                    x[it2] += self.cross_layers[layer_key][i // (self.num_layers - 1)](
-                        prev_x[it2], prev_x[it1], pad_mask[it2], pad_mask[it1], **kwargs
-                    )
-
-        # Apply final normalization
-        for it in self.input_names:
-            x[it] = self.final_norm(x[it])
-
-        # Optional resizing layer
-        if self.out_dim:
-            for it in self.input_names:
-                x[it] = self.final_linear(x[it])
-
-        return x
+        return x, pad_mask

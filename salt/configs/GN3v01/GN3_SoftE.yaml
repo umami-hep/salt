@@ -9,7 +9,7 @@ model:
       init_nets:
         - input_name: tracks
           dense_config: &init
-            output_size: &embed_dim 512
+            output_size: 512
             hidden_layers: [512]
             activation: &activation SiLU
         # Adding flows
@@ -75,8 +75,6 @@ model:
                 class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.56, 13.3, 1.0, 6.49, 21.48, 109.72]
                 dense_config:
                   <<: *task_dense_config
                   input_size: *out_dim

@@ -9,7 +9,7 @@ from torch import nn
 from torch.optim import AdamW
 
 from salt.models import InputNorm
-from salt.models.transformer_v2 import change_attn_backends
+from salt.models.transformer import change_attn_backends
 from salt.utils.muP_utils.configuration_muP import instantiate_mup
 
 try:
@@ -282,7 +282,7 @@ class ModelWrapper(lightning.LightningModule):
             Evaluation results
         """
         if (
-            type(self.model.encoder).__name__ == "TransformerV2"
+            type(self.model.encoder).__name__ == "Transformer"
             and self.trainer.precision == "32-true"
         ):
             change_attn_backends(self, backend="torch-math")

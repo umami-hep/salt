@@ -31,7 +31,7 @@ model:
             <<: *init
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           num_layers: 4
           embed_dim: *embed_dim
@@ -105,8 +105,6 @@ model:
                 class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.56, 13.3, 1.0, 6.49, 21.48, 109.72]
                 dense_config:
                   <<: *task_dense_config
                   input_size: *out_dim
@@ -127,7 +125,7 @@ model:
                   <<: *task_dense_config
                   output_size: 1
                   activation: *activation
-             # B-jet charge classification task
+              # B-jet charge classification task
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jets_charge
@@ -138,8 +136,6 @@ model:
                 weight: 1
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.56, 3.56, 1.0]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 3

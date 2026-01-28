@@ -14,7 +14,6 @@ model:
   model:
     class_path: salt.models.SaltModel
     init_args:
-
       init_nets:
         - input_name: tracks
           dense_config: &init
@@ -27,7 +26,7 @@ model:
             <<: *init
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           num_layers: 4
           embed_dim: *embed_dim
@@ -95,12 +94,10 @@ model:
                 name: track_type
                 input_name: tracks
                 label: ftagTruthTypeLabel
-                label_map: {-2 : 2, -3 : 3, 5 : 4, -5 : 4, 6 : 5, -6 : 5}
+                label_map: { -2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5 }
                 class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.5, 13.34, 1.0, 6.47, 21.5, 112.1]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 6

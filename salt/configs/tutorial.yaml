@@ -19,7 +19,7 @@ model:
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           embed_dim: *embed_dim
           num_layers: 2
@@ -59,7 +59,17 @@ model:
                 name: const_origin
                 input_name: tracks
                 label: truth_origin_label
-                class_names: [pileup, primary, fromBC, fromB, fromC, fromS, fromTau*, secondary]
+                class_names:
+                  [
+                    pileup,
+                    primary,
+                    fromBC,
+                    fromB,
+                    fromC,
+                    fromS,
+                    fromTau*,
+                    secondary,
+                  ]
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss

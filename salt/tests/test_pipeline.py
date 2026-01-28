@@ -11,15 +11,22 @@ from salt.utils.get_onnx_metadata import main as get_onnx_metadata
 from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
 
 w = "ignore::lightning.fabric.utilities.warnings.PossibleUserWarning:"
-CONFIG = "GN2.yaml"
+CONFIG = "GN2/GN2.yaml"
 TAU_CONFIGS = {"GN2.yaml"}
 
 GN3_TASKS = [
-    "jet_pt_regression", "jets_classification", "track_vertexing", "track_origin", "track_type"
+    "jet_pt_regression",
+    "jets_classification",
+    "track_vertexing",
+    "track_origin",
+    "track_type",
 ]
 
 
-def run_train(tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc_params=False, is_gn3=False):
+def run_train(
+    tmp_path, config_path, train_args, do_xbb=False, do_mup=False, inc_params=False, is_gn3=False
+):
+    print(config_path.name)
     incl_taus = config_path.name in TAU_CONFIGS
     tmp_path = Path(tmp_path)
     train_h5_path = tmp_path / "dummy_train_inputs.h5"
@@ -162,23 +169,14 @@ def run_combined(
 
 
 @pytest.mark.filterwarnings(w)
-def test_GN1(tmp_path) -> None:
-    run_combined(tmp_path, "GN1.yaml", do_onnx=False)
-
-
-@pytest.mark.filterwarnings(w)
 def test_GN2(tmp_path) -> None:
     run_combined(tmp_path, CONFIG, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN3V00(tmp_path) -> None:
-    run_combined(
-        tmp_path,
-        "GN3v01/GN3V00.yaml",
-        export_args=["--tasks", *GN3_TASKS],
-        is_gn3=True
-    )
+    run_combined(tmp_path, "GN3v01/GN3V00.yaml", export_args=["--tasks", *GN3_TASKS], is_gn3=True)
+
 
 @pytest.mark.filterwarnings(w)
 def test_GN3V01(tmp_path) -> None:
@@ -189,35 +187,30 @@ def test_GN3V01(tmp_path) -> None:
         is_gn3=True,
     )
 
+
 @pytest.mark.filterwarnings(w)
 def test_GN2_muP(tmp_path) -> None:
-    run_combined(tmp_path, "GN2_muP.yaml", do_mup=True, do_onnx=False)
+    run_combined(tmp_path, "GN2/GN2_muP.yaml", do_mup=True, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN2emu(tmp_path) -> None:
-    run_combined(tmp_path, "GN2emu.yaml", do_onnx=False)
+    run_combined(tmp_path, "GN2/GN2emu.yaml", do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
 def test_GN2XE(tmp_path) -> None:
-    run_combined(tmp_path, "GN2XE.yaml", do_onnx=False, do_xbb=True)
-
-
-@pytest.mark.filterwarnings(w)
-def test_GN1_GATv2(tmp_path) -> None:
-    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'GATv2.yaml'}"]
-    run_combined(tmp_path, "GN1.yaml", train_args=args, do_onnx=False)
+    run_combined(tmp_path, "GN2/GN2XE.yaml", do_onnx=False, do_xbb=True)
 
 
 @pytest.mark.filterwarnings(w)
 def test_DIPS(tmp_path) -> None:
-    run_combined(tmp_path, "dips.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "legacy/dips.yaml", do_eval=True, do_onnx=True)
 
 
 @pytest.mark.filterwarnings(w)
 def test_DL1(tmp_path) -> None:
-    run_combined(tmp_path, "DL1.yaml", do_eval=True, do_onnx=False)
+    run_combined(tmp_path, "legacy/DL1.yaml", do_eval=True, do_onnx=False)
 
 
 @pytest.mark.filterwarnings(w)
@@ -280,12 +273,6 @@ def test_truncate_inputs_error(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
-def test_tfv2(tmp_path) -> None:
-    args = [f"--config={Path(__file__).parent.parent / 'configs' / 'encoder-v2.yaml'}"]
-    run_combined(tmp_path, CONFIG, train_args=args)
-
-
-@pytest.mark.filterwarnings(w)
 def test_maskformer(tmp_path) -> None:
     run_combined(tmp_path, "MaskFormer.yaml", train_args=None, export_args=["-mf=vertexing"])
 
@@ -309,12 +296,12 @@ def test_gls_weighting(tmp_path) -> None:
     # Ensure that this raises an assertion
     args = ["--model.loss_mode=lol"]
     with pytest.raises(AssertionError):
-        run_combined(tmp_path, "dips.yaml", train_args=args)
+        run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
 
     # Should fail, as we still have weights here
     args = ["--model.loss_mode=GLS"]
     with pytest.raises(AssertionError):
-        run_combined(tmp_path, "GN2.yaml", train_args=args)
+        run_combined(tmp_path, "GN2/GN2.yaml", train_args=args)
 
     # And this *should* work
-    run_combined(tmp_path, "dips.yaml", train_args=args)
+    run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
