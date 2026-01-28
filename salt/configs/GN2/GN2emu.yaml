@@ -15,18 +15,20 @@ model:
             <<: *init
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
-          embed_dim: *embed_dim
           num_layers: 6
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          # flash attention
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
             activation: *activation
-            hidden_layers: [256]
-            dropout: &dropout 0.1
+            gated: False
+          attn_kwargs:
+            num_heads: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -43,13 +45,12 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.73, 1.08] }
                 dense_config: &task
                   input_size: &pooled_dim 142
                   output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
+                  dropout: 0.1
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -59,8 +60,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
                 dense_config:
                   <<: *task
                   input_size: *out_dim
@@ -90,8 +89,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.96, 104.05, 1.0, 8.32, 5.98, 10.22, 1.0, 21.54]
                 dense_config:
                   <<: *task
                   input_size: *out_dim

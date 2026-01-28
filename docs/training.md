@@ -9,11 +9,11 @@ This allows you control all aspects of the training from config or directly via 
 The configuration is split into two parts.
 The [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
 This config is used by default for all trainings without you having to explicitly specify it.
-Meanwhile the model configs, for example [`gnn.yaml`]({{repo_url}}-/blob/main/salt/configs/gnn.yaml) contain a full description of a specific model, including a list of input variables used.
+Meanwhile the model configs, for example [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2.yaml) contain a full description of a specific model, including a list of input variables used.
 You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `salt`.
 
 ```bash
-salt fit --config configs/GN2.yaml
+salt fit --config configs/GN2/GN2.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
@@ -27,7 +27,7 @@ The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io
     exit.
 
     ```bash
-    salt fit --config configs/GN2.yaml --trainer.fast_dev_run 2
+    salt fit --config configs/GN2/GN2.yaml --trainer.fast_dev_run 2
     ```
 
     Logging and checkpoint are suppressed when using this flag.
@@ -150,7 +150,7 @@ If you have enough RAM, you can load the training data into shared memory before
 Those at institutions with HTCondor managed GPU batch queues can submit training jobs using
 
 ```bash
-python submit/submit_htcondor.py --config configs/GN2.yaml
+python submit/submit_htcondor.py --config configs/GN2/GN2.yaml
 ```
 
 It is required to pass the path to the configuration file via the `--config` argument.
@@ -172,7 +172,7 @@ Those at institutions with Slurm managed GPU batch queues can submit training jo
 All options described above for HTCondor and more (CPUs, GPUs, etc) are available as command line arguments. 
 
 ```bash
-python submit/submit_slurm.py --config configs/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2
+python submit/submit_slurm.py --config configs/GN2/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2
 ```
 
 Where arguments need to agree between Slurm and Pytorch Lightning, such as ntasks-per-node for Slurm and trainer.devices for Lightning, this is handled by the script.
@@ -180,13 +180,13 @@ Where arguments need to agree between Slurm and Pytorch Lightning, such as ntask
 Lightning has the ability to requeue a job if it is killed by Slurm for exceeding the system walltime. The training state is saved in a checkpoint and loaded when the new job begins. submit_slurm.py creates a single log directory holding the checkpoints for the original and any requeue-d jobs (in the below example GN2_my_requeue_job).
 
 ```bash
-python submit/submit_slurm.py --config configs/GN2.yaml --requeue --salt_log_dir=my_requeue_job --signal=SIGUSR1@90
+python submit/submit_slurm.py --config configs/GN2/GN2.yaml --requeue --salt_log_dir=my_requeue_job --signal=SIGUSR1@90
 ```
 
 There are many options for both Slurm and Salt, not all of which are explicitly handled but which should be available to a user if needed. To access these you can add `slurm.` (for Slurm) or `config.` (for Salt) to the beginning of an argument and it will be converted into a valid argument. Note that the "=" should be used in this case instead of a space.
 
 ```bash
-python submit/submit_slurm.py --config configs/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2 --config.trainer.max_epochs=1 --slurm.dependency=afterok:1111111 
+python submit/submit_slurm.py --config configs/GN2/GN2.yaml --tag test_salt --account MY-ACCOUNT --nodes 1 --gpus_per_node 2 --config.trainer.max_epochs=1 --slurm.dependency=afterok:1111111 
 ```
 
 The submit/submit_slurm.py script itself can also be modified if necessary.
@@ -230,7 +230,7 @@ If you are not producing a "final" version of your model (i.e. with maximum poss
 Other things you can always do:
 
 - Use bfloat16 precision
-- Use the flash attention backend for the [`TransformerV2` class](https://gitlab.cern.ch/svanstro/hepformer/-/blob/main/hepformer/models/transformerV2.py)
+- Use the flash attention backend for the [`Transformer` class](https://gitlab.cern.ch/svanstro/hepformer/-/blob/main/hepformer/models/transformer.py)
 - Use the maximum possible [batch size](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.BatchSizeFinder.html)
 - Increase your effective batch size by [accumulating gradients](https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html#accumulate-gradients)
 - Ensure you have enough [workers for dataloading](worker-counts)

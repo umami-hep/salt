@@ -19,16 +19,20 @@ model:
             activation: &activation ReLU
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
-          embed_dim: *embed_dim
           num_layers: 4
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          # flash attention
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
             activation: *activation
+            gated: False
+          attn_kwargs:
+            num_heads: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -43,12 +47,11 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
-                use_class_dict: True
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 4
+                  output_size: 5
                   hidden_layers: [128, 64, 32]
                   activation: *activation
 
@@ -57,7 +60,6 @@ model:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
-                use_class_dict: True
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
@@ -109,11 +111,10 @@ data:
       #- numberOfTRTHits
       #- leptonID
 
-  train_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_train.h5
-  val_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_val.h5
-  norm_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/norm_dict.yaml
-  class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
-  #move_files_temp: /dev/shm/svanstro/salt/gn2/
+  train_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_train.h5
+  val_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_val.h5
+  norm_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/norm_dict.yaml
+  class_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/class_dict.yaml
 
   batch_size: 4000
   num_workers: 40
@@ -121,5 +122,5 @@ data:
 trainer:
   max_epochs: 40
   accelerator: gpu
-  devices: 1
+  devices: 2
   precision: 16-mixed

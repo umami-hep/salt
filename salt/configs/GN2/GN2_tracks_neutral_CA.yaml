@@ -1,4 +1,4 @@
-name: GN2
+name: GN2_tracks_neutral_CA
 
 model:
   lrs_config:
@@ -17,18 +17,28 @@ model:
             output_size: &embed_dim 256
             hidden_layers: [256]
             activation: &activation ReLU
+        - input_name: neutral
+          dense_config:
+            output_size: *embed_dim
+            hidden_layers: [256]
+            activation: *activation
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.TransformerCrossAttentionEncoder
         init_args:
+          input_names: [tracks, neutral]
           embed_dim: *embed_dim
           num_layers: 4
           out_dim: &out_dim 128
           mha_config:
             num_heads: 8
             attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          sa_dense_config:
             activation: *activation
+            dropout: &dropout 0.1
+          ca_dense_config:
+            activation: *activation
+            dropout: *dropout
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -45,42 +55,12 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [2.0, 2.0, 2.0, 1.0, 6.25] }
-                dense_config: &task_dense_config
+                dense_config:
                   input_size: *out_dim
-                  output_size: 5
+                  output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-
-            - class_path: salt.models.ClassificationTask
-              init_args:
-                name: track_origin
-                input_name: tracks
-                label: ftagTruthOriginLabel
-                weight: 0.5
-                loss:
-                  class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.92, 83.21, 1.0, 10.22, 7.11, 7.88, 62.91, 19.42]
-                dense_config:
-                  <<: *task_dense_config
-                  output_size: 8
-                  context_size: *out_dim
-
-            - class_path: salt.models.VertexingTask
-              init_args:
-                name: track_vertexing
-                input_name: tracks
-                label: ftagTruthVertexIndex
-                weight: 1.5
-                loss:
-                  class_path: torch.nn.BCEWithLogitsLoss
-                  init_args: { reduction: none }
-                dense_config:
-                  <<: *task_dense_config
-                  input_size: 256
-                  output_size: 1
-                  context_size: *out_dim
+                  dropout: *dropout
 
 data:
   variables:
@@ -109,17 +89,23 @@ data:
       - numberOfSCTSharedHits
       #- numberOfTRTHits
       #- leptonID
+    neutral:
+      - flow_pt
+      - flow_energy
+      - flow_deta
+      - flow_dphi
 
-  train_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_train.h5
-  val_file: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/pp_output_val.h5
-  norm_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/norm_dict.yaml
-  class_dict: /nfs/dust/atlas/user/nkumari/UPP_latest/umami-preprocessing/upp/configs/prep/output/class_dict.yaml
+  train_file: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/pp_output_train.h5
+  val_file: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/pp_output_val.h5
+  norm_dict: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/norm_dict.yaml
+  class_dict: /home/users/o/oleksiyu/WORK/umami-preprocessing/user_medium_equal_allvar_GN2/output/class_dict.yaml
+  #move_files_temp: /dev/shm/svanstro/salt/gn2/
 
-  batch_size: 4000
-  num_workers: 40
+  batch_size: 400
+  num_workers: 16
 
 trainer:
-  max_epochs: 40
+  max_epochs: 25
   accelerator: gpu
-  devices: 2
-  precision: 16-mixed
+  devices: 1
+  precision: 32

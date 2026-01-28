@@ -1,448 +1,657 @@
+"""Efficient Transformer implementation.
+
+Updated transformer implementation based on
+https://github.com/mistralai/mistral-src
+
+Features
+--------
+- native SDP kernels (including flash)
+- gated linear units https://arxiv.org/abs/2002.05202
+- RMSNorm https://arxiv.org/abs/1910.07467
+"""
+
 import math
-from collections.abc import Mapping
+import warnings
 
 import torch
-from lightning.pytorch.cli import instantiate_class
 from torch import BoolTensor, Size, Tensor, nn
+from torch.nn import functional
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from salt.utils.tensor_utils import masked_softmax
+import salt.models.layernorm as layernorms
+
+try:
+    from flash_attn import flash_attn_varlen_qkvpacked_func as _flash_attn_func
+except ImportError:
+    _flash_attn_func = None
 
 
-def merge_masks(
-    q_mask: BoolTensor | None,
-    kv_mask: BoolTensor | None,
-    attn_mask: BoolTensor | None,
-    q_shape: Size,
-    k_shape: Size,
-    device: torch.device,
-) -> BoolTensor:
-    """Combine query, key/value, and attention masks into a single boolean mask.
-
-    This utility follows the PyTorch transformer convention where:
-
-    * ``False`` indicates a **real (valid) token/node**.
-    * ``True`` indicates a **padded/invalid token/node**.
-
-    Parameters
-    ----------
-    q_mask : BoolTensor | None
-        Padding mask for the query sequence with shape matching ``q_shape[:-1]``
-        (batch and query length). If ``None``, a mask of all ``False`` (no padding)
-        is assumed.
-    kv_mask : BoolTensor | None
-        Padding mask for the key/value sequence with shape matching ``k_shape[:-1]``.
-        If ``None``, a mask of all ``False`` (no padding) is assumed.
-    attn_mask : BoolTensor | None
-        Pre-computed attention mask (e.g., from a causal mask) to be merged with the
-        padding masks. If ``None``, no additional attention masking is applied.
-    q_shape : Size
-        Shape tuple for the query input (e.g., ``(batch_size, q_len, d_model)``). Only
-        the first two dimensions are used to infer default mask size.
-    k_shape : Size
-        Shape tuple for the key/value input (e.g., ``(batch_size, k_len, d_model)``).
-    device : torch.device
-        Device on which to allocate any default masks.
+def check_flash_attn() -> str:
+    """Check if Flash Attention is available and compatible.
 
     Returns
     -------
-    BoolTensor
-        A combined boolean mask of shape ``(batch_size, q_len, k_len)`` (if padding
-        masks are provided) or the shape of ``attn_mask`` if only that is provided.
-        ``True`` entries mark positions to **mask out**; ``False`` entries mark valid
-        positions.
-
-    Notes
-    -----
-    - If both padding masks and an ``attn_mask`` are supplied, the result is the
-      elementwise OR of all masks.
-    - If one of ``q_mask`` or ``kv_mask`` is missing, it is replaced by an all-``False``
-      mask of appropriate size.
+    str
+        Empty string if Flash Attention is available, otherwise a reason why not.
     """
-    # Create the full mask which combines the attention and padding masks
-    merged_mask = None
+    # 1. Check CUDA Availability
+    if not torch.cuda.is_available():
+        return "No GPU available."
 
-    # If either pad mask exists, create
-    if q_mask is not None or kv_mask is not None:
-        if q_mask is None:
-            q_mask = torch.full(q_shape[:-1], False, device=device)
-        if kv_mask is None:
-            kv_mask = torch.full(k_shape[:-1], False, device=device)
-        merged_mask = q_mask.unsqueeze(-1) | kv_mask.unsqueeze(-2)
+    # 2. Get CUDA & GPU Info
+    gpu_name = torch.cuda.get_device_name(0)
+    # Compute capability is a tuple (major, minor), e.g., (8, 0)
+    compute_capability = torch.cuda.get_device_capability(0)
+    major, minor = compute_capability
+    sm_version = float(f"{major}.{minor}")
 
-    # If attention mask exists then it must be included
+    if sm_version < 8.0:
+        return (
+            f"GPU '{gpu_name}' with SM {sm_version} is not compatible. "
+            "Flash Attention 2 requires SM 8.0 or newer (Ampere+)."
+        )
+    if _flash_attn_func is None:
+        return (
+            "Requires the flash_attn package, CUDA 12+, and A100+, and must be installed "
+            "separately or using the [flash] extra. See requirements-flash.txt."
+        )
+    return ""
+
+
+ATTN_TYPES = ["torch-math", "torch-flash", "torch-meff", "flash-varlen"]
+
+
+def merge_masks(
+    kv_mask: BoolTensor | None,
+    attn_mask: BoolTensor | None,
+    q_shape: Size,
+) -> BoolTensor | None:
+    """Create a full attention mask which incorporates padding information.
+
+    Using PyTorch transformer convention for padding:
+        ``False``: real token
+        ``True``: zero padded
+
+    Using PyTorch transformer convention for attention mask:
+        ``False``: not allowed in attention
+        ``True``: allowed in attention
+
+    We design the mask such that padded tokens can't **send** information, but
+    they can **receive** it. This prevents NaNs in attention scores due to softmax.
+
+    Parameters
+    ----------
+    kv_mask : BoolTensor | None
+        Mask for keys/values of shape ``[B, L_kv]`` where padded positions are ``True``.
+    attn_mask : BoolTensor | None
+        Full attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+    q_shape : Size
+        Shape of the query tensor, expected as ``(B, L_q, D)``.
+
+    Returns
+    -------
+    BoolTensor | None
+        Combined mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable over heads), or ``None``.
+    """
+    mask = None
+
+    # If the kv_mask exists, ensure padded tokens never send information
+    if kv_mask is not None:
+        mask = kv_mask.unsqueeze(-2).expand(-1, q_shape[-2], -1)
+        mask = ~mask  # convert the mask so that True indicates a valid token
+
+    # Combine with the explicit attention mask if present
     if attn_mask is not None:
-        merged_mask = attn_mask if merged_mask is None else attn_mask | merged_mask
+        mask = attn_mask if mask is None else attn_mask & mask
 
-    return merged_mask
+    # Unsqueeze for head broadcasting
+    if mask is not None:
+        mask = mask.unsqueeze(1)
+
+    return mask
 
 
-class MultiheadAttention(nn.Module):
-    """Generic multihead attention.
+def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
+    """Repeat keys and values along a dimension.
 
-    Takes in three sequences with dim: (batch, sqeuence, features)
-    - q: The primary sequence queries (determines output sequence length)
-    - k: The attending sequence keys (determines incoming information)
-    - v: The attending sequence values
+    Parameters
+    ----------
+    keys : Tensor
+        Key tensor.
+    values : Tensor
+        Value tensor.
+    repeats : int
+        Number of repeats.
+    dim : int
+        Dimension along which to repeat.
 
-    In a message passing sense you can think of q as your receiver nodes, v and k
-    are the information coming from the sender nodes.
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        Repeated ``(keys, values)`` tensors.
+    """
+    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
+    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
+    return keys, values
 
-    When q == k(and v) this is a SELF attention operation
-    When q != k(and v) this is a CROSS attention operation
 
-    Block operations:
+def projection_packed(
+    q: Tensor,
+    kv: Tensor | None,
+    weight: Tensor,
+    bias: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Efficient input projection for MHA using a single packed linear layer.
 
-    1) Uses three linear layers to embed the sequences.
-    - q = q_linear * q
-    - k = k_linear * k
-    - v = v_linear * v
+    Essentially the same as ``torch.nn.functional._in_projection_packed`` but uses
+    ``chunk`` (substantially faster than ``unflatten`` here).
 
-    2) Outputs are reshaped to add a head dimension, and transposed for matmul.
-    - dim becomes: batch, heads, sequence, features
+    Parameters
+    ----------
+    q : Tensor
+        Queries tensor of shape ``[B, L_q, D]``.
+    kv : Tensor | None
+        Keys/values tensor for cross-attention of shape ``[B, L_kv, D]``. If ``None``,
+        self-attention is assumed.
+    weight : Tensor
+        Packed projection weight of shape ``[3D, D]``.
+    bias : Tensor | None, optional
+        Packed projection bias of shape ``[3D]``. The default is ``None``.
 
-    3) Passes these through to the attention module (message passing)
-    - In standard transformers this is the scaled dot product attention
-    - Also takes additional dropout layer to mask the attention
+    Returns
+    -------
+    tuple[Tensor, Tensor, Tensor]
+        Projected queries, keys, and values: ``(Q, K, V)``.
+    """
+    if kv is None:
+        return functional.linear(q, weight, bias).chunk(3, dim=-1)
 
-    4) Flatten out the head dimension, and optionally one more linear layer
-    - results are same as if attention was done seperately for each head and concat
-    - dim: batch, sequence, features*heads
+    dim = q.size(-1)
+    w_q, w_kv = weight.split([dim, dim * 2])
+    b_q, b_kv = bias.split([dim, dim * 2]) if bias is not None else (None, None)
+
+    q_proj = functional.linear(q, w_q, b_q)
+    k_proj, v_proj = functional.linear(kv, w_kv, b_kv).chunk(2, dim=-1)
+    return q_proj, k_proj, v_proj
+
+
+def torch_attn(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    mask: BoolTensor | None,
+    dropout: float,
+    softmax_scale: float,
+    backend: str,
+) -> Tensor:
+    """Scaled dot-product attention with a switchable torch backend.
+
+    Parameters
+    ----------
+    q : Tensor
+        Query tensor of shape ``[B, H, L_q, D_h]``.
+    k : Tensor
+        Key tensor of shape ``[B, H, L_kv, D_h]``.
+    v : Tensor
+        Value tensor of shape ``[B, H, L_kv, D_h]``.
+    mask : BoolTensor | None
+        Attention mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable), or ``None``.
+    dropout : float
+        Dropout probability applied inside attention.
+    softmax_scale : float
+        Scaling factor applied to the dot products before softmax.
+    backend : str
+        One of ``{"torch-math", "torch-flash", "torch-meff"}`` (flash-varlen handled elsewhere).
+
+    Returns
+    -------
+    Tensor
+        Attention output of shape ``[B, H, L_q, D_h]``.
+    """
+    backends = [SDPBackend.MATH]  # Default backend
+    if backend == "torch-flash":
+        backends += [SDPBackend.FLASH_ATTENTION]
+    elif backend == "torch-meff":
+        backends += [SDPBackend.EFFICIENT_ATTENTION]
+    with sdpa_kernel(backends=backends):
+        return functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=dropout, scale=softmax_scale
+        )
+
+
+class Attention(nn.Module):
+    """Multihead attention module with optional differential attention and norms.
 
     Parameters
     ----------
     embed_dim : int
-        Model embedding dimension (query dim only if k_dim and v_dim also provided).
-    num_heads : int
-        Number of attention heads. The embed_dim is split into num_heads chunks.
-    attention : nn.Module | Mapping
-        Type of attention (pooling operation) to use.
-    edge_embed_dim: int, optional
-        Model embedding dimension for edge features, by default 0
-    k_dim : int | None, optional
-        Key dimension, by default None where it assumes embed_dim
-    v_dim : int | None, optional
-        Value dimension, by default None where it assumes embed_dim
-    out_proj : bool, optional
-        An optional output linear layer, by default True
-    update_edges : bool, optional
-        Indicate whether to update edge features, by default False
+        Input (and output) embedding dimension.
+    num_heads : int, optional
+        Number of attention heads. The default is ``1``.
+    attn_type : str, optional
+        Backend kernel to use. One of ``{"torch-math", "torch-flash", "torch-meff",
+        "flash-varlen"}``. The default is ``"torch-meff"``.
+    dropout : float, optional
+        Dropout rate applied in attention. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms in projections. The default is ``True``.
+    do_qk_norm : bool, optional
+        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
+    do_v_norm : bool, optional
+        Whether to apply RMSNorm to V per head. The default is ``False``.
     mup: bool, optional
-        Whether to use the muP parametrisation, by default False
+        Whether to use the muP parametrisation. The default is ``False``.
         Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
         Ref: https://arxiv.org/abs/2203.03466
-
-    Raises
-    ------
-    ValueError
-        If the embed_dim is not divisible by the num_heads
-        If the edge_embed_dim is not divisible by the num_heads
     """
 
     def __init__(
         self,
         embed_dim: int,
-        num_heads: int,
-        attention: nn.Module | Mapping,
-        edge_embed_dim: int = 0,
-        k_dim: int | None = None,
-        v_dim: int | None = None,
-        out_proj: bool = True,
-        update_edges: bool = False,
+        num_heads: int = 1,
+        attn_type: str = "torch-meff",
+        dropout: float = 0.0,
+        bias: bool = True,
+        do_qk_norm: bool = False,
+        do_v_norm: bool = False,
         mup: bool = False,
     ) -> None:
         super().__init__()
+        assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
+        assert attn_type in ATTN_TYPES, "Invalid attention type!"
 
-        # Check that the dimension of each heads makes internal sense
-        if embed_dim % num_heads != 0:
-            raise ValueError(f"embed_dim {embed_dim} must be divisible by num_heads {num_heads}")
-        if edge_embed_dim % num_heads != 0:
-            raise ValueError(
-                f"edge_embed_dim {edge_embed_dim} must be divisible by num_heads {num_heads}"
-            )
-
-        # Model base attributes
+        # Attributes
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        self.out_proj = out_proj
-        self.edge_embed_dim = edge_embed_dim
-        self.edge_head_dim = edge_embed_dim // num_heads
-        self.k_dim = k_dim or embed_dim
-        self.v_dim = v_dim or embed_dim
-        self.scale = self.head_dim if mup else math.sqrt(self.head_dim)
-        self.update_edges = update_edges
+        self.dropout = dropout
+        self.bias = bias
+        self.attn_type = attn_type
+        self.do_qk_norm = do_qk_norm
+        self.do_v_norm = do_v_norm
         self.mup = mup
 
-        # Explicitly instantiate the attention class if passed as a dictionary
-        if isinstance(attention, Mapping):
-            attention = instantiate_class((), attention)
-        self.attention = attention
+        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
 
-        # The different linear projection layers, output is optional
-        self.linear_q = nn.Linear(self.embed_dim, self.embed_dim)
-        self.linear_k = nn.Linear(self.k_dim, self.embed_dim)
-        self.linear_v = nn.Linear(self.v_dim, self.embed_dim)
-        if self.edge_embed_dim > 0:
-            self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads)
-            self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads)
-            if self.update_edges:
-                self.linear_e_out = nn.Linear(self.num_heads, self.edge_embed_dim)
-            else:
-                self.register_buffer("linear_e_out", None)
-        if self.out_proj:
-            self.linear_out = nn.Linear(self.embed_dim, self.embed_dim)
-        else:
-            self.register_buffer("linear_out", None)
+        if self.do_qk_norm:
+            self.q_norm = layernorms.RMSNorm(self.head_dim)
+            self.k_norm = layernorms.RMSNorm(self.head_dim)
+        if self.do_v_norm:
+            self.v_norm = layernorms.RMSNorm(self.head_dim)
 
-        if self.mup:
-            self._reset_parameters()
+        # Better parallelism for self-attention when using parameters directly
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.reset_parameters()
+        self.set_backend(attn_type)
 
-    def _reset_parameters(self) -> None:
-        """Initialise the weights and biases of all linear projections.
-
-        This sets up the learnable parameters for the MuP (mu-parameterization)
-        attention block.
-        """
-        nn.init.constant_(self.linear_q.weight, 0)  # zero initialisation of query weights
-        nn.init.normal_(self.linear_k.weight, std=(1.0 / self.k_dim) ** 0.5)
-        nn.init.normal_(self.linear_v.weight, std=(1.0 / self.v_dim) ** 0.5)
-        linear_list = [self.linear_q, self.linear_k, self.linear_v]
-        if self.edge_embed_dim > 0:
-            nn.init.normal_(self.linear_e.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
-            nn.init.normal_(self.linear_g.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
-            linear_list.extend([self.linear_e, self.linear_g])
-            if self.update_edges:
-                nn.init.normal_(self.linear_e_out.weight, std=(1.0 / self.num_heads) ** 0.5)
-                linear_list.append(self.linear_e_out)
-        if self.out_proj:
-            nn.init.normal_(self.linear_out.weight, std=(1.0 / self.embed_dim) ** 0.5)
-            linear_list.append(self.linear_out)
-        for linear in linear_list:
-            nn.init.constant_(linear.bias, 0.0)
-
-    def input_projections(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply the query/key/value linear projections and reshape to multi-head format.
-
-        This is typically used inside a multi-head attention block. Each of
-        ``q``, ``k`` and ``v`` is first passed through its corresponding linear
-        layer, reshaped to ``(batch_size, seq_len, num_heads, head_dim)`` and then
-        transposed to ``(batch_size, num_heads, seq_len, head_dim)`` to get the
-        standard multi-head layout.
+    def set_backend(self, attn_type: str) -> str:
+        """Set and validate the attention backend.
 
         Parameters
         ----------
-        q : torch.Tensor
-            Query input tensor of shape ``(batch_size, seq_len_q, embed_dim)``.
-        k : torch.Tensor
-            Key input tensor of shape ``(batch_size, seq_len_k, embed_dim)``.
-        v : torch.Tensor
-            Value input tensor of shape ``(batch_size, seq_len_v, embed_dim)``.
+        attn_type : str
+            Backend name.
 
         Returns
         -------
-        tuple of torch.Tensor
-            A 3-tuple ``(q_proj, k_proj, v_proj)``, where each tensor has shape
-            ``(batch_size, num_heads, seq_len, head_dim)``.
-
-        Notes
-        -----
-        - The attributes ``self.linear_q``, ``self.linear_k``, ``self.linear_v``,
-        ``self.num_heads`` and ``self.head_dim`` must be defined on ``self``.
-        - This method does not apply any scaling or masking to the projections.
+        str
+            Effective backend set (may fall back to ``"torch-math"``).
         """
-        shape = (k.shape[0], -1, self.num_heads, self.head_dim)
-        q_proj = self.linear_q(q).view(shape).transpose(1, 2)
-        k_proj = self.linear_k(k).view(shape).transpose(1, 2)
-        v_proj = self.linear_v(v).view(shape).transpose(1, 2)
-        return q_proj, k_proj, v_proj
+        # Check the attention backend
+        self.attn_type = attn_type
+        if self.attn_type == "flash-varlen":
+            why_not_flash = check_flash_attn()
+            if why_not_flash:
+                warnings.warn(
+                    f"Cannot use flash-varlen backend. {why_not_flash} Reverting to torch-math.",
+                    stacklevel=2,
+                )
+                self.attn_type = "torch-math"
+            else:
+                self._flash_attn = _flash_attn_func
+        return self.attn_type
 
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor | None = None,
-        v: Tensor | None = None,
-        edges: Tensor | None = None,
-        q_mask: BoolTensor | None = None,
-        kv_mask: BoolTensor | None = None,
-        attn_mask: BoolTensor | None = None,
-        attn_bias: Tensor | None = None,
-    ) -> Tensor:
-        """Full forward pass through the model.
+    def reset_parameters(self) -> None:
+        """Initialize the parameters."""
+        if self.mup:
+            # muP init: https://arxiv.org/abs/2203.03466
+            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
+            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
+            nn.init.normal_(self.out_proj.weight, std=(1.0 / self.embed_dim) ** 0.5)  # Output proj
+            if self.bias:
+                nn.init.constant_(self.in_proj_bias, 0.0)
+                nn.init.constant_(self.out_proj.bias, 0.0)
+            return
+
+        # Standard init
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        self.out_proj.reset_parameters()
+        if self.bias:
+            nn.init.constant_(self.in_proj_bias, 0.0)
+
+    def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
+        """FlashAttention backend.
 
         Parameters
         ----------
-        q : Tensor
-            The main sequence used to generate the queries.
-        k : Tensor | None, optional
-            Seperate sequence from which to generate the keys, by default None
-        v : Tensor | None, optional
-            Seperate sequence from which to generate the values, by default None
-        edges : Tensor | None, optional
-            Main sequence for edge features (used to calculate E and G)
-        q_mask : BoolTensor | None, optional
-            Shows which elements of q are real verses padded, by default None
-        kv_mask : BoolTensor | None, optional
-            Shows which elements of k and v are real verses padded, by default None
-        attn_mask : BoolTensor | None, optional
-            Extra mask for the attention (adjacency) matrix, by default None
-        attn_bias : Tensor | None, optional
-            Extra values to further augment the attention matrix, by default None
+        x : Tensor
+            Packed sequence of shape ``[N_total, D]``.
+        culens : Tensor
+            Cumulative sequence lengths (for varlen flash).
+        maxlen : int
+            Maximum sequence length.
 
         Returns
         -------
         Tensor
-            Output with the same shape as q
+            Output of shape ``[N_total, D]``.
         """
-        # If only q and q_mask are provided then we automatically apply self attention
-        if k is None:
-            k = q
-            # warning: this isn't necessary or nan-safe in general
-            # however fine how we implemented it since we use a custom masked softmax
-            if kv_mask is None:
-                kv_mask = q_mask
-        v = v if v is not None else k
+        # Perform the packed input projection
+        qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
+        qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
-        # input shape
-        b_size, _seq_len, _features = q.shape
+        if self.do_qk_norm or self.do_v_norm:
+            dtype = qkv.dtype
+            q, k, v = qkv.unbind(1)
+            if self.do_qk_norm:
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+            if self.do_v_norm:
+                v = self.v_norm(v)
+            qkv = torch.stack([q, k, v], dim=1).to(dtype)
 
-        # Work out the masking situation, with padding, peaking, etc
-        attn_mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape, q.device)
+        # Run the flash-varlen backend
+        dropout = self.dropout if self.training else 0.0
+        a_out = self._flash_attn(qkv, culens, maxlen, dropout, softmax_scale=self.scale)
+        a_out = a_out.reshape(-1, self.embed_dim)
 
-        # Apply the input projections (B,H,L,HD)
-        q_proj, k_proj, v_proj = self.input_projections(q, k, v)
+        # Mix with final linear layer
+        return self.out_proj(a_out)
 
-        # Calculate edge feature matrices E, G and reshape them to (B,L,L,H)
-        if edges is not None:
-            e = self.linear_e(edges)
-            g = nn.functional.sigmoid(self.linear_g(edges))
-            attn_bias = e if attn_bias is None else attn_bias + e
+    def _torch_forward(
+        self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
+    ) -> Tensor:
+        """Attention using PyTorch SDPA backends.
 
-        # Calculate attention scores (B,H,Lq,Lk)
-        attn_weights = self.attention(
-            q_proj, k_proj, self.scale, attn_mask, attn_bias, self.update_edges
+        Parameters
+        ----------
+        x : Tensor
+            Query input of shape ``[B, L_q, D]``.
+        kv : Tensor
+            Key/value input of shape ``[B, L_kv, D]`` (use ``x`` for self-attention).
+        mask : BoolTensor
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : BoolTensor
+            Padding mask for ``kv`` where padded positions are ``True``.
+        attn_mask : BoolTensor
+            Attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[B, L_q, D]``.
+        """
+        b, s, d = x.shape
+
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        shape = (b, -1, self.num_heads, self.head_dim)
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        if self.do_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.do_v_norm:
+            v = self.v_norm(v)
+
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        dropout = self.dropout if self.training else 0.0
+        a_out = torch_attn(
+            q, k, v, mask, dropout=dropout, softmax_scale=self.scale, backend=self.attn_type
         )
+
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
+        return self.out_proj(a_out)
+
+    def forward(
+        self,
+        x: Tensor,
+        kv: Tensor | None = None,
+        mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+        attn_mask: BoolTensor | None = None,
+        culens: Tensor | None = None,
+        maxlen: int | None = None,
+    ) -> Tensor:
+        """Attention forward pass, dispatching to the appropriate backend.
+
+        Parameters
+        ----------
+        x : Tensor
+            Query input of shape ``[B, L_q, D]``.
+        kv : Tensor | None, optional
+            Optional key/value input of shape ``[B, L_kv, D]`` for cross-attention.
+            If ``None``, self-attention is used.
+        mask : BoolTensor | None, optional
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : BoolTensor | None, optional
+            Padding mask for ``kv`` where padded positions are ``True``.
+        attn_mask : BoolTensor | None, optional
+            Attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+        culens : Tensor | None, optional
+            Cumulative lengths for varlen flash. Required for ``attn_type="flash-varlen"``.
+        maxlen : int | None, optional
+            Maximum sequence length. Required for ``attn_type="flash-varlen"``.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[B, L_q, D]``.
+        """
+        if self.attn_type == "flash-varlen":
+            assert kv is None, "flash-varlen only supports self attention!"
+            assert attn_mask is None, "flash-varlen does not support attention masks!"
+            assert culens is not None, "flash-varlen requires culens!"
+            assert maxlen is not None, "flash-varlen requires maxlen!"
+            return self._flash_forward(x, culens, maxlen)
+
+        return self._torch_forward(x, kv, mask, kv_mask, attn_mask)
+
+
+class EdgeAttention(nn.Module):
+    """Multihead attention module with optional norms.
+    It includes edge features in the attention computation.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input (and output) embedding dimension.
+    edge_embed_dim : int
+        Model embedding dimension for edge features.
+    num_heads : int, optional
+        Number of attention heads. The default is ``1``.
+    dropout : float, optional
+        Dropout rate applied in attention. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms in projections. The default is ``True``.
+    do_qk_norm : bool, optional
+        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
+    do_v_norm : bool, optional
+        Whether to apply RMSNorm to V per head. The default is ``False``.
+    update_edges : bool, optional
+        Indicate whether to update edge features, by default False
+    mup: bool, optional
+        Whether to use the muP parametrisation. The default is ``False``.
+        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
+        Ref: https://arxiv.org/abs/2203.03466
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        edge_embed_dim: int,
+        num_heads: int = 1,
+        dropout: float = 0.0,
+        bias: bool = True,
+        do_qk_norm: bool = False,
+        do_v_norm: bool = False,
+        update_edges: bool = False,
+        mup: bool = False,
+    ) -> None:
+        super().__init__()
+        assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
+
+        # Attributes
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.edge_embed_dim = edge_embed_dim
+        self.edge_head_dim = edge_embed_dim // num_heads
+        self.dropout = dropout
+        self.bias = bias
+        self.do_qk_norm = do_qk_norm
+        self.do_v_norm = do_v_norm
+        self.update_edges = update_edges
+        self.mup = mup
+
+        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
+
+        if self.do_qk_norm:
+            self.q_norm = layernorms.RMSNorm(self.head_dim)
+            self.k_norm = layernorms.RMSNorm(self.head_dim)
+        if self.do_v_norm:
+            self.v_norm = layernorms.RMSNorm(self.head_dim)
+
+        # Better parallelism for self-attention when using parameters directly
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        # Edge feature projections
+        self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
+        self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
         if self.update_edges:
-            attn_weights, attn_scores = attn_weights
+            self.linear_e_out = nn.Linear(self.num_heads, self.edge_embed_dim, bias=bias)
+        else:
+            self.register_buffer("linear_e_out", None)
 
-        # Apply gating to attention scores
-        if edges is not None:
-            attn_weights = attn_weights * g.transpose(-3, -1).transpose(
-                -2, -1
-            )  # Reshape to (0, 3, 1, 2)
+        self.reset_parameters()
 
-        # Use the scores for pooling and reshape (B, Lv, F)
-        out = torch.matmul(attn_weights, v_proj)
-        out = out.transpose(1, 2).contiguous().view(b_size, -1, self.embed_dim)
+    def set_backend(self, attn_type: str) -> str:
+        warnings.warn(
+            "EdgeAttention does not support different backends yet. Using raw attention.",
+            stacklevel=2,
+        )
+        return attn_type
 
-        # update edges with dot product attention scores (if desired)
-        edge_out = None
+    def reset_parameters(self) -> None:
+        """Initialize the parameters."""
+        if self.mup:
+            # muP init: https://arxiv.org/abs/2203.03466
+            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
+            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
+            linear_layers = [self.out_proj]
+            nn.init.normal_(self.linear_e.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
+            nn.init.normal_(self.linear_g.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
+            linear_layers.extend([self.linear_e, self.linear_g])
+            if self.update_edges:
+                nn.init.normal_(self.linear_e_out.weight, std=(1.0 / self.num_heads) ** 0.5)
+                linear_layers.append(self.linear_e_out)
+            if self.bias:
+                nn.init.constant_(self.in_proj_bias, 0.0)
+                for layer in linear_layers:
+                    nn.init.constant_(layer.bias, 0.0)
+            return
+
+        # Standard init
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        if self.bias:
+            nn.init.constant_(self.in_proj_bias, 0.0)
+
+        # Linear layers
+        layers = [self.linear_e, self.linear_g, self.out_proj]
+        if self.update_edges:
+            layers.append(self.linear_e_out)
+        for layer in layers:
+            layer.reset_parameters()
+            if self.bias:
+                nn.init.constant_(layer.bias, 0.0)
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_x: Tensor,
+        kv: Tensor | None = None,
+        mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+        attn_mask: BoolTensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Attention using PyTorch SDPA backends.
+
+        Parameters
+        ----------
+        x : Tensor
+            Query input of shape ``[B, L_q, D]``.
+        edge_x : Tensor
+            Edge features of shape ``[B, L_q, L_kv, E]``
+        kv : Tensor | None, optional
+            Key/value input of shape ``[B, L_kv, D]`` (use ``None`` for self-attention).
+        mask : BoolTensor | None, optional
+            Padding mask for ``x`` where padded positions are ``True``.
+        kv_mask : BoolTensor | None, optional
+            Padding mask for ``kv`` where padded positions are ``True``.
+        attn_mask : BoolTensor | None, optional
+            Attention mask of shape ``[B, L_q, L_kv]`` where allowed positions are ``True``.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            Output of shape ``[B, L_q, D]`` and updated edge features of shape
+            ``[B, L_q, L_kv, E]``.
+        """
+        b, s, d = x.shape
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        shape = (b, -1, self.num_heads, self.head_dim)
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        if self.do_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.do_v_norm:
+            v = self.v_norm(v)
+
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        e = self.linear_e(edge_x)  # (B, L_q, L_kv, num_heads)
+        g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, num_heads, L_q, L_kv)
+        attn_scores = attn_scores + e.permute(0, 3, 1, 2)  # add edge embeddings
+
+        if self.dropout > 0.0 and self.training:
+            attn_scores = functional.dropout(attn_scores, p=self.dropout)
+
+        # Prepare edge output
+        edge_out = edge_x
         if self.update_edges:
             edge_out = self.linear_e_out(
-                attn_scores.transpose(-3, -2).transpose(-2, -1)
-            )  # Reshape to (0, 2, 3, 1)
+                attn_scores.permute(0, 2, 3, 1)  # (B, L_q, L_kv, num_heads)
+            )
+        # Compute attention weights
+        masked_scores = (
+            torch.masked_fill(attn_scores, ~mask, float("-inf"))
+            if mask is not None
+            else attn_scores
+        )
+        attn_weights = torch.softmax(masked_scores, dim=-1)  # (B, num_heads, L_q, L_kv)
 
-        # Optional output layer
-        if self.out_proj:
-            out = self.linear_out(out)
+        attn_weights = attn_weights * g.permute(0, 3, 1, 2)  # apply gating
 
-        if edges is not None:
-            return out, edge_out
+        a_out = torch.matmul(attn_weights, v)  # (B, num_heads, L_q, head_dim)
 
-        return out
-
-
-class ScaledDotProductAttention(nn.Module):
-    """Scaled dot product attention, commonly used in transformers.
-
-    Contains dropout layer to stochastically mask messages, used a lot in language
-    processing.
-
-    Allows for addition of extra bias term in the attention matrix as used in the
-    particle transformer: https://arxiv.org/abs/2202.03772
-    """
-
-    def __init__(self, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        scale: Tensor,
-        mask: BoolTensor | None = None,
-        attn_bias: Tensor | None = None,
-        return_scores: bool = False,
-    ) -> Tensor:
-        # inputs are of shape (batch, heads, sequence, head_dim)
-
-        # dot product between queries and keys
-        scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-
-        # add the bias terms if present
-        if attn_bias is not None:  # Move the head dimension to the first
-            scores = scores + attn_bias.transpose(-3, -1).transpose(
-                -2, -1
-            )  # Reshape to (0, 3, 1, 2)
-
-        # apply the dropout to the scores
-        scores = self.dropout(scores)
-
-        # softmax, use the mask to not included padded information
-        attention_weights = masked_softmax(scores, mask)
-
-        if return_scores:
-            return attention_weights, scores
-
-        return attention_weights
-
-
-class GATv2Attention(nn.Module):
-    """GATv2 attention, used in the original implementation of GN1.
-
-    https://arxiv.org/abs/2105.14491
-    """
-
-    def __init__(self, num_heads: int, head_dim: int, activation: str = "SiLU") -> None:
-        super().__init__()
-        self.attention = nn.Parameter(torch.FloatTensor(size=(1, num_heads, 1, 1, head_dim)))
-        self.activation = getattr(nn, activation)()
-        nn.init.xavier_uniform_(self.attention)
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        scale: Tensor,
-        mask: BoolTensor | None = None,
-        attn_bias: Tensor | None = None,
-        return_scores: bool = False,
-    ) -> Tensor:
-        _ = scale
-        # inputs are (B, H, Lq/k, D)
-        # B, H, Lq, D, which equal q.shape
-
-        # sum each pair of tracks within a batch
-        # The shape is: (B, H, Lq, Lk, D)
-        summed = q.unsqueeze(-2) + k.unsqueeze(-3)
-
-        # after activation, dot product with learned vector
-        # The shape is: (B, H, Lq, Lk)
-        scores = (self.activation(summed) * self.attention).sum(dim=-1)
-
-        # add the optional bias
-        if attn_bias is not None:
-            scores = scores + attn_bias
-
-        # softmax
-        attention_weights = masked_softmax(scores, mask)
-
-        if return_scores:
-            return attention_weights, scores
-
-        return attention_weights
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
+        return self.out_proj(a_out), edge_out

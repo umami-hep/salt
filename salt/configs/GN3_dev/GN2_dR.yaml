@@ -45,7 +45,6 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0, 1.0, 3.0] }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 4
@@ -60,8 +59,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.46, 52.41, 1.0, 13.51, 9.56, 9.56, 40.49, 21.52]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8

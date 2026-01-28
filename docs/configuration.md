@@ -16,7 +16,7 @@ These are defined in the model files, rather than the `base.yaml` config.
     You should _not_ include any truth information (unless you are testing this explicitly),
     but rather specify truth labels for each task in your model config.
 
-For example, in [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) you will find the following variables:
+For example, in [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2.yaml) you will find the following variables:
 
 ```yaml
 data:
@@ -34,7 +34,7 @@ data:
 
 The number of variables specified here will be used to automatically set the `input_size` of your [`salt.models.InitNet`][salt.models.InitNet] modules.
 
-Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2emu.yaml) which includes a separate electrons input type.
+Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) which includes a separate electrons input type.
 
 #### Mapping Input Dataset Names
 
@@ -149,7 +149,7 @@ config_s3:
 Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
 
 ```bash
-download_S3 --config configs/GN2.yaml
+download_S3 --config configs/GN2/GN2.yaml
 ```
 
 This will run the downloading script without starting the salt CLI. 
@@ -195,42 +195,6 @@ data:
 You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
 
 
-#### Switching Attention Mechanisms
-
-By default the [`GN1.yaml`]({{repo_url}}-/blob/main/salt/configs/GN1.yaml) config uses the scaled dot product attention found in transformers.
-To switch to the GATv2 attention, add the [`GATv2.yaml`]({{repo_url}}-/blob/main/salt/configs/GATv2.yaml) config fragment.
-
-```bash
-salt fit --config configs/GN1.yaml --config configs/GATv2.yaml
-```
-
-Note that the  `num_heads` and `head_dim` arguments must match those in the `gnn.init_args` config block.
-
-
-#### Switching Pooling Mechanisms
-
-The [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2.yaml) config by default uses Global Attention Pooling. This can be switched out for Cross Attention Pooling where a learnable class token is attended to by the learned track representation. The same arguments used for the Transformer Encoder apply to the Cross Attention layers. An example Cross Attention block is shown below:
-
-```yaml
-pool_net:
-class_path: salt.models.CrossAttentionPooling
-init_args:
-    input_size: 128
-    num_layers: 4
-    mha_config:
-        num_heads: 4
-        attention:
-            class_path: salt.models.ScaledDotProductAttention
-        out_proj: False
-    dense_config:
-        activation: *activation
-        hidden_layers: [128]
-        dropout: 0.1
-
-```
-
-
-
 #### Edge Features
 
 It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
@@ -259,31 +223,6 @@ init_nets:
 ```
 
 The separate input types are by default combined and treated homogeneously within the GNN layers. 
-Alternatively, each input type can be updated with separate self-attention blocks and cross-attention blocks between each input type:
-
-!!!warning "This isn't recommended"
-
-    It is slower and hasn't proved to be more performant than the homogeneous GNN approach
-
-```yaml
-    encoder:
-    class_path: salt.models.TransformerCrossAttentionEncoder
-    init_args:
-        input_names: [tracks, electrons]
-        ca_every_layer: true
-        embed_dim: 192
-        num_layers: 6
-        out_dim: &out_dim 128
-        mha_config:
-        num_heads: 4
-        attention:
-            class_path: salt.models.ScaledDotProductAttention
-        out_proj: False
-        sa_dense_config:
-        activation: *activation
-        hidden_layers: [256]
-        dropout: &dropout 0.1
-```
 
 #### Parameterisation
 
@@ -452,13 +391,13 @@ To run mup, you must instantiate a GN2 model into the Maximal Update Parametrisa
 - step 1: create `storeshapes` file using a model config file with mup configuration: 
 
 ```bash
-setup_mup -config GN2.yaml
+setup_mup -config GN2/GN2.yaml
 ```
 
 - step 2: run a mup training normally with the model config with mup configuration:
 
 ```bash
-salt fit --config GN2.yaml
+salt fit --config GN2/GN2.yaml
 ```
 
 The config file `GN2_mup.yaml` gives an example of a valid configuration file for mup.
@@ -473,7 +412,7 @@ Important note: mup has been implemented to scale the transformer encoder (and i
 To leverage the existing [mup library](https://github.com/microsoft/mup), a `base` and `delta` models have to be instantiated using the `main_mup` script to generate a `storeshapes` file to be passed to the mup library. Note that you __must__ vary a parameter between the `base` and `delta` models, as this will define the dimension to muTransfer along (embedding dimension and num_heads are supported). This script is installed with salt and callable under the name `setup_mup`. For example, run: 
 
 ```bash
-setup_mup -c GN2.yaml
+setup_mup -c GN2/GN2.yaml
 ```
 
 Where the `GN2.yaml` is your usual model configuration file, endowed with the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
@@ -508,7 +447,7 @@ init_nets:
 - for `encoder`:
 ```yaml
 encoder:
-    class_path: salt.models.TransformerEncoder
+    class_path: salt.models.Transformer
     init_args:
         ...
         mup: True
@@ -516,7 +455,7 @@ encoder:
 
 If correctly setup, you can just run a salt training in the usual way: 
 ```bash
-salt fit --config GN2.yaml
+salt fit --config GN2/GN2.yaml
 ```
 
 You are now training a mup-GN2!

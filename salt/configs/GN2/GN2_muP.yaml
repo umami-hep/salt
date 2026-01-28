@@ -1,12 +1,19 @@
-name: GN2X
+name: GN2
 
 model:
   lrs_config:
     initial: 1e-7
-    max: 3e-4
-    end: 5e-5
+    max: 5e-4
+    end: 1e-5
     pct_start: 0.01
     weight_decay: 1e-5
+  mup_config:
+    shape_path: ./shape_mup
+    embed_dim:
+      apply_to: [init_nets, encoder]
+      parameter_name: [output_size, embed_dim]
+      parameter_base: &embed_dim 256
+      parameter_delta: &num_heads 8
 
   model:
     class_path: salt.models.SaltModel
@@ -14,32 +21,26 @@ model:
       init_nets:
         - input_name: tracks
           dense_config:
-            output_size: &embed_dim 256
-            hidden_layers: [256]
-            activation: &activation ReLU
-        - input_name: flow
-          dense_config:
             output_size: *embed_dim
             hidden_layers: [256]
-            activation: *activation
+            activation: &activation ReLU
+            mup: True
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
-          num_layers: 8
+          num_layers: 4
           embed_dim: *embed_dim
           out_dim: &out_dim 128
+          # flash attention
           attn_type: flash-varlen
           norm: LayerNorm
           dense_kwargs:
             activation: *activation
-            dropout: 0.1
-            gated: True
+            gated: False
           attn_kwargs:
-            num_heads: 8
-            dropout: 0.1
-          num_registers: 8
-
+            num_heads: *num_heads
+          mup: True
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -56,23 +57,21 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [1.0, 1.0, 1.0, 1.5]}
                 dense_config: &task_dense_config
                   input_size: *out_dim
-                  output_size: 4
+                  output_size: 3
                   hidden_layers: [128, 64, 32]
                   activation: *activation
+                  dropout: 0.1
 
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: track_origin
                 input_name: tracks
                 label: ftagTruthOriginLabel
-                weight: 0.33
+                weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 8
@@ -83,7 +82,7 @@ model:
                 name: track_vertexing
                 input_name: tracks
                 label: ftagTruthVertexIndex
-                weight: 0.75
+                weight: 1.5
                 loss:
                   class_path: torch.nn.BCEWithLogitsLoss
                   init_args: { reduction: none }
@@ -94,14 +93,10 @@ model:
                   context_size: *out_dim
 
 data:
-  num_inputs:
-    tracks: 100
-    flow: 100
-
   variables:
     jets:
-      - pt
-      - eta
+      - pt_btagJes
+      - eta_btagJes
     tracks:
       - d0
       - z0SinTheta
@@ -122,24 +117,20 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-      - leptonID
-    flow:
-      - flow_pt
-      - flow_energy
-      - flow_deta
-      - flow_dphi
+      #- numberOfTRTHits
+      #- leptonID
 
+  train_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_train.h5
+  val_file: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/pp_output_val.h5
+  norm_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/norm_dict.yaml
+  class_dict: /home/xzcappon/phd/datasets/combined_run2_run3/p5770/high_stats_320m/output/class_dict.yaml
+  #move_files_temp: /dev/shm/svanstro/salt/gn2/
 
-  train_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_train.h5
-  val_file: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/pp_output_val.h5
-  norm_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/norm_dict.yaml
-  class_dict: /share/lustre/jbarr/training-files/2024-01-01-gn2x-combined/output/class_dict.yaml
-
-  batch_size: 2000
+  batch_size: 400
   num_workers: 40
 
 trainer:
-  max_epochs: 20
+  max_epochs: 40
   accelerator: gpu
-  devices: 3
-  precision: bf16-mixed
+  devices: 1
+  #precision: 16-mixed

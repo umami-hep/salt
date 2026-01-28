@@ -71,21 +71,19 @@ model:
             activation: *activation
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
+          num_layers: 6
           embed_dim: *embed_dim
           edge_embed_dim: *edge_embed_dim
-          num_layers: 6
+          update_edges: true
           out_dim: &out_dim 128
-          update_edges: True
-          mha_config:
-            num_heads: 4
-            attention:
-              class_path: salt.models.ScaledDotProductAttention
-          dense_config:
+          norm: LayerNorm
+          dense_kwargs:
             activation: *activation
-            hidden_layers: [256]
-            dropout: &dropout 0.1
+            gated: False
+          attn_kwargs:
+            num_heads: 4
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
@@ -102,13 +100,12 @@ model:
                 label: flavour_label
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args: { weight: [2.75, 1.0, 1.52, 1.52] }
                 dense_config:
                   input_size: *out_dim
                   output_size: 4
                   hidden_layers: [128, 64, 32]
                   activation: *activation
-                  dropout: *dropout
+                  dropout: &dropout 0.1
 
             - class_path: salt.models.ClassificationTask
               init_args:
@@ -118,8 +115,6 @@ model:
                 weight: 0.5
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [4.37, 194.0, 1.0, 17.78, 12.25, 13.28, 1.0, 22.46]
                 dense_config:
                   input_size: 128
                   context_size: 128

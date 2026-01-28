@@ -40,22 +40,22 @@ model:
             final_activation: Sigmoid
 
       encoder:
-        class_path: salt.models.TransformerEncoder
+        class_path: salt.models.Transformer
         init_args:
-          embed_dim: *embed_dim
           num_layers: 4
+          embed_dim: *embed_dim
           out_dim: &out_dim 128
-          mha_config:
-            num_heads: 8
-            attention: { class_path: salt.models.ScaledDotProductAttention }
-          dense_config:
+          attn_type: torch-meff
+          norm: LayerNorm
+          dense_kwargs:
             activation: *activation
-            dropout: &dropout 0.1
+            gated: True
+          attn_kwargs:
+            num_heads: 8
 
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
         init_args: { input_size: *out_dim }
-
 
       tasks:
         class_path: torch.nn.ModuleList

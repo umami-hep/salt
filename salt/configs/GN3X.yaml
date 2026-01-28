@@ -24,9 +24,8 @@ model:
             hidden_layers: [256]
             activation: *activation
 
-
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           num_layers: 8
           embed_dim: *embed_dim
@@ -42,7 +41,6 @@ model:
             dropout: 0.1
           num_registers: 8
 
-
       pool_net:
         class_path: salt.models.GlobalAttentionPooling
         init_args: { input_size: *out_dim }
@@ -56,12 +54,16 @@ model:
                 name: jets_classification
                 input_name: jets
                 label: flavour_label
-                class_names: [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
+                class_names:
+                  [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
                   # adjust weight based on flavour fraction in samples
                   # class_dict does not have an entry for new subclasses
-                  init_args: { weight: [8.0, 2.0, 2.0, 4.0, 20.0, 20.0, 10.0, 1.5, 16.0] }
+                  init_args:
+                    {
+                      weight: [8.0, 2.0, 2.0, 4.0, 20.0, 20.0, 10.0, 1.5, 16.0],
+                    }
                 dense_config: &task_dense_config
                   input_size: *out_dim
                   output_size: 9
@@ -140,7 +142,6 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-
 
   train_file: /share/lustre/ecritelli/xbb_upp_pre_release_Zprimeonly/output/pp_output_train.h5
   val_file: /share/lustre/ecritelli/xbb_upp_pre_release_Zprimeonly/output/pp_output_val.h5

@@ -1,8 +1,8 @@
 # Transformer
-## ::: salt.models.transformer_v2.Attention
+## ::: salt.models.transformer.Attention
     options:
       members: [forward]
-## ::: salt.models.transformer_v2.GLU
-## ::: salt.models.transformer_v2.EncoderLayer
-## ::: salt.models.transformer_v2.TransformerV2
+## ::: salt.models.transformer.GLU
+## ::: salt.models.transformer.EncoderLayer
+## ::: salt.models.transformer.Transformer
 

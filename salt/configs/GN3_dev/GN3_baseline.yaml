@@ -13,7 +13,6 @@ model:
   model:
     class_path: salt.models.SaltModel
     init_args:
-
       init_nets:
         - input_name: tracks
           dense_config:
@@ -22,7 +21,7 @@ model:
             activation: &activation SiLU
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           num_layers: 4
           embed_dim: *embed_dim

@@ -27,7 +27,7 @@ model:
             <<: *init
 
       encoder:
-        class_path: salt.models.TransformerV2
+        class_path: salt.models.Transformer
         init_args:
           num_layers: 4
           embed_dim: *embed_dim
@@ -99,8 +99,6 @@ model:
                 class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
                 loss:
                   class_path: torch.nn.CrossEntropyLoss
-                  init_args:
-                    weight: [3.56, 13.3, 1.0, 6.49, 21.48, 109.72]
                 dense_config:
                   <<: *task_dense_config
                   output_size: 6
