@@ -3,6 +3,8 @@ import numpy as np
 import pytest
 import torch
 from ftag import get_mock_file, Flavours
+from tempfile import NamedTemporaryFile, mkdtemp
+from pathlib import Path
 
 from salt.data import SaltDataset
 from salt.data.datasets import malformed_truthorigin_check
@@ -16,6 +18,52 @@ def test_salt_dataset():
     dataset = SaltDataset(f, norm_dict, variables, "train")
     for i in range(0, len(dataset), 10):
         dataset[i : i + 10]
+
+
+def test_salt_dataset_wildcard():
+    # Get a temp directory
+    temp_dir = mkdtemp()
+
+    # Create two mock files in the same folder
+    f = get_mock_file(
+        fname=NamedTemporaryFile(
+            prefix="train_1_",
+            suffix=".h5",
+            dir=temp_dir,
+        ).name
+    )[0]
+    g = get_mock_file(
+        fname=NamedTemporaryFile(
+            prefix="train_2_",
+            suffix=".h5",
+            dir=temp_dir,
+        ).name
+    )[0]
+
+    # Define a wildcard
+    h = str(Path(temp_dir) / "train_*.h5")
+
+    # Define default norm and variable dicts
+    norm_dict = {}
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0"]}
+    dataset = SaltDataset(h, norm_dict, variables, "train")
+    for i in range(0, len(dataset), 10):
+        dataset[i : i + 10]
+
+
+def test_salt_dataset_no_matching_wildcard():
+    # Get a temp directory
+    temp_dir = mkdtemp()
+
+    # Define a wildcard
+    h = str(Path(temp_dir) / "val*.h5")
+
+    # Define default norm and variable dicts
+    norm_dict = {}
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0"]}
+
+    with pytest.raises(FileNotFoundError, match="No files match wildcard:"):
+        SaltDataset(h, norm_dict, variables, "train")
 
 
 def test_track_selector():

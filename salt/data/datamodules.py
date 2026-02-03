@@ -42,6 +42,12 @@ class SaltDataModule(lightning.LightningDataModule):
         Path to umami preprocessing scale dict file, by default None
     test_file : str | None, optional
         Test file path, by default None
+    train_vds_path : str | None, optional
+        Path to where the VDS train file will be created, if wildcards are used for this.
+    val_vds_path : str | None, optional
+        Path to where the VDS validation file will be created, if wildcards are used for this.
+    test_vds_path : str | None, optional
+        Path to where the VDS test file will be created, if wildcards are used for this.
     test_suff : str | None, optional
         Test file suffix, by default None
     pin_memory : bool, optional
@@ -64,6 +70,9 @@ class SaltDataModule(lightning.LightningDataModule):
         move_files_temp: str | None = None,
         class_dict: str | None = None,
         test_file: str | None = None,
+        train_vds_path: str | None = None,
+        val_vds_path: str | None = None,
+        test_vds_path: str | None = None,
         test_suff: str | None = None,
         pin_memory: bool = True,
         config_s3: dict | None = None,
@@ -73,6 +82,9 @@ class SaltDataModule(lightning.LightningDataModule):
         self.train_file = Path(train_file)
         self.val_file = Path(val_file)
         self.test_file = test_file
+        self.train_vds_path = train_vds_path
+        self.val_vds_path = val_vds_path
+        self.test_vds_path = test_vds_path
         self.test_suff = test_suff
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -107,12 +119,14 @@ class SaltDataModule(lightning.LightningDataModule):
                 filename=self.train_file,
                 num=self.num_train,
                 stage=stage,
+                vds_path=self.train_vds_path,
                 **self.kwargs,
             )
             self.val_dset = SaltDataset(
                 filename=self.val_file,
                 num=self.num_val,
                 stage=stage,
+                vds_path=self.val_vds_path,
                 **self.kwargs,
             )
 
@@ -127,6 +141,7 @@ class SaltDataModule(lightning.LightningDataModule):
                 filename=self.test_file,
                 num=self.num_test,
                 stage=stage,
+                vds_path=self.test_vds_path,
                 **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dset):,} entries")

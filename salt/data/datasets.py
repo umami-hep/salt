@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from ftag import Cuts, Labeller
 from ftag.track_selector import TrackSelector
+from ftag.vds import create_virtual_file
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
@@ -45,6 +46,15 @@ class SaltDataset(Dataset):
     input_map : dict[str, str] | None, optional
         Map names to the corresponding dataset names in the input h5 file.
         If not provided, the input names will be used as the dataset names.
+    vds_path : str | None, optional
+        When using a wildcard as input h5 file, SaltDataset will create a VDS
+        (virtual dataset) file. By default (None), this file will be created in a
+        folder, which will be created exactly where the wildcard points to. For
+        example, if the wildcard points to /path/to/somewhere/pp_train_*.h5, the
+        following folder will be created: /path/to/somewhere/pp_train_vds/ and
+        in there the file vds.h5. If the vds should be created somewhere else,
+        set this option to the path where the h5 file will be created, e.g.
+        /path/to/somewhere/my_personal_vds_folder/my_personal_vds.h5
     num_inputs : dict | None, optional
         Truncate the number of constituent inputs to this number, to speed up training
     non_finite_to_num : bool, optional
@@ -65,6 +75,10 @@ class SaltDataset(Dataset):
 
     Raises
     ------
+    FileNotFoundError
+        If no file could be found that matches the given wildcard in filename.
+    PermissionError
+        If no permission are given to create the VDS file
     ValueError
         if use_labeller is set to true but the classes for relabelling are not supplied.
     """
@@ -80,6 +94,7 @@ class SaltDataset(Dataset):
         labels: Vars | None = None,
         mf_config: MaskformerConfig | None = None,
         input_map: dict[str, str] | None = None,
+        vds_path: str | None = None,
         num_inputs: dict | None = None,
         non_finite_to_num: bool = False,
         global_object: str = "jets",
@@ -105,8 +120,59 @@ class SaltDataset(Dataset):
             input_map["parameters"] = global_object
 
         self.input_map = input_map
+
+        # Define the dataset that will be used
         self.filename = Path(filename)
+
+        if "*" in self.filename.name:
+            # Check that the wildcard matches at least one file
+            matches = list(self.filename.parent.glob(self.filename.name))
+            if not matches:
+                raise FileNotFoundError(f"No files match wildcard: {self.filename}")
+
+            if vds_path is None:
+                # Replace the wildcard marker with "vds"
+                vds_name = self.filename.name.replace("*", "vds")
+
+                # Get the path of the new folder for the vds
+                vds_dir = self.filename.parent / vds_name.strip(".h5")
+
+                # Try to create the new folder/file.
+                try:
+                    vds_dir.mkdir(parents=True, exist_ok=True)
+
+                    vds_out_path = Path(
+                        create_virtual_file(
+                            pattern=self.filename,
+                            out_fname=vds_dir / "vds.h5",
+                        )
+                    )
+
+                # If no permissions, raise error with custom message
+                except PermissionError as err:
+                    raise PermissionError(
+                        f"No permissions to create a VDS folder/file in {vds_out_path}."
+                        "Please use the custom vds_path option."
+                    ) from err
+
+            else:
+                # Ensure the parent directory exists
+                Path(vds_path).parent.mkdir(parents=True, exist_ok=True)
+
+                # Create the virtual file
+                vds_out_path = Path(
+                    create_virtual_file(
+                        pattern=self.filename,
+                        out_fname=Path(vds_path),
+                    )
+                )
+
+            # Set the file to the new VDS file
+            self.filename = vds_out_path
+
+        # Get the file correctly
         self.file = h5py.File(self.filename, "r")
+
         self.num_inputs = num_inputs
         self.non_finite_to_num = non_finite_to_num
         self.global_object = global_object
