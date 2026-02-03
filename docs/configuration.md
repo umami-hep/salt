@@ -3,6 +3,43 @@
 
 ### Dataloading
 
+#### Using Multiple Small H5 Files (Wildcards)
+
+Training files for can become quite large these days. To still have the possibility to store them properly, the big training
+files are broken up into smaller training files. To use them similar to a big file, you can use so-called wildcards. Let's
+assume you have your smaller files, which are named `pp_output_train_split_000.h5`, `pp_output_train_split_001.h5` and so on.
+When all of them are stored in the same folder, the path used to define the training h5 file in the config can be given as:
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+```
+
+This will automatically trigger the Virtual Dataset (VDS) creation of Salt, using the VDS
+capabilities of the [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools). The VDS is
+something like a symlink to the actual files and allows Salt to correctly read in the h5 files. The
+VDS will be created by default in the same folder where also the wildcard points to. In the example
+given above, the VDS file path would be `/path/to/somewhere/pp_output_train_split_vds/vds.h5`. If
+you want a specific path, you can define this like this:
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+  train_vds_file: /path/to/something/completely/else/my_train_vds_file.h5
+```
+
+All the aformentioned settings are also usable for the validation and test file(s):
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+  train_vds_file: /path/to/something/completely/else/my_train_vds_file.h5
+  val_file: /path/to/somewhere/pp_output_val_split_*.h5
+  val_vds_file: /path/to/something/completely/else/my_val_vds_file.h5
+  test_file: /path/to/somewhere/pp_output_test_split_*.h5
+  test_vds_file: /path/to/something/completely/else/my_test_vds_file.h5
+```
+
 #### Selecting Training Variables
 
 Training files are structured arrays, so it is easy to specify which variables you want to include in the training by name.
