@@ -251,8 +251,10 @@ class SaltCLI(LightningCLI):
                 # Check if the comet api key is available
                 comet_api_key = os.getenv("COMET_API_KEY")
 
+                # Add name to the logger
+                config.trainer.logger["dict_kwargs"] = {"name": config.name}
                 # If online is true but no API key is given, set offline to False
-                if not comet_api_key:
+                if not comet_api_key or config.trainer.fast_dev_run:
                     config.trainer.logger.init_args["online"] = False
 
                 # Setup the offline output directory
