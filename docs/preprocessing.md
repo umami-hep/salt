@@ -33,7 +33,7 @@ If you want to get started running the code without producing your own samples, 
 Training samples are created using the [training dataset dumper](https://gitlab.cern.ch/aft/algorithms/training-dataset-dumper/) (TDD).
 The default config file [`EMPFlow.json`](https://gitlab.cern.ch/aft/algorithms/training-dataset-dumper/-/blob/r22/configs/single-b-tag/EMPFlowGNN.json) has all the information required to train models with salt.
 
-Pre-dumped h5 samples are available [here](https://ftag.docs.cern.ch/samples/samples/).
+Pre-dumped h5 samples are available [here](https://ftag.docs.cern.ch/samples/h5_sample_list/).
 
 
 ## Python pre-processing

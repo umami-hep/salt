@@ -107,7 +107,7 @@ See `compare_models.py -h` for more information.
 
 ### Deploying FTAG Models in Athena
 
-Please see [this page](https://ftag.docs.cern.ch/algorithms/taggers/deploy/) in the central FTAG documentation.
+Please see [this page](https://ftag.docs.cern.ch/reco_algs/taggers/deploy/) in the central FTAG documentation.
 
 
 ### Viewing ONNX Model Metadata
