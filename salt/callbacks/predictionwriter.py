@@ -1,6 +1,7 @@
 from collections import defaultdict
 from pathlib import Path
 
+import h5py
 import numpy as np
 from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
@@ -73,25 +74,38 @@ class PredictionWriter(Callback):
         self.global_object = self.ds.global_object
         self.batch_size = trainer.datamodule.batch_size
         self.test_suff = trainer.datamodule.test_suff
-        self.file = self.ds.file
+        self.filename = self.ds.filename
         self.num = len(self.ds)
         self.norm_dict = self.ds.norm_dict
 
         # inputs names
         self.input_map = self.ds.input_map
 
-        # check extra vars exist
-        for input_type, vars_to_check in self.extra_vars.items():
-            if input_type in self.input_map:
-                dataset_name = self.input_map[input_type]
-                available_vars = set(self.file[dataset_name].dtype.names)
-                if missing_vars := set(vars_to_check) - available_vars:
-                    raise ValueError(
-                        "The following variables are missing for input type"
-                        f"'{input_type}': {missing_vars}"
+        # Cache metadata + validate extra_vars (no open handles kept)
+        self._dset_exists: set[str] = set()
+        self._dset_dtype_names: dict[str, tuple[str, ...]] = {}
+
+        with h5py.File(self.filename, "r") as test_file:
+            # check extra vars exist (extra_vars is keyed by input_type)
+            for input_type, vars_to_check in self.extra_vars.items():
+                if input_type in self.input_map:
+                    dataset_name = self.input_map[input_type]
+                    available_vars = set(test_file[dataset_name].dtype.names)
+                    if missing_vars := set(vars_to_check) - available_vars:
+                        raise ValueError(
+                            "The following variables are missing for input type"
+                            f"'{input_type}': {missing_vars}"
+                        )
+                else:
+                    raise ValueError(f"Input type '{input_type}' is not recognized in input_map.")
+
+            # cache dtype names for mapped datasets
+            for dataset_name in self.input_map.values():
+                if dataset_name in test_file:
+                    self._dset_exists.add(dataset_name)
+                    self._dset_dtype_names[dataset_name] = tuple(
+                        test_file[dataset_name].dtype.names or ()
                     )
-            else:
-                raise ValueError(f"Input type '{input_type}' is not recognized in input_map.")
 
         # place to store intermediate outputs
         self.tasks = module.model.tasks
@@ -116,6 +130,37 @@ class PredictionWriter(Callback):
             if "objects" not in self.outputs:
                 self.outputs["objects"] = {}
 
+    def _read_inputs_slice(
+        self,
+        dataset_name: str,
+        variables: list[str] | tuple[str, ...],
+        blow: int,
+        bhigh: int,
+    ):
+        """Read a slice of structured input variables from the test HDF5 file.
+
+        Parameters
+        ----------
+        dataset_name : str
+            Name of the dataset in the HDF5 file (i.e. the mapped value from
+            ``input_map``).
+        variables : list[str] | tuple[str, ...]
+            Names of the structured fields to extract from the dataset.
+        blow : int
+            Lower index (inclusive) of the slice to read.
+        bhigh : int
+            Upper index (exclusive) of the slice to read.
+
+        Returns
+        -------
+        numpy.ndarray
+            Structured NumPy array containing the selected fields for the
+            requested index range.
+        """
+        with h5py.File(self.filename, "r") as f:
+            dset = f[dataset_name]
+            return dset.fields(list(variables))[blow:bhigh]
+
     @property
     def output_path(self) -> Path:
         out_dir = Path(self.trainer.ckpt_path).parent
@@ -130,6 +175,7 @@ class PredictionWriter(Callback):
         blow = batch_idx * self.batch_size
         bhigh = (batch_idx + 1) * self.batch_size
         bhigh = min(bhigh, self.num)
+
         for input_name, outputs in batch_outputs.items():
             this_outputs = []
 
@@ -138,12 +184,15 @@ class PredictionWriter(Callback):
 
                 # get input variables
                 input_variables = None
-                if name in self.extra_vars:
-                    input_variables = self.extra_vars[name]
+                # extra_vars is keyed by input_type (input_name), not dataset_name
+                if self.extra_vars.get(input_name):
+                    input_variables = self.extra_vars[input_name]
                 if not input_variables:
-                    input_variables = self.file[name].dtype.names
-                if name in self.file:
-                    inputs = self.file[name].fields(input_variables)[blow:bhigh]
+                    input_variables = self._dset_dtype_names.get(name)
+
+                inputs = None
+                if name in self._dset_exists and input_variables:
+                    inputs = self._read_inputs_slice(name, input_variables, blow, bhigh)
                     this_outputs.append(inputs)
             else:
                 name = input_name
@@ -197,9 +246,9 @@ class PredictionWriter(Callback):
             this_pad_masks = pad_masks.get(task.input_name)
 
             # Get the outputs in the correct format
-            if isinstance(task, ClassificationTask | VertexingTask):
+            if isinstance(task, (ClassificationTask, VertexingTask)):
                 this_preds = task.get_h5(this_preds, this_pad_masks)
-            if isinstance(task, RegressionTask | GaussianRegressionTask):
+            if isinstance(task, (RegressionTask, GaussianRegressionTask)):
                 this_preds = task.get_h5(this_preds, labels, this_pad_masks)
 
             # Add the outputs to the dictionary
@@ -239,7 +288,12 @@ class PredictionWriter(Callback):
             mask_indices = indices_from_mask(objects["masks"].cpu().sigmoid() > 0.5)
             dtype = np.dtype([(f"{module.name}_MaskIndex", "i8")])
             mask_indices = mask_indices.int().cpu().numpy()
-            mask_indices = np.where(~this_pad_masks, mask_indices, -1)
+
+            tracks_pad = pad_masks.get("tracks")
+            if tracks_pad is not None:
+                tracks_pad_np = tracks_pad.cpu().numpy()
+                mask_indices = np.where(~tracks_pad_np, mask_indices, -1)
+
             to_write["tracks"]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
 
             # Write the truth mask and mask logits to their own dset

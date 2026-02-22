@@ -1,5 +1,8 @@
+import os
+import time
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -7,6 +10,7 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
+from filelock import FileLock, Timeout
 from ftag import Cuts, Labeller
 from ftag.track_selector import TrackSelector
 from ftag.vds import create_virtual_file
@@ -124,7 +128,7 @@ class SaltDataset(Dataset):
         # Define the dataset that will be used
         self.filename = Path(filename)
 
-        if "*" in self.filename.name:
+        if self._has_wildcard(self.filename):
             # Check that the wildcard matches at least one file
             matches = list(self.filename.parent.glob(self.filename.name))
             if not matches:
@@ -140,38 +144,27 @@ class SaltDataset(Dataset):
                 # Try to create the new folder/file.
                 try:
                     vds_dir.mkdir(parents=True, exist_ok=True)
-
-                    vds_out_path = Path(
-                        create_virtual_file(
-                            pattern=self.filename,
-                            out_fname=vds_dir / "vds.h5",
-                        )
-                    )
-
-                # If no permissions, raise error with custom message
                 except PermissionError as err:
                     raise PermissionError(
-                        f"No permissions to create a VDS folder/file in {vds_out_path}."
+                        f"No permissions to create a VDS folder/file in {vds_dir}. "
                         "Please use the custom vds_path option."
                     ) from err
 
+                out_fname = vds_dir / "vds.h5"
             else:
-                # Ensure the parent directory exists
-                Path(vds_path).parent.mkdir(parents=True, exist_ok=True)
+                out_fname = Path(vds_path)
+                out_fname.parent.mkdir(parents=True, exist_ok=True)
 
-                # Create the virtual file
-                vds_out_path = Path(
-                    create_virtual_file(
-                        pattern=self.filename,
-                        out_fname=Path(vds_path),
-                    )
-                )
+            vds_out_path = self._create_vds_locked(
+                pattern=self.filename,
+                out_fname=out_fname,
+            )
 
             # Set the file to the new VDS file
             self.filename = vds_out_path
 
-        # Get the file correctly
-        self.file = h5py.File(self.filename, "r")
+        self._h5: h5py.File | None = None
+        self._pid: int | None = None
 
         self.num_inputs = num_inputs
         self.non_finite_to_num = non_finite_to_num
@@ -226,17 +219,153 @@ class SaltDataset(Dataset):
 
         self._is_setup = False
 
+    @staticmethod
+    def _has_wildcard(path: Path) -> bool:
+        """Check whether a path contains glob-style wildcard characters.
+
+        Parameters
+        ----------
+        path : Path
+            Input path to inspect.
+
+        Returns
+        -------
+        bool
+            True if the filename contains wildcard characters (``*``, ``?``, or ``[``),
+            otherwise False.
+        """
+        name = path.name
+        return any(ch in name for ch in ("*", "?", "["))
+
+    @staticmethod
+    def _done_marker(vds_out: Path) -> Path:
+        """Return the path to the VDS completion marker file.
+
+        Parameters
+        ----------
+        vds_out : Path
+            Path to the final VDS file.
+
+        Returns
+        -------
+        Path
+            Path to the corresponding ``.done`` marker file.
+        """
+        return vds_out.with_suffix(vds_out.suffix + ".done")
+
+    def _create_vds_locked(self, pattern: Path, out_fname: Path) -> Path:
+        """Create a VDS file in a multi-process safe way.
+
+        This method serializes VDS creation across processes (and nodes)
+        using a filesystem lock and a completion marker. It prevents
+        concurrent writers from corrupting the output file.
+
+        The procedure is:
+
+        1. Acquire a file lock (``<out_fname>.lock``).
+        2. Re-check whether a completion marker exists.
+        3. Build the VDS into a temporary file.
+        4. Atomically rename the temporary file to the final filename.
+        5. Write a ``.done`` marker.
+
+        Parameters
+        ----------
+        pattern : Path
+            Glob-style pattern used to construct the VDS.
+        out_fname : Path
+            Target path for the VDS file.
+
+        Returns
+        -------
+        Path
+            Path to the final VDS file.
+
+        Raises
+        ------
+        RuntimeError
+            If acquiring the lock times out.
+        """
+        out_fname = Path(out_fname)
+        out_fname.parent.mkdir(parents=True, exist_ok=True)
+
+        lock_path = out_fname.with_suffix(out_fname.suffix + ".lock")
+        done_path = self._done_marker(out_fname)
+
+        # Fast path: already built
+        if done_path.exists():
+            return out_fname
+
+        lock = FileLock(str(lock_path))
+
+        try:
+            lock.acquire(timeout=1800)
+        except Timeout as exc:
+            raise RuntimeError(f"Timeout waiting for VDS lock: {lock_path}") from exc
+
+        try:
+            # Re-check after acquiring lock
+            if done_path.exists():
+                return out_fname
+
+            tmp_out = out_fname.with_name(out_fname.name + f".tmp.{os.getpid()}")
+
+            created_path = Path(
+                create_virtual_file(
+                    pattern=pattern,
+                    out_fname=tmp_out,
+                )
+            )
+
+            # Ensure atomic publish from tmp_out
+            if (
+                created_path.resolve() != tmp_out.resolve()
+                and created_path.exists()
+                and not tmp_out.exists()
+            ):
+                created_path.replace(tmp_out)
+
+            tmp_out.replace(out_fname)
+
+            marker_tmp = done_path.with_name(done_path.name + f".tmp.{os.getpid()}")
+            marker_tmp.write_text(f"ok pid={os.getpid()} time={time.time()}\n")
+            marker_tmp.replace(done_path)
+
+            return out_fname
+
+        finally:
+            with suppress(Exception):
+                lock.release()
+
+    def _ensure_open(self) -> None:
+        """Ensure an HDF5 handle is opened for the current process.
+
+        This guards against handle inheritance across processes (fork) and
+        covers cases where the Dataset instance is re-used in a different
+        process context.
+        """
+        pid = os.getpid()
+        if self._h5 is None or self._pid != pid:
+            # Close stale handle if valid
+            if self._h5 is not None and self._h5.id.valid:
+                self._h5.close()
+
+            self._h5 = h5py.File(self.filename, "r", swmr=True, libver="latest")
+            self._pid = pid
+
     def _setup(self):
-        """Setup the dataset."""
+        """Setup the dataset (lazy, per process/worker)."""
+        self._ensure_open()
+
         # setup datasets and accessor arrays
         self.dss = {}
         self.arrays = {}
-        file = h5py.File(self.filename, "r")
+        assert self._h5 is not None
+        file = self._h5
 
         for internal, external in self.input_map.items():
             self.dss[internal] = file[external]
             if (internal == external) and internal == self.global_object:
-                this_vars = list(self.file[internal].dtype.fields.keys())
+                this_vars = list(file[external].dtype.fields.keys())
             else:
                 this_vars = self.labels[internal].copy() if internal in self.labels else []
                 this_vars += self.input_variables.get(internal, [])
@@ -400,7 +529,8 @@ class SaltDataset(Dataset):
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
-        num_available = len(self.file[self.global_object])
+        with h5py.File(self.filename, "r") as f:
+            num_available = len(f[self.global_object])
 
         # not enough objects
         if num_requested > num_available:
@@ -418,7 +548,8 @@ class SaltDataset(Dataset):
 
     def check_file(self):
         keys = {self.input_map[k] for k in self.variables}
-        available = set(self.file.keys())
+        with h5py.File(self.filename, "r") as f:
+            available = set(f.keys())
         if missing := keys - available - {"EDGE", "global", "parameters"}:
             raise KeyError(
                 f"Input file '{self.filename.name}' does not contain keys {missing}."
@@ -433,15 +564,16 @@ class SaltDataset(Dataset):
                 case _:
                     pass
             name = self.input_map[k]
-            if not isinstance(self.file[name], h5py.Dataset):
-                raise KeyError(
-                    f"The object '{name}' in file '{self.filename.name}' is not a dataset."
-                )
-            if missing := set(v) - set(self.file[name].dtype.names):
-                raise KeyError(
-                    f"Variables {missing} are missing from dataset '{name}' in input file"
-                    f" '{self.filename.name}'."
-                )
+            with h5py.File(self.filename, "r") as f:
+                if not isinstance(f[name], h5py.Dataset):
+                    raise KeyError(
+                        f"The object '{name}' in file '{self.filename.name}' is not a dataset."
+                    )
+                if missing := set(v) - set(f[name].dtype.names):
+                    raise KeyError(
+                        f"Variables {missing} are missing from dataset '{name}' in input file"
+                        f" '{self.filename.name}'."
+                    )
 
     def process_labels(self, labels, batch, input_name):
         if (len(self.labels) != 0) and (input_name in self.labels):
@@ -454,7 +586,8 @@ class SaltDataset(Dataset):
                     and label == "flavour_label"
                 ):
                     labeller = self.labeller
-                    all_train_vars = list(self.file["jets"].dtype.fields.keys())
+                    with h5py.File(self.filename, "r") as f:
+                        all_train_vars = list(f["jets"].dtype.fields.keys())
                     for var in labeller.variables:
                         if var not in all_train_vars:
                             raise ValueError("Not enough fields to apply labelling cuts.")

@@ -10,7 +10,9 @@ data:
   class_dict: /eos/user/u/umamibot/www/ci/salt/pflow_3M/class_dict.yaml
   #move_files_temp: /dev/shm/...
   batch_size: 1000
-  num_workers: 10
+  num_workers: 8
+  persistent_workers: True
+  prefetch_factor: 2
   num_train: -1
   num_val: -1
   num_test: -1
