@@ -239,8 +239,6 @@ class SaveConfigCallback(Callback):
         meta["val_file"] = str(val_dset.filename)
         meta["num_train"] = len(train_dset)
         meta["num_val"] = len(val_dset)
-        meta["available_train"] = len(train_dset.file[global_object])
-        meta["available_val"] = len(val_dset.file[global_object])
         batch_size = train_loader.batch_size
         batch_size = batch_size or train_loader.sampler.batch_size
         meta["batch_size"] = batch_size
@@ -250,12 +248,37 @@ class SaveConfigCallback(Callback):
         meta["gpu_ids"] = trainer.device_ids
         meta["num_workers"] = train_loader.num_workers
 
-        with contextlib.suppress(KeyError):
+        # Read metadata from the train file
+        with h5py.File(meta["train_file"]) as train_file:
+            meta["available_train"] = len(train_file[global_object])
+
             # TODO(@jabarr): update UPP to call attribute objects instead of jets
             # https://github.com/umami-hep/umami-preprocessing/issues/56
-            meta["num_unique_jets_train"] = get_attr(train_dset.file, "unique_jets")
-            meta["num_unique_jets_val"] = get_attr(val_dset.file, "unique_jets")
-            meta["dsids"] = get_attr(train_dset.file, "dsids")
+            with contextlib.suppress(KeyError):
+                meta["num_unique_jets_train"] = get_attr(train_file, "unique_jets")
+                meta["dsids"] = get_attr(train_file, "dsids")
+                meta["jet_counts_train"] = get_attr(train_file, "jet_counts")
+                meta["pp_config_train"] = get_attr(train_file, "config")
+
+            # save the object classes, which is stored as an attr in the training file
+            try:
+                object_classes = train_file[global_object].attrs["flavour_label"]
+            except KeyError:
+                object_classes = "not available"
+            meta["object_classes"] = dict(
+                zip(range(len(object_classes)), object_classes, strict=True)
+            )
+
+        # Read metadata from the validation file
+        with h5py.File(meta["val_file"]) as val_file:
+            meta["available_val"] = len(val_file[global_object])
+
+            # TODO(@jabarr): update UPP to call attribute objects instead of jets
+            # https://github.com/umami-hep/umami-preprocessing/issues/56
+            with contextlib.suppress(KeyError):
+                meta["num_unique_jets_val"] = get_attr(val_file, "unique_jets")
+                meta["jet_counts_val"] = get_attr(val_file, "jet_counts")
+                meta["pp_config_val"] = get_attr(val_file, "config")
 
         meta["salt_hash"] = get_git_hash(Path(__file__).parent)
         if logger:
@@ -273,22 +296,6 @@ class SaveConfigCallback(Callback):
         if logger and not self.use_S3:
             # Currently not available on S3
             logger.log_hyperparams(meta)
-
-        # save the object classes, which is stored as an attr in the training file
-        with h5py.File(meta["train_file"]) as file:
-            try:
-                object_classes = file[global_object].attrs["flavour_label"]
-            except KeyError:
-                object_classes = "not available"
-            meta["object_classes"] = dict(
-                zip(range(len(object_classes)), object_classes, strict=True)
-            )
-
-        with contextlib.suppress(KeyError):
-            meta["jet_counts_train"] = get_attr(train_dset.file, "jet_counts")
-            meta["jet_counts_val"] = get_attr(val_dset.file, "jet_counts")
-            meta["pp_config_train"] = get_attr(train_dset.file, "config")
-            meta["pp_config_val"] = get_attr(val_dset.file, "config")
 
         meta_path = self.make_path(config_path.parent / "metadata.yaml")
         self.write_dump_yaml_file(meta, meta_path)

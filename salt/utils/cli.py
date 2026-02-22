@@ -395,11 +395,17 @@ class SaltCLI(LightningCLI):
             if data.input_map
             else task.init_args.input_name
         )
-        with h5py.File(data.train_file) as f:
+
+        # Check for wildcards in train_file
+        tmp_path = Path(data.train_file)
+        matches = sorted(tmp_path.parent.glob(tmp_path.name))
+        train_file_path = matches[0]
+
+        with h5py.File(train_file_path) as f:
             if task.init_args.label not in f[name].attrs:
                 raise ValueError(
                     f"'{task.init_args.label}' not found in the h5 attrs of group '{name}' in file "
-                    f"{data.train_file}. Specify class_names manually."
+                    f"{train_file_path}. Specify class_names manually."
                 )
 
             return list(f[name].attrs[task.init_args.label])

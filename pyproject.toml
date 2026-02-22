@@ -17,6 +17,7 @@ classifiers = [
 dependencies = [
   "atlas-ftag-tools==0.2.17",
   "comet_ml>=3.49.7",
+  "filelock>=3.12",
   "h5py>=3.14.0",
   "jsonargparse[signatures,argcomplete]>=4.32.0",
   "lightning==2.5.3",

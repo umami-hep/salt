@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import lightning
+import torch
 from torch.utils.data import DataLoader
 
 import salt.utils.file_utils as fu
@@ -52,6 +53,24 @@ class SaltDataModule(lightning.LightningDataModule):
         Test file suffix, by default None
     pin_memory : bool, optional
         Pin memory for faster GPU transfer, by default True
+    persistent_workers : bool, optional
+        Whether to keep DataLoader worker processes alive between epochs. Defaults to True.
+        This is strongly recommended when reading HDF5 / VDS files, since it ensures that each
+        worker keeps its own HDF5 file handle open for the lifetime of training. Repeated worker
+        teardown and recreation can otherwise lead to excessive file-open churn and increased risk
+        of multiprocessing-related HDF5 issues. Ignored if ``num_workers == 0``.
+    prefetch_factor : int, optional
+        Number of batches loaded in advance by each worker. Defaults to 2.
+        Lower values reduce concurrent HDF5 reads and metadata pressure, which can improve stability
+        and reduce I/O contention when using Virtual Datasets (VDS) or many DataLoader workers. Only
+        used when ``num_workers > 0``.
+    multiprocessing_context : str | None, optional
+        Multiprocessing start method for DataLoader workers. Typical values are ``"fork"``,
+        ``"spawn"``, or ``"forkserver"``. Defaults to None (PyTorch default).
+        When reading HDF5 files in parallel, using ``"spawn"`` can improve robustness by preventing
+        file handle inheritance across processes. This is particularly relevant for DDP training on
+        Linux systems where the default start method is ``"fork"``. Note that ``"spawn"`` may
+        slightly increase worker startup time.
     config_s3 : dict | None, optional
         Some parameters for the S3 access, by default None
     **kwargs
@@ -75,6 +94,9 @@ class SaltDataModule(lightning.LightningDataModule):
         test_vds_path: str | None = None,
         test_suff: str | None = None,
         pin_memory: bool = True,
+        persistent_workers: bool = True,
+        prefetch_factor: int = 2,
+        multiprocessing_context: str | None = None,
         config_s3: dict | None = None,
         **kwargs,
     ):
@@ -94,8 +116,72 @@ class SaltDataModule(lightning.LightningDataModule):
         self.class_dict = class_dict
         self.move_files_temp = move_files_temp
         self.pin_memory = pin_memory
+        self.persistent_workers = persistent_workers
+        self.prefetch_factor = prefetch_factor
+        self.multiprocessing_context = multiprocessing_context
         self.config_s3 = config_s3
         self.kwargs = kwargs
+
+    @staticmethod
+    def _dist_barrier() -> None:
+        """Synchronize all distributed ranks (no-op if not running distributed).
+
+        This helper calls :func:`torch.distributed.barrier` if and only if the
+        default process group is initialized.
+        """
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+    def _precreate_vds_rank0(self, stage: str) -> None:
+        """Pre-create VDS files on global rank 0 to avoid stampede at startup.
+
+        In DDP/multi-node training, each rank may instantiate datasets. When
+        wildcards are used, dataset initialization can trigger VDS creation.
+        This method runs dataset initialization once on global rank 0 and then
+        returns. Other ranks should call :meth:`_dist_barrier` to wait for the
+        VDS to exist.
+
+        Notes
+        -----
+        - Correctness is enforced by the VDS lock inside :class:`salt.data.SaltDataset`.
+          This method is a performance/robustness optimization to avoid redundant
+          work and metadata pressure.
+        - This method should be called before constructing the "real" datasets
+          that will be used by DataLoaders.
+
+        Parameters
+        ----------
+        stage : str
+            The Lightning stage (e.g. ``"fit"`` or ``"test"``).
+        """
+        if self.trainer is None or not self.trainer.is_global_zero:
+            return
+
+        if stage == "fit":
+            _ = SaltDataset(
+                filename=self.train_file,
+                num=self.num_train,
+                stage=stage,
+                vds_path=self.train_vds_path,
+                **self.kwargs,
+            )
+            _ = SaltDataset(
+                filename=self.val_file,
+                num=self.num_val,
+                stage=stage,
+                vds_path=self.val_vds_path,
+                **self.kwargs,
+            )
+
+        elif stage == "test":
+            assert self.test_file is not None, "No test file specified, see --data.test_file"
+            _ = SaltDataset(
+                filename=self.test_file,
+                num=self.num_test,
+                stage=stage,
+                vds_path=self.test_vds_path,
+                **self.kwargs,
+            )
 
     def prepare_data(self):
         if self.move_files_temp and not self.trainer.fast_dev_run:
@@ -112,6 +198,11 @@ class SaltDataModule(lightning.LightningDataModule):
             # Set the training/validation file to the temp path
             self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
             self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
+
+        # Rank-0 precreate + barrier
+        if stage in {"fit", "test"}:
+            self._precreate_vds_rank0(stage)
+            self._dist_barrier()
 
         # create training and validation datasets
         if stage == "fit":
@@ -159,6 +250,9 @@ class SaltDataModule(lightning.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers and self.num_workers > 0,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            multiprocessing_context=self.multiprocessing_context,
         )
 
     def train_dataloader(self):
