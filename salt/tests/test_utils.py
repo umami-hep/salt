@@ -101,7 +101,7 @@ def test_repair_checkpoint(capsys):
 
         # test the repair_checkpoint function
         repair_ckpt.repair_checkpoint(ckpt_path)
-        repaired_ckpt = torch.load(ckpt_path)
+        repaired_ckpt = torch.load(ckpt_path, weights_only=False)
         repaired_state_dict = repaired_ckpt["state_dict"]
         for key in repaired_state_dict:
             assert not key.startswith("_orig_mod."), "Found unmodified key in state_dict"

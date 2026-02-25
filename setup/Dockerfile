@@ -1,5 +1,5 @@
 # base image
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-devel
 
 # local and envs
 ENV LANG=C.UTF-8
@@ -24,9 +24,11 @@ COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
 # Build/Install flash-attn so it can import the already-installed torch
-RUN python -m pip install --no-build-isolation --no-deps "flash-attn>=2.5.7"
+# The correct prbuild wheel can be found here: https://flashattn.dev/#finder
+RUN python -m pip install --no-deps \
+    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3%2Bcu130torch2.9-cp311-cp311-linux_x86_64.whl"
 
-# Install dependencies (make use of caching)
+# Install dependencies (make use of caching, skip flash because it's already installed)
 RUN python -m pip install ".[dev,muP]"
 
 # Copy and install package (Source layer)

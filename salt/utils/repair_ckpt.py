@@ -25,7 +25,7 @@ def repair_checkpoint(path: str | Path) -> None:
         Path to the checkpoint file to repair.
     """
     path = Path(path)
-    ckpt = torch.load(path)
+    ckpt = torch.load(path, weights_only=False)
     in_state_dict = ckpt["state_dict"]
     pairings = [(src_key, src_key.replace("_orig_mod.", "")) for src_key in in_state_dict]
 

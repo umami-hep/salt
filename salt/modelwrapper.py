@@ -6,10 +6,11 @@ from typing import Any
 import lightning
 import torch
 from torch import nn
-from torch.optim import AdamW
+from torch.optim import AdamW, Optimizer
 
 from salt.models import InputNorm
 from salt.models.transformer import change_attn_backends
+from salt.optim import HybridMuonAdamW
 from salt.utils.muP_utils.configuration_muP import instantiate_mup
 
 try:
@@ -72,7 +73,7 @@ class ModelWrapper(lightning.LightningModule):
     loss_mode : str, optional
         Loss reduction mode. Default is ``"wsum"``. Other option: ``"GLS"``.
     optimizer : str, optional
-        Optimizer to use. Default is ``"AdamW"``. Other option: ``"lion"``.
+        Optimizer to use. Default is ``"AdamW"``. Other options: ``"lion"``, ``"HybridMuonAdamW"``.
     """
 
     def __init__(
@@ -127,11 +128,42 @@ class ModelWrapper(lightning.LightningModule):
                 "GLS does not utilise task weights - set all weights to 1"
             )
 
-        allowed_optimizers = ["lion", "AdamW"]
-        assert optimizer in allowed_optimizers, (
-            f"Optimizer {optimizer} not implemented, please choose from {allowed_optimizers}"
-        )
+        # Set the optimizer
         self.optimizer = optimizer
+
+    def _get_optimizer_class(self) -> type[Optimizer]:
+        """
+        Resolve and validate the optimizer class.
+
+        Returns
+        -------
+        Type[Optimizer]
+            The optimizer class to instantiate.
+
+        Raises
+        ------
+        ImportError
+            If a requested optimizer backend is not available.
+        ValueError
+            If an unsupported optimizer name is provided.
+        """
+        opt_name = self.optimizer
+
+        if opt_name == "lion":
+            if not _lion_available:
+                raise ImportError(
+                    "Lion optimizer requested but not available. "
+                    "Check installation of lion-pytorch."
+                )
+            return Lion
+
+        if opt_name == "AdamW":
+            return MuAdamW if (self.mup and _mup_available) else AdamW
+
+        if opt_name == "HybridMuonAdamW":
+            return HybridMuonAdamW
+
+        raise ValueError(f"Optimizer '{opt_name}' is not supported.")
 
     def total_loss(self, loss: dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute the final loss given per-task losses.
@@ -290,46 +322,48 @@ class ModelWrapper(lightning.LightningModule):
         batch = (inputs, pad_masks, None)
         return self.shared_step(batch, evaluation=True)[0]
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
         """Configure optimizer and learning-rate scheduler for Lightning.
+
+        This method resolves the optimizer class based on the configuration,
+        instantiates it with shared hyperparameters, and attaches a
+        OneCycleLR scheduler.
 
         Returns
         -------
-        tuple
-            Tuple of the optimizer and the scheduler
-
-        Raises
-        ------
-        ImportError
-            When Lion should be used but isn't found
+        tuple[list[torch.optim.Optimizer], list[dict]]
+            A tuple containing:
+                - List with a single instantiated optimizer.
+                - List with a scheduler configuration dictionary compatible
+                with Lightning (interval='step').
         """
-        if self.optimizer == "lion":
-            if _lion_available:
-                opt = Lion(
-                    self.parameters(),
-                    lr=self.lrs_config["initial"],
-                    weight_decay=self.lrs_config.get("weight_decay", 1e-5),
-                )
-            else:
-                raise ImportError("Lion is not available! Please check the installation")
-        else:  # AdamW or MuAdamW
-            optimizer = MuAdamW if self.mup and _mup_available else AdamW
-            opt = optimizer(
-                self.parameters(),
-                lr=self.lrs_config["initial"],
-                weight_decay=self.lrs_config.get("weight_decay", 1e-5),
-            )
+        optimizer_class = self._get_optimizer_class()
 
-        sch = torch.optim.lr_scheduler.OneCycleLR(
-            opt,
+        optimizer_kwargs = {
+            "lr": self.lrs_config["initial"],
+            "weight_decay": self.lrs_config.get("weight_decay", 1e-5),
+        }
+
+        # HybridMuonAdamW wants names for good parameter selection
+        if optimizer_class is HybridMuonAdamW:
+            optimizer = optimizer_class(self.named_parameters(), **optimizer_kwargs)
+
+        else:
+            optimizer = optimizer_class(self.parameters(), **optimizer_kwargs)
+
+        # IMPORTANT: OneCycleLR takes the optimizer as the FIRST positional argument.
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
             max_lr=self.lrs_config["max"],
             total_steps=self.trainer.estimated_stepping_batches,
             div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
             final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
             pct_start=float(self.lrs_config["pct_start"]),
             last_epoch=int(self.lrs_config.get("last_epoch", -1)),
+            cycle_momentum=optimizer_class is not HybridMuonAdamW,
         )
-        return [opt], [{"scheduler": sch, "interval": "step"}]
+
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
     @property
     def input_dims(self) -> dict[str, int]:
