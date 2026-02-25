@@ -305,3 +305,9 @@ def test_gls_weighting(tmp_path) -> None:
 
     # And this *should* work
     run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
+
+
+@pytest.mark.filterwarnings(w)
+def test_hybrid_muon_adamw(tmp_path) -> None:
+    args = ["--model.optimizer=HybridMuonAdamW"]
+    run_combined(tmp_path, CONFIG, do_onnx=False, train_args=args)

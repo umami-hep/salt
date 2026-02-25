@@ -201,9 +201,7 @@ def get_model_path(mod_type, path_dict=None):
     return (
         path_dict["model_base_path"]
         if "base" in mod_type
-        else path_dict["model_delta_path"]
-        if "delta" in mod_type
-        else path_dict["model_main_path"]
+        else path_dict["model_delta_path"] if "delta" in mod_type else path_dict["model_main_path"]
     )
 
 
@@ -234,8 +232,20 @@ def get_models_muptest(variations, modInd=None, modType=None):
 def load_models(check=False):
     path_dict = get_paths()
     if check:
-        return load(path_dict["model_base_check_path"]), load(path_dict["model_delta_check_path"])
-    return load(path_dict["model_base_path"]), load(path_dict["model_delta_path"])
+        return load(
+            path_dict["model_base_check_path"],
+            weights_only=False,
+        ), load(
+            path_dict["model_delta_check_path"],
+            weights_only=False,
+        )
+    return load(
+        path_dict["model_base_path"],
+        weights_only=False,
+    ), load(
+        path_dict["model_delta_path"],
+        weights_only=False,
+    )
 
 
 def store_shapes_mup(path=None, check=False):

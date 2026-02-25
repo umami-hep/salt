@@ -23,18 +23,19 @@
 unit-tests:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/unit-models.xml run_test salt/tests/test_models.py
-    - JUNIT_FILE=reports/unit-union_find.xml run_test salt/tests/test_union_find.py
-    - JUNIT_FILE=reports/unit-edges.xml run_test salt/tests/test_edges.py
-    - JUNIT_FILE=reports/unit-utils.xml run_test salt/tests/test_utils.py
-    - JUNIT_FILE=reports/unit-posenc.xml run_test salt/tests/test_posenc.py
-    - JUNIT_FILE=reports/unit-initnet.xml run_test salt/tests/test_initnet.py
     - JUNIT_FILE=reports/unit-attention.xml run_test salt/tests/test_attention.py
-    - JUNIT_FILE=reports/unit-transformer.xml run_test salt/tests/test_transformer.py
-    - JUNIT_FILE=reports/unit-masks.xml run_test salt/tests/test_masks.py
-    - JUNIT_FILE=reports/unit-featurewise.xml run_test salt/tests/test_featurewise.py
-    - JUNIT_FILE=reports/unit-datasets.xml run_test salt/tests/test_datasets.py
     - JUNIT_FILE=reports/unit-cli.xml run_test salt/tests/test_cli.py
+    - JUNIT_FILE=reports/unit-datasets.xml run_test salt/tests/test_datasets.py
+    - JUNIT_FILE=reports/unit-edges.xml run_test salt/tests/test_edges.py
+    - JUNIT_FILE=reports/unit-featurewise.xml run_test salt/tests/test_featurewise.py
+    - JUNIT_FILE=reports/unit-initnet.xml run_test salt/tests/test_initnet.py
+    - JUNIT_FILE=reports/unit-masks.xml run_test salt/tests/test_masks.py
+    - JUNIT_FILE=reports/unit-models.xml run_test salt/tests/test_models.py
+    - JUNIT_FILE=reports/unit-optimizer.xml run_test salt/tests/test_optimizer.py
+    - JUNIT_FILE=reports/unit-posenc.xml run_test salt/tests/test_posenc.py
+    - JUNIT_FILE=reports/unit-transformer.xml run_test salt/tests/test_transformer.py
+    - JUNIT_FILE=reports/unit-union_find.xml run_test salt/tests/test_union_find.py
+    - JUNIT_FILE=reports/unit-utils.xml run_test salt/tests/test_utils.py
 
 # --------------------------- PIPELINE TESTS ---------------------------
 test-dev:
@@ -43,22 +44,21 @@ test-dev:
     - JUNIT_FILE=reports/dev.xml run_test salt/tests/test_pipeline.py::test_train_dev
     - JUNIT_FILE=reports/dev-move.xml run_test salt/tests/test_pipeline.py::test_train_movefilestemp
 
-test-truncate-inputs:
+test-DIPS-DL1:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/truncate.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs
-    - JUNIT_FILE=reports/truncate-error.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs_error
+    - JUNIT_FILE=reports/dips.xml run_test salt/tests/test_pipeline.py::test_DIPS
+    - JUNIT_FILE=reports/dl1.xml run_test salt/tests/test_pipeline.py::test_DL1
+
+test-flow:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/flow.xml run_test salt/tests/test_pipeline.py::test_flow
 
 test-GN2:
   extends: .test-template
   script:
     - JUNIT_FILE=reports/gn2.xml run_test salt/tests/test_pipeline.py::test_GN2
-
-test-GN3:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn3-v00.xml run_test salt/tests/test_pipeline.py::test_GN3V00
-    - JUNIT_FILE=reports/gn3-v01.xml run_test salt/tests/test_pipeline.py::test_GN3V01
 
 test-GN2_muP:
   extends: .test-template
@@ -75,11 +75,29 @@ test-GN2XE:
   script:
     - JUNIT_FILE=reports/gn2xe.xml run_test salt/tests/test_pipeline.py::test_GN2XE
 
-test-DIPS-DL1:
+test-GN3:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/dips.xml run_test salt/tests/test_pipeline.py::test_DIPS
-    - JUNIT_FILE=reports/dl1.xml run_test salt/tests/test_pipeline.py::test_DL1
+    - JUNIT_FILE=reports/gn3-v00.xml run_test salt/tests/test_pipeline.py::test_GN3V00
+    - JUNIT_FILE=reports/gn3-v01.xml run_test salt/tests/test_pipeline.py::test_GN3V01
+
+test-maskformer:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/maskformer.xml run_test salt/tests/test_pipeline.py::test_maskformer
+
+test-misc:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/misc-gls.xml run_test salt/tests/test_pipeline.py::test_gls_weighting
+    - JUNIT_FILE=reports/misc-noglobal.xml run_test salt/tests/test_pipeline.py::test_no_global_inputs
+    - JUNIT_FILE=reports/misc-hybrid_muon_adamw.xml run_test salt/tests/test_pipeline.py::test_hybrid_muon_adamw
+
+test-parameterisation:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/param-concat.xml run_test salt/tests/test_pipeline.py::test_param_concat
+    - JUNIT_FILE=reports/param-featurewise.xml run_test salt/tests/test_pipeline.py::test_param_featurewise
 
 test-regression:
   extends: .test-template
@@ -88,24 +106,8 @@ test-regression:
     - JUNIT_FILE=reports/regression-nan.xml run_test salt/tests/test_pipeline.py::test_nan_regression
     - JUNIT_FILE=reports/regression-gauss.xml run_test salt/tests/test_pipeline.py::test_regression_gaussian
 
-test-flow:
+test-truncate-inputs:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/flow.xml run_test salt/tests/test_pipeline.py::test_flow
-
-test-maskformer:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/maskformer.xml run_test salt/tests/test_pipeline.py::test_maskformer
-
-test-parameterisation:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/param-concat.xml run_test salt/tests/test_pipeline.py::test_param_concat
-    - JUNIT_FILE=reports/param-featurewise.xml run_test salt/tests/test_pipeline.py::test_param_featurewise
-
-test-misc:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/misc-gls.xml run_test salt/tests/test_pipeline.py::test_gls_weighting
-    - JUNIT_FILE=reports/misc-noglobal.xml run_test salt/tests/test_pipeline.py::test_no_global_inputs
+    - JUNIT_FILE=reports/truncate.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs
+    - JUNIT_FILE=reports/truncate-error.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs_error

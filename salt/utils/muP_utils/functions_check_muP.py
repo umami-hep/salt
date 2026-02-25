@@ -257,7 +257,7 @@ def _get_coord_data(
         for width, model_path in models.items():
             if fix_data:
                 dataloader = fix_batch_dataloader(saved_batch, nsteps)
-            model = torch.load(model_path)
+            model = torch.load(model_path, weights_only=False)
             model.train()
             if mup:
                 from salt.utils.muP_utils.configuration_muP import instantiate_mup
@@ -575,7 +575,7 @@ def _get_training_data(
 
                 pbar = tqdm(total=nsteps)
 
-            model = torch.load(model_path)
+            model = torch.load(model_path, weights_only=False)
             model.train()
 
             if mup:

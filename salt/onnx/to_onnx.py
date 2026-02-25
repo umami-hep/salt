@@ -739,6 +739,7 @@ def main(args: list[str] | None = None) -> None:
         input_names=onnx_model.input_names,
         output_names=onnx_model.output_names,
         dynamic_axes=onnx_model.dynamic_axes,
+        dynamo=False,
     )
 
     # Attach metadata (config, hashes, IO schema) to the ONNX file
