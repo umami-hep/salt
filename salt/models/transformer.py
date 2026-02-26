@@ -312,6 +312,8 @@ class EncoderLayer(nn.Module):
         If ``True``, edge features are updated after attention. The default is ``False``
     mup: bool, optional
         Whether to use μP parameterization. The default is ``False``.
+    num_dense: int, optional
+        Number of dense layers to stack in the feed-forward block. The default is ``1``.
     """
 
     def __init__(
@@ -327,9 +329,13 @@ class EncoderLayer(nn.Module):
         edge_embed_dim: int = 0,
         update_edges: bool = False,
         mup: bool = False,
+        num_dense: int = 1,
     ) -> None:
         super().__init__()
         self.mup = mup
+        self.num_dense = num_dense
+
+        assert num_dense >= 1, "num_dense must be at least 1"
         self.update_edges = update_edges
 
         # Safe defaults
@@ -377,7 +383,12 @@ class EncoderLayer(nn.Module):
             norm_type=residual_norm_type,
         )
         self.attn = residual(attn_class(embed_dim, **attn_kwargs))
-        self.dense = residual(GLU(embed_dim, **dense_kwargs))
+        if num_dense == 1:
+            self.dense = residual(GLU(embed_dim, **dense_kwargs))
+        else:
+            self.dense = nn.Sequential(*[
+                residual(GLU(embed_dim, **dense_kwargs)) for _ in range(num_dense)
+            ])
 
     def forward(
         self, x: Tensor, edge_x: Tensor | None = None, **kwargs: Any
