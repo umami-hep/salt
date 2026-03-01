@@ -272,11 +272,6 @@ class PredictionWriter(Callback):
                 add_mask = True
 
         if self.write_objects and self.ds.mf_config:
-            self.object_params = {
-                "class_label": self.ds.mf_config.object.class_label,
-                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
-            }
-
             # Generate the object outputs of the form (B, N) where N is the number of objects
             objects = outputs["objects"]
             constituent_name = self.object_params["constituent_name"]
