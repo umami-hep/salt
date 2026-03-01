@@ -232,15 +232,20 @@ class MaskDecoder(nn.Module):
             preds["intermediate_outputs"] = intermediate_outputs
 
         if labels is not None:
-            # print("Hmm?", labels.keys())
-            # print(labels["objects"].keys())
-            # print(labels["objects"]["pt"].shape)
-            # print(labels["objects"]["pt"][0], labels["objects"]["pt"][1])
-            for k in ['pt', 'Lxy', 'deta', 'dphi', 'mass']:
-                labels["objects"][k] = torch.nan_to_num(
-                    labels["objects"][k], nan=0, posinf=0, neginf=0
-                )
-            return self.mask_loss(preds, tasks, labels)
+            if self.training:
+                for k in labels["objects"]:
+                    labels["objects"][k] = torch.nan_to_num(
+                        labels["objects"][k], nan=0, posinf=0, neginf=0
+                    )
+                return self.mask_loss(preds, tasks, labels)
+
+            # During eval: produce regression predictions without loss/matching.
+            # Loss requires matched dimensions (num_queries == num_objects in data),
+            # which may not hold for test data. PredictionWriter uses raw predictions.
+            for task in tasks:
+                if task.input_name == "objects":
+                    task_pred = task.net(preds["objects"]["embed"])
+                    preds["objects"][task.name] = task_pred
 
         return preds, labels, {}
 
