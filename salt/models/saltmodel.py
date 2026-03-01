@@ -227,7 +227,9 @@ class SaltModel(nn.Module):
             if task.input_name == task.global_object:
                 task_preds, task_loss = task(preds["global_rep"], labels, None, context=None)
             elif self.mask_decoder and task.input_name == "objects":
-                task_preds, task_loss = task(preds["objects"]["embed"], labels, masks, context=None)
+                # MaskDecoder handles object tasks internally (Hungarian-matched loss
+                # during training, direct predictions during eval)
+                continue
             else:
                 task_preds, task_loss = task(
                     preds["embed_xs"], labels, masks, context=preds["global_rep"]
