@@ -232,16 +232,20 @@ class MaskDecoder(nn.Module):
             preds["intermediate_outputs"] = intermediate_outputs
 
         if labels is not None:
-            if self.training:
+            # Check if label and query dimensions match (they won't for test
+            # data which may have different padding, e.g. 25 vs 15 objects)
+            label_dim = next(iter(labels["objects"].values())).shape[1]
+            query_dim = preds["objects"]["embed"].shape[1]
+
+            if label_dim == query_dim:
+                # Dimensions match (train + val): full loss path with matching
                 for k in labels["objects"]:
                     labels["objects"][k] = torch.nan_to_num(
                         labels["objects"][k], nan=0, posinf=0, neginf=0
                     )
                 return self.mask_loss(preds, tasks, labels)
 
-            # During eval: produce regression predictions without loss/matching.
-            # Loss requires matched dimensions (num_queries == num_objects in data),
-            # which may not hold for test data. PredictionWriter uses raw predictions.
+            # Dimension mismatch (test data): produce predictions without loss
             for task in tasks:
                 if task.input_name == "objects":
                     task_pred = task.net(preds["objects"]["embed"])
