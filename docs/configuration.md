@@ -241,6 +241,7 @@ It is possible to include edge features as network input, representing relationa
 - `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
 - `isSelfLoop` = 1 if edge represents self-connection, 0 if not
 - `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
+- `mass` = $\ln\sqrt{\left(\Sigma E\right)^2 - \left(\Sigma p_T\cos\phi\right)^2 - \left(\Sigma p_T\sin\phi\right)^2 - \left(\Sigma p_T\sinh\eta\right)^2}$ (requires `pt`, `eta`, `phi`, `energy`)
 
 
 #### Heterogeneous Models
