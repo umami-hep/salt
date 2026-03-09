@@ -35,6 +35,7 @@ def get_dtype_edge(
         * ``"kt"`` → requires ``eta``, ``phi``, ``pt``.
         * ``"isSelfLoop"`` → skipped (no extra vars).
         * ``"subjetIndex"`` → requires ``subjetIndex``.
+        * ``"mass"`` → requires ``pt``, ``eta``, ``phi``, ``energy``.
 
         If ``None``, a ``ValueError`` is raised.
 
@@ -75,6 +76,8 @@ def get_dtype_edge(
             continue
         elif variable == "subjetIndex":
             req_vars.extend(["subjetIndex"])
+        elif variable == "mass":
+            req_vars.extend(["pt", "eta", "phi", "energy"])
         else:
             raise ValueError(f"Edge feature {variable} not recognized")
 
@@ -114,6 +117,7 @@ def get_inputs_edge(
 
         * ``eta``, ``phi`` for ``"dR"`` and ``"kt"``
         * ``pt`` for ``"z"`` and ``"kt"``
+        * ``energy`` for ``"mass"``
         * ``subjetIndex`` for ``"subjetIndex"``
 
     variables : Sequence[str]
@@ -124,6 +128,7 @@ def get_inputs_edge(
         * ``"z"``: log of pT fraction
         * ``"isSelfLoop"``: indicator for self-edges
         * ``"subjetIndex"``: indicator for same-subjet edges
+        * ``"mass"``: log of invariant mass
 
     Returns
     -------
@@ -163,6 +168,14 @@ def get_inputs_edge(
                 np.expand_dims(batch["pt"].astype(ebatch.dtype), 1).repeat(batch.shape[1], 1),
                 np.expand_dims(batch["pt"].astype(ebatch.dtype), 2).repeat(batch.shape[1], 2),
             )
+        if "mass" in variables:
+            pt = batch["pt"].astype(ebatch.dtype)
+            eta = batch["eta"].astype(ebatch.dtype)
+            phi = batch["phi"].astype(ebatch.dtype)
+            energy = batch["energy"].astype(ebatch.dtype)
+            px = pt * np.cos(phi)
+            py = pt * np.sin(phi)
+            pz = pt * np.sinh(eta)
         # fill edge features
         for i, variable in enumerate(variables):
             if variable == "dR":
@@ -184,5 +197,21 @@ def get_inputs_edge(
                     batch.shape[1], 2
                 )
                 ebatch[:, :, :, i] = np.logical_and(np.equal(sji1, sji2), sji1 >= 0)
+            elif variable == "mass":
+                e1 = np.expand_dims(energy, 1).repeat(batch.shape[1], 1)
+                e2 = np.expand_dims(energy, 2).repeat(batch.shape[1], 2)
+                px1 = np.expand_dims(px, 1).repeat(batch.shape[1], 1)
+                px2 = np.expand_dims(px, 2).repeat(batch.shape[1], 2)
+                py1 = np.expand_dims(py, 1).repeat(batch.shape[1], 1)
+                py2 = np.expand_dims(py, 2).repeat(batch.shape[1], 2)
+                pz1 = np.expand_dims(pz, 1).repeat(batch.shape[1], 1)
+                pz2 = np.expand_dims(pz, 2).repeat(batch.shape[1], 2)
+                e_sum = e1 + e2
+                px_sum = px1 + px2
+                py_sum = py1 + py2
+                pz_sum = pz1 + pz2
+                mass2 = e_sum**2 - px_sum**2 - py_sum**2 - pz_sum**2
+                mass2 = np.maximum(mass2, 1e-8)  # protect against small negative FP errors
+                ebatch[:, :, :, i] = 0.5 * np.log(mass2)
 
     return np.nan_to_num(ebatch, nan=0.0, posinf=0.0, neginf=0.0)
