@@ -686,6 +686,7 @@ def main(args: list[str] | None = None) -> None:
             parsed_args.ckpt_path,
             map_location=torch.device("cpu"),
             **config["model"],
+            weights_only=False,  # pytorch 2.6+. see https://pytorch.org/docs/stable/generated/torch.load.html
         )
         pt_model.eval()
         pt_model.float()
@@ -735,7 +736,7 @@ def main(args: list[str] | None = None) -> None:
     # Export the model to ONNX using our wrapper's shapes and dynamic axes
     onnx_model.to_onnx(
         onnx_path,
-        opset_version=16,
+        opset_version=20,  # updating beyond 20 needs dynamo export.
         input_names=onnx_model.input_names,
         output_names=onnx_model.output_names,
         dynamic_axes=onnx_model.dynamic_axes,

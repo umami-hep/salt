@@ -24,7 +24,7 @@ from salt.models.task import (
 from salt.models.transformer import Transformer
 
 # Alias for backward compatibility
-TransformerV2 = Transformer
+from salt.models.transformer_v2 import TransformerV2
 
 __all__ = [
     "ClassificationTask",
