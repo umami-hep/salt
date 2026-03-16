@@ -52,8 +52,9 @@ def check_flash_attn() -> str:
         )
     if _flash_attn_func is None:
         return (
-            "Requires the flash_attn package, CUDA 12+, and A100+, and must be installed "
-            "separately or using the [flash] extra. See requirements-flash.txt."
+            "Flash attention is required but not found! Please ensure the package is installed "
+            "correctly. If not, please install the flash attention package as described in "
+            "https://ftag-salt.docs.cern.ch/setup/#install-the-salt-package"
         )
     return ""
 

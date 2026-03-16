@@ -18,7 +18,7 @@ cd salt
 
 You can install salt within a virtual environment or a docker image.
 The recommended workflow is to set the package up using conda/mamba.
-Salt requires Python 3.9, 3.10 or 3.11.
+Salt requires Python 3.10 or 3.11.
 
 === "conda"
 
@@ -61,10 +61,10 @@ Salt requires Python 3.9, 3.10 or 3.11.
     source env/bin/activate
     ```
 
-=== "singularity"
+=== "apptainer"
 
     Prebuilt docker images are an easy way to use salt, but can also be a bit less flexible than other approaches.
-    You can run the prebuilt docker images using [singulartiy](https://sylabs.io/guides/latest/user-guide/).
+    You can run the prebuilt docker images using [apptainer](https://apptainer.org/docs/user/latest/).
 
     The first step is to decide which image you want to use.
     You can either pull an image locally, or use the unpacked images hosted on CVMFS.
@@ -74,7 +74,7 @@ Salt requires Python 3.9, 3.10 or 3.11.
 
         You only need to read this if you aren't manually pulling the Salt image yourself.
 
-        The Salt singularity images are hosted on CVMFS.
+        The Salt apptainer images are hosted on CVMFS.
         If you have a good connection to CVMFS, using this option can be faster than manually pulling the image.
         The images are located in
         `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/`
@@ -82,7 +82,7 @@ Salt requires Python 3.9, 3.10 or 3.11.
         You can run the latest image using
 
         ```bash
-        singularity shell -e --nv --bind $PWD \
+        apptainer shell -e --nv --bind $PWD \
             /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/
         ```
 
@@ -93,26 +93,26 @@ Salt requires Python 3.9, 3.10 or 3.11.
         You only need to read this if you want to pull the Salt image yourself, rather than using the unpacked image from CVMFS.
         This approach is slower than using the CVMFS image.
 
-        The first step is to ensure that the `SINGULARITY_CACHEDIR` environment variable is set to a directory with plenty of free space.
+        The first step is to ensure that the `APPTAINER_CACHEDIR` environment variable is set to a directory with plenty of free space.
         You may want to add the following lin to your `~/.bashrc` to make sure the variable is consistently set when you log in.
 
         ```bash
-        export SINGULARITY_CACHEDIR=<some path>/.singularity/
+        export APPTAINER_CACHEDIR=<some path>/.apptainer/
         ```
 
         Next, pull the image:
 
         ```bash
-        singularity pull --docker-login \
-            $SINGULARITY_CACHEDIR/salt.simg \
+        apptainer pull --docker-login \
+            $APPTAINER_CACHEDIR/salt.simg \
             docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest
         ```
 
         You can then run the image
 
         ```bash
-        singularity shell -e --nv --bind $PWD \
-            $SINGULARITY_CACHEDIR/salt.simg
+        apptainer shell -e --nv --bind $PWD \
+            $APPTAINER_CACHEDIR/salt.simg
         ```
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
@@ -120,9 +120,9 @@ Salt requires Python 3.9, 3.10 or 3.11.
 
     --------------------------------------------------------
 
-    ??? info "`singularity shell` arguments"
+    ??? info "`apptainer shell` arguments"
 
-        An explanation of the different arguments and flags is given [here](https://docs.sylabs.io/guides/latest/user-guide/cli/singularity_shell.html).
+        An explanation of the different arguments and flags is given [here](https://apptainer.org/docs/user/main/cli/apptainer_shell.html).
 
         In short, `--nv` is used for GPU support, `-e` ensures environment variables are not carried over to the image environment, and `--bind <path>` is used to mount a directory to the image.
         For convenience, you may wish to specify e.g. `--bind $PWD,/eos,/cvmfs`.
@@ -131,7 +131,7 @@ Salt requires Python 3.9, 3.10 or 3.11.
     This is required to to install the salt package, which is the next step.
     You may also wish to bind the directories containing your training files.
 
-    Please note that if you want an editable install, you need to run the installation command below each time you open a new singularity shell.
+    Please note that if you want an editable install, you need to run the installation command below each time you open a new apptainer shell.
 
 
 ### Install the salt package
@@ -146,6 +146,31 @@ Once inside your container or virtual environment and in the top level directory
     ```bash
     python -m pip install -e .
     ```
+
+    To install special packages for development or special trainings (like flash attention), you need
+    to adapt the command slightly:
+
+    ```bash
+    python -m pip install -e ".[dev,muP,flash]"
+    ```
+
+    The three options (`dev`, `muP`, and `flash`) install additional packages, which can be needed for
+    certain purposes.
+
+    ??? failure "`The detected CUDA version mismatches the version that was used to compilePyTorch`"
+
+        This failure is due to an issue with the installation of flash attention. To circumvent this,
+        remove `flash` from the additional package installation and re-run the it. To get flash attention
+        installed, you need to find a prebuild wheel version of it that fits your needs. To do so, visit
+        https://flashattn.dev/#finder. It will ask you for your platform, flash attention version you want,
+        and the versions of python, pytorch, and CUDA you use. It will give you a copy-able command under
+        "Install with PIP". Take the URL that is shown and run the following command:
+
+        ```bash
+        python -m pip install --no-deps "<URL>"
+        ```
+
+        This will now install the correct flash attention version and everything should work.
 
 === "From PyPI"
 
