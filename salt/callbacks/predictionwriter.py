@@ -278,15 +278,10 @@ class PredictionWriter(Callback):
             probs_dtype = np.dtype([
                 (f"{module.name}_{n}", self.precision) for n in self.object_params["label_map"]
             ])
-            # Predictions go to "objects" group (dim = num_queries)
             to_write["objects"]["object_class_probs"] = u2s(
                 objects["class_probs"].cpu().float().numpy(), dtype=probs_dtype
             )
-
-            # Truth labels go to separate "truth_objects" group (dim = num_truth_objects)
-            # because num_queries != num_truth_objects in general
-            to_write["truth_objects"] = {}
-            to_write["truth_objects"]["object_class_targets"] = u2s(
+            to_write["objects"]["object_class_targets"] = u2s(
                 labels["objects"][self.object_params["class_label"]].cpu().unsqueeze(-1).numpy(),
                 dtype=np.dtype([("class_label", "i8")]),
             )
@@ -300,17 +295,15 @@ class PredictionWriter(Callback):
                 to_write[constituent_name] = {}
             to_write[constituent_name]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
 
-            # Predicted mask logits (dim = num_queries)
+            # Write truth masks and predicted mask logits to the same group
             to_write["object_masks"] = {}
+            to_write["object_masks"]["tgt_masks"] = u2s(
+                labels["objects"]["masks"].cpu().unsqueeze(-1).numpy(),
+                dtype=np.dtype([("truth_mask", "i8")]),
+            )
             to_write["object_masks"]["mask_logits"] = u2s(
                 objects["masks"].cpu().float().unsqueeze(-1).numpy(),
                 dtype=np.dtype([("mask_logits", self.precision)]),
-            )
-            # Truth masks (dim = num_truth_objects) — separate group
-            to_write["truth_object_masks"] = {}
-            to_write["truth_object_masks"]["tgt_masks"] = u2s(
-                labels["objects"]["masks"].cpu().unsqueeze(-1).numpy(),
-                dtype=np.dtype([("truth_mask", "i8")]),
             )
             # Exapnd the pad mask from (B, N_constituents) to (B, N_objects, N_constituents) 
             # and set the invalid entries to -inf
