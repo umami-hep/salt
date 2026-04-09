@@ -591,16 +591,27 @@ class RegressionTask(RegressionTaskBase):
             De-scaled predictions in the original target space with nan padding.
         """
         preds = preds.float()
+        print(f"[DEBUG run_inference] task={self.name}, preds.shape={preds.shape}, "
+              f"scaler={self.scaler is not None}, "
+              f"target_denoms={self.target_denominators is not None}, "
+              f"norm_params={self.norm_params is not None}")
+        print(f"[DEBUG run_inference] preds min={preds.min():.4f}, max={preds.max():.4f}")
         if self.target_denominators is not None and labels is not None:
+            print("[DEBUG run_inference] BRANCH: target_denominators")
             for i in range(len(self.targets)):
                 preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
+            print("[DEBUG run_inference] BRANCH: norm_params")
             for i in range(len(self.norm_params["mean"])):
                 preds[:, i] *= self.norm_params["std"][i]
                 preds[:, i] += self.norm_params["mean"][i]
         elif self.scaler is not None:
+            print("[DEBUG run_inference] BRANCH: scaler.inverse")
             for i in range(len(self.targets)):
                 preds[:, :, i] = self.scaler.inverse(self.targets[i], preds[:, :, i])
+        else:
+            print("[DEBUG run_inference] BRANCH: none (no scaling applied!)")
+        print(f"[DEBUG run_inference] AFTER: preds min={preds.min():.4f}, max={preds.max():.4f}")
 
         # apply mask if available
         if pad_mask is not None:
@@ -625,6 +636,7 @@ class RegressionTask(RegressionTaskBase):
         np.ndarray
             Predictions as np.ndarray.
         """
+        print(f"[DEBUG get_h5] task={self.name}, calling run_inference")
         preds = self.run_inference(preds, labels, pad_mask)
         dtype = np.dtype([(x, "f4") for x in self.output_names])
         return u2s(preds.float().cpu().numpy(), dtype)

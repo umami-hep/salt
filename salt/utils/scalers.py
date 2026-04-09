@@ -272,6 +272,8 @@ class RegressionTargetScaler:
         ValueError
             If the operation is not recognized.
         """
+        print(f"[DEBUG scaler.inverse] target={target}, values.shape={values.shape}, "
+              f"min={values.min():.4f}, max={values.max():.4f}")
         params = self.scales[target].copy()
         op = params.pop("op")
         if op == "log":

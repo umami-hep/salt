@@ -252,9 +252,12 @@ class PredictionWriter(Callback):
             this_pad_masks = pad_masks.get(task.input_name)
 
             # Get the outputs in the correct format
+            print(f"[DEBUG PW] task={task.name}, type={type(task).__name__}, "
+                  f"input={task.input_name}, preds type={type(this_preds).__name__}")
             if isinstance(task, (ClassificationTask, VertexingTask)):
                 this_preds = task.get_h5(this_preds, this_pad_masks)
             if isinstance(task, (RegressionTask, GaussianRegressionTask)):
+                print(f"[DEBUG PW] calling RegressionTask.get_h5 for {task.name}")
                 this_preds = task.get_h5(this_preds, labels, this_pad_masks)
 
             # Add the outputs to the dictionary
