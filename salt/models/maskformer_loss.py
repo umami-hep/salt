@@ -363,4 +363,12 @@ class MaskFormerLoss(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, preds, labels))
 
+        # compute regression loss on Hungarian-matched predictions
+        for task in tasks:
+            if task.input_name == "objects" and task.name in preds["objects"]:
+                matched_preds = preds["objects"][task.name]
+                matched_targets = labels["objects"][task.name]
+                task_loss = task.nan_loss(matched_preds, matched_targets) * task.weight
+                losses[task.name] = task_loss * self.loss_weights.get("regression", 1.0)
+
         return preds, labels, losses
