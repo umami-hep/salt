@@ -707,7 +707,7 @@ def main(args: list[str] | None = None) -> None:
             parsed_args.ckpt_path,
             onnx_feature_map=onnx_feature_map,
             variable_map=config["data"]["variables"],
-            name=parsed_args.name,
+            name=parsed_args.name or config["name"].replace("_", "").replace("-", ""),
             tasks_to_output=parsed_args.tasks,
             object_name=parsed_args.object_name,
             mf_config=mf_config,
