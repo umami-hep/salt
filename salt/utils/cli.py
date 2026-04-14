@@ -227,12 +227,21 @@ class SaltCLI(LightningCLI):
                     task.init_args.class_names = class_names
 
                 # if class weights are not specified read them from class_dict
-                if (
-                    task.init_args.get("use_class_dict")
-                    and (config.ckpt_path is None)
-                    and (class_weights := self.get_class_weights_from_class_dict(task, config.data))
-                ):
-                    task.init_args.loss.init_args.weight = torch.Tensor(class_weights)
+                if task.init_args.get("use_class_dict"):
+                    if config.ckpt_path is not None:
+                        # On resume, class_weights must already be baked into the config.
+                        # salt writes a resolved config to logs/<model_dir>/config.yaml at
+                        # training start — that's the config to pass with --ckpt_path, not
+                        # the original one.
+                        if task.init_args.loss.init_args.weight is None:
+                            raise ValueError(
+                                "Resuming with use_class_dict=True but no class_weights "
+                                "found in config. Pass the resolved config at "
+                                "logs/<model_dir>/config.yaml (written by salt at "
+                                "training start), not the original training config."
+                            )
+                    elif class_weights := self.get_class_weights_from_class_dict(task, config.data):
+                        task.init_args.loss.init_args.weight = torch.Tensor(class_weights)
 
             # reduce precision to improve performance
             # don't do this during evaluation as you will get increased variation wrt Athena
