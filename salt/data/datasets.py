@@ -1,3 +1,4 @@
+import operator
 import os
 import time
 import warnings
@@ -14,6 +15,7 @@ from filelock import FileLock, Timeout
 from ftag import Cuts, Labeller
 from ftag.track_selector import TrackSelector
 from ftag.vds import create_virtual_file
+from numpy.lib.recfunctions import append_fields
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
@@ -23,6 +25,16 @@ from salt.utils.array_utils import maybe_copy
 from salt.utils.configs import LabellerConfig, MaskformerConfig
 from salt.utils.inputs import as_half
 from salt.utils.mask_utils import build_target_masks
+
+# Define the available operators
+OPERATORS = {
+    "==": operator.eq,
+    "!=": operator.ne,
+    ">=": operator.ge,
+    "<=": operator.le,
+    ">": operator.gt,
+    "<": operator.lt,
+}
 
 
 class SaltDataset(Dataset):
@@ -76,6 +88,8 @@ class SaltDataset(Dataset):
         Converts to invalid tracks from malformed inputs in truthOriginLabel.
     transforms : list[Callable] | None, optional
         Transformations to apply to the data, by default None.
+    multi_target: list[dict] | None, optional
+        Config flag to allow multi target based on condition set, by default None.
 
     Raises
     ------
@@ -107,6 +121,7 @@ class SaltDataset(Dataset):
         ignore_finite_checks: bool = False,
         recover_malformed: bool = False,
         transforms: list[Callable] | None = None,
+        multi_target: list[dict] | None = None,
     ):
         super().__init__()
         # check labels have been configured
@@ -218,6 +233,19 @@ class SaltDataset(Dataset):
         self.recover_malformed = recover_malformed
 
         self._is_setup = False
+        self.multi_target = multi_target or []
+        for entry in self.multi_target:
+            if "target" in entry and "custom_target" in entry:
+                raise ValueError(
+                    "multi_target entry cannot define both 'target' and 'custom_target'; "
+                    "use 'target' to replace an existing label or 'custom_target' to create "
+                    f"a new one. Got: {entry}"
+                )
+            if "target" not in entry and "custom_target" not in entry:
+                raise ValueError(
+                    "multi_target entry must define either 'target' or 'custom_target'. "
+                    f"Got: {entry}"
+                )
 
     @staticmethod
     def _has_wildcard(path: Path) -> bool:
@@ -518,6 +546,13 @@ class SaltDataset(Dataset):
                             f"Non-finite inputs for '{input_name}' in {self.filename.name}."
                         )
 
+            # inject placeholders for any custom_target labels
+            if any(
+                entry.get("input_name") == input_name and "custom_target" in entry
+                for entry in self.multi_target
+            ):
+                batch = self.inject_custom_target_placeholders(batch, input_name)
+
             # process labels for this input type
             self.process_labels(labels, batch, input_name)
 
@@ -526,6 +561,11 @@ class SaltDataset(Dataset):
                 labels["objects"][self.mf_config.object.id_label],
                 labels[self.mf_config.constituent.name][self.mf_config.constituent.id_label],
             )
+
+        # apply multi target replacements if configured
+        if self.multi_target:
+            self.apply_multi_target_replacements(labels)
+
         return inputs, pad_masks, labels
 
     def get_num(self, num_requested: int):
@@ -613,6 +653,99 @@ class SaltDataset(Dataset):
                 labels[input_name][label] = x
             return labels[input_name]
         return None
+
+    def inject_custom_target_placeholders(self, batch: np.ndarray, input_name: str) -> np.ndarray:
+        """
+        Inject a new placeholder field into the structured array for any `custom_target`
+        labels declared in the `multi_target` configuration.
+
+        Parameters
+        ----------
+        batch : np.ndarray
+            Structured numpy array of current batch input.
+        input_name : str
+            Name of the input type (e.g. 'jets').
+
+        Returns
+        -------
+        np.ndarray
+            Updated structured array with custom target placeholders added.
+
+        Raises
+        ------
+        KeyError
+            If the `source` field is not found in the batch.
+        """
+        seen = set()
+        for entry in self.multi_target:
+            if entry.get("input_name") != input_name:
+                continue
+
+            custom_target = entry.get("custom_target")
+            source = entry.get("source")
+            if not custom_target or custom_target in seen:
+                continue  # skip entries that are not custom targets, or already injected
+
+            if source not in batch.dtype.names:
+                raise KeyError(
+                    f"Source field '{source}' not found in batch for "
+                    f"custom_target '{custom_target}'"
+                )
+
+            # Create the placeholder column (NaN-filled, same dtype as source)
+            placeholder = np.full(batch.shape, np.nan, dtype=batch[source].dtype)
+
+            # Append this field to the structured array
+            batch = append_fields(batch, custom_target, placeholder, usemask=False)
+            seen.add(custom_target)
+
+        return batch
+
+    def apply_multi_target_replacements(self, labels: dict[str, dict[str, torch.Tensor]]):
+        """
+        Apply conditional target replacements as defined in the multi_target config.
+
+        Parameters
+        ----------
+        labels : dict[str, dict[str, torch.Tensor]]
+            Nested dictionary containing labels for each input type.
+
+        Raises
+        ------
+        KeyError
+            If expected labels or inputs are not found in the labels dictionary.
+        """
+        for condition in self.multi_target:
+            input_name = condition["input_name"]
+            sel_label = condition["sel_label"]
+            target_label = condition.get("target") or condition["custom_target"]
+            source_label = condition["source"]
+            value = condition["value"]
+            opp = condition["opp"]
+
+            if opp not in OPERATORS:
+                raise KeyError(
+                    f"Invalid operator: {opp}. Allowed operators are: {list(OPERATORS.keys())}"
+                )
+
+            operator_func = OPERATORS[opp]
+
+            if input_name not in labels:
+                raise KeyError(f"Input '{input_name}' not found in labels.")
+            if sel_label not in labels[input_name]:
+                raise KeyError(f"Selection label '{sel_label}' not found in '{input_name}' labels.")
+            if target_label not in labels[input_name]:
+                raise KeyError(f"Target label '{target_label}' not found in '{input_name}' labels.")
+            if source_label not in labels[input_name]:
+                raise KeyError(f"Source label '{source_label}' not found in '{input_name}' labels.")
+
+            mask = operator_func(labels[input_name][sel_label], value)
+
+            labels[input_name][target_label] = torch.where(
+                mask,
+                labels[input_name][source_label],
+                labels[input_name][target_label],
+            )
 
 
 def get_dtype(ds: h5py.Dataset, variables: Iterable[str] | None = None) -> np.dtype:

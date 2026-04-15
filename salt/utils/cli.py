@@ -180,7 +180,12 @@ class SaltCLI(LightningCLI):
             self.collect_labels_from_task(
                 task["init_args"], config.model.model.init_args.get("merge_dict"), labels
             )
-
+        if config.data.get("multi_target"):
+            for targets in config.data.multi_target:
+                target_key = targets.get("target") or targets.get("custom_target")
+                for key in [targets["sel_label"], targets["source"], target_key]:
+                    if key and key not in labels[targets["input_name"]]:
+                        labels[targets["input_name"]].append(key)
         if config.model.model.init_args.get("mask_decoder"):
             if not (maskformer_config := config.data.get("mf_config")):
                 raise ValueError("Mask decoder requires 'mf_config' in data config.")

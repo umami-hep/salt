@@ -165,6 +165,43 @@ transforms:
 
 This will add noise with mean 0 and standard deviation 0.1 to the `pt_btagJes` jet feature and separately add noise with mean 0.1 and standard deviation 0.05 to the `d0` track feature.
 
+#### Having multiple targets
+
+You can set up your config so alternative labels are used during training. For example, if you would like to use a $\tau$-specific truth $p_T$ for $\tau$ jets and the standard `pt_btagJes` for all other jets, you can set up a `multi_target` config block in data to swap the target based on a condition:
+
+```yaml
+multi_target:
+    - input_name: jets
+      sel_label: HadronConeExclTruthLabelID
+      opp: '=='
+      value: 15
+      target: pt_btagJes
+      source: pt_visFromTruthTaus
+```
+In this case `pt_visFromTruthTaus` will replace `pt_btagJes` for $\tau$ jets (`HadronConeExclTruthLabelID == 15`). The `source` field remains available in the labels, so it can be reused by other conditions or other tasks.
+
+You can also use this to create a custom label from scratch. For example, if you would like to set up a $p_T$ regression task specifically for $\tau$ jets without having a matching label in the H5 file. You can define a placeholder name in your task config:
+```yaml
+- class_path: salt.models.RegressionTask
+  init_args:
+    name: regression_with_custom_labels
+    input_name: jets
+    targets: pt_label_handle
+```
+Then in the data config, use `custom_target` to create the placeholder and fill it conditionally:
+```yaml
+multi_target:
+    - input_name: jets
+      sel_label: HadronConeExclTruthLabelID
+      opp: '=='
+      value: 15
+      custom_target: pt_label_handle
+      source: pt_visFromTruthTaus
+```
+`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config]({{repo_url}}-/blob/main/salt/configs/regression_multi_target.yaml).
+
+The allowed values of `opp` are: `"=="`, `"!="`, `">="`, `"<="`, `">"`, `"<"`.
+
 #### Data From S3
 
 To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:

@@ -79,7 +79,6 @@ def test_track_selector():
         inputs, masks, _ = sel[i : i + 10]
         assert not torch.any(inputs["tracks"][~masks["tracks"]] > 3.5)
 
-
 def test_input_batch():
     f = get_mock_file()[0]
     norm_dict = {}
@@ -251,3 +250,158 @@ def test_malformed_check_fail():
     malformed_truthOrigin = np.array([-457384, -3, -2, -1, 0, 1, 5, 7, 8, 7892])
     with pytest.raises(ValueError, match="Recover flag is off, failing"):
         malformed_truthorigin_check(ds, malformed_truthOrigin)
+
+
+def test_alt_target():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "pt_btagJes", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt", "pt_btagJes"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "target": "pt",
+            "source": "pt_btagJes",
+        }
+    ]
+    ori = SaltDataset(f, norm_dict, variables, "train", labels=labels)
+    replace = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, multi_target=multi_target
+    )
+    _, _, labels_ori = ori[0 : len(ori)]
+    _, _, labels_replace = replace[0 : len(replace)]
+    mask = labels_ori["jets"]["pt"] != labels_replace["jets"]["pt"]
+    assert torch.all(labels_ori["jets"]["pt_btagJes"][mask] == labels_replace["jets"]["pt"][mask])
+    assert torch.all(labels_ori["jets"]["HadronConeExclTruthLabelID"][mask] == 15)
+    # source label should still be available for other tasks
+    assert "pt_btagJes" in labels_replace["jets"]
+
+
+def test_new_target():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "pt_btagJes", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt_label_handle", "pt_btagJes"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "custom_target": "pt_label_handle",
+            "source": "pt_btagJes",
+        }
+    ]
+    ori = SaltDataset(f, norm_dict, variables, "train", labels=labels, multi_target=multi_target)
+    _, _, labels = ori[0 : len(ori)]
+    mask = labels["jets"]["pt_label_handle"].isnan()
+    assert torch.all(labels["jets"]["HadronConeExclTruthLabelID"][~mask] == 15)
+
+
+def test_invalid_operator():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "pt_btagJes", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt", "pt_btagJes"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "invalid_op",
+            "value": 15,
+            "target": "pt",
+            "source": "pt_btagJes",
+        }
+    ]
+    dataset = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, multi_target=multi_target
+    )
+    with pytest.raises(KeyError, match="Invalid operator: invalid_op"):
+        dataset[0:10]
+
+
+def test_missing_target():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "pt_btagJes", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt_label_handle", "pt_btagJes"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "custom_target": "pt_label_handle_wrong",
+            "source": "pt_btagJes",
+        }
+    ]
+    dataset = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, multi_target=multi_target
+    )
+    with pytest.raises(ValueError, match="no field of name pt_label_handle"):
+        dataset[0:10]
+
+
+def test_missing_source():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt_label_handle"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "custom_target": "pt_label_handle",
+            "source": "boo",
+        }
+    ]
+    dataset = SaltDataset(
+        f, norm_dict, variables, "train", labels=labels, multi_target=multi_target
+    )
+    with pytest.raises(
+        KeyError, match="Source field 'boo' not found in batch for custom_target 'pt_label_handle'"
+    ):
+        dataset[0:10]
+
+
+def test_target_and_custom_target_both_defined():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "target": "pt",
+            "custom_target": "pt_label_handle",
+            "source": "pt_btagJes",
+        }
+    ]
+    with pytest.raises(ValueError, match="cannot define both 'target' and 'custom_target'"):
+        SaltDataset(f, norm_dict, variables, "train", labels=labels, multi_target=multi_target)
+
+
+def test_target_and_custom_target_neither_defined():
+    f = get_mock_file()[0]
+    norm_dict = {}
+    variables = {"jets": ["pt", "HadronConeExclTruthLabelID"]}
+    labels = {"jets": ["HadronConeExclTruthLabelID", "pt"]}
+    multi_target = [
+        {
+            "input_name": "jets",
+            "sel_label": "HadronConeExclTruthLabelID",
+            "opp": "==",
+            "value": 15,
+            "source": "pt_btagJes",
+        }
+    ]
+    with pytest.raises(ValueError, match="must define either 'target' or 'custom_target'"):
+        SaltDataset(f, norm_dict, variables, "train", labels=labels, multi_target=multi_target)
