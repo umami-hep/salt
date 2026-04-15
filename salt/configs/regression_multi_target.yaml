@@ -1,0 +1,75 @@
+name: regression_multi_target_example
+
+model:
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: tracks
+          dense_config:
+            input_size: 22
+            output_size: &embed_dim 128
+            hidden_layers: [256]
+            activation: &activation SiLU
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *embed_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_with_mean_std_norm
+                input_name: jets
+                targets: pt_label_handle
+                norm_params: { mean: 1.0, std: 1.0 }
+                loss: MSELoss
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+
+data:
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+      - mass
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+  multi_target:
+    - input_name: jets
+      sel_label: HadronConeExclTruthLabelID
+      opp: '=='
+      value: 15
+      custom_target: pt_label_handle
+      source: HadronConeExclTruthLabelPt
+    - input_name: jets
+      sel_label: HadronConeExclTruthLabelID
+      opp: '!='
+      value: 15
+      custom_target: pt_label_handle
+      source: pt
