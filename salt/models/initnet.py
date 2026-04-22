@@ -53,7 +53,7 @@ class InitNet(nn.Module):
         # set input size
         if "input_size" not in dense_config:
             dense_config["input_size"] = len(variables[input_name])
-            if attach_global and input_name != "EDGE":
+            if attach_global:
                 dense_config["input_size"] += len(variables[global_object])
                 if not featurewise:
                     dense_config["input_size"] += len(variables.get("parameters", []))

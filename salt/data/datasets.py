@@ -19,7 +19,6 @@ from numpy.lib.recfunctions import append_fields
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from torch.utils.data import Dataset
 
-from salt.data.edge_features import get_dtype_edge, get_inputs_edge
 from salt.stypes import Vars
 from salt.utils.array_utils import maybe_copy
 from salt.utils.configs import LabellerConfig, MaskformerConfig
@@ -138,7 +137,8 @@ class SaltDataset(Dataset):
         if "parameters" in input_map:
             input_map["parameters"] = global_object
 
-        self.input_map = input_map
+        # remove any key that starts with an underscore
+        self.input_map = {k: v for k, v in input_map.items() if not k.startswith("_")}
 
         # Define the dataset that will be used
         self.filename = Path(filename)
@@ -397,10 +397,7 @@ class SaltDataset(Dataset):
             else:
                 this_vars = self.labels[internal].copy() if internal in self.labels else []
                 this_vars += self.input_variables.get(internal, [])
-            if internal == "EDGE":
-                dtype = get_dtype_edge(file[external], this_vars)
-            else:
-                dtype = get_dtype(file[external], this_vars)
+            dtype = get_dtype(file[external], this_vars)
             self.arrays[internal] = np.array(0, dtype=dtype)
         if self.global_object not in self.dss:
             self.dss[self.global_object] = file[self.global_object]
@@ -473,14 +470,8 @@ class SaltDataset(Dataset):
                 assert int(self.num_inputs[input_name]) <= batch.shape[1]
                 batch = batch[:, : int(self.num_inputs[input_name])]
 
-            # load edge inputs for this input type
-            if input_name == "EDGE":
-                inputs[input_name] = torch.from_numpy(
-                    get_inputs_edge(batch, self.input_variables[input_name])
-                )
-
             # load parameters for this input type
-            elif input_name == "parameters":
+            if input_name == "parameters":
                 flat_array = s2u(batch[self.input_variables[input_name]], dtype=np.float32)
 
                 # Ensure parameters is a dict here for mypy (and logic)
@@ -525,7 +516,6 @@ class SaltDataset(Dataset):
 
                 # apply the input padding mask
                 if "valid" in batch.dtype.names and input_name not in {
-                    "EDGE",
                     "parameters",
                     self.global_object,
                     "global",
@@ -587,22 +577,23 @@ class SaltDataset(Dataset):
         return num_requested
 
     def check_file(self):
-        keys = {self.input_map[k] for k in self.variables}
+        keys = {self.input_map[k] for k in self.variables if not k.startswith("_")}
         with h5py.File(self.filename, "r") as f:
             available = set(f.keys())
-        if missing := keys - available - {"EDGE", "global", "parameters"}:
+        if missing := keys - available - {"global", "parameters"}:
             raise KeyError(
                 f"Input file '{self.filename.name}' does not contain keys {missing}."
                 f" Available keys: {available}"
             )
         for k, v in self.variables.items():
             match k:
-                case "EDGE" | "parameters":
+                case "parameters":
                     continue
                 case "global":
                     k = self.global_object  # noqa: PLW2901
                 case _:
-                    pass
+                    if k.startswith("_"):
+                        continue
             name = self.input_map[k]
             with h5py.File(self.filename, "r") as f:
                 if not isinstance(f[name], h5py.Dataset):

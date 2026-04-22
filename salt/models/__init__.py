@@ -1,6 +1,7 @@
 """Model definitions from the SALT framework."""
 
 from salt.models.dense import Dense
+from salt.models.edge_constructor import EdgeConstructor
 from salt.models.featurewise import FeaturewiseTransformation
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
@@ -29,6 +30,7 @@ from salt.models.transformer_v2 import TransformerV2
 __all__ = [
     "ClassificationTask",
     "Dense",
+    "EdgeConstructor",
     "FeaturewiseTransformation",
     "GaussianRegressionTask",
     "GlobalAttentionPooling",

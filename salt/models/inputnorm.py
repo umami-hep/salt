@@ -42,15 +42,14 @@ class InputNorm(nn.Module):
         super().__init__()
         self.variables = variables
         self.global_object = global_object
-        self.NO_NORM = ["EDGE", "parameters"]
+        self.NO_NORM = ["parameters"]
         with open(norm_dict) as f:
             self.norm_dict = yaml.safe_load(f)
 
         # get the keys that need to be normalised
         if input_map is None:
             input_map = {k: k for k in variables}
-        keys = {input_map[k] for k in set(variables.keys())}
-        keys.discard("EDGE")
+        keys = {input_map[k] for k in set(variables.keys()) if not k.startswith("_")}
         keys.discard("parameters")
         if "global" in keys:
             keys.remove("global")
@@ -65,7 +64,7 @@ class InputNorm(nn.Module):
 
         # check we have all required variables for each input type
         for k, vs in variables.items():
-            if k in self.NO_NORM:
+            if k in self.NO_NORM or k.startswith("_"):
                 continue
             name = input_map[k]
             if k == "global":
@@ -102,7 +101,7 @@ class InputNorm(nn.Module):
             Tensor output
         """
         for k, x in inputs.items():
-            if k in self.NO_NORM:
+            if k in self.NO_NORM or k.startswith("_"):
                 continue
             inputs[k] = (x - getattr(self, f"{k}_means")) / getattr(self, f"{k}_stds")
         return inputs
