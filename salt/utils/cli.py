@@ -215,11 +215,25 @@ class SaltCLI(LightningCLI):
             "input_map": config.data.input_map,
         }
 
+        # add edge constructors
+        if edge_constructors := config.data.get("edge_constructors"):
+            config.model.edge_constructors = edge_constructors
+            for ec in config.model.edge_constructors:
+                config.data.variables["_edge_features_" + ec["input_name"]] = ec["edge_features"]
+                ec["variables"] = config.data.variables
+
         if self.subcommand == "fit" or self.subcommand is None:
             # add variables to inititialization networks
             for init_net in config.model.model.init_args.init_nets:
                 init_net["variables"] = config.data.variables
                 init_net["global_object"] = config.data.global_object
+
+            if config.model.model.init_args.edge_init_nets:
+                for init_net in config.model.model.init_args.edge_init_nets:
+                    init_net["variables"] = config.data.variables
+                    init_net["global_object"] = config.data.global_object
+                    init_net["input_name"] = "_edge_features_" + init_net["input_name"]
+                    init_net["attach_global"] = False
 
             # add variables to feature-wise networks
             if config.model.model.init_args.featurewise_nets:

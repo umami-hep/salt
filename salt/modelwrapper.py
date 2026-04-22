@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from torch.optim import AdamW, Optimizer
 
-from salt.models import InputNorm
+from salt.models import EdgeConstructor, InputNorm
 from salt.models.transformer import change_attn_backends
 from salt.optim import HybridMuonAdamW
 from salt.utils.muP_utils.configuration_muP import instantiate_mup
@@ -74,6 +74,8 @@ class ModelWrapper(lightning.LightningModule):
         Loss reduction mode. Default is ``"wsum"``. Other option: ``"GLS"``.
     optimizer : str, optional
         Optimizer to use. Default is ``"AdamW"``. Other options: ``"lion"``, ``"HybridMuonAdamW"``.
+    edge_constructors : list[dict] | None, optional
+        Edge constructors configuration. By default None
     """
 
     def __init__(
@@ -86,6 +88,7 @@ class ModelWrapper(lightning.LightningModule):
         mup_config: dict | None = None,
         loss_mode: str = "wsum",
         optimizer: str = "AdamW",
+        edge_constructors: list[dict] | None = None,
     ):
         super().__init__()
         with warnings.catch_warnings():
@@ -114,7 +117,17 @@ class ModelWrapper(lightning.LightningModule):
         check_unique(self.model.init_nets, "input_name")
         check_unique(self.model.tasks, "name")
 
-        assert len({t.net.output_size for t in self.model.init_nets if t.input_name != "EDGE"}) == 1
+        assert len({t.net.output_size for t in self.model.init_nets}) == 1
+
+        # initialize edge constructors
+        self.edge_constructor: EdgeConstructor | None
+        if edge_constructors:
+            assert len(edge_constructors) <= 1, (
+                "At most one edge constructor is supported at this moment"
+            )
+            self.edge_constructor = EdgeConstructor(**edge_constructors[0])
+        else:
+            self.edge_constructor = None
 
         # input normalizer
         assert norm_config is not None
@@ -205,6 +218,8 @@ class ModelWrapper(lightning.LightningModule):
         Any
             Whatever is returned by the wrapped model's forward pass.
         """
+        if self.edge_constructor:
+            inputs = self.edge_constructor(inputs)
         x = self.norm(inputs)
         return self.model(x, pad_masks, labels)
 

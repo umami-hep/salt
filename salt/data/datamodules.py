@@ -73,6 +73,8 @@ class SaltDataModule(lightning.LightningDataModule):
         slightly increase worker startup time.
     config_s3 : dict | None, optional
         Some parameters for the S3 access, by default None
+    edge_constructors : list[dict] | None, optional
+        Edge constructors configuration. By default None
     **kwargs
         Keyword arguments for [`salt.data.SaltDataset`][salt.data.SaltDataset]
     """
@@ -98,6 +100,7 @@ class SaltDataModule(lightning.LightningDataModule):
         prefetch_factor: int = 2,
         multiprocessing_context: str | None = None,
         config_s3: dict | None = None,
+        edge_constructors: list[dict] | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -120,6 +123,7 @@ class SaltDataModule(lightning.LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.multiprocessing_context = multiprocessing_context
         self.config_s3 = config_s3
+        self.edge_constructors = edge_constructors
         self.kwargs = kwargs
 
     @staticmethod

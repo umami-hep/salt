@@ -23,6 +23,10 @@ class SaltModel(nn.Module):
     tasks : nn.ModuleList
         Task heads to apply to the encoded/poolled features. See
         :class:`salt.models.TaskBase`.
+    edge_init_nets : list[dict] | None, optional
+        Keyword arguments for one or more initialisation networks. Each
+        initialisation network produces an initial input embedding for a
+        single input type. See :class:`salt.models.InitNet`.
     encoder : nn.Module | None, optional
         Main input encoder which takes the outputs of the init nets and
         produces per-constituent embeddings. If not provided, the model is
@@ -46,6 +50,7 @@ class SaltModel(nn.Module):
         self,
         init_nets: list[dict],
         tasks: nn.ModuleList,
+        edge_init_nets: list[dict] | None = None,
         encoder: nn.Module | None = None,
         mask_decoder: nn.Module | None = None,
         pool_net: Pooling | None = None,
@@ -58,7 +63,22 @@ class SaltModel(nn.Module):
         if featurewise_nets:
             self.init_featurewise(featurewise_nets, init_nets, encoder)
 
-        self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
+        # Sort the `init_nets` so that the one with edge features is at the beginning
+        # This is done so that the padding is applied correctly to `edge_x` matrix later
+        # This would need modification if we support multiple edge_init_nets in future
+        if edge_init_nets:
+            assert len(edge_init_nets) == 1, "At most one edge_init_net is supported at this moment"
+            init_nets.sort(
+                key=lambda x: x["input_name"] == edge_init_nets[0]["input_name"], reverse=True
+            )
+            self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
+            self.edge_init_nets = nn.ModuleList([
+                InitNet(**init_net) for init_net in edge_init_nets
+            ])
+        else:
+            self.init_nets = nn.ModuleList([InitNet(**init_net) for init_net in init_nets])
+            self.edge_init_nets = None
+
         self.tasks = tasks
         self.encoder = encoder
         self.mask_decoder = mask_decoder
@@ -103,13 +123,13 @@ class SaltModel(nn.Module):
         """
         # initial input projections
         xs = {}
+        kwargs = {}
 
         for init_net in self.init_nets:
             xs[init_net.input_name] = init_net(inputs)
 
-        # handle edge features if present
-        edge_x = xs.pop("EDGE", None)
-        kwargs = {} if edge_x is None else {"edge_x": edge_x}
+        if self.edge_init_nets:
+            kwargs["edge_x"] = self.edge_init_nets[0](inputs)
 
         # merge multiple streams if requested
         if isinstance(self.merge_dict, dict):

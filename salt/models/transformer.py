@@ -568,7 +568,8 @@ class Transformer(nn.Module):
         # Check the inputs
         if num_registers < 1:
             raise ValueError(
-                "Some jets have no tracks, which causes NaNs in the attention scores. "
+                "Some global objects (graphs) might have no constituents (nodes), "
+                "which causes NaNs in the attention scores. "
                 "To avoid this, set num_registers to at least 1",
             )
 
@@ -690,7 +691,12 @@ class Transformer(nn.Module):
                 [
                     edge_x,
                     torch.zeros(
-                        (edge_x.shape[0], self.num_registers, edge_x.shape[2], edge_x.shape[3]),
+                        (
+                            edge_x.shape[0],
+                            x.shape[1] - edge_x.shape[1],
+                            edge_x.shape[2],
+                            edge_x.shape[3],
+                        ),
                         device=edge_x.device,
                     ),
                 ],
@@ -700,7 +706,12 @@ class Transformer(nn.Module):
                 [
                     edge_x,
                     torch.zeros(
-                        (edge_x.shape[0], edge_x.shape[1], self.num_registers, edge_x.shape[3]),
+                        (
+                            edge_x.shape[0],
+                            edge_x.shape[1],
+                            x.shape[1] - edge_x.shape[2],
+                            edge_x.shape[3],
+                        ),
                         device=edge_x.device,
                     ),
                 ],

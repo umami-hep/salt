@@ -6,16 +6,16 @@ data:
   norm_dict: /share/lustre/svanstroud/data/xbb/ext_v1/norm_dict.yaml
   class_dict: /share/lustre/svanstroud/data/xbb/ext_v1/class_dict.yaml
   #move_files_temp: /dev/shm/svanstro/salt/xbb/
-  input_map:
-    jets: jets
-    tracks: tracks
-    EDGE: tracks
   variables:
     jets:
       - pt
       - eta
       - mass
     tracks:
+      - pt
+      - eta
+      - phi
+      - subjetIndex
       - d0
       - z0SinTheta
       - dphi
@@ -35,12 +35,14 @@ data:
       - numberOfPixelSharedHits
       - numberOfPixelSplitHits
       - numberOfSCTSharedHits
-    EDGE:
-      - dR
-      - z
-      - kt
-      - subjetIndex
-      - isSelfLoop
+  edge_constructors:
+    - input_name: tracks
+      edge_features:
+        - dR
+        - z
+        - kt
+        - subjetIndex
+        - isSelfLoop
   num_train: -1
   num_val: -1
   num_test: -1
@@ -58,14 +60,13 @@ model:
       init_nets:
         - input_name: tracks
           dense_config:
-            input_size: 22
             output_size: &embed_dim 192
             hidden_layers: [256]
             activation: &activation SiLU
-        - input_name: EDGE
-          attach_global: false
+
+      edge_init_nets:
+        - input_name: tracks
           dense_config:
-            input_size: 5
             output_size: &edge_embed_dim 32
             hidden_layers: [32]
             activation: *activation
