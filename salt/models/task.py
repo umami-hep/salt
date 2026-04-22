@@ -318,6 +318,9 @@ class RegressionTaskBase(TaskBase, ABC):
         with other scaling options. Expected keys: ``"mean"``, ``"std"``.
     custom_output_names : list[str] | str | None, optional
         Optional custom output names overriding the default.
+    sample_weight : str | None, optional
+        Key of a per-sample weight found in ``labels_dict[self.input_name]``.
+        Requires the configured loss to have ``reduction="none"``.
     **kwargs
         Forwarded to :class:`TaskBase`.
 
@@ -335,6 +338,7 @@ class RegressionTaskBase(TaskBase, ABC):
         target_denominators: list[str] | str | None = None,
         norm_params: dict | None = None,
         custom_output_names: list[str] | str | None = None,
+        sample_weight: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -346,6 +350,7 @@ class RegressionTaskBase(TaskBase, ABC):
             norm_params["mean"] = listify(norm_params["mean"])
             norm_params["std"] = listify(norm_params["std"])
         self.norm_params = norm_params
+        self.sample_weight = sample_weight
 
         if [scaler, target_denominators, norm_params].count(None) not in {2, 3}:
             raise ValueError("Can only use a single scaling method")
@@ -371,8 +376,12 @@ class RegressionTaskBase(TaskBase, ABC):
                 f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
                 f"number of targets ({len(self.targets)})"
             )
+        if self.sample_weight is not None:
+            assert self.loss.reduction == "none", (
+                "Sample weights only supported for reduction='none'"
+            )
 
-    def nan_loss(self, preds: Tensor, targets: Tensor, **kwargs) -> Tensor:
+    def nan_loss(self, preds: Tensor, targets: Tensor, targets_dict: Mapping, **kwargs) -> Tensor:
         """Compute a loss that ignores NaN targets.
 
         If NaNs are present in ``targets``, the underlying loss should be
@@ -385,6 +394,8 @@ class RegressionTaskBase(TaskBase, ABC):
             Predicted values with the same shape as ``targets``.
         targets : Tensor
             Target values; NaNs are ignored in the mean.
+        targets_dict : Mapping
+            Mapping providing target tensors for the configured input stream.
         **kwargs
             Additional keyword arguments forwarded to the loss call (e.g., ``var``).
 
@@ -414,6 +425,14 @@ class RegressionTaskBase(TaskBase, ABC):
                     " check configs/nan_regression.yaml for options to deal with this."
                 )
             return loss
+
+        if self.sample_weight is not None:
+            weights = targets_dict[self.input_name][self.sample_weight]
+            weights = weights.unsqueeze(1)
+            # If multiple regression targets, expand the weights to match the shape
+            if loss.shape[1] > 1:
+                weights = weights.expand(-1, loss.shape[1])
+            loss = loss * weights
 
         nanmean = torch.nanmean(loss)
         if torch.isnan(nanmean):
@@ -541,7 +560,7 @@ class RegressionTask(RegressionTaskBase):
 
         loss: Tensor | None = None
         if targets is not None:
-            loss = self.nan_loss(preds, targets) * self.weight
+            loss = self.nan_loss(preds, targets, targets_dict) * self.weight
 
         return preds, loss
 
@@ -703,7 +722,7 @@ class GaussianRegressionTask(RegressionTaskBase):
 
         loss: Tensor | None = None
         if targets is not None:
-            loss = self.nan_loss(means, targets, var=variances) * self.weight
+            loss = self.nan_loss(means, targets, targets_dict, var=variances) * self.weight
 
         return preds, loss
 

@@ -234,6 +234,11 @@ def test_regression_multi_target(tmp_path) -> None:
 
 
 @pytest.mark.filterwarnings(w)
+def test_regression_weighted(tmp_path) -> None:
+    run_combined(tmp_path, "regression_weighted.yaml", do_eval=True, do_onnx=True)
+
+
+@pytest.mark.filterwarnings(w)
 def test_flow(tmp_path) -> None:
     run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)
 
