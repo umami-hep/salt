@@ -106,6 +106,7 @@ test-regression:
     - JUNIT_FILE=reports/regression-nan.xml run_test salt/tests/test_pipeline.py::test_nan_regression
     - JUNIT_FILE=reports/regression-gauss.xml run_test salt/tests/test_pipeline.py::test_regression_gaussian
     - JUNIT_FILE=reports/regression-multi-target.xml run_test salt/tests/test_pipeline.py::test_regression_multi_target
+    - JUNIT_FILE=reports/regression.xml run_test salt/tests/test_pipeline.py::test_regression_weighted
 
 test-truncate-inputs:
   extends: .test-template

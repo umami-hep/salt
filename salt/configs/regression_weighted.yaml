@@ -1,0 +1,145 @@
+name: regression_example
+
+model:
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: tracks
+          dense_config:
+            input_size: 22
+            output_size: &embed_dim 128
+            hidden_layers: [256]
+            activation: &activation SiLU
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *embed_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_with_mean_std_norm
+                input_name: jets
+                targets: HadronConeExclTruthLabelPt
+                norm_params: { mean: 1.0, std: 1.0 }
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args:
+                    reduction: none
+                sample_weight: sample_weight
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_multi_output_with_mean_std_norm
+                input_name: jets
+                targets:
+                  [
+                    R10TruthLabel_R22v1_TruthJetMass,
+                    R10TruthLabel_R22v1_TruthJetPt,
+                  ]
+                norm_params:
+                  mean: [1.0, 2.0]
+                  std: [3.0, 4.0]
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args:
+                    reduction: none
+                sample_weight: sample_weight
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_with_ratio_norm
+                input_name: jets
+                targets: HadronConeExclTruthLabelPt
+                target_denominators: pt_btagJes
+                custom_output_names: pt
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args:
+                    reduction: none
+                sample_weight: sample_weight
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 1
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_multi_output_with_ratio_norm
+                custom_output_names: [truthMass, truthPt]
+                input_name: jets
+                targets:
+                  [
+                    R10TruthLabel_R22v1_TruthJetMass,
+                    R10TruthLabel_R22v1_TruthJetPt,
+                  ]
+                target_denominators: [mass, pt_btagJes]
+                loss:
+                  class_path: torch.nn.MSELoss
+                  init_args:
+                    reduction: none
+                sample_weight: sample_weight
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.RegressionTask
+              init_args:
+                name: regression_multi_output_no_global_object
+                custom_output_names: [dummyOutput_dPhi, dummyOutput_dEta]
+                input_name: tracks
+                targets:
+                  [
+                    dphi,
+                    deta,
+                  ]
+                loss: MSELoss
+                dense_config:
+                  input_size: *embed_dim
+                  output_size: 2
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+data:
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+      - mass
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - IP3D_signed_d0_significance
+      - IP3D_signed_z0_significance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits

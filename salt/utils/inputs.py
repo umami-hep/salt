@@ -466,6 +466,7 @@ def write_dummy_file(
         "HadronConeExclTruthLabelLxy",
         "n_tracks",
         "n_truth_promptLepton",
+        "sample_weight",
         "softMuon_pt",
         "softMuon_dR",
         "softMuon_eta",
@@ -572,6 +573,8 @@ def write_dummy_file(
         size=n_jets,
     )
 
+    jets["sample_weight"] = rng.uniform(0.0, 1.0, size=n_jets)
+
     # setup hadrons
     hadrons_dtype = np.dtype(
         [(n, "f4") for n in HADRON_VARS] + [("barcode", "i4"), ("flavour", "i4")]
@@ -579,7 +582,11 @@ def write_dummy_file(
     hadrons = rng.random(shapes_hadrons["inputs"])
     valid = rng.choice([True, False], size=shapes_hadrons["valid"])
     valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
-    hadrons[~valid["valid"]] = np.nan
+    # Set hadron features to NaN and labels to -1 for invalid entries
+    n_float_vars = len(HADRON_VARS)
+    mask = ~valid["valid"]
+    hadrons[mask, :n_float_vars] = np.nan
+    hadrons[mask, n_float_vars:] = -1
     hadrons = u2s(hadrons, hadrons_dtype)
     hadrons = join_structured_arrays([hadrons, valid])
     hadrons["barcode"] = rng.integers(0, 10000, size=(n_jets, n_hadrons_per_jet))
@@ -601,7 +608,11 @@ def write_dummy_file(
     tracks = rng.random(shapes_tracks["inputs"])
     valid = rng.choice([True, False], size=shapes_tracks["valid"])
     valid = np.sort(valid, axis=-1)[:, ::-1].view(dtype=np.dtype([("valid", bool)]))
-    tracks[~valid["valid"]] = np.nan
+    # Set track features to NaN and labels to -1 for invalid entries
+    n_float_vars = len(TRACK_VARS)
+    mask = ~valid["valid"]
+    tracks[mask, :n_float_vars] = np.nan
+    tracks[mask, n_float_vars:] = -1
     tracks = u2s(tracks, tracks_dtype)
     tracks = join_structured_arrays([tracks, valid])
     hadron_track_select = rng.choice(np.arange(5), size=(n_jets, n_tracks_per_jet))
