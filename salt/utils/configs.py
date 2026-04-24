@@ -24,16 +24,18 @@ class MaskformerObjectConfig:
             }
     max_lxy_mm : float | None
         Optional threshold on |Lxy| (mm). Truth vertices with
-        ``|ftagTPDecayPVDistance| > max_lxy_mm`` are re-labelled to the null
-        class in the dataloader, so they contribute neither classification nor
-        regression loss. ``None`` (default) disables the cut — backward
-        compatible with all existing configs.
+        ``|Lxy| > max_lxy_mm`` are re-labelled to the null class in the
+        dataloader, so they contribute neither classification nor regression
+        loss. ``None`` (default) disables the cut — backward compatible with
+        all existing configs.
     lxy_field : str
         Name of the Lxy field in the objects structured array. Defaults to
-        ``"ftagTPDecayPVDistance"``. Override if the field is named differently
-        in a particular dataset. **Note**: this field must appear in the
-        ``data.variables.objects`` list in the training config, otherwise the
-        batch will not contain it and a ``KeyError`` will be raised at runtime.
+        ``"Lxy"`` (the preprocessed field name after umami-preprocessing
+        renames ``ftagTPDecayPVDistance`` → ``Lxy``). Override if the field
+        is named differently in a particular dataset. **Note**: this field
+        must appear in the ``data.variables.objects`` list in the training
+        config, otherwise the batch will not contain it and a ``KeyError``
+        will be raised at runtime.
     """
 
     name: str
@@ -41,7 +43,7 @@ class MaskformerObjectConfig:
     class_label: str | None = None
     object_classes: dict[str | None, dict[str, float | int | list[int]]] | None = None
     max_lxy_mm: float | None = None
-    lxy_field: str = "ftagTPDecayPVDistance"
+    lxy_field: str = "Lxy"
 
     def __post_init__(self) -> None:
         """Ensure that the object_classes dictionary is valid."""
