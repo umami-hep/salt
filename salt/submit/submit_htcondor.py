@@ -31,7 +31,6 @@ handler["cpu"] = 1
 handler["gpu"] = 2
 handler["memory"] = 80_000  # 80 GiB - in MiB
 handler["runtime"] = 82800  # 23h - in seconds
-handler["requirements"] = 'OpSysAndVer == "CentOS7"'
 
 # Run in singularity container?
 if args.environment == "singularity":
