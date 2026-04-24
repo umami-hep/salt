@@ -641,6 +641,18 @@ class SaltDataset(Dataset):
                     for k, v in self.mf_config.object.class_map.items():
                         for kk in k:
                             x[x == kk] = v
+                    # Optional Lxy cut: re-label far-tracker vertices to null.
+                    # Vertices with |Lxy| > max_lxy_mm cannot be reconstructed by the
+                    # tracker and should not contribute classification or regression loss.
+                    # NaN Lxy (legitimate on null slots) is safe: np.abs(nan) > thr is
+                    # always False, so null slots are never accidentally re-labelled.
+                    # NOTE: lxy_field must appear in data.variables.objects in the config.
+                    if self.mf_config.object.max_lxy_mm is not None:
+                        lxy_field = self.mf_config.object.lxy_field
+                        lxy = maybe_copy(batch[lxy_field])
+                        null_idx = self.mf_config.object.null_index
+                        too_far = np.abs(lxy) > self.mf_config.object.max_lxy_mm
+                        x[too_far] = null_idx
                 labels[input_name]["object_class"] = x
                 labels[input_name][label] = x
             return labels[input_name]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from salt.data import SaltDataset
 from salt.data.datasets import malformed_truthorigin_check
-from salt.utils.configs import LabellerConfig
+from salt.utils.configs import LabellerConfig, MaskformerConfig, MaskformerObjectConfig
 
 
 def test_salt_dataset():
@@ -405,3 +405,123 @@ def test_target_and_custom_target_neither_defined():
     ]
     with pytest.raises(ValueError, match="must define either 'target' or 'custom_target'"):
         SaltDataset(f, norm_dict, variables, "train", labels=labels, multi_target=multi_target)
+
+
+def _make_mf_h5(tmp_path, n_jets=20, n_obj=5):
+    """Create a minimal HDF5 file with jets and truth_hadrons groups for MF tests."""
+    f = tmp_path / "mf_test.h5"
+    rng = np.random.default_rng(42)
+    # jets group
+    jets_dtype = np.dtype([("pt", "f4"), ("eta", "f4"), ("barcode", "i4")])
+    jets_data = np.zeros(n_jets, dtype=jets_dtype)
+    jets_data["pt"] = rng.uniform(20, 500, n_jets)
+    # truth_hadrons group (objects) — class_label = flavour, lxy = ftagTPDecayPVDistance
+    obj_dtype = np.dtype([
+        ("barcode", "i4"),
+        ("flavour", "i4"),
+        ("ftagTPDecayPVDistance", "f4"),
+    ])
+    obj_data = np.zeros((n_jets, n_obj), dtype=obj_dtype)
+    # raw flavour labels: 5=b (→0), 4=c (→1), -1=null (→2)
+    # slot layout: 0=b near, 1=b far, 2=b far, 3=null NaN, 4=c near
+    raw_labels = np.array([5, 5, 5, -1, 4], dtype="i4")
+    obj_data["flavour"] = raw_labels[np.newaxis, :]  # same for all jets
+    # Lxy values: 0=near(50), 1=just outside(250), 2=far(1000), 3=NaN(null slot), 4=near(100)
+    lxy_values = np.array([50.0, 250.0, 1000.0, np.nan, 100.0], dtype="f4")
+    obj_data["ftagTPDecayPVDistance"] = lxy_values[np.newaxis, :]
+    obj_data["barcode"] = rng.integers(1, 9999, (n_jets, n_obj))
+    # tracks group (needed by MaskformerConfig constituent)
+    trk_dtype = np.dtype([("ftagTruthParentBarcode", "i4"), ("d0", "f4")])
+    trk_data = np.zeros((n_jets, 20), dtype=trk_dtype)
+    with h5py.File(f, "w") as hf:
+        hf.create_dataset("jets", data=jets_data)
+        hf.create_dataset("truth_hadrons", data=obj_data)
+        hf.create_dataset("tracks", data=trk_data)
+    return str(f)
+
+
+def test_lxy_mask_relabels_far_vertices(tmp_path):
+    """Vertices with |Lxy| > max_lxy_mm must be re-labelled to the null class index."""
+    f = _make_mf_h5(tmp_path)
+    norm_dict = {}
+    variables = {
+        "jets": ["pt", "eta"],
+        "objects": ["barcode", "flavour", "ftagTPDecayPVDistance"],
+        "tracks": ["d0"],
+    }
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    mf_config = MaskformerConfig(
+        object=MaskformerObjectConfig(
+            name="truth_hadrons",
+            id_label="barcode",
+            class_label="flavour",
+            object_classes={
+                "b":    {"raw": 5,  "mapped": 0},
+                "c":    {"raw": 4,  "mapped": 1},
+                "null": {"raw": -1, "mapped": 2},
+            },
+            max_lxy_mm=200.0,
+            lxy_field="ftagTPDecayPVDistance",
+        ),
+        constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
+    )
+    # ignore_finite_checks=True: NaN Lxy on null slots is expected in real data
+    ds = SaltDataset(
+        f, norm_dict, variables, "train", labels=lbl, mf_config=mf_config,
+        ignore_finite_checks=True,
+    )
+    # null class index = 2 (len(object_classes) - 1)
+    null_idx = mf_config.object.null_index  # = 2
+    assert null_idx == 2
+
+    # Check all jets in the dataset
+    n_total = len(ds)
+    for start in range(0, n_total, 10):
+        batch_labels = ds[start : start + 10][2]
+        oc = batch_labels["objects"]["object_class"]  # shape: (batch, n_obj)
+        # slot 0: raw=b(5), Lxy=50 mm  → near → mapped to 0 (NOT null)
+        assert (oc[:, 0] == 0).all(), "Slot 0 (b, Lxy=50) should be class b (0)"
+        # slot 1: raw=b(5), Lxy=250 mm → far → re-labelled to null
+        assert (oc[:, 1] == null_idx).all(), "Slot 1 (b, Lxy=250) should be null after mask"
+        # slot 2: raw=b(5), Lxy=1000 mm → far → re-labelled to null
+        assert (oc[:, 2] == null_idx).all(), "Slot 2 (b, Lxy=1000) should be null after mask"
+        # slot 3: raw=null(-1), Lxy=NaN → NaN comparison is False, not flipped; stays null
+        assert (oc[:, 3] == null_idx).all(), "Slot 3 (null, NaN Lxy) should stay null"
+        # slot 4: raw=c(4), Lxy=100 mm → near → mapped to 1 (NOT null)
+        assert (oc[:, 4] == 1).all(), "Slot 4 (c, Lxy=100) should be class c (1)"
+
+
+def test_lxy_mask_disabled_when_none(tmp_path):
+    """With max_lxy_mm=None (default), no Lxy cut is applied."""
+    f = _make_mf_h5(tmp_path)
+    norm_dict = {}
+    variables = {
+        "jets": ["pt", "eta"],
+        "objects": ["barcode", "flavour", "ftagTPDecayPVDistance"],
+        "tracks": ["d0"],
+    }
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    mf_config = MaskformerConfig(
+        object=MaskformerObjectConfig(
+            name="truth_hadrons",
+            id_label="barcode",
+            class_label="flavour",
+            object_classes={
+                "b":    {"raw": 5,  "mapped": 0},
+                "c":    {"raw": 4,  "mapped": 1},
+                "null": {"raw": -1, "mapped": 2},
+            },
+            max_lxy_mm=None,  # disabled
+            lxy_field="ftagTPDecayPVDistance",
+        ),
+        constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
+    )
+    ds = SaltDataset(
+        f, norm_dict, variables, "train", labels=lbl, mf_config=mf_config,
+        ignore_finite_checks=True,
+    )
+    null_idx = mf_config.object.null_index  # = 2
+    batch_labels = ds[0:10][2]
+    oc = batch_labels["objects"]["object_class"]
+    # slot 1 Lxy=250 should NOT be null (no cut applied)
+    assert (oc[:, 1] != null_idx).all(), "With max_lxy_mm=None, slot 1 (Lxy=250) should NOT be null"
