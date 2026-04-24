@@ -238,11 +238,10 @@ class MaskDecoder(nn.Module):
             query_dim = preds["objects"]["embed"].shape[1]
 
             if label_dim == query_dim:
-                # Dimensions match (train + val): full loss path with matching
-                for k in labels["objects"]:
-                    labels["objects"][k] = torch.nan_to_num(
-                        labels["objects"][k], nan=0, posinf=0, neginf=0
-                    )
+                # Dimensions match (train + val): full loss path with matching.
+                # Do not nan_to_num regression targets here — invalid slots are filtered
+                # downstream by class_label == null_index. Zeroing NaN would train every
+                # null-matched Hungarian slot to predict 0.
                 return self.mask_loss(preds, tasks, labels)
 
             # Dimension mismatch (test data): produce predictions without loss

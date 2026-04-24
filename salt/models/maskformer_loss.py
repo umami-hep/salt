@@ -363,12 +363,33 @@ class MaskFormerLoss(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, preds, labels))
 
-        # compute regression loss on Hungarian-matched predictions
+        # compute regression loss on Hungarian-matched predictions.
+        # Filter by class_label == null_index (self.num_classes) rather than isnan —
+        # NaN targets are not a reliable sentinel (they don't survive nan_to_num,
+        # float16 arithmetic, etc.). object_class is the single source of truth
+        # for "this slot has no real truth vertex, skip its regression".
+        valid = labels["objects"]["object_class"] != self.num_classes  # [B, M]
+
         for task in tasks:
             if task.input_name == "objects" and task.name in preds["objects"]:
                 matched_preds = preds["objects"][task.name]
                 matched_targets = labels["objects"][task.name]
-                task_loss = task.nan_loss(matched_preds, matched_targets) * task.weight
+
+                if matched_preds.ndim == 3:
+                    valid_mask = valid.unsqueeze(-1).expand_as(matched_preds)
+                else:
+                    valid_mask = valid
+                pred_v = matched_preds[valid_mask]
+                tgt_v = matched_targets[valid_mask]
+
+                if pred_v.numel() == 0:
+                    # edge case: batch has no real vertices at all
+                    task_loss = matched_preds.sum() * 0.0
+                else:
+                    task_loss = task.loss(pred_v, tgt_v)
+                    if task_loss.ndim > 0:
+                        task_loss = task_loss.mean()
+                    task_loss = task_loss * task.weight
                 losses[task.name] = task_loss * self.loss_weights.get("regression", 1.0)
 
         return preds, labels, losses

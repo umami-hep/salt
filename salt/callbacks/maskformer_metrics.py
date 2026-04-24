@@ -142,10 +142,14 @@ class MaskformerMetrics(Callback):
                 )
             task = task[0]
 
-            valid_idx = ~torch.isnan(qlabels["regression"]).all(-1)
+            # Filter by class_label != null_index — single source of truth for
+            # "real truth vertex slot". Non-null slots must have finite targets;
+            # if not, l1_loss will produce NaN and crash training (by design).
+            valid_idx = qlabels["object_class"] != self.null_index
             for i, t in enumerate(task.targets):
-                unscaled_preds = task.scaler.inverse(t, qpreds["regression"][valid_idx][:, i])
-                targets = qlabels[t][valid_idx]
+                pred_i = qpreds["regression"][valid_idx][:, i].float()
+                unscaled_preds = task.scaler.inverse(t, pred_i)
+                targets = qlabels[t][valid_idx].float()
                 metrics[f"query_{t}_mae"] = nnf.l1_loss(unscaled_preds, targets)
 
         return metrics
