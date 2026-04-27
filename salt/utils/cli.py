@@ -103,22 +103,12 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "model.name")
         parser.link_arguments("data.global_object", "model.global_object")
 
-        # Auto-link the model-side number of object queries to the data-side
-        # truncation cap. When the user leaves
-        # ``data.mf_config.object.max_objects`` unset, it inherits the value
-        # from ``model.mask_decoder.num_objects`` so the truth tensors and
-        # query slots line up by construction. If the user sets
-        # ``max_objects`` explicitly, the link is a no-op.
-        try:
-            parser.link_arguments(
-                "model.model.init_args.mask_decoder.init_args.num_objects",
-                "data.mf_config.object.max_objects",
-                apply_on="parse",
-            )
-        except (ValueError, KeyError):
-            # Either argument may be absent on configs that don't use
-            # MaskFormer — in that case skip the link silently.
-            pass
+        # Auto-link of model.mask_decoder.num_objects → data.mf_config.object.max_objects
+        # is performed in `before_instantiate_classes` instead of via
+        # `parser.link_arguments`. jsonargparse cannot link cleanly into the
+        # dataclass-backed `mf_config` (the ``null:`` YAML key becomes a
+        # Python ``None`` and triggers `NSKeyError: Key must be a string`
+        # when jsonargparse tries to wrap the nested dict as a Namespace).
 
     def add_arguments_to_parser(self, parser: Any) -> None:
         """Add SALT-specific CLI arguments to the parser.
