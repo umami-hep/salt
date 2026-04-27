@@ -564,11 +564,7 @@ class SaltDataset(Dataset):
         if self.mf_config is None:
             return False
         obj = self.mf_config.object
-        return (
-            obj.cuts is not None
-            or obj.sort_by is not None
-            or obj.max_objects is not None
-        )
+        return obj.cuts is not None or obj.sort_by is not None or obj.max_objects is not None
 
     def __getitem__(
         self, object_idx: slice

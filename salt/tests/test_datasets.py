@@ -1,10 +1,11 @@
+from pathlib import Path
+from tempfile import NamedTemporaryFile, mkdtemp
+
 import h5py
 import numpy as np
 import pytest
 import torch
-from ftag import get_mock_file, Flavours
-from tempfile import NamedTemporaryFile, mkdtemp
-from pathlib import Path
+from ftag import Flavours, get_mock_file
 
 from salt.data import SaltDataset
 from salt.data.datasets import _select_objects, malformed_truthorigin_check
@@ -462,8 +463,8 @@ def test_lxy_mask_relabels_far_vertices(tmp_path):
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "b":    {"raw": 5,  "mapped": 0},
-                "c":    {"raw": 4,  "mapped": 1},
+                "b": {"raw": 5, "mapped": 0},
+                "c": {"raw": 4, "mapped": 1},
                 "null": {"raw": -1, "mapped": 2},
             },
             max_lxy_mm=200.0,
@@ -473,7 +474,12 @@ def test_lxy_mask_relabels_far_vertices(tmp_path):
     )
     # ignore_finite_checks=True: NaN Lxy on null slots is expected in real data
     ds = SaltDataset(
-        f, norm_dict, variables, "train", labels=lbl, mf_config=mf_config,
+        f,
+        norm_dict,
+        variables,
+        "train",
+        labels=lbl,
+        mf_config=mf_config,
         ignore_finite_checks=True,
     )
     # null class index = 2 (len(object_classes) - 1)
@@ -513,8 +519,8 @@ def test_lxy_mask_disabled_when_none(tmp_path):
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "b":    {"raw": 5,  "mapped": 0},
-                "c":    {"raw": 4,  "mapped": 1},
+                "b": {"raw": 5, "mapped": 0},
+                "c": {"raw": 4, "mapped": 1},
                 "null": {"raw": -1, "mapped": 2},
             },
             max_lxy_mm=None,  # disabled
@@ -523,7 +529,12 @@ def test_lxy_mask_disabled_when_none(tmp_path):
         constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
     )
     ds = SaltDataset(
-        f, norm_dict, variables, "train", labels=lbl, mf_config=mf_config,
+        f,
+        norm_dict,
+        variables,
+        "train",
+        labels=lbl,
+        mf_config=mf_config,
         ignore_finite_checks=True,
     )
     null_idx = mf_config.object.null_index  # = 2
@@ -564,9 +575,9 @@ def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6, *, nan_in_lxy=False):
         ("valid", "u1"),
     ])
     flavours = np.array([0, 5, 5, 5, 5, -1], dtype="i4")  # 0=pv, 5=b, -1=null
-    pts      = np.array([10.0, 80.0, 60.0, 40.0, 90.0,  0.0], dtype="f4")
-    lxys     = np.array([ 5.0, 50.0, 80.0, 300.0, 30.0, 0.0], dtype="f4")
-    valids   = np.array([   1,    1,    1,    1,    1,   0 ], dtype="u1")
+    pts = np.array([10.0, 80.0, 60.0, 40.0, 90.0, 0.0], dtype="f4")
+    lxys = np.array([5.0, 50.0, 80.0, 300.0, 30.0, 0.0], dtype="f4")
+    valids = np.array([1, 1, 1, 1, 1, 0], dtype="u1")
     if nan_in_lxy:
         # Inject NaN Lxy on slot 2 so a Lxy cut must drop it (strict NaN-fails).
         lxys = lxys.copy()
@@ -574,11 +585,11 @@ def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6, *, nan_in_lxy=False):
 
     obj_data = np.zeros((n_jets, n_obj), dtype=obj_dtype)
     for slot in range(n_obj):
-        obj_data[:, slot]["barcode"] = slot      # barcode == slot index
+        obj_data[:, slot]["barcode"] = slot  # barcode == slot index
         obj_data[:, slot]["flavour"] = flavours[slot]
-        obj_data[:, slot]["pt"]      = pts[slot]
-        obj_data[:, slot]["Lxy"]     = lxys[slot]
-        obj_data[:, slot]["valid"]   = valids[slot]
+        obj_data[:, slot]["pt"] = pts[slot]
+        obj_data[:, slot]["Lxy"] = lxys[slot]
+        obj_data[:, slot]["valid"] = valids[slot]
     jets_dtype = np.dtype([("pt", "f4"), ("eta", "f4")])
     jets_data = np.zeros(n_jets, dtype=jets_dtype)
     trk_dtype = np.dtype([("ftagTruthParentBarcode", "i4"), ("d0", "f4")])
@@ -598,8 +609,8 @@ def _mf_config_selection(**kwargs):
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "pv":   {"raw": 0,  "mapped": 0},
-                "b":    {"raw": 5,  "mapped": 1},
+                "pv": {"raw": 0, "mapped": 0},
+                "b": {"raw": 5, "mapped": 1},
                 "null": {"raw": -1, "mapped": 2},
             },
             **kwargs,
@@ -621,7 +632,11 @@ def test_object_selection_cuts_drop_with_pv_preserved(tmp_path):
     """Lxy<=200 cut: PV (Lxy=5) survives, slot 3 (Lxy=300) is dropped."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(
             cuts=[ObjectCut(field="Lxy", max=200.0)],
         ),
@@ -640,7 +655,11 @@ def test_object_selection_sort_by_pt_pv_pinned(tmp_path):
     """sort_by=pt desc: output is [PV, slot4(pt=90), slot1(pt=80), slot2(pt=60), slot3(pt=40), pad]."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(sort_by="pt"),
         ignore_finite_checks=True,
     )
@@ -661,7 +680,11 @@ def test_object_selection_max_objects_truncates(tmp_path):
     """max_objects=3 → out shape (B, 3); PV at slot 0."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(max_objects=3, sort_by="pt"),
         ignore_finite_checks=True,
     )
@@ -681,7 +704,11 @@ def test_object_selection_combined_cuts_sort_truncate(tmp_path):
     """Lxy<=200 cut + sort_by=pt desc + max_objects=4 → leading 4 survivors."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(
             cuts=[ObjectCut(field="Lxy", max=200.0)],
             sort_by="pt",
@@ -707,7 +734,11 @@ def test_object_selection_pad_hygiene(tmp_path):
     """Pad slots: valid=False, id_label=-1, class_label=null_raw."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(
             cuts=[ObjectCut(field="Lxy", max=200.0)],
             sort_by="pt",
@@ -752,8 +783,8 @@ def test_object_selection_no_pv_jet(tmp_path):
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "pv":   {"raw": 0,  "mapped": 0},
-                "b":    {"raw": 5,  "mapped": 1},
+                "pv": {"raw": 0, "mapped": 0},
+                "b": {"raw": 5, "mapped": 1},
                 "null": {"raw": -1, "mapped": 2},
             },
             sort_by="pt",
@@ -762,7 +793,11 @@ def test_object_selection_no_pv_jet(tmp_path):
         constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
     )
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=cfg,
         ignore_finite_checks=True,
     )
@@ -780,7 +815,11 @@ def test_object_selection_missing_field_raises(tmp_path):
     """A cut on a field not in the loaded dtype must raise KeyError."""
     f = _make_mf_h5_selection(tmp_path)
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(
             cuts=[ObjectCut(field="not_a_real_field", min=0.0)],
         ),
@@ -796,7 +835,11 @@ def test_object_selection_backward_compat_no_op(tmp_path):
     f = _make_mf_h5_selection(tmp_path)
     # Config without any new selection knob — just the legacy max_lxy_mm=None.
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(),  # all defaults except pv_class=0
         ignore_finite_checks=True,
     )
@@ -825,8 +868,9 @@ def test_object_selection_build_target_masks_invariant(tmp_path):
     """
     f = _make_mf_h5_selection(tmp_path)
     cfg = _mf_config_selection(sort_by="pt", max_objects=3)
-    ds = SaltDataset(f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
-                     mf_config=cfg, ignore_finite_checks=True)
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL, mf_config=cfg, ignore_finite_checks=True
+    )
     ds._setup()
 
     # Read raw batch directly
@@ -870,7 +914,11 @@ def test_object_selection_nan_fails_cut(tmp_path):
     """NaN in a cut field must drop the vertex (strict NaN-fails semantics)."""
     f = _make_mf_h5_selection(tmp_path, nan_in_lxy=True)  # slot 2 Lxy=NaN
     ds = SaltDataset(
-        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        f,
+        {},
+        _VARS_SEL,
+        "train",
+        labels=_LBL_SEL,
         mf_config=_mf_config_selection(
             cuts=[ObjectCut(field="Lxy", min=-1e9, max=1e9)],  # finite → NaN fails
         ),
@@ -899,8 +947,8 @@ def test_object_cut_max_objects_legacy_alias():
         id_label="barcode",
         class_label="flavour",
         object_classes={
-            "pv":   {"raw": 0,  "mapped": 0},
-            "b":    {"raw": 5,  "mapped": 1},
+            "pv": {"raw": 0, "mapped": 0},
+            "b": {"raw": 5, "mapped": 1},
             "null": {"raw": -1, "mapped": 2},
         },
         num_objects=7,
@@ -917,8 +965,8 @@ def test_object_pv_class_validation():
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "pv":   {"raw": 0,  "mapped": 0},
-                "b":    {"raw": 5,  "mapped": 1},
+                "pv": {"raw": 0, "mapped": 0},
+                "b": {"raw": 5, "mapped": 1},
                 "null": {"raw": -1, "mapped": 2},
             },
             pv_class=99,

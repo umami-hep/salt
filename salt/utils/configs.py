@@ -28,9 +28,7 @@ class ObjectCut:
 
     def __post_init__(self) -> None:
         if self.min is None and self.max is None:
-            raise ValueError(
-                f"ObjectCut on field '{self.field}' must set at least one of min/max"
-            )
+            raise ValueError(f"ObjectCut on field '{self.field}' must set at least one of min/max")
 
 
 @dataclass
@@ -128,9 +126,7 @@ class MaskformerObjectConfig:
 
         # jsonargparse may pass dicts → coerce to ObjectCut
         if self.cuts:
-            self.cuts = [
-                ObjectCut(**c) if isinstance(c, dict) else c for c in self.cuts
-            ]
+            self.cuts = [ObjectCut(**c) if isinstance(c, dict) else c for c in self.cuts]
 
         # legacy num_objects → max_objects bridge (max_objects wins if both set)
         if self.max_objects is None and self.num_objects is not None:
@@ -225,16 +221,16 @@ class MaskformerObjectConfig:
         """
         if not self.object_classes:
             raise ValueError("No object classes defined")
+
         def make_tuple(v):
             if isinstance(v, (list, tuple)):
                 assert all(isinstance(i, int) for i in v), "All values must be integers"
                 return tuple(v)
-            elif isinstance(v, int):
+            if isinstance(v, int):
                 return (v,)
 
-            else:
+            return (int(v),)
 
-                return (int(v),)
         return {make_tuple(v["raw"]): v["mapped"] for v in self.object_classes.values()}
 
     @property
@@ -276,9 +272,7 @@ class MaskformerObjectConfig:
         for raw_tuple, mapped in self.class_map.items():
             if mapped == self.pv_class:
                 return raw_tuple
-        raise ValueError(
-            f"No raw values in class_map map to pv_class={self.pv_class}"
-        )
+        raise ValueError(f"No raw values in class_map map to pv_class={self.pv_class}")
 
     @property
     def null_raw_value(self) -> int | None:
