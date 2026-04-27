@@ -971,3 +971,50 @@ def test_object_pv_class_validation():
             },
             pv_class=99,
         )
+
+
+# G. pad_masks must NOT include "objects" even when data.variables.objects is set
+# (regression test for exp 22 attention shape mismatch crash)
+def test_objects_excluded_from_pad_masks(tmp_path):
+    """When ``data.variables.objects`` is non-empty (required for cuts/sort), the
+    standard input-loader path runs for ``input_name == "objects"`` because
+    ``self.input_variables.get("objects")`` is truthy. Before the fix, this
+    populated ``pad_masks["objects"]`` (because the truth-vertices array carries
+    a ``valid`` field), and the encoder later concatenated it into its
+    sequence-axis mask alongside tracks/flows. Since ``"objects"`` has no init
+    network, the encoder's ``x`` (tracks+flows+REGISTERS) and its concatenated
+    ``mask`` (tracks+flows+objects+REGISTERS) had different lengths,
+    crashing ``scaled_dot_product_attention`` with a dim-3 mismatch.
+
+    Objects metadata is consumed by ``_select_objects`` /
+    ``build_target_masks``, never by the encoder, so it must be excluded from
+    ``pad_masks`` (alongside ``EDGE``, ``parameters``, ``global``, and the
+    global object).
+    """
+    f = _make_mf_h5_selection(tmp_path)
+    ds = SaltDataset(
+        f,
+        {},
+        _VARS_SEL,  # includes "objects": ["barcode", "flavour", "Lxy", "pt"]
+        "train",
+        labels=_LBL_SEL,
+        mf_config=_mf_config_selection(
+            cuts=[ObjectCut(field="Lxy", max=200.0)],
+            sort_by="pt",
+            max_objects=4,
+        ),
+        ignore_finite_checks=True,
+    )
+    inputs, pad_masks, _ = ds[0:5]
+    # Objects should still load as inputs (downstream code may inspect dtype etc.)
+    assert "objects" in inputs
+    # But pad_masks must NOT carry "objects" — that would leak into the encoder
+    # mask concatenation and break attention shapes.
+    assert "objects" not in pad_masks, (
+        "pad_masks must NOT include 'objects'; it would mismatch the encoder "
+        "input shape and crash attention. Excluded set in datasets.py must "
+        "include 'objects'."
+    )
+    # Sanity: tracks (which have no 'valid' field in this fixture) carry no
+    # pad_mask either — we just need to confirm 'objects' is excluded.
+    assert "objects" not in pad_masks

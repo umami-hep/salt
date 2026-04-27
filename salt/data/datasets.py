@@ -675,10 +675,19 @@ class SaltDataset(Dataset):
                 inputs[input_name] = torch.from_numpy(maybe_copy(flat_array))
 
                 # apply the input padding mask
+                # "objects" is excluded because it carries MaskFormer per-jet
+                # truth-vertex metadata (Lxy, pt, etc. used by _select_objects /
+                # build_target_masks), not encoder input. If a pad_mask were
+                # written for "objects" it would leak into the encoder's
+                # concatenated mask via SaltModel.forward → Transformer.forward
+                # (which builds `mask = cat(pad_mask.values())`) and produce a
+                # shape mismatch against the concatenated input `x` (which only
+                # contains init_net streams like tracks/flows). See exp 22 fix.
                 if "valid" in batch.dtype.names and input_name not in {
                     "parameters",
                     self.global_object,
                     "global",
+                    "objects",
                 }:
                     pad_masks[input_name] = ~torch.from_numpy(batch["valid"]).bool()
                     inputs[input_name][pad_masks[input_name]] = 0
