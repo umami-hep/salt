@@ -36,6 +36,64 @@ OPERATORS = {
 }
 
 
+def _select_objects(batch: np.ndarray, obj_config) -> np.ndarray:
+    """Select, sort, and optionally truncate the objects structured array.
+
+    PV is assumed to always occupy slot 0 and is placed first in the output.
+    Valid non-PV vertices are sorted by ``obj_config.sort_by`` (descending) or
+    kept in their original HDF5 order when ``sort_by`` is ``None``.
+    Vertices failing the Lxy cut and all remaining invalid/padded slots are
+    pushed to the end; if a ``valid`` field exists in the dtype they are
+    marked ``valid=0`` in the output.
+
+    Parameters
+    ----------
+    batch : np.ndarray
+        Structured array of shape ``(n_jets, n_file)`` as read from HDF5.
+    obj_config : MaskformerObjectConfig
+        Object configuration carrying ``num_objects``, ``sort_by``,
+        ``max_lxy_mm``, and ``lxy_field``.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array of shape ``(n_jets, n_out)`` where
+        ``n_out = obj_config.num_objects or n_file``.
+    """
+    n_jets, n_file = batch.shape
+    n_out = obj_config.num_objects if obj_config.num_objects is not None else n_file
+
+    priority = np.full((n_jets, n_file), np.inf)
+    priority[:, 0] = -np.inf  # PV always first, beats any sort value
+
+    has_valid = "valid" in batch.dtype.names
+    valid = batch["valid"].astype(bool) if has_valid else np.ones((n_jets, n_file), dtype=bool)
+
+    if obj_config.max_lxy_mm is not None:
+        lxy = batch[obj_config.lxy_field].astype(float)
+        valid = valid & ~(np.abs(lxy) > obj_config.max_lxy_mm)
+
+    non_pv = np.ones((n_jets, n_file), dtype=bool)
+    non_pv[:, 0] = False
+    valid_non_pv = valid & non_pv
+
+    if obj_config.sort_by is not None:
+        sort_vals = batch[obj_config.sort_by].astype(float)
+        priority[valid_non_pv] = -np.nan_to_num(sort_vals, nan=np.inf)[valid_non_pv]
+    else:
+        slot_idx = np.tile(np.arange(n_file), (n_jets, 1)).astype(float)
+        priority[valid_non_pv] = slot_idx[valid_non_pv]
+
+    order = np.argsort(priority, axis=1, kind="stable")[:, :n_out]
+    jet_idx = np.arange(n_jets)[:, None]
+    new_batch = batch[jet_idx, order].copy()
+
+    if has_valid:
+        new_batch["valid"][priority[jet_idx, order] == np.inf] = 0
+
+    return new_batch
+
+
 class SaltDataset(Dataset):
     """An efficient map-style dataset for loading data from an H5 file containing structured
     arrays.
@@ -461,6 +519,17 @@ class SaltDataset(Dataset):
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
 
+            # select, sort, and truncate object slots for MaskFormer
+            if (
+                input_name == "objects"
+                and self.mf_config
+                and (
+                    self.mf_config.object.num_objects is not None
+                    or self.mf_config.object.sort_by is not None
+                )
+            ):
+                batch = _select_objects(batch, self.mf_config.object)
+
             # apply selections for constituent inputs
             if self.selectors and (selector := self.selectors.get(input_name)):
                 batch = selector(batch)
@@ -520,7 +589,7 @@ class SaltDataset(Dataset):
                     self.global_object,
                     "global",
                 }:
-                    pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
+                    pad_masks[input_name] = ~torch.from_numpy(batch["valid"]).bool()
                     inputs[input_name][pad_masks[input_name]] = 0
 
                 # check inputs are finite

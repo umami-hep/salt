@@ -23,19 +23,26 @@ class MaskformerObjectConfig:
                 "null": {"mapped": len(object_classes) - 1}
             }
     max_lxy_mm : float | None
-        Optional threshold on |Lxy| (mm). Truth vertices with
-        ``|Lxy| > max_lxy_mm`` are re-labelled to the null class in the
-        dataloader, so they contribute neither classification nor regression
-        loss. ``None`` (default) disables the cut — backward compatible with
-        all existing configs.
+        Optional threshold on |Lxy| (mm). When ``num_objects`` or ``sort_by``
+        is also set, vertices failing this cut are *physically excluded* from
+        the selection pool (compacted out before truncation). When used alone
+        (without ``num_objects``/``sort_by``), vertices are re-labelled to
+        null in ``process_labels`` — the legacy behaviour kept for backward
+        compatibility. ``None`` (default) disables the cut.
     lxy_field : str
         Name of the Lxy field in the objects structured array. Defaults to
-        ``"Lxy"`` (the preprocessed field name after umami-preprocessing
-        renames ``ftagTPDecayPVDistance`` → ``Lxy``). Override if the field
-        is named differently in a particular dataset. **Note**: this field
-        must appear in the ``data.variables.objects`` list in the training
-        config, otherwise the batch will not contain it and a ``KeyError``
-        will be raised at runtime.
+        ``"Lxy"``. Must appear in ``data.variables.objects`` in the training
+        config.
+    num_objects : int | None
+        Maximum number of object slots to retain per jet, applied after
+        optional Lxy filtering and sorting. Slot 0 (PV) is always kept first.
+        ``None`` (default) keeps all slots from the HDF5 file.
+    sort_by : str | None
+        Field name to sort non-PV valid vertices by, in descending order
+        (highest value first), before applying ``num_objects`` truncation.
+        E.g. ``"pt"`` gives the leading-pT vertex ordering.  Must appear in
+        ``data.variables.objects``.  ``None`` (default) preserves the
+        original HDF5 slot order.
     """
 
     name: str
@@ -44,6 +51,8 @@ class MaskformerObjectConfig:
     object_classes: dict[str | None, dict[str, float | int | list[int]]] | None = None
     max_lxy_mm: float | None = None
     lxy_field: str = "Lxy"
+    num_objects: int | None = None
+    sort_by: str | None = None
 
     def __post_init__(self) -> None:
         """Ensure that the object_classes dictionary is valid."""

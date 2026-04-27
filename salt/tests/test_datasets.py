@@ -525,3 +525,136 @@ def test_lxy_mask_disabled_when_none(tmp_path):
     oc = batch_labels["objects"]["object_class"]
     # slot 1 Lxy=250 should NOT be null (no cut applied)
     assert (oc[:, 1] != null_idx).all(), "With max_lxy_mm=None, slot 1 (Lxy=250) should NOT be null"
+
+
+# ---------------------------------------------------------------------------
+# Helpers and tests for _select_objects (num_objects / sort_by / Lxy exclusion)
+# ---------------------------------------------------------------------------
+
+
+def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6):
+    """HDF5 with a 'valid' field and deterministic per-slot values for selection tests.
+
+    Slot layout (same for all jets, barcode == slot index for easy verification):
+      0: pt=10,  Lxy=5,   valid=1  → PV slot (low pt, always kept first)
+      1: pt=80,  Lxy=50,  valid=1  → near, medium-high pt
+      2: pt=60,  Lxy=80,  valid=1  → near, medium pt
+      3: pt=40,  Lxy=300, valid=1  → FAR (excluded by 200mm cut)
+      4: pt=90,  Lxy=30,  valid=1  → near, highest pt of non-PV
+      5: pt=0,   Lxy=0,   valid=0  → padding slot (explicitly invalid)
+    """
+    f = tmp_path / "mf_sel_test.h5"
+    obj_dtype = np.dtype([
+        ("barcode", "i4"),
+        ("flavour", "i4"),
+        ("pt", "f4"),
+        ("Lxy", "f4"),
+        ("valid", "u1"),
+    ])
+    pts   = np.array([10.0, 80.0, 60.0, 40.0, 90.0,  0.0], dtype="f4")
+    lxys  = np.array([ 5.0, 50.0, 80.0, 300.0, 30.0, 0.0], dtype="f4")
+    valids = np.array([   1,    1,    1,    1,    1,   0 ], dtype="u1")
+    obj_data = np.zeros((n_jets, n_obj), dtype=obj_dtype)
+    for slot in range(n_obj):
+        obj_data[:, slot]["barcode"] = slot      # barcode == slot index
+        obj_data[:, slot]["flavour"] = 5         # all b for simplicity
+        obj_data[:, slot]["pt"]      = pts[slot]
+        obj_data[:, slot]["Lxy"]     = lxys[slot]
+        obj_data[:, slot]["valid"]   = valids[slot]
+    jets_dtype = np.dtype([("pt", "f4"), ("eta", "f4")])
+    jets_data = np.zeros(n_jets, dtype=jets_dtype)
+    trk_dtype = np.dtype([("ftagTruthParentBarcode", "i4"), ("d0", "f4")])
+    trk_data = np.zeros((n_jets, 10), dtype=trk_dtype)
+    with h5py.File(f, "w") as hf:
+        hf.create_dataset("jets", data=jets_data)
+        hf.create_dataset("truth_hadrons", data=obj_data)
+        hf.create_dataset("tracks", data=trk_data)
+    return str(f)
+
+
+def _mf_config_selection(**kwargs):
+    """Return a MaskformerConfig with standard classes for selection tests."""
+    return MaskformerConfig(
+        object=MaskformerObjectConfig(
+            name="truth_hadrons",
+            id_label="barcode",
+            class_label="flavour",
+            object_classes={
+                "b":    {"raw": 5,  "mapped": 0},
+                "null": {"raw": -1, "mapped": 1},
+            },
+            **kwargs,
+        ),
+        constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
+    )
+
+
+def test_object_selection_truncation(tmp_path):
+    """num_objects=4 with n_file=6 → objects tensor shape (B, 4)."""
+    f = _make_mf_h5_selection(tmp_path)
+    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    ds = SaltDataset(
+        f, {}, variables, "train", labels=lbl,
+        mf_config=_mf_config_selection(num_objects=4, lxy_field="Lxy"),
+        ignore_finite_checks=True,
+    )
+    inputs, _, _ = ds[0:5]
+    assert inputs["objects"].shape[1] == 4, "Objects tensor should have 4 slots"
+
+
+def test_object_selection_pv_always_first(tmp_path):
+    """PV (slot 0, barcode=0) must remain at output position 0 regardless of sort."""
+    f = _make_mf_h5_selection(tmp_path)
+    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    ds = SaltDataset(
+        f, {}, variables, "train", labels=lbl,
+        mf_config=_mf_config_selection(num_objects=4, sort_by="pt", lxy_field="Lxy"),
+        ignore_finite_checks=True,
+    )
+    _, _, labels = ds[0:5]
+    # barcode of output slot 0 must be 0 (= original slot 0 = PV)
+    pv_barcodes = labels["objects"]["barcode"][:, 0]
+    assert (pv_barcodes == 0).all(), "PV (barcode=0) must always be at output slot 0"
+
+
+def test_object_selection_sort_by_pt(tmp_path):
+    """With sort_by='pt', non-PV valid non-far vertices appear in descending pt order."""
+    f = _make_mf_h5_selection(tmp_path)
+    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    ds = SaltDataset(
+        f, {}, variables, "train", labels=lbl,
+        mf_config=_mf_config_selection(
+            num_objects=4, sort_by="pt", max_lxy_mm=200.0, lxy_field="Lxy"
+        ),
+        ignore_finite_checks=True,
+    )
+    _, _, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"]  # (B, 4)
+    # Expected: PV (0) first, then slot 4 (pt=90), slot 1 (pt=80), slot 2 (pt=60).
+    # Slot 3 (Lxy=300 > 200) and slot 5 (valid=0) are excluded.
+    expected = [0, 4, 1, 2]
+    for b in range(barcodes.shape[0]):
+        assert list(barcodes[b].numpy()) == expected, (
+            f"Unexpected order {list(barcodes[b].numpy())}, expected {expected}"
+        )
+
+
+def test_object_selection_lxy_exclusion(tmp_path):
+    """Far vertices (Lxy > 200) must be physically excluded, not just re-labeled."""
+    f = _make_mf_h5_selection(tmp_path)
+    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
+    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+    ds = SaltDataset(
+        f, {}, variables, "train", labels=lbl,
+        mf_config=_mf_config_selection(num_objects=4, max_lxy_mm=200.0, lxy_field="Lxy"),
+        ignore_finite_checks=True,
+    )
+    _, pad_masks, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"]  # (B, 4)
+    # Slot 3 (barcode=3, Lxy=300) must NOT appear in any output position
+    assert (barcodes != 3).all(), "Far vertex (barcode=3, Lxy=300) must be excluded from output"
+    # Slot 5 (barcode=5, valid=0) must NOT appear in positions 0–3
+    assert (barcodes != 5).all(), "Invalid padding slot (barcode=5) must not appear in active slots"
