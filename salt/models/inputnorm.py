@@ -42,14 +42,19 @@ class InputNorm(nn.Module):
         super().__init__()
         self.variables = variables
         self.global_object = global_object
-        self.NO_NORM = ["parameters"]
+        self.NO_NORM = ["EDGE", "parameters", "objects"]
         with open(norm_dict) as f:
             self.norm_dict = yaml.safe_load(f)
 
         # get the keys that need to be normalised
         if input_map is None:
             input_map = {k: k for k in variables}
-        keys = {input_map[k] for k in set(variables.keys()) if not k.startswith("_")}
+        keys = {
+            input_map[k]
+            for k in set(variables.keys())
+            if k not in self.NO_NORM and not k.startswith("_")
+        }
+        keys.discard("EDGE")
         keys.discard("parameters")
         if "global" in keys:
             keys.remove("global")
