@@ -3,6 +3,37 @@ from dataclasses import dataclass
 
 
 @dataclass
+class ObjectCut:
+    """A single field-bound cut applied to MaskFormer truth objects.
+
+    A vertex is *kept* if ``min <= batch[field] <= max``. NaN values FAIL
+    the cut (the vertex is dropped). PV (identified via ``pv_class`` on
+    :class:`MaskformerObjectConfig`) is exempt from cuts.
+
+    Attributes
+    ----------
+    field : str
+        Name of the field in the objects structured array to cut on. Must
+        appear in ``data.variables.objects`` so it is present in the
+        loaded dtype.
+    min : float | None
+        Inclusive lower bound. ``None`` disables the lower bound.
+    max : float | None
+        Inclusive upper bound. ``None`` disables the upper bound.
+    """
+
+    field: str
+    min: float | None = None
+    max: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.min is None and self.max is None:
+            raise ValueError(
+                f"ObjectCut on field '{self.field}' must set at least one of min/max"
+            )
+
+
+@dataclass
 class MaskformerObjectConfig:
     """Sub-configuration for Maskformer describing the object to reconstruct.
 
@@ -23,26 +54,45 @@ class MaskformerObjectConfig:
                 "null": {"mapped": len(object_classes) - 1}
             }
     max_lxy_mm : float | None
-        Optional threshold on |Lxy| (mm). When ``num_objects`` or ``sort_by``
-        is also set, vertices failing this cut are *physically excluded* from
-        the selection pool (compacted out before truncation). When used alone
-        (without ``num_objects``/``sort_by``), vertices are re-labelled to
-        null in ``process_labels`` — the legacy behaviour kept for backward
-        compatibility. ``None`` (default) disables the cut.
+        Optional threshold on |Lxy| (mm). Vertices failing this cut are
+        *re-labelled to null* in :meth:`process_labels` (legacy behaviour
+        kept for backward compatibility). For *physical exclusion* (drop
+        the vertex and free its slot) use ``cuts`` instead, e.g.
+        ``cuts: [{field: Lxy, max: 200}]``. ``None`` (default) disables
+        the cut.
     lxy_field : str
         Name of the Lxy field in the objects structured array. Defaults to
         ``"Lxy"``. Must appear in ``data.variables.objects`` in the training
         config.
-    num_objects : int | None
-        Maximum number of object slots to retain per jet, applied after
-        optional Lxy filtering and sorting. Slot 0 (PV) is always kept first.
-        ``None`` (default) keeps all slots from the HDF5 file.
+    cuts : list[ObjectCut] | None
+        Generic per-jet field cuts applied during data loading. A vertex
+        is *dropped* if any cut fails — survivors are compacted into the
+        leading output slots. NaN values fail (strict). PV is exempt.
+        ``None`` (default) disables generic cuts. Complements (does not
+        replace) ``max_lxy_mm``: ``max_lxy_mm`` *relabels* to null (keeps
+        the slot), ``cuts`` *drops* the vertex (frees the slot).
     sort_by : str | None
-        Field name to sort non-PV valid vertices by, in descending order
-        (highest value first), before applying ``num_objects`` truncation.
-        E.g. ``"pt"`` gives the leading-pT vertex ordering.  Must appear in
-        ``data.variables.objects``.  ``None`` (default) preserves the
-        original HDF5 slot order.
+        Field name to sort surviving non-PV vertices by, before applying
+        truncation. Must appear in ``data.variables.objects``. ``None``
+        (default) preserves the original HDF5 slot order.
+    sort_descending : bool
+        Whether to sort by ``sort_by`` in descending order (largest first).
+        Defaults to ``True``.
+    pv_class : int | None
+        Mapped class index that identifies the primary vertex (PV).
+        Vertices whose ``class_label`` raw value maps to this index are
+        always pinned at output slot 0 and exempt from cuts/sorts. Set to
+        ``None`` to disable PV pinning entirely (no slot is special).
+        Defaults to ``0``.
+    max_objects : int | None
+        Maximum number of object slots to retain per jet, applied after
+        cuts, PV-pinning, and sorting. ``None`` (default) keeps all
+        original slots. May be auto-linked from
+        ``model.mask_decoder.num_objects`` by the CLI when left ``None``.
+    num_objects : int | None
+        DEPRECATED alias for ``max_objects``, kept for backward
+        compatibility with older configs. If both are set, ``max_objects``
+        wins. Will be removed in a future release.
     """
 
     name: str
@@ -51,8 +101,12 @@ class MaskformerObjectConfig:
     object_classes: dict[str | None, dict[str, float | int | list[int]]] | None = None
     max_lxy_mm: float | None = None
     lxy_field: str = "Lxy"
-    num_objects: int | None = None
+    cuts: list[ObjectCut] | None = None
     sort_by: str | None = None
+    sort_descending: bool = True
+    pv_class: int | None = 0
+    max_objects: int | None = None
+    num_objects: int | None = None  # legacy alias for max_objects
 
     def __post_init__(self) -> None:
         """Ensure that the object_classes dictionary is valid."""
@@ -71,6 +125,29 @@ class MaskformerObjectConfig:
             for k, v in self.object_classes.items():
                 if isinstance(v["raw"], float):
                     v["raw"] = int(v["raw"])
+
+        # jsonargparse may pass dicts → coerce to ObjectCut
+        if self.cuts:
+            self.cuts = [
+                ObjectCut(**c) if isinstance(c, dict) else c for c in self.cuts
+            ]
+
+        # legacy num_objects → max_objects bridge (max_objects wins if both set)
+        if self.max_objects is None and self.num_objects is not None:
+            self.max_objects = self.num_objects
+        # keep num_objects in sync so any downstream code that still reads
+        # it sees the resolved value.
+        if self.num_objects is None and self.max_objects is not None:
+            self.num_objects = self.max_objects
+
+        # Validate pv_class is a valid non-null mapped index
+        if self.pv_class is not None and self.object_classes:
+            n_non_null = len(self.object_classes) - 1
+            if not (0 <= self.pv_class < n_non_null):
+                raise ValueError(
+                    f"pv_class={self.pv_class} must be in [0, {n_non_null - 1}] "
+                    f"(non-null mapped indices)"
+                )
 
     @property
     def num_classes(self) -> int:
@@ -154,7 +231,7 @@ class MaskformerObjectConfig:
                 return tuple(v)
             elif isinstance(v, int):
                 return (v,)
-            
+
             else:
 
                 return (int(v),)
@@ -178,6 +255,49 @@ class MaskformerObjectConfig:
             raise ValueError("No object classes defined")
         sortedmap = sorted(self.object_classes.items(), key=lambda x: x[1]["mapped"])
         return [n for n, _ in sortedmap]  # type: ignore[misc]
+
+    @property
+    def pv_raw_values(self) -> tuple[int, ...] | None:
+        """Raw class_label value(s) that map to ``pv_class``.
+
+        Returns
+        -------
+        tuple[int, ...] | None
+            Tuple of raw class label values that map to ``pv_class``, or
+            ``None`` if ``pv_class`` or ``object_classes`` is unset.
+
+        Raises
+        ------
+        ValueError
+            If ``pv_class`` is set but no raw values map to it.
+        """
+        if self.pv_class is None or not self.object_classes:
+            return None
+        for raw_tuple, mapped in self.class_map.items():
+            if mapped == self.pv_class:
+                return raw_tuple
+        raise ValueError(
+            f"No raw values in class_map map to pv_class={self.pv_class}"
+        )
+
+    @property
+    def null_raw_value(self) -> int | None:
+        """First raw value that maps to the null class, or ``None``.
+
+        Returns
+        -------
+        int | None
+            First raw value mapped to the null class, useful as a sentinel
+            for pad-slot ``class_label`` so :meth:`process_labels` maps it
+            cleanly to :attr:`null_index`. Returns ``None`` if
+            ``object_classes`` is unset.
+        """
+        if not self.object_classes:
+            return None
+        null_raw = self.object_classes["null"].get("raw", -1)
+        if isinstance(null_raw, (list, tuple)):
+            return int(null_raw[0])
+        return int(null_raw)
 
 
 @dataclass

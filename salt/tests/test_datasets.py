@@ -7,8 +7,14 @@ from tempfile import NamedTemporaryFile, mkdtemp
 from pathlib import Path
 
 from salt.data import SaltDataset
-from salt.data.datasets import malformed_truthorigin_check
-from salt.utils.configs import LabellerConfig, MaskformerConfig, MaskformerObjectConfig
+from salt.data.datasets import _select_objects, malformed_truthorigin_check
+from salt.utils.configs import (
+    LabellerConfig,
+    MaskformerConfig,
+    MaskformerObjectConfig,
+    ObjectCut,
+)
+from salt.utils.mask_utils import build_target_masks
 
 
 def test_salt_dataset():
@@ -528,21 +534,27 @@ def test_lxy_mask_disabled_when_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Helpers and tests for _select_objects (num_objects / sort_by / Lxy exclusion)
+# Helpers and tests for the generic per-jet object selection
+# (cuts / sort / pv-pin / max_objects truncation)
 # ---------------------------------------------------------------------------
 
 
-def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6):
-    """HDF5 with a 'valid' field and deterministic per-slot values for selection tests.
+# Class layout used by the generic selection tests:
+#   pv:   raw=0,  mapped=0  (PV — pinned at slot 0, exempt from cuts/sort)
+#   b:    raw=5,  mapped=1
+#   null: raw=-1, mapped=2
+#
+# Slot layout (same for all jets, barcode == slot index):
+#   0: pv,    pt=10,  Lxy=5,    valid=1  → PV (always kept at output slot 0)
+#   1: b,     pt=80,  Lxy=50,   valid=1  → near, medium-high pt
+#   2: b,     pt=60,  Lxy=80,   valid=1  → near, medium pt
+#   3: b,     pt=40,  Lxy=300,  valid=1  → FAR (excluded by Lxy<=200 cut)
+#   4: b,     pt=90,  Lxy=30,   valid=1  → near, highest pt of non-PV
+#   5: null,  pt=0,   Lxy=0,    valid=0  → padding slot (explicitly invalid)
 
-    Slot layout (same for all jets, barcode == slot index for easy verification):
-      0: pt=10,  Lxy=5,   valid=1  → PV slot (low pt, always kept first)
-      1: pt=80,  Lxy=50,  valid=1  → near, medium-high pt
-      2: pt=60,  Lxy=80,  valid=1  → near, medium pt
-      3: pt=40,  Lxy=300, valid=1  → FAR (excluded by 200mm cut)
-      4: pt=90,  Lxy=30,  valid=1  → near, highest pt of non-PV
-      5: pt=0,   Lxy=0,   valid=0  → padding slot (explicitly invalid)
-    """
+
+def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6, *, nan_in_lxy=False):
+    """HDF5 fixture with a 'valid' field and deterministic per-slot values."""
     f = tmp_path / "mf_sel_test.h5"
     obj_dtype = np.dtype([
         ("barcode", "i4"),
@@ -551,13 +563,19 @@ def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6):
         ("Lxy", "f4"),
         ("valid", "u1"),
     ])
-    pts   = np.array([10.0, 80.0, 60.0, 40.0, 90.0,  0.0], dtype="f4")
-    lxys  = np.array([ 5.0, 50.0, 80.0, 300.0, 30.0, 0.0], dtype="f4")
-    valids = np.array([   1,    1,    1,    1,    1,   0 ], dtype="u1")
+    flavours = np.array([0, 5, 5, 5, 5, -1], dtype="i4")  # 0=pv, 5=b, -1=null
+    pts      = np.array([10.0, 80.0, 60.0, 40.0, 90.0,  0.0], dtype="f4")
+    lxys     = np.array([ 5.0, 50.0, 80.0, 300.0, 30.0, 0.0], dtype="f4")
+    valids   = np.array([   1,    1,    1,    1,    1,   0 ], dtype="u1")
+    if nan_in_lxy:
+        # Inject NaN Lxy on slot 2 so a Lxy cut must drop it (strict NaN-fails).
+        lxys = lxys.copy()
+        lxys[2] = np.nan
+
     obj_data = np.zeros((n_jets, n_obj), dtype=obj_dtype)
     for slot in range(n_obj):
         obj_data[:, slot]["barcode"] = slot      # barcode == slot index
-        obj_data[:, slot]["flavour"] = 5         # all b for simplicity
+        obj_data[:, slot]["flavour"] = flavours[slot]
         obj_data[:, slot]["pt"]      = pts[slot]
         obj_data[:, slot]["Lxy"]     = lxys[slot]
         obj_data[:, slot]["valid"]   = valids[slot]
@@ -573,15 +591,16 @@ def _make_mf_h5_selection(tmp_path, n_jets=10, n_obj=6):
 
 
 def _mf_config_selection(**kwargs):
-    """Return a MaskformerConfig with standard classes for selection tests."""
+    """Return a MaskformerConfig with PV/b/null classes for selection tests."""
     return MaskformerConfig(
         object=MaskformerObjectConfig(
             name="truth_hadrons",
             id_label="barcode",
             class_label="flavour",
             object_classes={
-                "b":    {"raw": 5,  "mapped": 0},
-                "null": {"raw": -1, "mapped": 1},
+                "pv":   {"raw": 0,  "mapped": 0},
+                "b":    {"raw": 5,  "mapped": 1},
+                "null": {"raw": -1, "mapped": 2},
             },
             **kwargs,
         ),
@@ -589,72 +608,318 @@ def _mf_config_selection(**kwargs):
     )
 
 
-def test_object_selection_truncation(tmp_path):
-    """num_objects=4 with n_file=6 → objects tensor shape (B, 4)."""
+_VARS_SEL = {
+    "jets": ["pt", "eta"],
+    "objects": ["barcode", "flavour", "Lxy", "pt"],
+    "tracks": ["d0"],
+}
+_LBL_SEL = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
+
+
+# A. Cuts drop, PV preserved
+def test_object_selection_cuts_drop_with_pv_preserved(tmp_path):
+    """Lxy<=200 cut: PV (Lxy=5) survives, slot 3 (Lxy=300) is dropped."""
     f = _make_mf_h5_selection(tmp_path)
-    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
-    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
     ds = SaltDataset(
-        f, {}, variables, "train", labels=lbl,
-        mf_config=_mf_config_selection(num_objects=4, lxy_field="Lxy"),
-        ignore_finite_checks=True,
-    )
-    inputs, _, _ = ds[0:5]
-    assert inputs["objects"].shape[1] == 4, "Objects tensor should have 4 slots"
-
-
-def test_object_selection_pv_always_first(tmp_path):
-    """PV (slot 0, barcode=0) must remain at output position 0 regardless of sort."""
-    f = _make_mf_h5_selection(tmp_path)
-    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
-    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
-    ds = SaltDataset(
-        f, {}, variables, "train", labels=lbl,
-        mf_config=_mf_config_selection(num_objects=4, sort_by="pt", lxy_field="Lxy"),
-        ignore_finite_checks=True,
-    )
-    _, _, labels = ds[0:5]
-    # barcode of output slot 0 must be 0 (= original slot 0 = PV)
-    pv_barcodes = labels["objects"]["barcode"][:, 0]
-    assert (pv_barcodes == 0).all(), "PV (barcode=0) must always be at output slot 0"
-
-
-def test_object_selection_sort_by_pt(tmp_path):
-    """With sort_by='pt', non-PV valid non-far vertices appear in descending pt order."""
-    f = _make_mf_h5_selection(tmp_path)
-    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
-    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
-    ds = SaltDataset(
-        f, {}, variables, "train", labels=lbl,
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
         mf_config=_mf_config_selection(
-            num_objects=4, sort_by="pt", max_lxy_mm=200.0, lxy_field="Lxy"
+            cuts=[ObjectCut(field="Lxy", max=200.0)],
         ),
         ignore_finite_checks=True,
     )
     _, _, labels = ds[0:5]
-    barcodes = labels["objects"]["barcode"]  # (B, 4)
-    # Expected: PV (0) first, then slot 4 (pt=90), slot 1 (pt=80), slot 2 (pt=60).
-    # Slot 3 (Lxy=300 > 200) and slot 5 (valid=0) are excluded.
-    expected = [0, 4, 1, 2]
+    barcodes = labels["objects"]["barcode"]  # (B, 6) — no truncation
+    # PV (barcode=0) must remain at slot 0
+    assert (barcodes[:, 0] == 0).all(), "PV (barcode=0) must remain at slot 0 after cuts"
+    # Slot 3 (Lxy=300) must not appear anywhere in the output
+    assert (barcodes != 3).all(), "Far vertex (barcode=3, Lxy=300) must be dropped by Lxy<=200 cut"
+
+
+# B. Sort by pt desc, PV pinned
+def test_object_selection_sort_by_pt_pv_pinned(tmp_path):
+    """sort_by=pt desc: output is [PV, slot4(pt=90), slot1(pt=80), slot2(pt=60), slot3(pt=40), pad]."""
+    f = _make_mf_h5_selection(tmp_path)
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(sort_by="pt"),
+        ignore_finite_checks=True,
+    )
+    _, _, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"].numpy()
+    # PV at slot 0
+    assert (barcodes[:, 0] == 0).all(), "PV must be at slot 0"
+    # Then: slot 4 (pt=90), 1 (pt=80), 2 (pt=60), 3 (pt=40). Slot 5 is invalid → pad.
+    expected_active = [0, 4, 1, 2, 3]
     for b in range(barcodes.shape[0]):
-        assert list(barcodes[b].numpy()) == expected, (
-            f"Unexpected order {list(barcodes[b].numpy())}, expected {expected}"
+        assert list(barcodes[b, : len(expected_active)]) == expected_active, (
+            f"Unexpected order {list(barcodes[b])}, expected prefix {expected_active}"
         )
 
 
-def test_object_selection_lxy_exclusion(tmp_path):
-    """Far vertices (Lxy > 200) must be physically excluded, not just re-labeled."""
+# C. Truncation
+def test_object_selection_max_objects_truncates(tmp_path):
+    """max_objects=3 → out shape (B, 3); PV at slot 0."""
     f = _make_mf_h5_selection(tmp_path)
-    variables = {"jets": ["pt", "eta"], "objects": ["barcode", "flavour", "Lxy", "pt"], "tracks": ["d0"]}
-    lbl = {"objects": ["barcode", "flavour"], "tracks": ["ftagTruthParentBarcode"]}
     ds = SaltDataset(
-        f, {}, variables, "train", labels=lbl,
-        mf_config=_mf_config_selection(num_objects=4, max_lxy_mm=200.0, lxy_field="Lxy"),
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(max_objects=3, sort_by="pt"),
         ignore_finite_checks=True,
     )
-    _, pad_masks, labels = ds[0:5]
-    barcodes = labels["objects"]["barcode"]  # (B, 4)
-    # Slot 3 (barcode=3, Lxy=300) must NOT appear in any output position
-    assert (barcodes != 3).all(), "Far vertex (barcode=3, Lxy=300) must be excluded from output"
-    # Slot 5 (barcode=5, valid=0) must NOT appear in positions 0–3
-    assert (barcodes != 5).all(), "Invalid padding slot (barcode=5) must not appear in active slots"
+    inputs, _, labels = ds[0:5]
+    assert inputs["objects"].shape[1] == 3
+    barcodes = labels["objects"]["barcode"].numpy()
+    # [PV(0), slot4(pt=90), slot1(pt=80)]
+    expected = [0, 4, 1]
+    for b in range(barcodes.shape[0]):
+        assert list(barcodes[b]) == expected, (
+            f"Unexpected truncated order {list(barcodes[b])}, expected {expected}"
+        )
+
+
+# D. Combined cuts + sort + truncate
+def test_object_selection_combined_cuts_sort_truncate(tmp_path):
+    """Lxy<=200 cut + sort_by=pt desc + max_objects=4 → leading 4 survivors."""
+    f = _make_mf_h5_selection(tmp_path)
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(
+            cuts=[ObjectCut(field="Lxy", max=200.0)],
+            sort_by="pt",
+            max_objects=4,
+        ),
+        ignore_finite_checks=True,
+    )
+    inputs, _, labels = ds[0:5]
+    assert inputs["objects"].shape[1] == 4
+    barcodes = labels["objects"]["barcode"].numpy()
+    # Survivors after Lxy<=200: PV(0), slot1(pt=80,Lxy=50), slot2(pt=60,Lxy=80), slot4(pt=90,Lxy=30).
+    # Slot 3 dropped (Lxy=300). Slot 5 invalid. Sort non-PV by pt desc:
+    # → [PV, slot4(90), slot1(80), slot2(60)]
+    expected = [0, 4, 1, 2]
+    for b in range(barcodes.shape[0]):
+        assert list(barcodes[b]) == expected, (
+            f"Combined order {list(barcodes[b])} != expected {expected}"
+        )
+
+
+# E. Pad hygiene
+def test_object_selection_pad_hygiene(tmp_path):
+    """Pad slots: valid=False, id_label=-1, class_label=null_raw."""
+    f = _make_mf_h5_selection(tmp_path)
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(
+            cuts=[ObjectCut(field="Lxy", max=200.0)],
+            sort_by="pt",
+            max_objects=6,  # allow pads to exist
+        ),
+        ignore_finite_checks=True,
+    )
+    # Reach into the dataset to validate the structured array directly
+    # (so we can check 'valid', class_label, and id_label sentinels).
+    ds._setup()
+    obj_dtype = ds.arrays["objects"].dtype
+    n_jets = 5
+    batch = np.zeros((n_jets, ds.dss["objects"].shape[1]), dtype=obj_dtype)
+    ds.dss["objects"].read_direct(batch, np.s_[0:n_jets])
+    out = _select_objects(batch, ds.mf_config.object)
+    # 4 survivors per jet (PV + 3 b-slots passing Lxy cut), pad slots 4–5.
+    n_survivors = 4
+    pad_valid = out["valid"][:, n_survivors:]
+    pad_barcode = out["barcode"][:, n_survivors:]
+    pad_flavour = out["flavour"][:, n_survivors:]
+    assert (pad_valid == 0).all(), "Pad slots must have valid=0/False"
+    assert (pad_barcode == -1).all(), "Pad slots must have id_label=-1 sentinel"
+    null_raw = ds.mf_config.object.null_raw_value
+    assert (pad_flavour == null_raw).all(), (
+        f"Pad class_label must be null_raw ({null_raw}), got {pad_flavour}"
+    )
+
+
+# F. No-PV jet
+def test_object_selection_no_pv_jet(tmp_path):
+    """If no slot matches pv_class, slot 0 is the highest-sort_by survivor."""
+    f = _make_mf_h5_selection(tmp_path)
+    # Use pv_class=None so PV is NOT pinned. Slot 0 is now just another vertex
+    # but its raw flavour=0 is no longer in the class_map → it would map to
+    # null_index. Use a config that never references the PV class instead:
+    # set pv_class=None and use a class_map without 'pv' would change the
+    # null index. Simpler: keep the pv class in the map so the dtype remains
+    # the same, but disable pv pinning by setting pv_class=None.
+    cfg = MaskformerConfig(
+        object=MaskformerObjectConfig(
+            name="truth_hadrons",
+            id_label="barcode",
+            class_label="flavour",
+            object_classes={
+                "pv":   {"raw": 0,  "mapped": 0},
+                "b":    {"raw": 5,  "mapped": 1},
+                "null": {"raw": -1, "mapped": 2},
+            },
+            sort_by="pt",
+            pv_class=None,  # disable PV pinning
+        ),
+        constituent=MaskformerObjectConfig(name="tracks", id_label="ftagTruthParentBarcode"),
+    )
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=cfg,
+        ignore_finite_checks=True,
+    )
+    _, _, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"].numpy()
+    # With no PV pinning and sort_by=pt desc, slot 0 should be the highest pt
+    # valid vertex: slot 4 (pt=90).
+    assert (barcodes[:, 0] == 4).all(), (
+        f"With pv_class=None, slot 0 should be top-pt (barcode=4), got {barcodes[:, 0]}"
+    )
+
+
+# G. Missing field error
+def test_object_selection_missing_field_raises(tmp_path):
+    """A cut on a field not in the loaded dtype must raise KeyError."""
+    f = _make_mf_h5_selection(tmp_path)
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(
+            cuts=[ObjectCut(field="not_a_real_field", min=0.0)],
+        ),
+        ignore_finite_checks=True,
+    )
+    with pytest.raises(KeyError, match="not_a_real_field"):
+        ds[0:5]
+
+
+# H. Backward compat: no new fields → identical behaviour to legacy path
+def test_object_selection_backward_compat_no_op(tmp_path):
+    """cuts=None, sort_by=None, max_objects=None → batch identical to direct read."""
+    f = _make_mf_h5_selection(tmp_path)
+    # Config without any new selection knob — just the legacy max_lxy_mm=None.
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(),  # all defaults except pv_class=0
+        ignore_finite_checks=True,
+    )
+    # _needs_object_selection should be False → no _select_objects call
+    assert not ds._needs_object_selection(), (
+        "Legacy config (no cuts/sort_by/max_objects) must skip _select_objects"
+    )
+    _, _, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"].numpy()
+    # Original slot order preserved.
+    expected = [0, 1, 2, 3, 4, 5]
+    for b in range(barcodes.shape[0]):
+        assert list(barcodes[b]) == expected, (
+            f"Backward-compat order changed: {list(barcodes[b])} != {expected}"
+        )
+
+
+# I. build_target_masks invariant after permutation
+def test_object_selection_build_target_masks_invariant(tmp_path):
+    """After sort+truncate, build_target_masks(out_ids, track_ids) reflects the new order.
+
+    This is the load-bearing test that protects the design assumption that no
+    separate per-vertex mask permutation is required: build_target_masks rebuilds
+    the truth mask from id_label after permutation, so as long as id_label is
+    permuted (and pad slots are -1), the masks line up automatically.
+    """
+    f = _make_mf_h5_selection(tmp_path)
+    cfg = _mf_config_selection(sort_by="pt", max_objects=3)
+    ds = SaltDataset(f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+                     mf_config=cfg, ignore_finite_checks=True)
+    ds._setup()
+
+    # Read raw batch directly
+    n_jets = 5
+    obj_dtype = ds.arrays["objects"].dtype
+    raw = np.zeros((n_jets, ds.dss["objects"].shape[1]), dtype=obj_dtype)
+    ds.dss["objects"].read_direct(raw, np.s_[0:n_jets])
+
+    # Synthesise per-track parent barcodes that point at non-PV vertices 1, 2, 4.
+    # We don't care about exact track-vertex association beyond consistency.
+    n_trk = 12
+    parent_barcodes = np.zeros((n_jets, n_trk), dtype="i4")
+    # 4 tracks each pointing at vertices 1, 2, 4
+    parent_barcodes[:, 0:4] = 1
+    parent_barcodes[:, 4:8] = 2
+    parent_barcodes[:, 8:12] = 4
+
+    out = _select_objects(raw, cfg.object)
+    out_ids = torch.as_tensor(out["barcode"].astype("int64"))  # (B, 3)
+    parent_ids = torch.as_tensor(parent_barcodes.astype("int64"))  # (B, 12)
+
+    # Expected output barcodes after sort=pt-desc + max_objects=3: [PV(0), 4, 1]
+    # → masks: row0=PV (no track matches), row1=barcode=4 (tracks 8–11),
+    #          row2=barcode=1 (tracks 0–3). Vertex 2 (4 tracks) is *not in
+    #          the truncated output*, so its tracks have no matching row.
+    # Use a copy of out_ids because build_target_masks mutates -1 → -999 in place.
+    masks = build_target_masks(out_ids.clone(), parent_ids)
+    assert masks.shape == (n_jets, 3, n_trk)
+    # PV row: no track has parent barcode 0 → all False
+    assert not masks[:, 0, :].any(), "PV row must have no track matches"
+    # Slot 1: barcode 4 → tracks 8–11 only
+    assert masks[:, 1, 8:12].all(), "Slot 1 (barcode=4) must match its tracks"
+    assert not masks[:, 1, :8].any(), "Slot 1 must not match other tracks"
+    # Slot 2: barcode 1 → tracks 0–3 only
+    assert masks[:, 2, 0:4].all(), "Slot 2 (barcode=1) must match its tracks"
+    assert not masks[:, 2, 4:].any(), "Slot 2 must not match other tracks"
+
+
+# J. NaN in cut field fails (vertex dropped)
+def test_object_selection_nan_fails_cut(tmp_path):
+    """NaN in a cut field must drop the vertex (strict NaN-fails semantics)."""
+    f = _make_mf_h5_selection(tmp_path, nan_in_lxy=True)  # slot 2 Lxy=NaN
+    ds = SaltDataset(
+        f, {}, _VARS_SEL, "train", labels=_LBL_SEL,
+        mf_config=_mf_config_selection(
+            cuts=[ObjectCut(field="Lxy", min=-1e9, max=1e9)],  # finite → NaN fails
+        ),
+        ignore_finite_checks=True,
+    )
+    _, _, labels = ds[0:5]
+    barcodes = labels["objects"]["barcode"].numpy()
+    # Slot 2 (NaN Lxy) must not appear anywhere — strict NaN fail.
+    assert (barcodes != 2).all(), (
+        f"NaN Lxy slot must be dropped, but barcode=2 appears in {barcodes.tolist()}"
+    )
+    # PV (barcode=0) still pinned at slot 0
+    assert (barcodes[:, 0] == 0).all()
+
+
+def test_object_cut_requires_min_or_max():
+    """ObjectCut with no min and no max must raise ValueError on construction."""
+    with pytest.raises(ValueError, match="must set at least one of min/max"):
+        ObjectCut(field="pt")
+
+
+def test_object_cut_max_objects_legacy_alias():
+    """num_objects (legacy) is bridged to max_objects in __post_init__."""
+    cfg = MaskformerObjectConfig(
+        name="truth_hadrons",
+        id_label="barcode",
+        class_label="flavour",
+        object_classes={
+            "pv":   {"raw": 0,  "mapped": 0},
+            "b":    {"raw": 5,  "mapped": 1},
+            "null": {"raw": -1, "mapped": 2},
+        },
+        num_objects=7,
+    )
+    assert cfg.max_objects == 7
+    assert cfg.num_objects == 7
+
+
+def test_object_pv_class_validation():
+    """pv_class out of range must raise ValueError."""
+    with pytest.raises(ValueError, match="pv_class"):
+        MaskformerObjectConfig(
+            name="truth_hadrons",
+            id_label="barcode",
+            class_label="flavour",
+            object_classes={
+                "pv":   {"raw": 0,  "mapped": 0},
+                "b":    {"raw": 5,  "mapped": 1},
+                "null": {"raw": -1, "mapped": 2},
+            },
+            pv_class=99,
+        )

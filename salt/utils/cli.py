@@ -102,6 +102,23 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "model.name")
         parser.link_arguments("data.global_object", "model.global_object")
 
+        # Auto-link the model-side number of object queries to the data-side
+        # truncation cap. When the user leaves
+        # ``data.mf_config.object.max_objects`` unset, it inherits the value
+        # from ``model.mask_decoder.num_objects`` so the truth tensors and
+        # query slots line up by construction. If the user sets
+        # ``max_objects`` explicitly, the link is a no-op.
+        try:
+            parser.link_arguments(
+                "model.model.init_args.mask_decoder.init_args.num_objects",
+                "data.mf_config.object.max_objects",
+                apply_on="parse",
+            )
+        except (ValueError, KeyError):
+            # Either argument may be absent on configs that don't use
+            # MaskFormer — in that case skip the link silently.
+            pass
+
     def add_arguments_to_parser(self, parser: Any) -> None:
         """Add SALT-specific CLI arguments to the parser.
 
@@ -212,6 +229,27 @@ class SaltCLI(LightningCLI):
                     MaskformerObjectConfig(**maskformer_config.object).object_weights
                 )
                 print("OBJECT WEIGHTS", config.model.model.init_args.mask_decoder.init_args.class_weights)
+
+            # Auto-link mask_decoder.num_objects → mf_config.object.max_objects
+            # when the user did not set max_objects explicitly. This mirrors a
+            # `link_arguments` call but works against the dataclass-backed
+            # mf_config which jsonargparse doesn't link cleanly into.
+            mask_decoder_init = (
+                config.model.model.init_args.mask_decoder.get("init_args", {}) or {}
+            )
+            num_objects_val = mask_decoder_init.get("num_objects")
+            obj_cfg = maskformer_config.object
+            if (
+                num_objects_val is not None
+                and obj_cfg.get("max_objects") is None
+                and obj_cfg.get("num_objects") is None
+            ):
+                obj_cfg.max_objects = num_objects_val
+                obj_cfg.num_objects = num_objects_val
+                print(
+                    f"Auto-linked mf_config.object.max_objects = "
+                    f"mask_decoder.num_objects = {num_objects_val}"
+                )
 
         config.data.labels = labels
 
