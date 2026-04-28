@@ -1,13 +1,12 @@
-pages:
+# Build the site on all MR pipelines + the default branch (artifact = docs preview)
+test_docs_build: &docs_build
   image: registry.cern.ch/docker.io/library/python:3.11.2
   stage: docs
   needs: []
   before_script:
     - pip install -r docs/requirements.txt
   script:
-    - indicomb2 --config docs/indicomb.yaml
     - mkdocs build -s -d public
-    - if [[ -f _redirects ]]; then cp _redirects public; fi;
   artifacts:
     paths:
       - public
@@ -18,5 +17,51 @@ pages:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH=="aft/algorithms/salt"
-      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+    - when: never
+
+# Publish GitLab Pages only for the default branch in the official repo
+pages:
+  stage: publish
+  needs:
+    - job: test_docs_build
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PROJECT_PATH == "aft/algorithms/salt"'
+      when: on_success
+    - when: never
+  script:
+    # The artifact from test_docs_build already contains "public/"
+    - test -d public
+  artifacts:
+    paths:
+      - public
+    expire_in: 1 hour
+
+# Publish a dev version of the docs for each MR
+pages_review:
+  stage: publish
+  needs:
+    - job: test_docs_build
+      artifacts: true
+  rules:
+    - if: '$CI_PROJECT_PATH == "aft/algorithms/salt" && $CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+  script:
+    # The artifact from test_docs_build already contains "public/"
+    - test -d public
+  pages:
+    publish: public
+    path_prefix: "mr-$CI_MERGE_REQUEST_IID"
+    expire_in: 1 week
+  environment:
+    name: "Docs Review / MR ${CI_MERGE_REQUEST_IID}"
+    url: "https://ftag-salt.docs.cern.ch/mr-$CI_MERGE_REQUEST_IID"
+  artifacts:
+    paths:
+      - public
+    expire_in: 1 hour
