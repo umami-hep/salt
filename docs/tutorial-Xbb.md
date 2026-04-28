@@ -114,14 +114,14 @@ We'll use the tagged image for version `0.3` of the code.
 
     ```bash
     singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/afs,/eos,/tmp,/cvmfs,/run/user \
-        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0-3
+        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0.3
     ```
 
 === "other (cvmfs only)"
 
     ```
     singularity shell -e --env KRB5CCNAME=$KRB5CCNAME --nv --bind $PWD,/cvmfs,/run/user \
-        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0-3
+        /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:0.3
     ```
 
 If you have issues accessing bound paths, ensure your Kerberos credentials are set with `export KRB5CCNAME=FILE:/run/user/${UID}/krb5cc`
