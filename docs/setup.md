@@ -160,17 +160,8 @@ Once inside your container or virtual environment and in the top level directory
     ??? failure "`The detected CUDA version mismatches the version that was used to compilePyTorch`"
 
         This failure is due to an issue with the installation of flash attention. To circumvent this,
-        remove `flash` from the additional package installation and re-run the it. To get flash attention
-        installed, you need to find a prebuild wheel version of it that fits your needs. To do so, visit
-        https://flashattn.dev/#finder. It will ask you for your platform, flash attention version you want,
-        and the versions of python, pytorch, and CUDA you use. It will give you a copy-able command under
-        "Install with PIP". Take the URL that is shown and run the following command:
-
-        ```bash
-        python -m pip install --no-deps "<URL>"
-        ```
-
-        This will now install the correct flash attention version and everything should work.
+        remove `flash` from the additional package installation and re-run the it. See instructions below
+        for how to install flash attention properly.
 
 === "From PyPI"
 
@@ -232,11 +223,24 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     to install the `h5ls` command.
     The `h5utils` is already present in the docker image.
 
+### Install FlashAttention
+FlashAttention is an attention algorithm which greatly reduces the computational overhead of the attention mechanism of 
+transformer models. To get FlashAttention installed, you need to find a prebuild wheel version of it that fits your needs. 
+To do so, visit the [flash-attention pre-build wheels GitHub repo](https://github.com/mjun0812/flash-attention-prebuild-wheels). 
+You will have to go to another website where you can fill in information about your platform, the flash 
+attention version you want, and the versions of python, pytorch, and CUDA on your system. You can then copy
+the URL link to the correct wheel and install it using `pip`:
+
+```bash
+python -m pip install "<URL>"
+```
+
+This will install the correct FlashAttention version and you should not get any errors or warnings related to FlashAttention.
 
 
 ### Setup Logging
 
-Salt has the potential to supports any logging framework also supported by Lightning.
+Salt has the potential to support any logging framework that is also supported by Lightning.
 At the moment only comet is supported.
 
 #### Comet
@@ -244,7 +248,7 @@ At the moment only comet is supported.
 To use the [comet](https://www.comet.ml/) logger, you need to make an account with comet and [generate an API key](https://www.comet.ml/docs/quick-start/#getting-your-comet-api-key).
 You also need to create a [workspace](https://www.comet.ml/docs/user-interface/#workspaces).
 Next save the API key and the workspace name in environment variables called `COMET_API_KEY` and `COMET_WORKSPACE`.
-These variables are automatically read by the comet, see [here](https://www.comet.com/docs/v2/guides/tracking-ml-training/configuring-comet/#configure-comet-through-environment-variables) for more info.
+These variables are automatically read by comet, see [here](https://www.comet.com/docs/v2/guides/tracking-ml-training/configuring-comet/#configure-comet-through-environment-variables) for more info.
 Consider adding these variables to your [bashrc](https://www.journaldev.com/41479/bashrc-file-in-linux).
 
 ??? info "Add the environment variable to your bashrc"
