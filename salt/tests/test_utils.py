@@ -88,6 +88,37 @@ def test_inputs_concat(n_batch, n_track, n_jet_feat, n_track_feat):
     assert not torch.any(mask[:, 0])
 
 
+def test_modelwrapper_on_load_checkpoint_strips_compile_prefix():
+    """The hook should strip ``_orig_mod.`` from saved keys (see ModelWrapper)."""
+    from salt.modelwrapper import ModelWrapper
+
+    checkpoint = {
+        "state_dict": {
+            "model._orig_mod.encoder.layers.0.weight": torch.zeros(2),
+            "model._orig_mod.encoder.layers.0.bias": torch.zeros(2),
+            "norm.running_mean": torch.zeros(3),  # untouched
+        }
+    }
+    # Call the unbound hook — no instance state needed.
+    ModelWrapper.on_load_checkpoint(None, checkpoint)
+    keys = set(checkpoint["state_dict"])
+    assert keys == {
+        "model.encoder.layers.0.weight",
+        "model.encoder.layers.0.bias",
+        "norm.running_mean",
+    }
+
+
+def test_modelwrapper_on_load_checkpoint_noop_when_no_prefix():
+    """When no ``_orig_mod.`` prefix is present, the state_dict is left alone."""
+    from salt.modelwrapper import ModelWrapper
+
+    state_dict = {"model.encoder.weight": torch.zeros(2), "norm.bias": torch.zeros(2)}
+    checkpoint = {"state_dict": dict(state_dict)}
+    ModelWrapper.on_load_checkpoint(None, checkpoint)
+    assert checkpoint["state_dict"].keys() == state_dict.keys()
+
+
 def test_repair_checkpoint(capsys):
     with tempfile.TemporaryDirectory() as tmpdirname:
         # Setup: Create a fake checkpoint file
