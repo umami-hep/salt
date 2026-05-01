@@ -7,6 +7,7 @@ from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 import h5py
+from salt.data.datasets import _select_objects
 from salt.models.task import (
     ClassificationTask,
     GaussianRegressionTask,
@@ -165,7 +166,23 @@ class PredictionWriter(Callback):
         """
         with h5py.File(self.filename, "r") as f:
             dset = f[dataset_name]
-            return dset.fields(list(variables))[blow:bhigh]
+            slice_arr = dset.fields(list(variables))[blow:bhigh]
+
+        # Mirror the training-time per-jet object selection (cuts → PV-pin →
+        # sort → truncate) on the objects input so the written H5 has the
+        # same shape as the model's predictions. Without this, the writer
+        # zero-pads (B, max_objects) preds to the raw (B, n_in) input shape
+        # and downstream consumers see ghost padding slots.
+        objects_dataset_name = self.input_map.get("objects")
+        if (
+            self.ds.mf_config is not None
+            and objects_dataset_name is not None
+            and dataset_name == objects_dataset_name
+            and self.ds._needs_object_selection()
+        ):
+            slice_arr = _select_objects(slice_arr, self.ds.mf_config.object)
+
+        return slice_arr
 
     @property
     def output_path(self) -> Path:
