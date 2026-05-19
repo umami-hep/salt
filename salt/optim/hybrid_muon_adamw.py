@@ -325,9 +325,10 @@ class HybridMuonAdamW(Optimizer):
         -------
         dict
             A dictionary containing state for both internal optimizers and
-            informational parameter name lists.
+            the wrapper optimizer metadata needed by schedulers.
         """
         return {
+            "wrapper": super().state_dict(),
             "muon": self.muon.state_dict(),
             "adamw": self.adamw.state_dict(),
             "muon_names": list(self._muon_names),
@@ -342,10 +343,14 @@ class HybridMuonAdamW(Optimizer):
         state_dict : dict[str, Any]
             State dictionary as produced by :meth:`state_dict`.
         """
+        if "wrapper" in state_dict:
+            super().load_state_dict(state_dict["wrapper"])
+
         self.muon.load_state_dict(state_dict["muon"])
         self.adamw.load_state_dict(state_dict["adamw"])
         self._muon_names = list(state_dict.get("muon_names", self._muon_names))
         self._adamw_names = list(state_dict.get("adamw_names", self._adamw_names))
+        self._sync_lrs_from_wrapper()
 
     @property
     def muon_param_names(self) -> list[str]:

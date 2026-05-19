@@ -220,7 +220,10 @@ def test_hybrid_state_dict_roundtrip() -> None:
     _set_all_grads(model1, value=0.01)
     opt1.step()
 
+    scheduler_lr = 2e-4
+    opt1.param_groups[0]["lr"] = scheduler_lr
     sd = opt1.state_dict()
+    assert "wrapper" in sd
 
     # New model + optimizer with same structure
     torch.manual_seed(0)
@@ -233,3 +236,8 @@ def test_hybrid_state_dict_roundtrip() -> None:
     # Ensure name lists were restored (informational but useful)
     assert opt2.muon_param_names == opt1.muon_param_names
     assert opt2.adamw_param_names == opt1.adamw_param_names
+
+    # Ensure wrapper state was restored and propagated to the internal optimizers.
+    assert opt2.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
+    assert opt2.muon.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
+    assert opt2.adamw.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
