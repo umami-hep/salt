@@ -3,13 +3,16 @@ name = "salt-ml"
 description = "Multimodal and Multiclass Machine Learning for High Energy Physics"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.10,<3.15"
 dynamic = ["version"]
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Operating System :: OS Independent",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -29,26 +32,14 @@ dependencies = [
   "puma-hep==0.5.1",
   "rich>=14.1.0",
   "scipy>=1.15.3",
-  "torch==2.9.1",
+  "torch==2.12.0",
   "torchmetrics==1.8.2",
-  "torchvision==0.24.1",
+  "torchvision==0.27.0",
   "tqdm>=4.66.1",
   "umami-preprocessing==0.3.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-  "coverage>=7.10.6",
-  "ipykernel>=6.30.1",
-  "mypy>=1.18.1",
-  "pre-commit>=4.3.0",
-  "pydoclint>=0.7.3",
-  "pytest_notebook>=0.10.0",
-  "pytest-cov>=7.0.0",
-  "pytest-randomly>=4.0.1",
-  "pytest>=8.4.2",
-  "ruff>=0.13.0",
-]
 muP = [
   "aiobotocore==2.24.2",
   "boto3==1.40.18",
@@ -64,6 +55,32 @@ flash = [
   "packaging",
   "wheel",
 ]
+
+[dependency-groups]
+dev = [
+  "coverage>=7.10.6",
+  "ipykernel>=6.30.1",
+  "mypy>=1.18.1",
+  "pre-commit>=4.3.0",
+  "pydoclint>=0.7.3",
+  "pytest_notebook>=0.10.0",
+  "pytest-cov>=7.0.0",
+  "pytest-randomly>=4.0.1",
+  "pytest>=8.4.2",
+  "ruff>=0.13.0",
+]
+docs = [
+  "indicomb2==0.2",
+  "mkdocs==1.5.3",
+  "mkdocs-autorefs==1.4.0",
+  "mkdocs-git-revision-date-localized-plugin",
+  "mkdocs-markdownextradata-plugin>=0.2.5",
+  "mkdocs-material==9.4.7",
+  "mkdocstrings[python]==0.28.2",
+]
+
+[tool.uv]
+default-groups = []
 
 [project.urls]
 "Homepage" = "https://gitlab.cern.ch/aft/algorithms/salt"

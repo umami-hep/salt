@@ -1,5 +1,5 @@
 # base image
-FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-devel
+FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-devel
 
 # local and envs
 ENV LANG=C.UTF-8
@@ -15,24 +15,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git openssh-client ca-certificates h5utils wget vim nano build-essential jq \
     && rm -rf /var/lib/apt/lists/*
 
-# update python pip
-RUN python -m pip install --upgrade pip setuptools wheel
+# install uv for Python package management
+RUN wget -qO- https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+ENV UV_NO_CACHE=1
 
 # --- deps layer (only files needed to compute metadata/deps) ---
 # pyproject + init so setuptools can read __version__
 COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
-# Build/Install flash-attn so it can import the already-installed torch
-# The correct prbuild wheel can be found here: https://flashattn.dev/#finder
-RUN python -m pip install --no-deps \
-    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3%2Bcu130torch2.9-cp311-cp311-linux_x86_64.whl"
+# Install flash-attn after torch so it can import the already-installed torch.
+# The correct prebuilt wheel can be found here: https://flashattn.dev/#finder
+RUN uv pip install --system --no-deps \
+    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl"
 
 # Install dependencies (make use of caching, skip flash because it's already installed)
-RUN python -m pip install ".[dev,muP]"
+RUN uv pip install --system --group dev ".[muP]"
 
 # Copy and install package (Source layer)
 COPY . .
 
 # Editable install without re-resolving deps
-RUN python -m pip install -e . --no-deps
+RUN uv pip install --system -e . --no-deps
