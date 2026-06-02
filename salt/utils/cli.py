@@ -229,10 +229,14 @@ class SaltCLI(LightningCLI):
                 init_net["global_object"] = config.data.global_object
 
             if config.model.model.init_args.edge_init_nets:
+                edge_prefix = "_edge_features_"
                 for init_net in config.model.model.init_args.edge_init_nets:
+                    input_name = init_net["input_name"]
+                    if not input_name.startswith(edge_prefix):
+                        input_name = edge_prefix + input_name
                     init_net["variables"] = config.data.variables
                     init_net["global_object"] = config.data.global_object
-                    init_net["input_name"] = "_edge_features_" + init_net["input_name"]
+                    init_net["input_name"] = input_name
                     init_net["attach_global"] = False
 
             # add variables to feature-wise networks
