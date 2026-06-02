@@ -4,9 +4,10 @@ test_docs_build: &docs_build
   stage: docs
   needs: []
   before_script:
-    - pip install -r docs/requirements.txt
+    - python -m pip install uv
+    - uv sync --only-group docs
   script:
-    - mkdocs build -s -d public
+    - uv run --no-sync mkdocs build -s -d public
   artifacts:
     paths:
       - public

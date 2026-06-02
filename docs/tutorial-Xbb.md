@@ -160,7 +160,7 @@ Go to the GitLab project page of Salt to begin with the task: <https://gitlab.ce
 
 ??? info "Hint: installing the package in development mode"
 
-    By default, the singularity image comes with salt preinstalled, but this not an editable installation. If you want to make code changes, you can install salt in development mode using `pip` with the `-e` flag.
+    By default, the singularity image comes with salt preinstalled, but this not an editable installation. If you want to make code changes, you can install salt in development mode using `uv sync`.
 
 
 ??? info "Hint: Run the test suite"
@@ -204,7 +204,7 @@ Go to the GitLab project page of Salt to begin with the task: <https://gitlab.ce
     If you want to modify the salt code and contribute to development, you need to install the salt package to switch to development mode:
 
     ```bash
-    python -m pip install -e .
+    uv sync
     ```
 
     Finally, you can run a test to check if everything works fine:

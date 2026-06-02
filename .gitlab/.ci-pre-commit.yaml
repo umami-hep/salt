@@ -7,5 +7,6 @@ pre-commit:
       when: never
     - when: on_success
   script:
-    - pip install pre-commit
-    - pre-commit run --all-files
+    - python -m pip install uv
+    - uv sync --only-group dev
+    - uv run --no-sync pre-commit run --all-files

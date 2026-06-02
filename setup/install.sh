@@ -8,7 +8,8 @@ export SALTDIR
 export PYTHONUSERBASE="${SALTDIR}/python_install"
 
 # Safe expansions: only add colon + old value if it exists
-export PYTHONPATH="${PYTHONUSERBASE}${PYTHONPATH:+:${PYTHONPATH}}"
+PYTHON_VERSION="$(python -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
+export PYTHONPATH="${PYTHONUSERBASE}/lib/${PYTHON_VERSION}/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
 export PATH="${PYTHONUSERBASE}/bin${PATH:+:${PATH}}"
 
 # Setup the environment for salt
@@ -21,5 +22,6 @@ rm -rf "${SALTDIR}/"*.egg-info
 # Create the new directory
 mkdir -p "${PYTHONUSERBASE}"
 
-# Install Salt (pip --user respects PYTHONUSERBASE)
-python -m pip install --user -e '.[dev,muP,flash]'
+# Bootstrap uv into PYTHONUSERBASE, then install Salt into the same project environment.
+python -m pip install --user uv
+UV_PROJECT_ENVIRONMENT="${PYTHONUSERBASE}" uv sync --python "$(command -v python)" --group dev --extra muP --extra flash

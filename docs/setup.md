@@ -1,4 +1,4 @@
-To use the framework, you can either use the prebuilt docker containers, or create your own conda or venv environment.
+To use the framework, you can either use the prebuilt docker containers, or create your own uv or conda environment.
 You should set up the package from a powerful machine with access to a GPU.
 
 ### Get the Code
@@ -17,11 +17,28 @@ cd salt
 ### Create Environment
 
 You can install salt within a virtual environment or a docker image.
-The recommended workflow is to set the package up using conda/mamba.
-Salt requires Python 3.10 or 3.11.
+The recommended workflow is to create the Python environment and install Salt with `uv sync`.
+Salt requires Python 3.10 to 3.14.
+
+=== "uv"
+
+    [uv](https://docs.astral.sh/uv/) is the recommended way to create the Python environment and install Salt.
+    After cloning the repo, install uv if it is not already available:
+
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+    Then create and activate a fresh environment:
+
+    ```bash
+    uv venv --python 3.12
+    source .venv/bin/activate
+    ```
 
 === "conda"
 
+    Conda/mamba remains useful on clusters with managed installations or when you need non-Python system packages.
     After cloning the repo, you will need to set up conda/mamba if you don't already have it installed.
 
     ??? info "Check for an existing conda installation"
@@ -42,7 +59,7 @@ Salt requires Python 3.10 or 3.11.
     Once you have mamba installed, you can instead create a fresh python environment using
 
     ```
-    mamba create -n salt python=3.11
+    mamba create -n salt python=3.12
     ```
 
     To activate it, just run
@@ -51,14 +68,10 @@ Salt requires Python 3.10 or 3.11.
     mamba activate salt
     ```
 
-=== "venv"
-
-    [venv](https://docs.python.org/3/library/venv.html) is a lightweight solution for creating virtual python environments, however it is not as fully featured as a fully fledged package manager such as conda.
-    Create a fresh virtual environment and activate it using
+    If uv is not already available, install it into the environment with
 
     ```bash
-    python3 -m venv env
-    source env/bin/activate
+    mamba install uv -c conda-forge
     ```
 
 === "apptainer"
@@ -136,7 +149,7 @@ Salt requires Python 3.10 or 3.11.
 
 ### Install the salt package
 
-Once inside your container or virtual environment and in the top level directory of the cloned repo, you can install the `salt` package and it's dependencies via `pip` using
+Once inside your container or virtual environment and in the top level directory of the cloned repo, you can install the `salt` package and its dependencies with `uv sync` using
 
 === "From source (recommended)"
 
@@ -144,23 +157,23 @@ Once inside your container or virtual environment and in the top level directory
     This allows you to easily modify configs and code and have the changes reflected in the package.
 
     ```bash
-    python -m pip install -e .
+    uv sync
     ```
 
     To install special packages for development or special trainings (like flash attention), you need
     to adapt the command slightly:
 
     ```bash
-    python -m pip install -e ".[dev,muP,flash]"
+    uv sync --group dev --extra muP --extra flash
     ```
 
-    The three options (`dev`, `muP`, and `flash`) install additional packages, which can be needed for
+    The `dev` dependency group and the `muP` and `flash` extras install additional packages, which can be needed for
     certain purposes.
 
     ??? failure "`The detected CUDA version mismatches the version that was used to compilePyTorch`"
 
         This failure is due to an issue with the installation of flash attention. To circumvent this,
-        remove `flash` from the additional package installation and re-run the it. See instructions below
+        remove `flash` from the additional package installation and re-run it. See instructions below
         for how to install flash attention properly.
 
 === "From PyPI"
@@ -169,7 +182,7 @@ Once inside your container or virtual environment and in the top level directory
     so you can also install with
 
     ```bash
-    python -m pip install salt-ml
+    uv tool install salt-ml
     ```
 
 To verify your installation, you can run the [test suite](contributing.md#test-suite).
@@ -178,15 +191,15 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
 
     If you get an `error: can't create or remove files in install directory` when installing
     or get `ModuleNotFoundError: No module named 'salt'` when trying to run the code,
-    then you may need to install the package using the setup script, rather than directly using `pip`.
+    then you may need to install the package using the setup script, rather than directly using `uv sync`.
 
     ```bash
     source setup/install.sh
     ```
 
-??? failure "`ERROR: Could not build wheels for jsonnet` during `pip install`"
-    
-    If you see the following message when running `pip install`:
+??? failure "`ERROR: Could not build wheels for jsonnet` during `uv sync`"
+
+    If you see the following message when running `uv sync`:
     ```
     Failed to build jsonnet
     ERROR: Could not build wheels for jsonnet, which is required to install pyproject.toml-based projects
@@ -195,11 +208,11 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     ```
     conda install jsonnet
     ```
-    and then re-run `pip install`.
+    and then re-run `uv sync`.
 
 
 ??? failure "`RuntimeError: The NVIDIA driver on your system is too old` when running salt"
-    
+
     If you see the following error when running `salt fit`, then you need to install suitable pytorch version.
     You can read about available versions [here](https://pytorch.org/get-started/locally/).
 
@@ -209,7 +222,7 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     mamba install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia
     ```
 
-    and then re-run `pip install`.
+    and then re-run `uv sync`.
 
 
 ??? info "Installing `h5ls`"
@@ -224,15 +237,15 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     The `h5utils` is already present in the docker image.
 
 ### Install FlashAttention
-FlashAttention is an attention algorithm which greatly reduces the computational overhead of the attention mechanism of 
-transformer models. To get FlashAttention installed, you need to find a prebuild wheel version of it that fits your needs. 
-To do so, visit the [flash-attention pre-build wheels GitHub repo](https://github.com/mjun0812/flash-attention-prebuild-wheels). 
-You will have to go to another website where you can fill in information about your platform, the flash 
+FlashAttention is an attention algorithm which greatly reduces the computational overhead of the attention mechanism of
+transformer models. To get FlashAttention installed, you need to find a prebuilt wheel version of it that fits your needs.
+To do so, visit the [flash-attention pre-build wheels GitHub repo](https://github.com/mjun0812/flash-attention-prebuild-wheels).
+You will have to go to another website where you can fill in information about your platform, the flash
 attention version you want, and the versions of python, pytorch, and CUDA on your system. You can then copy
-the URL link to the correct wheel and install it using `pip`:
+the URL link to the correct wheel and install it in the synced environment:
 
 ```bash
-python -m pip install "<URL>"
+uv run --no-sync python -m pip install "<URL>"
 ```
 
 This will install the correct FlashAttention version and you should not get any errors or warnings related to FlashAttention.
