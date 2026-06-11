@@ -1,10 +1,13 @@
 """salt.core — modular v2 core (greenfield namespace, design doc plans/02).
 
-Re-exports the graph-kernel public API and the dataset schema artifact API
-(design §2.6). The ``salt2`` CLI lives in `salt.core.cli` (entry point
-``salt2 = salt.core.cli:main``) and is not re-exported here. The legacy
-``salt.*`` packages keep working during the migration (study key decision 1);
-no physics code lives here in M1.
+Re-exports the graph-kernel public API, the dataset schema artifact API
+(design §2.6), and the Lightning integration (`SaltModule`, design §3.4 —
+M2). The dataset pipeline and model modules live in `salt.core.data` and
+`salt.core.nn`. The ``salt2`` CLI lives in `salt.core.main` (entry point
+``salt2 = salt.core.main:main`` — ``fit``/``test`` via `Salt2CLI`, design
+§5; ``graph``/``schema`` dispatch to `salt.core.cli`) and is not
+re-exported here. The legacy ``salt.*`` packages keep working during the
+migration (study key decision 1).
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ from salt.core.graph import (
     sym_dim,
     unflatten_spec,
 )
+from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
 from salt.core.schema import (
     SCHEMA_VERSION,
     GroupSchema,
@@ -61,6 +65,7 @@ from salt.core.schema import (
 )
 
 __all__ = [
+    "CKPT_KEY",
     "IO",
     "KEY_SEP",
     "KINDS",
@@ -88,11 +93,13 @@ __all__ = [
     "NestedSpec",
     "Plan",
     "PlanStep",
+    "SaltModule",
     "Schema",
     "SchemaError",
     "ShapeError",
     "Sinks",
     "TensorSpec",
+    "bundle_as_v1_outputs",
     "check_key_component",
     "compile_plan",
     "deadcode",

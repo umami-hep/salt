@@ -94,7 +94,7 @@ compare_models = "salt.utils.compare_models:main"
 repair_ckpt = "salt.utils.repair_ckpt:main"
 setup_mup = "salt.utils.mup_utils.main_mup:main"
 download_S3 = "salt.utils.file_utils:download_from_S3"
-salt2 = "salt.core.cli:main"
+salt2 = "salt.core.main:main"
 
 [tool.setuptools]
 packages = { find = { include = ["salt*"] } }

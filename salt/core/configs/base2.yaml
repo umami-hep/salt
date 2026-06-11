@@ -1,0 +1,45 @@
+# base2.yaml — salt v2 shared defaults (design §5, §5.3).
+#
+# Auto-loaded as a default config for every `salt2 fit` / `salt2 test`
+# invocation (the v1 base.yaml mechanism, salt/core/main.py). Stacked user
+# configs deep-merge on top: dict-typed sections (model.init_args.modules,
+# data.modules, callbacks, writers) merge key-by-key, an entry set to null is
+# deleted (DeepMergeParser + assembly-time filtering, design §5.3).
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  # Experiment loggers (Comet) are wired in M6 — design §5 keeps the v1
+  # comet-before-lightning import order in salt/core/main.py meanwhile.
+  logger: false
+  log_every_n_steps: 50
+  # The raw trainer.callbacks list is reserved for STOCK Lightning callbacks
+  # only; salt callbacks belong in the top-level callbacks: dict below, whose
+  # entries deep-merge across config files (design §5.3).
+
+# Dict-keyed, deep-mergeable callback defaults (design §5.3): override one key
+# (--callbacks.checkpoint.init_args.monitor=...), add an entry from any config
+# file, or delete one with `checkpoint: null`. Assembled into trainer.callbacks
+# ahead of any stock list entries. M3 replaces ModelCheckpoint with
+# salt.core.callbacks.Checkpoint (per-task monitor defaults incl. the design
+# §5.3 val/jets_classification_loss monitor, run-dir layout). The design §5.3
+# lr_monitor and progress entries are ALSO deferred: LearningRateMonitor needs
+# a logger (Comet wiring is M6) and the salt ProgressBar port is M3 — until
+# then losses show on Lightning's stock progress bar (prog_bar=True).
+callbacks:
+  checkpoint:
+    class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      monitor: val/loss
+      mode: min
+      save_top_k: 1
+  model_summary:
+    class_path: lightning.pytorch.callbacks.ModelSummary
+    init_args:
+      max_depth: 2
+
+# Prediction writers (design §8) — the namespace parses for its stable §5.3
+# merge address, but writer modules land in M3; a non-empty value warns.
+writers: null

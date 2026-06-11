@@ -51,7 +51,7 @@ from salt.core.graph.errors import (
 from salt.core.graph.planner import Plan, PlanStep
 from salt.core.graph.spec import KEY_SEP, GraphModule, Mode, flatten_spec, split_key
 
-__all__ = ["Executor"]
+__all__ = ["Executor", "canonical_produced"]
 
 
 class Executor:
@@ -170,7 +170,7 @@ class Executor:
                 )
             expected = set(step.produces)
             bundle.merge(
-                _canonical_produced(produced, expected, step.name),
+                canonical_produced(produced, expected, step.name),
                 who=step.name,
                 expected=expected,
             )
@@ -386,7 +386,7 @@ class _ReadTrackedBundle:
 # ---------------------------------------------------------------------------
 
 
-def _canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -> dict[str, Any]:
+def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -> dict[str, Any]:
     """Canonicalise a module's returned dict to nested single-component form.
 
     Modules may return nested dicts, flat dotted keys, or any mixture (the
@@ -394,6 +394,8 @@ def _canonical_produced(produced: dict[str, Any], expected: set[str], who: str) 
     dicts with single-component keys. A dict value whose dotted path is in
     `expected` is a declared dict-valued leaf and is kept whole; empty
     undeclared dicts are kept as leaves so they surface as unexpected keys.
+    Public because the dataset-side runner (`salt.core.data.dataset`) merges
+    module returns under the same convention (design §2.4).
 
     Returns
     -------

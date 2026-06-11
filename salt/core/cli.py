@@ -1,4 +1,8 @@
-"""``salt2`` — static graph tooling CLI for the salt v2 kernel (design §4).
+r"""``salt2 graph``/``salt2 schema`` — static graph tooling CLI (design §4).
+
+The ``salt2`` console script lives in `salt.core.main` (M2): trainer
+subcommands (``fit``/``test``) run through `Salt2CLI` there, and ``graph``/
+``schema`` invocations are dispatched unchanged to this module's `main`.
 
 Subcommands (design §4.1-§4.4, §2.6):
 
@@ -13,11 +17,25 @@ All graph tooling operates on declarations only: instantiate the config,
 compile plans per mode, analyse — no data, no GPU (design §4). Errors are
 always fatal; warnings are promotable with ``--strict`` (the CI default).
 
-**M1 config loading is deliberately minimal**: a small
-instantiate-from-``class_path`` helper using `importlib` (see `instantiate`).
-Full jsonargparse integration (subclass validation, ``--print_config``,
-config stacking, null-deletion, env overrides) is M2 — design §5.3 and the
-stage-E spike in ``salt/core/SPIKE_jsonargparse.md``.
+**Two config formats are accepted** (auto-detected by `load_config`):
+
+1. **§5.1 trainer configs** (the ``salt2 fit`` YAML surface, top-level
+   ``model:``/``data:`` blocks): parsed through the REAL `Salt2CLI` in
+   run-free mode (``base2.yaml`` auto-loaded, deep-merge semantics intact),
+   then adapted into one full-pipeline graph — dataset modules + model
+   modules, per-mode sinks from the model's declared anchors, the label-key
+   universe from the reader's schema artifact. Init args that the YAML
+   leaves as required overrides (e.g. ``norm_dict``) can be supplied
+   data-free with repeated ``--set KEY=VALUE`` flags::
+
+       salt2 graph validate -c salt/core/configs/gn2v2-dummy.yaml \\
+         --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+   ``validate`` additionally runs the default-on §2.6 class-names ↔
+   schema-attrs cross-check when the reader has a schema artifact.
+2. **M1 toy configs** (top-level ``modules:``/``sources:``/``sinks:``) — a
+   small instantiate-from-``class_path`` helper using `importlib` (see
+   `instantiate`); kept for unit/toy graphs.
 
 M1 config format (YAML)::
 
@@ -91,12 +109,17 @@ _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"}
 
 @dataclass
 class GraphConfig:
-    """A loaded M1 graph config: live modules plus planner boundary inputs."""
+    """A loaded graph config: live modules plus planner boundary inputs.
+
+    `reader` is set only for §5.1 trainer configs (the adapter path) — it
+    carries the schema artifact for the validate-time class-names check.
+    """
 
     modules: dict[str, GraphModule]
     sources: NestedSpec
     sinks: Sinks
     schema: tuple[str, ...] | None
+    reader: Any | None = None
 
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
@@ -135,11 +158,22 @@ def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> 
         raise ConfigError(f"instantiating {class_path!r} failed: {err}") from err
 
 
-def load_config(path: str | Path) -> GraphConfig:
-    """Load and instantiate an M1 graph config (format in the module docstring).
+def load_config(path: str | Path, set_overrides: Sequence[str] | None = None) -> GraphConfig:
+    """Load and instantiate a graph config (both formats — module docstring).
 
-    Instance names are assigned from the ``modules:`` keys (design §2.2 —
-    names must match config keys; the planner re-checks this invariant).
+    A top-level ``model:``/``data:`` mapping is a §5.1 trainer config and is
+    adapted through `Salt2CLI` (`_load_fit_config`); a top-level ``modules:``
+    mapping is the M1 toy format. Instance names are assigned from the
+    module-dict keys (design §2.2 — names must match config keys; the
+    planner re-checks this invariant).
+
+    Parameters
+    ----------
+    path : str | Path
+        The config YAML.
+    set_overrides : Sequence[str] | None, optional
+        ``KEY=VALUE`` entries forwarded to the trainer parser (the ``--set``
+        CLI flag) — trainer configs only, by default None.
 
     Returns
     -------
@@ -161,11 +195,19 @@ def load_config(path: str | Path) -> GraphConfig:
         raise ConfigError(f"config file {path} is not valid YAML: {err}") from err
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {path} must contain a mapping")
+    if "modules" not in raw and ("model" in raw or "data" in raw):
+        return _load_fit_config(path, set_overrides)
+    if set_overrides:
+        raise ConfigError(
+            "--set overrides apply to salt2 trainer configs only "
+            f"({path} is an M1 toy graph config)"
+        )
     modules_raw = raw.get("modules")
     if not isinstance(modules_raw, dict) or not modules_raw:
         raise ConfigError(
-            f"config file {path} must declare a non-empty 'modules' mapping of "
-            "name -> {class_path, init_args}"
+            f"config file {path} must declare either a salt2 trainer config "
+            "(top-level 'model:'/'data:' blocks, the §5.1 fit surface) or an M1 toy graph "
+            "config (a non-empty 'modules' mapping of name -> {class_path, init_args})"
         )
     modules: dict[str, GraphModule] = {}
     for name, node in modules_raw.items():
@@ -186,6 +228,78 @@ def load_config(path: str | Path) -> GraphConfig:
         sources=_parse_sources(raw.get("sources"), path),
         sinks=_parse_sinks(raw.get("sinks"), path),
         schema=_parse_schema(raw.get("schema"), path),
+    )
+
+
+def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphConfig:
+    """Adapt a §5.1 trainer config into one full-pipeline `GraphConfig` (design §4).
+
+    Parses the config through the REAL `Salt2CLI` surface in run-free mode
+    (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics intact),
+    then builds the combined dataset + model graph: ``data.modules`` and
+    ``model.modules`` form one module dict (the reader is the source node,
+    so ``sources`` is empty), the per-mode sinks are the model's declared
+    anchors (``loss.total`` / ``preds.*`` + TEST ``meta.rows``), and the
+    wildcard-narrowing universe comes from the reader's schema artifact.
+    Everything stays config-only — no data file is touched (design §2.3).
+
+    Returns
+    -------
+    GraphConfig
+        The adapted config, with `reader` set for the validate-time
+        class-names check.
+
+    Raises
+    ------
+    ConfigError
+        When the trainer parse fails (with the ``--set`` hint — required
+        init_args like ``norm_dict`` can be supplied data-free), or when a
+        module name appears in both ``data.modules`` and ``model.modules``.
+    """
+    # local imports: the trainer surface (lightning/jsonargparse) is heavy
+    # and circular with this module (salt.core.main dispatches to cli.main)
+    from salt.core.data.processors import Labels  # noqa: PLC0415 - heavy/circular (docstring)
+    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (docstring)
+
+    args = ["--config", str(path)]
+    for entry in set_overrides or []:
+        if "=" not in entry:
+            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
+        args.append(f"--{entry}")
+    try:
+        cli = Salt2CLI(args=args, run=False)
+    except SystemExit as err:
+        raise ConfigError(
+            f"trainer config {path} failed to parse through the salt2 surface "
+            f"(parser exit {err.code}; the parser error is printed above). Required "
+            "init_args left as overrides in the YAML header can be supplied data-free "
+            "via --set, e.g. --set model.modules.norm.init_args.norm_dict=unused.yaml"
+        ) from err
+    model, dm = cli.model, cli.datamodule
+    data_modules = dm.modules
+    reader = dm.reader
+    for module in data_modules.values():
+        if isinstance(module, Labels):
+            module.bind_streams(reader.streams)
+    if overlap := sorted(set(data_modules) & set(model._graph_modules)):  # noqa: SLF001 - same-package adapter
+        raise ConfigError(
+            f"config {path}: module name(s) {overlap} appear in BOTH data.modules and "
+            "model.modules — instance names must be unique across the pipeline graph "
+            "(design §2.2)"
+        )
+    modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
+    sinks: dict[Mode, tuple[str, ...]] = {}
+    for mode in PRIMARY_MODES:
+        keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
+        if mode is Mode.TEST:
+            keys.append("meta.rows")  # writer row alignment (design §8)
+        sinks[mode] = tuple(keys)
+    return GraphConfig(
+        modules=modules,
+        sources={},
+        sinks=sinks,
+        schema=reader.label_universe(),
+        reader=reader,
     )
 
 
@@ -437,7 +551,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     int
         0 on success, 1 on error (or warnings under ``--strict``).
     """
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     warnings: list[str] = []
     errors: list[str] = []
     if cfg.schema is None:
@@ -445,6 +559,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             "field spellings cannot be checked statically (no 'schema:' in the config); "
             "a misspelled key will fail at the first batch (design §2.6)"
         )
+    if cfg.reader is not None:
+        # default-on §2.6 class-names ↔ schema-attrs cross-check (set AND
+        # order); raises ConfigError -> formatted by main()
+        from salt.core.saltmodule import check_class_names  # noqa: PLC0415 - heavy/circular
+
+        checked = check_class_names(cfg.modules, cfg.reader)
+        if checked:
+            print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order (§2.6)")
     for mode in _modes_for(args):
         try:
             plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
@@ -486,7 +608,7 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
         0 when no error-level finding exists; 1 on error-level findings or
         if the graph itself fails to resolve.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     rc = 0
     for mode in _modes_for(args):
         findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
@@ -521,7 +643,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     int
         0 on success, 1 on graph errors.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
     print(f"plan [mode={mode.name}] {len(plan.steps)} steps  plan_hash={plan.plan_hash}")
@@ -571,7 +693,7 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     int
         0 on success, 1 on graph errors.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
@@ -722,7 +844,7 @@ def _cmd_why(args: argparse.Namespace) -> int:
     ConfigError
         If ``--key`` is not a valid dotted bundle key.
     """
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     try:
         key_parts = split_key(args.key)
@@ -884,8 +1006,19 @@ def _cmd_schema_dump(args: argparse.Namespace) -> int:
 
 
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the shared ``-c/--config`` argument."""
-    parser.add_argument("-c", "--config", required=True, help="M1 graph config YAML")
+    """Add the shared ``-c/--config`` and ``--set`` arguments."""
+    parser.add_argument(
+        "-c", "--config", required=True, help="config YAML (salt2 trainer config or M1 toy graph)"
+    )
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="dotted override forwarded to the trainer parser (repeatable; trainer configs "
+        "only) — supplies required init_args data-free, e.g. "
+        "model.modules.norm.init_args.norm_dict=unused.yaml",
+    )
 
 
 def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:

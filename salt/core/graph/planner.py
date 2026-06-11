@@ -197,6 +197,7 @@ def compile_plan(
     sources: NestedSpec,
     schema: Collection[str] | None = None,
     sinks: Sinks = None,
+    sink_origins: Mapping[str, str] | None = None,
 ) -> Plan:
     """Compile the execution plan for one primary mode (design §3.1).
 
@@ -206,7 +207,10 @@ def compile_plan(
     (design §2.2 rule (d)); `sinks` anchors demand pruning (see module
     docstring). Only non-optional requires create wildcard demand — optional
     ports are consumed-if-present and never force a producer to materialise
-    a key.
+    a key. `sink_origins` optionally maps sink keys to a human-readable
+    description of WHO demanded them (e.g. the model-side task module behind
+    a dataset-plan sink) — used purely to upgrade error messages to the
+    design §4.1 attribution bar.
 
     Errors (all `GraphError` subclasses): `ConfigError` for composite modes,
     instance-name mismatches, wildcard misuse, or non-concrete source/sink
@@ -225,7 +229,7 @@ def compile_plan(
     _check_primary_mode(mode)
     if sinks is not None and not isinstance(sinks, Mapping):
         sinks = list(sinks)
-    res = _resolve(modules, mode, sources, schema, _sinks_for(sinks, mode, mode))
+    res = _resolve(modules, mode, sources, schema, _sinks_for(sinks, mode, mode), sink_origins)
     _check_all_modes_dead(modules, mode, sources, sinks, res)
     order = _topo_order(res)
     steps = tuple(
@@ -365,6 +369,7 @@ def _resolve(
     sources: NestedSpec,
     schema: Collection[str] | None,
     sink_keys: list[str] | None,
+    sink_origins: Mapping[str, str] | None = None,
 ) -> _Resolution:
     """Resolve one mode's graph: narrow wildcards, build edges, check, prune.
 
@@ -378,8 +383,10 @@ def _resolve(
     producer_of = _concrete_producers(src, nodes, mode)
     sink_list = _checked_sink_keys(sink_keys)
     demand = _collect_demand(nodes, sink_list or [])
-    _narrow_wildcards(nodes, producer_of, demand, schema, mode)
-    edges = _build_edges(nodes, producer_of, src, sink_list or [], mode, modules, sources)
+    _narrow_wildcards(nodes, producer_of, demand, schema, mode, sink_origins)
+    edges = _build_edges(
+        nodes, producer_of, src, sink_list or [], mode, modules, sources, sink_origins
+    )
     _check_wildcard_self_feed(nodes, edges, mode)
     if sink_list is None:
         alive, pruned = dict(nodes), {}
@@ -573,12 +580,30 @@ def _collect_demand(nodes: dict[str, _Node], sink_keys: list[str]) -> dict[str, 
     return demand
 
 
+def _describe_consumer(consumer: str, key: str, sink_origins: Mapping[str, str] | None) -> str:
+    """Render one demand consumer for an error message (§4.1 attribution).
+
+    Returns
+    -------
+    str
+        The module name (repr) for module consumers; for the `SINKS`
+        sentinel, the configured origin description when one is known
+        (never the raw ``'<sinks>'`` placeholder).
+    """
+    if consumer != SINKS:
+        return repr(consumer)
+    if sink_origins and key in sink_origins:
+        return sink_origins[key]
+    return "the configured sinks"
+
+
 def _narrow_wildcards(
     nodes: dict[str, _Node],
     producer_of: dict[str, str],
     demand: dict[str, list[str]],
     schema: Collection[str] | None,
     mode: Mode,
+    sink_origins: Mapping[str, str] | None = None,
 ) -> None:
     """Narrow wildcard patterns against concrete demand (design §2.2 rules (a)-(d)).
 
@@ -609,14 +634,16 @@ def _narrow_wildcards(
                         "producer (design §3.1)"
                     )
                 if schema is not None and key not in schema:
-                    consumers = ", ".join(repr(c) for c in demand[key])
+                    consumers = ", ".join(
+                        _describe_consumer(c, key, sink_origins) for c in demand[key]
+                    )
                     near = get_close_matches(key, sorted(schema), n=3, cutoff=_SUGGESTION_CUTOFF)
                     hint = f"\n  nearest schema keys: {', '.join(near)}" if near else ""
                     raise ConnectivityError(
-                        f"[mode={mode.name}] key {key!r} demanded by {consumers} would be "
-                        f"narrowed from wildcard {pattern!r} of {name!r} but is not in the "
-                        f"declared schema.{hint}\n  fix: correct the key in the demanding "
-                        "module (design §2.2 rule (d))"
+                        f"[mode={mode.name}] key {key!r} (demanded by {consumers}) is not in "
+                        f"the declared schema — {name!r} can only serve schema-backed keys "
+                        f"(wildcard {pattern!r}, design §2.2 rule (d)).{hint}\n"
+                        f"  fix: correct the key in the demanding module's config"
                     )
                 wildcard_owner[key] = name
                 node.narrowed[key] = spec
@@ -633,6 +660,7 @@ def _build_edges(
     mode: Mode,
     modules: dict[str, GraphModule],
     sources: NestedSpec,
+    sink_origins: Mapping[str, str] | None = None,
 ) -> list[Edge]:
     """Bind every require/sink to its producer; check kinds and unify shapes.
 
@@ -672,7 +700,7 @@ def _build_edges(
     for key in sink_keys:
         producer = producer_of.get(key)
         if producer is None:
-            _raise_missing_producer(SINKS, key, mode, producer_of, modules, sources)
+            _raise_missing_producer(SINKS, key, mode, producer_of, modules, sources, sink_origins)
         edges.append(Edge(producer, key, SINKS))
     return edges
 
@@ -1009,11 +1037,13 @@ def _raise_missing_producer(
     producer_of: dict[str, str],
     modules: dict[str, GraphModule],
     sources: NestedSpec,
+    sink_origins: Mapping[str, str] | None = None,
 ) -> NoReturn:
     """Raise the missing-producer error meeting the §4.1 quality bar.
 
-    Names the consumer, the key, nearest-key suggestions, the available keys,
-    modes in which the key would exist, and a concrete fix.
+    Names the consumer (the demanding module behind a sink, when
+    `sink_origins` knows it), the key, nearest-key suggestions, the
+    available keys, modes in which the key would exist, and a concrete fix.
 
     Raises
     ------
@@ -1021,7 +1051,10 @@ def _raise_missing_producer(
         Always.
     """
     if consumer == SINKS:
-        head = f"[mode={mode.name}] sink key {key!r} — no module or source produces it."
+        demander = (
+            f" (demanded by {sink_origins[key]})" if sink_origins and key in sink_origins else ""
+        )
+        head = f"[mode={mode.name}] sink key {key!r}{demander} — no module or source produces it."
         fix = f"fix: correct the sink key, or add a module producing {key!r}"
     else:
         head = (

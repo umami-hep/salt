@@ -18,7 +18,7 @@ import json
 import torch
 
 from salt.core.graph import IO, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn import Concat, ConstituentTask, Normaliser, Pooling, StreamEmbed
+from salt.core.nn.wrappers import Concat, ConstituentTask, Normaliser, Pooling, StreamEmbed
 from salt.core.parity_gn2 import main, run_parity
 
 EXPECTED_SINKS = {

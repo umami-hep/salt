@@ -20,7 +20,8 @@ import pytest
 import torch
 
 from salt.core.graph import Bundle, Executor, Mode, compile_plan
-from salt.core.nn import Split, from_v1, v1_sinks, v1_sources
+from salt.core.nn import from_v1, v1_sinks, v1_sources
+from salt.core.nn.wrappers import Split
 from salt.tests.core.gn2_fixture import build_test_gn2, make_gn2_batch, v1_forward
 
 OUT_DIM = 16
