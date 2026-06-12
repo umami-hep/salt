@@ -356,7 +356,11 @@ class Normaliser(nn.Module):
             un-normalised.
         """
         del mode
-        if not bool(self.materialised):
+        # skip under tracing: the tensor->bool read would emit a spurious
+        # TracerWarning on every export. Tracing is still guarded —
+        # OnnxAdapter rejects unmaterialised modules at construction, before
+        # any trace (the eager path keeps this check).
+        if not torch.jit.is_tracing() and not bool(self.materialised):
             raise RuntimeError(
                 f"Normaliser {self.name!r}: forward before materialise() — on a fresh fit "
                 "call materialise(); on checkpoint load the state_dict provides the values "
@@ -528,7 +532,9 @@ class Concat(nn.Module):
         """Declare ``embed.*``/``masks.*`` per stream -> seq keys.
 
         All streams share one instance-scoped embed-width symbol — equal
-        widths are a genuine concat constraint.
+        widths are a genuine concat constraint. In ONNX mode an additional
+        ``seq.offsets`` int64 tensor is produced (the trace-safe stream
+        boundary table consumed by `Split`'s export branch, design §7).
 
         Returns
         -------
@@ -551,11 +557,22 @@ class Concat(nn.Module):
                 "seq.x": TensorSpec(shape=("B", _SEQ_LEN, embed_dim), dtype="float32"),
                 "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
                 "seq.layout": TensorSpec(kind="meta"),
+                "seq.offsets": TensorSpec(
+                    shape=(len(self.streams) + 1,), dtype="int64", modes=Mode.ONNX
+                ),
             }),
         )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Any]:
         """Concatenate streams along the token dim and record the layout.
+
+        In ONNX mode the per-stream token counts are ALSO published as the
+        ``seq.offsets`` cumulative-boundary tensor, built with
+        ``torch.onnx.operators.shape_as_tensor`` on the per-stream pad masks
+        so the boundaries trace to Shape/Concat/CumSum nodes that stay
+        symbolic under ``dynamo=False`` tracing (design §7 multi-stream
+        trace-safety; the mode branch itself is static Python). Eager
+        FIT/VAL/TEST numerics are untouched.
 
         Returns
         -------
@@ -564,7 +581,6 @@ class Concat(nn.Module):
             allocates fresh tensors even for one input, so the seq leaves
             never alias the per-stream leaves.
         """
-        del mode
         xs = [b.get(f"embed.{stream}") for stream in self.streams]
         masks = [b.get(f"masks.{stream}") for stream in self.streams]
         layout: dict[str, tuple[int, int]] = {}
@@ -572,11 +588,16 @@ class Concat(nn.Module):
         for stream, x in zip(self.streams, xs, strict=True):
             layout[stream] = (start, start + x.shape[1])
             start += x.shape[1]
-        return {
+        out: dict[str, Any] = {
             "seq.x": torch.cat(xs, dim=1),
             "seq.mask": torch.cat(masks, dim=1),
             "seq.layout": layout,
         }
+        if mode & Mode.ONNX:
+            lengths = [torch.onnx.operators.shape_as_tensor(mask)[1:2] for mask in masks]
+            zero = torch.zeros(1, dtype=torch.int64)
+            out["seq.offsets"] = torch.cumsum(torch.cat([zero, *lengths]), dim=0)
+        return out
 
 
 class TransformerEncoder(nn.Module):
@@ -710,6 +731,23 @@ class Split(nn.Module):
     pad-mask dict order (v1 ``input_name_mask``, task.py:58-78). Register
     rows sit AFTER every stream in the encoder output, so the pre-register
     layout offsets remain valid slices of ``encoded.seq``.
+
+    Export-mode implementation (design §7 / risk 7, adjudicated empirically
+    in the M4 recipe spike, 2026-06-12): the eager branch slices with
+    Python-int ``seq.layout`` offsets, which ``dynamo=False`` tracing bakes
+    as constants. A single-stream probe (L=0..60) showed the JIT tracer
+    keeps ``size()``-derived ints symbolic through single-stream slicing —
+    silently CORRECT for one dynamic sequence axis — but a two-stream probe
+    mis-sliced at ALL 15 (L_trk, L_el) grid points: with >=2 dynamic axes
+    the baked offsets are provably wrong. The ONNX branch therefore slices
+    with ``index_select`` over an index range built from the `Concat`
+    ``seq.offsets`` tensor (``shape_as_tensor``-derived, design §7
+    mechanism (A)) — proven correct on the full two-axis grid including
+    zero-length streams in the same spike; the design's fallback
+    (per-stream encoder outputs) was NOT needed. The mode branch is static
+    Python; eager FIT/VAL/TEST numerics are bit-identical to the M2 port,
+    and ``index_select`` over a contiguous range equals the eager narrow
+    slicing exactly.
     """
 
     def __init__(self, streams: Sequence[str]) -> None:
@@ -731,6 +769,10 @@ class Split(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``encoded.seq`` + ``seq.layout`` -> ``encoded.<stream>`` per stream.
 
+        In ONNX mode the `Concat` ``seq.offsets`` boundary tensor is
+        additionally required (the trace-safe slicing path, see the class
+        docstring).
+
         Returns
         -------
         IO
@@ -743,6 +785,7 @@ class Split(nn.Module):
             requires=unflatten_spec({
                 "encoded.seq": TensorSpec(shape=("B", _ENC_LEN, width), dtype="float32"),
                 "seq.layout": TensorSpec(kind="meta"),
+                "seq.offsets": TensorSpec(shape=None, dtype="int64", modes=Mode.ONNX),
             }),
             produces=unflatten_spec({
                 f"encoded.{stream}": TensorSpec(
@@ -755,15 +798,29 @@ class Split(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Slice each configured stream out of the encoded sequence.
 
+        ONNX mode uses dynamic ``index_select`` slicing driven by
+        ``seq.offsets`` (see the class docstring for the risk-7 evidence);
+        the stream's position in the offsets table is its position in the
+        ``seq.layout`` dict (static Python — `Concat` insertion order), so
+        a `Split` over a stream SUBSET stays correct without knowing the
+        full concat list.
+
         Returns
         -------
         dict[str, Tensor]
             The newly produced keys only (design §2.5).
         """
-        del mode
         encoded = b.get("encoded.seq")
         layout = b.get("seq.layout")
         out: dict[str, Tensor] = {}
+        if mode & Mode.ONNX:
+            offsets = b.get("seq.offsets")
+            order = list(layout)
+            for stream in self.streams:
+                i = order.index(stream)
+                idx = torch.arange(offsets[i + 1] - offsets[i]) + offsets[i]
+                out[f"encoded.{stream}"] = encoded.index_select(1, idx)
+            return out
         for stream in self.streams:
             start, stop = layout[stream]
             out[f"encoded.{stream}"] = encoded[:, start:stop]

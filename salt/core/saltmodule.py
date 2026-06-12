@@ -423,7 +423,12 @@ class SaltModule(lightning.LightningModule):
             (attached or passed), the writer-demanded model-produced keys —
             demand-gating proper (design §8); without writers (programmatic
             ``Trainer.test``) and in ONNX, every declared ``preds.*`` key in
-            declaration order (the M2 behaviour).
+            declaration order (the M2 behaviour). NOTE: the design §3.1
+            ONNX sinks (the ``export.outputs`` ports) are derived OUTSIDE
+            this method — `salt.core.onnx.export.compile_onnx_plan` on the
+            export path and `salt.core.cli._load_fit_config` on the static
+            path (M4-review fix); the all-preds ONNX fallback here serves
+            only configs without an ``export:`` block.
 
         Raises
         ------

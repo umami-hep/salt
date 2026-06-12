@@ -25,8 +25,8 @@ from salt.core.data import GraphDataModule
 from salt.core.main import CONFIG_DIR, Salt2CLI, main
 from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.saltmodule import SaltModule
-from salt.core.writers import WriterCallback
 from salt.core.schema import dump_schema, save_schema
+from salt.core.writers import WriterCallback
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
 from salt.utils.inputs import write_dummy_file
 
@@ -540,6 +540,89 @@ class TestGraphFitConfigAdapter:
             main(["graph", "validate", "-c", str(DUMMY_CFG), "--strict", *self.set_flags(data)])
             == 0
         )
+
+    def test_validate_onnx_bad_export_port_fails(self, tmp_path, capsys):
+        # M4-review HIGH fix: ONNX-mode sinks come from export.outputs —
+        # a typo'd export port used to validate green (even --strict) and
+        # fail months later at export time (design §3.1/§4.1, §9.3 CI gate)
+        import yaml
+
+        config = yaml.safe_load(DUMMY_CFG.read_text())
+        config["export"]["outputs"][0]["port"] = "preds.jets.jets_clasification"
+        bad = tmp_path / "bad_port.yaml"
+        bad.write_text(yaml.dump(config, sort_keys=False))
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(bad),
+            "--mode",
+            "onnx",
+            "--set",
+            "model.modules.norm.init_args.norm_dict=unused.yaml",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "preds.jets.jets_clasification" in err
+        assert "export.outputs" in err  # the demanding config address
+
+    def test_validate_onnx_underscore_model_name_fails(self, tmp_path, capsys):
+        # the §4.1 'export.model_name contains no _/-' validate check —
+        # used to pass even with --strict (M4-review HIGH fix)
+        import yaml
+
+        config = yaml.safe_load(DUMMY_CFG.read_text())
+        config["export"]["model_name"] = "GN2_v2_dummy"
+        bad = tmp_path / "bad_name.yaml"
+        bad.write_text(yaml.dump(config, sort_keys=False))
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(bad),
+            "--mode",
+            "onnx",
+            "--set",
+            "model.modules.norm.init_args.norm_dict=unused.yaml",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "GN2_v2_dummy" in err
+        assert "underscores or dashes" in err
+
+    def test_validate_onnx_export_less_config_warns(self, tmp_path, capsys):
+        # a trainer config without an export: block keeps the all-preds
+        # fallback but says so — and --strict promotes it (the §9.3
+        # converted-config CI gate expects the block to exist)
+        import yaml
+
+        config = yaml.safe_load(DUMMY_CFG.read_text())
+        config.pop("export")
+        no_export = tmp_path / "no_export.yaml"
+        no_export.write_text(yaml.dump(config, sort_keys=False))
+        flags = ["--set", "model.modules.norm.init_args.norm_dict=unused.yaml"]
+        rc = main(["graph", "validate", "-c", str(no_export), "--mode", "onnx", *flags])
+        out, err = capsys.readouterr()
+        assert rc == 0  # non-strict: warning only
+        assert "OK [mode=ONNX]" in out
+        assert "no export: block" in err
+        assert (
+            main(["graph", "validate", "-c", str(no_export), "--mode", "onnx", "--strict", *flags])
+            == 1
+        )
+
+    def test_plan_onnx_uses_export_sinks_and_prints_caveat(self, data, capsys):
+        rc = main(["graph", "plan", "-c", str(DUMMY_CFG), "--mode", "onnx", *self.set_flags(data)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        # the static ONNX view is flagged as the dataset-fed approximation;
+        # the traced graph's rendering is the export-time plan_onnx.txt
+        assert "dataset-fed STATIC view" in out
+        assert "plan_onnx.txt" in out
+        # the no-op narrowed-to-nothing labels step is annotated (M4-review
+        # fix: it used to look like live label loading in the ONNX plan)
+        assert "labels" in out
+        assert "[narrowed to 0 keys — no-op]" in out
 
     def test_validate_reports_fit_preds_as_info(self, data, capsys):
         rc = main([

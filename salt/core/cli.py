@@ -87,6 +87,7 @@ from salt.core.graph.spec import (
     split_key,
     unflatten_spec,
 )
+from salt.core.onnx.config import resolve_export_config
 from salt.core.render import dot_source, plan_table, render_graph
 from salt.core.schema import dump_schema, load_schema, save_schema
 
@@ -115,12 +116,18 @@ class GraphConfig:
     `reader` is set only for §5.1 trainer configs (the adapter path) — it
     carries the schema artifact for the validate-time class-names check.
     `mode_errors` carries per-mode config errors found while deriving sinks
-    (currently the TEST dead-preds / invalid-writers errors from the parsed
-    ``writers:`` block, M3-review fix): ``validate``/``deadcode`` report
-    them as error-level findings for that mode, ``plan``/``plot``/``why``
-    raise them when the broken mode is requested — the affected mode's
-    sinks fall back to anchor-on-all-preds so the other modes stay
-    inspectable.
+    (the TEST dead-preds / invalid-writers errors from the parsed
+    ``writers:`` block, M3-review fix; the ONNX export-block resolution
+    errors — bad ``model_name``, malformed entries — M4-review fix):
+    ``validate``/``deadcode`` report them as error-level findings for that
+    mode, ``plan``/``plot``/``why`` raise them when the broken mode is
+    requested — the affected mode's sinks fall back to anchor-on-all-preds
+    so the other modes stay inspectable. `mode_warnings` carries per-mode
+    warnings (a trainer config without an ``export:`` block leaves the ONNX
+    contract unchecked — design §4.1); ``validate`` reports them
+    (promotable with ``--strict``). `sink_origins` enriches missing-sink
+    planner errors with the demanding config address (e.g.
+    ``export.outputs``), per mode.
     """
 
     modules: dict[str, GraphModule]
@@ -129,6 +136,8 @@ class GraphConfig:
     schema: tuple[str, ...] | None
     reader: Any | None = None
     mode_errors: dict[Mode, str] = field(default_factory=dict)
+    mode_warnings: dict[Mode, str] = field(default_factory=dict)
+    sink_origins: dict[Mode, dict[str, str]] = field(default_factory=dict)
 
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
@@ -307,8 +316,12 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
+    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
+    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
     sinks: dict[Mode, tuple[str, ...]] = {}
     mode_errors: dict[Mode, str] = {}
+    mode_warnings: dict[Mode, str] = {}
+    sink_origins: dict[Mode, dict[str, str]] = {}
     for mode in PRIMARY_MODES:
         if mode is Mode.TEST and writer_cb is not None:
             try:
@@ -320,7 +333,32 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
+        elif mode is Mode.ONNX and export_cfg is not None:
+            # the static half of the design §3.1/§4.1 export contract
+            # (M4-review fix): ONNX sinks are the export.outputs ports, and
+            # the export block is validated exactly as `salt2 export` does
+            # (model_name rule, entry shape) — a typo'd port then fails the
+            # ONNX compile with the §4.1 missing-sink error citing
+            # export.outputs, instead of validating green and failing
+            # months later at export time
+            try:
+                resolved = resolve_export_config(export_cfg, run_name)
+                keys = [out.port for out in resolved.outputs]
+                sink_origins[mode] = {
+                    out.port: f"export output {out.port!r} (config: export.outputs)"
+                    for out in resolved.outputs
+                }
+            except ConfigError as err:
+                mode_errors[mode] = str(err)
+                keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
         else:
+            if mode is Mode.ONNX:
+                mode_warnings[mode] = (
+                    "the config has no export: block — the ONNX contract was NOT checked "
+                    "(sinks fall back to every preds.* key); declare export.inputs/outputs "
+                    "(design §5.1, §7) so `salt2 graph validate --mode onnx` gates what "
+                    "`salt2 export` will trace"
+                )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
         if mode is Mode.TEST and "meta.rows" not in keys:
             keys.append("meta.rows")  # writer row alignment (design §8)
@@ -332,6 +370,8 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
         schema=reader.label_universe(),
         reader=reader,
         mode_errors=mode_errors,
+        mode_warnings=mode_warnings,
+        sink_origins=sink_origins,
     )
 
 
@@ -649,8 +689,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     for mode in _modes_for(args):
         if stored := cfg.mode_errors.get(mode):
             errors.append(stored)
+        if warned := cfg.mode_warnings.get(mode):
+            warnings.append(warned)
         try:
-            plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
+            plan = compile_plan(
+                cfg.modules,
+                mode,
+                cfg.sources,
+                schema=cfg.schema,
+                sinks=cfg.sinks,
+                sink_origins=cfg.sink_origins.get(mode),
+            )
         except GraphError as err:
             return _fail(_format_graph_error(err))
         print(
@@ -738,8 +787,16 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     _require_mode_ok(cfg, mode)
-    plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
+    plan = compile_plan(
+        cfg.modules,
+        mode,
+        cfg.sources,
+        schema=cfg.schema,
+        sinks=cfg.sinks,
+        sink_origins=cfg.sink_origins.get(mode),
+    )
     print(plan_table(plan))
+    _print_onnx_static_caveat(cfg, mode)
     return 0
 
 
@@ -750,10 +807,29 @@ def _require_mode_ok(cfg: GraphConfig, mode: Mode) -> None:
     ------
     ConfigError
         The `GraphConfig.mode_errors` entry for `mode` (e.g. the TEST
-        dead-preds error derived from the parsed ``writers:`` block).
+        dead-preds error derived from the parsed ``writers:`` block, or the
+        ONNX export-block resolution error).
     """
     if stored := cfg.mode_errors.get(mode):
         raise ConfigError(stored)
+
+
+def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
+    """Print the dataset-fed-approximation caveat for static ONNX renderings.
+
+    The static ONNX-mode plan/plot of a trainer config includes the dataset
+    modules and anchors on dataset sources; the graph `salt2 export`
+    actually traces has positional export inputs, no dataset modules, and
+    in-graph reduces — its authoritative rendering is the `plan_onnx.txt`
+    written next to ``network.onnx`` at export time (design §4.4; the two
+    plan hashes legitimately differ).
+    """
+    if mode is Mode.ONNX and cfg.reader is not None:
+        print(
+            "note: this is the dataset-fed STATIC view of the ONNX graph (reader/features "
+            "included, no export reduces). The traced export graph is rendered to "
+            "plan_onnx.txt next to network.onnx by `salt2 export` (design §4.4)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +854,15 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     _require_mode_ok(cfg, mode)
-    plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
+    plan = compile_plan(
+        cfg.modules,
+        mode,
+        cfg.sources,
+        schema=cfg.schema,
+        sinks=cfg.sinks,
+        sink_origins=cfg.sink_origins.get(mode),
+    )
+    _print_onnx_static_caveat(cfg, mode)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
     dot_text = dot_source(plan, cfg.modules, pruned)
@@ -852,7 +936,14 @@ def _cmd_why(args: argparse.Namespace) -> int:
     except (TypeError, ValueError) as err:
         raise ConfigError(f"invalid --key {args.key!r}: {err}") from err
     key = KEY_SEP.join(key_parts)
-    plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
+    plan = compile_plan(
+        cfg.modules,
+        mode,
+        cfg.sources,
+        schema=cfg.schema,
+        sinks=cfg.sinks,
+        sink_origins=cfg.sink_origins.get(mode),
+    )
     found = _explain_present(plan, key, mode)
     if found:
         return 0

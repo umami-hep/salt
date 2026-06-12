@@ -86,7 +86,11 @@ def plan_table(plan: Plan) -> str:
         else:
             after = "(no inputs)"
         needs = ", ".join(sorted(step.requires)) or "nothing"
-        lines.append(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs})")
+        # a wildcard producer narrowed to nothing (e.g. Labels in TEST/ONNX)
+        # runs as a no-op and reads no fields — say so, or the step looks
+        # like live label loading in a plan that provably has none (§4.2)
+        noop = "" if step.produces else "  [narrowed to 0 keys — no-op]"
+        lines.append(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs}){noop}")
     narrowed_lines = []
     for step in plan.steps:
         declared = step.module.declare_io(mode).produces

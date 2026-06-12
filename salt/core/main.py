@@ -47,6 +47,7 @@ from lightning.pytorch.trainer import Trainer
 from salt.core import cli as graph_cli
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.graph.errors import ConfigError, GraphError
+from salt.core.onnx.config import ExportConfig
 from salt.core.saltmodule import SaltModule
 from salt.core.writers import DEFAULT_OUTPUT, Writer, WriterCallback
 
@@ -56,6 +57,7 @@ CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base2.yaml`` and the worked GN2v2 configs (design §5.1)."""
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema"})
+_EXPORT_COMMAND = "export"
 
 # --model.modules.X=null (also the explicit --model.init_args.modules.X=null):
 # jsonargparse's SUBCLASS adapter re-emits nested args as "--key=value"
@@ -294,6 +296,15 @@ class Salt2CLI(LightningCLI):
             default=False,
             help="write float columns at half precision (v1 PredictionWriter flag)",
         )
+        parser.add_argument(
+            "--export",
+            type=ExportConfig | None,
+            default=None,
+            help="the declarative ONNX export block consumed by `salt2 export` (design §5.1, "
+            "§7): model_name (no '_'/'-', validated ONLY at export time), inputs "
+            "(port/name/sequence/dyn_axis/alias) and outputs (port/name|names/dtype/reduce). "
+            "Inert during fit/test; round-trips through saved run configs.",
+        )
         if not self._run_mode:
             # run-free parses must round-trip a SAVED run config.yaml, which
             # carries the Lightning run-surface key ckpt_path (M3-review fix:
@@ -415,20 +426,22 @@ def main(args: Sequence[str] | None = None) -> int:
     """``salt2`` console entry point (pyproject ``[project.scripts]``).
 
     ``salt2 graph …`` / ``salt2 schema …`` dispatch to the static graph
-    tooling (`salt.core.cli.main`, design §4); everything else goes to
-    `Salt2CLI` (``salt2 fit`` / ``salt2 test``, design §5). Console use
-    (``args is None``) passes ``args=None`` through so Lightning reads
-    ``sys.argv`` natively (no spurious "args parameter is intended..."
-    warning); programmatic argv is filtered for the same warning. Graph
-    errors (`GraphError`) print as the clean §4.1 one-block form on stderr
-    instead of a Python traceback. Top-level ``-h``/``--help`` gains a
-    see-also note for the graph/schema subcommand family.
+    tooling (`salt.core.cli.main`, design §4) and ``salt2 export`` to the
+    ONNX exporter (`salt.core.onnx.export.main`, design §7); everything
+    else goes to `Salt2CLI` (``salt2 fit`` / ``salt2 test``, design §5).
+    Console use (``args is None``) passes ``args=None`` through so
+    Lightning reads ``sys.argv`` natively (no spurious "args parameter is
+    intended..." warning); programmatic argv is filtered for the same
+    warning. Graph errors (`GraphError`) print as the clean §4.1 one-block
+    form on stderr instead of a Python traceback. Top-level
+    ``-h``/``--help`` gains a see-also note for the graph/schema/export
+    subcommand family.
 
     Returns
     -------
     int
-        Process exit code (graph tooling semantics for graph/schema; 0 when
-        a trainer subcommand completes).
+        Process exit code (graph tooling semantics for graph/schema/export;
+        0 when a trainer subcommand completes).
 
     Raises
     ------
@@ -439,6 +452,12 @@ def main(args: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if args is None else args)
     if argv and argv[0] in _GRAPH_COMMANDS:
         return graph_cli.main(argv)
+    if argv and argv[0] == _EXPORT_COMMAND:
+        # local import: the exporter pulls onnx/onnxruntime — not needed at
+        # fit/test/graph startup
+        from salt.core.onnx import export as onnx_export  # noqa: PLC0415 - heavy, export-only
+
+        return onnx_export.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
         with warnings.catch_warnings():
@@ -450,7 +469,8 @@ def main(args: Sequence[str] | None = None) -> int:
         if help_requested:
             print(
                 "\nsee also: 'salt2 graph --help' (static graph tooling: validate/plan/plot/"
-                "why/deadcode, design §4) and 'salt2 schema --help' (schema artifacts, §2.6)"
+                "why/deadcode, design §4), 'salt2 schema --help' (schema artifacts, §2.6) and "
+                "'salt2 export --help' (ONNX export, §7)"
             )
         raise
     except GraphError as err:

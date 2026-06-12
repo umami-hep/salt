@@ -217,6 +217,23 @@ covering every module before any value is materialised. Unconsumed
 case, design §3.3) and never promoted, so `--strict` passes on a standard
 tagger config.
 
+**ONNX mode checks the `export:` block** (design §3.1/§4.1): when a trainer
+config carries one, the static ONNX sinks are the `export.outputs` ports
+(not all `preds.*`) and the block is validated exactly as `salt2 export`
+does — a typo'd export port fails the ONNX compile citing `export.outputs`
+with did-you-mean suggestions, and an invalid `export.model_name` (`_`/`-`)
+is an error-level `validate` finding (`plan`/`plot`/`why --mode onnx` raise
+it). A trainer config **without** an export block falls back to
+anchor-on-all-preds with a WARNING that the ONNX contract was not checked
+(promoted under `--strict` — the §9.3 converter CI gate expects converted
+configs to carry the block). Predictions excluded from `export.outputs`
+show up as info-level ONNX deadcode findings (the §4.2 export-pruning
+story). Note the static ONNX plan/plot remain the **dataset-fed
+approximation** (reader/features included, no reduces); the authoritative
+rendering of the traced graph is the `plan_onnx.txt` that `salt2 export`
+writes next to `network.onnx` — the two plan hashes legitimately differ,
+and the CLI prints this caveat on `plan`/`plot --mode onnx`.
+
 `salt2 graph plot` renders with **matplotlib** (layered topological DAG,
 namespace-coloured modules — the salt container has no graphviz binary) and
 always writes the Graphviz `.dot` alongside for manual re-rendering.
@@ -281,6 +298,94 @@ MaskFormer metrics (see `SaltModule._model_sinks`).
   a train-only aux task needs `--model.modules.<task>=null` on each
   `salt2 test` invocation.
 
+## ONNX export: `salt2 export` (design §7)
+
+```bash
+salt2 export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
+# config inferred at <run_dir>/config.yaml (pass -c to override); output
+# defaults to <run_dir>/network.onnx (--output / -o/--overwrite to control)
+```
+
+The design §7 `--run-dir` spelling lands with the M6 run-dir layout; until
+then `--ckpt_path` + the inferred sibling config reproduces the v1 contract
+(`to_onnx.py:629-631`). `-c` is **repeatable** with the fit deep-merge
+semantics — the supported way to export a run trained before the export
+block existed (every v1 migrator until the M7 converter):
+
+```bash
+salt2 export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
+# my_export_block.yaml carries ONLY the export: block below
+```
+
+Everything Athena-facing is declared in the **`export:` block** (top-level,
+shipped in the gn2v2 configs; parsed by the normal salt2 surface so it
+round-trips through saved run configs):
+
+```yaml
+export:
+  model_name: GN2v2 # no '_'/'-' — validated ONLY at export time; the run
+  #                   name stays unrestricted (default: run name stripped)
+  inputs:
+    - { port: inputs.jets, name: jet_features } # [1, F] global
+    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
+  outputs:
+    - { port: preds.jets.jets_classification, names: [pb, pc, pu] } # -> GN2v2_pb, ...
+    - { port: preds.tracks.track_origin, name: TrackOrigin, dtype: int8, reduce: argmax }
+    - { port: preds.tracks.track_vertexing, name: VertexIndex, dtype: int8, reduce: vertex_union_find }
+```
+
+How it works (no data file is touched — config + checkpoint only):
+
+- The **ONNX plan** is compiled with the `export.outputs` ports as sinks —
+  labels/losses/writers are demand-pruned automatically; sources mirror the
+  `Features` declaration (widths/columns from `variables:`).
+- The **`OnnxAdapter`** wrapper assembles the bundle in-graph (sequences
+  `[L, F]` -> `[1, L, F]` + all-valid pad masks — the v1 traced pattern),
+  executes the frozen plan, and emits the flat output tuple. Every module
+  recursively receives `set_export_mode()` (the encoder forces torch-math
+  attention — the Athena-agreement requirement).
+- **Reduces** (`split_scalars`, `argmax`, `vertex_union_find`) generate the
+  output names/dtypes/dynamic axes from the config; union-find runs INSIDE
+  the traced graph on the raw edge scores the vertexing task publishes in
+  ONNX mode (design §3.3 per-family exception). MaskFormer reduces are M5.
+- **Multi-stream trace-safety** (design risk 7, adjudicated): eager `Split`
+  slicing is wrong under tracing with ≥2 dynamic sequence axes; in ONNX
+  mode `Concat` publishes a `seq.offsets` boundary tensor and `Split`
+  slices via `index_select` — proven on a two-axis (tracks, electrons)
+  grid including zero-length streams (see the `Split` docstring).
+- **`gnn_config` metadata** is bit-compatible with v1 on equivalent config
+  (key set/order, `jet_var`/`*_sd0sort` input names, `_btagJes` strip on
+  global variables, placeholders); the single additive key `plan_hash` is
+  appended after the v1 set. `onnx_model_version` stays `v1`.
+- The **checker** runs by default after export (`--no-check` to skip):
+  eager-v2-torch vs onnxruntime over the v1 sweep (L=0..39 x `--trials`,
+  including L=0), outputs addressed by name; v1 bars (float 1e-4 + no-NaN
+  + no-exact-zero; int8 exact). `--float-atol 1e-6` for the gate bar.
+- Aliases: `{port: inputs.global, alias: inputs.jets}` binds a port from
+  another input's tensor (the GN3 global stream; clone when the `Features`
+  declarations match, name-resolved `index_select` gather otherwise);
+  exercised on a real GN3 model in M5.
+- **Artifacts**: alongside `network.onnx` the exporter writes
+  `plan_onnx.txt` — the §4.4 plan table of the graph Athena will actually
+  run (union-find placement, `Split` `index_select` mechanism). This is the
+  authoritative ONNX plan; `salt2 graph plan --mode onnx` shows the
+  dataset-fed static approximation.
+- **Expected console output**: a clean export prints NO trace warnings.
+  The torch `aten::index ... indices of type Byte` UserWarning (raised on
+  the v1-verbatim bool-mask gathers in the union-find/zero-token tricks,
+  identically noisy under v1's exporter) is deliberately suppressed around
+  `torch.onnx.export` — the default-on sweep checker (incl. L=0) is the
+  proof the traced graph is correct.
+- **Known gaps**: v1's `--combine_outputs`/`--rename` CLI features have no
+  v2 config surface yet (`gnn_config` hardcodes `combine_outputs: []`,
+  `rename_outputs: {}`) — exports of v1 models that used them cannot be
+  reproduced; the M7 converter must hard-error on configs carrying either
+  (tracked in `salt/core/onnx/metadata.py`).
+
+Programmatic surface for gates/tests (no checkpoint needed):
+`salt.core.onnx.export_graph(modules, export_cfg, variables, path)` +
+`salt.core.onnx.check_onnx(adapter, path, ...)`.
+
 ## Checkpoints and resume (design §2.3)
 
 Checkpoints carry the resolved schema + per-mode plan hashes under the
@@ -291,7 +396,7 @@ Data-less loading: `SaltModule.load_from_checkpoint(path, modules=...)`.
 
 ## Parity and gate harnesses (design §9.5)
 
-Three standalone v1-vs-v2 harnesses, each `python -m` runnable, each writing
+Four standalone v1-vs-v2 harnesses, each `python -m` runnable, each writing
 a `<gate>_report.json` + stdout table and exiting non-zero on failure:
 
 - `python -m salt.core.parity_gn2 --outdir ...` — bitwise forward parity on
@@ -307,3 +412,19 @@ a `<gate>_report.json` + stdout table and exiting non-zero on failure:
   override journey, `w5` ConfusionMatrix v1/v2 value parity (with a
   prediction-diversity non-degeneracy bar). Dummy-file gates generate their
   data into `--outdir` when no `--file` is given.
+- `python -m salt.core.gates_m4 {o1..o5} --outdir ...` — the ONNX-export
+  milestone (plan 07; NO data needed — fixtures are built in `--outdir`):
+  `o1` v2-torch vs v2-ONNX over the full L=0..39 sweep incl. L=0 at the
+  1e-6 bar (v1 ships 1e-4), `o2` v1-ONNX vs v2-ONNX output identity on the
+  same weights (bitwise on the GN2 fixture) + IO/dynamic-axes/`gnn_config`
+  contract equality, `o3` two independent dynamic sequence axes over a
+  (L_trk, L_el) grid incl. zeros — the design risk-7 blocker, with a v1
+  eager cross-check and the `Concat seq.offsets -> Split index_select`
+  mechanism recorded from the compiled plan, `o4` VertexIndex triple
+  identity (v1-ONNX == v2-ONNX == the v1 torch union-find chain,
+  int8-exact, multi-vertex non-degeneracy bar), `o5` negative controls
+  (corrupted weights fail the checker; `model_name` rule) + `gnn_config`
+  byte-comparison vs v1 (13-key ordered prefix + additive trailing
+  `plan_hash`). The untrained fixture heads are mean-centered before the
+  weight transfer (`_decollapse_v1_heads`) so the int8 comparisons have
+  discriminating power.
