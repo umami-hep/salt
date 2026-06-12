@@ -370,7 +370,9 @@ class TestBoundaryDemandGuards:
     """Stage-E fixes: demand provenance + early missing-producer errors (§4.1)."""
 
     def test_sink_origins_name_demanding_modules(self, data):
-        origins = build_model(data).sink_origins()
+        # per-mode since the M3 review (a merged map mis-attributed
+        # writer-demanded TEST keys to their inactive FIT demander)
+        origins = build_model(data).sink_origins()[Mode.FIT]
         assert (
             origins["labels.jets.flavour_label"]
             == "'jets_classification' (config: model.modules.jets_classification)"
@@ -378,6 +380,42 @@ class TestBoundaryDemandGuards:
         assert "track_vertexing" in origins["labels.tracks.ftagTruthVertexIndex"]
         # feature demand is attributed too (norm is the first requirer)
         assert "model.modules." in origins["inputs.jets"]
+
+    def test_sink_origins_attribute_writer_demand_per_mode(self, data):
+        # M3-review fix: a writer-demanded TEST label is attributed to the
+        # WRITER in Mode.TEST while Mode.FIT keeps the task attribution —
+        # the old merged map won FIT-first for both
+        from types import SimpleNamespace
+
+        from salt.core.graph.spec import TensorSpec
+        from salt.core.writers import TaskWriter, Writer, WriterCallback
+
+        class TruthWriter(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"labels.jets.flavour_label": TensorSpec(kind="label")}
+
+            def columns(self, ctx):
+                raise NotImplementedError  # static demand only in this test
+
+            def write(self, bundle, rows):
+                raise NotImplementedError
+
+        wcb = WriterCallback(modules={"truth": TruthWriter(), "tasks": TaskWriter()})
+        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+        model = build_model(data)
+        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
+            callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
+        )
+        origins = model.sink_origins()
+        assert (
+            origins[Mode.TEST]["labels.jets.flavour_label"]
+            == "writer 'truth' (config: writers.modules.truth)"
+        )
+        assert (
+            origins[Mode.FIT]["labels.jets.flavour_label"]
+            == "'jets_classification' (config: model.modules.jets_classification)"
+        )
 
     def test_deleted_producer_raises_named_error(self, data):
         # the ergonomics journey-(d) repro: --model.modules.pool=null used to
@@ -434,9 +472,7 @@ class TestClassNamesCheck:
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
-        reader = H5StructuredReader(
-            groups={"jets": {"vector": True}, "tracks": {"vector": False}}
-        )
+        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
         assert check_class_names(modules, reader) == 0
 
     def test_default_on_at_fit_setup(self, data):

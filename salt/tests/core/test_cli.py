@@ -343,7 +343,8 @@ class TestPlot:
         assert "style=dashed" in dot
         assert '"aux"' in dot
 
-    def test_says_so_when_graphviz_missing(self, cfg, tmp_path, capsys, monkeypatch):
+    def test_matplotlib_is_the_primary_renderer(self, cfg, tmp_path, capsys, monkeypatch):
+        # graphviz absence is irrelevant: matplotlib renders the image
         import salt.core.cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "graphviz", None)
@@ -351,8 +352,26 @@ class TestPlot:
         rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
         assert rc == 0
         out = capsys.readouterr().out
+        assert "matplotlib" in out
+        assert out_path.exists()
+        assert (tmp_path / "graph.dot").exists()
+
+    def test_says_so_when_no_renderer_available(self, cfg, tmp_path, capsys, monkeypatch):
+        # matplotlib AND graphviz unavailable -> DOT stays, with a render hint
+        import salt.core.cli as cli_mod
+
+        def _no_mpl(*args, **kwargs):
+            raise ImportError("matplotlib disabled for the test")
+
+        monkeypatch.setattr(cli_mod, "render_graph", _no_mpl)
+        monkeypatch.setattr(cli_mod, "graphviz", None)
+        out_path = tmp_path / "graph.svg"
+        rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
         assert "not importable" in out
         assert "graph.dot" in out
+        assert not out_path.exists()
 
 
 # ---------------------------------------------------------------------------

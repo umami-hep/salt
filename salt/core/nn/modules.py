@@ -215,6 +215,78 @@ class Normaliser(nn.Module):
         self.register_buffer("materialised", torch.tensor(False))
         self._bound = True
 
+    def preflight(self) -> None:
+        """Fail-fast, data-free norm-dict validation (M3 leftover, design §2.3).
+
+        Without this check a wrong ``norm_dict`` path/content only surfaces
+        at `materialise` — after dataset setup and plan compilation. The
+        preflight reads ONLY the norm-dict YAML (config I/O in the design
+        §2.6 sense — no H5/bind I/O): the file must exist, parse, and carry
+        every configured stream; when the module is already bound (the
+        `SaltModule.setup` call site) the per-variable mean/std entries are
+        checked too, mirroring `materialise`'s validation. Called by
+        `SaltModule.setup` on fresh fits (hard error) and by ``salt2 graph
+        validate`` (warning — data-less machines stay supported).
+
+        Raises
+        ------
+        ConfigError
+            On a missing/unparsable norm dict, a missing stream, or (when
+            bound) missing/non-finite/zero-std variable entries.
+        """
+        path = self.norm_dict_path
+        prefix = f"Normaliser {self.name!r} preflight"
+        fix = (
+            f"  fix: point model.modules.{self.name}.init_args.norm_dict at the "
+            "preprocessing norm_dict.yaml for this sample"
+        )
+        if not path.is_file():
+            raise ConfigError(f"{prefix}: norm dict not found: {path}\n{fix}")
+        try:
+            with open(path) as fh:
+                norm_dict = yaml.safe_load(fh)
+        except yaml.YAMLError as err:
+            raise ConfigError(
+                f"{prefix}: norm dict {path} is not valid YAML: {err}\n{fix}"
+            ) from err
+        if not isinstance(norm_dict, dict):
+            raise ConfigError(f"{prefix}: norm dict {path} must be a mapping\n{fix}")
+        for stream in self.streams:
+            if stream not in norm_dict:
+                raise ConfigError(
+                    f"{prefix}: missing input type {stream!r} in {path}. "
+                    f"Choose from {sorted(norm_dict)}."
+                )
+            if not self._fields:
+                continue  # unbound (the data-free `salt2 graph validate` path)
+            variables = self._fields[stream]
+            if missing := set(variables) - set(norm_dict[stream]):
+                raise ConfigError(
+                    f"{prefix}: missing variables {sorted(missing)} for {stream!r} in {path}. "
+                    f"Choose from {sorted(norm_dict[stream])}.\n"
+                    f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove "
+                    f"them from the features variable list "
+                    f"(config: data.modules.features.init_args.variables.{stream})"
+                )
+            for variable in variables:
+                entry = norm_dict[stream][variable]
+                try:
+                    mean, std = float(entry["mean"]), float(entry["std"])
+                except (KeyError, TypeError, ValueError):
+                    raise ConfigError(
+                        f"{prefix}: entry for {stream}.{variable} in {path} must be a "
+                        f"{{mean, std}} mapping, got {entry!r}"
+                    ) from None
+                if not (torch.isfinite(torch.tensor(mean)) and torch.isfinite(torch.tensor(std))):
+                    raise ConfigError(
+                        f"{prefix}: non-finite normalisation parameters for "
+                        f"{stream}.{variable} in {path}."
+                    )
+                if std == 0:
+                    raise ConfigError(
+                        f"{prefix}: zero standard deviation for {stream}.{variable} in {path}."
+                    )
+
     def materialise(self) -> None:
         """Fill the buffers from the norm dict (the ONLY file I/O, design §2.3).
 

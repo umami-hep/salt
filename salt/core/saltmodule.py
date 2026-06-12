@@ -241,28 +241,35 @@ class SaltModule(lightning.LightningModule):
         """
         return {mode: demand for mode, (demand, _) in self._boundary_demand().items()}
 
-    def sink_origins(self) -> dict[str, str]:
-        """Demanded-key -> demanding-module description, merged across modes.
+    def sink_origins(self) -> dict[Mode, dict[str, str]]:
+        """Per-mode demanded-key -> demanding-module description.
 
-        `GraphDataModule` threads this into the dataset plans so dataset-side
-        errors (schema-invalid label narrowing, missing sink producers) name
-        the model-side module the user actually configured instead of the
-        planner's ``'<sinks>'`` placeholder (design §4.1 attribution).
+        `GraphDataModule` threads the matching mode's map into each stage
+        dataset plan so dataset-side errors (schema-invalid label narrowing,
+        missing sink producers) and the ``plan_<mode>.txt`` artifacts name
+        the demander the user actually configured instead of the planner's
+        ``'<sinks>'`` placeholder (design §4.1 attribution). The map is
+        deliberately PER MODE (M3-review fix): in TEST a label can be
+        demanded by a *writer* while the same key is task-demanded in FIT —
+        a merged map would attribute TEST artifacts/errors to the inactive
+        FIT demander.
 
         Returns
         -------
-        dict[str, str]
-            E.g. ``{"labels.jets.flavour_label": "'jets_classification'
-            (config: model.modules.jets_classification)"}``.
+        dict[Mode, dict[str, str]]
+            E.g. ``{Mode.FIT: {"labels.jets.flavour_label":
+            "'jets_classification' (config:
+            model.modules.jets_classification)"}}``.
         """
-        out: dict[str, str] = {}
-        for _demand, origins in self._boundary_demand().values():
-            for key, who in origins.items():
-                out.setdefault(key, who)
-        return out
+        return {mode: origins for mode, (_demand, origins) in self._boundary_demand().items()}
 
     def _boundary_demand(self) -> dict[Mode, tuple[list[str], dict[str, str]]]:
         """Compute per-mode boundary demand plus per-key demander descriptions.
+
+        In TEST, an attached `WriterCallback`'s declared requires extend the
+        demand (design §8): writer-demanded dataset-namespace keys (labels,
+        masks, ``meta.rows``) keep their demand-gated producers alive — the
+        TEST-mode `Labels` narrowing serves exactly what writers demand.
 
         Returns
         -------
@@ -315,29 +322,122 @@ class SaltModule(lightning.LightningModule):
                 for key in demand
             }
             if mode is Mode.TEST:
+                for key, who in (self._writer_demand() or {}).items():
+                    if key == "meta.rows" or key in produced or key in required:
+                        continue  # appended below / a plan sink / already demanded
+                    if _WILDCARD_PARTS & set(key.split(KEY_SEP)):
+                        raise ConfigError(
+                            f"writer demand key {key!r} ({who}) contains a wildcard — "
+                            "writer requires are concrete keys (design §2.2, §8)"
+                        )
+                    if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
+                        raise ConfigError(
+                            f"[mode=TEST] key {key!r} is required by {who} but no model "
+                            "module produces it, and it cannot come from the dataset (the "
+                            f"dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
+                            "keys only, design §6.1, §8).\n  fix: correct the writer's "
+                            "requires, or add a module producing the key"
+                        )
+                    demand.append(key)
+                    origins[key] = who
                 demand.append("meta.rows")
             out[mode] = (demand, origins)
         return out
 
-    def _model_sinks(self, mode: Mode) -> list[str]:
-        """The model-plan sink anchors for one mode (design §3.1).
+    def _attached_writer(self) -> tuple[Any, Any]:
+        """The attached writer callback + reader, if both exist.
+
+        Duck-typed (a callback exposing ``writer_demand``) so the model side
+        stays free of a writers import — the `sink_demand` symmetry
+        precedent (design §3.4, §8).
+
+        Returns
+        -------
+        tuple[Any, Any]
+            ``(callback, reader)`` or ``(None, None)`` when no writer
+            callback (or no datamodule boundary) is attached.
+        """
+        trainer = self._trainer
+        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+        callback = next(
+            (cb for cb in callbacks or [] if callable(getattr(cb, "writer_demand", None))),
+            None,
+        )
+        if callback is None:
+            return None, None
+        reader = getattr(getattr(trainer, "datamodule", None), "reader", None)
+        if reader is None:
+            return None, None
+        return callback, reader
+
+    def _writer_demand(self) -> dict[str, str] | None:
+        """Merged writer-declared TEST demand from an attached `WriterCallback`.
+
+        Returns None when no writer callback (or no datamodule boundary) is
+        attached: programmatic ``Trainer.test`` without writers keeps the M2
+        anchor-on-all-preds behaviour.
+
+        Returns
+        -------
+        dict[str, str] | None
+            ``{demanded key: demander description}``, or None.
+        """
+        callback, reader = self._attached_writer()
+        if callback is None:
+            return None
+        return callback.writer_demand(self._graph_modules, reader)
+
+    def _model_sinks(self, mode: Mode, writers: Any = None, reader: Any = None) -> list[str]:
+        """The model-plan sink anchors for one mode (design §3.1, §8).
+
+        M5 deferral note (M3 review): FIT/VAL sinks are ``loss.total`` only.
+        Design §3.1/§3.4 additionally name the declared requires of
+        configured training callbacks (e.g. a metrics callback) as FIT/VAL
+        sinks — that wiring is deferred to M5 with the MaskFormer metrics
+        that first need it. Until then the shipped `ConfusionMatrix` works
+        because tasks publish ``preds.*`` in all modes and stay alive via
+        their losses; a future callback demanding a key no task keeps alive
+        would be demand-pruned (mirror the TEST ``writers=`` mechanism here
+        when porting).
+
+        Parameters
+        ----------
+        mode : Mode
+            A primary mode.
+        writers : Any, optional
+            An explicit writer callback (the `WriterCallback` duck-typed
+            surface: ``writer_demand`` + ``writers``), by default None —
+            discovered from the attached trainer. The static tooling
+            (`salt.core.cli`) passes the callback it builds from the parsed
+            ``writers:`` block so ``salt2 graph`` sees the same TEST sinks
+            and dead-preds errors as a real ``salt2 test`` run (M3-review
+            fix; design §4.2, §8).
+        reader : Any, optional
+            The reader prototype matching `writers` (static path only), by
+            default None — the attached datamodule's reader.
 
         Returns
         -------
         list[str]
-            ``["loss.total"]`` in FIT/VAL; every declared ``preds.*`` key in
-            TEST/ONNX, in declaration order.
+            ``["loss.total"]`` in FIT/VAL. In TEST with a writer callback
+            (attached or passed), the writer-demanded model-produced keys —
+            demand-gating proper (design §8); without writers (programmatic
+            ``Trainer.test``) and in ONNX, every declared ``preds.*`` key in
+            declaration order (the M2 behaviour).
 
         Raises
         ------
         ConfigError
-            When no module produces the mode's anchor keys.
+            When no module produces the mode's anchor keys, or — TEST with
+            writers — when a produced ``preds.*`` key is consumed by no
+            writer (the design §4.2/§8 dead-preds hard error: a computed
+            prediction would never be persisted).
         """
-        produced: dict[str, None] = {}
-        for module in self._graph_modules.values():
+        produced: dict[str, str] = {}
+        for name, module in self._graph_modules.items():
             for key, spec in flatten_spec(module.declare_io(mode).produces).items():
                 if spec.active_in(mode):
-                    produced.setdefault(key)
+                    produced.setdefault(key, name)
         if mode & Mode.TRAINING:
             if "loss.total" not in produced:
                 raise ConfigError(
@@ -346,6 +446,20 @@ class SaltModule(lightning.LightningModule):
                 )
             return ["loss.total"]
         preds = [key for key in produced if key.split(KEY_SEP, 1)[0] == "preds"]
+        if mode is Mode.TEST:
+            if writers is None or reader is None:
+                writers, reader = self._attached_writer()
+            if writers is not None:
+                writer_demand = writers.writer_demand(self._graph_modules, reader)
+                if dead := [key for key in preds if key not in writer_demand]:
+                    raise ConfigError(_dead_preds_message(dead, produced, writers))
+                consumed = [key for key in produced if key in writer_demand]
+                if not consumed:
+                    raise ConfigError(
+                        "[mode=TEST] the configured writers consume nothing the model "
+                        "produces — check writers.modules (design §8)"
+                    )
+                return consumed
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "
@@ -427,6 +541,25 @@ class SaltModule(lightning.LightningModule):
             self.compile_mode(Mode.TEST, self._boundary(dm.test_dset, "test"))
             check_class_names(self._graph_modules, dm.test_dset.reader)
         self._ensure_bound()
+
+    def _run_preflights(self) -> None:
+        """Fail-fast data-free checks of file-backed `materialise` sources.
+
+        Duck-typed: every graph module exposing a callable ``preflight()``
+        (e.g. `Normaliser` — norm-dict existence/streams/values) is checked
+        BEFORE any `materialise` writes buffers, so a wrong path/content
+        fails with one §4.1-quality `ConfigError` covering all modules
+        instead of a per-module mid-materialise crash (M3 leftover; design
+        §2.3 — preflights do config I/O only, never bind/data I/O). Called
+        from ``on_fit_start`` on fresh fits only — on resume the values
+        arrive via the state_dict and the files are never read (the
+        `materialise_all` contract). A failing module preflight propagates
+        as `ConfigError`.
+        """
+        for module in self._graph_modules.values():
+            preflight = getattr(module, "preflight", None)
+            if callable(preflight):
+                preflight()
 
     def _assert_fit_val_identical(self) -> None:
         """Assert the VAL plan is structurally identical to the FIT plan (design §3.4).
@@ -539,6 +672,7 @@ class SaltModule(lightning.LightningModule):
         """
         if self._materialised or self._loaded_from_checkpoint:
             return
+        self._run_preflights()
         materialise_all(self._graph_modules)
         self._materialised = True
 
@@ -778,6 +912,64 @@ class SaltModule(lightning.LightningModule):
         if mode is Mode.FIT:
             raise ConfigError(msg)
         warnings.warn(f"{msg} — continuing (non-FIT modes warn only)", stacklevel=2)
+
+
+def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: Any) -> str:
+    """Build the TEST dead-preds hard error at the design §4.2 quality bar.
+
+    Names, per dead key, the producing task module and its config address;
+    attributes the culprit when a configured writer's explicit ``streams``
+    list excludes the dead streams (the §4.2 worked-example attribution,
+    M3-review fix); and spells out the null-deletion workaround for
+    train-only aux tasks (the per-task ``expose:`` opt-out of design §4.2 is
+    an M5 deferral and deliberately NOT advertised here).
+
+    Parameters
+    ----------
+    dead : list[str]
+        The produced ``preds.*`` keys no writer consumes.
+    produced : Mapping[str, str]
+        Produced key -> producing module instance name.
+    writers : Any
+        The writer callback (duck-typed ``writers`` mapping for the
+        streams-narrowing hint; absent attributes degrade gracefully).
+
+    Returns
+    -------
+    str
+        The multi-line error message.
+    """
+    lines = ["[mode=TEST] prediction keys consumed by NO writer:"]
+    for key in dead:
+        name = produced.get(key)
+        where = f" (produced by {name!r}, config: model.modules.{name})" if name else ""
+        lines.append(f"  - {key!r}{where}")
+    lines.append(
+        "an unconsumed preds.* port in TEST means a computed prediction is never "
+        "persisted (design §4.2, §8)."
+    )
+    dead_streams = {
+        parts[1]
+        for key in dead
+        if len(parts := key.split(KEY_SEP)) > 2  # preds.<stream>.<task>
+    }
+    hints = [
+        f"writers.modules.{wname}.init_args.streams: {list(streams)} currently excludes {excluded}"
+        for wname, writer in (getattr(writers, "writers", None) or {}).items()
+        if (streams := getattr(writer, "streams", None)) is not None
+        and (excluded := sorted(dead_streams - set(streams)))
+    ]
+    fix = "  fix: widen the writers"
+    if hints:
+        fix += " — " + "; ".join(hints) + " —"
+    targets = sorted({produced[key] for key in dead if key in produced})
+    if targets:
+        null_form = " / ".join(f"--model.modules.{name}=null" for name in targets)
+        fix += f", or remove the task module ({null_form})"
+    else:
+        fix += ", or remove the task module"
+    lines.append(fix)
+    return "\n".join(lines)
 
 
 def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:

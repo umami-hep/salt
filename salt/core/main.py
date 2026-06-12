@@ -19,12 +19,15 @@ modules, `Salt2CLI.instantiate_trainer` for callbacks).
 
 ``base2.yaml`` (this package's ``configs/``) is auto-loaded for every
 ``fit``/``test`` invocation — the v1 ``base.yaml`` mechanism kept wholesale
-(design §5: trainer defaults plus the dict-keyed ``callbacks:`` defaults).
+(design §5: trainer defaults plus the dict-keyed ``callbacks:`` defaults,
+including the default ``writers:`` block — design §8).
 
-M2 scope: the ``writers:`` namespace parses (stable deep-merge address) but
-is NOT assembled — writer modules are M3 (design §8, §9.5); a non-empty
-``writers:`` warns. Comet logger wiring and run-dir timestamping are M6;
-``base2.yaml`` ships ``logger: false``.
+The ``writers:`` block (M3, design §8) is assembled into ONE `WriterCallback`
+appended after the ``callbacks:`` dict entries; ``salt2 test`` keeps the v1
+eval ergonomics (single config, best-checkpoint glob without ``--ckpt_path``,
+``logger=False``, forced single device — ``utils/cli.py:312-332``).
+Comet logger wiring and run-dir timestamping are M6; ``base2.yaml`` ships
+``logger: false``.
 """
 
 from __future__ import annotations
@@ -43,8 +46,9 @@ from lightning.pytorch.trainer import Trainer
 
 from salt.core import cli as graph_cli
 from salt.core.data.datamodule import GraphDataModule
-from salt.core.graph.errors import GraphError
+from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.saltmodule import SaltModule
+from salt.core.writers import DEFAULT_OUTPUT, Writer, WriterCallback
 
 __all__ = ["CONFIG_DIR", "DeepMergeParser", "Salt2CLI", "main"]
 
@@ -120,6 +124,55 @@ class DeepMergeParser(LightningArgumentParser):
         return super().parse_args(args, *pargs, **kwargs)
 
 
+def _best_checkpoint(config_path: Path) -> str:
+    """The v1 best-epoch selection: lowest ``loss=`` next to the saved config.
+
+    Port of ``utils/cli.py:55-79``, extended to BOTH checkpoint layouts
+    (M3-review fix — the original ``ckpts/``-only glob could never match a
+    v2 run): scan ``<config dir>/ckpts/*.ckpt`` (the v1 layout) and
+    ``<config dir>/checkpoints/*.ckpt`` (Lightning's `ModelCheckpoint`
+    default dirname — ``base2.yaml`` names the files
+    ``epoch={epoch:03d}-loss={val/loss:.5f}.ckpt`` so this glob matches by
+    construction; keep the two in sync) and pick the smallest
+    ``loss=<value>`` embedded in any filename.
+
+    Parameters
+    ----------
+    config_path : Path
+        The single user config (the saved run ``config.yaml``).
+
+    Returns
+    -------
+    str
+        Path to the best checkpoint.
+
+    Raises
+    ------
+    ConfigError
+        When no ``loss=``-named checkpoint exists next to the config.
+    """
+    ckpt_dirs = [config_path.parent / name for name in ("ckpts", "checkpoints")]
+    print(
+        "salt2 test: no --ckpt_path specified, looking for best checkpoint in "
+        + " and ".join(str(d) for d in ckpt_dirs)
+    )
+    scored = [
+        (float(found[0]), str(ckpt))
+        for ckpt_dir in ckpt_dirs
+        for ckpt in sorted(ckpt_dir.glob("*.ckpt"))
+        if (found := re.findall(r"(?<=loss=)(?:\d+(?:\.\d*)?|\.\d+)", ckpt.name))
+    ]
+    if not scored:
+        raise ConfigError(
+            f"no 'loss='-named checkpoints under {config_path.parent}/{{ckpts,checkpoints}} — "
+            "pass --ckpt_path explicitly (v1 best-epoch contract, utils/cli.py:71-78; "
+            "base2.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
+        )
+    best = min(scored)[1]
+    print(f"salt2 test: using checkpoint {best}")
+    return best
+
+
 def _normalise_module_null(arg: str) -> str:
     """Rewrite ``--…modules.X=null`` to the JSON-block form (module docstring).
 
@@ -148,8 +201,10 @@ class Salt2CLI(LightningCLI):
     - ``callbacks:`` — dict-keyed, deep-mergeable; values are assembled into
       ``trainer.callbacks`` ahead of the stock list entries (design §5.3;
       ``None`` values are filtered = deleted).
-    - ``writers:`` — parsed for the stable §5.3 merge address; ignored until
-      the M3 writer modules land (a non-empty value warns).
+    - ``writers:`` — ``output`` template + ``half_precision`` + the
+      deep-mergeable ``modules`` dict, assembled into ONE `WriterCallback`
+      (design §8; defaults ship in ``base2.yaml`` in the v1 column order
+      ``inputs_copy -> tasks -> pad_mask``).
 
     ``auto_configure_optimizers`` is off (`SaltModule.configure_optimizers`
     owns the v1 OneCycleLR schedule, design §3.4) and Lightning's
@@ -159,6 +214,9 @@ class Salt2CLI(LightningCLI):
     """
 
     def __init__(self, args: Any = None, run: bool = True, **kwargs: Any) -> None:
+        # before super().__init__: add_arguments_to_parser runs inside it and
+        # needs to know whether this is the run-free parse surface
+        self._run_mode = bool(run)
         default_config = [str(CONFIG_DIR / "base2.yaml")]
         parser_kwargs: dict[str, Any] = {"default_env": True}
         if run:
@@ -217,38 +275,122 @@ class Salt2CLI(LightningCLI):
             "(design §5.3; an entry set to null is removed)",
         )
         parser.add_argument(
-            "--writers",
-            type=dict | None,
+            "--writers.modules",
+            type=dict[str, Writer | None] | None,
             default=None,
-            help="prediction-writer config (design §8) — parsed but IGNORED until M3",
+            help="dict-keyed prediction-writer modules, deep-mergeable; assembled into one "
+            "WriterCallback (design §8; an entry set to null is removed; dict order is the "
+            "per-group column order)",
         )
+        parser.add_argument(
+            "--writers.output",
+            type=str,
+            default=DEFAULT_OUTPUT,
+            help="eval-file path template; keys: ckpt_dir, ckpt_stem, sample (design §5.1)",
+        )
+        parser.add_argument(
+            "--writers.half_precision",
+            type=bool,
+            default=False,
+            help="write float columns at half precision (v1 PredictionWriter flag)",
+        )
+        if not self._run_mode:
+            # run-free parses must round-trip a SAVED run config.yaml, which
+            # carries the Lightning run-surface key ckpt_path (M3-review fix:
+            # `salt2 graph ... -c <run_dir>/config.yaml` used to die with
+            # "Option 'ckpt_path' is not accepted"); accepted and ignored.
+            parser.add_argument(
+                "--ckpt_path",
+                type=str | None,
+                default=None,
+                help="accepted-and-ignored on the run-free parse surface so saved run "
+                "configs round-trip into the salt2 graph tooling",
+            )
         parser.link_arguments("name", "model.init_args.name")
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
-        """Assemble ``callbacks:`` dict values into ``trainer.callbacks``.
+        """Assemble ``callbacks:`` dict values and the writers block into the trainer.
 
-        Dict values come first (YAML insertion order), then any stock
-        Lightning entries from the raw ``trainer.callbacks`` list (design
-        §5.3 assembly order); ``None`` values are filtered — the
-        assembly-time half of null-deletion.
+        Dict values come first (YAML insertion order), then the
+        `WriterCallback` built from ``writers:`` (design §8 — inert outside
+        the test stage), then any stock Lightning entries from the raw
+        ``trainer.callbacks`` list (design §5.3 assembly order); ``None``
+        values are filtered — the assembly-time half of null-deletion.
 
         Returns
         -------
         Trainer
             The instantiated trainer.
         """
-        if self._get(self.config_init, "writers"):
-            warnings.warn(
-                "the 'writers:' config is parsed but ignored in M2 — writer modules land in "
-                "M3 (design §8, §9.5)",
-                stacklevel=2,
-            )
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         assembled = [cb for cb in callbacks_dict.values() if cb is not None]
+        writer_modules = {
+            name: writer
+            for name, writer in (self._get(self.config_init, "writers.modules") or {}).items()
+            if writer is not None
+        }
+        if writer_modules:
+            assembled.append(
+                WriterCallback(
+                    modules=writer_modules,
+                    output=self._get(self.config_init, "writers.output") or DEFAULT_OUTPUT,
+                    half_precision=bool(self._get(self.config_init, "writers.half_precision")),
+                )
+            )
         if assembled:
             stock = self._get(self.config_init, "trainer.callbacks") or []
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
         return super().instantiate_trainer(**kwargs)
+
+    def before_instantiate_classes(self) -> None:
+        """``salt2 test`` ergonomics — the v1 eval surface kept (utils/cli.py:312-332).
+
+        No resolved-config dump and no experiment logger on eval runs; a
+        missing ``--ckpt_path`` triggers the v1 best-checkpoint glob (which
+        requires exactly ONE user ``--config``, the saved run config next to
+        ``ckpts/`` or ``checkpoints/``); multi-device eval is rejected/forced
+        to one device; a
+        writer-less eval is refused up front (TEST predictions would be
+        computed and never persisted — design §4.2, §8).
+
+        Raises
+        ------
+        ConfigError
+            On a writer-less test config, an ambiguous config list without
+            ``--ckpt_path``, or an explicit multi-device list.
+        """
+        if getattr(self.config, "subcommand", None) != "test":
+            return
+        cfg = self.config["test"]
+        self.save_config_callback = None  # v1: no config.yaml dump on test (cli.py:312-316)
+        cfg.trainer.logger = False
+        writer_modules = cfg.get("writers.modules") or {}
+        if not any(writer is not None for writer in writer_modules.values()):
+            raise ConfigError(
+                "salt2 test needs at least one writer under writers.modules — predictions "
+                "would be computed and never persisted (design §4.2, §8; base2.yaml ships "
+                "inputs_copy/tasks/pad_mask defaults)"
+            )
+        if not cfg.get("ckpt_path"):
+            configs = cfg.get("config") or []
+            if len(configs) != 1:
+                raise ConfigError(
+                    "salt2 test without --ckpt_path needs exactly one --config (the saved "
+                    "run config.yaml next to ckpts/) to glob the best checkpoint — "
+                    "v1 contract (utils/cli.py:323-325)"
+                )
+            cfg.ckpt_path = _best_checkpoint(Path(str(configs[0])))
+        devices = cfg.trainer.devices
+        if isinstance(devices, str | int):
+            try:
+                n_devices = int(devices)
+            except ValueError:
+                n_devices = None  # "auto" — the WriterCallback single-device assert covers it
+            if n_devices is not None and n_devices > 1:
+                print("salt2 test: forcing --trainer.devices=1 (single-device eval, design §8)")
+                cfg.trainer.devices = "1"
+        elif isinstance(devices, list) and len(devices) > 1:
+            raise ConfigError("salt2 test requires a single device (design §8, v1 cli.py:330)")
 
     def after_fit(self) -> None:
         """Tell the user where the run artifacts went (M6 run dirs pending).

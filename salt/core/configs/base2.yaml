@@ -22,12 +22,14 @@ trainer:
 # Dict-keyed, deep-mergeable callback defaults (design §5.3): override one key
 # (--callbacks.checkpoint.init_args.monitor=...), add an entry from any config
 # file, or delete one with `checkpoint: null`. Assembled into trainer.callbacks
-# ahead of any stock list entries. M3 replaces ModelCheckpoint with
-# salt.core.callbacks.Checkpoint (per-task monitor defaults incl. the design
-# §5.3 val/jets_classification_loss monitor, run-dir layout). The design §5.3
-# lr_monitor and progress entries are ALSO deferred: LearningRateMonitor needs
-# a logger (Comet wiring is M6) and the salt ProgressBar port is M3 — until
-# then losses show on Lightning's stock progress bar (prog_bar=True).
+# ahead of any stock list entries. The salt.core.callbacks.Checkpoint port
+# (per-task monitor defaults incl. the design §5.3
+# val/jets_classification_loss monitor) is deferred to M5/M6 alongside the
+# run-dir layout it depends on — recorded in the study CLAUDE.md TODOs. The
+# design §5.3 lr_monitor and progress entries are ALSO deferred:
+# LearningRateMonitor needs a logger (Comet wiring is M6) and the salt
+# ProgressBar port is M5 — until then losses show on Lightning's stock
+# progress bar (prog_bar=True).
 callbacks:
   checkpoint:
     class_path: lightning.pytorch.callbacks.ModelCheckpoint
@@ -35,11 +37,35 @@ callbacks:
       monitor: val/loss
       mode: min
       save_top_k: 1
+      # 'loss=' in the stem is the salt2-test no-ckpt_path fallback contract
+      # (salt/core/main.py _best_checkpoint; v1 utils/cli.py:55-79) — keep
+      # the filename and that glob in sync.
+      filename: "epoch={epoch:03d}-loss={val/loss:.5f}"
+      auto_insert_metric_name: false
   model_summary:
     class_path: lightning.pytorch.callbacks.ModelSummary
     init_args:
       max_depth: 2
+  # design §4.4 run-dir artifacts: plan_<mode>.txt + graph_<stage>.{dot,svg}
+  # written into the trainer log dir at fit/test start. Default-on; delete
+  # with `artifacts: null`.
+  artifacts:
+    class_path: salt.core.callbacks.GraphArtifacts
 
-# Prediction writers (design §8) — the namespace parses for its stable §5.3
-# merge address, but writer modules land in M3; a non-empty value warns.
-writers: null
+# Prediction writers (design §8): assembled into ONE WriterCallback that owns
+# the single eval H5 file ({ckpt_dir}/{ckpt_stem}__test_{sample}.h5, the v1
+# path contract). The modules dict deep-merges across config files; an entry
+# set to null is deleted (--writers.modules.pad_mask=null). Module ORDER is
+# the per-group COLUMN order — inputs_copy -> tasks -> pad_mask reproduces the
+# v1 PredictionWriter layout (input copies, task columns in model declaration
+# order, the boolean mask last). TaskWriter/InputCopyWriter default to "every
+# stream with a configured task" (v1 derive-from-the-model), so a new aux task
+# is persisted automatically; narrowing TaskWriter streams trips the TEST
+# dead-preds hard error for any prediction no writer consumes (design §4.2).
+writers:
+  output: "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
+  half_precision: false
+  modules:
+    inputs_copy: {class_path: salt.core.writers.InputCopyWriter}
+    tasks: {class_path: salt.core.writers.TaskWriter}
+    pad_mask: {class_path: salt.core.writers.PadMaskWriter}

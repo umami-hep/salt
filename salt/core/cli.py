@@ -65,7 +65,7 @@ import argparse
 import importlib
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import get_close_matches
 from functools import reduce
 from operator import or_
@@ -75,7 +75,7 @@ from typing import Any
 import yaml
 
 from salt.core.graph.errors import ConfigError, GraphError
-from salt.core.graph.planner import SINKS, SOURCES, Plan, Sinks, compile_plan, deadcode
+from salt.core.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
 from salt.core.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
@@ -87,6 +87,7 @@ from salt.core.graph.spec import (
     split_key,
     unflatten_spec,
 )
+from salt.core.render import dot_source, plan_table, render_graph
 from salt.core.schema import dump_schema, load_schema, save_schema
 
 try:
@@ -113,6 +114,13 @@ class GraphConfig:
 
     `reader` is set only for §5.1 trainer configs (the adapter path) — it
     carries the schema artifact for the validate-time class-names check.
+    `mode_errors` carries per-mode config errors found while deriving sinks
+    (currently the TEST dead-preds / invalid-writers errors from the parsed
+    ``writers:`` block, M3-review fix): ``validate``/``deadcode`` report
+    them as error-level findings for that mode, ``plan``/``plot``/``why``
+    raise them when the broken mode is requested — the affected mode's
+    sinks fall back to anchor-on-all-preds so the other modes stay
+    inspectable.
     """
 
     modules: dict[str, GraphModule]
@@ -120,6 +128,7 @@ class GraphConfig:
     sinks: Sinks
     schema: tuple[str, ...] | None
     reader: Any | None = None
+    mode_errors: dict[Mode, str] = field(default_factory=dict)
 
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
@@ -243,6 +252,15 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
     wildcard-narrowing universe comes from the reader's schema artifact.
     Everything stays config-only — no data file is touched (design §2.3).
 
+    The parsed ``writers:`` block enters the TEST sinks exactly as on the
+    runtime path (M3-review fix; design §4.2, §8): a `WriterCallback` is
+    built from ``writers.modules`` and its declared demand anchors the TEST
+    plan, so ``salt2 graph validate``/``deadcode`` fire the dead-preds hard
+    error a real ``salt2 test`` would raise, and writer-demanded
+    dataset-namespace keys (labels/masks/``meta.rows``) keep their producers
+    alive in the static TEST plan. The resulting per-mode errors are carried
+    in `GraphConfig.mode_errors` (see its docstring).
+
     Returns
     -------
     GraphConfig
@@ -288,10 +306,23 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
             "(design §2.2)"
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
+    writer_cb = _static_writer_callback(cli)
     sinks: dict[Mode, tuple[str, ...]] = {}
+    mode_errors: dict[Mode, str] = {}
     for mode in PRIMARY_MODES:
-        keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
-        if mode is Mode.TEST:
+        if mode is Mode.TEST and writer_cb is not None:
+            try:
+                keys = list(model._model_sinks(mode, writers=writer_cb, reader=reader))  # noqa: SLF001 - same-package adapter
+                demand = writer_cb.writer_demand(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
+                # writer-demanded dataset-namespace keys (labels/masks/meta)
+                # are TEST sinks too — their producers stay alive (design §8)
+                keys.extend(key for key in demand if key not in keys)
+            except ConfigError as err:
+                mode_errors[mode] = str(err)
+                keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
+        else:
+            keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
+        if mode is Mode.TEST and "meta.rows" not in keys:
             keys.append("meta.rows")  # writer row alignment (design §8)
         sinks[mode] = tuple(keys)
     return GraphConfig(
@@ -300,7 +331,36 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
         sinks=sinks,
         schema=reader.label_universe(),
         reader=reader,
+        mode_errors=mode_errors,
     )
+
+
+def _static_writer_callback(cli: Any) -> Any | None:
+    """Build a `WriterCallback` from the run-free CLI's parsed ``writers:`` block.
+
+    The static-tooling half of the design §8 writers-are-sinks contract
+    (M3-review fix): the same assembly `Salt2CLI.instantiate_trainer`
+    performs at runtime, minus the trainer — `_load_fit_config` feeds the
+    callback into `SaltModule._model_sinks` so TEST sink derivation (and the
+    dead-preds error) match the runtime path exactly.
+
+    Returns
+    -------
+    Any | None
+        The assembled callback, or None when the config carries no writer
+        modules (toy/model-only configs keep the M2 anchor-on-all-preds
+        TEST sinks).
+    """
+    from salt.core.writers import WriterCallback  # noqa: PLC0415 - heavy/circular
+
+    writer_modules = {
+        name: writer
+        for name, writer in (cli._get(cli.config_init, "writers.modules") or {}).items()  # noqa: SLF001 - same-package adapter
+        if writer is not None
+    }
+    if not writer_modules:
+        return None
+    return WriterCallback(modules=writer_modules)
 
 
 def _parse_mode(name: str) -> Mode:
@@ -542,9 +602,13 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     """``salt2 graph validate``: compile every requested mode; report findings.
 
     Graph errors are always fatal, as are error-level deadcode findings (an
-    unconsumed ``preds.*`` port in TEST, design §4.2); warnings (no schema
-    configured, warning-level dead outputs) are promoted to errors under
-    ``--strict`` (design §4).
+    unconsumed ``preds.*`` port in TEST, design §4.2) and stored per-mode
+    sink errors (`GraphConfig.mode_errors`); warnings (no schema configured,
+    warning-level dead outputs) are promoted to errors under ``--strict``
+    (design §4). Info-level findings (unconsumed FIT/VAL preds — the normal
+    no-metric-callback case, design §3.3) are report-only and NEVER promoted,
+    so ``--strict`` stays usable as the CI default on standard tagger
+    configs.
 
     Returns
     -------
@@ -552,6 +616,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         0 on success, 1 on error (or warnings under ``--strict``).
     """
     cfg = load_config(args.config, args.set)
+    infos: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
     if cfg.schema is None:
@@ -567,7 +632,23 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
             print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order (§2.6)")
+    # data-free module preflights (design §2.3): duck-typed `preflight()`
+    # checks file-backed materialise sources (e.g. the Normaliser norm dict).
+    # WARNING-level here — `validate` must stay runnable on data-less machines
+    # where the documented `--set ...norm_dict=unused.yaml` override is in
+    # play; an actual `salt2 fit`/`test` run promotes these to hard errors
+    # (SaltModule.setup).
+    for name, module in cfg.modules.items():
+        preflight = getattr(module, "preflight", None)
+        if not callable(preflight):
+            continue
+        try:
+            preflight()
+        except GraphError as err:
+            warnings.append(f"preflight of module {name!r}: {err}")
     for mode in _modes_for(args):
+        if stored := cfg.mode_errors.get(mode):
+            errors.append(stored)
         try:
             plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
         except GraphError as err:
@@ -578,7 +659,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
         for finding in deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks):
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
-            (errors if finding.severity == "error" else warnings).append(line)
+            bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
+            bucket.append(line)
+    for info in infos:
+        print(f"info: {info}")
     for warning in warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
     for error in errors:
@@ -599,8 +683,11 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
     """``salt2 graph deadcode``: mode-aware dead-output report (design §4.2).
 
     Findings carry severity levels: an unconsumed ``preds.*`` port in TEST is
-    an error by default and makes the command exit 1 (design §4.2); the rest
-    are warnings (report-only). TODO(M2): the per-task ``expose:`` opt-out.
+    an error by default and makes the command exit 1 (design §4.2), as does a
+    stored per-mode sink error (the writers-block dead-preds error,
+    `GraphConfig.mode_errors`); unconsumed FIT/VAL preds are info (the normal
+    no-metric-callback case, design §3.3); the rest are warnings
+    (report-only). TODO(M5): the per-task ``expose:`` opt-out.
 
     Returns
     -------
@@ -611,6 +698,11 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, args.set)
     rc = 0
     for mode in _modes_for(args):
+        if stored := cfg.mode_errors.get(mode):
+            print(f"[deadcode] mode={mode.name}:")
+            print(f"  ERROR {stored}")
+            rc = 1
+            continue
         findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
         if not findings:
             print(f"[deadcode] mode={mode.name}: OK — all produced ports consumed.")
@@ -645,35 +737,23 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
+    _require_mode_ok(cfg, mode)
     plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
-    print(f"plan [mode={mode.name}] {len(plan.steps)} steps  plan_hash={plan.plan_hash}")
-    index = {step.name: i for i, step in enumerate(plan.steps)}
-    for i, step in enumerate(plan.steps, start=1):
-        binding = [
-            (index[edge.producer], edge.key)
-            for edge in plan.edges
-            if edge.consumer == step.name and edge.producer in index
-        ]
-        if binding:
-            latest, _ = max(binding)
-            after = plan.steps[latest].name
-        elif any(e.consumer == step.name and e.producer == SOURCES for e in plan.edges):
-            after = SOURCES
-        else:
-            after = "(no inputs)"
-        needs = ", ".join(sorted(step.requires)) or "nothing"
-        print(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs})")
-    narrowed_lines = []
-    for step in plan.steps:
-        declared = step.module.declare_io(mode).produces
-        concrete = {key for key in flatten_spec(declared) if not _has_wildcard(key)}
-        if extra := sorted(set(step.produces) - concrete):
-            narrowed_lines.append(f"  {step.name}: {', '.join(extra)}")
-    if narrowed_lines:
-        print(f"narrowed wildcards [mode={mode.name}]:")
-        print("\n".join(narrowed_lines))
-    print(f"sources: {', '.join(sorted(plan.sources)) or '(none)'}")
+    print(plan_table(plan))
     return 0
+
+
+def _require_mode_ok(cfg: GraphConfig, mode: Mode) -> None:
+    """Raise the stored per-mode sink error when the requested mode is broken.
+
+    Raises
+    ------
+    ConfigError
+        The `GraphConfig.mode_errors` entry for `mode` (e.g. the TEST
+        dead-preds error derived from the parsed ``writers:`` block).
+    """
+    if stored := cfg.mode_errors.get(mode):
+        raise ConfigError(stored)
 
 
 # ---------------------------------------------------------------------------
@@ -684,9 +764,11 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 def _cmd_plot(args: argparse.Namespace) -> int:
     """``salt2 graph plot``: render the mode graph (design §4.3).
 
-    Always emits Graphviz DOT next to the requested output; renders the
-    requested format via the optional ``graphviz`` package when available,
-    else says so and leaves the ``.dot`` for manual rendering.
+    Always emits Graphviz DOT next to the requested output. The image itself
+    is rendered with the matplotlib layered-DAG renderer (`render_graph` —
+    matplotlib ships in the salt container, the graphviz binary does not);
+    if matplotlib is unavailable, the optional ``graphviz`` package is tried,
+    else the ``.dot`` is left with a manual-render hint.
 
     Returns
     -------
@@ -695,10 +777,11 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
+    _require_mode_ok(cfg, mode)
     plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
-    dot_text = _render_dot(plan, cfg.modules, pruned)
+    dot_text = dot_source(plan, cfg.modules, pruned)
     out_path = Path(args.output)
     if out_path.parent != Path():
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -708,117 +791,34 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     if out_path.suffix == ".dot":
         return 0
     fmt = out_path.suffix.lstrip(".") or "svg"
+    try:
+        render_graph(plan, out_path, pruned=pruned)
+    except ImportError:
+        return _plot_graphviz_fallback(dot_text, dot_path, out_path, fmt)
+    print(f"wrote {fmt.upper()} to {out_path} (matplotlib)")
+    return 0
+
+
+def _plot_graphviz_fallback(dot_text: str, dot_path: Path, out_path: Path, fmt: str) -> int:
+    """Render via the optional ``graphviz`` package when matplotlib is missing.
+
+    Returns
+    -------
+    int
+        Always 0 (the DOT artifact already exists; rendering is best-effort).
+    """
+    hint = f"render manually with: dot -T{fmt} {dot_path} -o {out_path}"
     if graphviz is None:
-        print(
-            f"graphviz is not importable — wrote DOT only; render manually with: "
-            f"dot -T{fmt} {dot_path} -o {out_path}"
-        )
+        print(f"matplotlib/graphviz are not importable — wrote DOT only; {hint}")
         return 0
     try:
         payload = graphviz.Source(dot_text).pipe(format=fmt)
     except (OSError, graphviz.ExecutableNotFound, graphviz.CalledProcessError) as err:
-        print(
-            f"graphviz rendering failed ({err}) — wrote DOT only; render manually with: "
-            f"dot -T{fmt} {dot_path} -o {out_path}"
-        )
+        print(f"graphviz rendering failed ({err}) — wrote DOT only; {hint}")
         return 0
     out_path.write_bytes(payload)
-    print(f"wrote {fmt.upper()} to {out_path}")
+    print(f"wrote {fmt.upper()} to {out_path} (graphviz)")
     return 0
-
-
-def _esc(text: str) -> str:
-    """Escape a string for a double-quoted DOT identifier.
-
-    Returns
-    -------
-    str
-        The escaped text (without surrounding quotes).
-    """
-    return text.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _quote(text: str) -> str:
-    """Quote a string as a DOT identifier.
-
-    Returns
-    -------
-    str
-        The double-quoted, escaped identifier.
-    """
-    return f'"{_esc(text)}"'
-
-
-def _label(*lines: str) -> str:
-    r"""Build a quoted multi-line DOT label.
-
-    Returns
-    -------
-    str
-        The quoted label with ``\n`` separators.
-    """
-    return '"' + "\\n".join(_esc(line) for line in lines) + '"'
-
-
-def _edge_style(key: str, spec: TensorSpec) -> list[str]:
-    """Kind-based DOT edge styling (design §4.3).
-
-    Labels orange, losses red, pad-masks dotted grey, ``preds.*`` blue.
-
-    Returns
-    -------
-    list[str]
-        Extra DOT edge attributes.
-    """
-    if spec.kind == "label":
-        return ["color=orange", "fontcolor=orange"]
-    if spec.kind == "loss":
-        return ["color=red", "fontcolor=red"]
-    if spec.kind == "pad_mask":
-        return ["color=grey", "fontcolor=grey", "style=dotted"]
-    if spec.kind == "meta":
-        return ["color=grey", "fontcolor=grey"]
-    if key.partition(KEY_SEP)[0] == "preds":
-        return ["color=blue", "fontcolor=blue"]
-    return []
-
-
-def _render_dot(plan: Plan, modules: dict[str, GraphModule], pruned: list[str]) -> str:
-    r"""Render a compiled plan as Graphviz DOT text (design §4.3).
-
-    Nodes are module instances (``name\nClassName``); edges are bundle keys
-    with kind-based styling; demand-pruned modules render grey-dashed.
-
-    Returns
-    -------
-    str
-        The DOT source.
-    """
-    lines = [
-        f"digraph salt_core_{plan.mode.name.lower()} {{",
-        "  rankdir=LR;",
-        '  node [shape=box, fontname="Helvetica"];',
-    ]
-    if any(edge.producer == SOURCES for edge in plan.edges):
-        lines.append(f"  {_quote(SOURCES)} [shape=ellipse, style=dashed];")
-    if any(edge.consumer == SINKS for edge in plan.edges):
-        lines.append(f"  {_quote(SINKS)} [shape=ellipse, style=dashed];")
-    lines.extend(
-        f"  {_quote(step.name)} [label={_label(step.name, type(step.module).__name__)}];"
-        for step in plan.steps
-    )
-    for name in pruned:
-        label = _label(name, type(modules[name]).__name__, "(pruned)")
-        lines.append(f"  {_quote(name)} [label={label}, style=dashed, color=grey, fontcolor=grey];")
-    for edge in plan.edges:
-        if edge.producer == SOURCES:
-            spec = plan.sources[edge.key]
-        else:
-            spec = plan.step(edge.producer).produces[edge.key]
-        attrs = [f"label={_quote(edge.key)}", *_edge_style(edge.key, spec)]
-        lines.append(f"  {_quote(edge.producer)} -> {_quote(edge.consumer)} [{', '.join(attrs)}];")
-    lines.append("}")
-    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +846,7 @@ def _cmd_why(args: argparse.Namespace) -> int:
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
+    _require_mode_ok(cfg, mode)
     try:
         key_parts = split_key(args.key)
     except (TypeError, ValueError) as err:

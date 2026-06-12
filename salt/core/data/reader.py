@@ -442,6 +442,22 @@ class H5StructuredReader(Reader):
         assert self._num_rows is not None
         return int(self._num_rows)
 
+    @property
+    def source_path(self) -> Path:
+        """The resolved source file (the VDS for wildcard filenames).
+
+        Resolves on first access (`prepare` is idempotent). Writers re-read
+        input copies from this path by absolute rows (design §8).
+
+        Returns
+        -------
+        Path
+            The concrete H5 file backing this reader.
+        """
+        self.prepare()
+        assert self._resolved is not None
+        return self._resolved
+
     def _ensure_open(self) -> None:
         """Open (or re-open) the per-process H5 handle, pid-guarded.
 

@@ -59,6 +59,10 @@ class GraphDataModule(lightning.LightningDataModule):
         Dataloader worker processes, by default 0.
     num_train, num_val, num_test : int, optional
         Row counts per stage; ``-1`` = all (v1 semantics).
+    test_suff : str | None, optional
+        Suffix appended to the eval-file ``{sample}`` name by the writer
+        callback (v1 ``SaltDataModule.test_suff``, ``datamodules.py:113``;
+        design §8), by default None.
     train_vds_path, val_vds_path, test_vds_path : str | Path | None, optional
         Explicit VDS output paths for wildcard files.
     sinks : Mapping[Mode, Iterable[str]] | None, optional
@@ -98,6 +102,7 @@ class GraphDataModule(lightning.LightningDataModule):
         num_train: int = -1,
         num_val: int = -1,
         num_test: int = -1,
+        test_suff: str | None = None,
         train_vds_path: str | Path | None = None,
         val_vds_path: str | Path | None = None,
         test_vds_path: str | Path | None = None,
@@ -131,11 +136,14 @@ class GraphDataModule(lightning.LightningDataModule):
         self.num_train = num_train
         self.num_val = num_val
         self.num_test = num_test
+        self.test_suff = test_suff
         self.train_vds_path = train_vds_path
         self.val_vds_path = val_vds_path
         self.test_vds_path = test_vds_path
         self._sinks = dict(sinks) if sinks is not None else None
-        self._sink_origins: dict[str, str] | None = None
+        # per-mode demand provenance (M3-review fix: a merged map mis-attributed
+        # writer-demanded TEST keys to their inactive FIT demander)
+        self._sink_origins: dict[Mode, dict[str, str]] | None = None
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.prefetch_factor = prefetch_factor
@@ -193,10 +201,11 @@ class GraphDataModule(lightning.LightningDataModule):
         demand = getattr(model, "sink_demand", None)
         if callable(demand):
             self._sinks = dict(demand())
-            # demand provenance for §4.1 error attribution (optional hook)
+            # per-mode demand provenance for §4.1 error attribution (optional
+            # hook; SaltModule.sink_origins returns {Mode: {key: who}})
             origins = getattr(model, "sink_origins", None)
             if callable(origins):
-                self._sink_origins = dict(origins())
+                self._sink_origins = {mode: dict(who) for mode, who in origins().items()}
 
     # -- stage plumbing --------------------------------------------------------
 
@@ -240,7 +249,7 @@ class GraphDataModule(lightning.LightningDataModule):
             sinks=self._sinks,
             seed=self.seed,
             debug=self.debug,
-            sink_origins=self._sink_origins,
+            sink_origins=(self._sink_origins or {}).get(mode),
         )
 
     @staticmethod

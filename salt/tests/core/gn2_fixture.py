@@ -138,6 +138,8 @@ def build_test_gn2(
     num_heads: int = 2,
     seed: int = 42,
     with_electrons: bool = False,
+    variables: dict[str, list[str]] | None = None,
+    norm_dict: Path | str | None = None,
 ) -> ModelWrapper:
     """Construct a small v1 GN2 `ModelWrapper` directly (no CLI), in eval mode.
 
@@ -164,6 +166,18 @@ def build_test_gn2(
         multi-stream Concat order / per-stream mask dict order genuinely
         excitable — with a single stream they are vacuous (stage-4 critic
         finding: a reversed single-stream Concat passes trivially).
+    variables : dict[str, list[str]] | None, optional
+        TEST-ONLY override of the per-stream input variable lists (must
+        carry ``jets`` and ``tracks``), by default None — the fixture
+        `JET_VARIABLES`/`TRACK_VARIABLES`. Added for the M3 W2 gate (plan
+        06): the real open-data sample names the IP3D significances
+        ``lifetimeSigned*``; the model is width-matched as long as the list
+        LENGTHS match the defaults. Ignores `with_electrons`.
+    norm_dict : Path | str | None, optional
+        TEST-ONLY existing norm-dict YAML used INSTEAD of the parity dict
+        written into `norm_dir` (which is still written, for callers reading
+        the class dict), by default None. Must cover every variable in
+        `variables`. Added for the M3 W2 gate (real open-data norm dict).
 
     Returns
     -------
@@ -174,10 +188,15 @@ def build_test_gn2(
     nd_path = norm_dir / "norm_dict.yaml"
     cd_path = norm_dir / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
+    if norm_dict is not None:
+        nd_path = Path(norm_dict)
 
-    variables = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-    if with_electrons:
-        variables["electrons"] = list(ELECTRON_VARIABLES)
+    if variables is None:
+        variables = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
+        if with_electrons:
+            variables["electrons"] = list(ELECTRON_VARIABLES)
+    else:
+        variables = {stream: list(names) for stream, names in variables.items()}
 
     # Seed AFTER imports: importing salt.utils.inputs already seeded torch
     # to 42 (inputs.py:134-135); this makes param init reproducible per call.

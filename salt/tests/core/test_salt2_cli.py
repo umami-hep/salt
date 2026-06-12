@@ -25,6 +25,7 @@ from salt.core.data import GraphDataModule
 from salt.core.main import CONFIG_DIR, Salt2CLI, main
 from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.saltmodule import SaltModule
+from salt.core.writers import WriterCallback
 from salt.core.schema import dump_schema, save_schema
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
 from salt.utils.inputs import write_dummy_file
@@ -238,9 +239,7 @@ class TestDottedOverrides:
         assert len(cli.model.net["encoder"].encoder.layers) == 3
 
     def test_long_form_into_module_init_args(self, data):
-        cli = make_cli(
-            data, extra=["--model.init_args.modules.track_origin.init_args.weight=0.25"]
-        )
+        cli = make_cli(data, extra=["--model.init_args.modules.track_origin.init_args.weight=0.25"])
         assert cli.model.net["track_origin"].weight == pytest.approx(0.25)
 
     def test_data_module_init_args_override(self, data):
@@ -273,14 +272,20 @@ class TestCallbacksDict:
         cli = make_cli(data, extra=["--callbacks.checkpoint=null"])
         # no configured checkpoint left (Lightning may add its bare default,
         # which has no monitor)
-        assert not any(
-            getattr(cb, "monitor", None) == "val/loss" for cb in cli.trainer.callbacks
-        )
+        assert not any(getattr(cb, "monitor", None) == "val/loss" for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
 
-    def test_writers_stub_warns(self, data):
-        with pytest.warns(UserWarning, match="ignored in M2"):
-            make_cli(data, extra=['--writers={"output": "preds.h5"}'])
+    def test_writers_defaults_assembled(self, data):
+        # base2.yaml ships the v1-layout writer order (M3, design §8)
+        cli = make_cli(data)
+        wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
+        assert list(wcb.writers) == ["inputs_copy", "tasks", "pad_mask"]
+
+    def test_writers_null_deletes(self, data):
+        cli = make_cli(data, extra=["--writers.modules.pad_mask=null"])
+        wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
+        assert "pad_mask" not in wcb.writers
+        assert set(wcb.writers) == {"inputs_copy", "tasks"}  # siblings survive
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +310,20 @@ class TestFitSmoke:
             "--trainer.enable_progress_bar=false",
         ])
         assert rc == 0
-        # base2's ModelCheckpoint wrote a checkpoint under the run dir
+        # base2's ModelCheckpoint wrote a checkpoint under the run dir, with
+        # the 'loss=' stem the salt2-test fallback globs (M3-review fix)
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"
+        assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
         # the resolved config was persisted (SaveConfigCallback, design §5)
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
         assert "class_path: salt.core.SaltModule" in configs[0].read_text()
+        # M3-review fix: the SAVED run config (which carries ckpt_path: null)
+        # round-trips into the salt2 graph tooling
+        assert "ckpt_path" in configs[0].read_text()
+        assert main(["graph", "validate", "-c", str(configs[0]), "--mode", "fit"]) == 0
+        assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +473,85 @@ class TestGraphFitConfigAdapter:
         ])
         assert rc == 1
         assert "trainer configs only" in capsys.readouterr().err
+
+    def test_deadcode_sees_narrowed_writers(self, data, capsys):
+        # M3-review MEDIUM fix: static tooling builds the writers' TEST
+        # demand from the parsed writers: block — the §4.2 worked example
+        # (narrowed TaskWriter -> dead-preds ERROR, exit non-zero, culprit
+        # config address named), previously '[deadcode] mode=TEST: OK'
+        rc = main([
+            "graph",
+            "deadcode",
+            "-c",
+            str(DUMMY_CFG),
+            "--mode",
+            "test",
+            *self.set_flags(data),
+            "--set",
+            'writers.modules.tasks.init_args.streams=["jets"]',
+        ])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "consumed by NO writer" in out
+        assert "track_origin" in out and "track_vertexing" in out
+        # §4.2-exemplar attribution: the culprit writer address + excluded
+        # streams, and the per-task config addresses
+        assert "writers.modules.tasks.init_args.streams" in out
+        assert "excludes" in out
+        assert "model.modules.track_origin" in out
+
+    def test_validate_errors_on_narrowed_writers_other_modes_still_report(self, data, capsys):
+        # validate (all modes) exits 1 on the stored TEST sink error while
+        # FIT/VAL/ONNX still compile and print their OK lines
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(DUMMY_CFG),
+            *self.set_flags(data),
+            "--set",
+            'writers.modules.tasks.init_args.streams=["jets"]',
+        ])
+        out, err = capsys.readouterr()
+        assert rc == 1
+        assert "OK [mode=FIT]" in out
+        assert "consumed by NO writer" in err
+
+    def test_plan_test_mode_raises_on_narrowed_writers(self, data, capsys):
+        rc = main([
+            "graph",
+            "plan",
+            "-c",
+            str(DUMMY_CFG),
+            "--mode",
+            "test",
+            *self.set_flags(data),
+            "--set",
+            'writers.modules.tasks.init_args.streams=["jets"]',
+        ])
+        assert rc == 1
+        assert "consumed by NO writer" in capsys.readouterr().err
+
+    def test_strict_validate_passes_stock_config(self, data):
+        # M3-review fix: unconsumed FIT/VAL preds are info-level (design
+        # §3.3), so the documented CI mode (--strict) works on a standard
+        # tagger config — it used to exit 1 on six preds warnings
+        assert (
+            main(["graph", "validate", "-c", str(DUMMY_CFG), "--strict", *self.set_flags(data)])
+            == 0
+        )
+
+    def test_validate_reports_fit_preds_as_info(self, data, capsys):
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(DUMMY_CFG),
+            "--mode",
+            "fit",
+            *self.set_flags(data),
+        ])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "info:" in out
+        assert "metric callback" in out

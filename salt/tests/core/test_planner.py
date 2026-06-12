@@ -757,11 +757,14 @@ class TestDeadcode:
         assert finding.severity == "error"
         assert "never persisted" in finding.reason
 
-    def test_unconsumed_preds_outside_test_is_warning_severity(self):
+    def test_unconsumed_preds_outside_test_is_info_severity(self):
+        # design §3.3 (M3-review fix): the normal no-metric-callback case is
+        # INFO, never promoted by --strict — was 'warning' in M1/M2
         a, b = chain_ab()
         report = deadcode(mods(a, b), Mode.FIT, SRC_X)
         finding = next(d for d in report if d.key == "preds.x")
-        assert finding.severity == "warning"
+        assert finding.severity == "info"
+        assert "metric callback" in finding.reason
 
     def test_unconsumed_non_preds_in_test_is_warning_severity(self):
         a, b = chain_ab()

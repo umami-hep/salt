@@ -176,8 +176,11 @@ class DeadOutput:
     demand-pruned; `module` may be the `SOURCES` sentinel for unconsumed
     source leaves. `severity` classifies the finding: an unconsumed
     ``preds.*`` port in TEST mode is an ``"error"`` by default (design §4.2 —
-    predictions silently vanishing from eval files); everything else is a
-    ``"warning"`` in M1. The CLI exits non-zero on any error-level finding.
+    predictions silently vanishing from eval files); an unconsumed
+    ``preds.*`` port in FIT/VAL is ``"info"`` (design §3.3 — the normal case
+    of no configured metric callback; never promoted by ``--strict``);
+    everything else is a ``"warning"``. The CLI exits non-zero on any
+    error-level finding.
     """
 
     module: str
@@ -268,11 +271,15 @@ def deadcode(
     `compile_plan`, a module dead in every mode is reported, not raised — but
     graph errors (missing producers, cycles via wildcards, ...) still raise.
 
-    Severity (design §4.2): an unconsumed ``preds.*`` key in TEST mode is an
-    ``"error"`` by default — the model computed a prediction and no writer
-    will persist it. Everything else is a ``"warning"``.
-    TODO(M2): the per-task ``expose:`` opt-out (design §4.2) silences this
-    error and prunes the task from the TEST plan — tasks land in M2.
+    Severity (design §4.2, §3.3): an unconsumed ``preds.*`` key in TEST mode
+    is an ``"error"`` by default — the model computed a prediction and no
+    writer will persist it. An unconsumed ``preds.*`` key in FIT/VAL is
+    ``"info"`` — the normal case of no configured metric callback (§3.3).
+    Everything else is a ``"warning"``.
+    TODO(M5): the per-task ``expose:`` opt-out (design §4.2) silences the
+    TEST error and prunes the task from the TEST plan; once configured
+    callbacks' declared requires enter FIT/VAL sinks (§3.1/§3.4, also M5),
+    a callback-consumed pred stops appearing here at all.
 
     Returns
     -------
@@ -296,17 +303,22 @@ def deadcode(
         "TEST means a computed prediction is never persisted; wire a writer or drop the "
         "port (design §4.2)"
     )
+    preds_in_training_reason = (
+        f"produced but never consumed in mode {mode.name} "
+        "(normal: no configured metric callback consumes this prediction — design §3.3)"
+    )
     for name, node in res.alive.items():
         used = consumed.get(name, set())
         for key in node.all_produces():
             if key in used:
                 continue
-            is_preds_in_test = mode == Mode.TEST and key.partition(KEY_SEP)[0] == "preds"
-            out.append(
-                DeadOutput(name, key, preds_in_test_reason, severity="error")
-                if is_preds_in_test
-                else DeadOutput(name, key, unconsumed_reason)
-            )
+            is_preds = key.partition(KEY_SEP)[0] == "preds"
+            if is_preds and mode == Mode.TEST:
+                out.append(DeadOutput(name, key, preds_in_test_reason, severity="error"))
+            elif is_preds:
+                out.append(DeadOutput(name, key, preds_in_training_reason, severity="info"))
+            else:
+                out.append(DeadOutput(name, key, unconsumed_reason))
     src_used = consumed.get(SOURCES, set())
     out.extend(
         DeadOutput(SOURCES, key, f"source never consumed in mode {mode.name}")

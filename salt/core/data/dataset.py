@@ -128,6 +128,7 @@ class GraphDataset(Dataset):
         self._plan: Plan = self._compile()
         self._read_fields: dict[str, dict[str, str]] = self._collect_read_fields()
         self._bound_pid: int | None = None
+        self._build_caches()
 
     # -- static compilation (config-only, design §3.1) ------------------------
 
@@ -203,6 +204,27 @@ class GraphDataset(Dataset):
                     bucket.setdefault(field, f"{who} (for {origin})" if origin else who)
         return out
 
+    def _build_caches(self) -> None:
+        """Precompute the per-batch loop state from the frozen plan (hot path).
+
+        The plan is static, so the step sequence (module, reader flag,
+        declared key set) and the model-visible boundary keys are computed
+        once here instead of being rebuilt every ``__getitem__`` (M3
+        equal-work leftover; `Bundle.merge` enforces produced == declared,
+        so the boundary key list is exact). Rebuilt after unpickling
+        (`__setstate__` recompiles the plan).
+        """
+        self._exec_steps = tuple(
+            (step.name, step.module, isinstance(step.module, Reader), frozenset(step.produces))
+            for step in self._plan.steps
+        )
+        self._boundary_keys = tuple(
+            (key, tuple(parts))
+            for step in self._plan.steps
+            for key in step.produces
+            if (parts := key.split(KEY_SEP))[0] in MODEL_VISIBLE_NAMESPACES
+        )
+
     @property
     def plan(self) -> Plan:
         """The compiled dataset plan.
@@ -213,6 +235,30 @@ class GraphDataset(Dataset):
             The frozen plan for this dataset's mode.
         """
         return self._plan
+
+    @property
+    def modules(self) -> dict[str, DatasetModule]:
+        """The configured dataset modules by instance name (read-only view).
+
+        Returns
+        -------
+        dict[str, DatasetModule]
+            A fresh dict of the modules (used by the §4.4 artifact callback
+            to render pruned modules).
+        """
+        return dict(self._modules)
+
+    @property
+    def read_fields(self) -> dict[str, dict[str, str]]:
+        """The demand-narrowed per-stream read set with demand provenance.
+
+        Returns
+        -------
+        dict[str, dict[str, str]]
+            ``{stream: {field: demanding module}}`` (fresh copies) — the
+            §4.4 'per-group read columns' artifact content (design §6.1).
+        """
+        return {stream: dict(fields) for stream, fields in self._read_fields.items()}
 
     @property
     def reader(self) -> Reader:
@@ -311,16 +357,14 @@ class GraphDataset(Dataset):
             )
         self._maybe_bind()
         bundle = Bundle()
-        for step in self._plan.steps:
-            module = step.module
-            if isinstance(module, Reader):
-                produced = module.read(rows, self._mode)
+        for name, module, is_reader, expected in self._exec_steps:
+            if is_reader:
+                produced = module.read(rows, self._mode)  # type: ignore[attr-defined]
             else:
                 produced = module.process(bundle, rows, self._mode)  # type: ignore[attr-defined]
-            expected = set(step.produces)
             bundle.merge(
-                canonical_produced(produced, expected, step.name),
-                who=step.name,
+                canonical_produced(produced, expected, name),
+                who=name,
                 expected=expected,
             )
         return self._to_torch(bundle)
@@ -339,10 +383,9 @@ class GraphDataset(Dataset):
             Under ``debug=True``, when a leaf aliases a reader buffer.
         """
         out: dict[str, Any] = {}
-        for key in bundle.keys():  # noqa: SIM118 - Bundle is not a Mapping
-            parts = key.split(KEY_SEP)
-            if parts[0] not in MODEL_VISIBLE_NAMESPACES:
-                continue
+        # `_boundary_keys` is the plan-exact model-visible key list (merge
+        # enforces produced == declared), precomputed in `_build_caches`
+        for key, parts in self._boundary_keys:
             value = bundle.get(key)
             if isinstance(value, np.ndarray):
                 if self._debug and self._reader.aliases(value):
@@ -373,6 +416,8 @@ class GraphDataset(Dataset):
         state["_plan"] = None
         state["_read_fields"] = None
         state["_bound_pid"] = None
+        state["_exec_steps"] = None
+        state["_boundary_keys"] = None
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -381,3 +426,4 @@ class GraphDataset(Dataset):
         self._plan = self._compile()
         self._read_fields = self._collect_read_fields()
         self._bound_pid = None
+        self._build_caches()
