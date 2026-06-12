@@ -1,0 +1,166 @@
+# gn2v1-opendata.yaml — the LEGACY-stack (v1 `salt fit`) half of the GN2
+# before/after retraining gate (plan 09: v1 vs v2 under IDENTICAL conditions).
+#
+# GN2-nominal architecture (salt/configs/GN2/GN2.yaml: 256/128, 4 layers,
+# 8 heads, flash-varlen) adapted to the ATLAS open-data ttbar sample produced
+# by umami-preprocessing — the SAME sample as salt/core/configs/
+# gn2v2-opendata.yaml:
+#   - track variables: the IP3D_* significances are named lifetimeSigned* here
+#   - 4 jet classes INCLUDING taujets; class_names are NOT listed because the
+#     v1 CLI reads them from the train file's h5 attrs (utils/cli.py
+#     get_object_class_names: jets attr 'flavour_label' ->
+#     ['bjets','cjets','ujets','taujets'] — verified against the real file)
+#   - use_class_dict: True pulls CE class weights from class_dict.yaml for
+#     jets_classification AND track_origin (== the v2 weight_source
+#     {from_class_dict: ...} overrides, design §5.1)
+#
+# FAIRNESS CONTRACT (must stay in sync with gn2v2-opendata.yaml +
+# gn2v2-cluster-override.yaml; checked at run time by the experiment's
+# scheduler_diff.py):
+#   lrs initial 1e-7 / max 5e-4 / end 1e-5 / pct_start 0.01 / wd 1e-5,
+#   AdamW + OneCycle (interval=step), batch_size 1000, num_workers 8,
+#   seed 42 (base.yaml seed_everything), 10 epochs, 16-mixed, flash-varlen.
+#
+# Data paths are REQUIRED overrides — NO machine paths are committed. Typical
+# invocation (the experiment runner passes resolved ${DATA_*} placeholders):
+#
+#   salt fit --config salt/configs/GN2/gn2v1-opendata.yaml \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --data.norm_dict  $DATA/norm_dict.yaml \
+#     --data.class_dict $DATA/class_dict.yaml
+#
+# CPU smoke (no flash kernels / no fp16 on CPU): add
+#   --model.model.init_args.encoder.init_args.attn_type torch-math \
+#   --trainer.accelerator cpu --trainer.precision 32-true \
+#   --trainer.fast_dev_run 2
+
+name: GN2v1opendata
+
+model:
+  lrs_config:
+    initial: 1e-7
+    max: 5e-4
+    end: 1e-5
+    pct_start: 0.01
+    weight_decay: 1e-5
+
+  model:
+    class_path: salt.models.SaltModel
+    init_args:
+      init_nets:
+        - input_name: tracks
+          dense_config:
+            output_size: &embed_dim 256
+            hidden_layers: [256]
+            activation: &activation ReLU
+
+      encoder:
+        class_path: salt.models.Transformer
+        init_args:
+          num_layers: 4
+          embed_dim: *embed_dim
+          out_dim: &out_dim 128
+          # flash attention (GN2 nominal); silently reverts to torch-math when
+          # unavailable — the experiment's preflight stage greps the log for
+          # the reversion warning and FAILS, so a cluster run cannot quietly
+          # train without flash (plan 09 condition 3).
+          attn_type: flash-varlen
+          norm: LayerNorm
+          do_final_norm: True
+          dense_kwargs:
+            activation: *activation
+            gated: False
+          attn_kwargs:
+            num_heads: 8
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: jets_classification
+                input_name: jets
+                label: flavour_label
+                # class_names auto-read from train-file h5 attrs (see header):
+                # ['bjets', 'cjets', 'ujets', 'taujets'] — 4 outputs below
+                use_class_dict: True
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                dense_config: &task_dense_config
+                  input_size: *out_dim
+                  output_size: 4
+                  hidden_layers: [128, 64, 32]
+                  activation: *activation
+
+            - class_path: salt.models.ClassificationTask
+              init_args:
+                name: track_origin
+                input_name: tracks
+                label: ftagTruthOriginLabel
+                use_class_dict: True
+                weight: 0.5
+                loss:
+                  class_path: torch.nn.CrossEntropyLoss
+                dense_config:
+                  <<: *task_dense_config
+                  output_size: 8
+                  context_size: *out_dim
+
+            - class_path: salt.models.VertexingTask
+              init_args:
+                name: track_vertexing
+                input_name: tracks
+                label: ftagTruthVertexIndex
+                weight: 1.5
+                loss:
+                  class_path: torch.nn.BCEWithLogitsLoss
+                  init_args: { reduction: none }
+                dense_config:
+                  <<: *task_dense_config
+                  input_size: 256
+                  output_size: 1
+                  context_size: *out_dim
+
+data:
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - lifetimeSignedD0Significance
+      - lifetimeSignedZ0SinThetaSignificance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+
+  # train_file / val_file / norm_dict / class_dict: REQUIRED overrides (header)
+
+  # matched to gn2v2-opendata.yaml (fairness contract)
+  batch_size: 1000
+  num_workers: 8
+
+trainer:
+  max_epochs: 10
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
