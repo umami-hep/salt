@@ -300,10 +300,12 @@ class Salt2CLI(LightningCLI):
             "--export",
             type=ExportConfig | None,
             default=None,
-            help="the declarative ONNX export block consumed by `salt2 export` (design §5.1, "
-            "§7): model_name (no '_'/'-', validated ONLY at export time), inputs "
-            "(port/name/sequence/dyn_axis/alias) and outputs (port/name|names/dtype/reduce). "
-            "Inert during fit/test; round-trips through saved run configs.",
+            help="the export-ONLY half of the ONNX contract, consumed by `salt2 export` "
+            "(design §5.1, §7; M4.5): model_name (no '_'/'-', validated ONLY at export "
+            "time), inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
+            "manifest post-processing. The OUTPUT manifest derives from writers.modules "
+            "(M4.5 unified manifest) — declaring export.outputs is a hard error at export "
+            "time. Inert during fit/test; round-trips through saved run configs.",
         )
         if not self._run_mode:
             # run-free parses must round-trip a SAVED run config.yaml, which
@@ -469,8 +471,9 @@ def main(args: Sequence[str] | None = None) -> int:
         if help_requested:
             print(
                 "\nsee also: 'salt2 graph --help' (static graph tooling: validate/plan/plot/"
-                "why/deadcode, design §4), 'salt2 schema --help' (schema artifacts, §2.6) and "
-                "'salt2 export --help' (ONNX export, §7)"
+                "why/deadcode/resolve, design §4), 'salt2 schema --help' (schema artifacts, "
+                "§2.6) and 'salt2 export --help' (ONNX export, §7; --manifest prints the "
+                "writer-derived output manifest)"
             )
         raise
     except GraphError as err:

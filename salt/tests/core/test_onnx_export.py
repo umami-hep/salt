@@ -38,6 +38,7 @@ from salt.core.onnx import (
     ExportConfig,
     ExportInput,
     ExportOutput,
+    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
@@ -52,7 +53,12 @@ from salt.tests.core.gn2_fixture import (
     write_parity_norm_dict,
 )
 from salt.tests.core.gn2v2_fixture import build_gn2v2_modules
-from salt.tests.core.test_onnx_adapter import VARIABLES, gn2_export_cfg
+from salt.tests.core.test_onnx_adapter import (
+    VARIABLES,
+    gn2_export_cfg,
+    gn2_manifest,
+    gn2_resolved,
+)
 
 SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
 """Unit-scale sweep: the zero-token edge case + a spread; full sweep is gate O1."""
@@ -64,12 +70,17 @@ def exported(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("onnx_export")
     v1 = build_test_gn2(tmp)
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
-    resolved = resolve_export_config(gn2_export_cfg(), "GN2_v2")
+    resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
     nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
     result = export_graph(
-        modules, gn2_export_cfg(), VARIABLES, tmp / "network.onnx", run_name="GN2_v2"
+        modules,
+        gn2_export_cfg(),
+        VARIABLES,
+        tmp / "network.onnx",
+        outputs=gn2_manifest(),
+        run_name="GN2_v2",
     )
     return SimpleNamespace(v1=v1, modules=modules, result=result, tmp=tmp)
 
@@ -185,6 +196,7 @@ class TestExportedModel:
             gn2_export_cfg(),
             VARIABLES,
             exported.result.onnx_path,
+            outputs=gn2_manifest(),
             run_name="GN2_v2",
         )
         assert again.plan.plan_hash == exported.result.plan.plan_hash
@@ -270,24 +282,26 @@ def two_stream(tmp_path_factory):
                 dyn_axis="n_electrons",
             ),
         ],
-        outputs=[
-            ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-            ExportOutput(
-                port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-            ),
-            ExportOutput(
-                port="preds.electrons.electron_origin",
-                name="ElectronOrigin",
-                dtype="int8",
-                reduce="argmax",
-            ),
-        ],
     )
-    resolved = resolve_export_config(export_cfg, "two_stream")
+    manifest = [
+        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
+        ExportOutput(
+            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
+        ),
+        ExportOutput(
+            port="preds.electrons.electron_origin",
+            name="ElectronOrigin",
+            dtype="int8",
+            reduce="argmax",
+        ),
+    ]
+    resolved = attach_manifest(resolve_export_config(export_cfg, "two_stream"), manifest)
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
-    result = export_graph(modules, export_cfg, variables, tmp / "two.onnx", run_name="two_stream")
+    result = export_graph(
+        modules, export_cfg, variables, tmp / "two.onnx", outputs=manifest, run_name="two_stream"
+    )
     return SimpleNamespace(result=result, variables=variables)
 
 
@@ -417,11 +431,11 @@ class TestSalt2Surface:
         assert [entry.port for entry in export_cfg.inputs] == ["inputs.jets", "inputs.tracks"]
         assert export_cfg.inputs[1].sequence is True
         assert export_cfg.inputs[1].dyn_axis == "n_tracks"
-        assert [out.reduce for out in export_cfg.outputs] == [
-            None,  # split_scalars by default (resolved at export time)
-            "argmax",
-            "vertex_union_find",
-        ]
+        # M4.5: the shipped configs carry NO export.outputs — the manifest
+        # derives from the writers (rename/combine empty by default)
+        assert export_cfg.outputs == []
+        assert export_cfg.rename == {}
+        assert export_cfg.combine == []
 
     def test_dispatch_wired_into_salt2(self):
         from salt.core.main import main as salt2_main
@@ -519,3 +533,34 @@ class TestSalt2Surface:
         assert out_path.is_file()
         meta = make_session(out_path).get_modelmeta()
         assert meta.description == "GN2v2dummy"
+
+    def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
+        # salt2 export --manifest: the writer-derived manifest, no ckpt
+        # needed (M4.5 amendment §2.3 discoverability mitigation)
+        from salt.core.onnx.export import main as export_main
+
+        rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ONNX output manifest (writer-derived, model_name=GN2v2dummy)" in out
+        for name in ("GN2v2dummy_pb", "GN2v2dummy_TrackOrigin", "GN2v2dummy_VertexIndex"):
+            assert name in out
+        assert "vertex_union_find preds.tracks.track_vertexing" in out
+
+    def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
+        # the M4.5 migration error must fire on the CLI path with the
+        # writers: pointer (§4.1 bar)
+        from salt.core.onnx.export import main as export_main
+
+        config = dict(cli_run.config)
+        config["export"] = dict(config["export"])
+        config["export"]["outputs"] = [
+            {"port": "preds.jets.jets_classification", "names": ["pb", "pc", "pu"]}
+        ]
+        legacy_cfg = tmp_path / "legacy_outputs.yaml"
+        legacy_cfg.write_text(yaml.dump(config, sort_keys=False))
+        rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(legacy_cfg)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "REMOVED by the M4.5" in err
+        assert "writers" in err

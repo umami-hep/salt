@@ -83,12 +83,14 @@ from salt.core.onnx import (
     ExportConfig,
     ExportInput,
     ExportOutput,
+    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
     make_session,
     resolve_export_config,
 )
+from salt.core.writers import TaskWriter, WriterDeclareCtx
 from salt.models.task import mask_fill_flattened
 from salt.models.transformer import change_attn_backends
 from salt.onnx.to_onnx import ONNXModel, add_metadata, get_default_onnx_feature_map
@@ -115,6 +117,7 @@ __all__ = [
     "run_o4",
     "run_o5",
     "two_stream_export_config",
+    "writer_manifest",
 ]
 
 FLOAT_ATOL = 1e-6
@@ -253,6 +256,10 @@ def _print_checks(checks: Mapping[str, bool]) -> None:
 def gn2_export_config(**overrides: Any) -> ExportConfig:
     """The GN2 fixture ``export:`` block (mirrors ``configs/gn2v2-dummy.yaml``).
 
+    Since M4.5 the block carries the export-only half — the output
+    manifest derives from the writers (`writer_manifest`), exactly as the
+    shipped configs do.
+
     Parameters
     ----------
     **overrides : Any
@@ -272,22 +279,39 @@ def gn2_export_config(**overrides: Any) -> ExportConfig:
                 port="inputs.tracks", name="track_features", sequence=True, dyn_axis="n_tracks"
             ),
         ],
-        outputs=[
-            ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-            ExportOutput(
-                port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-            ),
-            ExportOutput(
-                port="preds.tracks.track_vertexing",
-                name="VertexIndex",
-                dtype="int8",
-                reduce="vertex_union_find",
-            ),
-        ],
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
+
+
+def writer_manifest(
+    modules: Mapping[str, Any],
+    streams: Sequence[str],
+    sequence_streams: Sequence[str],
+) -> list[ExportOutput]:
+    """The writer-derived export manifest — the M4.5 mechanism under gate.
+
+    A default `TaskWriter` (the ``base2.yaml`` shipped writer, ``onnx:
+    true``) declares the fixture's export entries from the SAME suffix
+    helpers that name the eval columns; O2's identity bar then proves the
+    derived manifest reproduces v1's hand-built output list bitwise — the
+    re-sourcing the M4.5 re-run exists to gate.
+
+    Returns
+    -------
+    list[ExportOutput]
+        The assembled manifest in the v1 output order (global-stream
+        entries first, then sequence-stream aux entries).
+    """
+    writer = TaskWriter()
+    writer.name = "tasks"
+    ctx = WriterDeclareCtx(
+        model_modules=dict(modules),
+        streams=tuple(streams),
+        sequence_streams=tuple(sequence_streams),
+    )
+    return writer.onnx_outputs(ctx)
 
 
 def _gn2_variables() -> dict[str, list[str]]:
@@ -474,7 +498,8 @@ def _build_gn2_pair(workdir: Path, *, with_v1_export: bool = True) -> SimpleName
     _decollapse_v1_heads(v1, variables)
 
     modules = build_gn2v2_modules(norm_dict)
-    resolved = resolve_export_config(gn2_export_config(), RUN_NAME)
+    manifest = writer_manifest(modules, ("jets", "tracks"), ("tracks",))
+    resolved = attach_manifest(resolve_export_config(gn2_export_config(), RUN_NAME), manifest)
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
     nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
@@ -499,6 +524,7 @@ def _build_gn2_pair(workdir: Path, *, with_v1_export: bool = True) -> SimpleName
         gn2_export_config(),
         variables,
         workdir / "v2_network.onnx",
+        outputs=manifest,  # writer-derived (M4.5) — the re-sourcing under gate
         run_name=RUN_NAME,
         config=config_payload,
         run_metadata={},  # == the synthesized metadata.yaml content read by v1
@@ -1056,11 +1082,13 @@ def run_o2(
 def two_stream_export_config() -> ExportConfig:
     """The two-stream (tracks + electrons) ``export:`` block for gate O3.
 
-    The per-electron ``ElectronOrigin`` output is load-bearing: electrons
-    are the SECOND stream in the concat layout, so producing it forces a
-    `Split` slice at a DYNAMIC offset — the exact operation design risk 7
-    is about (a track-only output would leave the offset-dependent slice
-    untraced and the gate vacuous).
+    Export-only half (M4.5) — the manifest derives from `writer_manifest`,
+    where the per-electron ``ElectronOrigin`` entry (the default
+    snake-to-Pascal naming of the ``electron_origin`` task) is
+    load-bearing: electrons are the SECOND stream in the concat layout, so
+    producing it forces a `Split` slice at a DYNAMIC offset — the exact
+    operation design risk 7 is about (a track-only output would leave the
+    offset-dependent slice untraced and the gate vacuous).
 
     Returns
     -------
@@ -1079,24 +1107,6 @@ def two_stream_export_config() -> ExportConfig:
                 name="electron_features",
                 sequence=True,
                 dyn_axis="n_electrons",
-            ),
-        ],
-        outputs=[
-            ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-            ExportOutput(
-                port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-            ),
-            ExportOutput(
-                port="preds.tracks.track_vertexing",
-                name="VertexIndex",
-                dtype="int8",
-                reduce="vertex_union_find",
-            ),
-            ExportOutput(
-                port="preds.electrons.electron_origin",
-                name="ElectronOrigin",
-                dtype="int8",
-                reduce="argmax",
             ),
         ],
     )
@@ -1192,7 +1202,8 @@ def _build_two_stream(workdir: Path) -> SimpleNamespace:
         module.name = name
 
     export_cfg = two_stream_export_config()
-    resolved = resolve_export_config(export_cfg, RUN_NAME)
+    manifest = writer_manifest(modules, ("jets", "tracks", "electrons"), ("tracks", "electrons"))
+    resolved = attach_manifest(resolve_export_config(export_cfg, RUN_NAME), manifest)
     plan = compile_onnx_plan(modules, resolved, variables)
     torch.manual_seed(42)  # deterministic bind-time init for the v2-only head
     bind_all(modules, resolve_bind_schema([plan]))
@@ -1204,7 +1215,12 @@ def _build_two_stream(workdir: Path) -> SimpleNamespace:
         f"only the v2-only electron head may be unmatched, got missing={list(missing)}"
     )
     result = export_graph(
-        modules, export_cfg, variables, workdir / "two_stream.onnx", run_name=RUN_NAME
+        modules,
+        export_cfg,
+        variables,
+        workdir / "two_stream.onnx",
+        outputs=manifest,
+        run_name=RUN_NAME,
     )
     return SimpleNamespace(
         v1=v1,
@@ -1725,6 +1741,7 @@ def run_o5(
             gn2_export_config(model_name="GN2_v2"),
             pair.variables,
             bad_path,
+            outputs=writer_manifest(pair.modules, ("jets", "tracks"), ("tracks",)),
             run_name=RUN_NAME,
         )
     except ConfigError:

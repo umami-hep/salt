@@ -1,9 +1,22 @@
-"""The declarative ``export:`` config block for ``salt2 export`` (design §5.1, §7).
+"""The export-only ``export:`` config block + the writer-derived output manifest.
 
-Three plain dataclasses parsed by jsonargparse (registered on the `Salt2CLI`
+(design §5.1, §7; M4.5 unified-manifest amendment.)
+
+Plain dataclasses parsed by jsonargparse (registered on the `Salt2CLI`
 parser as ``--export``, so the block round-trips through saved run configs
-and the run-free parse surface), plus the resolution/validation step that
-turns the parsed block into a fully-defaulted `ExportConfig`.
+and the run-free parse surface), plus the two resolution steps:
+
+- `resolve_export_config` — validates/defaults the EXPORT-ONLY half
+  (``model_name``, ``inputs`` incl. ``alias:``/``dyn_axis``,
+  ``track_selection``, the ``rename:``/``combine:`` post-processing
+  declarations). Declaring ``export.outputs`` is a HARD ERROR since M4.5:
+  the output manifest derives from the writers (``writers.modules``), the
+  single output manifest for eval AND export.
+- `attach_manifest` — attaches the writer-derived `ExportOutput` list to a
+  resolved config: per-entry validation/defaulting, ``rename:``
+  application, ``combine:`` validation, and the flat-namespace uniqueness
+  backstop. (`WriterCallback.onnx_manifest` runs the richer
+  writer-attributed collision check before this.)
 
 Validation timing (design §7 "Naming"): the no-``_``/no-``-`` restriction on
 `ExportConfig.model_name` applies ONLY when the ONNX plan is compiled or
@@ -13,11 +26,14 @@ name with ``_``/``-`` stripped, byte-reproducing v1
 (``to_onnx.py:687``: ``config['name'].replace('_','').replace('-','')``).
 
 This module is deliberately torch-free: `salt.core.main` imports it at CLI
-startup to register the parser argument.
+startup to register the parser argument, and the writer base imports
+`ExportOutput` (amendment merge condition 2 — writers return M4's type
+directly, no parallel manifest type).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
 from salt.core.graph.errors import ConfigError
@@ -25,11 +41,17 @@ from salt.core.graph.spec import split_key
 
 __all__ = [
     "KNOWN_REDUCES",
+    "PER_TOKEN_REDUCES",
     "TRACK_SELECTIONS",
+    "ExportCombine",
     "ExportConfig",
     "ExportInput",
     "ExportOutput",
+    "attach_manifest",
+    "combine_insertion_index",
     "default_athena_name",
+    "manifest_table",
+    "ordered_output_names",
     "resolve_export_config",
     "sanitised_model_name",
     "stream_of_input_port",
@@ -50,6 +72,11 @@ https://gitlab.cern.ch/atlas/athena/-/blob/main/PhysicsAnalysis/JetTagging/Flavo
 
 KNOWN_REDUCES = ("split_scalars", "argmax", "vertex_union_find")
 """The shipped reduce registry keys (design §7.3; MaskFormer reduces are M5)."""
+
+PER_TOKEN_REDUCES = ("argmax", "vertex_union_find")
+"""Reduces emitting per-token (dynamic-axis) outputs — the "sequence-aux"
+entries of v1's output order. `combine_insertion_index` keys off this set
+(amendment merge condition 5)."""
 
 
 @dataclass
@@ -97,13 +124,20 @@ class ExportInput:
 
 @dataclass
 class ExportOutput:
-    """One ONNX graph output group — design §5.1/§7.3.
+    """One ONNX graph output group — design §5.1/§7.3; WRITER-declared since M4.5.
+
+    Instances are returned by `salt.core.writers.Writer.onnx_outputs`
+    (amendment merge condition 2: writers return THIS type directly) and
+    assembled into the export manifest by ``WriterCallback.onnx_manifest``
+    — they are no longer config-parsed (`resolve_export_config` hard-errors
+    on a config-declared ``export.outputs``).
 
     Parameters
     ----------
     port : str
         The bundle port the reduce consumes (an ONNX-plan sink), e.g.
-        ``preds.jets.jets_classification``.
+        ``preds.jets.jets_classification``. Any bundle key is legal (e.g.
+        ``objects.masks``), not only ``preds.*``.
     name : str | None, optional
         Single-output suffix (``argmax``/``vertex_union_find`` reduces);
         the full ONNX name is ``{model_name}_{name}``. Exclusive with
@@ -129,8 +163,42 @@ class ExportOutput:
 
 
 @dataclass
+class ExportCombine:
+    """One manifest post-processing combine: a NEW output from existing ones.
+
+    The v2 spelling of v1's ``--combine_outputs`` (``to_onnx.py:556-600``):
+    an Athena-presentation concern with no eval analogue, kept in the
+    ``export:`` block as manifest post-processing (amendment §7 cost 3 /
+    merge condition 5). The combined value is
+    ``sum(scale * output(suffix))`` over `inputs`, computed INSIDE the
+    traced graph from the already-reduced outputs (v1 ``to_onnx.py:
+    404-412``); the combined output is float32, global, no dynamic axis.
+
+    Parameters
+    ----------
+    name : str
+        The new output's suffix (full name ``{model_name}_{name}``).
+    inputs : dict[str, float]
+        Source suffix -> scale, in combination order. Every source must be
+        an existing GLOBAL float manifest suffix (``split_scalars``
+        entries, after ``rename:`` — the v1 existence check,
+        ``to_onnx.py:273-279``).
+    """
+
+    name: str
+    inputs: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
 class ExportConfig:
     """The top-level ``export:`` block (design §5.1), consumed by ``salt2 export``.
+
+    Since M4.5 the block carries the EXPORT-ONLY half of the contract:
+    inputs, the Athena model name, and the ``rename:``/``combine:``
+    manifest post-processing. The output manifest itself derives from the
+    writers (``writers.modules`` — the single output manifest for eval AND
+    export); `outputs` is the assembled-manifest carrier filled by
+    `attach_manifest`, and DECLARING it in a config is a hard error.
 
     Parameters
     ----------
@@ -144,13 +212,25 @@ class ExportConfig:
     inputs : list[ExportInput], optional
         ONNX graph inputs, in positional order.
     outputs : list[ExportOutput], optional
-        ONNX graph outputs, in output order.
+        The ASSEMBLED writer-derived manifest (`attach_manifest`). Never
+        config-declared: `resolve_export_config` raises the M4.5 migration
+        error on a non-empty parsed value.
+    rename : dict[str, str], optional
+        Manifest suffix renames ``old -> new``, applied BEFORE `combine`
+        (v1 ``--rename`` semantics, existence-checked —
+        ``to_onnx.py:263-270``).
+    combine : list[ExportCombine], optional
+        Combined outputs, inserted after the global entries and BEFORE the
+        first per-token aux entry (`combine_insertion_index` — the v1
+        order, amendment merge condition 5).
     """
 
     model_name: str | None = None
     track_selection: str = "r22default"
     inputs: list[ExportInput] = field(default_factory=list)
     outputs: list[ExportOutput] = field(default_factory=list)
+    rename: dict[str, str] = field(default_factory=dict)
+    combine: list[ExportCombine] = field(default_factory=list)
 
 
 def sanitised_model_name(run_name: str) -> str:
@@ -246,24 +326,41 @@ def default_athena_name(stream: str, sequence: bool, track_selection: str) -> st
 
 
 def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
-    """Validate the parsed ``export:`` block and fill every default.
+    """Validate the EXPORT-ONLY half of the ``export:`` block and fill its defaults.
 
     The returned config has `model_name` resolved+validated and, per input,
     `name`/`dyn_axis`/`athena_name` filled (see the field docs for the v1
-    rules each default reproduces); per output, `reduce`/`dtype` filled.
-    Called only on the export path — fit never validates (design §7).
+    rules each default reproduces). `outputs` is NOT handled here — the
+    manifest derives from the writers and is attached by `attach_manifest`;
+    a non-empty parsed value is the M4.5 migration hard error. Called only
+    on the export path — fit never validates (design §7).
 
     Returns
     -------
     ExportConfig
-        A fully-resolved copy (the input object is not mutated).
+        A resolved copy of the export-only half (``outputs == []``; the
+        input object is not mutated).
 
     Raises
     ------
     ConfigError
-        On any malformed entry (messages name the offending entry and the
-        rule it breaks).
+        On a declared ``export.outputs`` section (removed at M4.5 — the
+        §4.1-bar pointer at ``writers:``), or any malformed entry
+        (messages name the offending entry and the rule it breaks).
     """
+    if export.outputs:
+        raise ConfigError(
+            "export.outputs was REMOVED by the M4.5 unified-manifest amendment — the ONNX "
+            "output manifest now derives from the writers (the same declarations that name "
+            "the eval columns), so the two can never drift.\n"
+            "  fix: delete the export.outputs section. The shipped writers already declare "
+            "the standard surface (writers.modules.tasks: global classification -> per-class "
+            "scalars, sequence classification -> argmax int8, vertexing -> union-find int8); "
+            "narrow with TaskWriter onnx/onnx_streams/onnx_tasks, rename with onnx_names, "
+            "post-process with export.rename/export.combine, and inspect the assembled "
+            "manifest with `salt2 export --manifest` or `salt2 graph resolve` "
+            "(amendment-unified-writers.md §2, §6)"
+        )
     model_name = validate_model_name(export.model_name or sanitised_model_name(run_name))
     if export.track_selection not in TRACK_SELECTIONS:
         raise ConfigError(
@@ -272,18 +369,236 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
         )
     if not export.inputs:
         raise ConfigError("export.inputs must declare at least one input (design §5.1)")
-    if not export.outputs:
-        raise ConfigError("export.outputs must declare at least one output (design §5.1)")
     inputs = [_resolve_input(entry, export.track_selection) for entry in export.inputs]
     _check_input_uniqueness(inputs)
-    outputs = [_resolve_output(entry) for entry in export.outputs]
-    _check_output_uniqueness(outputs)
+    for old, new in export.rename.items():
+        if not isinstance(old, str) or not isinstance(new, str) or not old or not new:
+            raise ConfigError(
+                f"export.rename entries must map a non-empty old suffix to a non-empty new "
+                f"suffix, got {old!r}: {new!r} (v1 --rename semantics, to_onnx.py:263-270)"
+            )
+    for entry in export.combine:
+        if not entry.name:
+            raise ConfigError("export.combine entries must set a non-empty 'name' suffix")
+        if not entry.inputs:
+            raise ConfigError(
+                f"export.combine {entry.name!r}: 'inputs' must map at least one source "
+                "suffix to a scale (v1 parse_output_combination, to_onnx.py:556-600)"
+            )
     return ExportConfig(
         model_name=model_name,
         track_selection=export.track_selection,
         inputs=inputs,
-        outputs=outputs,
+        outputs=[],
+        rename=dict(export.rename),
+        combine=[ExportCombine(name=c.name, inputs=dict(c.inputs)) for c in export.combine],
     )
+
+
+def attach_manifest(export: ExportConfig, outputs: Sequence[ExportOutput]) -> ExportConfig:
+    """Attach the writer-derived output manifest to a RESOLVED export config.
+
+    Per entry: validation + ``reduce``/``dtype`` defaulting (unchanged M4
+    rules). Then the post-processing declared in the export block, in v1
+    order (``to_onnx.py:243-307``): ``rename:`` applied in place
+    (existence-checked), ``combine:`` validated against the renamed GLOBAL
+    float suffixes. Uniqueness (ports + flat suffix namespace, combines
+    included) is re-checked as the backstop behind the writer-attributed
+    collision check in ``WriterCallback.onnx_manifest``.
+
+    Parameters
+    ----------
+    export : ExportConfig
+        A `resolve_export_config` result (``model_name`` validated).
+    outputs : Sequence[ExportOutput]
+        The assembled writer manifest, in manifest order.
+
+    Returns
+    -------
+    ExportConfig
+        A copy carrying the resolved manifest.
+
+    Raises
+    ------
+    ConfigError
+        On an empty manifest, a malformed entry, a ``rename:`` of a
+        missing suffix, a ``combine:`` referencing a non-global/missing
+        suffix, or a name collision.
+    """
+    if export.model_name is None:
+        raise ConfigError("attach_manifest needs a resolved export config (model_name set)")
+    if not outputs:
+        raise ConfigError(
+            "the configured writers declare no ONNX outputs — the export manifest derives "
+            "from writers.modules (M4.5 unified manifest); check that at least one writer "
+            "participates (TaskWriter default onnx: true, or a custom onnx_outputs override; "
+            "amendment §2)"
+        )
+    resolved = [_resolve_output(entry) for entry in outputs]
+    resolved = _apply_rename(resolved, export.rename)
+    _check_output_uniqueness(resolved)
+    _check_combines(resolved, export.combine)
+    return replace(export, outputs=resolved)
+
+
+def _apply_rename(outputs: list[ExportOutput], rename: dict[str, str]) -> list[ExportOutput]:
+    """Apply ``export.rename`` suffix renames to the manifest (v1 semantics).
+
+    Every old suffix must exist (v1's existence assert,
+    ``to_onnx.py:268``); renames run BEFORE combines so combine inputs can
+    reference renamed suffixes (v1 order, ``to_onnx.py:263-279``).
+
+    Returns
+    -------
+    list[ExportOutput]
+        The manifest with renamed entries (input list not mutated).
+
+    Raises
+    ------
+    ConfigError
+        When an old suffix matches no manifest entry.
+    """
+    if not rename:
+        return outputs
+    out = list(outputs)
+    for old, new in rename.items():
+        hit = False
+        for i, entry in enumerate(out):
+            if entry.name == old:
+                out[i] = replace(entry, name=new)
+                hit = True
+            elif entry.names is not None and old in entry.names:
+                out[i] = replace(
+                    entry, names=[new if suffix == old else suffix for suffix in entry.names]
+                )
+                hit = True
+        if not hit:
+            known = [s for entry in out for s in (entry.names or [entry.name])]
+            raise ConfigError(
+                f"export.rename: suffix {old!r} matches no manifest output — the "
+                f"writer-derived manifest carries {known} (v1 existence check, "
+                "to_onnx.py:268; inspect with `salt2 export --manifest`)"
+            )
+    return out
+
+
+def _check_combines(outputs: list[ExportOutput], combines: list[ExportCombine]) -> None:
+    """Validate ``export.combine`` entries against the (renamed) manifest.
+
+    Combine inputs must be GLOBAL float suffixes (``split_scalars``
+    entries) — the v1 contract: combined values are linear combinations of
+    the global outputs, checked before the aux entries are appended
+    (``to_onnx.py:273-279``). Combined names must not collide with the
+    manifest or each other.
+
+    Raises
+    ------
+    ConfigError
+        Naming the offending combine entry and the rule it breaks.
+    """
+    global_suffixes = {
+        suffix for entry in outputs if entry.names is not None for suffix in entry.names
+    }
+    taken = {str(s) for entry in outputs for s in (entry.names or [entry.name])}
+    for entry in combines:
+        if missing := sorted(set(entry.inputs) - global_suffixes):
+            raise ConfigError(
+                f"export.combine {entry.name!r}: input suffix(es) {missing} are not global "
+                f"float outputs of the manifest — combines draw from the split_scalars "
+                f"suffixes {sorted(global_suffixes)} after rename (v1 contract, "
+                "to_onnx.py:273-279)"
+            )
+        if entry.name in taken:
+            raise ConfigError(
+                f"export.combine {entry.name!r}: the combined suffix collides with an "
+                "existing output name — pick a fresh suffix"
+            )
+        taken.add(entry.name)
+
+
+def combine_insertion_index(outputs: Sequence[ExportOutput]) -> int:
+    """Where combined outputs insert into the manifest order (merge condition 5).
+
+    The v1 rule (``to_onnx.py:258-292``): combined outputs are appended
+    after the global entries (renames included) but BEFORE the sequence-aux
+    entries — i.e. immediately before the first `PER_TOKEN_REDUCES` entry,
+    or at the end when there is none. Append-at-end would diverge for any
+    model carrying both combines and aux outputs (the O2 combine+aux
+    fixture exercises exactly this).
+
+    Returns
+    -------
+    int
+        The entry index combines insert at (en bloc, declaration order).
+    """
+    for i, entry in enumerate(outputs):
+        if entry.reduce in PER_TOKEN_REDUCES:
+            return i
+    return len(outputs)
+
+
+def ordered_output_names(export: ExportConfig) -> list[tuple[str, str, str]]:
+    """The final flat ONNX output list — names/dtypes/sources in traced order.
+
+    The single ordering authority shared by the adapter
+    (``output_names``/``output_dtypes``/``forward``), the metadata
+    ``output_names`` list, and the `manifest_table` rendering: per-entry
+    suffixes prefixed with ``{model_name}_``, combines inserted at
+    `combine_insertion_index`.
+
+    Parameters
+    ----------
+    export : ExportConfig
+        A manifest-attached resolved config (`attach_manifest` output).
+
+    Returns
+    -------
+    list[tuple[str, str, str]]
+        ``(full output name, dtype, source)`` triples, where source is the
+        entry's ``{reduce} {port}`` or ``combine(...)`` description.
+    """
+    prefix = str(export.model_name)
+    rows: list[tuple[str, str, str]] = []
+    for entry in export.outputs:
+        rows.extend(
+            (f"{prefix}_{suffix}", str(entry.dtype), f"{entry.reduce} {entry.port}")
+            for suffix in (entry.names if entry.names is not None else [entry.name])
+        )
+    at = sum(
+        len(entry.names) if entry.names is not None else 1
+        for entry in export.outputs[: combine_insertion_index(export.outputs)]
+    )
+    combined = [
+        (
+            f"{prefix}_{c.name}",
+            "float32",
+            "combine(" + " + ".join(f"{scale:g}*{s}" for s, scale in c.inputs.items()) + ")",
+        )
+        for c in export.combine
+    ]
+    return rows[:at] + combined + rows[at:]
+
+
+def manifest_table(export: ExportConfig) -> str:
+    """Render the assembled output manifest (``salt2 export --manifest``, plan_onnx.txt).
+
+    Parameters
+    ----------
+    export : ExportConfig
+        A manifest-attached resolved config.
+
+    Returns
+    -------
+    str
+        One row per flat ONNX output: name, dtype, source (reduce + port,
+        or the combine expression) — the generated-artifact answer to
+        "what exactly does Athena see" (amendment §7 cost 2 mitigation).
+    """
+    rows = ordered_output_names(export)
+    width = max(len(name) for name, _, _ in rows)
+    lines = [f"ONNX output manifest (writer-derived, model_name={export.model_name}):"]
+    lines += [f"  {name:<{width}}  {dtype:<7}  {source}" for name, dtype, source in rows]
+    return "\n".join(lines)
 
 
 def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
@@ -438,9 +753,13 @@ def _check_output_uniqueness(outputs: list[ExportOutput]) -> None:
     seen_names: set[str] = set()
     for entry in outputs:
         if entry.port in seen_ports:
-            raise ConfigError(f"export.outputs declares port {entry.port!r} twice")
+            raise ConfigError(f"the assembled export manifest declares port {entry.port!r} twice")
         seen_ports.add(entry.port)
         for suffix in entry.names if entry.names is not None else [entry.name]:
             if suffix in seen_names:
-                raise ConfigError(f"export.outputs declares output name {suffix!r} twice")
+                raise ConfigError(
+                    f"the assembled export manifest declares output name {suffix!r} twice "
+                    "(flat ONNX namespace — rename one side via TaskWriter onnx_names or "
+                    "export.rename, amendment §5 rule 4)"
+                )
             seen_names.add(str(suffix))

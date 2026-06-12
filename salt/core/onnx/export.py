@@ -1,9 +1,11 @@
-"""``salt2 export``: config + checkpoint -> validated ``.onnx`` (design §7).
+"""``salt2 export``: config + checkpoint -> validated ``.onnx`` (design §7; M4.5).
 
 The exporter compiles the ``Mode.ONNX`` plan from CONFIG-DERIVED sources
 ("no data needed", design §7.1 — boundary specs mirror the dataset
 `Features` declaration instead of touching the H5), demands exactly the
-``export.outputs`` ports (pruning removes labels/losses/writers
+ports of the WRITER-DERIVED output manifest (the M4.5 unified manifest:
+``WriterCallback.onnx_manifest`` assembles the writers' `ExportOutput`
+declarations — pruning removes labels/losses/the writers' own TEST role
 automatically), wraps the plan in the traceable `OnnxAdapter`, traces with
 ``torch.onnx.export(opset_version=20, dynamo=False)`` (v1
 ``to_onnx.py:714-721``), writes the v1-bit-compatible ``gnn_config``
@@ -11,9 +13,12 @@ metadata, and sweep-checks torch vs onnxruntime (design §7.6).
 
 Programmatic surface (used by the fixture-driven gates, no checkpoint/CLI
 required): `compile_onnx_plan` + `export_graph` on a bound, weight-loaded
-module dict. CLI surface: ``salt2 export --ckpt_path <ckpt> [-c config ...]``
-(``-c`` repeatable — later files deep-merge on top, e.g. an export-block
-override onto a run config trained without one), dispatched from
+module dict, with the manifest passed explicitly (``outputs=``). CLI
+surface: ``salt2 export --ckpt_path <ckpt> [-c config ...]`` (``-c``
+repeatable — later files deep-merge on top, e.g. an export-block override
+onto a run config trained without one) derives the manifest from the parsed
+``writers:`` block; ``salt2 export --manifest -c <config>`` prints the
+assembled manifest and exits (no checkpoint needed). Dispatched from
 `salt.core.main` exactly like the graph subcommands. ``--run-dir`` is the
 design §7 spelling — it lands with the M6 run-dir layout; until then
 ``--ckpt_path`` + the inferred sibling config reproduces the v1 contract
@@ -26,7 +31,7 @@ import argparse
 import sys
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +52,10 @@ from salt.core.onnx.adapter import OnnxAdapter
 from salt.core.onnx.check import CheckResult, check_onnx
 from salt.core.onnx.config import (
     ExportConfig,
+    ExportInput,
+    ExportOutput,
+    attach_manifest,
+    manifest_table,
     resolve_export_config,
     stream_of_input_port,
 )
@@ -130,14 +139,17 @@ def compile_onnx_plan(
     export: ExportConfig,
     variables: Mapping[str, Sequence[str]],
 ) -> Plan:
-    """Compile the ``Mode.ONNX`` plan demanded by the ``export.outputs`` ports.
+    """Compile the ``Mode.ONNX`` plan demanded by the manifest ports.
 
+    `export` must be a manifest-attached resolved config (`attach_manifest`
+    — the writer-derived manifest is the ONLY outputs source since M4.5).
     Demand pruning removes labels/losses/matcher automatically (design §7);
     a missing output producer raises the planner's §4.1-quality
-    `ConnectivityError`. A `ShapeError` on an ``export.inputs`` port (the
-    classic mis-flagged ``sequence:`` mistake — a variable-length stream
-    declared as a ``[1, F]`` global, or vice versa) is re-raised with the
-    config address and the concrete fix appended (§4.1 quality bar).
+    `ConnectivityError` (attributed to the declaring writer surface). A
+    `ShapeError` on an ``export.inputs`` port (the classic mis-flagged
+    ``sequence:`` mistake — a variable-length stream declared as a
+    ``[1, F]`` global, or vice versa) is re-raised with the config address
+    and the concrete fix appended (§4.1 quality bar).
 
     Returns
     -------
@@ -146,10 +158,18 @@ def compile_onnx_plan(
 
     Raises
     ------
+    ConfigError
+        When `export` carries no attached manifest.
     ShapeError
         On a rank/shape mismatch — augmented with the ``export.inputs``
         attribution when the offending key is an export input port.
     """
+    if not export.outputs:
+        raise ConfigError(
+            "compile_onnx_plan needs a manifest-attached export config — assemble the "
+            "writer-derived outputs first (WriterCallback.onnx_manifest + attach_manifest; "
+            "M4.5 unified manifest)"
+        )
     try:
         return compile_plan(
             modules,
@@ -157,7 +177,10 @@ def compile_onnx_plan(
             sources=derive_onnx_sources(export, variables),
             sinks=[out.port for out in export.outputs],
             sink_origins={
-                out.port: f"export output {out.port!r} (config: export.outputs)"
+                out.port: (
+                    f"ONNX manifest output {out.port!r} (writer-derived, config: "
+                    "writers.modules — M4.5 unified manifest)"
+                )
                 for out in export.outputs
             },
         )
@@ -187,6 +210,7 @@ def export_graph(
     variables: Mapping[str, Sequence[str]],
     onnx_path: str | Path,
     *,
+    outputs: Sequence[ExportOutput],
     run_name: str = "salt",
     config: Mapping[str, Any] | None = None,
     run_metadata: Mapping[str, Any] | None = None,
@@ -196,23 +220,31 @@ def export_graph(
     """Export a bound, weight-loaded module dict to ONNX (the programmatic core).
 
     Resolves+validates the export block (`model_name` rules apply HERE,
-    never at fit — design §7), compiles the ONNX plan, builds the
-    `OnnxAdapter` (torch-math forced via the ``set_export_mode`` protocol),
-    traces at ``opset_version=20, dynamo=False`` with example inputs sized
-    from the `Features` declaration, and writes the ``gnn_config``
-    metadata. The checker is the caller's separate step (`check_onnx` —
-    the CLI runs it by default).
+    never at fit — design §7), attaches the writer-derived output manifest
+    (M4.5: `outputs` is the assembled ``WriterCallback.onnx_manifest`` —
+    or a hand-built `ExportOutput` list in fixture code), compiles the
+    ONNX plan, builds the `OnnxAdapter` (torch-math forced via the
+    ``set_export_mode`` protocol), traces at ``opset_version=20,
+    dynamo=False`` with example inputs sized from the `Features`
+    declaration, and writes the ``gnn_config`` metadata. The checker is
+    the caller's separate step (`check_onnx` — the CLI runs it by
+    default).
 
     Parameters
     ----------
     modules : dict[str, GraphModule]
         Bound module instances carrying the weights to export.
     export : ExportConfig
-        The parsed (unresolved is fine) export block.
+        The parsed (unresolved is fine) export block — export-only half;
+        a config-declared ``outputs`` section raises the M4.5 migration
+        error.
     variables : Mapping[str, Sequence[str]]
         Per-stream `Features` variable lists.
     onnx_path : str | Path
         Output ``.onnx`` path.
+    outputs : Sequence[ExportOutput]
+        The writer-derived output manifest (``WriterCallback.
+        onnx_manifest``), in manifest order.
     run_name : str, optional
         The run ``name:`` — the default `model_name` source, by default
         ``"salt"``.
@@ -232,7 +264,7 @@ def export_graph(
         The adapter (reusable as the checker reference), plan and written
         metadata.
     """
-    resolved = resolve_export_config(export, run_name)
+    resolved = attach_manifest(resolve_export_config(export, run_name), outputs)
     plan = compile_onnx_plan(modules, resolved, variables)
     feature_fields = {
         entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
@@ -276,11 +308,13 @@ def export_graph(
     write_metadata(onnx_path, gnn_config, str(resolved.model_name))
     # the authoritative rendering of the graph Athena will run — the M3
     # run-dir plan_<mode>.txt contract extended to export (design §4.4); the
-    # static `salt2 graph plan --mode onnx` view is dataset-fed and differs
+    # static `salt2 graph plan --mode onnx` view is dataset-fed and differs.
+    # The writer-derived output manifest is appended (amendment §2.3: the
+    # generated-artifact answer to "what exactly does Athena see")
     from salt.core.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
-    plan_txt_path.write_text(plan_table(plan) + "\n")
+    plan_txt_path.write_text(plan_table(plan) + "\n\n" + manifest_table(resolved) + "\n")
     return ExportResult(
         adapter=adapter,
         plan=plan,
@@ -309,7 +343,18 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         description="Export a trained salt2 model to ONNX (design §7).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--ckpt_path", type=Path, required=True, help="checkpoint path")
+    parser.add_argument(
+        "--ckpt_path",
+        type=Path,
+        default=None,
+        help="checkpoint path (required except with --manifest)",
+    )
+    parser.add_argument(
+        "--manifest",
+        action="store_true",
+        help="print the writer-derived output manifest (full ONNX names, dtypes, reduces) "
+        "and exit — no checkpoint needed (M4.5 unified manifest)",
+    )
     parser.add_argument(
         "-c",
         "--config",
@@ -503,7 +548,12 @@ def main(args: Sequence[str] | None = None) -> int:
         failed check.
     """
     parsed = _parse_args(args)
+    if not parsed.manifest and parsed.ckpt_path is None:
+        print("salt2 export: --ckpt_path is required (except with --manifest)", file=sys.stderr)
+        return 1
     try:
+        if parsed.manifest:
+            return _print_manifest_from_cli(parsed)
         result, adapter = _export_from_cli(parsed)
     except GraphError as err:
         print(f"salt.core.graph.{type(err).__name__}: {err}", file=sys.stderr)
@@ -536,8 +586,101 @@ def main(args: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
+    """The run-config stack: explicit ``-c`` files, or the v1 sibling inference.
+
+    Returns
+    -------
+    list[Path]
+        At least one config path; the FIRST is the run config (it anchors
+        the default output path, ``metadata.yaml`` lookup and the embedded
+        ``config.yaml`` payload).
+
+    Raises
+    ------
+    ConfigError
+        When no config is given and none can be inferred.
+    """
+    config_paths: list[Path] = list(parsed.config or [])
+    if config_paths:
+        return config_paths
+    if parsed.ckpt_path is None:
+        raise ConfigError("salt2 export --manifest needs a config — pass -c <config.yaml>")
+    inferred = parsed.ckpt_path.parents[1] / "config.yaml"  # to_onnx.py:629-631
+    if not inferred.is_file():
+        raise ConfigError(f"could not find a run config at {inferred} — pass --config")
+    return [inferred]
+
+
+def _writer_manifest_from_cli(cli: Any) -> list[ExportOutput]:
+    """Assemble the writer-derived output manifest from a run-free CLI parse.
+
+    The CLI half of the M4.5 unified manifest: the parsed ``writers:``
+    block is assembled into a `WriterCallback` (exactly as
+    ``Salt2CLI.instantiate_trainer`` does at runtime) and its
+    ``onnx_manifest`` — the same declarations that name the eval columns —
+    becomes the export-output list.
+
+    Returns
+    -------
+    list[ExportOutput]
+        The assembled manifest, collision-checked.
+
+    Raises
+    ------
+    ConfigError
+        When the config carries no writer modules (the manifest has no
+        source).
+    """
+    from salt.core.writers import WriterCallback  # noqa: PLC0415 - heavy/circular
+
+    writer_modules = {
+        name: writer
+        for name, writer in (cli._get(cli.config_init, "writers.modules") or {}).items()  # noqa: SLF001 - main.py precedent
+        if writer is not None
+    }
+    if not writer_modules:
+        raise ConfigError(
+            "the config declares no writer modules — since M4.5 the ONNX output manifest "
+            "derives from writers.modules (the same declarations that name the eval "
+            "columns; base2.yaml ships inputs_copy/tasks/pad_mask defaults). Restore the "
+            "writers block (design §8, amendment-unified-writers.md §2)"
+        )
+    callback = WriterCallback(modules=writer_modules)
+    return callback.onnx_manifest(
+        cli.model._graph_modules,  # noqa: SLF001 - same-package adapter (cli.py precedent)
+        cli.datamodule.reader,
+    )
+
+
+def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
+    """``salt2 export --manifest``: print the assembled output manifest and exit.
+
+    Returns
+    -------
+    int
+        0 on success (errors raise `GraphError`, handled by `main`).
+    """
+    config_paths = _resolve_config_paths(parsed)
+    cli = _run_free_cli(config_paths, parsed.set_overrides)
+    export_cfg = cli._get(cli.config_init, "export") or ExportConfig()  # noqa: SLF001 - main.py precedent
+    if parsed.name is not None:
+        export_cfg.model_name = parsed.name
+    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
+    outputs = _writer_manifest_from_cli(cli)
+    if not export_cfg.inputs:
+        # the manifest needs no inputs: --manifest must work on configs that
+        # have not declared export.inputs yet (outputs derive from writers
+        # alone), so a throwaway input satisfies the export-half resolution
+        # for this print-only path
+        export_cfg = replace(export_cfg, inputs=[ExportInput(port="inputs.placeholder")])
+    resolved = attach_manifest(resolve_export_config(export_cfg, run_name), outputs)
+    print(manifest_table(resolved))
+    return 0
+
+
 def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdapter]:
-    """The CLI export flow: parse config, load checkpoint, export.
+    """The CLI export flow: parse config, derive manifest, load checkpoint, export.
 
     Returns
     -------
@@ -547,36 +690,33 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     Raises
     ------
     ConfigError
-        On a missing config / export block, or schema drift.
+        On a missing config / export block, a config-declared
+        ``export.outputs`` (the M4.5 migration error), or schema drift.
     FileExistsError
         On an existing output without ``--overwrite``.
     """
     from salt.core.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
 
     ckpt_path: Path = parsed.ckpt_path
-    config_paths: list[Path] = list(parsed.config or [])
-    if not config_paths:
-        inferred = ckpt_path.parents[1] / "config.yaml"  # to_onnx.py:629-631
-        if not inferred.is_file():
-            raise ConfigError(f"could not find a run config at {inferred} — pass --config")
-        config_paths = [inferred]
-    # the FIRST config is the run config: it anchors the default output path,
-    # metadata.yaml lookup and the embedded config.yaml payload; later -c
-    # files deep-merge overrides on top (the fit stacking semantics)
+    config_paths = _resolve_config_paths(parsed)
     config_path = config_paths[0]
     cli = _run_free_cli(config_paths, parsed.set_overrides)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - the main.py _get precedent
     if export_cfg is None:
         raise ConfigError(
-            f"config {config_path} has no export: block — declare export.inputs/outputs "
-            "(design §5.1) in the run config, or stack an override file carrying only the "
-            f"export: block as a second config:\n  salt2 export --ckpt_path {ckpt_path} "
+            f"config {config_path} has no export: block — declare export.inputs (and "
+            "optionally model_name/rename/combine; outputs derive from the writers, M4.5) "
+            "in the run config, or stack an override file carrying only the export: block "
+            f"as a second config:\n  salt2 export --ckpt_path {ckpt_path} "
             f"-c {config_path} -c my_export_block.yaml"
         )
     if parsed.name is not None:
         export_cfg.model_name = parsed.name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     variables = _features_variables(cli)
+    # the writer-derived output manifest (M4.5 unified manifest) — assembled
+    # BEFORE the checkpoint load so config errors stay cheap
+    outputs = _writer_manifest_from_cli(cli)
     # data-less checkpoint load: binds from the stored salt_core schema
     # BEFORE the strict state-dict load (saltmodule.py:861-893)
     model = SaltModule.load_from_checkpoint(
@@ -585,7 +725,8 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         map_location=torch.device("cpu"),
         weights_only=False,  # pytorch 2.6+ default flip (v1 to_onnx.py:666)
     )
-    resolved = resolve_export_config(export_cfg, run_name)
+    resolved_half = resolve_export_config(export_cfg, run_name)
+    resolved = attach_manifest(resolved_half, outputs)
     _cross_check_schema(model, resolved, variables)
     onnx_path: Path = parsed.output or (config_path.parent / "network.onnx")
     if onnx_path.exists() and not parsed.overwrite:
@@ -593,13 +734,15 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     print("-" * 100)
     print(f"Converting model to ONNX (model_name={resolved.model_name})...")
     print("-" * 100)
+    print(manifest_table(resolved))
     with open(config_path) as fh:
         config_payload = yaml.safe_load(fh) or {}
     result = export_graph(
         model._graph_modules,  # noqa: SLF001 - same-package adapter
-        resolved,
+        resolved_half,  # export_graph re-resolves + attaches (outputs= below)
         variables,
         onnx_path,
+        outputs=outputs,
         run_name=run_name,
         config=config_payload,
         run_metadata=load_run_metadata(config_path),

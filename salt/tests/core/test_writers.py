@@ -314,6 +314,38 @@ class TestWriterCallback:
         assert shapes["tracks"] == (N_JETS, L_FILE)
         cb.writers["inputs_copy"].finalize()
 
+    def test_runtime_stub_backstop_in_merge_columns(self, data, modules):
+        # M4.5 merge condition 3, the RUNTIME half (fix-stage regression):
+        # a writer that slips past the static role check (it declares TEST
+        # requires) but produces NO columns while declaring ONNX outputs
+        # must hit the explicit stub error at column merge — never a silent
+        # zero-contribution fall-through
+        from salt.core.onnx.config import ExportOutput
+
+        class RuntimeStub(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"meta.rows": TensorSpec(shape=(2,), dtype="int64", kind="meta")}
+
+            def columns(self, ctx):
+                del ctx
+                return {}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+            def onnx_outputs(self, ctx):
+                del ctx
+                return [ExportOutput(port="pooled.global", names=["s0", "s1"])]
+
+        cb = WriterCallback(modules={"tasks": TaskWriter(), "stub": RuntimeStub()})
+        ctx = write_ctx(data, modules)
+        for writer in cb.writers.values():
+            writer.setup(ctx)
+        with pytest.raises(ConfigError, match="export-only stub shape"):
+            cb._merge_columns(ctx)
+
 
 # ---------------------------------------------------------------------------
 # end to end: salt2 fit -> salt2 test on the dummy config (design §9.5 M3)

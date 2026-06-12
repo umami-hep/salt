@@ -1,15 +1,42 @@
-"""Writer-side base class and contexts (design §2.7, §8).
+"""Writer-side base class and contexts (design §2.7, §8; M4.5 unified manifest).
 
-A `Writer` is a TEST-mode graph *sink*: it declares the bundle keys it
-consumes (`Writer.requires` — kind-typed `TensorSpec`s, exactly like a
-module's ``declare_io``) and turns each test batch into structured-array
-columns for the shared H5 sink owned by
-`salt.core.writers.callback.WriterCallback`. Because the requires are
-declared statically, demand-gating works end to end: writer-demanded keys
-keep their producers alive in the TEST plan, dataset-served keys (labels,
-masks, ``meta.rows``) flow into the boundary demand, and a produced
-``preds.*`` key no writer consumes is a hard `ConfigError` (design §4.2, §8
-— wired in `salt.core.saltmodule.SaltModule._model_sinks`).
+A `Writer` is the SINGLE output manifest of a salt2 model, with one role
+per output mode (the M4.5 amendment, ``amendment-unified-writers.md``):
+
+- **TEST — the writer executes** (unchanged from M3): it declares the
+  bundle keys it consumes (`Writer.requires` — kind-typed `TensorSpec`s,
+  exactly like a module's ``declare_io``) and turns each test batch into
+  structured-array columns for the shared H5 sink owned by
+  `salt.core.writers.callback.WriterCallback`. Because the requires are
+  declared statically, demand-gating works end to end: writer-demanded keys
+  keep their producers alive in the TEST plan, dataset-served keys (labels,
+  masks, ``meta.rows``) flow into the boundary demand, and a produced
+  ``preds.*`` key no writer consumes is a hard `ConfigError` (design §4.2,
+  §8 — wired in `salt.core.saltmodule.SaltModule._model_sinks`).
+- **ONNX — the writer is read, never run**: `Writer.onnx_outputs` declares
+  the writer's export-manifest entries as M4 `ExportOutput` objects
+  (amendment merge condition 2 — no parallel type), and the exporter
+  assembles ``export.outputs`` from them. ONNX demand derives from the
+  manifest (``{o.port for o in onnx_outputs(ctx)}``) — one demand mechanism
+  in both output modes. **Export = reduces only: ``write()`` never traces
+  and never runs inside Athena** (amendment cost 1) — the manifest is
+  declarative precisely because arbitrary ``write()`` numpy cannot enter
+  the traced graph. Export math comes from the SHIPPED reduce registry
+  (``salt.core.onnx.config.KNOWN_REDUCES``: ``split_scalars``, ``argmax``,
+  ``vertex_union_find`` — implemented in ``salt.core.onnx.reduces``); a
+  public registration surface for CUSTOM reduces is an M5 deliverable, so
+  until it lands writers compose the shipped reduces only.
+
+Both directions of mode-narrowing are first-class (amendment merge
+condition 3): a writer that never overrides `Writer.onnx_outputs` is
+**eval-only** (the default — `InputCopyWriter`, `PadMaskWriter`, truth
+columns; ``TaskWriter(onnx=false)`` narrows per instance), and
+`ExportOnlyWriter` is THE blessed **export-only** pattern (non-empty
+manifest, no TEST role, explicit ``export_only`` flag). A writer with
+neither role is a `ConfigError` (design principle 10 extended to writers).
+Naming: writers declare logical *suffixes* (`salt.core.writers.names`);
+TEST prefixes with the run name, ONNX with ``export.model_name``
+(amendment §5).
 
 Design-deviation note: §2.7 sketches ``columns(schema: ResolvedSchema)``.
 The implemented signature is ``columns(ctx: WriteCtx)`` — writers need
@@ -41,8 +68,9 @@ import numpy as np
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import GraphModule, TensorSpec
+from salt.core.onnx.config import ExportOutput
 
-__all__ = ["WriteCtx", "Writer", "WriterDeclareCtx", "task_modules"]
+__all__ = ["ExportOnlyWriter", "WriteCtx", "Writer", "WriterDeclareCtx", "task_modules"]
 
 _UNNAMED = "unnamed"
 
@@ -159,22 +187,37 @@ class WriteCtx:
 
 
 class Writer(ABC):
-    """Test-time sink module: bundle keys in, structured-array columns out (design §2.7).
+    """The single output manifest: executes in TEST, is read in ONNX (design §2.7, M4.5).
 
     Writers are plain config-constructed objects (no parameters, not
     ``nn.Module``); jsonargparse instantiates them from the top-level
     ``writers.modules`` dict (design §5.1) and `WriterCallback` drives the
-    lifecycle: ``requires`` (static, demand wiring) -> ``setup`` ->
+    TEST lifecycle: ``requires`` (static, demand wiring) -> ``setup`` ->
     ``columns`` (file created before the first batch) -> ``write`` per
-    batch -> ``finalize``.
+    batch -> ``finalize``. In ONNX mode NOTHING here runs — the exporter
+    only *reads* `onnx_outputs` (and `WriterCallback` assembles the
+    declarations into the export manifest, M4.5 amendment §2/§4).
 
     Custom writers are the user story for "I want a new column": subclass,
     declare requires, return a structured array per stream, and add four
-    YAML lines under ``writers.modules`` (design §8).
+    YAML lines under ``writers.modules`` (design §8). To additionally
+    export, override `onnx_outputs` with ports + suffixes + a SHIPPED
+    reduce (``salt.core.onnx.config.KNOWN_REDUCES``; custom reduce
+    registration is an M5 deliverable) — ``write()`` is numpy and never
+    traces (amendment cost 1).
     """
 
     name: str = _UNNAMED
     """Instance name — assigned from the ``writers.modules`` config key."""
+
+    export_only: bool = False
+    """The explicit export-only flag (amendment merge condition 3).
+
+    False (default) for every writer with a TEST role. A writer whose TEST
+    role is empty but whose ONNX manifest is not MUST set this flag — the
+    blessed spelling is subclassing `ExportOnlyWriter` — or writer-role
+    validation raises a `ConfigError` (the stub shape is never implicit).
+    """
 
     @abstractmethod
     def requires(self, ctx: WriterDeclareCtx) -> dict[str, TensorSpec]:
@@ -237,5 +280,139 @@ class Writer(ABC):
     def finalize(self) -> None:  # noqa: B027 - intentional optional hook (default no-op)
         """Release any per-run resources (default: no-op)."""
 
+    # -- ONNX role: declarative only, never executed (M4.5 amendment §2.1) ------
+
+    def onnx_outputs(self, ctx: WriterDeclareCtx) -> list[ExportOutput]:
+        """The writer's ONNX-manifest entries (M4's `ExportOutput`, condition 2).
+
+        Default: the writer does not exist in the ONNX graph — the
+        eval-only direction (`InputCopyWriter`, `PadMaskWriter`, truth
+        columns; amendment §3). Static and config-only (`WriterDeclareCtx`)
+        so export-on-a-laptop (design §2.3, §7 step 1) is preserved by
+        construction. Entries carry logical SUFFIXES (``name``/``names``);
+        the exporter prefixes ``{export.model_name}_`` (amendment §5 rule
+        3) — writers never see the Athena name.
+
+        Parameters
+        ----------
+        ctx : WriterDeclareCtx
+            Model module dict + reader stream info (the same context
+            `requires` receives).
+
+        Returns
+        -------
+        list[ExportOutput]
+            The manifest entries, in this writer's output order.
+        """
+        del ctx
+        return []
+
+    def column_manifest(self, ctx: WriterDeclareCtx, run_name: str) -> dict[str, list[str]]:
+        """Statically-derivable TEST column names per stream (design §4.4 annotation).
+
+        The eval half of the ``salt2 graph resolve [--annotate]`` manifest
+        annotation (amendment merge condition 8): writers that can name
+        their eval columns from config alone override this; file-dependent
+        writers (`InputCopyWriter` — columns ride from the source file)
+        keep the empty default and are annotated as file-dependent. This is
+        documentation surface ONLY — the binding TEST schema remains
+        `columns` (checked against this in the U1 manifest-coherence gate).
+
+        Parameters
+        ----------
+        ctx : WriterDeclareCtx
+            Model module dict + reader stream info.
+        run_name : str
+            The run ``name:`` — the TEST column prefix (amendment §5
+            rule 2).
+
+        Returns
+        -------
+        dict[str, list[str]]
+            ``{stream: [column names]}`` (empty by default).
+        """
+        del ctx, run_name
+        return {}
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r})"
+
+
+class ExportOnlyWriter(Writer):
+    """THE export-only writer pattern (M4.5 amendment merge condition 3 — blessed).
+
+    A writer that exists ONLY in the ONNX manifest: no TEST demand, no
+    eval columns, nothing written — `onnx_outputs` is its single role.
+    Use it to declare an Athena output with no eval analogue (the inverse
+    of the default eval-only direction). Subclass and override
+    `onnx_outputs` only — e.g. echoing the normalised global features as
+    extra Athena outputs (run verbatim in ``test_manifest.py`` and, at
+    export scale, in the U1 gate):
+
+    .. code-block:: python
+
+        class JetEcho(ExportOnlyWriter):
+            def onnx_outputs(self, ctx):
+                # split_scalars: one float32 output per suffix; the suffix
+                # count must match the port's feature count
+                return [ExportOutput(port="normed.jets", names=["jetEcho0", "jetEcho1"])]
+
+    The ``export_only`` flag is what blesses the shape: a hand-rolled
+    writer with empty ``columns()`` and a non-empty manifest WITHOUT the
+    flag is rejected by writer-role validation (`WriterCallback`) — the
+    cargo-cult stub is never silently legal. Remember the export contract:
+    the output math is the entry's ``reduce``, which must name a SHIPPED
+    registry key — ``split_scalars`` (the ``names:`` default), ``argmax``
+    or ``vertex_union_find`` (``salt.core.onnx.config.KNOWN_REDUCES``);
+    there is no ``write()`` to put custom math in, and a public
+    ``register_reduce`` surface for custom export math is an M5
+    deliverable. One more rule of the manifest: one writer owns one export
+    port — re-exporting a port another writer already declares (e.g. a
+    ``preds.*`` key the `TaskWriter` exports) needs that writer narrowed
+    first (``onnx_tasks``/``onnx_streams``).
+    """
+
+    export_only: bool = True
+
+    def requires(self, ctx: WriterDeclareCtx) -> dict[str, TensorSpec]:
+        """No TEST demand — export-only writers never join the TEST plan.
+
+        Returns
+        -------
+        dict[str, TensorSpec]
+            Always empty.
+        """
+        del ctx
+        return {}
+
+    def columns(self, ctx: WriteCtx) -> dict[str, np.dtype]:
+        """No eval columns.
+
+        Returns
+        -------
+        dict[str, np.dtype]
+            Always empty.
+        """
+        del ctx
+        return {}
+
+    def write(self, bundle: Bundle, rows: slice) -> dict[str, np.ndarray]:
+        """Nothing to write (and never called: no columns were declared).
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            Always empty.
+        """
+        del bundle, rows
+        return {}
+
+    @abstractmethod
+    def onnx_outputs(self, ctx: WriterDeclareCtx) -> list[ExportOutput]:
+        """The export-manifest entries — the writer's single role.
+
+        Returns
+        -------
+        list[ExportOutput]
+            Must be non-empty (a both-empty writer violates principle 10).
+        """

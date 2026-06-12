@@ -135,15 +135,17 @@ model:
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
 
-export: # consumed by `salt2 export` (design §5.1, §7); inert during fit/test
+export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: GN2v2opendata # Athena name: no '_'/'-' (validated at export only)
   inputs:
     - { port: inputs.jets, name: jet_features } # [1, F] global
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  outputs:
-    - { port: preds.jets.jets_classification, names: [pb, pc, pu, ptau] } # open-data 4-class head
-    - { port: preds.tracks.track_origin, name: TrackOrigin, dtype: int8, reduce: argmax }
-    - { port: preds.tracks.track_vertexing, name: VertexIndex, dtype: int8, reduce: vertex_union_find }
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
+  # default TaskWriter declares GN2v2opendata_pb/_pc/_pu/_ptau (split_scalars
+  # from the open-data 4-class head's class_names — reorder/extend the classes
+  # and eval columns AND ONNX outputs move together), _TrackOrigin (argmax
+  # int8) and _VertexIndex (vertex_union_find int8). Inspect with
+  # `salt2 export --manifest` or `salt2 graph resolve [--annotate]`.
 
 trainer:
   max_epochs: 40

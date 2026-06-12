@@ -421,14 +421,18 @@ class SaltModule(lightning.LightningModule):
         list[str]
             ``["loss.total"]`` in FIT/VAL. In TEST with a writer callback
             (attached or passed), the writer-demanded model-produced keys —
-            demand-gating proper (design §8); without writers (programmatic
-            ``Trainer.test``) and in ONNX, every declared ``preds.*`` key in
-            declaration order (the M2 behaviour). NOTE: the design §3.1
-            ONNX sinks (the ``export.outputs`` ports) are derived OUTSIDE
-            this method — `salt.core.onnx.export.compile_onnx_plan` on the
-            export path and `salt.core.cli._load_fit_config` on the static
-            path (M4-review fix); the all-preds ONNX fallback here serves
-            only configs without an ``export:`` block.
+            demand-gating proper (design §8). In ONNX with a writer
+            callback, the union of the writers' declared manifest ports
+            (``WriterCallback.onnx_manifest`` — the M4.5 unified manifest:
+            ONE demand mechanism in both output modes, amendment §4); the
+            export path's `salt.core.onnx.export.compile_onnx_plan` anchors
+            on the same manifest. Without writers (programmatic
+            ``Trainer.test``, toy configs), every declared ``preds.*`` key
+            in declaration order (the M2 fallback). Note the asymmetry, by
+            design: TEST narrowing trips the dead-preds hard error (an
+            eval column silently dropped is a bug), ONNX narrowing is
+            legitimate (the Athena surface is narrower than eval —
+            ``onnx_streams``/``onnx_tasks``).
 
         Raises
         ------
@@ -465,6 +469,13 @@ class SaltModule(lightning.LightningModule):
                         "produces — check writers.modules (design §8)"
                     )
                 return consumed
+        if mode is Mode.ONNX:
+            if writers is None or reader is None:
+                writers, reader = self._attached_writer()
+            if writers is not None and callable(getattr(writers, "onnx_manifest", None)):
+                manifest = writers.onnx_manifest(self._graph_modules, reader)
+                if manifest:
+                    return [out.port for out in manifest]
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "

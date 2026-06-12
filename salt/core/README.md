@@ -84,7 +84,12 @@ model:
 All existing modules survive the merge; the new task's label is demanded
 from the dataset automatically and its loss joins `loss.total` via the
 `losses.**` collection (design §3.3) — and the default `TaskWriter`
-(streams=null) persists its predictions in eval automatically (design §8).
+(streams=null, onnx=true) persists its predictions in eval AND declares
+its ONNX output (`{model_name}_TrackType`, argmax int8) automatically —
+zero extra config, the M4.5 unified-manifest journey. If the aux head is
+a training-time regulariser that must NOT reach Athena, narrow the export
+surface explicitly (`onnx_tasks:`/`onnx: false` on the TaskWriter) and
+check with `salt2 export --manifest`.
 
 ## Evaluation: `salt2 test` + prediction writers (design §8)
 
@@ -101,7 +106,8 @@ test file per call; logger off; single device forced. Without `--ckpt_path`
 the v1 best-epoch glob picks the lowest `loss=` checkpoint from `ckpts/`
 (v1 runs) or `checkpoints/` (v2 runs — `base2.yaml` names files
 `epoch=NNN-loss=<val/loss>.ckpt` so the glob matches by construction) next
-to the single `--config`. The output is ONE H5 next to the checkpoint:
+to the single `--config` — when stacking a second `--config`, pass
+`--ckpt_path` explicitly (the glob needs exactly one config to anchor on). The output is ONE H5 next to the checkpoint:
 `{ckpt_dir}/{ckpt_stem}__test_{sample}.h5` (`{sample}` from the v1
 test-file stem heuristic + `--data.test_suff`); the test plan/graph
 artifacts are written into the same directory.
@@ -130,6 +136,65 @@ The same error fires statically from `salt2 graph validate`/`deadcode`.
 Deleting all writers is refused on the `salt2 test` path. A train-only aux
 task currently needs `--model.modules.<task>=null` on the test invocation
 (the design §4.2 per-task `expose: [fit, val]` opt-out is an M5 deferral).
+
+### Writers are the SINGLE output manifest (M4.5 unified manifest)
+
+Since the M4.5 amendment, the same writer declarations drive BOTH output
+modes — **TEST executes, ONNX declares**:
+
+- **TEST**: exactly as above — `requires`/`columns`/`write` run per batch.
+- **ONNX**: the writer is *read, never run* — `Writer.onnx_outputs(ctx)`
+  returns its export-manifest entries (M4 `ExportOutput` objects:
+  port + logical suffix(es) + registered reduce), and `salt2 export`
+  assembles `export.outputs` from them. There is no `export.outputs`
+  config section anymore (declaring one is a hard error pointing here).
+
+Naming policy (amendment §5): writers declare logical **suffixes**; the
+TEST column is `{run_name}_{suffix}` and the ONNX output is
+`{export.model_name}_{suffix}` — one declaration, two prefixes. For
+classification the suffix list is literally the `class_names`-derived list
+both modes share, so reordering classes moves eval columns AND Athena
+outputs together (the v1 eval-vs-ONNX vertex-naming drift class is
+unrepresentable). Cross-mode suffix constants live in
+`salt.core.writers.names` (`VERTEX_INDEX` shared; the MaskFormer
+`OBJECT_INDEX` MaskIndex/HadronIndex pair is a pinned, documented v1
+divergence M5 must import).
+
+Per-writer ONNX participation (`TaskWriter`):
+
+```yaml
+writers:
+  modules:
+    tasks:
+      class_path: salt.core.writers.TaskWriter
+      init_args:
+        onnx: true                       # default — eval-only with false
+        onnx_streams: [jets, tracks]     # stream-grained narrowing
+        onnx_tasks: [jets_classification, track_vertexing]  # task-grained
+        onnx_names: {track_origin: TrackLabel,              # str: aux rename
+                     jets_classification: [pb, pcharm, plight]}  # list: per-class
+```
+
+`InputCopyWriter`/`PadMaskWriter` are **eval-only** by design (Athena
+feeds the inputs; a pad-mask output has no consumer). The **export-only**
+direction is `salt.core.writers.ExportOnlyWriter`: subclass it and
+override `onnx_outputs` only — that explicit base class (the
+`export_only` flag) is THE blessed way to declare an Athena output with
+no eval analogue; a hand-rolled empty-columns writer with export entries
+is rejected, as is a writer with no role in either mode. **Export math is
+reduces only**: a custom writer's `write()` numpy never traces and never
+runs inside Athena, and every manifest entry names a reduce from the
+SHIPPED registry — `split_scalars`, `argmax`, `vertex_union_find`
+(`salt.core.onnx.config.KNOWN_REDUCES`, implemented in
+`salt.core.onnx.reduces`). A public registration surface for custom
+reduces is an M5 deliverable; until it lands, export-only writers compose
+the shipped reduces only.
+
+The assembled ONNX manifest is a FLAT namespace: two writers declaring
+one suffix is a hard error naming both (fix via `onnx_names:` or
+`export.rename:`). Inspect everything with `salt2 export --manifest`,
+`salt2 graph resolve [--annotate]`, or the manifest table appended to the
+export-time `plan_onnx.txt`.
 
 ### Add a custom output column (design §8)
 
@@ -166,6 +231,11 @@ writers:
     first_d0: {class_path: my_writer.FirstTrackD0Writer}
 ```
 
+When stacking a second `--config` on `salt2 test`, pass `--ckpt_path`
+explicitly: the best-checkpoint glob needs exactly ONE `--config` (it
+looks next to the saved run config), so the no-`--ckpt_path` shortcut and
+config stacking are mutually exclusive.
+
 Notes for writer authors:
 
 - **Importability**: `class_path` is resolved with a normal import, so the
@@ -190,7 +260,11 @@ Notes for writer authors:
 All `salt2 graph` subcommands accept BOTH the trainer configs above and the
 small M1 toy-graph format, and never touch data. Saved run `config.yaml`
 files round-trip directly (`salt2 graph plot -c <run_dir>/config.yaml ...`
-— the run-surface `ckpt_path` key is accepted and ignored). The parsed
+— the run-surface `ckpt_path` key is accepted and ignored). `-c` is
+**repeatable** for trainer configs with the fit/export deep-merge semantics
+— the base + override pattern (e.g. the add-an-aux-task journey above) is
+statically inspectable without a prior fit; with `--annotate` the comment
+block goes into the LAST `-c` file. The parsed
 `writers:` block enters the static TEST graph exactly as at runtime, so
 `validate`/`deadcode` fire the dead-preds error for a narrowed writer set
 before anything runs:
@@ -217,22 +291,32 @@ covering every module before any value is materialised. Unconsumed
 case, design §3.3) and never promoted, so `--strict` passes on a standard
 tagger config.
 
-**ONNX mode checks the `export:` block** (design §3.1/§4.1): when a trainer
-config carries one, the static ONNX sinks are the `export.outputs` ports
-(not all `preds.*`) and the block is validated exactly as `salt2 export`
-does — a typo'd export port fails the ONNX compile citing `export.outputs`
-with did-you-mean suggestions, and an invalid `export.model_name` (`_`/`-`)
-is an error-level `validate` finding (`plan`/`plot`/`why --mode onnx` raise
-it). A trainer config **without** an export block falls back to
-anchor-on-all-preds with a WARNING that the ONNX contract was not checked
-(promoted under `--strict` — the §9.3 converter CI gate expects converted
-configs to carry the block). Predictions excluded from `export.outputs`
+**ONNX mode checks the unified manifest** (design §3.1/§4.1; M4.5): the
+static ONNX sinks are the union of the writers' declared `onnx_outputs`
+ports — exactly what `salt2 export` will trace — with errors attributed to
+the declaring writer (`writers.modules.<name>`). The export-only half of
+the `export:` block is validated as `salt2 export` does: an invalid
+`export.model_name` (`_`/`-`) is an error-level `validate` finding
+(`plan`/`plot`/`why --mode onnx` raise it), `rename:`/`combine:` are
+checked against the assembled manifest, and a legacy config still carrying
+`export.outputs` fails with the M4.5 migration error. A trainer config
+without an `export:` block keeps the writer-derived sinks but WARNS that
+inputs/model_name were unchecked (promoted under `--strict` — the §9.3
+converter CI gate expects converted configs to carry the block).
+Predictions narrowed out of the manifest (`onnx_streams`/`onnx_tasks`)
 show up as info-level ONNX deadcode findings (the §4.2 export-pruning
 story). Note the static ONNX plan/plot remain the **dataset-fed
 approximation** (reader/features included, no reduces); the authoritative
 rendering of the traced graph is the `plan_onnx.txt` that `salt2 export`
 writes next to `network.onnx` — the two plan hashes legitimately differ,
 and the CLI prints this caveat on `plan`/`plot --mode onnx`.
+
+**`salt2 graph resolve -c <cfg> [--annotate]`** prints the writer-derived
+output manifest — eval columns per writer/stream AND the full ONNX output
+list (names, dtypes, reduces/combines) — and with `--annotate` writes it
+into the config as a refreshable comment block (the §4.4 labels precedent
+extended to the Athena surface): a reader of the YAML always sees what
+eval writes and what Athena gets, without running anything.
 
 `salt2 graph plot` renders with **matplotlib** (layered topological DAG,
 namespace-coloured modules — the salt container has no graphviz binary) and
@@ -317,9 +401,18 @@ salt2 export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
 # my_export_block.yaml carries ONLY the export: block below
 ```
 
-Everything Athena-facing is declared in the **`export:` block** (top-level,
-shipped in the gn2v2 configs; parsed by the normal salt2 surface so it
-round-trips through saved run configs):
+The export contract has two halves (M4.5 unified manifest, "one manifest
+and a half"):
+
+1. **The outputs come from the writers** (the same declarations that name
+   the eval columns — see the writers section above). There is NO
+   `export.outputs` section: a config declaring one fails with the M4.5
+   migration error. Inspect the assembled manifest any time with
+   `salt2 export --manifest -c <config>` (no checkpoint needed) or
+   `salt2 graph resolve [--annotate]`.
+2. **The export-only half** lives in the **`export:` block** (top-level,
+   shipped in the gn2v2 configs; parsed by the normal salt2 surface so it
+   round-trips through saved run configs):
 
 ```yaml
 export:
@@ -328,26 +421,37 @@ export:
   inputs:
     - { port: inputs.jets, name: jet_features } # [1, F] global
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  outputs:
-    - { port: preds.jets.jets_classification, names: [pb, pc, pu] } # -> GN2v2_pb, ...
-    - { port: preds.tracks.track_origin, name: TrackOrigin, dtype: int8, reduce: argmax }
-    - { port: preds.tracks.track_vertexing, name: VertexIndex, dtype: int8, reduce: vertex_union_find }
+  # optional Athena-presentation post-processing of the writer manifest
+  # (the v1 --rename/--combine_outputs features — readers of exotic
+  # configs consult the writers AND these two keys):
+  rename: { pu: plight } # old suffix -> new (existence-checked)
+  combine: # new output = sum(scale * existing GLOBAL output)
+    - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
 ```
 
 How it works (no data file is touched — config + checkpoint only):
 
-- The **ONNX plan** is compiled with the `export.outputs` ports as sinks —
-  labels/losses/writers are demand-pruned automatically; sources mirror the
-  `Features` declaration (widths/columns from `variables:`).
+- The **ONNX plan** is compiled with the writer-manifest ports as sinks —
+  labels/losses/the writers' own TEST role are demand-pruned
+  automatically; sources mirror the `Features` declaration
+  (widths/columns from `variables:`).
 - The **`OnnxAdapter`** wrapper assembles the bundle in-graph (sequences
   `[L, F]` -> `[1, L, F]` + all-valid pad masks — the v1 traced pattern),
   executes the frozen plan, and emits the flat output tuple. Every module
   recursively receives `set_export_mode()` (the encoder forces torch-math
   attention — the Athena-agreement requirement).
 - **Reduces** (`split_scalars`, `argmax`, `vertex_union_find`) generate the
-  output names/dtypes/dynamic axes from the config; union-find runs INSIDE
-  the traced graph on the raw edge scores the vertexing task publishes in
-  ONNX mode (design §3.3 per-family exception). MaskFormer reduces are M5.
+  output names/dtypes/dynamic axes from the manifest entries; union-find
+  runs INSIDE the traced graph on the raw edge scores the vertexing task
+  publishes in ONNX mode (design §3.3 per-family exception). MaskFormer
+  reduces are M5.
+- **`rename:`/`combine:`** post-process the manifest with v1 semantics:
+  renames apply first (existence-checked), combined outputs are linear
+  combinations of the (renamed) GLOBAL float outputs computed inside the
+  traced graph, and they insert after the global entries but BEFORE the
+  per-token aux entries — the v1 output order (`to_onnx.py:258-292`,
+  `combine_insertion_index`). Both are recorded in `gnn_config`
+  byte-compatibly with v1 (`combine_outputs`/`rename_outputs`).
 - **Multi-stream trace-safety** (design risk 7, adjudicated): eager `Split`
   slicing is wrong under tracing with ≥2 dynamic sequence axes; in ONNX
   mode `Concat` publishes a `seq.offsets` boundary tensor and `Split`
@@ -367,23 +471,21 @@ How it works (no data file is touched — config + checkpoint only):
   exercised on a real GN3 model in M5.
 - **Artifacts**: alongside `network.onnx` the exporter writes
   `plan_onnx.txt` — the §4.4 plan table of the graph Athena will actually
-  run (union-find placement, `Split` `index_select` mechanism). This is the
-  authoritative ONNX plan; `salt2 graph plan --mode onnx` shows the
-  dataset-fed static approximation.
+  run (union-find placement, `Split` `index_select` mechanism) PLUS the
+  writer-derived output-manifest table. This is the authoritative ONNX
+  plan; `salt2 graph plan --mode onnx` shows the dataset-fed static
+  approximation.
 - **Expected console output**: a clean export prints NO trace warnings.
   The torch `aten::index ... indices of type Byte` UserWarning (raised on
   the v1-verbatim bool-mask gathers in the union-find/zero-token tricks,
   identically noisy under v1's exporter) is deliberately suppressed around
   `torch.onnx.export` — the default-on sweep checker (incl. L=0) is the
   proof the traced graph is correct.
-- **Known gaps**: v1's `--combine_outputs`/`--rename` CLI features have no
-  v2 config surface yet (`gnn_config` hardcodes `combine_outputs: []`,
-  `rename_outputs: {}`) — exports of v1 models that used them cannot be
-  reproduced; the M7 converter must hard-error on configs carrying either
-  (tracked in `salt/core/onnx/metadata.py`).
 
 Programmatic surface for gates/tests (no checkpoint needed):
-`salt.core.onnx.export_graph(modules, export_cfg, variables, path)` +
+`salt.core.onnx.export_graph(modules, export_cfg, variables, path,
+outputs=<manifest>)` (`outputs` = the writer-derived `ExportOutput` list,
+e.g. `WriterCallback.onnx_manifest(...)` or `gates_m4.writer_manifest`) +
 `salt.core.onnx.check_onnx(adapter, path, ...)`.
 
 ## Checkpoints and resume (design §2.3)

@@ -28,7 +28,12 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.executor import Executor
 from salt.core.graph.planner import Plan
 from salt.core.graph.spec import Mode
-from salt.core.onnx.config import ExportConfig, ExportInput, stream_of_input_port
+from salt.core.onnx.config import (
+    ExportConfig,
+    ExportInput,
+    ordered_output_names,
+    stream_of_input_port,
+)
 from salt.core.onnx.reduces import BoundReduce, ReduceCtx, bind_reduce
 
 __all__ = ["OnnxAdapter"]
@@ -118,6 +123,23 @@ class OnnxAdapter(nn.Module):
             produced_specs=produced_specs,
         )
         self._reduces: list[BoundReduce] = [bind_reduce(out, ctx) for out in export.outputs]
+        # export.combine post-processing (M4.5 amendment merge condition 5):
+        # combined outputs are linear combinations of the reduced GLOBAL
+        # outputs (v1 to_onnx.py:404-412), inserted into the flat output
+        # order by `ordered_output_names` — after the global entries,
+        # BEFORE the first per-token aux entry (the v1 insertion rule,
+        # to_onnx.py:272-292)
+        self._combines: list[tuple[str, list[tuple[float, str]]]] = [
+            (
+                f"{self.model_name}_{entry.name}",
+                [
+                    (float(scale), f"{self.model_name}_{suffix}")
+                    for suffix, scale in entry.inputs.items()
+                ],
+            )
+            for entry in export.combine
+        ]
+        self._ordered = ordered_output_names(export)
         # the formal export-mode protocol (design §7.2): every module
         # recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math (modelwrapper.py:331-335,
@@ -140,14 +162,18 @@ class OnnxAdapter(nn.Module):
 
     @property
     def output_names(self) -> list[str]:
-        """The flat ONNX output names, in ``export.outputs`` order.
+        """The flat ONNX output names, in manifest order (combines inserted).
 
         Returns
         -------
         list[str]
-            The generated names (``{model_name}_{suffix}``).
+            The generated names (``{model_name}_{suffix}``), ordered by
+            `salt.core.onnx.config.ordered_output_names` — the single
+            ordering authority shared with the metadata and the manifest
+            table (combined outputs before the per-token aux entries, v1
+            ``to_onnx.py:258-292``).
         """
-        return [name for reduce in self._reduces for name in reduce.output_names]
+        return [name for name, _, _ in self._ordered]
 
     @property
     def output_dtypes(self) -> list[str]:
@@ -158,7 +184,7 @@ class OnnxAdapter(nn.Module):
         list[str]
             ``"float32"`` / ``"int8"`` per output.
         """
-        return [dtype for reduce in self._reduces for dtype in reduce.dtypes]
+        return [dtype for _, dtype, _ in self._ordered]
 
     @property
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
@@ -245,10 +271,14 @@ class OnnxAdapter(nn.Module):
             else:
                 b.set(entry.port, source.index_select(-1, getattr(self, f"_alias_index_{i}")))
         b = self._executor.run(b)
-        outputs: list[Tensor] = []
+        named: dict[str, Tensor] = {}
         for reduce in self._reduces:
-            outputs.extend(reduce.fn(b))
-        return tuple(outputs)
+            named.update(zip(reduce.output_names, reduce.fn(b), strict=True))
+        # combined outputs from the already-reduced tensors — the exact v1
+        # expression (sum of scale * output, to_onnx.py:404-412)
+        for combo_name, terms in self._combines:
+            named[combo_name] = sum(scale * named[source] for scale, source in terms)
+        return tuple(named[name] for name, _, _ in self._ordered)
 
     # -- helpers -----------------------------------------------------------------
 

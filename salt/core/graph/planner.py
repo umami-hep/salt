@@ -178,7 +178,11 @@ class DeadOutput:
     ``preds.*`` port in TEST mode is an ``"error"`` by default (design §4.2 —
     predictions silently vanishing from eval files); an unconsumed
     ``preds.*`` port in FIT/VAL is ``"info"`` (design §3.3 — the normal case
-    of no configured metric callback; never promoted by ``--strict``);
+    of no configured metric callback; never promoted by ``--strict``), as is
+    a module pruned from the ONNX plan (M4.5: the ONNX sinks are the
+    writer-declared manifest ports, and an export surface narrower than
+    eval — ``onnx_streams``/``onnx_tasks`` — is legitimate by design, so
+    ``--strict --mode onnx`` stays usable on narrowed configs);
     everything else is a ``"warning"``. The CLI exits non-zero on any
     error-level finding.
     """
@@ -275,6 +279,10 @@ def deadcode(
     is an ``"error"`` by default — the model computed a prediction and no
     writer will persist it. An unconsumed ``preds.*`` key in FIT/VAL is
     ``"info"`` — the normal case of no configured metric callback (§3.3).
+    A module pruned in ONNX mode is ``"info"`` too (M4.5 unified manifest:
+    ONNX sinks are the writer-declared export-manifest ports, and narrowing
+    the Athena surface below the eval surface is legitimate — the §4.2
+    export-pruning story; never promoted by ``--strict``).
     Everything else is a ``"warning"``.
     TODO(M5): the per-task ``expose:`` opt-out (design §4.2) silences the
     TEST error and prunes the task from the TEST plan; once configured
@@ -293,8 +301,22 @@ def deadcode(
     consumed: dict[str, set[str]] = {}
     for edge in res.edges:
         consumed.setdefault(edge.producer, set()).add(edge.key)
+    # ONNX-mode pruning is the writer-manifest narrowing story (M4.5): the
+    # export surface is explicitly declared and may legitimately be narrower
+    # than eval — info-level, never promoted by --strict (the README/§4.2
+    # export-pruning contract). All other modes keep the warning default.
+    pruned_suffix = (
+        " (narrowed out of the writer-declared export surface — legitimate, M4.5 amendment §4)"
+        if mode == Mode.ONNX
+        else ""
+    )
     out: list[DeadOutput] = [
-        DeadOutput(name, "*", f"module pruned in mode {mode.name}: {res.pruned[name]}")
+        DeadOutput(
+            name,
+            "*",
+            f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}",
+            severity="info" if mode == Mode.ONNX else "warning",
+        )
         for name in sorted(res.pruned)
     ]
     unconsumed_reason = f"produced but never consumed in mode {mode.name}"

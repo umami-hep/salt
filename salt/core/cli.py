@@ -11,7 +11,17 @@ Subcommands (design §4.1-§4.4, §2.6):
 - ``salt2 graph plan     -c cfg.yaml --mode fit``
 - ``salt2 graph plot     -c cfg.yaml --mode fit -o graph.svg``
 - ``salt2 graph why      -c cfg.yaml --mode test --key labels.tracks.origin``
+- ``salt2 graph resolve  -c cfg.yaml [--annotate]`` — the writer-derived
+  output manifest (eval columns + ONNX outputs, M4.5 unified manifest);
+  ``--annotate`` refreshes the §4.4 comment block inside the config
 - ``salt2 schema dump <file.h5> -o schema.yaml``
+
+``-c/--config`` is REPEATABLE on every graph subcommand: trainer configs
+deep-merge left-to-right exactly as on ``salt2 fit``/``salt2 export`` (the
+base + override pattern is statically inspectable without a prior fit;
+M1 toy graphs still take exactly one config). With ``--annotate`` and
+multiple configs, the comment block is written into the LAST (most
+specific) config file.
 
 All graph tooling operates on declarations only: instantiate the config,
 compile plans per mode, analyse — no data, no GPU (design §4). Errors are
@@ -64,6 +74,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -87,7 +98,7 @@ from salt.core.graph.spec import (
     split_key,
     unflatten_spec,
 )
-from salt.core.onnx.config import resolve_export_config
+from salt.core.onnx.config import attach_manifest, manifest_table, resolve_export_config
 from salt.core.render import dot_source, plan_table, render_graph
 from salt.core.schema import dump_schema, load_schema, save_schema
 
@@ -176,7 +187,21 @@ def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> 
         raise ConfigError(f"instantiating {class_path!r} failed: {err}") from err
 
 
-def load_config(path: str | Path, set_overrides: Sequence[str] | None = None) -> GraphConfig:
+def _is_trainer_format(raw: Mapping[str, Any]) -> bool:
+    """Check whether a parsed YAML mapping is a §5.1 trainer config.
+
+    Returns
+    -------
+    bool
+        True for a top-level ``model:``/``data:`` mapping without the M1
+        toy ``modules:`` key.
+    """
+    return "modules" not in raw and ("model" in raw or "data" in raw)
+
+
+def load_config(
+    path: str | Path | Sequence[str | Path], set_overrides: Sequence[str] | None = None
+) -> GraphConfig:
     """Load and instantiate a graph config (both formats — module docstring).
 
     A top-level ``model:``/``data:`` mapping is a §5.1 trainer config and is
@@ -187,8 +212,11 @@ def load_config(path: str | Path, set_overrides: Sequence[str] | None = None) ->
 
     Parameters
     ----------
-    path : str | Path
-        The config YAML.
+    path : str | Path | Sequence[str | Path]
+        The config YAML, or a STACK of trainer configs (deep-merged
+        left-to-right through the real `Salt2CLI` surface — the repeatable
+        ``-c`` flag; the salt2 fit/export stacking semantics). M1 toy
+        graphs take exactly one config.
     set_overrides : Sequence[str] | None, optional
         ``KEY=VALUE`` entries forwarded to the trainer parser (the ``--set``
         CLI flag) — trainer configs only, by default None.
@@ -201,20 +229,37 @@ def load_config(path: str | Path, set_overrides: Sequence[str] | None = None) ->
     Raises
     ------
     ConfigError
-        On unreadable files or structurally invalid configs.
+        On unreadable files or structurally invalid configs, or a config
+        stack with no trainer-format member.
     """
-    path = Path(path)
-    if not path.is_file():
-        raise ConfigError(f"config file not found: {path}")
-    try:
-        with open(path) as fh:
-            raw = yaml.safe_load(fh)
-    except yaml.YAMLError as err:
-        raise ConfigError(f"config file {path} is not valid YAML: {err}") from err
-    if not isinstance(raw, dict):
-        raise ConfigError(f"config file {path} must contain a mapping")
-    if "modules" not in raw and ("model" in raw or "data" in raw):
-        return _load_fit_config(path, set_overrides)
+    paths = [Path(p) for p in (path if isinstance(path, (list, tuple)) else [path])]
+    raws: list[dict[str, Any]] = []
+    for one in paths:
+        if not one.is_file():
+            raise ConfigError(f"config file not found: {one}")
+        try:
+            with open(one) as fh:
+                raw = yaml.safe_load(fh)
+        except yaml.YAMLError as err:
+            raise ConfigError(f"config file {one} is not valid YAML: {err}") from err
+        if not isinstance(raw, dict):
+            raise ConfigError(f"config file {one} must contain a mapping")
+        raws.append(raw)
+    if len(paths) > 1:
+        # config stacking is a trainer-surface feature (the salt2 fit /
+        # salt2 export deep-merge); override files may carry any subset of
+        # keys, but at least one stacked file must be trainer-format
+        if not any(_is_trainer_format(raw) for raw in raws):
+            raise ConfigError(
+                f"repeated -c is supported for salt2 trainer configs only (deep-merged "
+                f"left-to-right, the fit/export stacking semantics) — none of "
+                f"{[str(p) for p in paths]} has top-level model:/data: blocks; M1 toy "
+                "graph configs take exactly one -c"
+            )
+        return _load_fit_config(paths, set_overrides)
+    raw, path = raws[0], paths[0]
+    if _is_trainer_format(raw):
+        return _load_fit_config(paths, set_overrides)
     if set_overrides:
         raise ConfigError(
             "--set overrides apply to salt2 trainer configs only "
@@ -249,11 +294,12 @@ def load_config(path: str | Path, set_overrides: Sequence[str] | None = None) ->
     )
 
 
-def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphConfig:
-    """Adapt a §5.1 trainer config into one full-pipeline `GraphConfig` (design §4).
+def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
+    """Adapt a §5.1 trainer config (stack) into one full-pipeline `GraphConfig` (design §4).
 
-    Parses the config through the REAL `Salt2CLI` surface in run-free mode
-    (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics intact),
+    Parses the config(s) through the REAL `Salt2CLI` surface in run-free mode
+    (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics intact —
+    repeated configs stack left-to-right exactly as on ``salt2 fit``),
     then builds the combined dataset + model graph: ``data.modules`` and
     ``model.modules`` form one module dict (the reader is the source node,
     so ``sources`` is empty), the per-mode sinks are the model's declared
@@ -283,25 +329,11 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
         init_args like ``norm_dict`` can be supplied data-free), or when a
         module name appears in both ``data.modules`` and ``model.modules``.
     """
-    # local imports: the trainer surface (lightning/jsonargparse) is heavy
+    # local import: the trainer surface (lightning/jsonargparse) is heavy
     # and circular with this module (salt.core.main dispatches to cli.main)
     from salt.core.data.processors import Labels  # noqa: PLC0415 - heavy/circular (docstring)
-    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (docstring)
 
-    args = ["--config", str(path)]
-    for entry in set_overrides or []:
-        if "=" not in entry:
-            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
-        args.append(f"--{entry}")
-    try:
-        cli = Salt2CLI(args=args, run=False)
-    except SystemExit as err:
-        raise ConfigError(
-            f"trainer config {path} failed to parse through the salt2 surface "
-            f"(parser exit {err.code}; the parser error is printed above). Required "
-            "init_args left as overrides in the YAML header can be supplied data-free "
-            "via --set, e.g. --set model.modules.norm.init_args.norm_dict=unused.yaml"
-        ) from err
+    cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
     data_modules = dm.modules
     reader = dm.reader
@@ -310,9 +342,9 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
             module.bind_streams(reader.streams)
     if overlap := sorted(set(data_modules) & set(model._graph_modules)):  # noqa: SLF001 - same-package adapter
         raise ConfigError(
-            f"config {path}: module name(s) {overlap} appear in BOTH data.modules and "
-            "model.modules — instance names must be unique across the pipeline graph "
-            "(design §2.2)"
+            f"config {' + '.join(str(p) for p in paths)}: module name(s) {overlap} appear "
+            "in BOTH data.modules and model.modules — instance names must be unique "
+            "across the pipeline graph (design §2.2)"
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
@@ -333,30 +365,56 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
-        elif mode is Mode.ONNX and export_cfg is not None:
-            # the static half of the design §3.1/§4.1 export contract
-            # (M4-review fix): ONNX sinks are the export.outputs ports, and
-            # the export block is validated exactly as `salt2 export` does
-            # (model_name rule, entry shape) — a typo'd port then fails the
-            # ONNX compile with the §4.1 missing-sink error citing
-            # export.outputs, instead of validating green and failing
-            # months later at export time
+        elif mode is Mode.ONNX and writer_cb is not None:
+            # the static half of the design §3.1/§4.1 export contract,
+            # re-sourced at M4.5: ONNX sinks are the union of the writers'
+            # declared manifest ports (the unified output manifest —
+            # exactly what `salt2 export` will trace), and the export-only
+            # half of the export: block is validated as `salt2 export`
+            # does (model_name rule, input entries, rename/combine against
+            # the manifest, the export.outputs migration error) — a broken
+            # manifest fails HERE instead of months later at export time
             try:
-                resolved = resolve_export_config(export_cfg, run_name)
-                keys = [out.port for out in resolved.outputs]
-                sink_origins[mode] = {
-                    out.port: f"export output {out.port!r} (config: export.outputs)"
-                    for out in resolved.outputs
-                }
+                per_writer = writer_cb.per_writer_onnx_manifest(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
+                manifest = writer_cb.onnx_manifest(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
+                if export_cfg is not None and manifest:
+                    # validates the export-only half + rename/combine vs the
+                    # manifest, incl. the export.outputs migration error
+                    attach_manifest(resolve_export_config(export_cfg, run_name), manifest)
+                elif export_cfg is None:
+                    mode_warnings[mode] = (
+                        "the config has no export: block — outputs derive from the writers "
+                        "(checked), but export.inputs/model_name were NOT checked; declare "
+                        "the export-only half (design §5.1, §7) so `salt2 graph validate "
+                        "--mode onnx` gates everything `salt2 export` will trace"
+                    )
+                if manifest:
+                    keys = [out.port for out in manifest]
+                    sink_origins[mode] = {
+                        out.port: (
+                            f"ONNX manifest output {out.port!r} (writer {wname!r}, config: "
+                            f"writers.modules.{wname})"
+                        )
+                        for wname, entries in per_writer.items()
+                        for out in entries
+                    }
+                else:
+                    mode_warnings[mode] = (
+                        "the configured writers declare no ONNX outputs (all narrowed out?) "
+                        "— ONNX sinks fall back to every preds.* key; check TaskWriter "
+                        "onnx/onnx_streams/onnx_tasks (M4.5 unified manifest)"
+                    )
+                    keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
         else:
             if mode is Mode.ONNX:
                 mode_warnings[mode] = (
-                    "the config has no export: block — the ONNX contract was NOT checked "
-                    "(sinks fall back to every preds.* key); declare export.inputs/outputs "
-                    "(design §5.1, §7) so `salt2 graph validate --mode onnx` gates what "
+                    "the config has no writers: block — the ONNX contract was NOT checked "
+                    "(sinks fall back to every preds.* key); the ONNX output manifest "
+                    "derives from writers.modules (M4.5 unified manifest; base2.yaml ships "
+                    "defaults) so `salt2 graph validate --mode onnx` gates what "
                     "`salt2 export` will trace"
                 )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
@@ -373,6 +431,52 @@ def _load_fit_config(path: Path, set_overrides: Sequence[str] | None) -> GraphCo
         mode_warnings=mode_warnings,
         sink_origins=sink_origins,
     )
+
+
+def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> Any:
+    """Parse a §5.1 trainer config (stack) through the REAL salt2 surface, run-free.
+
+    Repeated configs deep-merge left-to-right (the ``salt2 fit`` /
+    ``salt2 export`` stacking semantics) — the static tooling accepts the
+    same base + override pattern the trainer surface does.
+
+    Returns
+    -------
+    Salt2CLI
+        The run-free CLI (``cli.model``/``cli.datamodule`` constructed,
+        nothing executed, no data touched).
+
+    Raises
+    ------
+    ConfigError
+        When the parse fails (with the documented ``--set`` hint).
+    """
+    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (module docstring)
+
+    args: list[str] = []
+    for path in paths:
+        args.extend(["--config", str(path)])
+    for entry in set_overrides or []:
+        if "=" not in entry:
+            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
+        args.append(f"--{entry}")
+    try:
+        with warnings.catch_warnings():
+            # programmatic argv triggers Lightning's 'args parameter is
+            # intended...' warning — filtered exactly as salt.core.main and
+            # the salt2 export run-free parse do (noise on tooling whose
+            # output users are told to read)
+            warnings.filterwarnings(
+                "ignore", message=r".*args parameter is intended to run from within Python.*"
+            )
+            return Salt2CLI(args=args, run=False)
+    except SystemExit as err:
+        raise ConfigError(
+            f"trainer config {' '.join(str(p) for p in paths)} failed to parse through the "
+            f"salt2 surface (parser exit {err.code}; the parser error is printed above). "
+            "Required init_args left as overrides in the YAML header can be supplied "
+            "data-free via --set, e.g. --set model.modules.norm.init_args.norm_dict=unused.yaml"
+        ) from err
 
 
 def _static_writer_callback(cli: Any) -> Any | None:
@@ -1069,6 +1173,155 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 
 
 # ---------------------------------------------------------------------------
+# graph resolve [--annotate] (design §4.4; M4.5 amendment merge condition 8)
+# ---------------------------------------------------------------------------
+
+MANIFEST_BEGIN = "# === salt2 output manifest"
+"""First line of the generated annotation block (the replace anchor)."""
+
+MANIFEST_END = "# === end salt2 output manifest ==="
+"""Last line of the generated annotation block."""
+
+
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    """``salt2 graph resolve``: the writer-derived output manifest, eval + ONNX.
+
+    Prints the assembled manifest (the §4.4-style answer to "what columns
+    does eval write / what does Athena see" for the unified-writer config);
+    with ``--annotate``, additionally writes it into the config file as a
+    refreshable comment block (replaced in place when already present) —
+    the amendment merge condition 8 mitigation for the discoverability
+    shift from a hand-typed ``export.outputs`` to derived declarations.
+    With repeated ``-c`` the configs deep-merge left-to-right and the
+    annotation goes into the LAST (most specific) file.
+
+    Returns
+    -------
+    int
+        0 on success; 1 on a non-trainer config or a manifest error.
+    """
+    paths = [Path(p) for p in args.config]
+    raws = []
+    for path in paths:
+        if not path.is_file():
+            return _fail(f"config file not found: {path}")
+        raws.append(yaml.safe_load(path.read_text()))
+    if not any(isinstance(raw, dict) and ("model" in raw or "data" in raw) for raw in raws):
+        return _fail(
+            "salt2 graph resolve needs a salt2 trainer config (top-level model:/data: "
+            "blocks) — toy graph configs have no writers block (M4.5 unified manifest)"
+        )
+    cli = _parse_trainer_cli(paths, args.set)
+    writer_cb = _static_writer_callback(cli)
+    if writer_cb is None:
+        return _fail(
+            "the config declares no writer modules — the output manifest derives from "
+            "writers.modules (M4.5 unified manifest; base2.yaml ships defaults)"
+        )
+    block = _manifest_block(cli, writer_cb, paths, args.set)
+    print(block)
+    if args.annotate:
+        _write_annotation(paths[-1], block)
+        print(f"\nannotated {paths[-1]} (block refreshed in place on the next run)")
+    return 0
+
+
+def _manifest_block(
+    cli: Any, writer_cb: Any, paths: Sequence[Path], set_overrides: Sequence[str] | None
+) -> str:
+    """Render the eval + ONNX manifest as a config comment block.
+
+    The embedded refresh hint reproduces the FULL generating command —
+    every ``-c`` file and every ``--set`` override — so the printed
+    command re-runs verbatim on configs whose required init_args (e.g.
+    ``norm_dict``) are supplied data-free (the merge-condition-8
+    self-documenting staleness contract).
+
+    Returns
+    -------
+    str
+        Lines between `MANIFEST_BEGIN` and `MANIFEST_END`, all
+        ``#``-prefixed (safe to append to any YAML file).
+    """
+    model, dm = cli.model, cli.datamodule
+    modules = model._graph_modules  # noqa: SLF001 - same-package adapter
+    reader = dm.reader
+    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
+    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
+    refresh_args = " ".join([
+        *(f"-c {path.name}" for path in paths),
+        *(f"--set {entry}" for entry in set_overrides or []),
+    ])
+    refresh = f"(generated — refresh: salt2 graph resolve {refresh_args} --annotate)"
+    lines = [
+        f"{MANIFEST_BEGIN} {refresh} ===",
+        f"# eval columns (salt2 test; prefix = run name {run_name!r}):",
+    ]
+    for wname, streams in writer_cb.column_manifests(modules, reader, run_name).items():
+        if not streams:
+            lines.append(
+                f"#   [{wname}] file-dependent or no static columns (e.g. source-file "
+                "copies ride along with file dtypes)"
+            )
+            continue
+        lines.extend(
+            f"#   [{wname}] {stream}: {' '.join(columns)}" for stream, columns in streams.items()
+        )
+    manifest = writer_cb.onnx_manifest(modules, reader)
+    if not manifest:
+        lines.extend((
+            "# onnx outputs (salt2 export): NONE — the writers declare no ONNX outputs",
+            MANIFEST_END,
+        ))
+        return "\n".join(lines)
+    from dataclasses import replace  # noqa: PLC0415 - stdlib, annotation-path only
+
+    from salt.core.onnx.config import ExportConfig, ExportInput  # noqa: PLC0415 - heavy package
+
+    export_half = export_cfg if export_cfg is not None else ExportConfig()
+    if not export_half.inputs:
+        # the manifest needs no inputs — satisfy the export-half resolution
+        # for this print-only path (the salt2 export --manifest precedent)
+        export_half = replace(export_half, inputs=[ExportInput(port="inputs.placeholder")])
+    resolved = attach_manifest(resolve_export_config(export_half, run_name), manifest)
+    source_note = " — default from run name):" if export_cfg is None else "):"
+    lines.append(f"# onnx outputs (salt2 export; model_name {resolved.model_name!r}{source_note}")
+    lines.extend(f"#   {line}" for line in manifest_table(resolved).splitlines()[1:])
+    lines.append(MANIFEST_END)
+    return "\n".join(lines)
+
+
+def _write_annotation(path: Path, block: str) -> None:
+    """Insert or refresh the manifest comment block in a config file.
+
+    A previous generated block (between `MANIFEST_BEGIN` and
+    `MANIFEST_END`) is replaced in place; otherwise the block is appended
+    at the end of the file — comments are inert YAML, so the config parses
+    identically (the §4.4 converter-emitted comment-block contract).
+    """
+    text = path.read_text()
+    new_lines: list[str] = []
+    replaced = False
+    skipping = False
+    for line in text.splitlines():
+        if line.startswith(MANIFEST_BEGIN):
+            skipping = True
+            replaced = True
+            new_lines.append(block)
+            continue
+        if skipping:
+            if line.startswith(MANIFEST_END):
+                skipping = False
+            continue
+        new_lines.append(line)
+    if not replaced:
+        if new_lines and new_lines[-1].strip():
+            new_lines.append("")
+        new_lines.append(block)
+    path.write_text("\n".join(new_lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # schema dump (design §2.6)
 # ---------------------------------------------------------------------------
 
@@ -1100,7 +1353,13 @@ def _cmd_schema_dump(args: argparse.Namespace) -> int:
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
     """Add the shared ``-c/--config`` and ``--set`` arguments."""
     parser.add_argument(
-        "-c", "--config", required=True, help="config YAML (salt2 trainer config or M1 toy graph)"
+        "-c",
+        "--config",
+        required=True,
+        action="append",
+        help="config YAML (salt2 trainer config or M1 toy graph). Repeatable: trainer "
+        "configs deep-merge left-to-right (the salt2 fit/export stacking semantics); "
+        "toy graphs take exactly one",
     )
     parser.add_argument(
         "--set",
@@ -1166,6 +1425,20 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_mode_arg(why, default="fit")
     why.add_argument("--key", required=True, help="dotted bundle key to explain")
     why.set_defaults(func=_cmd_why)
+
+    resolve = gsub.add_parser(
+        "resolve",
+        help="print the writer-derived output manifest (eval columns + ONNX outputs); "
+        "--annotate writes it into the config (design §4.4, M4.5 unified manifest)",
+    )
+    _add_config_arg(resolve)
+    resolve.add_argument(
+        "--annotate",
+        action="store_true",
+        help="rewrite the config file with the manifest comment block (refreshed in "
+        "place; with repeated -c the block goes into the LAST config file)",
+    )
+    resolve.set_defaults(func=_cmd_resolve)
 
     schema = sub.add_parser("schema", help="dataset schema artifact tooling (design §2.6)")
     ssub = schema.add_subparsers(dest="schema_command", required=True)

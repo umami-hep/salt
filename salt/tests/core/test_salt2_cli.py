@@ -541,15 +541,18 @@ class TestGraphFitConfigAdapter:
             == 0
         )
 
-    def test_validate_onnx_bad_export_port_fails(self, tmp_path, capsys):
-        # M4-review HIGH fix: ONNX-mode sinks come from export.outputs —
-        # a typo'd export port used to validate green (even --strict) and
-        # fail months later at export time (design §3.1/§4.1, §9.3 CI gate)
+    def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
+        # M4.5: export.outputs was removed — a pre-amendment config carrying
+        # the section must fail `validate --mode onnx` with the §4.1-bar
+        # migration error pointing at the writers (NOT silently validate
+        # green against a stale hand-typed manifest)
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["export"]["outputs"][0]["port"] = "preds.jets.jets_clasification"
-        bad = tmp_path / "bad_port.yaml"
+        config["export"]["outputs"] = [
+            {"port": "preds.jets.jets_classification", "names": ["pb", "pc", "pu"]}
+        ]
+        bad = tmp_path / "legacy_outputs.yaml"
         bad.write_text(yaml.dump(config, sort_keys=False))
         rc = main([
             "graph",
@@ -563,8 +566,47 @@ class TestGraphFitConfigAdapter:
         ])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "preds.jets.jets_clasification" in err
-        assert "export.outputs" in err  # the demanding config address
+        assert "REMOVED by the M4.5" in err
+        assert "writers" in err
+
+    def test_validate_onnx_bad_onnx_tasks_fails(self, capsys):
+        # the M4.5 replacement for the typo'd-export-port guarantee: the
+        # writer-derived manifest is validated statically — a TaskWriter
+        # onnx_tasks entry naming no task fails `validate --mode onnx`
+        # with the writer's config address (amendment merge condition 1)
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(DUMMY_CFG),
+            "--mode",
+            "onnx",
+            "--set",
+            "model.modules.norm.init_args.norm_dict=unused.yaml",
+            "--set",
+            'writers.modules.tasks.init_args.onnx_tasks=["track_vertexin"]',
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "track_vertexin" in err
+        assert "writers.modules.tasks" in err
+
+    def test_validate_onnx_sinks_derive_from_writers(self, capsys):
+        # the unified-manifest happy path: ONNX validates green with sinks
+        # from the writers (the shipped config carries NO export.outputs)
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(DUMMY_CFG),
+            "--mode",
+            "onnx",
+            "--set",
+            "model.modules.norm.init_args.norm_dict=unused.yaml",
+        ])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "OK [mode=ONNX]" in out
 
     def test_validate_onnx_underscore_model_name_fails(self, tmp_path, capsys):
         # the §4.1 'export.model_name contains no _/-' validate check —

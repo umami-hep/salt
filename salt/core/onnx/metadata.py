@@ -106,12 +106,16 @@ def build_gnn_config(
                     for name in variables[stream]
                 ],
             })
-    # TODO(M7): v1's --combine_outputs/--rename CLI features have no v2
-    # config surface yet — exports of v1 models that used them cannot be
-    # reproduced. The M7 converter MUST hard-error on a v1 config carrying
-    # either (never silently emit these empty defaults).
-    metadata["combine_outputs"] = []
-    metadata["rename_outputs"] = {}
+    # v1 records the combine/rename post-processing verbatim
+    # (to_onnx.py:817-818): combines as (name, [(scale, suffix), ...])
+    # tuples — JSON-encoded to nested lists identically on both paths —
+    # and renames as the raw old->new dict. The v2 config surface is
+    # export.combine / export.rename (M4.5, amendment merge condition 5).
+    metadata["combine_outputs"] = [
+        [entry.name, [[scale, suffix] for suffix, scale in entry.inputs.items()]]
+        for entry in export.combine
+    ]
+    metadata["rename_outputs"] = dict(export.rename)
     # ADDITIVE v2 key, appended after the complete v1 set (module docstring)
     metadata["plan_hash"] = plan_hash
     return metadata

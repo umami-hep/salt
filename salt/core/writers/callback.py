@@ -11,6 +11,12 @@ Responsibilities:
   `SaltModule` uses it as the TEST plan's sinks (replacing the M2
   anchor-on-all-preds) and as extra dataset-boundary demand, and raises the
   TEST dead-preds hard error (design §4.2, §8);
+- **ONNX manifest** (M4.5 unified manifest): `onnx_manifest` assembles the
+  writers' declared `ExportOutput` entries into THE export-output manifest
+  (writer config order; flat-namespace collision check naming both
+  writers) — its ports are the ONNX plan sinks (one demand mechanism in
+  both output modes, amendment §4) and the exporter's output list. Writers
+  are READ here, never run;
 - **sink**: ONE ftag `H5Writer` in FIXED mode (``num_jets`` known up front —
   an empty test set still produces a valid empty file, fixing
   ``predictionwriter.py:215-226``), ``shuffle=False``, lz4, v1 dataset
@@ -40,6 +46,7 @@ from lightning import Callback, LightningModule, Trainer
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import GraphModule
+from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
 from salt.utils.array_utils import join_structured_arrays
 
@@ -163,7 +170,168 @@ class WriterCallback(Callback):
             order, each list in the writer's declaration order.
         """
         ctx = self._declare_ctx(model_modules, reader)
+        self._validate_writer_roles(ctx)
         return {name: list(writer.requires(ctx)) for name, writer in self._writers.items()}
+
+    # -- the ONNX-manifest assembly (M4.5 amendment §4) --------------------------
+
+    def per_writer_onnx_manifest(
+        self, model_modules: dict[str, GraphModule], reader: Any
+    ) -> dict[str, list[ExportOutput]]:
+        """Each writer's declared ONNX-manifest entries, unmerged (static).
+
+        The per-writer view behind `onnx_manifest` — the sibling of
+        `per_writer_demand` for the ONNX role (amendment §4): consumed for
+        sink-origin attribution (`salt.core.cli`) and the manifest
+        annotation (``salt2 graph resolve``).
+
+        Returns
+        -------
+        dict[str, list[ExportOutput]]
+            ``{writer instance name: entries}`` in writer (config) order,
+            each list in the writer's declaration order.
+        """
+        ctx = self._declare_ctx(model_modules, reader)
+        self._validate_writer_roles(ctx)
+        return {name: list(writer.onnx_outputs(ctx)) for name, writer in self._writers.items()}
+
+    def onnx_manifest(
+        self, model_modules: dict[str, GraphModule], reader: Any
+    ) -> list[ExportOutput]:
+        """THE assembled export-output manifest (M4.5 unified manifest).
+
+        Manifest order = writer config order, each writer's entries in its
+        own declaration order (`TaskWriter` emits global-stream entries
+        before sequence-stream entries — the v1 output order, amendment §5
+        rule 5). The assembled manifest is a FLAT ONNX namespace: a suffix
+        declared by two entries is a hard error naming both owning writers
+        and ports, with ``onnx_names:`` as the fix (amendment §5 rule 4 —
+        previously unrepresentable when ``export.outputs`` was
+        hand-deduplicated by the author). Port duplicates (two writers
+        exporting one port) are equally rejected.
+
+        Returns
+        -------
+        list[ExportOutput]
+            The flat manifest; its ports are the ONNX plan sinks and its
+            entries the exporter's output list.
+
+        Raises
+        ------
+        ConfigError
+            On a suffix or port collision across writers.
+        """
+        per_writer = self.per_writer_onnx_manifest(model_modules, reader)
+        suffix_owner: dict[str, tuple[str, str]] = {}
+        port_owner: dict[str, str] = {}
+        manifest: list[ExportOutput] = []
+        for writer_name, entries in per_writer.items():
+            for entry in entries:
+                if (other := port_owner.get(entry.port)) is not None:
+                    raise ConfigError(
+                        f"ONNX manifest port {entry.port!r} is declared by writers "
+                        f"{other!r} AND {writer_name!r} (config: writers.modules.*) — one "
+                        "writer owns one export port (M4.5 amendment §4)"
+                    )
+                port_owner[entry.port] = writer_name
+                for raw_suffix in entry.names if entry.names is not None else [entry.name]:
+                    suffix = str(raw_suffix)
+                    if (owner := suffix_owner.get(suffix)) is not None:
+                        other_writer, other_port = owner
+                        raise ConfigError(
+                            f"ONNX output suffix {suffix!r} is declared TWICE in the flat "
+                            f"export namespace: by writer {other_writer!r} (port "
+                            f"{other_port!r}) and writer {writer_name!r} (port "
+                            f"{entry.port!r}) — distinct H5 groups may share column names, "
+                            "but ONNX outputs cannot; rename one side via "
+                            f"writers.modules.{writer_name}.init_args.onnx_names (or "
+                            "export.rename) — amendment §5 rule 4"
+                        )
+                    suffix_owner[suffix] = (writer_name, entry.port)
+                manifest.append(entry)
+        return manifest
+
+    def column_manifests(
+        self, model_modules: dict[str, GraphModule], reader: Any, run_name: str
+    ) -> dict[str, dict[str, list[str]]]:
+        """Each writer's statically-derivable eval columns (§4.4 annotation).
+
+        Returns
+        -------
+        dict[str, dict[str, list[str]]]
+            ``{writer instance name: {stream: [column names]}}`` in writer
+            order — empty inner dicts mean "file-dependent or no static
+            columns" (`Writer.column_manifest` default).
+        """
+        ctx = self._declare_ctx(model_modules, reader)
+        return {
+            name: dict(writer.column_manifest(ctx, run_name))
+            for name, writer in self._writers.items()
+        }
+
+    def _validate_writer_roles(self, ctx: WriterDeclareCtx) -> None:
+        """Reject writers with no role / the unblessed export-only stub shape.
+
+        Design principle 10 extended to writers (amendment §4 item 3): a
+        configured writer must do SOMETHING — an empty TEST demand
+        (`requires`) and an empty ONNX manifest (`onnx_outputs`) together
+        are a `ConfigError`. The export-only shape (no TEST demand,
+        non-empty manifest) is legal ONLY behind the explicit
+        ``export_only`` flag — `ExportOnlyWriter` is the blessed spelling
+        (merge condition 3); and an ``export_only`` writer declaring TEST
+        demand contradicts itself.
+
+        Note (recorded M5 decision point): this validation derives every
+        writer's ONNX manifest on the TEST path too (`per_writer_demand`
+        calls it during ``salt2 test`` demand assembly), so a task family
+        with a TEST representation but NO export representation would raise
+        `TaskWriter.onnx_outputs`'s unsupported-family error during eval
+        unless narrowed away (``onnx: false``/``onnx_streams``/
+        ``onnx_tasks`` — the error names all three). Today the TEST and
+        ONNX family sets are identical (classification + vertexing) so the
+        branch is unreachable; when M5 extends `TaskWriter` (regression —
+        the amendment pre-implementation check), the implementer must
+        either keep this loud coupling deliberately or derive only
+        export-representable families (skip + deadcode finding). Tracked in
+        the study CLAUDE.md M5 TODOs.
+
+        Raises
+        ------
+        ConfigError
+            Naming the writer and the violated rule.
+        """
+        for name, writer in self._writers.items():
+            demand = writer.requires(ctx)
+            manifest = writer.onnx_outputs(ctx)
+            where = f"writer {name!r} (config: writers.modules.{name})"
+            if writer.export_only:
+                if demand:
+                    raise ConfigError(
+                        f"{where} sets export_only=True but declares TEST requires "
+                        f"{sorted(demand)} — export-only writers have no TEST role "
+                        "(ExportOnlyWriter contract, M4.5 amendment merge condition 3)"
+                    )
+                if not manifest:
+                    raise ConfigError(
+                        f"{where} sets export_only=True but declares no onnx_outputs — "
+                        "an export-only writer's single role is its manifest "
+                        "(M4.5 amendment merge condition 3)"
+                    )
+                continue
+            if not demand and manifest:
+                raise ConfigError(
+                    f"{where} declares ONNX outputs but no TEST requires — this is the "
+                    "export-only stub shape, which must be EXPLICIT: subclass "
+                    "salt.core.writers.ExportOnlyWriter (or set export_only=True) "
+                    "(M4.5 amendment merge condition 3)"
+                )
+            if not demand and not manifest:
+                raise ConfigError(
+                    f"{where} declares neither TEST requires nor ONNX outputs — a "
+                    "configured writer must do something in at least one mode; remove it "
+                    f"(writers.modules.{name}: null) or fix its declarations "
+                    "(design principle 10, M4.5 amendment §4)"
+                )
 
     @staticmethod
     def _declare_ctx(model_modules: dict[str, GraphModule], reader: Any) -> WriterDeclareCtx:
@@ -449,7 +617,11 @@ class WriterCallback(Callback):
         with the ``base2.yaml`` writer order this reproduces the v1 group
         layout (input copies, task columns, pad mask). Collisions are a
         `ConfigError` naming both writers (fixing the silent overwrite of
-        ``array_utils.py:30-37``).
+        ``array_utils.py:30-37``). This is also the RUNTIME half of the
+        writer-role validation (`_validate_writer_roles` is the static
+        half): a non-``export_only`` writer producing no columns raises —
+        the merge-condition-3 stub error when it declares ONNX outputs,
+        the principle-10 does-nothing error otherwise.
 
         Returns
         -------
@@ -459,12 +631,43 @@ class WriterCallback(Callback):
         Raises
         ------
         ConfigError
-            On a column-name collision or an unknown stream.
+            On a column-name collision, an unknown stream, or a columnless
+            non-export-only writer (stub / does-nothing shapes).
         """
         descrs: dict[str, list] = {}
         owners: dict[tuple[str, str], str] = {}
+        declare = WriterDeclareCtx(
+            model_modules=dict(ctx.model_modules),
+            streams=ctx.streams,
+            sequence_streams=ctx.sequence_streams,
+        )
         for name, writer in self._writers.items():
-            for stream, dtype in writer.columns(ctx).items():
+            columns = writer.columns(ctx)
+            if not columns:
+                if writer.export_only:
+                    continue  # the blessed export-only pattern: no TEST columns by design
+                # the runtime backstop behind the static role check —
+                # columns() can be file-dependent, so "does nothing in
+                # TEST" is only fully decidable here (design principle 10,
+                # M4.5 amendment §4). The unblessed export-only stub shape
+                # (no columns, non-empty manifest, no flag) gets the
+                # merge-condition-3 error here too — never a silent
+                # zero-contribution fall-through
+                if writer.onnx_outputs(declare):
+                    raise ConfigError(
+                        f"writer {name!r} (config: writers.modules.{name}) declares ONNX "
+                        "outputs but produced no TEST columns — this is the export-only "
+                        "stub shape, which must be EXPLICIT: subclass "
+                        "salt.core.writers.ExportOnlyWriter (or set export_only=True) "
+                        "(M4.5 amendment merge condition 3)"
+                    )
+                raise ConfigError(
+                    f"writer {name!r} (config: writers.modules.{name}) declares no "
+                    "output columns AND no ONNX outputs — a configured writer must do "
+                    "something in at least one mode (design principle 10, M4.5 "
+                    "amendment §4)"
+                )
+            for stream, dtype in columns.items():
                 if stream not in ctx.streams:
                     raise ConfigError(
                         f"writer {name!r} declared columns for unknown stream {stream!r} — "

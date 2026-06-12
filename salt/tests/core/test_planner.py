@@ -773,6 +773,28 @@ class TestDeadcode:
         finding = next(d for d in report if d.key == "aux.y")
         assert finding.severity == "warning"
 
+    def test_pruned_module_in_onnx_is_info_severity(self):
+        # M4.5 unified manifest (fix-stage regression): ONNX sinks are the
+        # writer-declared export-manifest ports, so a module narrowed out of
+        # the export surface (onnx_streams/onnx_tasks) is LEGITIMATE — info,
+        # never promoted, keeping `validate --strict --mode onnx` usable on
+        # narrowed configs. Other modes keep the warning default.
+        a, b = chain_ab()
+        aux = Toy("aux", requires={"inputs.x": ts()}, produces={"aux.y": ts()})
+        onnx_finding = next(
+            d
+            for d in deadcode(mods(a, b, aux), Mode.ONNX, SRC_X, sinks=["preds.x"])
+            if d.module == "aux" and d.key == "*"
+        )
+        assert onnx_finding.severity == "info"
+        assert "export surface" in onnx_finding.reason
+        fit_finding = next(
+            d
+            for d in deadcode(mods(a, b, aux), Mode.FIT, SRC_X, sinks=["preds.x"])
+            if d.module == "aux" and d.key == "*"
+        )
+        assert fit_finding.severity == "warning"
+
 
 # ---------------------------------------------------------------------------
 # plan immutability (frozen plan, design §3.1)

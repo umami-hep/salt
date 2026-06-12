@@ -34,6 +34,7 @@ from salt.core.onnx import (
     ExportInput,
     ExportOutput,
     OnnxAdapter,
+    attach_manifest,
     compile_onnx_plan,
     derive_onnx_sources,
     resolve_export_config,
@@ -56,6 +57,7 @@ VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
 
 def gn2_export_cfg(**overrides) -> ExportConfig:
+    # export-only half (M4.5) — outputs come from gn2_manifest()/the writers
     cfg = ExportConfig(
         model_name="GN2v2",
         inputs=[
@@ -64,22 +66,35 @@ def gn2_export_cfg(**overrides) -> ExportConfig:
                 port="inputs.tracks", name="track_features", sequence=True, dyn_axis="n_tracks"
             ),
         ],
-        outputs=[
-            ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-            ExportOutput(
-                port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-            ),
-            ExportOutput(
-                port="preds.tracks.track_vertexing",
-                name="VertexIndex",
-                dtype="int8",
-                reduce="vertex_union_find",
-            ),
-        ],
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
+
+
+def gn2_manifest() -> list[ExportOutput]:
+    # the GN2 output manifest, as the default TaskWriter derives it (the
+    # writer-derivation itself is covered in test_manifest.py — these unit
+    # tests exercise the resolution/adapter mechanics on the same entries)
+    return [
+        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
+        ExportOutput(
+            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
+        ),
+        ExportOutput(
+            port="preds.tracks.track_vertexing",
+            name="VertexIndex",
+            dtype="int8",
+            reduce="vertex_union_find",
+        ),
+    ]
+
+
+def gn2_resolved(run_name: str = "GN2_v2", manifest=None, **overrides) -> ExportConfig:
+    return attach_manifest(
+        resolve_export_config(gn2_export_cfg(**overrides), run_name),
+        gn2_manifest() if manifest is None else manifest,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +138,6 @@ class TestResolveInputs:
                 ExportInput(port="inputs.jets"),
                 ExportInput(port="inputs.tracks", sequence=True),
             ],
-            outputs=[ExportOutput(port="preds.jets.c", names=["pb"])],
         )
         resolved = resolve_export_config(cfg, "m")
         jets, tracks = resolved.inputs
@@ -190,50 +204,64 @@ class TestResolveInputs:
 
 
 class TestResolveOutputs:
-    def test_name_and_names_exclusive(self):
-        cfg = gn2_export_cfg()
-        cfg.outputs[0].name = "both"
-        with pytest.raises(ConfigError, match="exactly one of"):
+    # since M4.5 outputs are writer-derived and resolved via attach_manifest
+    # (the M4 per-entry rules unchanged)
+
+    def test_config_declared_outputs_are_the_migration_hard_error(self):
+        # the M4.5 §4.1-bar error: export.outputs is gone; the message must
+        # point at the writers and the inspection tooling
+        cfg = gn2_export_cfg(outputs=gn2_manifest())
+        with pytest.raises(ConfigError, match="REMOVED by the M4.5") as excinfo:
             resolve_export_config(cfg, "m")
+        message = str(excinfo.value)
+        assert "writers" in message
+        assert "salt2 export --manifest" in message
+        assert "fix:" in message
+
+    def test_name_and_names_exclusive(self):
+        manifest = gn2_manifest()
+        manifest[0].name = "both"
+        with pytest.raises(ConfigError, match="exactly one of"):
+            gn2_resolved(manifest=manifest)
 
     def test_single_name_needs_explicit_reduce(self):
-        cfg = gn2_export_cfg()
-        cfg.outputs[1].reduce = None
+        manifest = gn2_manifest()
+        manifest[1].reduce = None
         with pytest.raises(ConfigError, match="explicit 'reduce'"):
-            resolve_export_config(cfg, "m")
+            gn2_resolved(manifest=manifest)
 
     def test_names_imply_split_scalars(self):
-        cfg = gn2_export_cfg()
-        resolved = resolve_export_config(cfg, "m")
+        resolved = gn2_resolved()
         assert resolved.outputs[0].reduce == "split_scalars"
         assert resolved.outputs[0].dtype == "float32"
-        cfg.outputs[0].reduce = "argmax"
+        manifest = gn2_manifest()
+        manifest[0].reduce = "argmax"
         with pytest.raises(ConfigError, match="split_scalars"):
-            resolve_export_config(cfg, "m")
+            gn2_resolved(manifest=manifest)
 
     def test_aux_dtype_is_int8(self):
-        cfg = gn2_export_cfg()
-        resolved = resolve_export_config(cfg, "m")
+        resolved = gn2_resolved()
         assert resolved.outputs[1].dtype == "int8"
-        cfg.outputs[1].dtype = "float32"
+        manifest = gn2_manifest()
+        manifest[1].dtype = "float32"
         with pytest.raises(ConfigError, match="int8"):
-            resolve_export_config(cfg, "m")
+            gn2_resolved(manifest=manifest)
 
     def test_unknown_reduce(self):
-        cfg = gn2_export_cfg()
-        cfg.outputs[1].reduce = "leading_object"  # MaskFormer reduces are M5
+        manifest = gn2_manifest()
+        manifest[1].reduce = "leading_object"  # MaskFormer reduces are M5
         with pytest.raises(ConfigError, match="unknown reduce"):
-            resolve_export_config(cfg, "m")
+            gn2_resolved(manifest=manifest)
 
     def test_duplicate_output_name_rejected(self):
-        cfg = gn2_export_cfg()
-        cfg.outputs[1].name = "pb"  # collides with the split_scalars suffix
+        manifest = gn2_manifest()
+        manifest[1].name = "pb"  # collides with the split_scalars suffix
         with pytest.raises(ConfigError, match="twice"):
-            resolve_export_config(cfg, "m")
+            gn2_resolved(manifest=manifest)
 
-    def test_empty_outputs_rejected(self):
-        with pytest.raises(ConfigError, match="export.outputs"):
-            resolve_export_config(gn2_export_cfg(outputs=[]), "m")
+    def test_empty_manifest_rejected(self):
+        with pytest.raises(ConfigError, match="no ONNX outputs"):
+            gn2_resolved(manifest=[])
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +359,7 @@ def gn2_modules(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("onnx_adapter_fixture")
     v1 = build_test_gn2(tmp)
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
-    resolved = resolve_export_config(gn2_export_cfg(), "GN2_v2")
+    resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
     nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
@@ -360,14 +388,20 @@ class TestOnnxPlan:
 
     def test_missing_output_producer_is_a_named_error(self, gn2_modules):
         modules, resolved, _ = gn2_modules
-        cfg = gn2_export_cfg()
-        cfg.outputs[0].port = "preds.jets.typo_task"
-        bad = resolve_export_config(cfg, "m")
-        with pytest.raises(ConnectivityError, match="export output"):
+        manifest = gn2_manifest()
+        manifest[0].port = "preds.jets.typo_task"
+        bad = gn2_resolved(manifest=manifest)
+        with pytest.raises(ConnectivityError, match="ONNX manifest output"):
             compile_onnx_plan(modules, bad, VARIABLES)
 
+    def test_manifest_less_config_cannot_compile(self, gn2_modules):
+        modules, _, _ = gn2_modules
+        half = resolve_export_config(gn2_export_cfg(), "m")
+        with pytest.raises(ConfigError, match="manifest-attached"):
+            compile_onnx_plan(modules, half, VARIABLES)
+
     def test_missing_variables_stream(self):
-        resolved = resolve_export_config(gn2_export_cfg(), "m")
+        resolved = gn2_resolved(run_name="m")
         with pytest.raises(ConfigError, match="Features variable"):
             derive_onnx_sources(resolved, {"jets": JET_VARIABLES})
 
@@ -381,7 +415,7 @@ class TestOnnxPlan:
         cfg = gn2_export_cfg()
         cfg.inputs[1].sequence = False
         cfg.inputs[1].dyn_axis = None
-        bad = resolve_export_config(cfg, "m")
+        bad = attach_manifest(resolve_export_config(cfg, "m"), gn2_manifest())
         with pytest.raises(ShapeError) as excinfo:
             compile_onnx_plan(modules, bad, VARIABLES)
         message = str(excinfo.value)
@@ -460,7 +494,7 @@ class TestAliasGather:
         modules, _, _ = gn2_modules
         cfg = gn2_export_cfg()
         cfg.inputs.append(ExportInput(port="inputs.global", alias="inputs.jets"))
-        resolved = resolve_export_config(cfg, "m")
+        resolved = attach_manifest(resolve_export_config(cfg, "m"), gn2_manifest())
         variables = {**VARIABLES, "global": alias_variables}
         plan = compile_onnx_plan(modules, resolved, variables)
         fields = {f"inputs.{s}": tuple(names) for s, names in variables.items()}
@@ -538,14 +572,16 @@ def _flash_export_cfg() -> ExportConfig:
                 port="inputs.tracks", name="track_features", sequence=True, dyn_axis="n_tracks"
             ),
         ],
-        outputs=[ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"])],
     )
 
 
 class TestExportModeProtocol:
     def _compiled(self, tmp_path, *, materialise: bool):
         modules = build_flash_gn2_modules(tmp_path)
-        resolved = resolve_export_config(_flash_export_cfg(), "flash_run")
+        resolved = attach_manifest(
+            resolve_export_config(_flash_export_cfg(), "flash_run"),
+            [ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"])],
+        )
         plan = compile_onnx_plan(modules, resolved, VARIABLES)
         bind_all(modules, resolve_bind_schema([plan]))
         if materialise:
