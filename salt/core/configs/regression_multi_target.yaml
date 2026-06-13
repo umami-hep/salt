@@ -1,0 +1,133 @@
+# regression_multi_target.yaml — MultiTarget processor + RegressionTaskModule in
+# the v2 schema (M5 sub-wave A3). The v2-native port of legacy
+# salt/configs/regression_multi_target.yaml: an encoder-less DiPS body (init_nets
+# + pool_net, NO encoder — v1 saltmodel.py:90-93) feeding a pooled regression
+# head whose target (`pt_label_handle`) is BUILT by the MultiTarget processor
+# (v1 datasets.py:237-248,648,695-739).
+#
+# The two MultiTarget rules write the SAME custom_target `pt_label_handle` and
+# apply SEQUENTIALLY over one NaN-base running array (v1 in-place mutation,
+# datasets.py:709-739): `ID==15 -> HadronConeExclTruthLabelPt`, then
+# `ID!=15 -> pt`. Because MultiTarget declares `labels.jets.pt_label_handle` as
+# a CONCRETE produce, it (not the Labels wildcard) owns that key — write-once is
+# preserved (planner rule (a), concrete beats wildcard).
+#
+# NO machine paths committed (design §5 placeholder policy). From the REPO ROOT:
+#   python -m salt.core.main graph validate -c salt/core/configs/regression_multi_target.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: regression_multi_target
+
+data:
+  batch_size: 100
+  num_workers: 0
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+    multi_target:
+      class_path: salt.core.data.MultiTarget
+      init_args:
+        # two rules building ONE custom_target over a NaN base, applied in order
+        # (v1 multi_target sequential mutation, datasets.py:709-739)
+        replacements:
+          - stream: jets
+            sel_label: HadronConeExclTruthLabelID
+            op: "=="
+            value: 15
+            source: HadronConeExclTruthLabelPt
+            custom_target: pt_label_handle
+          - stream: jets
+            sel_label: HadronConeExclTruthLabelID
+            op: "!="
+            value: 15
+            source: pt
+            custom_target: pt_label_handle
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs_config: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks # requires normed.tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: 128
+          dense: {hidden_layers: [256], activation: SiLU}
+      concat:
+        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask (no encoder)
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args:
+          input: seq.x # the Concat output (encoder-less: no encoded.seq)
+          out: pooled.global
+      reg_multi_target:
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          targets: pt_label_handle # the MultiTarget-built label
+          norm_params: {mean: 1.0, std: 1.0}
+          loss: MSELoss
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      loss:
+        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+
+writers:
+  modules:
+    # no sequence-stream task -> no pad mask to write (design §5.3 null-deletion).
+    pad_mask: null
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: regressionMultiTarget # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+  # outputs: NONE — derived from the writers. The MultiTarget label is a
+  # FIT|VAL-only training target, absent from the export graph.
+
+trainer:
+  max_epochs: 2

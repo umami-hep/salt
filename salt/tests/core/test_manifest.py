@@ -45,6 +45,7 @@ from salt.core.onnx import (
     ordered_output_names,
     resolve_export_config,
 )
+from salt.core.nn.tasks import RegressionTaskModule
 from salt.core.onnx.config import KNOWN_REDUCES
 from salt.core.onnx.metadata import build_gnn_config
 from salt.core.schema import dump_schema, save_schema
@@ -295,6 +296,77 @@ class TestSuffixConstants:
         assert OBJECT_INDEX.test == "MaskIndex"
         assert OBJECT_INDEX.onnx == "HadronIndex"
         assert "predictionwriter.py" in OBJECT_INDEX.why
+
+
+# ---------------------------------------------------------------------------
+# M5 sub-wave A: RegressionTaskModule is a supported TaskWriter family in
+# BOTH modes (TEST f4 columns + split_scalars ONNX manifest) — the A1
+# _validate_writer_roles adjudication consequence (AM dec 4)
+# ---------------------------------------------------------------------------
+
+
+def _regression_modules(modules):
+    """Add a GLOBAL regression head (2 targets, custom names) to the module set."""
+    reg = RegressionTaskModule(
+        stream="jets",
+        targets=["mass", "pt"],
+        input="pooled.global",
+        custom_output_names=["truthMass", "truthPt"],
+    )
+    reg.name = "jets_regression"
+    return dict(modules) | {"jets_regression": reg}
+
+
+class TestRegressionWriterFamily:
+    def test_test_columns_are_f4_per_target_suffix(self, modules):
+        # one {run}_{suffix} f4 column per target; suffix = custom name
+        writer = task_writer()
+        ctx = WriterDeclareCtx(
+            model_modules=_regression_modules(modules),
+            streams=("jets", "tracks"),
+            sequence_streams=("tracks",),
+        )
+        cols = writer.column_manifest(ctx, "run")["jets"]
+        assert cols == ["run_pb", "run_pc", "run_pu", "run_truthMass", "run_truthPt"]
+
+    def test_onnx_manifest_uses_split_scalars_per_target(self, modules):
+        # regression joins classification + vertexing as export-representable
+        writer = task_writer()
+        ctx = WriterDeclareCtx(
+            model_modules=_regression_modules(modules),
+            streams=("jets", "tracks"),
+            sequence_streams=("tracks",),
+        )
+        entries = writer.onnx_outputs(ctx)
+        reg = next(e for e in entries if e.port == "preds.jets.jets_regression")
+        assert reg.names == ["truthMass", "truthPt"]
+        assert reg.reduce == "split_scalars"
+        # global entry emitted before the sequence-stream aux entries
+        ports = [e.port for e in entries]
+        assert ports.index("preds.jets.jets_regression") < ports.index("preds.tracks.track_origin")
+
+    def test_onnx_false_makes_regression_eval_only(self, modules):
+        # a regression task an author declines to export -> empty manifest,
+        # non-empty TEST demand (the legal eval-only shape, A1 adjudication)
+        writer = task_writer(onnx=False)
+        ctx = WriterDeclareCtx(
+            model_modules=_regression_modules(modules),
+            streams=("jets", "tracks"),
+            sequence_streams=("tracks",),
+        )
+        assert writer.onnx_outputs(ctx) == []
+        assert "preds.jets.jets_regression" in writer.requires(ctx)
+
+    def test_onnx_names_rename_rejected_for_regression(self, modules):
+        # rename surface is the task's custom_output_names, not onnx_names
+        writer = task_writer(onnx_names={"jets_regression": ["a", "b"]})
+        ctx = WriterDeclareCtx(
+            model_modules=_regression_modules(modules),
+            streams=("jets", "tracks"),
+            sequence_streams=("tracks",),
+        )
+        with pytest.raises(ConfigError, match="custom_output_names"):
+            writer.onnx_outputs(ctx)
 
 
 # ---------------------------------------------------------------------------

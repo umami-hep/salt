@@ -33,7 +33,11 @@ from salt.core.nn.modules import (
     TransformerEncoder,
 )
 from salt.core.nn.state_dict import map_v1_state_dict
-from salt.core.nn.tasks import ClassificationTaskModule, VertexingTaskModule
+from salt.core.nn.tasks import (
+    ClassificationTaskModule,
+    RegressionTaskModule,
+    VertexingTaskModule,
+)
 
 __all__ = [
     "BindError",
@@ -42,6 +46,7 @@ __all__ = [
     "GlobalAttentionPooling",
     "LossSum",
     "Normaliser",
+    "RegressionTaskModule",
     "ResolvedSchema",
     "Split",
     "StreamEmbed",

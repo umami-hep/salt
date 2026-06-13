@@ -29,7 +29,7 @@ from torch import Tensor
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec
-from salt.core.nn.tasks import VertexingTaskModule
+from salt.core.nn.tasks import RegressionTaskModule, VertexingTaskModule
 from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx, task_modules
 from salt.core.writers.names import VERTEX_INDEX, pascal_case
@@ -75,7 +75,12 @@ class TaskWriter(Writer):
     - vertexing: a single ``('VertexIndex', 'i8')`` column from the
       TEST-mode node assignments via the exact v1 op chain
       ``preds.int().cpu()`` then u2s (``task.py:988-1005``) — padded
-      positions read the int32 cast of ``-inf`` (-2147483648).
+      positions read the int32 cast of ``-inf`` (-2147483648);
+    - regression (M5 sub-wave A): one ``f4`` column per target named
+      ``{run_name}_{suffix}`` where the suffix is ``custom_output_names``
+      when set else the target (v1 ``RegressionTask.output_names`` +
+      ``get_h5``, ``task.py:512-518,604``), from the de-scaled values the
+      task publishes in TEST (mode-split de-scaling, design §3.3).
 
     **v1-compat decision (M3, re-recorded at M4.5)**: the vertexing column
     is BARE ``VertexIndex`` by default — no run-name prefix — because the
@@ -96,7 +101,9 @@ class TaskWriter(Writer):
     ``split_scalars`` per-class suffixes, sequence classification -> one
     ``argmax`` int8 entry (Pascal-case of the task instance name,
     ``onnx_names:`` to override), vertexing -> ``vertex_union_find`` int8
-    on `VERTEX_INDEX`. Global-stream entries are emitted before
+    on `VERTEX_INDEX`, regression -> ``split_scalars`` per-target suffixes
+    (rename via the task's ``custom_output_names``). Global-stream entries
+    are emitted before
     sequence-stream entries regardless of module declaration order (the v1
     ``output_names`` order, ``to_onnx.py:258-292`` — O2/O5 byte parity).
     Adding an aux task therefore lands in eval AND export with zero extra
@@ -268,6 +275,17 @@ class TaskWriter(Writer):
         if isinstance(module, VertexingTaskModule):
             column = f"{run_name}_{VERTEX_INDEX}" if self.prefix_vertex_column else VERTEX_INDEX
             return [(column, "i8")]  # v1 task.py:1003
+        if isinstance(module, RegressionTaskModule):
+            # M5 sub-wave A: regression is a supported family — one
+            # `{run_name}_{suffix}` f4 column per target, the suffix being the
+            # custom output name when set else the target (v1
+            # RegressionTask.output_names + get_h5, task.py:512-518,604). The
+            # SAME `output_suffixes` ownership feeds `onnx_outputs` (amendment
+            # §2.2 single ownership; M5 decision in callback.
+            # _validate_writer_roles + README M4.5 addendum).
+            return [(f"{run_name}_{suffix}", "f4") for suffix in module.output_suffixes]
+        # The raise stays as the guard for families with no representation at
+        # all (e.g. a genuinely custom writer-role task).
         raise ConfigError(
             f"TaskWriter {self.name!r} cannot format predictions of module {name!r} "
             f"({type(module).__name__}) — supported families are classification "
@@ -344,7 +362,25 @@ class TaskWriter(Writer):
                         dtype="int8",
                     )
                 )
+            elif isinstance(module, RegressionTaskModule):
+                # M5 sub-wave A: regression is export-representable — one
+                # `split_scalars` scalar per target (v1 get_onnx splits the
+                # de-scaled `[B, R]` preds into R squeezed scalars,
+                # task.py:625-642). The suffixes ARE the TEST `output_suffixes`
+                # (custom_output_names else targets) minus the run-name prefix;
+                # the exporter prepends `{model_name}_` (amendment §2.2 single
+                # ownership). A regression task an author declines to export
+                # uses onnx/onnx_tasks/onnx_streams narrowing (handled above).
+                out.append(
+                    ExportOutput(
+                        port=module.pred_key,
+                        names=list(module.output_suffixes),
+                        reduce="split_scalars",
+                    )
+                )
             else:
+                # The raise stays for a genuinely unrepresentable family (e.g.
+                # a custom writer-role task with no shipped reduce).
                 raise ConfigError(
                     f"TaskWriter {self.name!r} cannot derive an ONNX output for module "
                     f"{name!r} ({type(module).__name__}) — supported families are "
@@ -415,6 +451,13 @@ class TaskWriter(Writer):
                     f"TaskWriter {self.name!r}: onnx_names cannot rename vertexing task "
                     f"{task_name!r} — its suffix is the shared cross-mode constant "
                     f"{VERTEX_INDEX!r} (salt.core.writers.names; amendment §2.2)"
+                )
+            if isinstance(module, RegressionTaskModule):
+                raise ConfigError(
+                    f"TaskWriter {self.name!r}: onnx_names cannot rename regression task "
+                    f"{task_name!r} — its per-target suffixes ARE the cross-mode "
+                    f"output_suffixes; rename via the task's custom_output_names instead "
+                    "(amendment §2.2 single ownership)"
                 )
             class_names = getattr(module, "class_names", None)
             if class_names is not None and module.stream not in ctx.sequence_streams:
@@ -502,6 +545,10 @@ class TaskWriter(Writer):
         """
         if getattr(module, "class_names", None) is not None:
             # v1 ClassificationTask.get_h5 (task.py:266-283): probs -> f4 u2s
+            return u2s(preds.float().cpu().numpy(), dtype)
+        if isinstance(module, RegressionTaskModule):
+            # v1 RegressionTask.get_h5 (task.py:604-623): de-scaled values
+            # (the forward already inverted scaling in TEST) -> f4 u2s
             return u2s(preds.float().cpu().numpy(), dtype)
         # v1 VertexingTask.get_h5 (task.py:988-1005): the EXACT op chain —
         # float assignments (-inf padded) -> .int() (int32 cast) -> u2s i8

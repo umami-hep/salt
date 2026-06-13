@@ -42,9 +42,13 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.modules import _reject_width_keys, _stream_len
 from salt.models.task import ClassificationTask as V1ClassificationTask
+from salt.models.task import GaussianRegressionTask as V1GaussianRegressionTask
+from salt.models.task import RegressionTask as V1RegressionTask
 from salt.models.task import VertexingTask as V1VertexingTask
+from salt.utils.array_utils import listify
+from salt.utils.scalers import RegressionTargetScaler
 
-__all__ = ["ClassificationTaskModule", "VertexingTaskModule"]
+__all__ = ["ClassificationTaskModule", "RegressionTaskModule", "VertexingTaskModule"]
 
 _UNNAMED = "unnamed"
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
@@ -54,6 +58,8 @@ _DEFAULT_VTX_LOSS: dict[str, Any] = {
     "class_path": "torch.nn.BCEWithLogitsLoss",
     "init_args": {"reduction": "none"},
 }
+_DEFAULT_REG_LOSS: dict[str, Any] = {"class_path": "torch.nn.MSELoss"}
+_DEFAULT_GAUSS_LOSS: dict[str, Any] = {"class_path": "torch.nn.GaussianNLLLoss"}
 
 
 class _TaskModuleBase(nn.Module):
@@ -554,6 +560,549 @@ class VertexingTaskModule(_TaskModuleBase):
         return {self.pred_key: preds}
 
 
+class RegressionTaskModule(_TaskModuleBase):
+    """Scalar/vector regression head (design §3.3, composes v1 `RegressionTask`).
+
+    Targets are read from labels (``labels.<stream>.<target>``) and the head
+    publishes ``preds.<stream>.<name>`` of shape ``[B, R]`` (global) or
+    ``[B, L, R]`` (per-token sequence), where ``R = len(targets)``. The
+    composed v1 head owns the scaling math verbatim (task.py:442-482 forward
+    scaling, 567-602 ``run_inference`` de-scaling); what is new is the
+    declared label/denominator dependency set and the **mode-split
+    de-scaling** wiring.
+
+    A single scaling method (v1 single-scaling guard, task.py:355): exactly
+    one of ``target_denominators`` (ratio targets), ``norm_params``
+    (mean/std), or ``scaler`` (per-target functional `RegressionTargetScaler`)
+    — or none (raw targets). Each is config scalar-or-list, count-checked
+    against ``targets`` inside the composed v1 head.
+
+    Mode-split de-scaling (FD §3.3): the de-scaling SOURCE for ratio targets
+    differs per mode — same math, different denominator provider.
+
+    - **FIT|VAL**: targets and ratio denominators come from
+      ``labels.<stream>.<var>`` (training labels). Predictions are published
+      RAW/SCALED (cheap, consumed by metrics callbacks), loss in scaled
+      space (v1 forward, task.py:519-565).
+    - **TEST**: predictions are DE-SCALED (v1 ``run_inference``). The ratio
+      denominator falls back to ``labels.<stream>.<denom>`` when it is not a
+      declared input Feature (v1 ``get_h5`` reads ``labels[input_name][denom]``,
+      task.py:587-589,604,621); ``event_classifier.yaml:65``'s ``mHH`` IS a
+      feature, but the TEST writer still re-reads it from the label group, so
+      TEST always sources denominators from labels.
+    - **ONNX**: the ratio denominator MUST be a declared input Feature
+      (resolved by NAME at `bind` against the stream's declared columns) —
+      v1 ``get_onnx(labels=structured_input_dict)`` reads it from the
+      structured INPUT dict, not the labels (to_onnx.py:381-398). A
+      denominator absent from the input Features is a `bind`-time error, since
+      the export graph has no other source for it.
+
+    ``norm_params`` and ``scaler`` need no external source, so their de-scaling
+    is mode-independent.
+
+    Gaussian regression (M5 sub-wave A3, FD 1567-1568): ``gaussian: true``
+    composes a v1 ``GaussianRegressionTask`` (task.py:645) — the head emits
+    ``2 * len(targets)`` outputs (means ‖ raw variances), the loss is the
+    Gaussian NLL, and inference returns means + ``stddev = sqrt`` of the
+    de-scaled softplus variance (task.py:753-774). Unlike v1's TEST-path
+    ``(means, stds)`` TUPLE, this module publishes ONE ``[B, 2R]`` (or
+    ``[B, L, 2R]``) array — means in the first R columns, stddevs in the last
+    R — so the rest of the graph sees the same single-leaf contract as a plain
+    regression head; the writer owns the ``_stddev`` suffix split (one owner,
+    both modes). The **ONNX stddev representation** is a M4.5 deferral-(b)
+    design-conformance: ``stddev = sqrt(softplus(var))`` is traced in-graph by
+    the same de-scaling math and declared in the unified manifest — there is NO
+    v1 ONNX golden (v1 ``onnx/to_onnx.py`` has zero Gaussian handling).
+
+    Per-sample weighting (``sample_weight:``) and NaN-target masking are
+    handled verbatim inside the composed v1 ``nan_loss`` (task.py:384-440):
+    invalid (NaN) targets are masked to 0 and the loss is reduced with
+    ``torch.nanmean``; a configured ``sample_weight`` label multiplies the
+    per-element loss (unsqueeze + multi-target expand) before the mean. Both
+    require ``loss.reduction == 'none'`` so the per-element loss survives —
+    surfaced at config time for ``sample_weight`` and documented for NaN
+    targets.
+
+    The `MultiTarget` processor (conditional row-wise target replacement) is a
+    DATASET-side sibling — `salt.core.data.processors.MultiTarget` — not a task
+    flag; it runs over the label bundle BEFORE the task forward.
+    """
+
+    def __init__(
+        self,
+        stream: str,
+        targets: str | Sequence[str],
+        input: str | None = None,  # noqa: A002 - design §3.3 YAML surface name
+        context: str | None = None,
+        sequence: bool | None = None,
+        target_denominators: str | Sequence[str] | None = None,
+        norm_params: Mapping[str, Any] | None = None,
+        scaler: Mapping[str, Mapping[str, Any]] | None = None,
+        custom_output_names: str | Sequence[str] | None = None,
+        gaussian: bool = False,
+        sample_weight: str | None = None,
+        dense: dict[str, Any] | None = None,
+        loss: str | dict[str, Any] | None = None,
+        weight: float = 1.0,
+    ) -> None:
+        """Capture config only (design §2.3).
+
+        Parameters
+        ----------
+        stream : str
+            The regressed stream (``jets``, ``tracks``, ``objects``, ...).
+        targets : str | Sequence[str]
+            Regression target name(s), demanded as
+            ``labels.<stream>.<target>``. The head width is ``len(targets)``.
+        input : str | None, optional
+            Input key, by default ``encoded.<stream>`` (the `Split` output).
+        context : str | None, optional
+            Context key (e.g. ``pooled.global``), by default None.
+        sequence : bool | None, optional
+            Whether the task is per-token, by default inferred: True when
+            `input` is the per-stream default, False for an explicit input
+            (e.g. ``pooled.global``). Set explicitly for per-token tasks on
+            non-default inputs.
+        target_denominators : str | Sequence[str] | None, optional
+            Per-target ratio denominator variable(s) (``target/denom``),
+            by default None. Mutually exclusive with `norm_params`/`scaler`.
+        norm_params : Mapping[str, Any] | None, optional
+            ``{"mean": <scalar|list>, "std": <scalar|list>}`` per-target
+            mean/std normalisation, by default None. Mutually exclusive.
+        scaler : Mapping[str, Mapping[str, Any]] | None, optional
+            Per-target functional scaling
+            ``{<target>: {op, x_scale, x_off, op_scale, op_off}}`` (built
+            into a `RegressionTargetScaler`), by default None. Mutually
+            exclusive.
+        custom_output_names : str | Sequence[str] | None, optional
+            Output column suffix(es) overriding the target names (the v1
+            ``custom_output_names``, task.py:514-516), by default None
+            (suffixes ARE the target names). Count-checked against `targets`.
+        gaussian : bool, optional
+            Compose a v1 ``GaussianRegressionTask`` instead of the plain
+            ``RegressionTask`` (mu/sigma head, ``output_size = 2 *
+            len(targets)``, softplus variance, Gaussian NLL, stddev =
+            ``sqrt`` in inference; v1 task.py:645-774), by default False.
+            A Gaussian head needs a non-functional scaling method
+            (``norm_params`` or ``target_denominators``): v1's gaussian
+            ``run_inference`` has no ``scaler`` branch and RAISES without
+            scaling params (task.py:765-766), so a ``scaler:`` or
+            scaling-free gaussian head is a config-time error.
+        sample_weight : str | None, optional
+            Per-sample loss-reweighting label (``labels.<stream>.<weight>``,
+            FIT|VAL only), multiplied INTO the per-element loss inside the
+            composed v1 ``nan_loss`` (unsqueeze + multi-target expand,
+            task.py:429-435), by default None. REQUIRES ``loss.reduction ==
+            'none'`` (the v1 assert, task.py:379-382) — surfaced at config
+            time.
+        dense : dict[str, Any] | None, optional
+            Extra v1 `Dense` kwargs (no width keys), by default None.
+        loss : str | dict[str, Any] | None, optional
+            Loss config, by default ``MSELoss`` (``GaussianNLLLoss`` when
+            ``gaussian`` is set). NaN-target masking is unconditional inside
+            the composed v1 ``nan_loss`` (mask invalid -> 0, ``torch.nanmean``
+            over the loss, task.py:412-437); a config that EXPECTS NaN
+            targets (``nan_regression``) must set ``reduction: none`` so the
+            per-element mask survives to the ``nanmean`` (task.py:421-427).
+        weight : float, optional
+            Scalar task-loss weight (applied INSIDE the composed v1 head,
+            task.py:563), by default 1.0.
+
+        Raises
+        ------
+        ConfigError
+            On empty targets, a custom-output-name count mismatch, more than
+            one scaling method (the v1 single-scaling guard surfaced at
+            config time), a ``sample_weight`` with a non-``none`` loss
+            reduction, or a gaussian head combined with a functional
+            ``scaler`` / no scaling method.
+        """
+        self.gaussian = bool(gaussian)
+        default_loss = _DEFAULT_GAUSS_LOSS if self.gaussian else _DEFAULT_REG_LOSS
+        super().__init__(stream, "", input, context, dense, loss, weight, default_loss)
+        # regression has no single `label` field; the demand is one label per
+        # target (set below). `_TaskModuleBase.label` is left empty.
+        self.targets = _opt_tuple(targets) or ()
+        if not self.targets:
+            raise ConfigError(
+                "RegressionTaskModule: targets is required and non-empty (design §3.3)"
+            )
+        self.sequence = sequence if sequence is not None else input is None
+        self.target_denominators = _opt_tuple(target_denominators)
+        self.norm_params = self._checked_norm_params(norm_params)
+        self.scaler_scales = dict(scaler) if scaler is not None else None
+        self.custom_output_names = _opt_tuple(custom_output_names)
+        self.sample_weight = sample_weight
+        n_methods = sum(
+            x is not None for x in (self.target_denominators, self.norm_params, self.scaler_scales)
+        )
+        if n_methods > 1:
+            raise ConfigError(
+                f"RegressionTaskModule: only a single scaling method is allowed — set at most "
+                f"one of target_denominators/norm_params/scaler (v1 task.py:355), got "
+                f"{n_methods}"
+            )
+        if self.custom_output_names is not None and len(self.custom_output_names) != len(
+            self.targets
+        ):
+            raise ConfigError(
+                f"RegressionTaskModule: custom_output_names {list(self.custom_output_names)} "
+                f"({len(self.custom_output_names)}) must match targets {list(self.targets)} "
+                f"({len(self.targets)}) (v1 task.py:515)"
+            )
+        if self.target_denominators is not None and len(self.target_denominators) != len(
+            self.targets
+        ):
+            raise ConfigError(
+                f"RegressionTaskModule: target_denominators {list(self.target_denominators)} "
+                f"({len(self.target_denominators)}) must match targets {list(self.targets)} "
+                f"({len(self.targets)}) (v1 task.py:361-366)"
+            )
+        if self.gaussian and self.scaler_scales is not None:
+            raise ConfigError(
+                "RegressionTaskModule: a gaussian head cannot use a functional 'scaler' — v1 "
+                "GaussianRegressionTask.run_inference has no scaler branch (task.py:753-766); use "
+                "norm_params or target_denominators (or none with no inference de-scaling)"
+            )
+        if self.sample_weight is not None and (
+            self.loss_cfg.get("init_args", {}).get("reduction", "mean") != "none"
+        ):
+            raise ConfigError(
+                f"RegressionTaskModule: sample_weight {self.sample_weight!r} requires the loss "
+                "reduction to be 'none' — the per-sample weight multiplies the unreduced loss "
+                "before nanmean (v1 task.py:379-382,429-435); set loss: "
+                "{class_path: torch.nn.MSELoss, init_args: {reduction: none}}"
+            )
+        # resolved at bind: the declared input-Feature column order, captured
+        # so the ONNX de-scaling can gather denominators by NAME (FD §3.3).
+        self._input_fields: tuple[str, ...] = ()
+
+    @staticmethod
+    def _checked_norm_params(
+        norm_params: Mapping[str, Any] | None,
+    ) -> dict[str, list[float]] | None:
+        """Normalise + validate the ``norm_params`` mapping (v1 task.py:349-351).
+
+        Returns
+        -------
+        dict[str, list[float]] | None
+            ``{"mean": [...], "std": [...]}`` with both listified, or None.
+
+        Raises
+        ------
+        ConfigError
+            If the mapping is present but lacks ``mean``/``std``.
+        """
+        if norm_params is None:
+            return None
+        if set(norm_params) < {"mean", "std"}:
+            raise ConfigError(
+                f"RegressionTaskModule: norm_params must carry 'mean' and 'std', got "
+                f"{sorted(norm_params)} (v1 task.py:349-351)"
+            )
+        return {
+            "mean": [float(x) for x in listify(norm_params["mean"])],
+            "std": [float(x) for x in listify(norm_params["std"])],
+        }
+
+    @property
+    def output_suffixes(self) -> tuple[str, ...]:
+        """Per-output column suffixes (custom names override the targets).
+
+        Reproduces v1 ``RegressionTask.output_names`` minus the ``model_name``
+        prefix (task.py:511-517); the writer adds the run-name prefix. For a
+        gaussian head the suffix list is doubled — the R mean suffixes followed
+        by the R ``<suffix>_stddev`` suffixes (v1 ``GaussianRegressionTask.
+        output_names``, task.py:672-675; the FD 1567-1568 consistency fix honours
+        ``custom_output_names`` for the means, which v1's ``output_names``
+        dropped), index-aligned with the published ``[B, 2R]`` array.
+
+        Returns
+        -------
+        tuple[str, ...]
+            R suffixes (plain regression) or 2R suffixes (gaussian: means then
+            ``_stddev``), in column order.
+        """
+        base = self.custom_output_names if self.custom_output_names is not None else self.targets
+        if self.gaussian:
+            return (*base, *(f"{s}_stddev" for s in base))
+        return base
+
+    @property
+    def target_label_keys(self) -> tuple[str, ...]:
+        """The declared target-label dependencies (one per target, design §3.3).
+
+        Returns
+        -------
+        tuple[str, ...]
+            ``labels.<stream>.<target>`` keys, in target order.
+        """
+        return tuple(f"labels.{self.stream}.{t}" for t in self.targets)
+
+    @property
+    def denom_label_keys(self) -> tuple[str, ...]:
+        """The declared ratio-denominator label dependencies (FIT|VAL|TEST source).
+
+        Returns
+        -------
+        tuple[str, ...]
+            ``labels.<stream>.<denom>`` keys, in target order, or empty when
+            there are no ratio denominators.
+        """
+        if self.target_denominators is None:
+            return ()
+        return tuple(f"labels.{self.stream}.{d}" for d in self.target_denominators)
+
+    @property
+    def input_feature_key(self) -> str:
+        """The raw-input key carrying the ONNX denominator columns.
+
+        Returns
+        -------
+        str
+            ``inputs.<stream>``.
+        """
+        return f"inputs.{self.stream}"
+
+    @property
+    def weight_label_key(self) -> str:
+        """The declared per-sample weight dependency (FIT|VAL only).
+
+        Returns
+        -------
+        str
+            ``labels.<stream>.<sample_weight>`` (only meaningful when
+            ``sample_weight`` is set).
+        """
+        return f"labels.{self.stream}.{self.sample_weight}"
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare input/context/masks (+ target/denominator deps) -> preds (+ loss).
+
+        Mode-split denominator dependency (FD §3.3): FIT|VAL|TEST demand the
+        denominators from ``labels.<stream>.<denom>``; ONNX demands the raw
+        ``inputs.<stream>`` Feature tensor (the export-side source). Targets,
+        the per-sample weight, and the FIT|VAL loss are TRAINING-gated;
+        predictions are produced in ALL modes. A gaussian head publishes a
+        ``2R``-wide prediction (means ‖ stddevs).
+
+        Returns
+        -------
+        IO
+            The declared requires/produces.
+        """
+        n_outputs = 2 * len(self.targets) if self.gaussian else len(self.targets)
+        width = sym_dim("D", self.name)
+        if self.sequence:
+            input_spec = TensorSpec(shape=("B", _stream_len(self.stream), width), dtype="float32")
+            label_shape: tuple[int | str, ...] = ("B", _stream_len(self.stream))
+            pred_spec = TensorSpec(
+                shape=("B", _stream_len(self.stream), n_outputs), dtype="float32"
+            )
+        else:
+            input_spec = TensorSpec(shape=("B", width), dtype="float32")
+            label_shape = ("B",)
+            pred_spec = TensorSpec(shape=("B", n_outputs), dtype="float32")
+        requires: dict[str, TensorSpec] = {self.input_key: input_spec}
+        if self.context is not None:
+            requires[self.context] = TensorSpec(shape=None, dtype="float32")
+        if self.sequence:
+            requires[f"masks.{self.stream}"] = TensorSpec(
+                shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
+            )
+        # targets are training labels (continuous → float32; v1 reads them as
+        # the dataset dtype and stacks/divides, task.py:458-460)
+        for key in self.target_label_keys:
+            requires[key] = TensorSpec(
+                shape=label_shape, dtype="float32", kind="label", modes=Mode.TRAINING
+            )
+        if self.sample_weight is not None:
+            # the per-sample weight is a FIT|VAL training label; it multiplies
+            # the per-element loss inside nan_loss (task.py:429-435)
+            requires[self.weight_label_key] = TensorSpec(
+                shape=label_shape, dtype="float32", kind="label", modes=Mode.TRAINING
+            )
+        if self.target_denominators is not None:
+            # FIT|VAL|TEST: denominators come from the label group; ONNX reads
+            # them from the raw input Feature tensor instead (de-scaling source
+            # split, FD §3.3 — to_onnx.py:381-398 vs task.py:587-589).
+            for key in self.denom_label_keys:
+                requires[key] = TensorSpec(
+                    shape=label_shape,
+                    dtype="float32",
+                    kind="label",
+                    modes=Mode.FIT | Mode.VAL | Mode.TEST,
+                )
+            if mode & Mode.ONNX:
+                requires[self.input_feature_key] = TensorSpec(
+                    shape=("B", sym_dim("F", f"{self.name}.{self.stream}")),
+                    dtype="float32",
+                    modes=Mode.ONNX,
+                )
+        produces: dict[str, TensorSpec] = {
+            self.pred_key: pred_spec,
+            self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
+        }
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Build the composed v1 regression head + resolve the ONNX denominator source.
+
+        ``output_size = len(targets)`` (``2 * len(targets)`` for a gaussian
+        head); the input/context widths are inferred from the resolved schema
+        (design §2.3). When ``target_denominators`` is set, every denominator
+        must be a declared column of ``inputs.<stream>`` so the ONNX graph can
+        gather it by name (to_onnx.py:381-398) — otherwise the ONNX de-scaling
+        has no source and `bind` raises. A gaussian head with neither
+        ``norm_params`` nor ``target_denominators`` also raises here: v1's
+        gaussian ``run_inference`` cannot de-scale without scaling params
+        (task.py:765-766).
+
+        Raises
+        ------
+        ConfigError
+            If a ratio denominator is not a declared input Feature (the ONNX
+            mode has no other source for it, FD §3.3), or a gaussian head has
+            no scaling method for inference de-scaling.
+        """
+        if self.gaussian and self.norm_params is None and self.target_denominators is None:
+            raise ConfigError(
+                f"RegressionTaskModule {self.name!r}: a gaussian head requires norm_params or "
+                "target_denominators — v1 GaussianRegressionTask.run_inference raises without "
+                "scaling params (task.py:765-766)"
+            )
+        init_args = dict(self.loss_cfg.get("init_args", {}))
+        loss_module = _loss_class(self.loss_cfg)(**init_args)
+        scaler = RegressionTargetScaler(self.scaler_scales) if self.scaler_scales else None
+        dense_config = {
+            "input_size": schema.width(self.input_key),
+            "output_size": (2 if self.gaussian else 1) * len(self.targets),
+            **({"context_size": schema.width(self.context)} if self.context else {}),
+            **self.dense_cfg,
+        }
+        # norm_params is mutated in place by v1 RegressionTaskBase (listify),
+        # so hand it a fresh copy to keep this module's config immutable.
+        norm_params = (
+            {"mean": list(self.norm_params["mean"]), "std": list(self.norm_params["std"])}
+            if self.norm_params is not None
+            else None
+        )
+        common = {
+            "name": self.name,
+            "input_name": self.stream,
+            "targets": list(self.targets),
+            "target_denominators": (
+                list(self.target_denominators) if self.target_denominators is not None else None
+            ),
+            "norm_params": norm_params,
+            "custom_output_names": (
+                list(self.custom_output_names) if self.custom_output_names is not None else None
+            ),
+            "sample_weight": self.sample_weight,
+            "loss": loss_module,
+            "weight": self.weight,
+            "dense_config": dense_config,
+        }
+        # the plain head additionally takes the functional `scaler` (the
+        # gaussian head has no scaler branch — guarded at __init__)
+        self.task = (
+            V1GaussianRegressionTask(**common)
+            if self.gaussian
+            else V1RegressionTask(scaler=scaler, **common)
+        )
+        if self.target_denominators is not None:
+            self._input_fields = schema.fields_of(self.input_feature_key)
+            features = set(self._input_fields)
+            if missing := [d for d in self.target_denominators if d not in features]:
+                raise ConfigError(
+                    f"RegressionTaskModule {self.name!r}: ratio denominators {missing} are not "
+                    f"declared columns of {self.input_feature_key!r} ({sorted(features)}) — the "
+                    f"ONNX export graph de-scales from the input Feature tensor "
+                    f"(to_onnx.py:381-398), so a denominator must be an input variable. Add it "
+                    f"to data.modules.features.init_args.variables.{self.stream}, or drop the "
+                    f"ratio target (FD §3.3 mode-split de-scaling)"
+                )
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Run the composed v1 head; RAW preds + loss in FIT|VAL, de-scaled in TEST/ONNX.
+
+        The v1 head is handed a SINGLE-STREAM targets dict (its
+        ``input_name_mask`` slicing is the identity on per-stream inputs). The
+        per-sample weight (when configured) rides in that dict so the composed
+        ``nan_loss`` finds it (task.py:430). In TEST/ONNX the denominator
+        provider differs (FD §3.3): TEST sources it from the label group, ONNX
+        gathers it by name from the raw input Feature tensor. A gaussian head's
+        de-scaling returns a v1 ``(means, stds)`` TUPLE — re-concatenated to one
+        ``[B, 2R]`` array here (FD 1567-1568 one-array contract); the writer
+        owns the ``_stddev`` split.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The newly produced keys only (design §2.5).
+        """
+        assert self.task is not None, "forward before bind()"
+        x = b.get(self.input_key)
+        ctx = b.get(self.context) if self.context is not None else None
+        mask = b.get(f"masks.{self.stream}") if self.sequence else None
+        pad_masks = {self.stream: mask} if self.sequence else None
+        if mode & Mode.TRAINING:
+            targets_dict = {
+                self.stream: {
+                    t: b.get(k) for t, k in zip(self.targets, self.target_label_keys, strict=True)
+                }
+            }
+            for denom, key in zip(
+                self.target_denominators or (), self.denom_label_keys, strict=True
+            ):
+                targets_dict[self.stream][denom] = b.get(key)
+            if self.sample_weight is not None:
+                targets_dict[self.stream][self.sample_weight] = b.get(self.weight_label_key)
+            preds, loss = self.task(x, targets_dict, pad_masks, context=ctx)
+            return {self.pred_key: preds, self.loss_key: loss}
+        # TEST|ONNX: de-scaled physical values (design §3.3). v1 forward with an
+        # empty targets dict returns raw preds; run_inference inverts scaling.
+        preds, _ = self.task(x, {}, pad_masks, context=ctx)
+        labels = self._descale_source(b, mode) if self.target_denominators is not None else None
+        descaled = self.task.run_inference(preds, labels=labels, pad_mask=mask)
+        if self.gaussian:
+            # v1 GaussianRegressionTask.run_inference returns (means, stds);
+            # publish ONE [..., 2R] array (means ‖ stds) for the single-leaf
+            # graph contract (FD 1567-1568)
+            means, stds = descaled
+            return {self.pred_key: torch.cat([means, stds], dim=-1)}
+        return {self.pred_key: descaled}
+
+    def _descale_source(self, b: Bundle, mode: Mode) -> dict[str, dict[str, Tensor]]:
+        """Build the per-denominator de-scaling source dict (FD §3.3 mode split).
+
+        ``run_inference`` reads ``labels[input_name][denom]`` (task.py:587-589),
+        so this returns that exact nesting — sourced from the label group in
+        TEST and gathered by NAME from the raw input Feature tensor in ONNX
+        (the only export-time source, to_onnx.py:381-398).
+
+        Returns
+        -------
+        dict[str, dict[str, Tensor]]
+            ``{stream: {denom: tensor}}`` for every ratio denominator.
+        """
+        assert self.target_denominators is not None
+        if mode & Mode.ONNX:
+            columns = b.get(self.input_feature_key)
+            field_index = {name: i for i, name in enumerate(self._input_fields)}
+            return {
+                self.stream: {
+                    denom: columns[..., field_index[denom]] for denom in self.target_denominators
+                }
+            }
+        return {
+            self.stream: {
+                denom: b.get(key)
+                for denom, key in zip(self.target_denominators, self.denom_label_keys, strict=True)
+            }
+        }
+
+
 class _OriginWeightedVertexing(V1VertexingTask):
     """v1 `VertexingTask` with config-driven heavy/fake origin ids (design §3.3).
 
@@ -581,6 +1130,22 @@ class _OriginWeightedVertexing(V1VertexingTask):
         weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
         weights = weights[adjmat]
         return 1 + weights
+
+
+def _opt_tuple(value: str | Sequence[str] | None) -> tuple[str, ...] | None:
+    """Listify a scalar-or-list config value to a tuple, preserving ``None``.
+
+    Mirrors v1 ``listify`` (array_utils.py:40) but returns a tuple (this
+    module's immutable-config convention) and never explodes on ``None``.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        The listified tuple, or None when the input is None.
+    """
+    if value is None:
+        return None
+    return tuple(listify(value))
 
 
 def _checked_weight_source(weight_source: Mapping[str, str] | None) -> dict[str, str] | None:

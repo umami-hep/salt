@@ -838,8 +838,25 @@ class GlobalAttentionPooling(nn.Module):
     pooling.py:56). The zero-token ONNX pad stays inside the composed v1
     class (pooling.py:59-63).
 
-    M2 scope: the pooled input is the encoder output, so the pad masks are
-    the fixed keys ``seq.mask`` + ``masks.registers``.
+    Two wirings, one class (design §5.1; v1 saltmodel.py:90-93,155-156,
+    169-170):
+
+    - **With an encoder** (the GN2 path): ``input`` is ``encoded.seq`` and
+      `TransformerEncoder` publishes ``masks.registers`` — the register rows
+      sit after every stream, so the pad dict is streams-then-REGISTERS.
+    - **Encoder-less** (M5; the DiPS/DeepSets family, every regression
+      config + ``legacy/dips.yaml``): ``init_nets`` + ``pool_net`` with NO
+      ``encoder:`` block, so nothing produces ``masks.registers`` (v1
+      saltmodel.py:155-156 pools ``flatten_tensor_dict(xs)`` directly). The
+      config points ``input`` at ``seq.x`` (the `Concat` output) and
+      ``masks.registers`` is declared OPTIONAL — absent from the plan when no
+      producer exists (planner `_collect_demand` skips optional requires,
+      `_build_edges` binds no edge), so the config plan-compiles and the pad
+      dict is just ``{"seq": seq.mask}``. v1's pooling cats mask values in
+      dict order, so dropping the REGISTERS entry is the exact v1
+      encoder-less semantics — NOT an approximation. The WITH-encoder path is
+      untouched: when the encoder produces ``masks.registers`` the optional
+      require still binds and the REGISTERS pad row is still consumed.
     """
 
     def __init__(self, input: str = "encoded.seq", out: str = "pooled.global") -> None:  # noqa: A002 - design §5.1 YAML surface name
@@ -869,8 +886,16 @@ class GlobalAttentionPooling(nn.Module):
                     shape=("B", sym_dim("L", self.name), width), dtype="float32"
                 ),
                 "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
+                # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder
+                # path, ABSENT on the encoder-less path (init_nets+pool_net, no
+                # encoder — v1 saltmodel.py:90-93,155-156). Optional means the
+                # planner drops it when no module produces it, so encoder-less
+                # configs plan-compile (design §2.2; M5 encoder-less pooling).
                 "masks.registers": TensorSpec(
-                    shape=("B", sym_dim("R", "registers")), dtype="bool", kind="pad_mask"
+                    shape=("B", sym_dim("R", "registers")),
+                    dtype="bool",
+                    kind="pad_mask",
+                    optional=True,
                 ),
             }),
             produces=unflatten_spec({
@@ -883,7 +908,7 @@ class GlobalAttentionPooling(nn.Module):
         self.pool_net = V1GlobalAttentionPooling(input_size=schema.width(self.input_key))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Pool the sequence with the post-register mask dict.
+        """Pool the sequence with the (optionally register-augmented) mask dict.
 
         Returns
         -------
@@ -894,8 +919,14 @@ class GlobalAttentionPooling(nn.Module):
         assert self.pool_net is not None, "forward before bind()"
         x = {"seq": b.get(self.input_key)}
         # streams-then-REGISTERS dict order is numerics-critical: pooling
-        # cats mask values in dict order (pooling.py:56).
-        pad = {"seq": b.get("seq.mask"), "REGISTERS": b.get("masks.registers")}
+        # cats mask values in dict order (pooling.py:56). The encoder-less
+        # path has no register row (no encoder produced one), so the pad dict
+        # is just {"seq": seq.mask} — the exact v1 saltmodel.py:155-156,170
+        # encoder-less semantics; absent optional ports are probed, not read
+        # (executor optional-port contract).
+        pad = {"seq": b.get("seq.mask")}
+        if "masks.registers" in b:
+            pad["REGISTERS"] = b.get("masks.registers")
         return {self.out_key: self.pool_net(x, pad_mask=pad)}
 
 

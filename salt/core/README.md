@@ -196,6 +196,49 @@ one suffix is a hard error naming both (fix via `onnx_names:` or
 `salt2 graph resolve [--annotate]`, or the manifest table appended to the
 export-time `plan_onnx.txt`.
 
+#### M4.5 amendment addendum — TaskWriter regression family (AM dec 4, settled M5)
+
+`WriterCallback._validate_writer_roles` derives every writer's ONNX
+manifest on the TEST demand-assembly path too (`per_writer_demand` calls it
+during `salt2 test`), so a task family with a TEST representation but NO
+export representation would trip `TaskWriter.onnx_outputs`'s
+unsupported-family `ConfigError` during eval, not just at export. AM
+decision 4 left the M5 implementer two options when `TaskWriter` gains
+**regression**: keep the loud eval-time coupling, or derive only
+export-representable families (skip + deadcode finding).
+
+**Decision (M5 sub-wave A foundation): derive a regression export
+representation — KEEP the loud error as the correct guard for genuinely
+unrepresentable families, and make scalar regression a supported family in
+BOTH modes so it never trips that error.** Rationale, grounded in AM dec 4
++ the AM pre-implementation check (§"Pre-implementation check"): global
+scalar regression is *already export-representable in v1* — `RegressionTask`
+has `output_names` (one `{model_name}_{target}` column per target,
+`task.py:512-518`) and a `get_onnx` (one squeezed scalar per target via
+`torch.split`, `task.py:625-642`); the AM check explicitly flags "a plain
+global regression export (GN2X-class, one line in v1)" as the family that
+must NOT become a custom-writer authoring task. So "derive-only-export-
+representable" and "keep the loud error" are not in tension *for
+regression*: regression simply joins classification + vertexing as a
+representable family in `TaskWriter._task_descr` (TEST) and
+`TaskWriter.onnx_outputs` (ONNX, a `split_scalars`-style per-target
+manifest entry), built from ONE shared per-family suffix helper exactly as
+the amendment §2.2 single-ownership rule requires. The loud
+unsupported-family raises (`writers/modules.py` `_task_descr` and
+`onnx_outputs`) stay — they remain the right error for a future family
+with no export math — but a regression config no longer reaches them.
+
+Consequence for A2: when `RegressionTaskModule` lands, the default
+`TaskWriter` formats it in TEST and ONNX, so `salt2 test` demand assembly
+does NOT crash on a regression config — the `_validate_writer_roles` check
+passes (the writer has a non-empty TEST demand AND a non-empty manifest).
+A regression task an author chooses NOT to export is still expressible
+(`onnx: false` / `onnx_tasks`): `onnx_outputs` returns `[]` before the
+family dispatch, so the eval-only shape (non-empty demand, empty manifest)
+is legal and never trips the raise. The narrow "TEST-representable but
+intentionally never export-representable" case is therefore served by
+explicit ONNX narrowing, not by silently skipping families.
+
 ### Add a custom output column (design §8)
 
 Subclass `salt.core.writers.Writer` and add four YAML lines under

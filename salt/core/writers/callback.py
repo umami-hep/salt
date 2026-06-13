@@ -281,19 +281,30 @@ class WriterCallback(Callback):
         (merge condition 3); and an ``export_only`` writer declaring TEST
         demand contradicts itself.
 
-        Note (recorded M5 decision point): this validation derives every
-        writer's ONNX manifest on the TEST path too (`per_writer_demand`
-        calls it during ``salt2 test`` demand assembly), so a task family
-        with a TEST representation but NO export representation would raise
-        `TaskWriter.onnx_outputs`'s unsupported-family error during eval
-        unless narrowed away (``onnx: false``/``onnx_streams``/
-        ``onnx_tasks`` — the error names all three). Today the TEST and
-        ONNX family sets are identical (classification + vertexing) so the
-        branch is unreachable; when M5 extends `TaskWriter` (regression —
-        the amendment pre-implementation check), the implementer must
-        either keep this loud coupling deliberately or derive only
-        export-representable families (skip + deadcode finding). Tracked in
-        the study CLAUDE.md M5 TODOs.
+        Note (M5 decision point — SETTLED in sub-wave A; AM dec 4): this
+        validation derives every writer's ONNX manifest on the TEST path too
+        (`per_writer_demand` calls it during ``salt2 test`` demand
+        assembly), so a task family with a TEST representation but NO export
+        representation would raise `TaskWriter.onnx_outputs`'s
+        unsupported-family error during eval unless narrowed away
+        (``onnx: false``/``onnx_streams``/``onnx_tasks`` — the error names
+        all three). AM dec 4 left two options for the M5 ``TaskWriter``
+        regression extension: keep the loud coupling, or derive only
+        export-representable families. **Decision: KEEP the loud coupling —
+        it is the correct guard for a genuinely unrepresentable family — and
+        make scalar regression representable in BOTH modes so it never
+        reaches the raise.** Global scalar regression is already
+        export-representable in v1 (`RegressionTask.output_names` +
+        ``get_onnx``; AM pre-implementation check), so it joins
+        classification + vertexing as a supported `TaskWriter` family rather
+        than tripping the error. A regression config therefore does NOT
+        crash ``salt2 test`` demand assembly (non-empty TEST demand AND
+        non-empty manifest); an author who declines to export a
+        TEST-representable regression task uses explicit ONNX narrowing
+        (``onnx_outputs`` returns ``[]`` before the family dispatch, so the
+        eval-only shape stays legal). Full rationale + the A2 consequence:
+        ``salt/core/README.md`` (M4.5 amendment addendum). The loud raises
+        (``writers/modules.py`` ``_task_descr`` / ``onnx_outputs``) stay.
 
         Raises
         ------

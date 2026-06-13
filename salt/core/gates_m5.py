@@ -1,0 +1,1038 @@
+"""M5 gates harness — R1-R4 for the regression family (plan 10, sub-wave A; design §9.5).
+
+Four standalone gates, each a subcommand of ``python -m salt.core.gates_m5``,
+each writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
+human-readable table to stdout, exiting non-zero on failure (the gates_m2/m3/m4
+envelope). NO machine data path lives in this file (design §5 placeholder
+policy): every gate generates its own dummy fixtures into ``--outdir`` from the
+in-repo parity generators (`salt.tests.core.regression_fixture` + the gn2
+fixture), and compares the composed-v1-head reference against the v2
+`RegressionTaskModule` driven through the REAL plan compiler / two-phase bind /
+executor.
+
+Gate criteria (each justified in its ``run_r*`` docstring vs the design/v1 ref):
+
+- **R1 RegressionTask forward+denorm parity** — the A2 core surface on
+  ``regression.yaml``'s variants (norm_params scalar+vector, target_denominators
+  ratio + custom_output_names, functional scaler per-token sequence). Two tiers
+  of assertion, kept honestly distinct:
+  (i) *v2-wiring self-consistency vs the composed v1 head* — the executor's
+  output equals ``module.task(...)`` (the SAME composed-v1 object the executor
+  invoked), which is byte-equal by construction and proves the Split/pool/
+  executor key-routing doesn't corrupt I/O (the corruption hook gives it teeth);
+  (ii) *genuine v1-vs-v2 cross-impl parity* — for the norm_params variant AND the
+  functional-scaler per-token sequence variant, the executor's output is compared
+  against an INDEPENDENT v1 ``RegressionTask`` (separately constructed from the
+  same kwargs, its own `Dense`, ``load_state_dict``-copied weights — the R3
+  dips-pooling pattern) to <= 1e-6. PLUS the ONNX denominator-∈-Features rule (a
+  denominator absent from the input Features is a bind-time ConfigError; the
+  TEST-vs-ONNX denominator source split, FD §3.3).
+- **R2 GaussianRegressionTask parity** — mu/sigma head on
+  ``regression_gaussian.yaml``: output_size == 2R, Gaussian NLL FIT loss, and
+  the TEST de-scaling (means ‖ sqrt(softplus(var))·std). Self-consistency vs the
+  composed v1 head PLUS a genuine cross-impl check against an INDEPENDENT v1
+  ``GaussianRegressionTask`` (separately built + state-copied) to <= 1e-6. PLUS
+  the Gaussian ONNX representation is EXERCISED (not merely asserted): a Mode.ONNX
+  plan is compiled and run, and the ONNX ``[B, 2R]`` array equals the TEST
+  ``[B, 2R]`` (the de-scaling math is mode-independent under norm_params), the
+  second R columns strictly positive (stddev = sqrt(softplus(var))). This is a
+  *design-conformance* check (NOT v1-byte-parity): v1 ``onnx/to_onnx.py`` has
+  zero Gaussian handling and v1's (means, stds) is TEST-path-only, so there is no
+  v1 ONNX golden to match. Gated at R=1 (v1's only correct multi-target gaussian
+  de-scaling case — see ``run_r2``).
+- **R3 sample_weight + NaN masking + encoder-less pooling parity** — the
+  per-sample-weighted loss (``regression_weighted.yaml``: nonuniform + all-zero
+  weights, multi-target expansion) and NaN-target masking
+  (``nan_regression.yaml``: NaN targets masked to 0, torch.nanmean): the loss
+  sub-checks assert v2-wiring self-consistency vs the composed v1 head (same
+  mask→0, weight-expand, nanmean ORDERING, v1 task.py:412-437), and the
+  nonuniform-weight variant ALSO asserts genuine cross-impl parity against an
+  INDEPENDENT v1 ``RegressionTask`` (separately built + state-copied) to <= 1e-6;
+  PLUS the encoder-less pooling forward parity on ``legacy/dips.yaml`` — the
+  encoder-less `GlobalAttentionPooling`
+  (``init_nets`` + ``pool_net``, no encoder, no ``masks.registers``; v1
+  saltmodel.py:90-93,155-156) reproduces a standalone v1
+  `GlobalAttentionPooling` BITWISE on the same ``seq.x``/``seq.mask`` with the
+  v1 encoder-less pad dict ``{"seq": seq.mask}`` (pooling.py:53-63), and the
+  compiled dips plan carries NO ``masks.registers`` key.
+- **R4 MultiTarget processor row-replacement parity** — the conditional
+  ``np.where`` replacement on ``regression_multi_target.yaml``'s two-rule
+  custom_target chain matches v1's ``apply_multi_target_replacements``
+  (``torch.where`` over a labels dict, datasets.py:695-739) BITWISE, including
+  the sequential per-output running array (v1 in-place mutation).
+
+Negative-control hooks (the pytest suite, ``test_gates_m5.py``): each ``run_r*``
+takes a python-only ``corruption`` keyword applied to the v2 OBSERVED values (or
+the loss) before the parity comparison — the gate must FAIL while the surface
+checks stay green. The gates_m2/m3/m4 pattern, never exposed on the CLI.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Callable, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from salt.core.data import MultiTarget
+from salt.core.graph import Bundle, Executor, Mode
+from salt.core.graph.errors import ConfigError
+from salt.core.nn import bind_all, materialise_all, resolve_bind_schema
+from salt.core.nn.tasks import RegressionTaskModule
+from salt.data.datasets import OPERATORS as V1_OPERATORS
+from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
+from salt.tests.core.gn2_fixture import JET_VARIABLES, make_gn2_batch, write_parity_norm_dict
+from salt.tests.core.regression_fixture import (
+    build_dips_modules,
+    build_independent_v1_head,
+    build_regression_modules,
+    compile_dips,
+    compile_regression,
+    make_dips_labels,
+    make_regression_labels,
+)
+from salt.utils.scalers import RegressionTargetScaler
+
+__all__ = [
+    "PARITY_ATOL",
+    "main",
+    "run_r1",
+    "run_r2",
+    "run_r3",
+    "run_r4",
+]
+
+PARITY_ATOL = 1e-6
+"""Forward/de-scaling parity ceiling — the A2 forward-equivalence bound.
+
+The v2 task path composes a FRESH v1 head and hands it single-stream dicts; the
+math is verbatim v1 but executed through the v2 Split/pool/executor, so it is
+mathematically equal, not guaranteed bitwise. The R-gates therefore assert
+<= 1e-6 absolute on every pred and loss (the same bound the M2 gates use,
+gates_m2.G3_ATOL0). R4 (the MultiTarget processor) is a pure numpy op with no
+model in the loop, so it asserts BITWISE.
+"""
+
+B, T = 6, 10
+
+
+# ---------------------------------------------------------------------------
+# shared report helpers (the gates_m2/m3/m4 envelope, kept standalone per harness)
+# ---------------------------------------------------------------------------
+
+
+def _emit_report(report: dict[str, Any], outdir: Path, gate: str) -> Path:
+    """Write the gate report JSON into ``outdir`` and return its path.
+
+    Returns
+    -------
+    Path
+        The written ``<gate>_report.json`` path.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / f"{gate}_report.json"
+    path.write_text(json.dumps(report, indent=2, default=str) + "\n")
+    return path
+
+
+def _print_verdict(gate: str, passed: bool, criterion: str, report_path: Path) -> None:
+    """Print the closing verdict block every gate ends with."""
+    print("=" * 96)
+    print(f"GATE {gate.upper()}: {'PASS' if passed else 'FAIL'} — criterion: {criterion}")
+    print(f"report: {report_path}")
+
+
+def _base_report(gate: str, passed: bool, criterion: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Build the common report envelope shared with the M2/M3/M4 gates.
+
+    Returns
+    -------
+    dict[str, Any]
+        Envelope with gate name, timestamp, verdict, criterion, config and
+        environment fields; gate-specific sections are added by the caller.
+    """
+    return {
+        "gate": gate,
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "passed": passed,
+        "criterion": criterion,
+        "config": config,
+        "environment": {"torch": torch.__version__, "device": "cpu"},
+    }
+
+
+def _print_checks(checks: dict[str, bool]) -> None:
+    """Print a name/PASS-FAIL table for a checks mapping."""
+    for name, ok in checks.items():
+        print(f"  {name:<56} {'PASS' if ok else 'FAIL'}")
+
+
+# ---------------------------------------------------------------------------
+# fixture helpers (the parity scaffold — dummy data, no machine paths)
+# ---------------------------------------------------------------------------
+
+
+def _norm_dict(outdir: Path) -> Path:
+    """Write the parity norm/class dicts into ``outdir``; return the norm-dict path.
+
+    Returns
+    -------
+    Path
+        The norm-dict YAML path (the encoder-less DiPS fixture needs it).
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    nd, cd = outdir / "norm_dict.yaml", outdir / "class_dict.yaml"
+    write_parity_norm_dict(nd, cd)
+    return nd
+
+
+def _build_and_bind(
+    norm_dict: Path,
+    task: RegressionTaskModule,
+    targets: tuple[str, ...],
+    denominators: tuple[str, ...] = (),
+    weight: str | None = None,
+    modes: Sequence[Mode] = (Mode.FIT, Mode.TEST),
+) -> dict[Mode, Any]:
+    """Build the encoder-less regression plan(s), bind + materialise the modules.
+
+    The module dict is bound in place; `task` (the caller's reference into it)
+    is the composed-v1-head handle used for the reference comparison.
+
+    Returns
+    -------
+    dict[Mode, Any]
+        ``{mode: compiled plan}`` — ready for `Executor`.
+    """
+    modules = build_regression_modules(norm_dict, task)
+    plans = {
+        mode: compile_regression(modules, mode, targets, denominators, weight) for mode in modes
+    }
+    bind_all(modules, resolve_bind_schema(list(plans.values())))
+    materialise_all(modules)
+    return plans
+
+
+def _fit_bundle(
+    targets: tuple[str, ...],
+    denominators: tuple[str, ...] = (),
+    *,
+    seed: int = 11,
+    weight: tuple[str, torch.Tensor] | None = None,
+    poison_nan: bool = False,
+) -> tuple[Bundle, dict[str, torch.Tensor]]:
+    """A FIT-mode bundle: GN2 inputs + regression labels (+ optional weight/NaN).
+
+    Returns
+    -------
+    tuple[Bundle, dict[str, torch.Tensor]]
+        ``(bundle, labels)`` — the bundle for the executor and the flat label
+        dict for the v1 reference call.
+    """
+    inputs, masks = make_gn2_batch(B, T)
+    labels = make_regression_labels(B, targets, denominators, seed=seed)
+    if poison_nan:
+        poisoned = labels[f"labels.jets.{targets[0]}"].clone()
+        poisoned[::2] = torch.nan
+        labels[f"labels.jets.{targets[0]}"] = poisoned
+    b = Bundle()
+    for stream, x in inputs.items():
+        b.set(f"inputs.{stream}", x)
+    b.set("masks.tracks", masks["tracks"])
+    for key, val in labels.items():
+        b.set(key, val)
+    if weight is not None:
+        name, values = weight
+        b.set(f"labels.jets.{name}", values)
+        labels[f"labels.jets.{name}"] = values
+    return b, labels
+
+
+def _test_bundle(denominators: tuple[str, ...] = ()) -> tuple[Bundle, dict[str, torch.Tensor]]:
+    """A TEST/ONNX-mode bundle: GN2 inputs + (TEST) the ratio denominator labels.
+
+    Returns
+    -------
+    tuple[Bundle, dict[str, torch.Tensor]]
+        ``(bundle, labels)``.
+    """
+    inputs, masks = make_gn2_batch(B, T)
+    labels = make_regression_labels(B, (), denominators)
+    b = Bundle()
+    for stream, x in inputs.items():
+        b.set(f"inputs.{stream}", x)
+    b.set("masks.tracks", masks["tracks"])
+    for key, val in labels.items():
+        b.set(key, val)
+    return b, labels
+
+
+def _max_abs(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Max absolute difference, NaN-robust (masked positions are NaN both sides).
+
+    Returns
+    -------
+    float
+        ``max |a - b|`` over the non-NaN positions (0.0 if all-NaN).
+    """
+    diff = (a.double() - b.double()).abs()
+    finite = diff[torch.isfinite(diff)]
+    return float(finite.max().item()) if finite.numel() else 0.0
+
+
+# ---------------------------------------------------------------------------
+# R1 — RegressionTask forward + de-scaling parity
+# ---------------------------------------------------------------------------
+
+
+def run_r1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """R1: the A2 RegressionTask family — FIT/TEST/ONNX parity vs v1.
+
+    Covers the ``regression.yaml`` variants: vector ``norm_params`` (FIT preds
+    raw/scaled + loss), ratio ``target_denominators`` + ``custom_output_names``
+    with the mode-split de-scaling (TEST sources the denominator from the label
+    group, ONNX gathers it BY NAME from the input Feature tensor — different
+    source, different de-scaled values, FD §3.3), the ONNX denominator-∈-Features
+    bind-time rule, AND the functional ``scaler`` per-token SEQUENCE path
+    (``input="seq.x"``, ``sequence=True``: v1 ``run_inference`` de-scales
+    ``preds[:, :, i]``, task.py:594-596).
+
+    Two assertion tiers, kept honestly distinct:
+
+    - ``*_self`` checks — v2-wiring self-consistency: the executor output equals
+      ``module.task(...)`` (the SAME composed-v1 object the executor invoked).
+      Byte-equal by construction; proves Split/pool/executor key-routing doesn't
+      corrupt I/O (the corruption hook gives this teeth).
+    - ``*_vs_independent_v1`` checks — genuine v1-vs-v2 cross-impl parity: the
+      executor output is compared against an INDEPENDENT v1 ``RegressionTask``
+      (`build_independent_v1_head`: separately constructed from the same kwargs,
+      its own `Dense`, ``load_state_dict``-copied weights — the R3 dips-pooling
+      pattern). Asserted on the norm_params variant AND the scaler sequence
+      variant, the variants whose de-scaling math the wiring most affects.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("R1 RegressionTask forward + de-scaling parity vs the composed v1 head")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+
+    # -- (a) vector norm_params: FIT preds raw/scaled + loss parity ------------
+    targets = ("R10TruthLabel_R22v1_TruthJetMass", "R10TruthLabel_R22v1_TruthJetPt")
+    task = RegressionTaskModule(
+        stream="jets",
+        targets=list(targets),
+        input="pooled.global",
+        norm_params={"mean": [1.0, 2.0], "std": [3.0, 4.0]},
+        weight=0.5,
+    )
+    plans = _build_and_bind(norm_dict, task, targets, modes=(Mode.FIT,))
+    b, labels = _fit_bundle(targets)
+    out = Executor(plans[Mode.FIT]).run(b, debug=True)
+    v2_pred = out.get("preds.jets.regression")
+    if corruption is not None:
+        v2_pred = corruption(v2_pred)
+    v2_loss = out.get("losses.regression")
+    pooled = out.get("pooled.global")
+    tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
+    # tier 1: self-consistency vs the composed v1 head (the executor's own object)
+    ref_pred, ref_loss = task.task(pooled, tdict, None, context=None)
+    diffs["normparams_fit_pred_self"] = _max_abs(v2_pred, ref_pred)
+    diffs["normparams_fit_loss_self"] = _max_abs(v2_loss, ref_loss)
+    checks["normparams_fit_pred_self"] = diffs["normparams_fit_pred_self"] <= PARITY_ATOL
+    checks["normparams_fit_loss_self"] = diffs["normparams_fit_loss_self"] <= PARITY_ATOL
+    # tier 2: genuine cross-impl parity vs an INDEPENDENT v1 RegressionTask
+    indep = build_independent_v1_head(task.task)
+    ind_pred, ind_loss = indep(pooled, tdict, None, context=None)
+    diffs["normparams_fit_pred_vs_independent_v1"] = _max_abs(v2_pred, ind_pred)
+    diffs["normparams_fit_loss_vs_independent_v1"] = _max_abs(v2_loss, ind_loss)
+    checks["normparams_fit_pred_vs_independent_v1"] = (
+        diffs["normparams_fit_pred_vs_independent_v1"] <= PARITY_ATOL
+    )
+    checks["normparams_fit_loss_vs_independent_v1"] = (
+        diffs["normparams_fit_loss_vs_independent_v1"] <= PARITY_ATOL
+    )
+
+    # -- (b) ratio denominator: TEST (label source) vs ONNX (input-feature) ----
+    rtargets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
+    rtask = RegressionTaskModule(
+        stream="jets",
+        targets=list(rtargets),
+        input="pooled.global",
+        target_denominators=list(denoms),
+        custom_output_names="pt",
+    )
+    rplans = _build_and_bind(
+        norm_dict, rtask, rtargets, denoms, modes=(Mode.FIT, Mode.TEST, Mode.ONNX)
+    )
+    # TEST: denominator from the label group
+    bt, tlabels = _test_bundle(denoms)
+    with torch.no_grad():
+        bt = Executor(rplans[Mode.TEST]).run(bt)
+    v2_test = bt.get("preds.jets.regression")
+    pooled_t = bt.get("pooled.global")
+    with torch.no_grad():
+        raw_t, _ = rtask.task(pooled_t, {}, None, context=None)
+        ref_test = rtask.task.run_inference(
+            raw_t.clone(), labels={"jets": {"pt_btagJes": tlabels["labels.jets.pt_btagJes"]}}
+        )
+    diffs["ratio_test_descale"] = _max_abs(v2_test, ref_test)
+    checks["ratio_test_descale_from_label"] = diffs["ratio_test_descale"] <= PARITY_ATOL
+    # ONNX: denominator gathered by NAME from inputs.jets
+    inputs, masks = make_gn2_batch(B, T)
+    bo = Bundle()
+    for stream, x in inputs.items():
+        bo.set(f"inputs.{stream}", x)
+    bo.set("masks.tracks", masks["tracks"])
+    with torch.no_grad():
+        bo = Executor(rplans[Mode.ONNX]).run(bo)
+    v2_onnx = bo.get("preds.jets.regression")
+    col = JET_VARIABLES.index("pt_btagJes")
+    denom_from_input = inputs["jets"][..., col]
+    pooled_o = bo.get("pooled.global")
+    with torch.no_grad():
+        raw_o, _ = rtask.task(pooled_o, {}, None, context=None)
+        ref_onnx = rtask.task.run_inference(
+            raw_o.clone(), labels={"jets": {"pt_btagJes": denom_from_input}}
+        )
+    diffs["ratio_onnx_descale"] = _max_abs(v2_onnx, ref_onnx)
+    checks["ratio_onnx_descale_by_name"] = diffs["ratio_onnx_descale"] <= PARITY_ATOL
+    checks["test_and_onnx_sources_differ"] = not torch.allclose(v2_test, v2_onnx, atol=PARITY_ATOL)
+
+    # -- (c) the ONNX denominator-∈-Features bind-time rule --------------------
+    bad = RegressionTaskModule(
+        stream="jets",
+        targets="t",
+        input="pooled.global",
+        target_denominators="not_a_feature",
+    )
+    bad.name = "regression"
+    raised = False
+    try:
+        bad_modules = build_regression_modules(norm_dict, bad)
+        bad_plan = compile_regression(bad_modules, Mode.ONNX, ("t",), ("not_a_feature",))
+        bad.bind(resolve_bind_schema([bad_plan]))
+    except ConfigError:
+        raised = True
+    checks["denominator_not_a_feature_is_bind_error"] = raised
+
+    # -- (d) functional scaler — per-token SEQUENCE de-scaling -----------------
+    # the scaler path is the ONLY de-scaling v1 runs on 3D preds[:, :, i]
+    # (task.py:594-596); a per-token regression head (input="seq.x",
+    # sequence=True) on legacy/dips-shaped tracks exercises it end-to-end and is
+    # checked against an INDEPENDENT v1 RegressionTask carrying the same scaler.
+    scaler_cfg = {"HadronConeExclTruthLabelPt": {"op": "log", "x_scale": 5}}
+    starget = ("HadronConeExclTruthLabelPt",)
+    stask = RegressionTaskModule(
+        stream="tracks",
+        targets=list(starget),
+        input="seq.x",
+        sequence=True,
+        scaler=scaler_cfg,
+        loss="MSELoss",
+    )
+    smodules = build_regression_modules(norm_dict, stask)
+    sfit = compile_regression(smodules, Mode.FIT, starget, sequence=True)
+    stest = compile_regression(smodules, Mode.TEST, starget, sequence=True)
+    bind_all(smodules, resolve_bind_schema([sfit, stest]))
+    materialise_all(smodules)
+    sinputs, smasks = make_gn2_batch(B, T)
+    slabels = make_regression_labels(B, starget, seq_len=T)
+    sb = Bundle()
+    for stream, x in sinputs.items():
+        sb.set(f"inputs.{stream}", x)
+    sb.set("masks.tracks", smasks["tracks"])
+    for key, val in slabels.items():
+        sb.set(key, val)
+    sout = Executor(sfit).run(sb, debug=True)
+    v2_spred = sout.get("preds.tracks.regression")
+    v2_sloss = sout.get("losses.regression")
+    spooled, smask = sout.get("seq.x"), sout.get("masks.tracks")
+    stdict = {"tracks": {starget[0]: slabels[f"labels.tracks.{starget[0]}"]}}
+    # FIT self-consistency + cross-impl parity (scaled space, no de-scale in FIT)
+    _, sref_loss = stask.task(spooled, stdict, {"tracks": smask}, context=None)
+    diffs["scaler_seq_fit_loss_self"] = _max_abs(v2_sloss, sref_loss)
+    checks["scaler_seq_fit_loss_self"] = diffs["scaler_seq_fit_loss_self"] <= PARITY_ATOL
+    # TEST: per-token de-scaling through the functional scaler (preds[:, :, i])
+    stb = Bundle()
+    for stream, x in sinputs.items():
+        stb.set(f"inputs.{stream}", x)
+    stb.set("masks.tracks", smasks["tracks"])
+    with torch.no_grad():
+        stb = Executor(stest).run(stb)
+    v2_stest = stb.get("preds.tracks.regression")
+    sind = build_independent_v1_head(stask.task, scaler=RegressionTargetScaler(scaler_cfg))
+    st_pooled, st_mask = stb.get("seq.x"), stb.get("masks.tracks")
+    with torch.no_grad():
+        st_raw, _ = sind(st_pooled, {}, {"tracks": st_mask}, context=None)
+        sref_test = sind.run_inference(st_raw.clone(), labels=None, pad_mask=st_mask)
+    diffs["scaler_seq_test_descale_vs_independent_v1"] = _max_abs(v2_stest, sref_test)
+    checks["scaler_seq_test_descale_vs_independent_v1"] = (
+        diffs["scaler_seq_test_descale_vs_independent_v1"] <= PARITY_ATOL
+    )
+    checks["scaler_seq_pred_is_3d"] = v2_spred.dim() == 3
+
+    passed = all(checks.values())
+    criterion = (
+        "RegressionTask FIT preds+loss (vector norm_params) and TEST/ONNX ratio de-scaling match "
+        "the composed v1 head (self-consistency) AND an INDEPENDENT v1 RegressionTask (cross-impl) "
+        "to <= 1e-6; the functional-scaler per-token SEQUENCE de-scaling (preds[:, :, i]) matches "
+        "an independent v1 head; TEST and ONNX denominator sources differ (FD §3.3); a denominator "
+        "absent from inputs.<stream> is a bind-time ConfigError"
+    )
+    report = _base_report(
+        "r1_regression_parity",
+        passed,
+        criterion,
+        {"atol": PARITY_ATOL, "B": B, "T": T, "corrupted_by_test_hook": corruption is not None},
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    print(f"{'diff':<32}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<32}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("r1", passed, criterion, _emit_report(report, outdir, "r1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# R2 — GaussianRegressionTask parity + ONNX-stddev design-conformance
+# ---------------------------------------------------------------------------
+
+
+def run_r2(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """R2: GaussianRegressionTask parity (mu/sigma, NLL, stddev) + ONNX-stddev conformance.
+
+    v1-decidable half: output_size == 2R, the FIT Gaussian NLL loss and the TEST
+    de-scaling (means ‖ sqrt(softplus(var))·std) match BOTH the composed v1
+    GaussianRegressionTask (self-consistency, the executor's own object) AND an
+    INDEPENDENT v1 ``GaussianRegressionTask`` (`build_independent_v1_head`:
+    separately constructed + state-copied — genuine cross-impl parity) to
+    <= 1e-6. The published TEST array IS the v1 (means, stds) TUPLE
+    re-concatenated to one [B, 2R] leaf (FD 1567-1568 one-array contract).
+
+    ONNX representation EXERCISED (not merely asserted on a TEST array): a
+    Mode.ONNX plan is compiled and RUN, and the ONNX [B, 2R] array equals the
+    TEST [B, 2R] (under norm_params the de-scaling math is mode-independent, so
+    ONNX shares the TEST stddev = sqrt(softplus(var)) computation), with the
+    second R columns strictly positive. This is *design-conformance*, NOT
+    v1-byte-parity: v1 ``onnx/to_onnx.py`` has zero Gaussian handling and v1's
+    (means, stds) is TEST-path-only, so there is no v1 ONNX golden to match. The
+    writer's split_scalars manifest carries R mean suffixes + R `_stddev`
+    suffixes index-aligned with the array.
+
+    R=1 ONLY: v1 ``GaussianRegressionTask.run_inference`` indexes variances as
+    ``preds[:, i+1]`` (task.py:752-754), correct only for R=1 (the variance sits
+    at column 1). For R>1 the variances live at columns R..2R-1, so v1's i+1
+    indexing is WRONG — RegressionTaskModule composes v1 verbatim and inherits
+    that bug. No shipped config uses a multi-target gaussian head, so this gate
+    gates the single correct case (R=1); multi-target gaussian de-scaling is a
+    KNOWN-BROKEN v1 path, untested both sides, deferred to the M7 v1-absorption.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("R2 GaussianRegressionTask parity (mu/sigma/NLL/stddev) + ONNX-stddev conformance")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+    targets = ("HadronConeExclTruthLabelPt",)
+    task = RegressionTaskModule(
+        stream="jets",
+        targets=list(targets),
+        input="pooled.global",
+        gaussian=True,
+        norm_params={"mean": 2.0, "std": 3.0},
+        weight=0.5,
+        loss="GaussianNLLLoss",
+    )
+    plans = _build_and_bind(norm_dict, task, targets, modes=(Mode.FIT, Mode.TEST, Mode.ONNX))
+    checks["output_size_is_2R"] = task.task.net.output_size == 2 * len(targets)
+    checks["output_suffixes_means_then_stddev"] = task.output_suffixes == (
+        *targets,
+        *(f"{t}_stddev" for t in targets),
+    )
+
+    # FIT: raw [B, 2R] preds + NLL loss parity (self + independent v1 cross-impl)
+    b, labels = _fit_bundle(targets)
+    out = Executor(plans[Mode.FIT]).run(b, debug=True)
+    v2_pred = out.get("preds.jets.regression")
+    v2_loss = out.get("losses.regression")
+    pooled = out.get("pooled.global")
+    tdict = {"jets": {targets[0]: labels[f"labels.jets.{targets[0]}"]}}
+    ref_pred, ref_loss = task.task(pooled, tdict, None, context=None)
+    indep = build_independent_v1_head(task.task)
+    _, ind_loss = indep(pooled, tdict, None, context=None)
+    if corruption is not None:
+        v2_loss = corruption(v2_loss)
+    diffs["gaussian_fit_pred_self"] = _max_abs(v2_pred, ref_pred)
+    diffs["gaussian_fit_loss_self"] = _max_abs(v2_loss, ref_loss)
+    diffs["gaussian_fit_loss_vs_independent_v1"] = _max_abs(v2_loss, ind_loss)
+    checks["gaussian_fit_pred_self"] = diffs["gaussian_fit_pred_self"] <= PARITY_ATOL
+    checks["gaussian_fit_loss_parity"] = diffs["gaussian_fit_loss_self"] <= PARITY_ATOL
+    checks["gaussian_fit_loss_vs_independent_v1"] = (
+        diffs["gaussian_fit_loss_vs_independent_v1"] <= PARITY_ATOL
+    )
+
+    # TEST: one [B, 2R] array == v1 (means, stds) re-concatenated (self + independent)
+    bt, _ = _test_bundle()
+    with torch.no_grad():
+        bt = Executor(plans[Mode.TEST]).run(bt)
+    v2_test = bt.get("preds.jets.regression")
+    pooled_t = bt.get("pooled.global")
+    with torch.no_grad():
+        raw_t, _ = task.task(pooled_t, {}, None, context=None)
+        ref_means, ref_stds = task.task.run_inference(raw_t.clone())
+        ind_raw, _ = indep(pooled_t, {}, None, context=None)
+        ind_means, ind_stds = indep.run_inference(ind_raw.clone())
+    ref_concat = torch.cat([ref_means, ref_stds], dim=-1)
+    ind_concat = torch.cat([ind_means, ind_stds], dim=-1)
+    diffs["gaussian_test_one_array"] = _max_abs(v2_test, ref_concat)
+    diffs["gaussian_test_vs_independent_v1"] = _max_abs(v2_test, ind_concat)
+    checks["gaussian_test_one_array_parity"] = diffs["gaussian_test_one_array"] <= PARITY_ATOL
+    checks["gaussian_test_vs_independent_v1"] = (
+        diffs["gaussian_test_vs_independent_v1"] <= PARITY_ATOL
+    )
+    checks["test_array_is_2R_wide"] = tuple(v2_test.shape) == (B, 2 * len(targets))
+
+    # ONNX EXERCISED: run the compiled Mode.ONNX plan, assert ONNX == TEST
+    # [B, 2R] (norm_params de-scaling is mode-independent, so ONNX shares the
+    # TEST stddev = sqrt(softplus(var)) math). NOT a v1-byte-parity gate — v1 has
+    # no gaussian ONNX handling; this is design-conformance the gate now RUNS.
+    inputs, masks = make_gn2_batch(B, T)
+    bonnx = Bundle()
+    for stream, x in inputs.items():
+        bonnx.set(f"inputs.{stream}", x)
+    bonnx.set("masks.tracks", masks["tracks"])
+    with torch.no_grad():
+        bonnx = Executor(plans[Mode.ONNX]).run(bonnx)
+    v2_onnx = bonnx.get("preds.jets.regression")
+    diffs["gaussian_onnx_eq_test"] = _max_abs(v2_onnx, v2_test)
+    checks["gaussian_onnx_array_is_2R_wide"] = tuple(v2_onnx.shape) == (B, 2 * len(targets))
+    checks["gaussian_onnx_equals_test"] = diffs["gaussian_onnx_eq_test"] <= PARITY_ATOL
+    # design-conformance: the ONNX stddev half is strictly positive
+    checks["onnx_stddev_design_conformance_positive"] = bool((v2_onnx[:, len(targets) :] > 0).all())
+
+    passed = all(checks.values())
+    criterion = (
+        "GaussianRegressionTask output_size==2R (R=1, v1's only correct multi-target case); FIT "
+        "NLL loss + TEST de-scaling (means ‖ sqrt(softplus(var))·std) match the composed v1 head "
+        "(self-consistency) AND an INDEPENDENT v1 GaussianRegressionTask (cross-impl) to <= 1e-6; "
+        "the published TEST array is the v1 (means, stds) re-concatenated to one [B, 2R] leaf; the "
+        "Mode.ONNX plan is COMPILED+RUN and its [B, 2R] equals TEST with a strictly-positive "
+        "stddev half — design-conformance (NO v1 ONNX golden — v1 onnx/to_onnx.py has zero "
+        "gaussian handling)"
+    )
+    report = _base_report(
+        "r2_gaussian_parity",
+        passed,
+        criterion,
+        {
+            "atol": PARITY_ATOL,
+            "B": B,
+            "R": len(targets),
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    report["onnx_stddev_is_design_conformance"] = (
+        "the Mode.ONNX plan is compiled and RUN; ONNX [B, 2R] == TEST [B, 2R] because norm_params "
+        "de-scaling is mode-independent, so ONNX shares the TEST stddev = sqrt(softplus(var)) "
+        "math; the split_scalars manifest declares R means + R _stddev suffixes. NOT a "
+        "v1-byte-parity gate: v1 has no gaussian ONNX handling (to_onnx.py grep empty)."
+    )
+    report["multi_target_gaussian_descale"] = (
+        "R=1 ONLY: v1 GaussianRegressionTask.run_inference indexes variances as preds[:, i+1] "
+        "(task.py:752-754), correct only for R=1. For R>1 variances live at columns R..2R-1, so "
+        "v1's i+1 indexing is broken; RegressionTaskModule composes v1 verbatim and inherits it. "
+        "No shipped config uses a multi-target gaussian head — the broken path is untested both "
+        "sides, deferred to M7 v1-absorption."
+    )
+    print(f"{'diff':<32}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<32}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("r2", passed, criterion, _emit_report(report, outdir, "r2"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# R3 — sample_weight + NaN-target masking parity
+# ---------------------------------------------------------------------------
+
+
+def run_r3(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """R3: sample_weight + NaN-target masking + encoder-less pooling parity.
+
+    Adversarial coverage (the codex plan-review finding): NONUNIFORM and ALL-ZERO
+    sample weights over TWO targets (the unsqueeze + expand, task.py:433-434),
+    AND a NaN-target run (NaN masked to 0, reduced with torch.nanmean,
+    task.py:412-437). Every case asserts the v2 scalar loss matches the composed
+    v1 head (self-consistency) after the same mask→0, weight-expand, nanmean
+    ORDERING to <= 1e-6, and that the NaN case did not poison the loss (finite).
+    The nonuniform-weight variant ALSO asserts genuine cross-impl parity against
+    an INDEPENDENT v1 ``RegressionTask`` (`build_independent_v1_head`: separately
+    constructed + state-copied), so the sample-weight wiring is checked against a
+    head v2 never touched, not only its own composed object.
+
+    Encoder-less pooling forward parity (plan 10 R3 row; the primary CI smoke
+    fixture ``legacy/dips.yaml``, test_pipeline.py:208,309,317): the dips plan
+    (``init_nets`` + ``pool_net``, NO ``encoder:``) runs through the real
+    compiler/bind/executor, and the executor's ``pooled.global`` is compared
+    BITWISE against a STANDALONE v1 `GlobalAttentionPooling` — built fresh,
+    loaded with the bound v2 pool's gate weights, fed the executor's
+    ``seq.x``/``seq.mask`` with the v1 encoder-less pad dict ``{"seq": seq.mask}``
+    (pooling.py:53-63). Also asserts the compiled dips plan carries NO
+    ``masks.registers`` key (the optional require is dropped when no encoder
+    produces it — the encoder-less pooling fix this gate guards; v1
+    saltmodel.py:155-156). A pure pooling-math comparison with deterministic
+    inputs, so BITWISE is required, not the <= 1e-6 fallback.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("R3 sample_weight + NaN-target masking + encoder-less dips pooling parity vs v1")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    none_loss = {"class_path": "torch.nn.MSELoss", "init_args": {"reduction": "none"}}
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+
+    # -- sample_weight: nonuniform + all-zero, two targets --------------------
+    targets = ("R10TruthLabel_R22v1_TruthJetMass", "R10TruthLabel_R22v1_TruthJetPt")
+    weight_cases = (
+        ("nonuniform", torch.tensor([1.0, 0.5, 2.0, 0.0, 1.5, 0.25])),
+        ("zero", torch.zeros(B)),
+    )
+    for tag, w in weight_cases:
+        task = RegressionTaskModule(
+            stream="jets",
+            targets=list(targets),
+            input="pooled.global",
+            sample_weight="w",
+            norm_params={"mean": [1.0, 2.0], "std": [3.0, 4.0]},
+            loss=none_loss,
+        )
+        plans = _build_and_bind(norm_dict, task, targets, weight="w", modes=(Mode.FIT,))
+        b, labels = _fit_bundle(targets, weight=("w", w))
+        out = Executor(plans[Mode.FIT]).run(b, debug=True)
+        v2_loss = out.get("losses.regression")
+        if corruption is not None and tag == "nonuniform":
+            v2_loss = corruption(v2_loss)
+        pooled = out.get("pooled.global")
+        tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
+        tdict["jets"]["w"] = w
+        # self-consistency vs the composed v1 head (the executor's own object)
+        _, ref_loss = task.task(pooled, tdict, None, context=None)
+        diff = _max_abs(v2_loss, ref_loss)
+        diffs[f"sample_weight_{tag}_loss"] = diff
+        checks[f"sample_weight_{tag}_loss_parity"] = diff <= PARITY_ATOL
+        # the nonuniform variant ALSO gets genuine cross-impl parity vs an
+        # INDEPENDENT v1 RegressionTask (separately built + state-copied)
+        if tag == "nonuniform":
+            indep = build_independent_v1_head(task.task)
+            _, ind_loss = indep(pooled, tdict, None, context=None)
+            diffs["sample_weight_nonuniform_loss_vs_independent_v1"] = _max_abs(v2_loss, ind_loss)
+            checks["sample_weight_nonuniform_loss_vs_independent_v1"] = (
+                diffs["sample_weight_nonuniform_loss_vs_independent_v1"] <= PARITY_ATOL
+            )
+
+    # -- NaN-target masking ----------------------------------------------------
+    ntargets = ("HadronConeExclTruthLabelPt",)
+    ntask = RegressionTaskModule(
+        stream="jets",
+        targets=list(ntargets),
+        input="pooled.global",
+        norm_params={"mean": 1.0, "std": 1.0},
+        loss=none_loss,
+    )
+    nplans = _build_and_bind(norm_dict, ntask, ntargets, modes=(Mode.FIT,))
+    nb, nlabels = _fit_bundle(ntargets, poison_nan=True)
+    nout = Executor(nplans[Mode.FIT]).run(nb, debug=True)
+    v2_nloss = nout.get("losses.regression")
+    checks["nan_loss_is_finite"] = bool(torch.isfinite(v2_nloss))
+    pooled_n = nout.get("pooled.global")
+    tdict_n = {"jets": {ntargets[0]: nlabels[f"labels.jets.{ntargets[0]}"]}}
+    _, ref_nloss = ntask.task(pooled_n, tdict_n, None, context=None)
+    diffs["nan_masking_loss"] = _max_abs(v2_nloss, ref_nloss)
+    checks["nan_masking_loss_parity"] = diffs["nan_masking_loss"] <= PARITY_ATOL
+
+    # -- encoder-less pooling forward parity on legacy/dips.yaml ---------------
+    dips = build_dips_modules(norm_dict)
+    fit_plan = compile_dips(dips, Mode.FIT)
+    bind_all(dips, resolve_bind_schema([fit_plan]))
+    materialise_all(dips)
+    # the encoder-less plan must NOT carry the (optional, encoder-produced)
+    # registers mask — the pooling fix this gate guards (v1 saltmodel.py:155-156).
+    # the optional require is dropped from the pool step when no producer exists.
+    checks["dips_plan_has_no_registers"] = "masks.registers" not in fit_plan.step("pool").requires
+    inputs, masks = make_gn2_batch(B, T)
+    db = Bundle()
+    for stream, x in inputs.items():
+        db.set(f"inputs.{stream}", x)
+    db.set("masks.tracks", masks["tracks"])
+    for key, val in make_dips_labels(B).items():
+        db.set(key, val)
+    dout = Executor(fit_plan).run(db, debug=True)
+    v2_pooled = dout.get("pooled.global")
+    if corruption is not None:
+        v2_pooled = corruption(v2_pooled)
+    # standalone v1 reference: fresh GAP, the bound v2 gate weights, the same
+    # seq.x / seq.mask, the v1 encoder-less pad dict {"seq": seq.mask}
+    seq_x, seq_mask = dout.get("seq.x"), dout.get("seq.mask")
+    pool_mod = dips["pool"]
+    v1_pool = V1GlobalAttentionPooling(input_size=seq_x.shape[-1])
+    v1_pool.load_state_dict(pool_mod.pool_net.state_dict())
+    v1_pool.eval()
+    with torch.no_grad():
+        ref_pooled = v1_pool({"seq": seq_x}, pad_mask={"seq": seq_mask})
+    diffs["dips_pool_forward"] = _max_abs(v2_pooled, ref_pooled)
+    checks["dips_encoderless_pool_bitwise"] = torch.equal(v2_pooled, ref_pooled)
+    checks["dips_encoderless_pool_parity"] = diffs["dips_pool_forward"] <= PARITY_ATOL
+
+    passed = all(checks.values())
+    criterion = (
+        "per-sample-weighted loss (nonuniform + all-zero weights, two targets, the "
+        "unsqueeze+expand) and NaN-target masking (mask→0, torch.nanmean) match the composed v1 "
+        "nan_loss to <= 1e-6 with the same ordering; the NaN run stays finite (v1 "
+        "task.py:412-437); the encoder-less legacy/dips.yaml pool reproduces a standalone v1 "
+        "GlobalAttentionPooling BITWISE on the same seq.x/seq.mask with the v1 pad dict "
+        "{'seq': seq.mask}, and the dips plan carries no masks.registers (v1 "
+        "saltmodel.py:90-93,155-156, pooling.py:53-63)"
+    )
+    report = _base_report(
+        "r3_weight_nan_parity",
+        passed,
+        criterion,
+        {"atol": PARITY_ATOL, "B": B, "corrupted_by_test_hook": corruption is not None},
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    print(f"{'diff':<32}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<32}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("r3", passed, criterion, _emit_report(report, outdir, "r3"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# R4 — MultiTarget processor row-replacement parity
+# ---------------------------------------------------------------------------
+
+
+def run_r4(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """R4: MultiTarget conditional replacement BITWISE parity vs v1's torch.where.
+
+    The shipped ``regression_multi_target.yaml`` shape: two rules write one
+    ``custom_target`` (``ID==15 -> Pt``, ``ID!=15 -> pt``) over a single NaN-base
+    running array (v1 in-place mutation, datasets.py:709-739). R4 reproduces v1's
+    ``apply_multi_target_replacements`` (``torch.where`` over a labels dict) step
+    by step and asserts the v2 numpy ``np.where`` output is BITWISE identical —
+    a pure data op, no model, no float drift. Also covers the single-rule
+    ``target:`` (raw-base replacement) case.
+
+    Placeholder-dtype deviation (documented, not gated as a divergence): v1's
+    ``inject_custom_target_placeholders`` (datasets.py:686-690) types the NaN base
+    as ``batch[source].dtype`` verbatim; v2 ``MultiTarget.process`` promotes any
+    sub-float32 source to >=float32 (``np.result_type(template.dtype, float32)``).
+    For f4/f8 sources the two are byte-identical, and every shipped
+    regression_multi_target.yaml source is f4 (HadronConeExclTruthLabelPt, pt), so
+    this fixture is f4 and the BITWISE claim holds. The divergence is reachable
+    only with an f2 source — which no shipped config has — and the float32
+    promotion is intentional (a NaN-filled regression placeholder needs the range
+    for log/ratio targets).
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("R4 MultiTarget processor conditional-replacement BITWISE parity vs v1 torch.where")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+    rng = np.random.default_rng(7)
+    n = 64
+    flav = rng.integers(0, 16, size=n)
+    pt_truth = rng.standard_normal(n).astype(np.float32)
+    pt_reco = rng.standard_normal(n).astype(np.float32)
+    raw_existing = rng.standard_normal(n).astype(np.float32)
+
+    # -- (a) two-rule custom_target chain (the shipped config) -----------------
+    mt = MultiTarget(
+        replacements=[
+            {
+                "stream": "jets",
+                "sel_label": "HadronConeExclTruthLabelID",
+                "op": "==",
+                "value": 15,
+                "source": "Pt",
+                "custom_target": "pt_label_handle",
+            },
+            {
+                "stream": "jets",
+                "sel_label": "HadronConeExclTruthLabelID",
+                "op": "!=",
+                "value": 15,
+                "source": "pt",
+                "custom_target": "pt_label_handle",
+            },
+        ]
+    )
+    mt.name = "multi_target"
+    b = Bundle()
+    b.set("labels.jets.HadronConeExclTruthLabelID", flav)
+    b.set("labels.jets.Pt", pt_truth)
+    b.set("labels.jets.pt", pt_reco)
+    v2 = mt.process(b, np.s_[0:n], Mode.FIT)["labels.jets.pt_label_handle"]
+    if corruption is not None:
+        v2 = corruption(v2)
+    # v1 reference: NaN-base placeholder, two sequential torch.where (the v1 loop
+    # mutates labels[input][target] in place, datasets.py:735-739)
+    running = torch.full((n,), float("nan"))
+    running = torch.where(
+        V1_OPERATORS["=="](torch.as_tensor(flav), 15), torch.as_tensor(pt_truth), running
+    )
+    running = torch.where(
+        V1_OPERATORS["!="](torch.as_tensor(flav), 15), torch.as_tensor(pt_reco), running
+    )
+    ref = running.numpy()
+    checks["custom_target_chain_bitwise"] = (
+        np.array_equal(np.nan_to_num(v2), np.nan_to_num(ref))
+        and (np.isnan(v2) == np.isnan(ref)).all()
+    )
+    checks["custom_target_chain_no_nan_left"] = not np.isnan(v2).any()
+
+    # -- (b) single-rule target: (raw-base replacement) -----------------------
+    mt2 = MultiTarget(
+        replacements=[
+            {
+                "stream": "jets",
+                "sel_label": "flav",
+                "op": ">=",
+                "value": 4,
+                "source": "src",
+                "target": "tgt",
+            }
+        ]
+    )
+    mt2.name = "multi_target"
+    arr = np.zeros(n, dtype=[("tgt", "f4")])
+    arr["tgt"] = raw_existing
+    b2 = Bundle()
+    b2.set("labels.jets.flav", flav)
+    b2.set("labels.jets.src", pt_truth)
+    b2.set("raw.jets", arr)
+    v2b = mt2.process(b2, np.s_[0:n], Mode.FIT)["labels.jets.tgt"]
+    refb = torch.where(
+        V1_OPERATORS[">="](torch.as_tensor(flav), 4),
+        torch.as_tensor(pt_truth),
+        torch.as_tensor(raw_existing),
+    ).numpy()
+    checks["target_mode_raw_base_bitwise"] = np.array_equal(v2b, refb)
+
+    passed = all(checks.values())
+    criterion = (
+        "MultiTarget np.where conditional replacement is BITWISE identical to v1's "
+        "apply_multi_target_replacements (torch.where over a labels dict, datasets.py:695-739): "
+        "the two-rule custom_target chain over a NaN-base running array AND the single-rule "
+        "target: raw-base replacement"
+    )
+    report = _base_report(
+        "r4_multitarget_parity",
+        passed,
+        criterion,
+        {"n_rows": n, "corrupted_by_test_hook": corruption is not None},
+    )
+    report["checks"] = checks
+    _print_checks(checks)
+    _print_verdict("r4", passed, criterion, _emit_report(report, outdir, "r4"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the gate subcommand parser (R1-R4).
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser with the ``r1``/``r2``/``r3``/``r4`` subcommands.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m salt.core.gates_m5", description=__doc__.splitlines()[0]
+    )
+    sub = parser.add_subparsers(dest="gate", required=True)
+    helps = {
+        "r1": "RegressionTask forward + de-scaling parity (norm_params/ratio/scaler, mode-split)",
+        "r2": "GaussianRegressionTask parity (mu/sigma/NLL/stddev) + ONNX-stddev conformance",
+        "r3": "sample_weight + NaN-target masking loss parity",
+        "r4": "MultiTarget processor conditional-replacement bitwise parity",
+    }
+    for gate, help_text in helps.items():
+        p = sub.add_parser(gate, help=help_text)
+        p.add_argument("--outdir", type=Path, required=True, help="report output directory")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run an M5 regression-family gate from the command line.
+
+    Returns
+    -------
+    int
+        0 if the gate passed, 1 otherwise.
+    """
+    args = _build_parser().parse_args(argv)
+    runner = {"r1": run_r1, "r2": run_r2, "r3": run_r3, "r4": run_r4}[args.gate]
+    code, _ = runner(args.outdir)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

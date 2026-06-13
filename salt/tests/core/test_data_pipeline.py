@@ -31,13 +31,14 @@ from salt.core.data import (
     GraphDataset,
     H5StructuredReader,
     Labels,
+    MultiTarget,
     create_vds,
 )
 from salt.core.data.base import WorkerCtx
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError, ConnectivityError, SchemaError
 from salt.core.graph.planner import PlanStep
-from salt.core.graph.spec import Mode, TensorSpec
+from salt.core.graph.spec import Mode, TensorSpec, flatten_spec
 from salt.core.schema import dump_schema, save_schema
 from salt.data.datasets import SaltDataset
 from salt.data.transforms import GaussianNoise
@@ -352,6 +353,163 @@ class TestLabelsUnit:
         labels = self._bound_labels()
         out = labels.process(self._bundle(np.array([0, 99, -2])), np.s_[0:3], Mode.FIT)
         np.testing.assert_array_equal(out["labels.tracks.ftagTruthOriginLabel"], [0, 99, -2])
+
+
+class TestMultiTarget:
+    """M5 sub-wave A3: conditional row-wise target replacement (v1 parity).
+
+    Mirrors v1 ``apply_multi_target_replacements`` (datasets.py:695-739) +
+    ``inject_custom_target_placeholders`` (datasets.py:648-693) exactly:
+    ``np.where(op(sel, value), source, base)`` where ``base`` is the raw
+    target column (``target:`` mode) or a NaN placeholder (``custom_target:``).
+    """
+
+    @staticmethod
+    def _bundle(sel, source, raw_target=None):
+        b = Bundle()
+        b.set("labels.jets.flav", np.asarray(sel))
+        b.set("labels.jets.src", np.asarray(source, dtype=np.float32))
+        if raw_target is not None:
+            arr = np.zeros(len(raw_target), dtype=[("tgt", "f4")])
+            arr["tgt"] = raw_target
+            b.set("raw.jets", arr)
+        return b
+
+    def test_construct_validations(self):
+        with pytest.raises(ConfigError, match="at least one"):
+            MultiTarget(replacements=[])
+        with pytest.raises(ConfigError, match="unknown operator"):
+            MultiTarget(replacements=[
+                {"stream": "jets", "sel_label": "f", "op": "~=", "value": 1, "source": "s",
+                 "target": "t"}
+            ])
+        with pytest.raises(ConfigError, match="both 'target' and 'custom_target'"):
+            MultiTarget(replacements=[
+                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
+                 "target": "t", "custom_target": "c"}
+            ])
+        with pytest.raises(ConfigError, match="either 'target' or 'custom_target'"):
+            MultiTarget(replacements=[
+                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s"}
+            ])
+        with pytest.raises(ConfigError, match="mixes"):
+            # same output, but one target: + one custom_target: — illegal mix
+            MultiTarget(replacements=[
+                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
+                 "target": "t"},
+                {"stream": "jets", "sel_label": "g", "op": ">", "value": 0, "source": "u",
+                 "custom_target": "t"},
+            ])
+        with pytest.raises(ConfigError, match="itself a MultiTarget output"):
+            MultiTarget(replacements=[
+                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
+                 "target": "a"},
+                {"stream": "jets", "sel_label": "a", "op": ">", "value": 0, "source": "u",
+                 "custom_target": "b"},
+            ])
+
+    def test_target_mode_replaces_existing(self):
+        """`target:` keeps source where the condition holds, raw target otherwise."""
+        mt = MultiTarget(replacements=[
+            {"stream": "jets", "sel_label": "flav", "op": "==", "value": 5, "source": "src",
+             "target": "tgt"}
+        ])
+        mt.name = "multi_target"
+        sel = [5, 0, 5, 1]
+        source = [10.0, 20.0, 30.0, 40.0]
+        raw_target = [-1.0, -2.0, -3.0, -4.0]
+        out = mt.process(self._bundle(sel, source, raw_target), np.s_[0:4], Mode.FIT)
+        produced = out["labels.jets.tgt"]
+        # v1 torch.where(flav==5, src, raw_tgt)
+        np.testing.assert_array_equal(produced, [10.0, -2.0, 30.0, -4.0])
+
+    def test_custom_target_mode_nan_placeholder(self):
+        """`custom_target:` is NaN where the condition is false (v1 placeholder)."""
+        mt = MultiTarget(replacements=[
+            {"stream": "jets", "sel_label": "flav", "op": ">=", "value": 4, "source": "src",
+             "custom_target": "newt"}
+        ])
+        mt.name = "multi_target"
+        sel = [5, 0, 4, 1]
+        source = [10.0, 20.0, 30.0, 40.0]
+        out = mt.process(self._bundle(sel, source), np.s_[0:4], Mode.FIT)
+        produced = out["labels.jets.newt"]
+        # filled with source where flav>=4, NaN elsewhere (no raw column read)
+        assert np.array_equal(produced[[0, 2]], [10.0, 30.0])
+        assert np.isnan(produced[[1, 3]]).all()
+
+    def test_declares_concrete_target_produce(self):
+        """The output is a CONCRETE produce that beats the Labels wildcard."""
+        mt = MultiTarget(replacements=[
+            {"stream": "jets", "sel_label": "flav", "op": "==", "value": 5, "source": "src",
+             "target": "tgt"},
+            {"stream": "jets", "sel_label": "flav", "op": "<", "value": 0, "source": "src2",
+             "custom_target": "newt"},
+        ])
+        mt.name = "multi_target"
+        io = mt.declare_io(Mode.FIT)
+        produces = set(flatten_spec(io.produces))
+        assert produces == {"labels.jets.tgt", "labels.jets.newt"}
+        requires = set(flatten_spec(io.requires))
+        # sel/source come from Labels; the target raw column is read for the
+        # `target:` rule only (the custom_target needs no base column)
+        assert "labels.jets.flav" in requires
+        assert "labels.jets.src" in requires
+        assert "labels.jets.src2" in requires
+        assert "raw.jets" in requires
+
+    def test_v1_parity_against_apply_multi_target_replacements(self):
+        """Bitwise parity with v1's torch.where over a labels dict."""
+        import torch as _torch
+
+        from salt.data.datasets import OPERATORS as V1_OPERATORS
+
+        rng = np.random.default_rng(7)
+        sel = rng.integers(0, 6, size=64)
+        source = rng.standard_normal(64).astype(np.float32)
+        raw_target = rng.standard_normal(64).astype(np.float32)
+        mt = MultiTarget(replacements=[
+            {"stream": "jets", "sel_label": "flav", "op": ">=", "value": 4, "source": "src",
+             "target": "tgt"}
+        ])
+        mt.name = "multi_target"
+        v2 = mt.process(self._bundle(sel, source, raw_target), np.s_[0:64], Mode.FIT)[
+            "labels.jets.tgt"
+        ]
+        # v1 reference: torch.where(OPERATORS[op](sel, value), source, target)
+        mask = V1_OPERATORS[">="](_torch.as_tensor(sel), 4)
+        v1 = _torch.where(
+            mask, _torch.as_tensor(source), _torch.as_tensor(raw_target)
+        ).numpy()
+        np.testing.assert_array_equal(v2, v1)
+
+    def test_two_rules_one_custom_output_chain_like_v1(self):
+        """Two rules writing one custom_target chain sequentially (the shipped config).
+
+        Mirrors ``regression_multi_target.yaml``: ``ID==15 -> Pt`` then
+        ``ID!=15 -> pt`` both fill ``pt_label_handle`` over a single NaN-base
+        running array (v1 in-place mutation, datasets.py:709-739) — no NaN
+        survives because the two conditions partition the rows.
+        """
+        mt = MultiTarget(replacements=[
+            {"stream": "jets", "sel_label": "flav_id", "op": "==", "value": 15,
+             "source": "Pt", "custom_target": "pt_label_handle"},
+            {"stream": "jets", "sel_label": "flav_id", "op": "!=", "value": 15,
+             "source": "pt", "custom_target": "pt_label_handle"},
+        ])
+        mt.name = "multi_target"
+        # one rule's output, but the source differs per rule -> need both labels
+        b = Bundle()
+        flav = np.array([15, 5, 15, 0])
+        b.set("labels.jets.flav_id", flav)
+        b.set("labels.jets.Pt", np.array([100.0, 200.0, 300.0, 400.0], dtype=np.float32))
+        b.set("labels.jets.pt", np.array([11.0, 22.0, 33.0, 44.0], dtype=np.float32))
+        out = mt.process(b, np.s_[0:4], Mode.FIT)
+        produced = out["labels.jets.pt_label_handle"]
+        assert set(out) == {"labels.jets.pt_label_handle"}  # one output, two rules
+        # rows 0,2 (ID==15) take Pt; rows 1,3 (ID!=15) take pt; no NaN remains
+        np.testing.assert_array_equal(produced, [100.0, 22.0, 300.0, 44.0])
+        assert not np.isnan(produced).any()
 
 
 class TestDataModule:
