@@ -39,6 +39,7 @@ same key (bind.py).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -69,11 +70,13 @@ from salt.utils.tensor_utils import attach_context
 __all__ = [
     "Concat",
     "GlobalAttentionPooling",
+    "LossGLS",
     "LossSum",
     "Normaliser",
     "Split",
     "StreamEmbed",
     "TransformerEncoder",
+    "VectorConcat",
 ]
 
 _UNNAMED = "unnamed"
@@ -600,6 +603,142 @@ class Concat(nn.Module):
         return out
 
 
+class VectorConcat(nn.Module):
+    """Ordered concatenation of ``[B, D_i]`` vectors into one ``[B, Dsum]`` key (design §6.6).
+
+    The v2 spelling of v1's post-pooling ``'global'`` magic key
+    (saltmodel.py:175-177): ``global_rep = cat([global_rep, global_feats],
+    dim=-1)``. v1 fed GN3's 2-feature ``global`` stream PAST the encoder and
+    concatenated it onto the pooled representation, producing the
+    ``&pooled_dim 258`` (256 + 2) every GN3 task consumes. The synthesis killed
+    ``'global'`` as a magic key without a replacement — a silent feature-drop
+    hazard (both design critics rated HIGH: all widths still unify after the
+    drop, so no ``ShapeError`` fires). This module is the explicit replacement.
+
+    There is **no v1 class** for this — v1 inlined the cat in
+    ``SaltModel.forward``. The nearest v1 primitives are the ``merge_dict``
+    stream merge (saltmodel.py:135-147, sequence-level, code-only) and
+    ``InitNet.attach_global`` (initnet.py:77-82, context prepend); neither is a
+    standalone post-pooling vector concat. The correctness anchors are therefore
+    design-conformance, not v1-byte-parity (plan 10 sub-wave B, L3):
+
+    1. **Concat ORDER is the config list.** For converted GN3 checkpoints the
+       converter emits ``inputs: [pooled.global, normed.global]`` (pooled first,
+       global features last) so the task first-layer weight layouts line up with
+       v1's ``cat([global_rep, global_feats])`` (design §6.6 1390-1391). The
+       order is the configured list and nothing else.
+    2. **Output width ``Dsum = sum(D_i)``.** Resolved at bind via
+       `derived_widths` (there is no concrete edge for the dim table to bind
+       ``Dsum`` to — only the concat knows the sum; design §6.6 "Dsum unified at
+       bind", bind.py second pass).
+    3. **ONNX is the ``alias:`` mechanism, not this module.** Athena feeds ONE
+       jet tensor that v1 clones into ``global`` (to_onnx.py:377-378); v2
+       reproduces that with ``export.inputs`` ``alias:`` (`OnnxAdapter`,
+       onnx/adapter.py, design §6.6/§7) — a name-resolved column gather binding
+       the aliased port from the source tensor. VectorConcat itself is
+       mode-agnostic: ``torch.cat`` over ``[B, D]`` vectors has no dynamic
+       feature axis, so the forward is identical in every mode (unlike
+       sequence-level `Concat`/`Split`, which need ``seq.offsets`` trace-safety).
+
+    4 configs depend on it: GN2emu, GN3V01, GN3_SoftE, GN3EPCLV01.
+    """
+
+    def __init__(self, inputs: Sequence[str], out: str = "pooled.global") -> None:
+        """Capture the explicit ordered input list and the output key (design §6.6).
+
+        Parameters
+        ----------
+        inputs : Sequence[str]
+            Dotted bundle keys to concatenate, in the EXACT order they appear
+            in the output (pooled first for converted GN3 checkpoints, design
+            §6.6 1390-1391). Must be non-empty with no duplicates.
+        out : str, optional
+            The produced concatenated key, by default ``"pooled.global"`` (the
+            v1 ``global_rep`` slot every GN3 task reads).
+
+        Raises
+        ------
+        ConfigError
+            If `inputs` is empty, contains duplicates, or names `out` itself
+            (a self-feed).
+        """
+        super().__init__()
+        self.name = _UNNAMED
+        if not inputs:
+            raise ConfigError("VectorConcat: inputs must be a non-empty sequence")
+        if len(set(inputs)) != len(tuple(inputs)):
+            raise ConfigError(f"VectorConcat: duplicate inputs in {tuple(inputs)}")
+        if out in inputs:
+            raise ConfigError(
+                f"VectorConcat: out {out!r} appears in inputs {tuple(inputs)} — a module cannot "
+                "consume its own output (design §2.1 write-once)"
+            )
+        self.inputs = tuple(inputs)
+        self.out_key = out
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare each ``[B, D_i]`` input -> the ``[B, Dsum]`` output (design §6.6).
+
+        Each input gets its OWN instance-scoped width symbol (the inputs are
+        genuinely different widths — pooled 256 vs global 2 — so they must NOT
+        share a symbol). The output's ``Dsum`` symbol is resolved at bind from
+        the sum of the resolved input widths (`derived_widths`); the dim table
+        alone cannot bind it (no concrete edge), which is exactly why the
+        bind-time second pass exists (design §6.6 "Dsum unified at bind").
+
+        Returns
+        -------
+        IO
+            The declared requires/produces.
+        """
+        del mode
+        requires: dict[str, TensorSpec] = {
+            key: TensorSpec(shape=("B", sym_dim(f"D{i}", self.name)), dtype="float32")
+            for i, key in enumerate(self.inputs)
+        }
+        return IO(
+            requires=unflatten_spec(requires),
+            produces=unflatten_spec({
+                self.out_key: TensorSpec(shape=("B", sym_dim("Dsum", self.name)), dtype="float32"),
+            }),
+        )
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """Contribute ``Dsum = sum(D_i)`` once every input width is resolved (design §6.6).
+
+        Called by `resolve_bind_schema`'s second pass with the widths resolved
+        so far. Returns the output width when ALL inputs are known, else an
+        empty dict (a mode where some input is absent — the hook is
+        order-insensitive across plans). This is the ONLY place the concat sum
+        is known; the union-find dim table cannot infer it from edges alone.
+
+        Returns
+        -------
+        dict[str, int]
+            ``{out: sum(widths[input])}`` when every input width is resolved,
+            otherwise ``{}``.
+        """
+        if all(key in widths for key in self.inputs):
+            return {self.out_key: sum(widths[key] for key in self.inputs)}
+        return {}
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Concatenate the inputs along the feature dim, in the configured order.
+
+        Mode-agnostic: ``[B, D]`` vectors have no dynamic feature axis, so the
+        same ``torch.cat`` traces correctly for ONNX (design §6.6). ``torch.cat``
+        allocates a fresh tensor, so the output never aliases an input leaf
+        (design §2.1 write-once).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The newly produced key only (design §2.5).
+        """
+        del mode
+        return {self.out_key: torch.cat([b.get(key) for key in self.inputs], dim=-1)}
+
+
 class TransformerEncoder(nn.Module):
     """Config-constructed transformer encoder (design §9.2, composes a fresh v1 `Transformer`).
 
@@ -612,9 +751,22 @@ class TransformerEncoder(nn.Module):
     mutated (v1's ``_add_registers`` inserts ``"REGISTERS"`` into it,
     transformer.py:777,785).
 
+    ``norm_type`` (``"pre"`` default, or ``"post"`` / ``"hybrid"``) is
+    forwarded verbatim to every composed v1 ``EncoderLayer`` (M5 sub-wave B;
+    the GN3V01 flagship + GN3_Hybrid / GN3EPCLV01 are ``"hybrid"``). The
+    placement logic — hybrid forcing ``do_qk_norm``/``do_v_norm``, the
+    depth-0 residual-norm special case, and the pre-FFN norm — all lives in
+    the composed v1 layer (transformer.py:350-356,421); the wrapper only
+    threads the flag through the `Transformer` ``**kwargs`` passthrough.
+
     TODO(M6): ``mup:`` flag; TODO(M7): ``featurewise:`` / ``edges:`` ports
     (design §6.4, §6.7) when the v1 internals are absorbed.
     """
+
+    _NORM_TYPES = ("pre", "post", "hybrid")
+    """The encoder-layer norm placements the wrapper forwards (v1 EncoderLayer,
+    transformer.py:307-308,350-356). ``"none"`` is a residual-only v1 mode with
+    no shipped v2 config — rejected loudly here rather than silently passed."""
 
     def __init__(
         self,
@@ -625,6 +777,7 @@ class TransformerEncoder(nn.Module):
         dense: dict[str, Any] | None = None,
         norm: str = "LayerNorm",
         num_registers: int = 1,
+        norm_type: str = "pre",
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -650,11 +803,22 @@ class TransformerEncoder(nn.Module):
         num_registers : int, optional
             Learned register tokens appended INSIDE the encoder, by default
             1 (v1 minimum — transformer.py:558-559).
+        norm_type : str, optional
+            Per-layer norm placement, one of ``{"pre", "post", "hybrid"}``,
+            by default ``"pre"``. Forwarded verbatim to every v1
+            ``EncoderLayer`` via the `Transformer` ``**kwargs`` passthrough
+            (transformer.py:611). ``"hybrid"`` (the GN3V01 flagship) makes the
+            EncoderLayer force ``do_qk_norm``/``do_v_norm`` on its `Attention`,
+            use a residual ``norm_type`` of ``"pre"`` at depth 0 / ``"none"``
+            after, and apply a pre-FFN norm in ``forward`` (transformer.py:
+            350-356,421). The wrapper only passes the flag through — all that
+            placement logic lives in the composed v1 layer.
 
         Raises
         ------
         ConfigError
-            If `attention` is missing ``num_heads``.
+            If `attention` is missing ``num_heads``, or `norm_type` is not one
+            of ``{"pre", "post", "hybrid"}``.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -663,9 +827,15 @@ class TransformerEncoder(nn.Module):
                 "TransformerEncoder: attention config must be a mapping containing 'num_heads' "
                 "(v1 Transformer requires attn_kwargs, transformer.py:600-601)"
             )
+        if norm_type not in self._NORM_TYPES:
+            raise ConfigError(
+                f"TransformerEncoder: norm_type must be one of {self._NORM_TYPES}, got "
+                f"{norm_type!r}"
+            )
         attn_kwargs = dict(attention)
         attn_type = attn_kwargs.pop("attn_type", "torch-math")
         self.dim = dim
+        self.norm_type = norm_type
         self.encoder = V1Transformer(
             num_layers=num_layers,
             embed_dim=dim,
@@ -676,6 +846,7 @@ class TransformerEncoder(nn.Module):
             num_registers=num_registers,
             attn_kwargs=attn_kwargs,
             dense_kwargs=dict(dense) if dense is not None else None,
+            norm_type=norm_type,
         )
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
@@ -1087,6 +1258,137 @@ class LossSum(nn.Module):
         assert self._loss_keys is not None, "forward before declare_io narrowing"
         total = sum(self.weights.get(key, 1.0) * b.get(key) for key in self._loss_keys)
         return {"loss.total": total}
+
+
+class LossGLS(LossSum):
+    """Geometric-mean (GLS) combination of per-task losses -> ``loss.total`` (design §3.3).
+
+    A NetModule SIBLING of `LossSum` (it subclasses it to share the
+    ``losses.**`` framework wildcard, `declare_io`, and the
+    `collect_loss_keys`/`narrow` integration — `SaltModule`'s narrow loop
+    already keys off ``isinstance(_, LossSum)``, so a `LossGLS` is narrowed
+    for free, saltmodule.py:157-158). The ONLY behavioural change is the
+    combination rule (`forward`): the n-task GEOMETRIC MEAN
+    ``(∏ losses)^(1/n)`` (GLS = geometric loss strategy), reproducing the v1
+    ``loss_mode == "GLS"`` branch (modelwrapper.py:194-196) which `LossSum`'s
+    weighted sum replaced for the default ``wsum`` mode.
+
+    GLS does NOT utilise loss weights. v1 enforces this with a loud
+    construction-time guard — ``assert all(task.weight == 1.0 for task in
+    self.model.tasks)`` (modelwrapper.py:139-142) — because the geometric mean
+    of per-task losses is only meaningful when no task is pre-scaled (a
+    weighted task loss ``w*L`` contributes ``w^(1/n)`` to the product, an
+    arbitrary rescale of the mean — silent divergence, plan 10 risk
+    "LossGLS gates 14 configs"). v2 has TWO weight surfaces, both guarded to
+    1.0:
+
+    - This module's per-loss ``weights`` multiplier (the `LossSum` extra) —
+      rejected in ``__init__`` so a GLS config can never carry one.
+    - The task-side ``weight: float`` applied INSIDE each composed v1 head
+      before it publishes ``losses.<task>`` (tasks.py:88, task.py:243) — the
+      EXACT v1 ``task.weight`` surface. This is sibling state the loss module
+      cannot see at construction, so the framework calls
+      `check_task_weights(modules)` from `SaltModule.__init__`'s narrow loop
+      (the v1 ctor guard's v2 home), failing loudly before any plan compiles.
+    """
+
+    def __init__(
+        self,
+        losses: Sequence[str] | None = None,
+        weights: Mapping[str, float] | None = None,
+    ) -> None:
+        """Capture config; reject any per-loss weight (GLS ignores weights).
+
+        Parameters
+        ----------
+        losses : Sequence[str] | None, optional
+            Explicit loss keys (``"losses.<task>"`` or bare task names), by
+            default None (auto-collected via `collect_loss_keys`/`narrow`,
+            as for `LossSum`).
+        weights : Mapping[str, float] | None, optional
+            Accepted only for parity with the `LossSum` signature: GLS does
+            NOT utilise weights, so any entry != 1.0 is rejected (v1
+            modelwrapper.py:139-142).
+
+        Raises
+        ------
+        ConfigError
+            If any configured weight is not 1.0 (GLS ignores weights — set
+            them to 1, or use `LossSum` for a weighted sum).
+        """
+        super().__init__(losses=losses, weights=weights)
+        # exact == 1.0 is the faithful v1 semantic (modelwrapper.py:140 asserts
+        # task.weight == 1.0); weights are config literals, never computed values
+        if bad := {k: v for k, v in self.weights.items() if v != 1.0}:  # noqa: RUF069
+            raise ConfigError(
+                f"LossGLS: per-loss weights are not utilised by the geometric mean — got "
+                f"{bad}; set all weights to 1.0, or use LossSum for a weighted sum "
+                "(v1 modelwrapper.py:139-142)"
+            )
+
+    @staticmethod
+    def check_task_weights(modules: Mapping[str, GraphModule]) -> None:
+        """Assert every loss-producing task carries ``weight == 1.0`` (the v1 guard).
+
+        The v2 home of v1's ``ModelWrapper.__init__`` GLS assertion
+        (``all(task.weight == 1.0 for task in self.model.tasks)``,
+        modelwrapper.py:139-142). Called by `SaltModule.__init__` when a
+        `LossGLS` is present, BEFORE any `declare_io`/compile, so a weighted
+        task under GLS fails loudly at assembly rather than silently
+        rescaling the geometric mean (plan 10 risk). Inspects the public
+        numeric ``weight`` every task module exposes (tasks.py:88 coerces it
+        to ``float``; the guard accepts ``int`` too so a future un-coerced
+        weight is still caught); modules without a numeric ``weight`` attribute
+        (`Normaliser`, `Concat`, `LossSum`/`LossGLS`, ...) are ignored — only
+        the loss producers carry it.
+
+        Parameters
+        ----------
+        modules : Mapping[str, GraphModule]
+            The full configured module dict.
+
+        Raises
+        ------
+        ConfigError
+            Naming each task whose ``weight`` is not 1.0.
+        """
+        offenders = {
+            name: float(module.weight)
+            for name, module in modules.items()
+            if not isinstance(module, LossSum)
+            # duck-typed numeric check (int OR float): the v2 task base coerces
+            # ``self.weight = float(weight)`` (tasks.py:88) so a YAML ``weight: 2``
+            # already arrives as 2.0 and is caught, but guarding ``(int, float)``
+            # keeps a future task module that stored an un-coerced int weight from
+            # silently slipping past the GLS guard. (LossSum carries ``weights`` —
+            # a dict — not ``weight``, and is excluded above regardless.)
+            and isinstance(getattr(module, "weight", None), (int, float))
+            and float(module.weight) != 1.0  # noqa: RUF069 - exact, the v1 semantic
+        }
+        if offenders:
+            raise ConfigError(
+                f"LossGLS: GLS does not utilise task weights — set all task weights to 1.0, "
+                f"got {offenders} (v1 modelwrapper.py:139-142)"
+            )
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Combine the loss leaves by their geometric mean.
+
+        ``(∏_k losses[k])^(1/n)`` over the narrowed loss keys — the v1
+        ``loss_mode == "GLS"`` reduction (``math.prod`` then ``pow(·, 1/n)``,
+        modelwrapper.py:194-196). Weights are guaranteed 1.0 by ``__init__``
+        and `check_task_weights`, so none appear here (a weighted product
+        would be the divergence v1's guard forbids).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"loss.total": (∏ losses)^(1/n)}``.
+        """
+        del mode
+        assert self._loss_keys is not None, "forward before declare_io narrowing"
+        product = math.prod(b.get(key) for key in self._loss_keys)
+        return {"loss.total": torch.pow(product, 1.0 / len(self._loss_keys))}
 
 
 def _loss_key(key: str) -> str:

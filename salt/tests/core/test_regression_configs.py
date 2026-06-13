@@ -22,6 +22,7 @@ from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
 from salt.core.schema import dump_schema, save_schema
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
+from salt.tests.core.regression_fixture import write_vector_concat_norm_dict
 from salt.utils.inputs import write_dummy_file
 
 CONFIGS = [
@@ -75,3 +76,37 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
         "--trainer.enable_progress_bar=false",
     ])
     assert rc == 0, f"{config} failed fast_dev_run fit"
+
+
+def test_gn3v01_config_validates_all_modes(tmp_path):
+    """The GN3V01 flagship (VectorConcat + alias + norm_type:hybrid) plan-compiles.
+
+    Validates the shipped ``gn3v01.yaml`` through the real ``salt2 graph
+    validate`` in ALL four modes (FIT/VAL/TEST/ONNX) — the sub-wave-B feature
+    config (design §6.6). Uses the augmented norm dict (jets/tracks/global) for
+    the TWO Normalisers; no H5 is needed (``validate`` is data-free, design
+    §2.3/§4.1). The ONNX mode in particular exercises the ``export.inputs
+    alias:`` (``inputs.global`` cloned from ``inputs.jets``) and the
+    ``VectorConcat`` width resolution at bind.
+    """
+    nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+    write_vector_concat_norm_dict(nd_path, cd_path)
+    rc = salt2_main([
+        "graph",
+        "validate",
+        "-c",
+        str(CONFIG_DIR / "gn3v01.yaml"),
+        "--set",
+        f"model.modules.norm.init_args.norm_dict={nd_path}",
+        "--set",
+        f"model.modules.norm_global.init_args.norm_dict={nd_path}",
+        "--mode",
+        "fit",
+        "--mode",
+        "val",
+        "--mode",
+        "test",
+        "--mode",
+        "onnx",
+    ])
+    assert rc == 0, "gn3v01.yaml failed graph validate"

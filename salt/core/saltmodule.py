@@ -70,7 +70,7 @@ from salt.core.nn.bind import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.modules import LossSum
+from salt.core.nn.modules import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW
 
 try:
@@ -156,6 +156,10 @@ class SaltModule(lightning.LightningModule):
         for module in modules.values():
             if isinstance(module, LossSum) and not module.narrowed:
                 module.narrow(LossSum.collect_loss_keys(modules, Mode.FIT))
+            # GLS does not utilise task weights: the v2 home of v1's ctor guard
+            # (modelwrapper.py:139-142) — fail loudly here, before declare_io
+            if isinstance(module, LossGLS):
+                LossGLS.check_task_weights(modules)
         if missing := [k for k in _LRS_REQUIRED if k not in lrs_config]:
             raise ConfigError(
                 f"lrs_config is missing required keys {missing} — the OneCycleLR schema is "

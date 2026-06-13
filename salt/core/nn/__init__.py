@@ -26,11 +26,13 @@ from salt.core.nn.from_v1 import from_v1, v1_sinks, v1_sources
 from salt.core.nn.modules import (
     Concat,
     GlobalAttentionPooling,
+    LossGLS,
     LossSum,
     Normaliser,
     Split,
     StreamEmbed,
     TransformerEncoder,
+    VectorConcat,
 )
 from salt.core.nn.state_dict import map_v1_state_dict
 from salt.core.nn.tasks import (
@@ -44,6 +46,7 @@ __all__ = [
     "ClassificationTaskModule",
     "Concat",
     "GlobalAttentionPooling",
+    "LossGLS",
     "LossSum",
     "Normaliser",
     "RegressionTaskModule",
@@ -51,6 +54,7 @@ __all__ = [
     "Split",
     "StreamEmbed",
     "TransformerEncoder",
+    "VectorConcat",
     "VertexingTaskModule",
     "bind_all",
     "from_v1",

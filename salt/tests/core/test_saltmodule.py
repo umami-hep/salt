@@ -23,7 +23,7 @@ from lightning import Callback, Trainer
 
 from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
 from salt.core.graph import Bundle, ConfigError, Mode
-from salt.core.nn.modules import LossSum
+from salt.core.nn.modules import LossGLS, LossSum
 from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
 from salt.core.schema import dump_schema, save_schema
 from salt.tests.core.gn2_fixture import (
@@ -179,6 +179,28 @@ class TestConstruction:
     def test_forward_without_plan_rejected(self, data):
         with pytest.raises(ConfigError, match="no compiled plan"):
             build_model(data)({}, Mode.TEST)
+
+    def test_lossgls_narrowed_like_losssum(self, data):
+        # a LossGLS is a LossSum subclass, so the SaltModule narrow loop fixes
+        # its loss keys for free (no explicit losses: needed). The gn2v2 fixture
+        # carries weighted tasks, so set them to 1.0 first (the GLS domain).
+        modules = build_gn2v2_modules(data["nd"])
+        for task in ("track_origin", "track_vertexing"):
+            modules[task].weight = 1.0
+        modules["loss"] = LossGLS()
+        model = SaltModule(modules, lrs_config=LRS)
+        loss = model.net["loss"]
+        assert isinstance(loss, LossGLS)
+        assert loss.narrowed
+        assert set(loss.declare_io(Mode.FIT).requires["losses"]) == set(TASKS)
+
+    def test_lossgls_rejects_weighted_task_at_construction(self, data):
+        # the all-weights==1.0 guard fires at assembly (the v2 home of v1's ctor
+        # assert) — the gn2v2 fixture's track_origin weight is 0.5
+        modules = build_gn2v2_modules(data["nd"])
+        modules["loss"] = LossGLS()
+        with pytest.raises(ConfigError, match="does not utilise task weights"):
+            SaltModule(modules, lrs_config=LRS)
 
 
 class TestFit:

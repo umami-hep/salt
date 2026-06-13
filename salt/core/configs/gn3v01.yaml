@@ -1,0 +1,170 @@
+# gn3v01.yaml — the GN3V01 flagship in the v2 schema (M5 sub-wave B, design §6.6).
+#
+# Exercises the three sub-wave-B features end-to-end through `salt2 graph
+# validate`: (1) the encoder's `norm_type: hybrid` placement (design §9.2;
+# v1 transformer.py:350-356); (2) the GN3 `global` stream fed PAST the encoder
+# and concatenated onto the pooled representation via `VectorConcat` (design
+# §6.6; v1 saltmodel.py:175-177 `cat([global_rep, global_feats])` -> the
+# `&pooled_dim 258` every GN3 task consumes); (3) the ONNX `export.inputs
+# alias:` that clones one Athena jet tensor into the `global` port (design
+# §6.6/§7; v1 to_onnx.py:377-378). GN3V01's exact identity case: `global` and
+# `jets` BOTH declare [pt_btagJes, eta_btagJes], so the alias gather is the
+# identity clone.
+#
+# This is the v2-native MIGRATED fixture for GN3V01 (the M7 converter later
+# proves the automated legacy->v2 path matches it). Shrunk to the gn2v2_fixture
+# widths (16-dim, 2 layers, 2 heads) for fast static validation — NOT the
+# production 256-dim/8-layer config (those widths are config values, irrelevant
+# to the graph wiring this gates).
+#
+# NO machine paths are committed (design §5 placeholder policy). Static
+# validation (no data) from the REPO ROOT:
+#
+#   python -m salt.core.main graph validate -c salt/core/configs/gn3v01.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml \
+#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml \
+#     --strict
+
+name: GN3V01
+
+data:
+  batch_size: 100
+  num_workers: 0
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false}
+          # the GN3 'global' stream: an ordinary [B, F] vector (no pad mask,
+          # design §6.6 1393-1396; v1 datasets.py:519-524 mask-excludes 'global')
+          global: {vector: true}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          # GN3V01's identity case: 'global' declares the SAME columns as jets
+          # (design §6.6 1400-1401) -> the ONNX alias is an identity clone
+          global: [pt_btagJes, eta_btagJes]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs_config: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    optimizer: AdamW
+    modules:
+      # the encoder-stream normaliser (jets is the global context object)
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks]
+          global_object: jets
+      # a SECOND normaliser for the 'global' vector stream fed past the encoder
+      # (one Normaliser has a single global_object slot; jets already fills it)
+      norm_global:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [global]
+          global_object: global
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: 16
+          dense: {hidden_layers: [16], activation: SiLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: 16
+          out_dim: 16
+          num_layers: 2
+          # the GN3V01 flagship: hybrid norm placement (design §9.2; sub-wave B)
+          norm_type: hybrid
+          attention: {num_heads: 2, attn_type: torch-math}
+          dense: {activation: ReLU, gated: false}
+      split:
+        class_path: salt.core.nn.Split # production task path (design §3.3)
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      # design §6.6: the pooled rep (256 in prod) concatenated with the global
+      # features (2). ORDER is the list — pooled FIRST, global features LAST
+      # (1390-1391), matching v1 cat([global_rep, global_feats]); the output
+      # vconcat.global is the v1 'global_rep' slot every GN3 task consumes.
+      vconcat:
+        class_path: salt.core.nn.VectorConcat
+        init_args:
+          inputs: [pooled.global, normed.global]
+          out: vconcat.global
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: vconcat.global # the augmented &pooled_dim (design §6.6)
+          label: HadronConeExclTruthLabelID
+          class_names: [ujets, cjets, bjets]
+          dense: {hidden_layers: [16], activation: SiLU}
+      # a track-level task consuming `encoded.tracks` (via Split) with the
+      # augmented `vconcat.global` as context — the GN3 pattern where every task
+      # sees the global features (design §6.6; consumes the split so the encoder
+      # output is not dead).
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks # input defaults to encoded.tracks
+          context: vconcat.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight: 0.5
+          dense: {hidden_layers: [16], activation: SiLU}
+      loss:
+        class_path: salt.core.nn.LossSum
+
+writers:
+  modules: {} # base2.yaml defaults: InputCopyWriter, PadMaskWriter, TaskWriter
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN3V01 # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    # the GN3 alias: ONE Athena jet tensor cloned into the global port (design
+    # §6.6/§7; v1 to_onnx.py:377-378). Identity gather here (global==jets cols).
+    - {port: inputs.global, alias: inputs.jets}
+
+trainer:
+  max_epochs: 2

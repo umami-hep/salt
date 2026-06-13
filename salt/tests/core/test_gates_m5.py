@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 import salt.core.gates_m5 as gm5
-from salt.core.gates_m5 import main, run_r1, run_r2, run_r3, run_r4
+from salt.core.gates_m5 import main, run_l1, run_l2, run_l3, run_r1, run_r2, run_r3, run_r4
 
 
 class TestR1:
@@ -118,9 +118,140 @@ class TestR4:
         assert not report["checks"]["custom_target_chain_bitwise"]
 
 
+class TestL1:
+    def test_pass(self, tmp_path):
+        code, report = run_l1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "l1_report.json").is_file()
+        # >= 2 task losses are genuinely combined (a 1-task GLS is the identity)
+        assert report["checks"]["gls_has_two_task_losses"]
+        assert report["config"]["n_losses"] >= 2
+        # geometric-mean parity vs an INDEPENDENT v1 ModelWrapper.total_loss (GLS)
+        assert report["checks"]["gls_total_bitwise_vs_independent_v1"]
+        assert report["checks"]["gls_total_parity_vs_independent_v1"]
+        assert report["max_abs_diffs"]["gls_total_vs_independent_v1"] <= 1e-6
+        # the reference is v1's actual method, not a re-implementation
+        assert "ModelWrapper.total_loss" in report["v1_reference"]
+        # it is a geometric mean, not a sum
+        assert report["checks"]["gls_is_not_the_sum"]
+        # the all-weights==1.0 guard fires on BOTH surfaces and is silent at 1.0
+        assert report["checks"]["module_weight_not_one_raises"]
+        assert report["checks"]["module_weight_one_accepted"]
+        assert report["checks"]["task_weight_not_one_raises"]
+        assert report["checks"]["task_weight_one_accepted"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # perturb a per-task loss -> the geometric-mean parity vs the independent
+        # v1 reference must FAIL, while the weight-guard checks (independent of
+        # the loss values) stay green
+        code, report = run_l1(tmp_path, corruption=lambda loss: loss + 1.0)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["gls_total_bitwise_vs_independent_v1"]
+        assert not report["checks"]["gls_total_parity_vs_independent_v1"]
+        assert report["checks"]["module_weight_not_one_raises"]
+        assert report["checks"]["task_weight_not_one_raises"]
+
+
+class TestL2:
+    def test_pass(self, tmp_path):
+        code, report = run_l2(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "l2_report.json").is_file()
+        # hybrid encoder forward parity vs an INDEPENDENT v1 Transformer (BITWISE)
+        assert report["checks"]["hybrid_encoded_bitwise_vs_independent_v1"]
+        assert report["checks"]["hybrid_encoded_parity_vs_independent_v1"]
+        assert report["max_abs_diffs"]["hybrid_encoded_vs_independent_v1"] <= 1e-6
+        # the reference is an independently-constructed v1 Transformer
+        assert "salt.models.Transformer" in report["v1_reference"]
+        # the hybrid flag genuinely reached every composed v1 EncoderLayer
+        assert report["checks"]["all_layers_hybrid"]
+        assert report["checks"]["all_layers_force_qk_v_norm"]
+        assert report["checks"]["depth0_pre_residual_identity_norm"]
+        assert report["checks"]["deeper_layers_none_residual_real_norm"]
+        # matched-init A/B control: pre-norm encoder loaded with the hybrid
+        # weights differs ONLY by placement, so the copy must be complete and
+        # the output must still differ
+        assert report["checks"]["matched_init_no_missing_pre_keys"]
+        assert report["checks"]["matched_init_unexpected_are_qk_v_norms"]
+        assert report["checks"]["hybrid_differs_from_pre"]
+        assert report["checks"]["unknown_norm_type_raises"]
+        # no ONNX claim is made (documented honestly in the report)
+        assert "no ONNX claim" in report["no_onnx_claim"] or "ONNX" in report["no_onnx_claim"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # perturb the v2 encoded.seq -> the bitwise + parity checks vs the
+        # independent v1 Transformer must FAIL, while the flag-reached-the-layers
+        # and reject-unknown-norm_type checks (independent of the values) stay green
+        code, report = run_l2(tmp_path, corruption=lambda enc: enc + 1.0)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["hybrid_encoded_bitwise_vs_independent_v1"]
+        assert not report["checks"]["hybrid_encoded_parity_vs_independent_v1"]
+        assert report["checks"]["all_layers_hybrid"]
+        assert report["checks"]["all_layers_force_qk_v_norm"]
+        assert report["checks"]["unknown_norm_type_raises"]
+
+
+class TestL3:
+    def test_pass(self, tmp_path):
+        code, report = run_l3(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "l3_report.json").is_file()
+        # VectorConcat output == the literal v1 cat([pooled, global]) BITWISE
+        assert report["checks"]["vconcat_bitwise_vs_v1_cat"]
+        assert report["checks"]["vconcat_parity_vs_v1_cat"]
+        assert report["max_abs_diffs"]["vconcat_vs_v1_cat"] == 0.0
+        # the reference is the literal saltmodel.py:175-177 cat (no v1 class)
+        assert "saltmodel.py:175-177" in report["v1_reference"]
+        # order: pooled FIRST, global features LAST + Dsum = sum
+        assert report["checks"]["order_pooled_first"]
+        assert report["checks"]["order_global_last"]
+        assert report["checks"]["dsum_is_input_width_sum"]
+        # alias: a COMPILED + RUN Mode.ONNX plan (identity clone + name gather)
+        assert report["checks"]["identity_alias_is_clone"]
+        assert report["checks"]["onnx_identity_runs_and_matches_eager"]
+        assert report["max_abs_diffs"]["onnx_identity_vs_eager"] <= 1e-6
+        assert report["checks"]["name_gather_index_resolves_by_name"]
+        assert report["checks"]["name_gather_reorders_columns"]
+        assert report["checks"]["name_gather_is_not_identity"]
+        # the ONNX claim is honestly backed by a real Mode.ONNX run
+        assert "Mode.ONNX" in report["onnx_claim"]
+        # loud construction / bind surfaces
+        assert report["checks"]["duplicate_inputs_raise"]
+        assert report["checks"]["self_feed_out_in_inputs_raises"]
+        assert report["checks"]["alias_missing_column_raises"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # perturb the v2 vconcat.global -> the order/Dsum/parity checks vs the
+        # literal v1 cat must FAIL, while the alias-run and loud-surface checks
+        # (independent of the FIT concat values) stay green
+        code, report = run_l3(tmp_path, corruption=lambda vc: vc + 1.0)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["vconcat_bitwise_vs_v1_cat"]
+        assert not report["checks"]["vconcat_parity_vs_v1_cat"]
+        # the +1.0 shift breaks the pooled/global column split too
+        assert not report["checks"]["order_pooled_first"]
+        assert not report["checks"]["order_global_last"]
+        # Dsum (a width, not a value) and the alias/loud checks stay green
+        assert report["checks"]["dsum_is_input_width_sum"]
+        assert report["checks"]["identity_alias_is_clone"]
+        assert report["checks"]["onnx_identity_runs_and_matches_eager"]
+        assert report["checks"]["name_gather_reorders_columns"]
+        assert report["checks"]["duplicate_inputs_raise"]
+        assert report["checks"]["alias_missing_column_raises"]
+
+
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        for gate in ("r1", "r2", "r3", "r4"):
+        for gate in ("r1", "r2", "r3", "r4", "l1", "l2", "l3"):
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0
             assert (tmp_path / gate / f"{gate}_report.json").is_file()

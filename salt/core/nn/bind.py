@@ -191,7 +191,85 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
         # column count IS the width.
         if key not in widths and key in fields:
             widths[key] = len(fields[key])
+
+    # Second pass: modules whose produced width is a FUNCTION of resolved input
+    # widths (not a single shared symbol the dim table can unify) contribute it
+    # via the optional duck-typed `derived_widths(widths) -> {key: int}` hook
+    # (design §6.6: VectorConcat's ``Dsum`` "unified at bind" — there is no
+    # concrete edge to bind ``Dsum``, so the dim table cannot resolve it; the
+    # concat module alone knows ``Dsum = sum(D_i)``). The plan steps hold live
+    # module references, so no signature change is needed. Generic: any module
+    # may derive widths; conflicting contributions raise (a derived width that
+    # disagrees with an already-resolved one is a real bug, not a silent drop).
+    _apply_derived_widths(plans, widths)
     return ResolvedSchema(widths=widths, fields=fields)
+
+
+def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None:
+    """Let plan-step modules contribute widths derived from resolved input widths.
+
+    Each unique plan-step module exposing a callable ``derived_widths`` is asked
+    for ``{produced_key: int}`` given the widths resolved so far (design §6.6).
+    The hook returns an empty dict when its inputs are not yet resolvable (a
+    width-less mode), so this is order-insensitive across the supplied plans.
+
+    Run to a FIXPOINT (re-sweep until no width changes), so a CHAIN of derived
+    widths — module B's input width is itself derived by module A — resolves
+    regardless of plan order: if B is visited before A on the first sweep its
+    inputs aren't bound yet and the hook returns ``{}``, but a later sweep
+    (after A bound them) re-runs B. A single sweep would leave B's output
+    unbound, surfacing only later as a (loud) `ShapeError`; the fixpoint loop
+    removes that order-dependence. The shipped configs chain no derived widths
+    (so the loop converges after one productive sweep), but the loop keeps the
+    surface robust to future chained derivations. Termination: each productive
+    sweep binds ≥1 new width and widths are never unbound, so the loop runs at
+    most ``num modules + 1`` times.
+
+    Raises
+    ------
+    BindError
+        When a derived width disagrees with an already-resolved width for the
+        same key (a genuine inconsistency, surfaced loudly per design §2.2).
+    """
+    modules = _unique_derived_modules(plans)
+    max_sweeps = len(modules) + 1
+    for _ in range(max_sweeps):
+        changed = False
+        for module in modules:
+            for key, size in module.derived_widths(widths).items():  # type: ignore[attr-defined]
+                previous = widths.get(key)
+                if previous is not None and previous != size:
+                    raise BindError(
+                        f"module {getattr(module, 'name', '?')!r} derives width {size} for "
+                        f"{key!r} but the resolved schema already has {previous} — conflicting "
+                        "widths (design §2.2/§6.6)"
+                    )
+                if previous is None:
+                    widths[key] = size
+                    changed = True
+        if not changed:
+            return
+
+
+def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
+    """The plan-step modules that expose a callable ``derived_widths``, deduped by identity.
+
+    Returns
+    -------
+    list[GraphModule]
+        First-seen order across the supplied plans (one entry per live module).
+    """
+    seen: set[int] = set()
+    derived: list[GraphModule] = []
+    for plan in plans:
+        for step in plan.steps:
+            module = step.module
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            if callable(getattr(module, "derived_widths", None)):
+                derived.append(module)
+    return derived
 
 
 def bind_all(modules: Mapping[str, GraphModule], schema: ResolvedSchema) -> None:
