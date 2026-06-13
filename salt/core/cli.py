@@ -348,6 +348,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
+    fitval_callbacks = _static_fitval_callbacks(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
     sinks: dict[Mode, tuple[str, ...]] = {}
@@ -408,6 +409,25 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
+        elif mode & Mode.TRAINING and fitval_callbacks:
+            # the static half of the design §3.1/§3.4 FIT/VAL-sink contract
+            # (D-prereq): configured metrics callbacks DECLARE plan sinks the
+            # same way writers do for TEST, so `salt2 graph validate --mode
+            # fit` sees the same sinks (and the same boundary demand) a real
+            # `salt2 fit` does — the prereq for the M5 MaskformerMetrics
+            # callback to enter graph validation. Mirror of the TEST branch.
+            try:
+                keys = list(
+                    model._model_sinks(mode, callbacks=fitval_callbacks)  # noqa: SLF001 - same-package adapter
+                )
+                demand = model._callback_demand(mode, fitval_callbacks)  # noqa: SLF001 - same-package adapter
+                # callback-demanded dataset-namespace keys (labels/masks/meta)
+                # are FIT/VAL sinks too — their producers stay alive (§3.1)
+                keys.extend(key for key in demand if key not in keys)
+                sink_origins[mode] = dict(demand)
+            except ConfigError as err:
+                mode_errors[mode] = str(err)
+                keys = list(model._model_sinks(mode))  # noqa: SLF001 - loss-only render fallback
         else:
             if mode is Mode.ONNX:
                 mode_warnings[mode] = (
@@ -505,6 +525,28 @@ def _static_writer_callback(cli: Any) -> Any | None:
     if not writer_modules:
         return None
     return WriterCallback(modules=writer_modules)
+
+
+def _static_fitval_callbacks(cli: Any) -> list[Any]:
+    """The configured FIT/VAL-sink callbacks from the run-free CLI (design §3.1).
+
+    The static-tooling half of the §3.1/§3.4 FIT/VAL-sink contract
+    (D-prereq, the `_static_writer_callback` sibling): any assembled
+    ``trainer.callbacks`` entry exposing a callable ``fit_val_demand`` (the
+    metrics family — `ConfusionMatrix`, the M5 `MaskformerMetrics`) is fed
+    into `SaltModule._model_sinks` so FIT/VAL sink derivation matches the
+    runtime path. Config-only: the callbacks are instantiated by the parse
+    but never ``setup``, and `fit_val_demand` resolves from the model module
+    dict, not from `setup` state.
+
+    Returns
+    -------
+    list[Any]
+        The FIT/VAL-sink callbacks in trainer order (empty when none).
+    """
+    trainer = getattr(cli, "trainer", None)
+    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+    return [cb for cb in callbacks or [] if callable(getattr(cb, "fit_val_demand", None))]
 
 
 def _parse_mode(name: str) -> Mode:

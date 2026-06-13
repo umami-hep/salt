@@ -25,10 +25,26 @@ eval and write columns exactly as today; the default export name is the run
 name with ``_``/``-`` stripped, byte-reproducing v1
 (``to_onnx.py:687``: ``config['name'].replace('_','').replace('-','')``).
 
-This module is deliberately torch-free: `salt.core.main` imports it at CLI
-startup to register the parser argument, and the writer base imports
-`ExportOutput` (amendment merge condition 2 — writers return M4's type
-directly, no parallel manifest type).
+This module's BODY is deliberately torch-free: `salt.core.main` imports
+`ExportConfig` from it at CLI startup to register the parser argument, and the
+writer base imports `ExportOutput` (amendment merge condition 2 — writers
+return M4's type directly, no parallel manifest type) — neither path needs the
+torch-importing reduce registry at parse time. (A bare ``import
+salt.core.onnx.config`` does pull torch transitively via the
+``salt.core.onnx`` package ``__init__``, which imports the torch-using
+adapter; the torch-free property here is this module's own body plus the
+deferred-import discipline below, not the whole import path.)
+
+Reduce validation is LIVE since M5: ``KNOWN_REDUCES`` / ``PER_TOKEN_REDUCES``
+are no longer frozen tuples but module attributes resolved on access from the
+live registry in `salt.core.onnx.reduces` (the M5 ``register_reduce`` surface,
+amendment 555-567). `_resolve_output` defaults + validates each manifest
+entry's dtype from the reduce's DECLARED dtype rather than hard-coding the
+per-reduce rules. The torch-free seam is preserved by a DEFERRED import: the
+torch-importing registry is loaded only inside the export-only validation path
+(`_resolve_output`, `combine_insertion_index`, the lazy attribute lookup),
+never at fit-time parse — `salt.core.main`'s CLI-startup import of this module
+touches none of it.
 """
 
 from __future__ import annotations
@@ -40,8 +56,8 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import split_key
 
 __all__ = [
-    "KNOWN_REDUCES",
-    "PER_TOKEN_REDUCES",
+    "KNOWN_REDUCES",  # noqa: F822 - PEP 562 module __getattr__ (live registry view)
+    "PER_TOKEN_REDUCES",  # noqa: F822 - PEP 562 module __getattr__ (live registry view)
     "TRACK_SELECTIONS",
     "ExportCombine",
     "ExportConfig",
@@ -70,13 +86,67 @@ TRACK_SELECTIONS = (
 """Track selections mirroring the Athena-side loader (v1 to_onnx.py:24-35,
 https://gitlab.cern.ch/atlas/athena/-/blob/main/PhysicsAnalysis/JetTagging/FlavorTagInference/Root/TracksLoader.cxx)."""
 
-KNOWN_REDUCES = ("split_scalars", "argmax", "vertex_union_find")
-"""The shipped reduce registry keys (design §7.3; MaskFormer reduces are M5)."""
 
-PER_TOKEN_REDUCES = ("argmax", "vertex_union_find")
-"""Reduces emitting per-token (dynamic-axis) outputs — the "sequence-aux"
-entries of v1's output order. `combine_insertion_index` keys off this set
-(amendment merge condition 5)."""
+def _live_known_reduces() -> tuple[str, ...]:
+    """The registered reduce names, queried from the live registry (deferred import).
+
+    The M5 replacement for the frozen ``KNOWN_REDUCES`` tuple: `register_reduce`
+    is the single owner of the set. Deferred so this torch-free module never
+    imports the torch-importing registry at parse time (it loads only when an
+    export block is actually resolved).
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted registered reduce names.
+    """
+    from salt.core.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
+
+    return registered_reduces()
+
+
+def _live_per_token_reduces() -> tuple[str, ...]:
+    """The registered per-token reduce names, from the live registry (deferred import).
+
+    The M5 replacement for the frozen ``PER_TOKEN_REDUCES`` tuple; consumed by
+    `combine_insertion_index` (combines insert before the first per-token entry,
+    amendment merge condition 5).
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted per-token reduce names.
+    """
+    from salt.core.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
+
+    return per_token_reduces()
+
+
+def __getattr__(name: str) -> tuple[str, ...]:
+    """Resolve the live ``KNOWN_REDUCES`` / ``PER_TOKEN_REDUCES`` attributes (PEP 562).
+
+    These were frozen tuples through M4.5; since M5 they are LIVE views of the
+    `salt.core.onnx.reduces` registry, resolved on attribute access (so
+    ``from salt.core.onnx.config import KNOWN_REDUCES`` and ``config.KNOWN_REDUCES``
+    keep working, now returning the registry's current contents). Accessing them
+    triggers the deferred registry import — i.e. only when something actually
+    reads the reduce set, never at this module's own import.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The requested live tuple.
+
+    Raises
+    ------
+    AttributeError
+        For any other attribute (the normal module-attribute protocol).
+    """
+    if name == "KNOWN_REDUCES":
+        return _live_known_reduces()
+    if name == "PER_TOKEN_REDUCES":
+        return _live_per_token_reduces()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass
@@ -531,8 +601,9 @@ def combine_insertion_index(outputs: Sequence[ExportOutput]) -> int:
     int
         The entry index combines insert at (en bloc, declaration order).
     """
+    per_token = _live_per_token_reduces()
     for i, entry in enumerate(outputs):
-        if entry.reduce in PER_TOKEN_REDUCES:
+        if entry.reduce in per_token:
             return i
     return len(outputs)
 
@@ -664,52 +735,61 @@ def _resolve_output(entry: ExportOutput) -> ExportOutput:
         raise ConfigError(
             f"export output port {entry.port!r} is not a valid dotted key: {err}"
         ) from err
+    # the live registry is the single owner of the reduce set + per-reduce dtype
+    # rules (M5 register_reduce surface); deferred import keeps this module
+    # torch-free at parse time (only export-block resolution loads it)
+    from salt.core.onnx.reduces import reduce_spec, registered_reduces  # noqa: PLC0415 - torch seam
+
     if (entry.name is None) == (entry.names is None):
         raise ConfigError(
             f"export output {entry.port!r} must set exactly one of 'name' (single-output "
             "reduces) or 'names' (per-class scalars) (design §5.1)"
         )
+    if entry.names is not None and (not entry.names or len(set(entry.names)) != len(entry.names)):
+        raise ConfigError(
+            f"export output {entry.port!r}: 'names' must be a non-empty list without "
+            f"duplicates, got {entry.names!r}"
+        )
+    # resolve the reduce key: plural-names entries default to split_scalars (the
+    # only names-consuming reduce); single-name entries must name one explicitly
+    # (aux reduces are never implicit, design §7.3)
     if entry.names is not None:
-        if not entry.names or len(set(entry.names)) != len(entry.names):
-            raise ConfigError(
-                f"export output {entry.port!r}: 'names' must be a non-empty list without "
-                f"duplicates, got {entry.names!r}"
-            )
         reduce = entry.reduce or "split_scalars"
-        if reduce != "split_scalars":
-            raise ConfigError(
-                f"export output {entry.port!r}: 'names' implies the split_scalars reduce, "
-                f"got reduce={entry.reduce!r} (design §7.3)"
-            )
-        dtype = entry.dtype or "float32"
-        if dtype != "float32":
-            raise ConfigError(
-                f"export output {entry.port!r}: split_scalars emits float32 scalars, got "
-                f"dtype={entry.dtype!r} (v1 per-class probability outputs)"
-            )
     else:
         reduce = entry.reduce
         if reduce is None:
+            aux = [k for k in registered_reduces() if not reduce_spec(k).expects_names]
             raise ConfigError(
                 f"export output {entry.port!r}: single-name outputs must set an explicit "
-                f"'reduce' from {[k for k in KNOWN_REDUCES if k != 'split_scalars']} — aux "
-                "reduces are never implicit (design §7.3)"
+                f"'reduce' from {aux} — aux reduces are never implicit (design §7.3)"
             )
-        if reduce == "split_scalars":
-            raise ConfigError(
-                f"export output {entry.port!r}: split_scalars emits per-class scalars — use "
-                "'names' (design §5.1)"
-            )
-        dtype = entry.dtype or "int8"
-        if dtype != "int8":
-            raise ConfigError(
-                f"export output {entry.port!r}: the {reduce!r} reduce emits int8 "
-                f"(v1 .char(), to_onnx.py:422,432), got dtype={entry.dtype!r}"
-            )
-    if reduce not in KNOWN_REDUCES:
+    try:
+        spec = reduce_spec(reduce)
+    except ConfigError:
         raise ConfigError(
             f"export output {entry.port!r}: unknown reduce {reduce!r} — registry: "
-            f"{list(KNOWN_REDUCES)} (design §7.3; MaskFormer reduces land in M5)"
+            f"{list(registered_reduces())} (design §7.3; register via "
+            "salt.core.onnx.reduces.register_reduce)"
+        ) from None
+    # the reduce's name/names arity must match how the entry was declared
+    if entry.names is not None and not spec.expects_names:
+        raise ConfigError(
+            f"export output {entry.port!r}: 'names' implies the split_scalars reduce, "
+            f"got reduce={entry.reduce!r} (design §7.3)"
+        )
+    if entry.name is not None and spec.expects_names:
+        raise ConfigError(
+            f"export output {entry.port!r}: {reduce} emits per-class scalars — use "
+            "'names' (design §5.1)"
+        )
+    # default + validate the dtype from the reduce's DECLARED dtype (the live
+    # registry owns the per-reduce rule — v1 .char() int8 for aux reduces,
+    # to_onnx.py:422,432; float32 per-class probabilities for split_scalars)
+    dtype = entry.dtype or spec.dtype
+    if dtype != spec.dtype:
+        raise ConfigError(
+            f"export output {entry.port!r}: the {reduce!r} reduce emits {spec.dtype}, got "
+            f"dtype={entry.dtype!r} (the reduce's declared output dtype, register_reduce)"
         )
     names = list(entry.names) if entry.names else None
     return replace(entry, names=names, reduce=reduce, dtype=dtype)

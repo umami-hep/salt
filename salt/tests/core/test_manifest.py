@@ -493,8 +493,9 @@ class TestExportOnlyStory:
 
     def test_documented_reduce_keys_are_shipped(self):
         # no phantom reduce keys in the writer-base docs: every literal
-        # reduce="..." mention must name a shipped registry key (there is no
-        # registration surface until M5 — base.py says so explicitly now)
+        # reduce="..." mention must name a registered registry key. The public
+        # register_reduce surface has LANDED (M5 sub-wave C/D), so base.py must
+        # document it as available, NOT as an unlanded "M5 deliverable".
         import inspect
         import re
 
@@ -503,7 +504,10 @@ class TestExportOnlyStory:
         source = inspect.getsource(writer_base)
         documented = re.findall(r'reduce="(\w+)"', source)
         assert all(key in KNOWN_REDUCES for key in documented), documented
-        assert "M5 deliverable" in source  # the honest re-scope stays put
+        # the honest re-scope: base.py points at the landed register_reduce
+        # surface and no longer calls it an unlanded M5 deliverable
+        assert "register_reduce" in source
+        assert "M5 deliverable" not in source
 
 
 # ---------------------------------------------------------------------------

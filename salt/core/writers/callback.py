@@ -35,6 +35,7 @@ contract still holds.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -652,6 +653,10 @@ class WriterCallback(Callback):
             streams=ctx.streams,
             sequence_streams=ctx.sequence_streams,
         )
+        # writer-declared OUTPUT groups that are not reader streams (e.g. the
+        # MaskFormer object writer's `objects`/`object_masks` groups, design §8):
+        # group -> trailing per-row shape, with the declaring writer for attribution.
+        extra_shapes, extra_owner = self._collect_extra_groups(ctx)
         for name, writer in self._writers.items():
             columns = writer.columns(ctx)
             if not columns:
@@ -679,10 +684,12 @@ class WriterCallback(Callback):
                     "amendment §4)"
                 )
             for stream, dtype in columns.items():
-                if stream not in ctx.streams:
+                if stream not in ctx.streams and stream not in extra_shapes:
                     raise ConfigError(
-                        f"writer {name!r} declared columns for unknown stream {stream!r} — "
-                        f"reader streams are {list(ctx.streams)}"
+                        f"writer {name!r} declared columns for unknown group {stream!r} — "
+                        f"reader streams are {list(ctx.streams)} and writer-declared extra "
+                        f"groups are {sorted(extra_shapes)} (declare a non-reader output group "
+                        "in Writer.extra_groups, design §8)"
                     )
                 for descr in dtype.descr:
                     field = descr[0]
@@ -699,12 +706,75 @@ class WriterCallback(Callback):
                 "the configured writers declare no output columns at all — check "
                 "writers.modules (design §8)"
             )
-        self._group_of = {stream: ctx.group_datasets[stream] for stream in descrs}
+        # reader streams map to their FILE dataset name (v1 group naming); writer-
+        # declared extra groups (object outputs) use the group name as the dataset.
+        self._group_of = {stream: ctx.group_datasets.get(stream, stream) for stream in descrs}
+        del extra_owner  # attribution is consumed inside _collect_extra_groups' checks
         dtypes = {self._group_of[stream]: np.dtype(descr) for stream, descr in descrs.items()}
         shapes = {
-            self._group_of[stream]: (
-                (ctx.total, ctx.seq_lengths[stream]) if stream in ctx.seq_lengths else (ctx.total,)
-            )
+            self._group_of[stream]: self._group_shape(stream, ctx, extra_shapes)
             for stream in descrs
         }
         return dtypes, shapes
+
+    def _collect_extra_groups(
+        self, ctx: WriteCtx
+    ) -> tuple[dict[str, tuple[int, ...]], dict[str, str]]:
+        """Merge the writers' `extra_groups` declarations (non-reader output groups).
+
+        Each writer declaring a non-reader output group (the MaskFormer object
+        writer's ``objects``/``object_masks``, design §8) sizes it via
+        `Writer.extra_groups`; this merges those declarations with a uniqueness
+        check (two writers cannot both own the same new group) and rejects an
+        extra group that shadows a reader stream (collision-proof H5 dataset
+        naming).
+
+        Returns
+        -------
+        tuple[dict[str, tuple[int, ...]], dict[str, str]]
+            ``(group -> trailing per-row shape, group -> declaring writer)``.
+
+        Raises
+        ------
+        ConfigError
+            On a duplicate extra group or one shadowing a reader stream.
+        """
+        shapes: dict[str, tuple[int, ...]] = {}
+        owner: dict[str, str] = {}
+        for name, writer in self._writers.items():
+            for group, trailing in writer.extra_groups(ctx).items():
+                if group in ctx.streams:
+                    raise ConfigError(
+                        f"writer {name!r} (config: writers.modules.{name}) declares extra group "
+                        f"{group!r}, which shadows reader stream {group!r} — extra groups are "
+                        "NON-reader output groups only (design §8)"
+                    )
+                if (other := owner.get(group)) is not None:
+                    raise ConfigError(
+                        f"extra output group {group!r} is declared by writers {other!r} AND "
+                        f"{name!r} — one writer owns one extra group (design §8)"
+                    )
+                owner[group] = name
+                shapes[group] = tuple(int(d) for d in trailing)
+        return shapes, owner
+
+    @staticmethod
+    def _group_shape(
+        stream: str, ctx: WriteCtx, extra_shapes: Mapping[str, tuple[int, ...]]
+    ) -> tuple[int, ...]:
+        """The fixed-mode H5 shape of one output group (leading ``total`` row dim).
+
+        Reader sequence streams carry ``(total, file_seq_len)``, reader global
+        streams ``(total,)`` (v1 group geometry); a writer-declared extra group
+        carries ``(total, *trailing)`` from its `Writer.extra_groups` shape.
+
+        Returns
+        -------
+        tuple[int, ...]
+            The full H5 dataset shape.
+        """
+        if stream in extra_shapes:
+            return (ctx.total, *extra_shapes[stream])
+        if stream in ctx.seq_lengths:
+            return (ctx.total, ctx.seq_lengths[stream])
+        return (ctx.total,)

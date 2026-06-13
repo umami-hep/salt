@@ -23,6 +23,8 @@ from salt.core.nn.bind import (
     resolve_bind_schema,
 )
 from salt.core.nn.from_v1 import from_v1, v1_sinks, v1_sources
+from salt.core.nn.maskdecoder import MaskDecoder
+from salt.core.nn.maskformer_loss import MaskFormerMatchedLoss
 from salt.core.nn.modules import (
     Concat,
     GlobalAttentionPooling,
@@ -48,6 +50,8 @@ __all__ = [
     "GlobalAttentionPooling",
     "LossGLS",
     "LossSum",
+    "MaskDecoder",
+    "MaskFormerMatchedLoss",
     "Normaliser",
     "RegressionTaskModule",
     "ResolvedSchema",

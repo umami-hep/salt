@@ -21,11 +21,15 @@ per output mode (the M4.5 amendment, ``amendment-unified-writers.md``):
   in both output modes. **Export = reduces only: ``write()`` never traces
   and never runs inside Athena** (amendment cost 1) — the manifest is
   declarative precisely because arbitrary ``write()`` numpy cannot enter
-  the traced graph. Export math comes from the SHIPPED reduce registry
-  (``salt.core.onnx.config.KNOWN_REDUCES``: ``split_scalars``, ``argmax``,
-  ``vertex_union_find`` — implemented in ``salt.core.onnx.reduces``); a
-  public registration surface for CUSTOM reduces is an M5 deliverable, so
-  until it lands writers compose the shipped reduces only.
+  the traced graph. Export math comes from the LIVE reduce registry
+  (``salt.core.onnx.reduces``; ``salt.core.onnx.config.KNOWN_REDUCES`` is a
+  live VIEW of its registered names — ``split_scalars``, ``argmax``,
+  ``vertex_union_find`` ship at import, plus the MaskFormer
+  ``leading_object``/``object_index``). The public
+  ``salt.core.onnx.reduces.register_reduce`` surface has LANDED (M5 sub-wave
+  C/D, amendment addendum 555-567), so custom and export-only writers may
+  register their OWN export math (a binder + declared dtype + per-token flag)
+  and name it in ``ExportOutput.reduce``.
 
 Both directions of mode-narrowing are first-class (amendment merge
 condition 3): a writer that never overrides `Writer.onnx_outputs` is
@@ -201,10 +205,11 @@ class Writer(ABC):
     Custom writers are the user story for "I want a new column": subclass,
     declare requires, return a structured array per stream, and add four
     YAML lines under ``writers.modules`` (design §8). To additionally
-    export, override `onnx_outputs` with ports + suffixes + a SHIPPED
-    reduce (``salt.core.onnx.config.KNOWN_REDUCES``; custom reduce
-    registration is an M5 deliverable) — ``write()`` is numpy and never
-    traces (amendment cost 1).
+    export, override `onnx_outputs` with ports + suffixes + a registered
+    reduce (the live ``salt.core.onnx.reduces`` registry, viewed via
+    ``salt.core.onnx.config.KNOWN_REDUCES``; custom export math registers
+    through the landed ``salt.core.onnx.reduces.register_reduce`` surface) —
+    ``write()`` is numpy and never traces (amendment cost 1).
     """
 
     name: str = _UNNAMED
@@ -334,6 +339,38 @@ class Writer(ABC):
         del ctx, run_name
         return {}
 
+    def extra_groups(self, ctx: WriteCtx) -> dict[str, tuple[int, ...]]:
+        """Declare OUTPUT groups that are not reader input streams (design §8).
+
+        The shipped task/copy/mask writers write ONLY into reader-stream H5
+        groups (``jets``, ``tracks``, ...), and `WriterCallback._merge_columns`
+        sizes those groups from the source file's per-stream geometry. A few
+        writers need NEW groups with their own first-class shapes — the
+        MaskFormer object writer's ``objects`` ``[total, M]`` and
+        ``object_masks`` ``[total, M, T]`` groups (v1
+        ``predictionwriter.py:267-308``), which have an object axis ``M`` that no
+        reader stream carries. A writer declaring such columns in `columns`
+        MUST size them here: ``{group: trailing shape}`` where ``trailing
+        shape`` is the per-row shape WITHOUT the leading ``total`` row dim
+        (``(M,)`` for ``objects``, ``(M, T)`` for ``object_masks``). The
+        callback names the H5 dataset after the group and merges the extra
+        groups alongside the reader-stream groups (same collision/order rules).
+        Default: no extra groups (the shipped task/copy/mask writers).
+
+        Parameters
+        ----------
+        ctx : WriteCtx
+            The test-run context (same object as `setup` / `columns` receive) —
+            carries ``seq_lengths`` for constituent-aligned trailing dims.
+
+        Returns
+        -------
+        dict[str, tuple[int, ...]]
+            ``{group name: trailing per-row shape}`` (empty by default).
+        """
+        del ctx
+        return {}
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r})"
 
@@ -361,15 +398,17 @@ class ExportOnlyWriter(Writer):
     writer with empty ``columns()`` and a non-empty manifest WITHOUT the
     flag is rejected by writer-role validation (`WriterCallback`) — the
     cargo-cult stub is never silently legal. Remember the export contract:
-    the output math is the entry's ``reduce``, which must name a SHIPPED
-    registry key — ``split_scalars`` (the ``names:`` default), ``argmax``
-    or ``vertex_union_find`` (``salt.core.onnx.config.KNOWN_REDUCES``);
-    there is no ``write()`` to put custom math in, and a public
-    ``register_reduce`` surface for custom export math is an M5
-    deliverable. One more rule of the manifest: one writer owns one export
-    port — re-exporting a port another writer already declares (e.g. a
-    ``preds.*`` key the `TaskWriter` exports) needs that writer narrowed
-    first (``onnx_tasks``/``onnx_streams``).
+    the output math is the entry's ``reduce``, which must name a registered
+    reduce — the shipped keys ``split_scalars`` (the ``names:`` default),
+    ``argmax`` or ``vertex_union_find`` (viewed via
+    ``salt.core.onnx.config.KNOWN_REDUCES``), or a CUSTOM reduce you register
+    through the landed ``salt.core.onnx.reduces.register_reduce`` surface (a
+    binder + declared dtype + per-token flag; M5 sub-wave C/D, amendment
+    addendum 555-567). There is no ``write()`` to put custom math in — export
+    math lives in the registered reduce. One more rule of the manifest: one
+    writer owns one export port — re-exporting a port another writer already
+    declares (e.g. a ``preds.*`` key the `TaskWriter` exports) needs that
+    writer narrowed first (``onnx_tasks``/``onnx_streams``).
     """
 
     export_only: bool = True

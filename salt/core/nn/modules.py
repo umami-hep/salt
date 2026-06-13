@@ -751,6 +751,27 @@ class TransformerEncoder(nn.Module):
     mutated (v1's ``_add_registers`` inserts ``"REGISTERS"`` into it,
     transformer.py:777,785).
 
+    ``drop_registers`` (the MaskFormer encoder passthrough, M5 sub-wave C;
+    v1 transformer.py:560,584,745-750) makes the composed v1 `Transformer`
+    strip the register rows from its output AFTER the layer stack runs: the
+    registers are still appended internally and visible to every attention
+    layer (they exist so a constituent-less jet has SOMETHING to attend to,
+    transformer.py:569-574), but the returned ``encoded.seq`` is sliced back
+    to the stream tokens only (``x[:, :-num_registers]``) and v1 drops the
+    ``"REGISTERS"`` pad entry (``del pad_mask["REGISTERS"]``,
+    transformer.py:745-750). So with ``drop_registers=True`` this module
+    produces NO ``masks.registers`` key — there are no register rows left in
+    ``encoded.seq`` for a downstream consumer to mask — exactly the v1
+    MaskFormer encoder shape its `MaskDecoder` reads (``embed_xs`` with the
+    registers already gone, maskformer.py:151-156,172). The shipped
+    MaskFormer.yaml sets ``drop_registers: true`` (MaskFormer.yaml:31). The
+    design's longer-term home for this is a `Concat`-owned ``registers:`` +
+    ``drop_registers_after:`` (FD 1121-1125); in the M2 architecture
+    registers live INSIDE this encoder (the composed v1 `Transformer`
+    appends them and requires ``num_registers >= 1``), so the M5 passthrough
+    is the faithful, byte-for-byte v1 mechanism — the Concat-owned form lands
+    when M7 absorbs the encoder.
+
     ``norm_type`` (``"pre"`` default, or ``"post"`` / ``"hybrid"``) is
     forwarded verbatim to every composed v1 ``EncoderLayer`` (M5 sub-wave B;
     the GN3V01 flagship + GN3_Hybrid / GN3EPCLV01 are ``"hybrid"``). The
@@ -778,6 +799,7 @@ class TransformerEncoder(nn.Module):
         norm: str = "LayerNorm",
         num_registers: int = 1,
         norm_type: str = "pre",
+        drop_registers: bool = False,
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -813,6 +835,12 @@ class TransformerEncoder(nn.Module):
             after, and apply a pre-FFN norm in ``forward`` (transformer.py:
             350-356,421). The wrapper only passes the flag through — all that
             placement logic lives in the composed v1 layer.
+        drop_registers : bool, optional
+            Strip the register rows from ``encoded.seq`` after the layer stack
+            (the MaskFormer encoder passthrough; v1 transformer.py:745-750), by
+            default False. Registers stay visible to every attention layer; only
+            the OUTPUT sequence is sliced back to the stream tokens, and no
+            ``masks.registers`` key is produced (see the class docstring).
 
         Raises
         ------
@@ -836,6 +864,7 @@ class TransformerEncoder(nn.Module):
         attn_type = attn_kwargs.pop("attn_type", "torch-math")
         self.dim = dim
         self.norm_type = norm_type
+        self.drop_registers = bool(drop_registers)
         self.encoder = V1Transformer(
             num_layers=num_layers,
             embed_dim=dim,
@@ -844,6 +873,7 @@ class TransformerEncoder(nn.Module):
             attn_type=attn_type,
             do_final_norm=True,
             num_registers=num_registers,
+            drop_registers=self.drop_registers,
             attn_kwargs=attn_kwargs,
             dense_kwargs=dict(dense) if dense is not None else None,
             norm_type=norm_type,
@@ -852,7 +882,14 @@ class TransformerEncoder(nn.Module):
         self.num_registers = num_registers
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``seq.x``/``seq.mask`` -> ``encoded.seq``/``masks.registers``.
+        """Declare ``seq.x``/``seq.mask`` -> ``encoded.seq`` (+ ``masks.registers``).
+
+        ``masks.registers`` is produced ONLY when ``drop_registers`` is False:
+        with the registers dropped from ``encoded.seq`` there are no register
+        rows left to mask (the v1 ``del pad_mask["REGISTERS"]`` shape,
+        transformer.py:745-750), and a downstream `GlobalAttentionPooling`
+        treats ``masks.registers`` as OPTIONAL — so a drop-registers config
+        plan-compiles exactly like the encoder-less path (modules.py:1065-1070).
 
         Returns
         -------
@@ -860,17 +897,19 @@ class TransformerEncoder(nn.Module):
             The declared requires/produces (widths concrete from config).
         """
         del mode
+        produces: dict[str, TensorSpec] = {
+            "encoded.seq": TensorSpec(shape=("B", _ENC_LEN, self.out_dim), dtype="float32"),
+        }
+        if not self.drop_registers:
+            produces["masks.registers"] = TensorSpec(
+                shape=("B", self.num_registers), dtype="bool", kind="pad_mask"
+            )
         return IO(
             requires=unflatten_spec({
                 "seq.x": TensorSpec(shape=("B", _SEQ_LEN, self.dim), dtype="float32"),
                 "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
             }),
-            produces=unflatten_spec({
-                "encoded.seq": TensorSpec(shape=("B", _ENC_LEN, self.out_dim), dtype="float32"),
-                "masks.registers": TensorSpec(
-                    shape=("B", self.num_registers), dtype="bool", kind="pad_mask"
-                ),
-            }),
+            produces=unflatten_spec(produces),
         )
 
     def set_export_mode(self) -> None:
@@ -879,6 +918,11 @@ class TransformerEncoder(nn.Module):
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Encode the sequence; publish the register mask as a NEW key.
+
+        With ``drop_registers`` the composed v1 `Transformer` strips the
+        register rows from its output and deletes the ``"REGISTERS"`` pad entry
+        (transformer.py:745-750), so only ``encoded.seq`` is produced — no
+        ``masks.registers`` (the produce is gated out in `declare_io`).
 
         Returns
         -------
@@ -891,6 +935,10 @@ class TransformerEncoder(nn.Module):
         xs: dict[str, Tensor] = {"seq": b.get("seq.x")}
         pad: dict[str, Tensor] = {"seq": b.get("seq.mask")}
         encoded, out_pad = self.encoder(xs, pad_mask=pad)
+        if self.drop_registers:
+            # registers stripped from encoded.seq; v1 also removed "REGISTERS"
+            # from the pad dict, so there is no register mask to publish
+            return {"encoded.seq": encoded}
         return {"encoded.seq": encoded, "masks.registers": out_pad["REGISTERS"]}
 
 

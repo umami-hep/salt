@@ -13,7 +13,9 @@ R1-R4 cover the sub-wave-A regression family (`RegressionTaskModule`); L1 covers
 the sub-wave-B `LossGLS` geometric-mean loss combination; L2 covers the
 sub-wave-B `TransformerEncoder` ``norm_type: hybrid`` passthrough (the GN3V01
 flagship encoder block); L3 covers the sub-wave-B `VectorConcat` + ``export.
-inputs alias:`` (the GN3 ``global`` stream past the encoder).
+inputs alias:`` (the GN3 ``global`` stream past the encoder); MF1a covers the
+sub-wave-C `MaskDecoder` + encoder ``drop_registers`` passthrough (the MaskFormer
+object decoder over a register-dropping encoder).
 
 Gate criteria (each justified in its ``run_r*`` docstring vs the design/v1 ref):
 
@@ -115,6 +117,66 @@ Gate criteria (each justified in its ``run_r*`` docstring vs the design/v1 ref):
   column absent from the source raises at adapter construction. L3 DOES make an
   ONNX claim and backs it by compiling + running ``Mode.ONNX`` (never asserting a
   TEST-mode array as an ONNX proxy).
+- **MF1a MaskDecoder + encoder drop_registers parity** (sub-wave C; the decoder
+  slice of the gate-table MF1a — the matched-loss sub-checks are added by the
+  `MaskFormerMatchedLoss` module). The MaskFormer encoder->decoder block (norm ->
+  embed -> concat -> encoder(``drop_registers=True``) -> decoder) from the real
+  compiler/bind/executor, with TWO INDEPENDENT v1 references:
+  (i) *drop_registers (BITWISE)* — ``encoded.seq`` equals a separately-constructed
+  v1 `Transformer` built with ``drop_registers=True`` + ``load_state_dict``-copied
+  weights (`build_independent_v1_transformer_drop`) fed the SAME ``seq.x``/
+  ``seq.mask``; its shape is register-FREE (``T`` not ``T + num_registers``); the
+  encoder plan/forward carry NO ``masks.registers`` key (v1 ``del
+  pad_mask["REGISTERS"]``, transformer.py:745-750); and the registers were
+  genuinely VISIBLE to attention — zeroing the register parameter CHANGES
+  ``encoded.seq`` (a no-op slice would not, so the "visible to encoder, stripped
+  from output" claim has teeth). (ii) *MaskDecoder forward (BITWISE)* — all four
+  ``objects.{embed,class_logits,class_probs,masks}`` equal an INDEPENDENT v1
+  `salt.models.maskformer.MaskDecoder` (`build_independent_v1_mask_decoder`:
+  separately built from the same architecture, fresh `Dense` heads, state-copied,
+  driven via its ``labels=None`` inference path) — proving the dummy-token trick
+  and layer loop key-routing reproduce v1 exactly. (iii) *ONNX exercised* — a
+  COMPILED + RUN ``Mode.ONNX`` plan produces register-free ``encoded.seq`` and the
+  dummy-token-handled ``objects.*`` (the decoder is mode-agnostic), and a
+  zero-constituent jet stays finite (the dummy-token's reason to exist). (iv)
+  *loud surfaces* — a missing ``md.n_heads``, a missing ``class_net.output_size``,
+  a width-key (``input_size``) in ``class_net``, and an ``embed_dim``-vs-input
+  mismatch at bind all raise ``ConfigError``. MF1a does NOT cover the matched loss
+  / matcher / object writer (separate sub-wave-C modules) — its report claims only
+  the decoder + drop_registers coverage its sub-checks exercise.
+- **MF2 MaskFormerObjectWriter + the two object reduces** (sub-wave C). The
+  object-writer slice: the writer's TEST ``write`` is BITWISE (``.tobytes()``) vs
+  the v1 op chain recomputed in the gate (``predictionwriter.py:276-308`` — the
+  per-class probs, the ``class_label`` truth, the ``MaskIndex`` -1/-2 column, the
+  ``object_masks`` truth/logits group), and a COMPILED + RUN ``Mode.ONNX`` export
+  of the writer's manifest produces the ``leading_object`` (float32 scalars) and
+  ``object_index`` (int8 ``HadronIndex``, dynamic token axis) reduces with
+  torch-vs-onnxruntime agreement (int8 EXACT; leading floats where finite — v1
+  returns NaN for a null leading object). It asserts `OBJECT_INDEX` is IMPORTED
+  (the strings never re-declared) and that the loud surfaces raise. MF2 does NOT
+  cover the decoder (MF1a) or the matched loss / targets (MF1c).
+- **D1 callback-sink assembly + register_reduce live registry** (sub-wave D, the
+  C-prereqs). Two slices, each with teeth, both driving the REAL surfaces (no
+  re-implementation in the gate):
+  (i) *FIT/VAL callback-sink assembly* — a real `SaltModule` with an aux head
+  producing a ``preds.*`` key NO loss consumes is compiled (`compile_plan`) with
+  the model's OWN `_model_sinks`: WITHOUT a FIT/VAL-sink callback the sinks are
+  ``['loss.total']`` only and the aux producer is demand-PRUNED; WITH the real
+  `MaskformerMetrics`-style callback (or the `ConfusionMatrix` ``preds.*`` /
+  ``labels.*`` declaration) attached, its `fit_val_demand` becomes a FIT/VAL plan
+  sink (`_callback_demand`) and the once-pruned producer is KEPT ALIVE in BOTH
+  FIT and VAL — the §3.1 454-456 / §3.4 667-671 deferral the DP2 prereq lands;
+  AND the callback demand is TRAINING-ONLY (empty in TEST/ONNX, where the sinks
+  are the writer manifest). (ii) *register_reduce live-registry validation +
+  reduce-declared dtypes* — a freshly `register_reduce`-d reduce VALIDATES through
+  the REAL ``export.outputs`` resolution (`attach_manifest` -> ``_resolve_output``
+  against the LIVE registry, defaulting + accepting the reduce's declared dtype),
+  while an UNREGISTERED reduce name is REJECTED loudly (``ConfigError``), and a
+  declared dtype that DISAGREES with the reduce's registered dtype is REJECTED
+  loudly (the reduce owns its per-reduce dtype rule, amendment 555-567 / design
+  §7.3). Plus the public `register_reduce` loud surfaces (duplicate name, bad
+  dtype, non-string name). D1 makes NO model-parity claim (it is a planner/
+  registry-assembly gate); the decoder/loss/writer parity are MF1a/MF1c/MF2.
 
 Negative-control hooks (the pytest suite, ``test_gates_m5.py``): each ``run_*``
 takes a python-only ``corruption`` keyword applied to the v2 OBSERVED values (or
@@ -134,20 +196,51 @@ from typing import Any
 
 import numpy as np
 import torch
+from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.data import MultiTarget
+from salt.core.callbacks import ConfusionMatrix, MaskformerMetrics
+from salt.core.data import MaskFormerTargets, MultiTarget
 from salt.core.graph import Bundle, Executor, Mode
 from salt.core.graph.errors import ConfigError
+from salt.core.graph.planner import compile_plan
+from salt.core.graph.spec import IO, TensorSpec, unflatten_spec
 from salt.core.nn import (
     LossGLS,
+    LossSum,
+    MaskDecoder,
+    MaskFormerMatchedLoss,
     TransformerEncoder,
     VectorConcat,
     bind_all,
     materialise_all,
     resolve_bind_schema,
 )
+from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.tasks import RegressionTaskModule
-from salt.core.onnx import OnnxAdapter
+from salt.core.onnx import (
+    ExportConfig,
+    ExportInput,
+    ExportOutput,
+    OnnxAdapter,
+    attach_manifest,
+    compile_onnx_plan,
+    export_graph,
+    make_session,
+    resolve_export_config,
+)
+from salt.core.onnx.reduces import (
+    reduce_dtype,
+    register_reduce,
+    registered_reduces,
+    unregister_reduce,
+)
+from salt.core.saltmodule import SaltModule
+from salt.core.writers import (
+    OBJECT_INDEX,
+    MaskFormerObjectWriter,
+    WriteCtx,
+    WriterDeclareCtx,
+)
 from salt.data.datasets import OPERATORS as V1_OPERATORS
 from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
 from salt.tests.core.gn2_fixture import (
@@ -156,37 +249,59 @@ from salt.tests.core.gn2_fixture import (
     make_gn2_batch,
     write_parity_norm_dict,
 )
+from salt.tests.core.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
 from salt.tests.core.regression_fixture import (
     GLOBAL_VARIABLES,
     HYBRID_ENC_DIM,
+    MASKFORMER_NUM_OBJECT_CLASSES,
+    MASKFORMER_NUM_OBJECTS,
+    MASKFORMER_NUM_REG_TARGETS,
+    MASKFORMER_OBJECT_CLASS_MAP,
     build_dips_modules,
     build_gls_modules,
     build_hybrid_encoder_modules,
     build_independent_v1_global_concat,
     build_independent_v1_gls_total_loss,
     build_independent_v1_head,
+    build_independent_v1_mask_decoder,
+    build_independent_v1_matched_loss,
     build_independent_v1_transformer,
+    build_independent_v1_transformer_drop,
+    build_maskformer_decoder_modules,
+    build_maskformer_targets,
+    build_maskformer_writer_modules,
+    build_matched_loss_module,
     build_regression_modules,
     build_vector_concat_modules,
     compile_dips,
     compile_gls,
     compile_hybrid_encoder,
+    compile_maskformer_decoder,
     compile_regression,
     compile_vector_concat,
     compile_vector_concat_onnx,
     make_dips_labels,
     make_gls_labels,
+    make_maskformer_object_batch,
+    make_maskformer_targets_batch,
+    make_maskformer_writer_batch,
     make_regression_labels,
     write_vector_concat_norm_dict,
 )
+from salt.utils.mask_utils import build_target_masks as v1_build_target_masks
+from salt.utils.mask_utils import indices_from_mask as v1_indices_from_mask
 from salt.utils.scalers import RegressionTargetScaler
 
 __all__ = [
     "PARITY_ATOL",
     "main",
+    "run_d1",
     "run_l1",
     "run_l2",
     "run_l3",
+    "run_mf1a",
+    "run_mf1c",
+    "run_mf2",
     "run_r1",
     "run_r2",
     "run_r3",
@@ -1695,18 +1810,1379 @@ def run_l3(
 
 
 # ---------------------------------------------------------------------------
+# MF1a — MaskDecoder + encoder drop_registers parity (sub-wave C)
+# ---------------------------------------------------------------------------
+
+
+def run_mf1a(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """MF1a (decoder slice): MaskDecoder + encoder drop_registers parity vs INDEPENDENT v1.
+
+    The MaskFormer encoder->decoder block (norm -> embed -> concat ->
+    encoder(``drop_registers=True``) -> `MaskDecoder`) is driven through the REAL
+    compiler/bind/executor and compared, BITWISE, against TWO independently-constructed
+    v1 references:
+
+    - **drop_registers** (`build_independent_v1_transformer_drop`): ``encoded.seq``
+      equals a fresh v1 `Transformer` (``drop_registers=True``, state-copied) fed the
+      SAME ``seq.x``/``seq.mask``; the shape is register-FREE; the encoder plan + forward
+      carry NO ``masks.registers`` (v1 ``del pad_mask["REGISTERS"]``,
+      transformer.py:745-750); and zeroing the register parameter CHANGES ``encoded.seq``
+      — proving the registers were visible to attention, not a no-op slice.
+    - **MaskDecoder** (`build_independent_v1_mask_decoder`): the four
+      ``objects.{embed,class_logits,class_probs,masks}`` equal a fresh v1
+      `salt.models.maskformer.MaskDecoder` (state-copied, driven via its ``labels=None``
+      inference path) — the dummy-token trick + layer loop reproduce v1 exactly.
+
+    A COMPILED + RUN ``Mode.ONNX`` plan exercises the export path (register-free
+    ``encoded.seq``, dummy-token-handled ``objects.*``, finite on a zero-constituent
+    jet). Loud surfaces (missing ``md.n_heads`` / ``class_net.output_size``, a width-key
+    in ``class_net``, an ``embed_dim`` mismatch at bind) all raise ``ConfigError``.
+
+    MF1a does NOT cover the matched loss / matcher / object writer (separate sub-wave-C
+    modules) — its criterion claims only the decoder + drop_registers coverage.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("MF1a MaskDecoder + encoder drop_registers parity vs INDEPENDENT v1")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+
+    modules = build_maskformer_decoder_modules(norm_dict)
+    test_plan = compile_maskformer_decoder(modules, Mode.TEST)
+    onnx_plan = compile_maskformer_decoder(modules, Mode.ONNX)
+    bind_all(modules, resolve_bind_schema([test_plan, onnx_plan]))
+    materialise_all(modules)
+    encoder = modules["encoder"]
+    decoder = modules["mask_decoder"]
+
+    # the drop-registers encoder produces NO masks.registers in EITHER plan
+    checks["test_plan_has_no_registers"] = (
+        "masks.registers" not in test_plan.step("encoder").produces
+    )
+    checks["onnx_plan_has_no_registers"] = (
+        "masks.registers" not in onnx_plan.step("encoder").produces
+    )
+
+    inputs, masks = make_gn2_batch(B, T)
+    b = Bundle()
+    for stream, x in inputs.items():
+        b.set(f"inputs.{stream}", x)
+    b.set("masks.tracks", masks["tracks"])
+    out = Executor(test_plan).run(b, debug=True)
+    seq_x, seq_mask = out.get("seq.x"), out.get("seq.mask")
+    v2_encoded = out.get("encoded.seq")
+    v2_embed = out.get("objects.embed")
+    v2_class_logits = out.get("objects.class_logits")
+    v2_class_probs = out.get("objects.class_probs")
+    v2_masks = out.get("objects.masks")
+    if corruption is not None:
+        v2_encoded = corruption(v2_encoded)
+        v2_embed = corruption(v2_embed)
+
+    # -- (i) drop_registers BITWISE parity vs an INDEPENDENT v1 Transformer ----
+    v1_encoder = build_independent_v1_transformer_drop(encoder)
+    with torch.no_grad():
+        v1_encoded, v1_pad = v1_encoder({"seq": seq_x.clone()}, pad_mask={"seq": seq_mask.clone()})
+    diffs["drop_registers_encoded"] = _max_abs(v2_encoded, v1_encoded)
+    checks["drop_registers_encoded_bitwise_vs_independent_v1"] = torch.equal(v2_encoded, v1_encoded)
+    checks["drop_registers_encoded_parity_vs_independent_v1"] = (
+        diffs["drop_registers_encoded"] <= PARITY_ATOL
+    )
+    # the encoded sequence is register-FREE: T track rows, no register rows
+    checks["encoded_seq_is_register_free"] = v2_encoded.shape[1] == seq_x.shape[1]
+    # v1 also removed the "REGISTERS" pad entry (transformer.py:748)
+    checks["v1_pad_dropped_registers"] = "REGISTERS" not in v1_pad
+
+    # registers were VISIBLE to attention: zeroing the register parameter (a fresh
+    # state-copy, untouched executor) CHANGES encoded.seq — a no-op slice would not.
+    probe = build_independent_v1_transformer_drop(encoder)
+    with torch.no_grad():
+        probe.registers.zero_()
+        zeroed_encoded, _ = probe({"seq": seq_x.clone()}, pad_mask={"seq": seq_mask.clone()})
+    checks["registers_visible_to_encoder"] = not torch.equal(v1_encoded, zeroed_encoded)
+
+    # -- (ii) MaskDecoder forward BITWISE parity vs an INDEPENDENT v1 decoder ---
+    # feed the v1 decoder the v2 executor's (uncorrupted) encoded.seq — its
+    # labels=None inference path returns preds["objects"] (maskformer.py:166-203)
+    v1_decoder = build_independent_v1_mask_decoder(decoder)
+    with torch.no_grad():
+        v1_preds, _, _ = v1_decoder(
+            {"embed_xs": out.get("encoded.seq").clone()},
+            tasks=[],
+            pad_mask=seq_mask.clone(),
+            labels=None,
+        )
+    v1_obj = v1_preds["objects"]
+    diffs["decoder_embed"] = _max_abs(v2_embed, v1_obj["embed"])
+    diffs["decoder_class_logits"] = _max_abs(v2_class_logits, v1_obj["class_logits"])
+    diffs["decoder_class_probs"] = _max_abs(v2_class_probs, v1_obj["class_probs"])
+    diffs["decoder_masks"] = _max_abs(v2_masks, v1_obj["masks"])
+    checks["decoder_embed_bitwise_vs_independent_v1"] = torch.equal(v2_embed, v1_obj["embed"])
+    checks["decoder_class_logits_bitwise_vs_independent_v1"] = torch.equal(
+        v2_class_logits, v1_obj["class_logits"]
+    )
+    checks["decoder_class_probs_bitwise_vs_independent_v1"] = torch.equal(
+        v2_class_probs, v1_obj["class_probs"]
+    )
+    checks["decoder_masks_bitwise_vs_independent_v1"] = torch.equal(v2_masks, v1_obj["masks"])
+    # the dummy token is stripped: masks span the real T constituents, not T + 1
+    checks["decoder_masks_unpadded_to_T"] = v2_masks.shape[-1] == seq_x.shape[1]
+    checks["decoder_objects_shape"] = tuple(v2_embed.shape) == (
+        B,
+        MASKFORMER_NUM_OBJECTS,
+        encoder.out_dim,
+    )
+    # class_probs is a proper distribution over C = num_classes + 1 (null LAST)
+    checks["class_probs_is_distribution"] = bool(
+        torch.allclose(v2_class_probs.sum(-1), torch.ones(B, MASKFORMER_NUM_OBJECTS), atol=1e-5)
+    )
+    checks["class_count_is_C"] = v2_class_logits.shape[-1] == MASKFORMER_NUM_OBJECT_CLASSES
+
+    # -- (iii) Mode.ONNX EXERCISED: compile + RUN, never a TEST-mode proxy -----
+    encoder.set_export_mode()
+    decoder.set_export_mode()
+    inputs_o, masks_o = make_gn2_batch(B, T)
+    bo = Bundle()
+    for stream, x in inputs_o.items():
+        bo.set(f"inputs.{stream}", x)
+    bo.set("masks.tracks", masks_o["tracks"])
+    with torch.no_grad():
+        bo = Executor(onnx_plan).run(bo)
+    onnx_embed = bo.get("objects.embed")
+    checks["onnx_encoded_is_register_free"] = bo.get("encoded.seq").shape[1] == T
+    checks["onnx_objects_finite"] = bool(torch.isfinite(onnx_embed).all())
+    checks["onnx_objects_masks_unpadded"] = bo.get("objects.masks").shape[-1] == T
+    # the dummy-token's reason to exist: a zero-constituent sequence must not NaN
+    zb = Bundle()
+    zb.set("encoded.seq", torch.zeros(1, 0, encoder.out_dim))
+    zb.set("seq.mask", torch.zeros(1, 0, dtype=torch.bool))
+    with torch.no_grad():
+        zout = decoder(zb, Mode.ONNX)
+    checks["zero_constituent_jet_is_finite"] = bool(torch.isfinite(zout["objects.embed"]).all())
+    checks["zero_constituent_masks_shape"] = tuple(zout["objects.masks"].shape) == (
+        1,
+        MASKFORMER_NUM_OBJECTS,
+        0,
+    )
+
+    # -- (iv) loud construction / bind surfaces --------------------------------
+    checks["missing_n_heads_raises"] = _raises_config_error(
+        lambda: MaskDecoder(
+            embed_dim=16, num_objects=5, num_layers=2, class_net={"output_size": 3}, md={}
+        )
+    )
+    checks["missing_class_output_size_raises"] = _raises_config_error(
+        lambda: MaskDecoder(
+            embed_dim=16, num_objects=5, num_layers=2, class_net={}, md={"n_heads": 2}
+        )
+    )
+    checks["class_net_width_key_raises"] = _raises_config_error(
+        lambda: MaskDecoder(
+            embed_dim=16,
+            num_objects=5,
+            num_layers=2,
+            class_net={"input_size": 16, "output_size": 3},
+            md={"n_heads": 2},
+        )
+    )
+    checks["embed_dim_mismatch_at_bind_raises"] = _raises_config_error(
+        _bad_embed_dim_bind, norm_dict
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the MaskFormer encoder->decoder block (real compiler/bind/executor) reproduces, BITWISE, "
+        "an INDEPENDENT v1 Transformer (drop_registers=True) for encoded.seq AND an INDEPENDENT v1 "
+        "MaskDecoder for all four objects.* — encoded.seq is register-free with no masks.registers "
+        "key, the registers were visible to attention (zeroing them changes the output), the "
+        "dummy-token trick is stripped (masks span T), a COMPILED+RUN Mode.ONNX plan stays "
+        "register-free + finite (incl. a zero-constituent jet), and missing n_heads / "
+        "class_net.output_size / width-key / embed_dim-mismatch all raise ConfigError. Decoder "
+        "slice ONLY — the matched loss / matcher / object writer are separate sub-wave-C modules"
+    )
+    report = _base_report(
+        "mf1a_maskdecoder_drop_registers",
+        passed,
+        criterion,
+        {
+            "atol": PARITY_ATOL,
+            "B": B,
+            "T": T,
+            "num_objects": MASKFORMER_NUM_OBJECTS,
+            "num_object_classes": MASKFORMER_NUM_OBJECT_CLASSES,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    report["v1_reference"] = (
+        "two independently-constructed, state-copied v1 references: "
+        "salt.models.Transformer(drop_registers=True) for encoded.seq "
+        "(build_independent_v1_transformer_drop) and salt.models.maskformer.MaskDecoder driven "
+        "on its labels=None inference path (build_independent_v1_mask_decoder) — NEVER the v2 "
+        "module's own composed objects"
+    )
+    report["onnx_claim"] = (
+        "MF1a compiles AND runs a Mode.ONNX plan through the executor (register-free encoded.seq, "
+        "dummy-token-handled objects.*, finite on a zero-constituent jet) — it never asserts a "
+        "TEST-mode array as an ONNX proxy (sub-wave-A gate-quality lesson)."
+    )
+    report["scope_note"] = (
+        "decoder slice of the gate-table MF1a; the MaskFormerMatchedLoss / HungarianMatcher / "
+        "MaskFormerObjectWriter forward-parity sub-checks are added by those (separate) modules"
+    )
+    print(f"{'diff':<40}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<40}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("mf1a", passed, criterion, _emit_report(report, outdir, "mf1a"))
+    return (0 if passed else 1), report
+
+
+def _raises_config_error(fn: Callable[..., Any], *args: Any) -> bool:
+    """Whether calling ``fn(*args)`` raises a `ConfigError` (the loud-surface probe).
+
+    Returns
+    -------
+    bool
+        True iff `fn` raised `ConfigError`.
+    """
+    try:
+        fn(*args)
+    except ConfigError:
+        return True
+    return False
+
+
+def _bad_embed_dim_bind(norm_dict: Path) -> None:
+    """Bind a `MaskDecoder` whose ``embed_dim`` disagrees with the encoder output width.
+
+    The encoder produces a 16-wide ``encoded.seq`` but the decoder declares
+    ``embed_dim=32``, so `MaskDecoder.bind` must raise (the queries could not attend to a
+    width-mismatched sequence; v1 maskformer.py:48,172). Driven through the real
+    compiler/bind so the failure is the genuine schema-resolution path.
+    """
+    modules = build_maskformer_decoder_modules(norm_dict)
+    modules["mask_decoder"] = MaskDecoder(
+        embed_dim=32,  # != encoder out_dim (16) -> bind-time ConfigError
+        num_objects=MASKFORMER_NUM_OBJECTS,
+        num_layers=2,
+        class_net={"output_size": MASKFORMER_NUM_OBJECT_CLASSES},
+        md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+    )
+    modules["mask_decoder"].name = "mask_decoder"
+    plan = compile_maskformer_decoder(modules, Mode.TEST)
+    bind_all(modules, resolve_bind_schema([plan]))
+
+
+# ---------------------------------------------------------------------------
+# MF1c — MaskFormerMatchedLoss + HungarianMatcher + MaskFormerTargets parity
+# (the matched-loss / matcher / targets-processor slice of the gate-table MF1a;
+#  the decoder slice is run_mf1a, the object writer is MF2)
+# ---------------------------------------------------------------------------
+
+
+def _matched_loss_schema() -> ResolvedSchema:
+    """A minimal `ResolvedSchema` for the matched-loss bind (the regression widths).
+
+    The matched loss binds only the scaled regression prediction/target widths (the
+    matcher cost matrix M is config-known); the fixture's regression width is R.
+
+    Returns
+    -------
+    ResolvedSchema
+        Widths for ``preds.objects.regression`` / ``targets.objects.regression``.
+    """
+    return ResolvedSchema(
+        widths={
+            "preds.objects.regression": MASKFORMER_NUM_REG_TARGETS,
+            "targets.objects.regression": MASKFORMER_NUM_REG_TARGETS,
+        }
+    )
+
+
+def run_mf1c(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """MF1c: MaskFormerMatchedLoss + matcher + MaskFormerTargets parity vs INDEPENDENT v1.
+
+    The matched-loss / matcher / targets-processor slice of the gate-table MF1a "code
+    forward-parity (v1-decidable)" row (the decoder slice is `run_mf1a`; the object
+    writer is MF2). Three slices:
+
+    - **Matched loss + matcher (the 4 loss components)**: the `MaskFormerMatchedLoss`
+      forward (matcher + loss methods) is compared against an INDEPENDENTLY-constructed
+      v1 ``MaskFormerLoss`` (`build_independent_v1_matched_loss`: a fresh instance from
+      the SAME config, its own ``HungarianMatcher`` + ``empty_weight`` buffer, NOT the
+      v2 module's composed ``v1_loss``). The matcher assignment is BITWISE identical
+      (same v1 matcher, same inputs), and the three v1-decidable components —
+      ``object_class_ce``, ``mask_dice``, ``mask_focal`` — are BITWISE
+      (``torch.equal``) vs the v1 reference driven on the v1-permuted predictions. The
+      fourth, ``regression``, is the FD alignment change (matched, not v1's
+      query-order, see Risks/the MF1b doc): there is NO v1 byte reference for a matched
+      object-regression loss, so it is asserted as a DESIGN-conformance property (the
+      matched L1 over valid objects of the matcher-permuted preds vs truth-order
+      targets, recomputed independently in the gate).
+    - **No in-place permute**: the matched loss publishes the permuted predictions as
+      NEW ``matched.objects.*`` keys; the input ``objects.*`` tensors are byte-unchanged
+      after the forward (v1 mutates them in place, maskformer_loss.py:338-343).
+    - **MaskFormerTargets**: the processor's ``object_class`` / ``masks`` / regression
+      labels are BITWISE identical to the v1 references (the v1 `build_target_masks`
+      equality, mask_utils.py, and the v1 ``MaskformerObjectConfig`` class map applied
+      to the ORIGINAL raw values), WITHOUT the v1 in-place id mutations.
+
+    Loud surfaces (null-not-last class map, unknown loss-weight key, regression
+    pred/target width mismatch at bind, all-zero matcher weights) all raise
+    ``ConfigError``.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("MF1c MaskFormerMatchedLoss + matcher + MaskFormerTargets parity vs INDEPENDENT v1")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+
+    # -- (i) matched loss + matcher: the 4 loss components vs INDEPENDENT v1 ----
+    module = build_matched_loss_module()
+    module.bind(_matched_loss_schema())
+    data = make_maskformer_object_batch()
+    b = Bundle()
+    for key, value in data.items():
+        b.set(key, value)
+    # snapshots of the input predictions, to prove they are NOT mutated in place
+    pre_class_logits = data["objects.class_logits"].clone()
+    pre_masks = data["objects.masks"].clone()
+    pre_reg = data["preds.objects.regression"].clone()
+
+    out = Executor(_single_module_plan(module)).run(b, debug=True)
+    v2_ce = out.get("losses.object_class_ce")
+    v2_dice = out.get("losses.mask_dice")
+    v2_focal = out.get("losses.mask_focal")
+    v2_reg = out.get("losses.regression")
+    if corruption is not None:
+        v2_ce = corruption(v2_ce)
+        v2_reg = corruption(v2_reg)
+
+    # the INDEPENDENT v1 reference: a fresh MaskFormerLoss, its OWN matcher + buffer
+    v1 = build_independent_v1_matched_loss(module)
+    pred_match = {
+        "class_logits": data["objects.class_logits"],
+        "class_probs": data["objects.class_probs"],
+        "masks": data["objects.masks"],
+        "regression": data["preds.objects.regression"],
+    }
+    tgt_match = {
+        "object_class": data["labels.objects.object_class"],
+        "masks": data["labels.objects.masks"].to(data["objects.masks"].dtype),
+        "regression": data["targets.objects.regression"],
+    }
+    v1_idx = v1.matcher(pred_match, tgt_match)
+    v1_perm = {
+        "objects": {
+            "class_logits": data["objects.class_logits"][v1_idx],
+            "masks": data["objects.masks"][v1_idx],
+        }
+    }
+    v1_truth = {
+        "objects": {
+            "object_class": data["labels.objects.object_class"],
+            "masks": data["labels.objects.masks"],
+        }
+    }
+    v1_ce = v1.get_loss("labels", v1_perm, v1_truth)["object_class_ce"]
+    v1_masks = v1.get_loss("masks", v1_perm, v1_truth)
+    v1_dice, v1_focal = v1_masks["mask_dice"], v1_masks["mask_focal"]
+
+    diffs["matched_object_class_ce"] = _max_abs(v2_ce, v1_ce)
+    diffs["matched_mask_dice"] = _max_abs(v2_dice, v1_dice)
+    diffs["matched_mask_focal"] = _max_abs(v2_focal, v1_focal)
+    checks["matched_object_class_ce_bitwise_vs_independent_v1"] = torch.equal(v2_ce, v1_ce)
+    checks["matched_mask_dice_bitwise_vs_independent_v1"] = torch.equal(v2_dice, v1_dice)
+    checks["matched_mask_focal_bitwise_vs_independent_v1"] = torch.equal(v2_focal, v1_focal)
+    # the matcher assignment itself matches the independent v1 matcher BITWISE
+    checks["matcher_assignment_bitwise_vs_independent_v1"] = torch.equal(
+        out.get("matched.objects.class_logits"), data["objects.class_logits"][v1_idx]
+    )
+
+    # -- (ii) matched regression: the FD alignment change (design-conformance) -
+    # NO v1 byte reference (v1's effective regression loss is QUERY-order); the gate
+    # recomputes the FD-specified matched L1 (matcher-permuted preds vs truth-order
+    # targets, valid objects only) independently and asserts the module matches it.
+    object_class = data["labels.objects.object_class"]
+    valid = object_class != module.num_classes
+    m_reg = data["preds.objects.regression"][v1_idx]
+    ref_reg = module.loss_weights["regression"] * torch.nn.functional.l1_loss(
+        m_reg[valid], data["targets.objects.regression"][valid]
+    )
+    diffs["matched_regression_design"] = _max_abs(v2_reg, ref_reg)
+    checks["matched_regression_design_conformance"] = diffs["matched_regression_design"] <= 0.0
+    # the matched regression is NOT v1's query-order loss (they genuinely differ here)
+    query_reg = module.loss_weights["regression"] * torch.nn.functional.l1_loss(
+        data["preds.objects.regression"][valid], data["targets.objects.regression"][valid]
+    )
+    checks["matched_regression_differs_from_query_order"] = not torch.equal(ref_reg, query_reg)
+
+    # -- (iii) NO in-place permute: the decoder's objects.* are untouched ------
+    checks["objects_class_logits_not_mutated"] = torch.equal(
+        b.get("objects.class_logits"), pre_class_logits
+    )
+    checks["objects_masks_not_mutated"] = torch.equal(b.get("objects.masks"), pre_masks)
+    checks["objects_regression_not_mutated"] = torch.equal(
+        b.get("preds.objects.regression"), pre_reg
+    )
+    # matched.* are NEW keys (distinct from objects.*), permuted by the matcher
+    checks["matched_objects_are_new_keys"] = (
+        "matched.objects.class_logits" in out and "matched.objects.masks" in out
+    )
+
+    # -- (iv) MaskFormerTargets: object_class / masks / regression vs v1 -------
+    proc = build_maskformer_targets()
+    tbatch = make_maskformer_targets_batch()
+    tb = Bundle()
+    for key, value in tbatch.items():
+        tb.set(key, value)
+    tout = proc.process(tb, np.s_[0:6], Mode.FIT)
+    v2_object_class = tout["labels.objects.object_class"]
+    v2_target_masks = tout["labels.objects.masks"]
+
+    # v1 object_class: the in-place x[x==raw]=mapped remap (datasets.py:641-643), here
+    # via the shipped class map applied to the ORIGINAL raw values.
+    raw_flav = np.asarray(tbatch["raw.truth_hadrons"]["flavour"], dtype=np.int64)
+    v1_oc = raw_flav.copy()
+    for spec in MASKFORMER_OBJECT_CLASS_MAP.values():
+        v1_oc[raw_flav == spec["raw"]] = spec["mapped"]
+    checks["targets_object_class_bitwise_vs_v1_classmap"] = np.array_equal(v2_object_class, v1_oc)
+
+    # v1 masks: build_target_masks(object_ids, constituent_ids) (mask_utils.py:5-37)
+    obj_ids = torch.as_tensor(np.asarray(tbatch["raw.truth_hadrons"]["barcode"], dtype=np.int64))
+    con_ids = torch.as_tensor(
+        np.asarray(tbatch["raw.tracks"]["ftagTruthParentBarcode"], dtype=np.int64)
+    )
+    v1_target_masks = v1_build_target_masks(obj_ids.clone(), con_ids).numpy()
+    checks["targets_masks_bitwise_vs_v1_build_target_masks"] = np.array_equal(
+        v2_target_masks, v1_target_masks
+    )
+    # the regression labels are the raw object columns verbatim (float32)
+    checks["targets_regression_labels_bitwise_vs_raw"] = all(
+        np.array_equal(
+            tout[f"labels.objects.{t}"],
+            np.asarray(tbatch["raw.truth_hadrons"][t], dtype=np.float32),
+        )
+        for t in proc.regression_targets
+    )
+    # v1's build_target_masks MUTATES object_ids in place (-1 -> -999, mask_utils.py:36);
+    # the v2 processor must NOT mutate the published object ids — the raw barcode column
+    # in the batch is byte-unchanged after process()
+    checks["targets_no_inplace_id_mutation"] = np.array_equal(
+        np.asarray(tb.get("raw.truth_hadrons")["barcode"]),
+        np.asarray(tbatch["raw.truth_hadrons"]["barcode"]),
+    )
+    # null is validated LAST (the mapped null index == num non-null classes)
+    checks["targets_null_class_is_last"] = proc.null_index == MASKFORMER_NUM_OBJECT_CLASSES - 1
+
+    # -- (v) loud construction / bind surfaces --------------------------------
+    # null not mapped last (null mapped to 0, b to 1 -> the v1 'Null class must be last')
+    checks["null_not_last_raises"] = _raises_config_error(
+        lambda: MaskFormerTargets(
+            object_class="flavour",
+            object_id="barcode",
+            constituent_id="ftagTruthParentBarcode",
+            class_map={"b": {"raw": 5, "mapped": 1}, "null": {"raw": -1, "mapped": 0}},
+            object_stream="truth_hadrons",
+            constituent_stream="tracks",
+        )
+    )
+    # missing null class
+    checks["missing_null_class_raises"] = _raises_config_error(
+        lambda: MaskFormerTargets(
+            object_class="flavour",
+            object_id="barcode",
+            constituent_id="ftagTruthParentBarcode",
+            class_map={"b": {"raw": 5, "mapped": 0}, "c": {"raw": 4, "mapped": 1}},
+            object_stream="truth_hadrons",
+            constituent_stream="tracks",
+        )
+    )
+    # unknown loss-weight key on the matched loss
+    checks["unknown_loss_weight_key_raises"] = _raises_config_error(
+        lambda: MaskFormerMatchedLoss(
+            num_classes=2, num_objects=5, loss_weights={"not_a_component": 1.0}
+        )
+    )
+    # all-zero matcher weights (the v1 matcher asserts the sum positive, matcher.py:167)
+    checks["zero_matcher_weights_raises"] = _raises_config_error(
+        lambda: MaskFormerMatchedLoss(
+            num_classes=2,
+            num_objects=5,
+            loss_weights={"object_class_ce": 1.0},
+            matcher_weights={"object_class_ce": 0.0},
+        )
+    )
+    # regression pred/target width mismatch at bind
+    checks["regression_width_mismatch_at_bind_raises"] = _raises_config_error(
+        _bad_matched_regression_bind
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the MaskFormerMatchedLoss forward (matcher + loss methods) reproduces, BITWISE, an "
+        "INDEPENDENT v1 MaskFormerLoss for the three v1-decidable components (object_class_ce, "
+        "mask_dice, mask_focal) on the v1-permuted predictions and for the matcher assignment; "
+        "the matched regression is the FD alignment change (matched, not v1's query-order) "
+        "asserted as a design-conformance property; the decoder's objects.* are NOT mutated in "
+        "place (matched.objects.* are NEW keys); and MaskFormerTargets reproduces object_class / "
+        "masks / regression labels BITWISE vs v1 (build_target_masks + the validated class map) "
+        "WITHOUT v1's in-place id mutations. Loud surfaces (null-not-last, missing null, unknown "
+        "loss weight, zero matcher weights, regression width mismatch) all raise ConfigError. "
+        "Matched-loss / matcher / targets slice ONLY — decoder is MF1a, object writer is MF2"
+    )
+    report = _base_report(
+        "mf1c_matched_loss_matcher_targets",
+        passed,
+        criterion,
+        {
+            "atol": PARITY_ATOL,
+            "num_classes": MASKFORMER_NUM_OBJECT_CLASSES - 1,
+            "num_objects": MASKFORMER_NUM_OBJECTS,
+            "num_reg_targets": MASKFORMER_NUM_REG_TARGETS,
+            "loss_weights": module.loss_weights,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    report["v1_reference"] = (
+        "an independently-constructed v1 MaskFormerLoss (build_independent_v1_matched_loss: a "
+        "fresh instance from the same config, its own HungarianMatcher + empty_weight buffer, "
+        "NOT the v2 module's composed v1_loss) for the matcher + the three mask/class losses; "
+        "v1 build_target_masks + MaskformerObjectConfig class map for the targets processor"
+    )
+    report["alignment_note"] = (
+        "MF1b (human sign-off, separate gate): v1's EFFECTIVE object-regression loss is "
+        "QUERY-ORDER (the object task computes its L1 in SaltModel.run_tasks WITHOUT the matcher, "
+        "saltmodel.py:218-219; 'regression' is not in MaskFormerLoss.losses, so the matched loop "
+        "never re-computes it — the matcher uses regression only as a COST). v2's "
+        "MaskFormerMatchedLoss makes the regression loss MATCHED (matcher-permuted preds vs "
+        "truth-order targets), a user-visible alignment change. This gate asserts the matched "
+        "form is what the FD specifies; it does NOT (cannot) claim v1 byte-parity for the "
+        "regression component. See the alignment characterisation doc for the MF1b sign-off."
+    )
+    report["scope_note"] = (
+        "matched-loss / matcher / MaskFormerTargets slice of the gate-table MF1a; the MaskDecoder "
+        "+ drop_registers forward-parity is run_mf1a; the MaskFormerObjectWriter byte-parity is MF2"
+    )
+    print(f"{'diff':<40}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<40}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("mf1c", passed, criterion, _emit_report(report, outdir, "mf1c"))
+    return (0 if passed else 1), report
+
+
+def _single_module_plan(module: MaskFormerMatchedLoss):
+    """Compile a one-module FIT plan that drives the matched loss on a fixture bundle.
+
+    The matched loss reads the decoder's object predictions, the scaled regression
+    prediction/target, and the truth labels — all supplied directly in the gate bundle
+    (the decoder + regression task are OTHER sub-wave-C modules). A single-module plan
+    over those source keys exercises the REAL executor (merge + write-once + the
+    declared produces check) rather than a bare ``module.forward`` call.
+
+    Returns
+    -------
+    Plan
+        The compiled FIT plan with the matched loss as its only step.
+    """
+    f = Mode.FIT
+    m = MASKFORMER_NUM_OBJECTS
+    n_cls = MASKFORMER_NUM_OBJECT_CLASSES
+    sources = unflatten_spec({
+        "objects.class_logits": TensorSpec(shape=("B", m, n_cls), dtype="float32", modes=f),
+        "objects.class_probs": TensorSpec(shape=("B", m, n_cls), dtype="float32", modes=f),
+        "objects.masks": TensorSpec(shape=("B", m, "T:tracks"), dtype="float32", modes=f),
+        "objects.embed": TensorSpec(shape=("B", m, HYBRID_ENC_DIM), dtype="float32", modes=f),
+        "preds.objects.regression": TensorSpec(
+            shape=("B", m, MASKFORMER_NUM_REG_TARGETS), dtype="float32", modes=f
+        ),
+        "targets.objects.regression": TensorSpec(
+            shape=("B", m, MASKFORMER_NUM_REG_TARGETS), dtype="float32", modes=f
+        ),
+        "labels.objects.object_class": TensorSpec(
+            shape=("B", m), dtype="int64", kind="label", modes=f
+        ),
+        "labels.objects.masks": TensorSpec(
+            shape=("B", m, "T:tracks"), dtype="bool", kind="label", modes=f
+        ),
+    })
+    sinks = [f"losses.{c}" for c in module.components] + [
+        "matched.objects.class_logits",
+        "matched.objects.masks",
+    ]
+    return compile_plan({module.name: module}, Mode.FIT, sources=sources, sinks=sinks)
+
+
+def _bad_matched_regression_bind() -> None:
+    """Bind a `MaskFormerMatchedLoss` whose regression pred/target widths disagree.
+
+    The matched L1 is element-wise, so a 3-wide prediction against a 4-wide target must
+    raise at bind (the schema resolves both widths and the module compares them).
+    """
+    module = MaskFormerMatchedLoss(
+        num_classes=2, num_objects=5, loss_weights={"object_class_ce": 1.0, "regression": 1.0}
+    )
+    module.name = "mf_matched_loss"
+    module.bind(
+        ResolvedSchema(widths={"preds.objects.regression": 3, "targets.objects.regression": 4})
+    )
+
+
+def _writer_write_ctx(modules: dict[str, Any], outdir: Path, n_tracks: int, total: int) -> WriteCtx:
+    """A `WriteCtx` for the MaskFormer object writer's TEST forward.
+
+    Returns
+    -------
+    WriteCtx
+        Run context with the constituent file length the masks span.
+    """
+    return WriteCtx(
+        output_path=outdir / "mf_objects.h5",
+        total=total,
+        run_name="MFrun",
+        source_path=outdir / "src.h5",
+        streams=("jets", "tracks"),
+        sequence_streams=("tracks",),
+        group_datasets={"jets": "jets", "tracks": "tracks"},
+        seq_lengths={"tracks": n_tracks},
+        model_modules=modules,
+        batch_size=total,
+    )
+
+
+def run_mf2(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """MF2: MaskFormerObjectWriter TEST byte-parity + ONNX leading_object/object_index reduces.
+
+    The object-writer slice of sub-wave C. Two halves:
+
+    - **TEST byte-parity (BITWISE, ``.tobytes()``)**: the writer's per-batch
+      ``write`` is compared, column by column, against the EXACT v1 op chain
+      (``predictionwriter.py:276-308``) recomputed in the gate on the SAME
+      decoder predictions + truth labels — the ``objects`` group (per-class
+      ``MFrun_p{c}`` f4 probs + the ``class_label`` i8 truth), the constituent
+      ``MFrun_MaskIndex`` i8 column (``indices_from_mask(masks.sigmoid() > 0.5)``,
+      ``-1`` padded / ``-2`` no-object), and the ``object_masks`` group
+      (``truth_mask`` i8 + ``mask_logits`` f4). Both MaskIndex sentinels are
+      exercised (the fixture pads the last constituents). The truth ``class_label``
+      column carries the v2 canonical remapped ``labels.objects.object_class``
+      (the documented v1 VALUE divergence — raw ``flavour`` in v1; the column
+      name/dtype/structure are v1-identical), so the gate compares it against
+      that bundle key, not v1's raw field.
+    - **ONNX (a COMPILED + RUN ``Mode.ONNX`` plan, never a TEST-mode proxy)**:
+      the writer's `onnx_outputs` manifest (``preds.objects.regression`` ->
+      ``leading_object``, ``objects.masks`` -> ``object_index``) is attached and a
+      REAL graph is traced + exported. The onnxruntime session's output dtypes are
+      asserted (the R leading scalars ``tensor(float)`` / float32, ``HadronIndex``
+      ``tensor(int8)`` with a dynamic ``n_tracks`` axis), and torch-vs-onnxruntime
+      AGREE over a constituent-length sweep — the int8 ``HadronIndex`` EXACTLY
+      (always finite), the leading-object floats where finite (v1 returns NaN for a
+      null leading object, ``maskformer.py:330-332``; NaN-on-both-sides is
+      agreement). The ONNX index suffix is `OBJECT_INDEX.onnx` (``HadronIndex``)
+      and the TEST suffix `OBJECT_INDEX.test` (``MaskIndex``) — the PINNED pair.
+
+    Plus: the writer IMPORTS `OBJECT_INDEX` and re-declares neither
+    ``"MaskIndex"`` nor ``"HadronIndex"`` as a string literal (the merge-condition-4
+    discipline, asserted by scanning the writer source), and loud surfaces raise
+    ``ConfigError`` — empty ``object_classes``; an unconfigured ``regression_task``
+    (the missing-``output_suffixes`` raise); a NON-DEFAULT ``regression_task`` for
+    ONNX (the ``object_index`` reduce reads the fixed
+    ``preds.<stream>.regression`` key, so a non-``regression`` name fails loudly at
+    ``onnx_outputs`` instead of fetching a stale key at trace time); and a
+    non-sequence constituent stream.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("MF2 MaskFormerObjectWriter TEST byte-parity + ONNX leading_object/object_index reduces")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+    diffs: dict[str, float] = {}
+
+    object_classes = ["b", "c", "null"]  # null LAST (MaskFormer.yaml:169-178)
+    # deterministic module weights: v1's composed get_maskformer_outputs has
+    # data-dependent control flow (the all-null `if not null_preds.any()` branch,
+    # maskformer.py:312-319) that bakes a SHAPE into the trace, so the random init
+    # must be fixed for a stable ONNX export regardless of prior-test RNG state.
+    torch.manual_seed(0)
+    modules = build_maskformer_writer_modules(norm_dict)
+    writer = MaskFormerObjectWriter(object_classes=object_classes, regression_task="regression")
+    writer.name = "object_writer"
+
+    # -- (i) TEST byte-parity vs the v1 op chain (predictionwriter.py:276-308) --
+    n_tracks, total = 10, 6
+    data = make_maskformer_writer_batch(batch_size=total, n_tracks=n_tracks)
+    b = Bundle()
+    for key, value in data.items():
+        b.set(key, value)
+    writer.setup(_writer_write_ctx(modules, outdir, n_tracks, total))
+    out = writer.write(b, slice(0, total))
+    if corruption is not None:
+        # corrupt one shipped column in place — the byte comparison must FAIL
+        out = {k: v.copy() for k, v in out.items()}
+        out["objects"]["MFrun_pb"] = corruption(out["objects"]["MFrun_pb"])
+
+    cp = data["objects.class_probs"]
+    masks = data["objects.masks"]
+    obj_class = data["labels.objects.object_class"]
+    truth_mask = data["labels.objects.masks"]
+    pad = data["masks.tracks"]
+
+    # objects group: per-class probs (v1 :276-281) + remapped truth class (v1 :282-285)
+    v1_prob_dtype = np.dtype([(f"MFrun_p{c}", "f4") for c in object_classes])
+    v1_probs = u2s(cp.cpu().float().numpy(), v1_prob_dtype)
+    v1_class = u2s(obj_class.cpu().unsqueeze(-1).numpy(), np.dtype([("class_label", "i8")]))
+    checks["test_class_probs_bitwise_vs_v1"] = all(
+        out["objects"][n].tobytes() == v1_probs[n].tobytes() for n in v1_probs.dtype.names
+    )
+    checks["test_class_target_bitwise_vs_v1"] = (
+        out["objects"]["class_label"].tobytes() == v1_class["class_label"].tobytes()
+    )
+
+    # MaskIndex on the constituent stream (v1 :287-297)
+    v1_idx = v1_indices_from_mask(masks.cpu().sigmoid() > 0.5).int().cpu().numpy()
+    v1_idx = np.where(~pad.cpu().numpy(), v1_idx, -1)
+    v1_idx_struct = u2s(
+        np.expand_dims(v1_idx, -1), np.dtype([(f"MFrun_{OBJECT_INDEX.test}", "i8")])
+    )
+    mask_index_col = f"MFrun_{OBJECT_INDEX.test}"
+    checks["test_mask_index_bitwise_vs_v1"] = (
+        out["tracks"][mask_index_col].tobytes() == v1_idx_struct[mask_index_col].tobytes()
+    )
+    # both sentinels exercised (the byte-parity claim has teeth on the encodings)
+    checks["test_mask_index_has_padded_sentinel"] = bool(
+        (out["tracks"][mask_index_col] == -1).any()
+    )
+    checks["test_mask_index_has_no_object_sentinel"] = bool(
+        (out["tracks"][mask_index_col] == -2).any()
+    )
+
+    # object_masks group: truth mask (v1 :300-304) + raw mask logits (v1 :305-308)
+    v1_tm = u2s(truth_mask.cpu().unsqueeze(-1).numpy(), np.dtype([("truth_mask", "i8")]))
+    v1_ml = u2s(masks.cpu().float().unsqueeze(-1).numpy(), np.dtype([("mask_logits", "f4")]))
+    checks["test_truth_mask_bitwise_vs_v1"] = (
+        out["object_masks"]["truth_mask"].tobytes() == v1_tm["truth_mask"].tobytes()
+    )
+    checks["test_mask_logits_bitwise_vs_v1"] = (
+        out["object_masks"]["mask_logits"].tobytes() == v1_ml["mask_logits"].tobytes()
+    )
+
+    # -- (ii) OBJECT_INDEX imported, NOT re-declared (merge condition 4) --------
+    import inspect  # noqa: PLC0415 - gate-local source scan
+
+    from salt.core.writers import maskformer as writer_src  # noqa: PLC0415 - gate-local source scan
+
+    source = inspect.getsource(writer_src)
+    checks["object_index_imported_not_redeclared"] = (
+        "from salt.core.writers.names import OBJECT_INDEX" in source
+        and '"MaskIndex"' not in source
+        and '"HadronIndex"' not in source
+        and "'MaskIndex'" not in source
+        and "'HadronIndex'" not in source
+    )
+
+    # -- (iii) ONNX: a real Mode.ONNX export of the two object reduces ----------
+    variables = {"jets": JET_VARIABLES, "tracks": TRACK_VARIABLES}
+    declare = WriterDeclareCtx(
+        model_modules=modules, streams=("jets", "tracks"), sequence_streams=("tracks",)
+    )
+    manifest = writer.onnx_outputs(declare)
+    export = ExportConfig(
+        model_name="MFv2",
+        inputs=[
+            ExportInput(port="inputs.jets"),
+            ExportInput(port="inputs.tracks", sequence=True, dyn_axis="n_tracks"),
+        ],
+    )
+    resolved = attach_manifest(resolve_export_config(export, "MFv2"), manifest)
+    plan = compile_onnx_plan(modules, resolved, variables)
+    bind_all(modules, resolve_bind_schema([plan]))
+    materialise_all(modules)
+    result = export_graph(
+        modules, export, variables, outdir / "mf_objects.onnx", outputs=manifest, run_name="MFv2"
+    )
+    session = make_session(result.onnx_path)
+    out_types = {o.name: o.type for o in session.get_outputs()}
+    out_axes = {o.name: o.shape for o in session.get_outputs()}
+    leading_names = [f"MFv2_leading_objects_{t}" for t in writer._regression_suffixes(modules)]  # noqa: SLF001 - gate adapter
+    index_name = f"MFv2_{OBJECT_INDEX.onnx}"
+    checks["onnx_leading_object_is_float32"] = all(
+        out_types.get(n) == "tensor(float)" for n in leading_names
+    )
+    checks["onnx_object_index_is_int8"] = out_types.get(index_name) == "tensor(int8)"
+    checks["onnx_object_index_has_dynamic_token_axis"] = out_axes.get(index_name) == ["n_tracks"]
+    checks["onnx_index_suffix_is_pinned_HadronIndex"] = index_name == "MFv2_HadronIndex"
+    # the manifest carries the two writer-declared reduces (not a TaskWriter family)
+    checks["onnx_manifest_uses_object_reduces"] = sorted(e.reduce for e in resolved.outputs) == [
+        "leading_object",
+        "object_index",
+    ]
+
+    # torch-vs-onnxruntime agreement, computed DIRECTLY (not via check_onnx's
+    # all-or-nothing comparison, which aborts a trial on the first NaN — and v1's
+    # leading-reg is NaN whenever the leading object is null, maskformer.py:330-332).
+    # A COMPILED + RUN Mode.ONNX claim over a constituent-length sweep: the int8
+    # HadronIndex EXACTLY (always finite), the leading floats where finite.
+    index_exact = True
+    float_finite_max = 0.0
+    torch.manual_seed(7)
+    for length in (3, 11, 20):
+        jets = torch.rand(1, len(JET_VARIABLES))
+        tracks = torch.rand(length, len(TRACK_VARIABLES))
+        with torch.no_grad():
+            eager = dict(
+                zip(result.adapter.output_names, result.adapter(jets, tracks), strict=True)
+            )
+        ort_out = dict(
+            zip(
+                [o.name for o in session.get_outputs()],
+                session.run(None, {"jet_features": jets.numpy(), "track_features": tracks.numpy()}),
+                strict=True,
+            )
+        )
+        index_exact &= np.array_equal(eager[index_name].numpy(), ort_out[index_name])
+        for name in leading_names:
+            e, o = eager[name].numpy(), ort_out[name]
+            finite = np.isfinite(e) & np.isfinite(o)
+            if finite.any():
+                float_finite_max = max(float_finite_max, float(np.abs(e[finite] - o[finite]).max()))
+            # NaN-on-both-sides is agreement (v1 null-leading-object NaN)
+            index_exact &= bool(np.array_equal(np.isnan(e), np.isnan(o)))
+    checks["onnx_object_index_int8_exact"] = index_exact
+    checks["onnx_leading_object_floats_agree_where_finite"] = float_finite_max <= 1e-4
+    diffs["onnx_leading_object_worst_abs_diff"] = float_finite_max
+
+    # -- (iv) loud construction / configuration surfaces -----------------------
+    checks["empty_object_classes_raises"] = _raises_config_error(
+        lambda: MaskFormerObjectWriter(object_classes=[])
+    )
+    checks["missing_regression_task_raises"] = _raises_config_error(
+        lambda: _bad_writer_onnx(modules)
+    )
+    checks["nondefault_regression_task_raises"] = _raises_config_error(
+        lambda: _bad_writer_nondefault_regression_task(modules)
+    )
+    checks["non_sequence_constituent_raises"] = _raises_config_error(
+        lambda: _bad_writer_extra_groups(outdir, modules)
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the MaskFormerObjectWriter reproduces v1's object-writing block BITWISE in TEST "
+        "(per-class probs + class_label truth on the objects group, the MaskIndex i8 column -1/-2 "
+        "sentinels on the constituent stream, the truth_mask + mask_logits object_masks group) and "
+        "declares the two object ONNX outputs that a COMPILED + RUN Mode.ONNX export produces with "
+        "the correct dtypes (leading_object float32 scalars, object_index int8 HadronIndex with a "
+        "dynamic token axis), torch and onnxruntime agreeing (int8 EXACT, leading floats where "
+        "finite). OBJECT_INDEX is IMPORTED, never re-declared. Loud surfaces raise ConfigError. "
+        "Object-writer slice ONLY (decoder is MF1a, matched loss/targets is MF1c)"
+    )
+    report = _base_report(
+        "mf2_object_writer",
+        passed,
+        criterion,
+        {
+            "object_classes": object_classes,
+            "regression_targets": list(writer._regression_suffixes(modules)),  # noqa: SLF001
+            "onnx_index_test_suffix": OBJECT_INDEX.test,
+            "onnx_index_onnx_suffix": OBJECT_INDEX.onnx,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["max_abs_diffs"] = diffs
+    report["v1_reference"] = (
+        "the v1 op chain recomputed in the gate (predictionwriter.py:276-308: u2s of the class "
+        "probs / class label / mask index / truth mask / mask logits) for TEST; a COMPILED + RUN "
+        "Mode.ONNX export checked against the eager OnnxAdapter (check_onnx) for the two reduces"
+    )
+    report["divergence_note"] = (
+        "the class_label truth column carries the REMAPPED labels.objects.object_class (the "
+        "canonical v2 truth MaskFormerTargets produces), where v1 wrote the RAW flavour field "
+        "(predictionwriter.py:282-285). Column name/dtype/structure are v1-identical; only the "
+        "integer mapping differs, intentionally (v2 standardised on the remapped class, and "
+        "MaskFormerTargets eliminates the v1 in-place raw-id mutation)"
+    )
+    report["scope_note"] = (
+        "MaskFormerObjectWriter byte-parity + the two new ONNX reduces; the MaskDecoder + "
+        "drop_registers is run_mf1a, the matched loss / matcher / targets is run_mf1c"
+    )
+    print(f"{'diff':<40}{'value':>14}")
+    for name, val in diffs.items():
+        print(f"{name:<40}{val:>14.3e}")
+    _print_checks(checks)
+    _print_verdict("mf2", passed, criterion, _emit_report(report, outdir, "mf2"))
+    return (0 if passed else 1), report
+
+
+def _bad_writer_onnx(modules: dict[str, Any]) -> None:
+    """Derive the manifest of a writer whose object-regression task is unconfigured.
+
+    The ``leading_object`` entry needs the object-regression task's
+    ``output_suffixes``; with ``regression_task == "regression"`` (the only ONNX-
+    legal name) but NO such module configured, ``_regression_suffixes`` must
+    raise. Drops the ``regression`` stub from the module dict so the raise is the
+    unconfigured-task one (not the non-default-name guard, which fires earlier).
+    """
+    without_reg = {k: v for k, v in modules.items() if k != "regression"}
+    writer = MaskFormerObjectWriter(object_classes=["b", "c", "null"], regression_task="regression")
+    writer.name = "object_writer"
+    writer.onnx_outputs(
+        WriterDeclareCtx(
+            model_modules=without_reg, streams=("jets", "tracks"), sequence_streams=("tracks",)
+        )
+    )
+
+
+def _bad_writer_nondefault_regression_task(modules: dict[str, Any]) -> None:
+    """Derive the manifest of a writer whose object-regression task is non-default.
+
+    The ``object_index`` reduce reads the fixed ``preds.<stream>.regression`` key
+    (it is declared on the masks port and cannot carry the task name), so a
+    ``regression_task`` other than ``"regression"`` must raise loudly at
+    ``onnx_outputs`` rather than fetching a stale/absent key at trace time.
+    """
+    writer = MaskFormerObjectWriter(object_classes=["b", "c", "null"], regression_task="objreg")
+    writer.name = "object_writer"
+    writer.onnx_outputs(
+        WriterDeclareCtx(
+            model_modules=modules, streams=("jets", "tracks"), sequence_streams=("tracks",)
+        )
+    )
+
+
+def _bad_writer_extra_groups(outdir: Path, modules: dict[str, Any]) -> None:
+    """Ask a writer to size its object_masks group with a non-sequence constituent.
+
+    The masks span the constituent stream's tokens, so a constituent stream with
+    no file sequence length (here ``jets``, a global stream) must raise.
+    """
+    writer = MaskFormerObjectWriter(
+        object_classes=["b", "c", "null"], constituent_stream="jets", regression_task="regression"
+    )
+    writer.name = "object_writer"
+    ctx = WriteCtx(
+        output_path=outdir / "bad.h5",
+        total=6,
+        run_name="MFrun",
+        source_path=outdir / "src.h5",
+        streams=("jets", "tracks"),
+        sequence_streams=("tracks",),
+        group_datasets={"jets": "jets", "tracks": "tracks"},
+        seq_lengths={"tracks": 10},  # 'jets' is NOT a sequence stream here
+        model_modules=modules,
+        batch_size=6,
+    )
+    writer.extra_groups(ctx)
+
+
+# ---------------------------------------------------------------------------
+# D1 — FIT/VAL callback-sink assembly + register_reduce live registry (sub-wave D)
+# ---------------------------------------------------------------------------
+
+
+class _D1AuxProbe(torch.nn.Module):
+    """An aux head producing a ``preds.*`` key NO loss consumes (the MaskformerMetrics shape).
+
+    Carries a real parameter so it is a genuine model module; its product
+    ``preds.jets.aux_d1`` is anchored by NOTHING in FIT/VAL, so it is demand-pruned
+    unless a callback declares it a sink (the §3.1/§3.4 deferral D1 lands).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = torch.nn.Linear(16, 2)  # 16 = the gn2v2 fixture pooled.global width
+        self.name = "aux_d1"
+
+    def declare_io(self, mode: Mode) -> IO:
+        """The aux head's IO: reads ``pooled.global``, produces an un-anchored pred.
+
+        Returns
+        -------
+        IO
+            ``pooled.global`` in, ``preds.jets.aux_d1`` out (all modes).
+        """
+        del mode
+        return IO(
+            requires=unflatten_spec({"pooled.global": TensorSpec()}),
+            produces=unflatten_spec({"preds.jets.aux_d1": TensorSpec(shape=("B", 2))}),
+        )
+
+
+class _D1SinkCallback:
+    """A duck-typed FIT/VAL-sink callback (the `fit_val_demand` surface, design §3.4).
+
+    The same protocol the real `MaskformerMetrics` / `ConfusionMatrix` callbacks
+    expose — declaring the bundle keys it reads each VAL epoch so they survive
+    demand pruning. Used to drive the REAL `SaltModule._callback_demand` /
+    `_model_sinks` / `compile_plan` assembly with an aux head's un-anchored pred.
+    """
+
+    def __init__(self, *keys: str) -> None:
+        self._keys = keys
+
+    def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
+        """The declared FIT/VAL demand keys (config-only, static).
+
+        Returns
+        -------
+        tuple[str, ...]
+            The keys this callback demands as FIT/VAL plan sinks.
+        """
+        del model_modules
+        return self._keys
+
+
+def _attach_callbacks(model: SaltModule, *callbacks: Any) -> None:
+    """Attach a duck-typed trainer carrying `callbacks` to a `SaltModule`.
+
+    The static-tooling attach shape (a trainer namespace exposing
+    ``callbacks`` + a ``datamodule.reader``) the model's `_attached_callbacks`
+    / `_attached_writer` discovery reads — exactly the `test_saltmodule`
+    `TestCallbackSinks` precedent.
+    """
+    from types import SimpleNamespace  # noqa: PLC0415 - gate-local duck-typed attach
+
+    model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed trainer attach
+        callbacks=list(callbacks), datamodule=SimpleNamespace(reader=None)
+    )
+
+
+def _d1_compile_with_sinks(model: SaltModule, mode: Mode) -> Any:
+    """Compile a model-side plan with the model's OWN assembled sinks for `mode`.
+
+    Drives the REAL `_model_sinks` (which folds in `_callback_demand`) and
+    `compile_plan` — so a callback-declared sink genuinely participates in
+    demand pruning, not a re-implemented sink list.
+
+    Returns
+    -------
+    Plan
+        The compiled plan for `mode`.
+    """
+    return compile_plan(
+        model._graph_modules,  # noqa: SLF001 - gate drives the real model-module dict
+        mode,
+        sources=gn2v2_sources(),
+        sinks=model._model_sinks(mode),  # noqa: SLF001 - the assembled FIT/VAL sinks under test
+    )
+
+
+def run_d1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[list[str]], list[str]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """D1: FIT/VAL callback-sink assembly + register_reduce live-registry + reduce dtypes.
+
+    The sub-wave-D C-prereqs (plan 10 D1 row). Two independent slices, both
+    driving the REAL surfaces (no re-implementation in the gate):
+
+    - **FIT/VAL callback-sink assembly** (design §3.1 454-456, §3.4 667-671). A
+      real `SaltModule` carries an aux head (`_D1AuxProbe`) producing
+      ``preds.jets.aux_d1`` that NO loss consumes. Compiled with the model's OWN
+      `_model_sinks` (which folds in `_callback_demand`):
+      (i) WITHOUT a FIT/VAL-sink callback, the FIT and VAL sinks are
+      ``['loss.total']`` only and the aux producer is demand-PRUNED (the
+      unchanged M2/M3 baseline — the negative control with teeth);
+      (ii) WITH a `_D1SinkCallback("preds.jets.aux_d1")` attached, its
+      `fit_val_demand` becomes a FIT/VAL plan sink (``preds.jets.aux_d1`` appears
+      in the assembled sinks, after the ``loss.total`` anchor) and the once-pruned
+      producer is KEPT ALIVE in BOTH FIT and VAL;
+      (iii) the SAME surface drives the real `ConfusionMatrix` callback — its
+      `fit_val_demand` declaration (``preds.jets.jets_classification`` +
+      ``labels.jets.flavour_label``) is consumed by `_callback_demand`, proving a
+      shipped callback class participates, not only the duck-typed fixture;
+      (iv) callback demand is TRAINING-ONLY — `_callback_demand` is empty in
+      TEST/ONNX (those sinks are the writer manifest, not callback requires).
+
+    - **register_reduce live-registry validation + reduce-declared dtypes**
+      (amendment 555-567, design §7.3). The export reduce set is a LIVE registry,
+      not a frozen tuple. A freshly `register_reduce`-d reduce
+      (``d1_probe_reduce``, int8 per-token) VALIDATES through the REAL
+      ``export.outputs`` resolution path (`attach_manifest` ->
+      ``config._resolve_output`` against the live registry), defaulting + accepting
+      its DECLARED dtype; an UNREGISTERED reduce name is REJECTED loudly
+      (``ConfigError``); and a declared dtype that DISAGREES with the reduce's
+      registered dtype is REJECTED loudly (the reduce owns its per-reduce dtype
+      rule). Plus the public `register_reduce` loud surfaces: a DUPLICATE name, a
+      bad dtype, and a non-string name each raise ``ConfigError`` — and the new
+      reduce appears in `registered_reduces` with `reduce_dtype` returning its
+      declared dtype. The probe is then `unregister_reduce`-d so the
+      process-global registry is restored (no residue leaks into the in-process
+      test suite's exact-shipped-set assertions).
+
+    D1 makes NO model-parity claim — it is a planner/registry-assembly gate; the
+    MaskFormer decoder/loss/writer forward parity are MF1a/MF1c/MF2.
+
+    Negative control (``test_gates_m5.py``): the ``corruption`` hook perturbs the
+    WITH-callback assembled sink list (dropping the callback-declared sink) before
+    the kept-alive recompile — the "callback sink keeps the producer alive" check
+    must then FAIL while the register_reduce / TRAINING-only / loud-surface checks
+    (independent of that sink list) stay green.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("D1 FIT/VAL callback-sink assembly + register_reduce live registry + reduce dtypes")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+
+    # -- (a) FIT/VAL callback-sink assembly through the REAL SaltModule ---------
+    def _model_with_aux() -> SaltModule:
+        modules = build_gn2v2_modules(norm_dict)
+        modules["aux_d1"] = _D1AuxProbe()
+        modules["loss"] = LossSum()
+        return SaltModule(
+            modules, lrs_config={"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
+        )
+
+    # baseline: NO FIT/VAL-sink callback -> sinks are loss.total only (M2/M3)
+    base_model = _model_with_aux()
+    checks["no_callback_fit_sinks_are_loss_only"] = base_model._model_sinks(Mode.FIT) == [  # noqa: SLF001
+        "loss.total"
+    ]
+    checks["no_callback_val_sinks_are_loss_only"] = base_model._model_sinks(Mode.VAL) == [  # noqa: SLF001
+        "loss.total"
+    ]
+    # negative control with teeth: the aux producer is demand-PRUNED without a sink
+    pruned_plan = _d1_compile_with_sinks(base_model, Mode.FIT)
+    checks["aux_producer_pruned_without_callback"] = "aux_d1" not in pruned_plan.module_names
+
+    # WITH a FIT/VAL-sink callback declaring the aux pred -> it becomes a sink
+    sink_model = _model_with_aux()
+    _attach_callbacks(sink_model, _D1SinkCallback("preds.jets.aux_d1"))
+    fit_sinks = sink_model._model_sinks(Mode.FIT)  # noqa: SLF001
+    val_sinks = sink_model._model_sinks(Mode.VAL)  # noqa: SLF001
+    if corruption is not None:
+        # drop the callback-declared sink -> the kept-alive recompile must FAIL
+        fit_sinks = corruption(list(fit_sinks))
+    checks["loss_anchor_stays_first"] = fit_sinks[0] == "loss.total"
+    checks["callback_require_becomes_fit_sink"] = "preds.jets.aux_d1" in fit_sinks
+    checks["callback_require_becomes_val_sink"] = "preds.jets.aux_d1" in val_sinks
+    # the once-pruned aux producer is KEPT ALIVE in BOTH FIT and VAL with the sink
+    kept_fit = compile_plan(
+        sink_model._graph_modules,  # noqa: SLF001
+        Mode.FIT,
+        sources=gn2v2_sources(),
+        sinks=fit_sinks,
+    )
+    kept_val = compile_plan(
+        sink_model._graph_modules,  # noqa: SLF001
+        Mode.VAL,
+        sources=gn2v2_sources(),
+        sinks=val_sinks,
+    )
+    checks["aux_producer_kept_alive_in_fit"] = "aux_d1" in kept_fit.module_names
+    checks["aux_producer_kept_alive_in_val"] = "aux_d1" in kept_val.module_names
+
+    # a shipped callback class participates in the SAME surface: ConfusionMatrix's
+    # fit_val_demand is consumed by the real _callback_demand (preds + label keys)
+    cm_model = _model_with_aux()
+    _attach_callbacks(cm_model, ConfusionMatrix(task_name="jets_classification"))
+    cm_demand = cm_model._callback_demand(Mode.FIT)  # noqa: SLF001
+    checks["shipped_confusion_matrix_demand_is_assembled"] = (
+        "preds.jets.jets_classification" in cm_demand and "labels.jets.flavour_label" in cm_demand
+    )
+    # the real MaskformerMetrics callback exposes the same static fit_val_demand
+    mf_demand = MaskformerMetrics().fit_val_demand({})
+    checks["maskformer_metrics_declares_matched_sinks"] = set(mf_demand) == {
+        "matched.objects.class_logits",
+        "matched.objects.object_class",
+        "matched.objects.masks",
+        "matched.objects.target_masks",
+    }
+
+    # callback demand is TRAINING-ONLY: empty in TEST/ONNX (writer-manifest sinks)
+    checks["callback_demand_empty_in_test"] = cm_model._callback_demand(Mode.TEST) == {}  # noqa: SLF001
+    checks["callback_demand_empty_in_onnx"] = cm_model._callback_demand(Mode.ONNX) == {}  # noqa: SLF001
+
+    # -- (b) register_reduce live-registry validation + reduce-declared dtypes --
+    reduce_name = "d1_probe_reduce"
+    if reduce_name not in registered_reduces():
+        register_reduce(reduce_name, _d1_probe_binder, dtype="int8", per_token=True)
+    checks["registered_reduce_in_live_registry"] = reduce_name in registered_reduces()
+    checks["reduce_declared_dtype_is_queryable"] = reduce_dtype(reduce_name) == "int8"
+
+    # a registered reduce VALIDATES through the REAL export.outputs resolution
+    # (attach_manifest -> config._resolve_output against the live registry); the
+    # declared dtype defaults from the registered declaration.
+    export = ExportConfig(model_name="D1probe", inputs=[ExportInput(port="inputs.tracks")])
+    good_entry = ExportOutput(port="objects.masks", name="ProbeIndex", reduce=reduce_name)
+    resolved = attach_manifest(resolve_export_config(export, "D1probe"), [good_entry])
+    (resolved_out,) = resolved.outputs
+    checks["registered_reduce_validates_in_manifest"] = (
+        resolved_out.reduce == reduce_name and resolved_out.dtype == "int8"
+    )
+    # an UNREGISTERED reduce name is REJECTED loudly through the same path
+    checks["unregistered_reduce_rejected_loudly"] = _raises_config_error(
+        _resolve_unregistered_reduce, export
+    )
+    # a declared dtype DISAGREEING with the reduce's registered dtype is REJECTED
+    checks["reduce_dtype_mismatch_rejected_loudly"] = _raises_config_error(
+        _resolve_dtype_mismatch, export, reduce_name
+    )
+    # an unregistered reduce name has NO declared dtype (reduce_dtype raises)
+    checks["unregistered_reduce_dtype_query_raises"] = _raises_config_error(
+        lambda: reduce_dtype("not_a_registered_reduce")
+    )
+
+    # the public register_reduce loud surfaces (duplicate / bad dtype / non-string)
+    checks["duplicate_register_reduce_raises"] = _raises_config_error(
+        lambda: register_reduce(reduce_name, _d1_probe_binder, dtype="int8")
+    )
+    checks["bad_dtype_register_reduce_raises"] = _raises_config_error(
+        lambda: register_reduce("d1_bad_dtype", _d1_probe_binder, dtype="float64")
+    )
+    checks["non_string_name_register_reduce_raises"] = _raises_config_error(
+        lambda: register_reduce(123, _d1_probe_binder, dtype="int8")  # type: ignore[arg-type]
+    )
+
+    # the live registry is process-global module state; this gate mutated it with a
+    # PROBE reduce — restore it so the gate leaves no residue (a leaked probe would
+    # break the exact-shipped-set assertions in the in-process test suite). Only the
+    # probe name registers successfully (the bad-dtype/non-string attempts raised).
+    unregister_reduce(reduce_name)
+    checks["register_reduce_residue_cleared"] = reduce_name not in registered_reduces()
+
+    passed = all(checks.values())
+    criterion = (
+        "a FIT/VAL-sink callback's declared require becomes a FIT/VAL plan sink in the REAL "
+        "SaltModule._model_sinks/_callback_demand, keeping an otherwise demand-PRUNED aux "
+        "producer alive in BOTH FIT and VAL (pruned without it — the negative control), with the "
+        "shipped ConfusionMatrix/MaskformerMetrics participating in the same surface, callback "
+        "demand TRAINING-only (empty in TEST/ONNX); AND a register_reduce-d reduce VALIDATES "
+        "through the live export.outputs registry with its declared dtype while an unregistered "
+        "reduce name and a mismatched declared dtype are both rejected loudly (ConfigError), and "
+        "the public register_reduce duplicate/bad-dtype/non-string loud surfaces raise; the gate "
+        "then UNregisters its probe so the process-global registry is left with no residue "
+        "(design §3.1 454-456, §3.4 667-671; amendment 555-567, design §7.3)"
+    )
+    report = _base_report(
+        "d1_callback_sinks_register_reduce",
+        passed,
+        criterion,
+        {
+            "registered_reduce": reduce_name,
+            "fit_sinks_with_callback": list(fit_sinks),
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["scope_note"] = (
+        "the sub-wave-D C-prereqs (FIT/VAL callback-sink assembly + register_reduce live "
+        "registry/dtypes) ONLY — NO model-parity claim; the MaskFormer decoder/loss/writer "
+        "parity are run_mf1a/run_mf1c/run_mf2"
+    )
+    report["surfaces_exercised"] = (
+        "the REAL SaltModule._model_sinks/_callback_demand + compile_plan demand pruning (not a "
+        "re-implemented sink list); the REAL salt.core.onnx.reduces live registry validated via "
+        "attach_manifest -> config._resolve_output (not a hard-coded reduce check)"
+    )
+    _print_checks(checks)
+    _print_verdict("d1", passed, criterion, _emit_report(report, outdir, "d1"))
+    return (0 if passed else 1), report
+
+
+def _d1_probe_binder(out_cfg: ExportOutput, ctx: Any) -> Any:
+    """A trivial reduce binder for the D1 probe reduce (registry-validation only).
+
+    D1 never RUNS this binder (it exercises the static config-validation path,
+    not a traced export); it exists so `register_reduce` has a callable to bind.
+    A one-output int8 per-token `BoundReduce` cloning the source port, the
+    minimal shape the registry accepts.
+
+    Returns
+    -------
+    BoundReduce
+        The bound reduce for ``out_cfg`` (never executed by D1).
+    """
+    from salt.core.onnx.reduces import BoundReduce  # noqa: PLC0415 - gate-local probe binder
+
+    name = f"{ctx.model_name}_{out_cfg.name}"
+    return BoundReduce(
+        port=out_cfg.port,
+        output_names=(name,),
+        dtypes=("int8",),
+        dynamic_axes={name: {0: "n_tracks"}},
+        fn=lambda bundle: (bundle.get(out_cfg.port),),
+    )
+
+
+def _resolve_unregistered_reduce(export: ExportConfig) -> None:
+    """Resolve an ``export.outputs`` entry naming an UNREGISTERED reduce.
+
+    The live registry has no such reduce, so `config._resolve_output` (reached
+    through `attach_manifest`) must raise a `ConfigError`.
+    """
+    entry = ExportOutput(port="objects.masks", name="Nope", reduce="not_a_registered_reduce")
+    attach_manifest(resolve_export_config(export, "D1probe"), [entry])
+
+
+def _resolve_dtype_mismatch(export: ExportConfig, reduce_name: str) -> None:
+    """Resolve an entry whose declared dtype disagrees with the reduce's declared dtype.
+
+    The D1 probe reduce is int8; declaring ``float32`` on its entry must raise a
+    `ConfigError` (the reduce owns its per-reduce dtype rule, design §7.3).
+    """
+    entry = ExportOutput(
+        port="objects.masks", name="ProbeIndex", reduce=reduce_name, dtype="float32"
+    )
+    attach_manifest(resolve_export_config(export, "D1probe"), [entry])
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the gate subcommand parser (R1-R4, L1-L3).
+    """Build the gate subcommand parser (R1-R4, L1-L3, MF1a/MF1c/MF2, D1).
 
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``r1``/``r2``/``r3``/``r4``/``l1``/``l2``/``l3``
-        subcommands.
+        Parser with the ``r1``/``r2``/``r3``/``r4``/``l1``/``l2``/``l3``/
+        ``mf1a``/``mf1c``/``mf2``/``d1`` subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m5", description=__doc__.splitlines()[0]
@@ -1720,6 +3196,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "l1": "LossGLS geometric-mean parity + all-weights==1.0 guard (sub-wave B)",
         "l2": "TransformerEncoder norm_type:hybrid passthrough parity (sub-wave B)",
         "l3": "VectorConcat order + Dsum + export.inputs alias conformance (sub-wave B)",
+        "mf1a": "MaskDecoder + encoder drop_registers parity vs independent v1 (sub-wave C)",
+        "mf1c": "MaskFormerMatchedLoss + matcher + MaskFormerTargets parity (sub-wave C)",
+        "mf2": "MaskFormerObjectWriter TEST byte-parity + ONNX object reduces (sub-wave C)",
+        "d1": "FIT/VAL callback-sink assembly + register_reduce live registry/dtypes (sub-wave D)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -1744,6 +3224,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "l1": run_l1,
         "l2": run_l2,
         "l3": run_l3,
+        "mf1a": run_mf1a,
+        "mf1c": run_mf1c,
+        "mf2": run_mf2,
+        "d1": run_d1,
     }[args.gate]
     code, _ = runner(args.outdir)
     return code

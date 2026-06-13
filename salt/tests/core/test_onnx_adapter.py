@@ -10,6 +10,8 @@ labels/losses/writers, design §7). Tracing/onnxruntime agreement lives in
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 from torch import nn
@@ -41,8 +43,16 @@ from salt.core.onnx import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.core.onnx.config import default_athena_name
-from salt.core.onnx.reduces import ReduceCtx, bind_reduce
+from salt.core.onnx.config import _resolve_output, default_athena_name
+from salt.core.onnx.reduces import (
+    BoundReduce,
+    ReduceCtx,
+    bind_reduce,
+    per_token_reduces,
+    reduce_dtype,
+    register_reduce,
+    registered_reduces,
+)
 from salt.models.task import mask_fill_flattened
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
@@ -249,7 +259,7 @@ class TestResolveOutputs:
 
     def test_unknown_reduce(self):
         manifest = gn2_manifest()
-        manifest[1].reduce = "leading_object"  # MaskFormer reduces are M5
+        manifest[1].reduce = "not_a_registered_reduce"  # never registered
         with pytest.raises(ConfigError, match="unknown reduce"):
             gn2_resolved(manifest=manifest)
 
@@ -347,6 +357,228 @@ class TestReduces:
         out = ExportOutput(port="pooled.global", name="X", reduce="argmax", dtype="int8")
         with pytest.raises(ConfigError, match="preds.<stream>.<task>"):
             bind_reduce(out, make_ctx(**{"pooled.global": None}))
+
+
+# ---------------------------------------------------------------------------
+# the MaskFormer object reduces (M5 sub-wave C) vs the v1 get_maskformer_outputs
+# ---------------------------------------------------------------------------
+
+
+def _mf_object_bundle(b: int = 1, m: int = 5, n_cls: int = 3, t: int = 8, seed: int = 9) -> Bundle:
+    """A bundle carrying the decoder object keys the MaskFormer reduces read."""
+    gen = torch.Generator().manual_seed(seed)
+    bundle = Bundle()
+    bundle.set("objects.class_probs", torch.randn(b, m, n_cls, generator=gen).softmax(-1))
+    bundle.set("objects.masks", torch.randn(b, m, t, generator=gen))
+    bundle.set("preds.objects.regression", torch.randn(b, m, 3, generator=gen))
+    return bundle
+
+
+class TestMaskFormerReduces:
+    def _ctx(self):
+        return ReduceCtx(
+            model_name="MFv2",
+            seq_dyn_axis={"tracks": "n_tracks"},
+            produced_specs={"preds.objects.regression": TensorSpec(shape=("B", 5, 3))},
+        )
+
+    def test_leading_object_matches_v1_helper(self):
+        from salt.models.maskformer import get_maskformer_outputs
+
+        out = ExportOutput(
+            port="preds.objects.regression",
+            names=["lead_pt", "lead_Lxy", "lead_mass"],
+            reduce="leading_object",
+        )
+        bound = bind_reduce(out, self._ctx())
+        assert bound.output_names == ("MFv2_lead_pt", "MFv2_lead_Lxy", "MFv2_lead_mass")
+        assert bound.dtypes == ("float32",) * 3
+        assert bound.dynamic_axes == {}  # GLOBAL scalars
+        b = _mf_object_bundle()
+        scalars = bound.fn(b)
+        # v1 op chain on a CLONE (the reduce must not mutate the bundle)
+        objs = {
+            "class_probs": b.get("objects.class_probs").clone(),
+            "masks": b.get("objects.masks").clone(),
+            "regression": b.get("preds.objects.regression").clone(),
+        }
+        v1_leading, _, _, _ = get_maskformer_outputs(objs, apply_reorder=True)
+        for i, s in enumerate(scalars):
+            assert s.dim() == 0  # 0-dim scalar per target (v1 leading_reg[0][i])
+            assert torch.equal(s, v1_leading[0, i]) or (
+                torch.isnan(s) and torch.isnan(v1_leading[0, i])
+            )
+
+    def test_leading_object_does_not_mutate_the_bundle(self):
+        out = ExportOutput(
+            port="preds.objects.regression", names=["a", "b", "c"], reduce="leading_object"
+        )
+        bound = bind_reduce(out, self._ctx())
+        b = _mf_object_bundle()
+        before = b.get("preds.objects.regression").clone()
+        bound.fn(b)  # v1's get_maskformer_outputs mutates in place — the reduce clones
+        assert torch.equal(b.get("preds.objects.regression"), before)
+
+    def test_object_index_matches_v1_helper(self):
+        from salt.models.maskformer import get_maskformer_outputs
+
+        out = ExportOutput(
+            port="objects.masks", name="HadronIndex", reduce="object_index", dtype="int8"
+        )
+        bound = bind_reduce(out, self._ctx())
+        assert bound.output_names == ("MFv2_HadronIndex",)
+        assert bound.dtypes == ("int8",)
+        assert bound.dynamic_axes == {"MFv2_HadronIndex": {0: "n_tracks"}}  # PER-TOKEN
+        b = _mf_object_bundle()
+        (got,) = bound.fn(b)
+        objs = {
+            "class_probs": b.get("objects.class_probs").clone(),
+            "masks": b.get("objects.masks").clone(),
+            "regression": b.get("preds.objects.regression").clone(),
+        }
+        _, v1_indices, _, _ = get_maskformer_outputs(objs, apply_reorder=True)
+        assert got.dtype == torch.int8
+        assert torch.equal(got, v1_indices.reshape(-1).char())  # v1 to_onnx.py:469
+
+    def test_object_index_needs_one_sequence_stream(self):
+        out = ExportOutput(
+            port="objects.masks", name="HadronIndex", reduce="object_index", dtype="int8"
+        )
+        ctx = ReduceCtx(model_name="MFv2", seq_dyn_axis={}, produced_specs={})
+        with pytest.raises(ConfigError, match="EXACTLY one sequence"):
+            bind_reduce(out, ctx)
+
+
+# ---------------------------------------------------------------------------
+# the LIVE register_reduce surface (M5 D-prereq; AM 555-567)
+# ---------------------------------------------------------------------------
+
+
+def _bind_passthrough_int8(out_cfg, ctx):
+    """A toy single-output reduce: flatten the port to int8 (registration target).
+
+    Returns
+    -------
+    BoundReduce
+        The bound toy reduce.
+    """
+    name = f"{ctx.model_name}_{out_cfg.name}"
+
+    def fn(b):
+        return (b.get(out_cfg.port).reshape(-1).char(),)
+
+    return BoundReduce(
+        port=out_cfg.port, output_names=(name,), dtypes=("int8",), dynamic_axes={}, fn=fn
+    )
+
+
+@pytest.fixture
+def fresh_reduce_name():
+    """Yield a never-registered reduce name and unregister it on teardown.
+
+    Keeps the global registry pristine across tests — the registration is the
+    behaviour under test, but it must not leak into the rest of the suite.
+
+    Yields
+    ------
+    str
+        A reduce name guaranteed unregistered at entry, popped on teardown.
+    """
+    import salt.core.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
+
+    name = "test_passthrough_int8"
+    assert name not in reduces_mod._REGISTRY, "fixture name already registered (leak)"  # noqa: SLF001
+    yield name
+    reduces_mod._REGISTRY.pop(name, None)  # noqa: SLF001
+
+
+class TestRegisterReduce:
+    """The public `register_reduce` live-registry surface."""
+
+    def test_shipped_reduces_are_registered_with_declared_dtypes(self):
+        # the three core reduces + the two MaskFormer object reduces register at
+        # import via register_reduce, with the dtypes/per-token flags that replace
+        # the frozen M4.5 tuples (leading_object/object_index land in sub-wave C)
+        assert set(registered_reduces()) == {
+            "split_scalars",
+            "argmax",
+            "vertex_union_find",
+            "leading_object",
+            "object_index",
+        }
+        assert reduce_dtype("split_scalars") == "float32"
+        assert reduce_dtype("argmax") == "int8"
+        assert reduce_dtype("vertex_union_find") == "int8"
+        # leading_object is GLOBAL float32 scalars; object_index is PER-TOKEN int8
+        assert reduce_dtype("leading_object") == "float32"
+        assert reduce_dtype("object_index") == "int8"
+        assert set(per_token_reduces()) == {"argmax", "vertex_union_find", "object_index"}
+
+    def test_config_known_reduces_is_a_live_registry_view(self):
+        # the config-level public names are LIVE views of the registry (PEP 562
+        # __getattr__), not the M4.5 frozen tuples
+        from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+
+        assert set(cfg.KNOWN_REDUCES) == set(registered_reduces())
+        assert set(cfg.PER_TOKEN_REDUCES) == set(per_token_reduces())
+
+    def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
+        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
+        # live everywhere: registry, config view, dtype lookup
+        assert fresh_reduce_name in registered_reduces()
+        assert reduce_dtype(fresh_reduce_name) == "int8"
+        from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+
+        assert fresh_reduce_name in cfg.KNOWN_REDUCES
+        # config validates a manifest entry naming it AND defaults its dtype from
+        # the DECLARED dtype (no hard-coded per-reduce rule)
+        out = ExportOutput(port="preds.objects.x", name="Lead", reduce=fresh_reduce_name)
+        resolved = _resolve_output(out)
+        assert resolved.reduce == fresh_reduce_name
+        assert resolved.dtype == "int8"
+        # and bind_reduce dispatches to the registered binder
+        ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
+        bound = bind_reduce(replace(out, dtype="int8"), ctx)
+        assert bound.output_names == ("M_Lead",)
+        b = Bundle()
+        b.set("preds.objects.x", torch.tensor([[1.0, 2.0]]))
+        (got,) = bound.fn(b)
+        assert got.dtype == torch.int8
+
+    def test_new_reduce_dtype_mismatch_rejected(self, fresh_reduce_name):
+        # the registry's DECLARED dtype is enforced — a contradicting entry dtype
+        # is a ConfigError (negative control: with the live-dtype default removed
+        # this would silently accept float32)
+        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
+        with pytest.raises(ConfigError, match="emits int8"):
+            _resolve_output(
+                ExportOutput(
+                    port="preds.objects.x", name="Lead", reduce=fresh_reduce_name, dtype="float32"
+                )
+            )
+
+    def test_duplicate_registration_rejected(self):
+        # re-registering a shipped name is a hard error (no silent override —
+        # would mask a real collision otherwise)
+        with pytest.raises(ConfigError, match="already registered"):
+            register_reduce("argmax", _bind_passthrough_int8, dtype="int8")
+
+    def test_bad_declared_dtype_rejected(self, fresh_reduce_name):
+        with pytest.raises(ConfigError, match=r"float32.*int8|int8.*float32"):
+            register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="float16")
+
+    def test_empty_name_rejected(self):
+        with pytest.raises(ConfigError, match="non-empty string"):
+            register_reduce("", _bind_passthrough_int8, dtype="int8")
+
+    def test_unregistered_reduce_rejected_by_config_and_bind(self):
+        # a name that is NOT registered is rejected at config validation AND at bind
+        out = ExportOutput(port="preds.objects.x", name="Lead", reduce="never_registered_reduce")
+        with pytest.raises(ConfigError, match="unknown reduce"):
+            _resolve_output(out)
+        ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
+        with pytest.raises(ConfigError, match="unknown reduce"):
+            bind_reduce(out, ctx)
 
 
 # ---------------------------------------------------------------------------

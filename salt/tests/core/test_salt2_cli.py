@@ -289,6 +289,72 @@ class TestCallbacksDict:
 
 
 # ---------------------------------------------------------------------------
+# FIT/VAL callback-declared sinks via the STATIC graph tooling (M5 D-prereq;
+# design §3.1 454-456, §3.4 667-671) — the runtime path is covered in
+# test_saltmodule.py::TestCallbackSinks; here the static `salt2 graph` path
+# (load_config / `salt2 graph validate`) must see the SAME FIT/VAL sinks.
+# ---------------------------------------------------------------------------
+
+CONFMAT_CALLBACK_YAML = """
+callbacks:
+  confmat:
+    class_path: salt.core.callbacks.ConfusionMatrix
+    init_args:
+      task_name: jets_classification
+"""
+
+
+class TestStaticFitValCallbackSinks:
+    def test_validate_fit_with_callback_passes(self, data, tmp_path):
+        # a configured ConfusionMatrix must not break `salt2 graph validate
+        # --mode fit` (it declares preds/labels the task already keeps alive)
+        from salt.core.main import main as graph_main
+
+        override = write_yaml(tmp_path, "confmat.yaml", CONFMAT_CALLBACK_YAML)
+        rc = graph_main([
+            "graph",
+            "validate",
+            "-c",
+            str(DUMMY_CFG),
+            "-c",
+            override,
+            "--mode",
+            "fit",
+            "--set",
+            f"data.train_file={data['h5']}",
+            "--set",
+            f"data.val_file={data['h5']}",
+            "--set",
+            f"data.modules.reader.init_args.schema={data['schema']}",
+            "--set",
+            f"model.modules.norm.init_args.norm_dict={data['nd']}",
+        ])
+        assert rc == 0
+
+    def test_load_config_fit_sinks_include_callback_demand(self, data, tmp_path):
+        # the static adapter sees the callback FIT/VAL sinks + their origins,
+        # exactly as the runtime SaltModule does
+        from salt.core.cli import load_config
+        from salt.core.graph.spec import Mode
+
+        override = write_yaml(tmp_path, "confmat.yaml", CONFMAT_CALLBACK_YAML)
+        cfg = load_config(
+            [DUMMY_CFG, Path(override)],
+            set_overrides=[
+                f"data.train_file={data['h5']}",
+                f"data.val_file={data['h5']}",
+                f"data.modules.reader.init_args.schema={data['schema']}",
+                f"model.modules.norm.init_args.norm_dict={data['nd']}",
+            ],
+        )
+        for mode in (Mode.FIT, Mode.VAL):
+            assert "loss.total" in cfg.sinks[mode]
+            assert "preds.jets.jets_classification" in cfg.sinks[mode]
+        origins = cfg.sink_origins[Mode.FIT]
+        assert "ConfusionMatrix" in origins["preds.jets.jets_classification"]
+
+
+# ---------------------------------------------------------------------------
 # 2-step fit smoke through the REAL CLI (run=True path; gate G2 surface)
 # ---------------------------------------------------------------------------
 

@@ -175,6 +175,157 @@ class TestConfusionMatrixSurface:
         with pytest.raises(ConfigError, match="graph-module dict"):
             callback.setup(None, SimpleNamespace(), stage="fit")
 
+    def test_fit_val_demand_static_without_setup(self):
+        # the FIT/VAL-sink declaration (design §3.1, §3.4): resolves from the
+        # module dict alone, NO setup needed (the static-tooling path)
+        callback = ConfusionMatrix(task_name="jets_classification")
+        modules = stub_pl_module()._graph_modules
+        assert callback.fit_val_demand(modules) == (
+            "preds.jets.jets_classification",
+            "labels.jets.flavour_label",
+        )
+        assert callback.requires == ()  # setup never ran; static surface only
+
+    def test_fit_val_demand_unknown_task_raises_with_candidates(self):
+        callback = ConfusionMatrix(task_name="nope")
+        with pytest.raises(ConfigError, match="classification task") as excinfo:
+            callback.fit_val_demand(stub_pl_module()._graph_modules)
+        assert "jets_classification" in str(excinfo.value)  # candidate listed
+
+
+# ---------------------------------------------------------------------------
+# MaskformerMetrics (FD 1200-1202) — matched.objects.* FIT/VAL sink + metrics
+# ---------------------------------------------------------------------------
+
+
+def make_matched_bundle(seed: int = 5, batch: int = 6, m: int = 5, n_cls: int = 3, t: int = 10):
+    """A VAL step bundle carrying the matcher-permuted ``matched.objects.*`` keys."""
+    from salt.tests.core.regression_fixture import MASKFORMER_WRITER_REG_TARGETS
+
+    gen = torch.Generator().manual_seed(seed)
+    bundle = Bundle()
+    bundle.set("matched.objects.class_logits", torch.randn(batch, m, n_cls, generator=gen))
+    bundle.set("matched.objects.object_class", torch.randint(0, n_cls, (batch, m), generator=gen))
+    bundle.set("matched.objects.masks", torch.randn(batch, m, t, generator=gen))
+    bundle.set("matched.objects.target_masks", torch.rand(batch, m, t, generator=gen) > 0.5)
+    bundle.set(
+        "matched.objects.regression",
+        torch.randn(batch, m, len(MASKFORMER_WRITER_REG_TARGETS), generator=gen),
+    )
+    bundle.set(
+        "matched.objects.target_regression",
+        torch.randn(batch, m, len(MASKFORMER_WRITER_REG_TARGETS), generator=gen),
+    )
+    bundle.set("masks.tracks", torch.zeros(batch, t, dtype=torch.bool))
+    return bundle
+
+
+class TestMaskformerMetrics:
+    def test_fit_val_demand_declares_matched_keys(self):
+        # the DP2 declaration: the matcher-permuted class/object-class/mask keys
+        # the callback reads each VAL epoch (config-only, no setup needed)
+        from salt.core.callbacks import MaskformerMetrics
+
+        callback = MaskformerMetrics()
+        assert callback.fit_val_demand({}) == (
+            "matched.objects.class_logits",
+            "matched.objects.object_class",
+            "matched.objects.masks",
+            "matched.objects.target_masks",
+        )
+
+    def test_enters_fit_val_sinks_and_keeps_matched_loss_alive(self):
+        # the criterion: the REAL MaskformerMetrics callback, attached to a
+        # SaltModule carrying a MaskFormerMatchedLoss, makes the matched.* keys
+        # FIT/VAL plan sinks (DP2) AND keeps the matched loss alive under pruning
+        from salt.core.callbacks import MaskformerMetrics
+        from salt.core.graph.planner import compile_plan
+        from salt.core.nn import LossSum
+        from salt.tests.core.regression_fixture import (
+            build_matched_loss_module,
+        )
+
+        loss_module = build_matched_loss_module()
+        model = SaltModule({"mf_matched_loss": loss_module, "loss": LossSum()}, lrs_config=LRS)
+        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
+            callbacks=[MaskformerMetrics()], datamodule=SimpleNamespace(reader=None)
+        )
+        for mode in (Mode.FIT, Mode.VAL):
+            sinks = model._model_sinks(mode)  # noqa: SLF001
+            assert "matched.objects.class_logits" in sinks
+            assert "matched.objects.object_class" in sinks
+        # the matched loss survives pruning to a FIT plan with those sinks: the
+        # matched.* products keep its module alive (it has no loss anchoring them
+        # beyond losses.* — the callback sink is what keeps matched.* reachable)
+        m = 5
+        n_cls = 3
+        from salt.core.graph.spec import TensorSpec, unflatten_spec
+
+        f = Mode.FIT
+        sources = unflatten_spec({
+            "objects.class_logits": TensorSpec(shape=("B", m, n_cls), dtype="float32", modes=f),
+            "objects.class_probs": TensorSpec(shape=("B", m, n_cls), dtype="float32", modes=f),
+            "objects.embed": TensorSpec(shape=("B", m, 16), dtype="float32", modes=f),
+            "objects.masks": TensorSpec(shape=("B", m, "T:tracks"), dtype="float32", modes=f),
+            "preds.objects.regression": TensorSpec(shape=("B", m, 3), dtype="float32", modes=f),
+            "targets.objects.regression": TensorSpec(shape=("B", m, 3), dtype="float32", modes=f),
+            "labels.objects.object_class": TensorSpec(
+                shape=("B", m), dtype="int64", kind="label", modes=f
+            ),
+            "labels.objects.masks": TensorSpec(
+                shape=("B", m, "T:tracks"), dtype="bool", kind="label", modes=f
+            ),
+        })
+        plan = compile_plan(
+            {"mf_matched_loss": loss_module},
+            Mode.FIT,
+            sources=sources,
+            sinks=[
+                "matched.objects.class_logits",
+                "matched.objects.object_class",
+                "matched.objects.masks",
+                "matched.objects.target_masks",
+            ],
+        )
+        assert "mf_matched_loss" in plan.module_names
+
+    def test_compute_metrics_from_matched_bundle(self):
+        # the metrics are computed from matched.objects.* (bundle-native) and stashed
+        from salt.core.callbacks import MaskformerMetrics
+
+        callback = MaskformerMetrics()
+        trainer = SimpleNamespace(fast_dev_run=False)
+        logged: dict[str, float] = {}
+        pl_module = SimpleNamespace(log=lambda name, value: logged.__setitem__(name, float(value)))
+        callback.on_validation_batch_end(
+            trainer, pl_module, {"bundle": make_matched_bundle()}, None, 0
+        )
+        # the v1 metric set is present, logged under the val/ prefix and stashed
+        assert callback.last_metrics
+        assert "class_exact_match" in callback.last_metrics
+        assert "notnull_eff" in callback.last_metrics and "notnull_pur" in callback.last_metrics
+        assert "query_perfect_match_eff" in callback.last_metrics
+        assert "query_regression_mae" in callback.last_metrics
+        assert any(k.startswith("val/") for k in logged)
+        # efficiencies / purities are valid fractions in [0, 1]
+        assert 0.0 <= callback.last_metrics["notnull_eff"] <= 1.0
+        assert 0.0 <= callback.last_metrics["class_exact_match"] <= 1.0
+
+    def test_only_val_skips_train_logging(self):
+        from salt.core.callbacks import MaskformerMetrics
+
+        callback = MaskformerMetrics(only_val=True)
+        logged: dict[str, float] = {}
+        pl_module = SimpleNamespace(log=lambda n, v: logged.__setitem__(n, v))
+        callback.on_train_batch_end(
+            SimpleNamespace(fast_dev_run=False),
+            pl_module,
+            {"bundle": make_matched_bundle()},
+            None,
+            0,
+        )
+        assert logged == {}  # only_val=True -> no train logging
+
 
 # ---------------------------------------------------------------------------
 # GraphArtifacts (design §4.4 run-dir artifacts)

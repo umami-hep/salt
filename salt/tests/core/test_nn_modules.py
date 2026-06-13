@@ -31,6 +31,7 @@ from salt.core.nn import (
     GlobalAttentionPooling,
     LossGLS,
     LossSum,
+    MaskDecoder,
     Normaliser,
     ResolvedSchema,
     Split,
@@ -62,8 +63,13 @@ from salt.tests.core.gn2v2_fixture import (
 )
 from salt.tests.core.regression_fixture import (
     GLOBAL_VARIABLES,
+    MASKFORMER_NUM_OBJECTS,
+    build_independent_v1_mask_decoder,
+    build_independent_v1_transformer_drop,
+    build_maskformer_decoder_modules,
     build_regression_modules,
     build_vector_concat_modules,
+    compile_maskformer_decoder,
     compile_regression,
     compile_vector_concat,
     make_regression_labels,
@@ -314,9 +320,7 @@ class TestTransformerEncoder:
             assert not layer.attn.fn.do_v_norm
 
     def test_norm_type_post_passthrough(self):
-        enc = TransformerEncoder(
-            dim=16, num_layers=2, attention={"num_heads": 2}, norm_type="post"
-        )
+        enc = TransformerEncoder(dim=16, num_layers=2, attention={"num_heads": 2}, norm_type="post")
         assert enc.norm_type == "post"
         for layer in enc.encoder.layers:
             assert layer.norm_type == "post"
@@ -342,9 +346,208 @@ class TestTransformerEncoder:
     def test_unknown_norm_type_rejected(self):
         # "none" is a v1 residual-only mode with no shipped v2 config — rejected
         with pytest.raises(ConfigError, match="norm_type must be one of"):
-            TransformerEncoder(
-                dim=16, num_layers=1, attention={"num_heads": 2}, norm_type="none"
+            TransformerEncoder(dim=16, num_layers=1, attention={"num_heads": 2}, norm_type="none")
+
+    def test_drop_registers_declare_io_drops_register_mask(self):
+        # drop_registers => no masks.registers produced (the v1 del pad_mask
+        # ["REGISTERS"] shape, transformer.py:748)
+        enc = TransformerEncoder(
+            dim=16, num_layers=1, attention={"num_heads": 2}, num_registers=3, drop_registers=True
+        )
+        enc.name = "encoder"
+        produces = flatten_spec(enc.declare_io(Mode.FIT).produces)
+        assert "encoded.seq" in produces
+        assert "masks.registers" not in produces
+        # default (drop_registers=False) still publishes the mask
+        enc2 = TransformerEncoder(dim=16, num_layers=1, attention={"num_heads": 2}, num_registers=3)
+        enc2.name = "encoder"
+        assert "masks.registers" in flatten_spec(enc2.declare_io(Mode.FIT).produces)
+
+    def test_drop_registers_forward_strips_registers(self):
+        enc = TransformerEncoder(
+            dim=16, num_layers=2, attention={"num_heads": 2}, num_registers=3, drop_registers=True
+        )
+        enc.name = "encoder"
+        b = Bundle()
+        b.set("seq.x", torch.randn(B, T, 16))
+        b.set("seq.mask", torch.zeros(B, T, dtype=torch.bool))
+        out = enc(b, Mode.FIT)
+        # registers stripped: encoded.seq is the T stream rows only, no +num_registers
+        assert out["encoded.seq"].shape == (B, T, 16)
+        assert "masks.registers" not in out
+
+
+class TestMaskDecoder:
+    def _build(self, norm_paths, **overrides):
+        modules = build_maskformer_decoder_modules(norm_paths[0], **overrides)
+        test_plan = compile_maskformer_decoder(modules, Mode.TEST)
+        onnx_plan = compile_maskformer_decoder(modules, Mode.ONNX)
+        bind_all(modules, resolve_bind_schema([test_plan, onnx_plan]))
+        materialise_all(modules)
+        return modules, test_plan, onnx_plan
+
+    def test_missing_n_heads_rejected(self):
+        with pytest.raises(ConfigError, match="n_heads"):
+            MaskDecoder(embed_dim=16, num_objects=5, num_layers=2, class_net={"output_size": 3})
+
+    def test_missing_class_output_size_rejected(self):
+        with pytest.raises(ConfigError, match=r"class_net\.output_size is required"):
+            MaskDecoder(embed_dim=16, num_objects=5, num_layers=2, class_net={}, md={"n_heads": 2})
+
+    def test_class_net_width_key_rejected(self):
+        with pytest.raises(ConfigError, match=r"class_net\.input_size"):
+            MaskDecoder(
+                embed_dim=16,
+                num_objects=5,
+                num_layers=2,
+                class_net={"input_size": 16, "output_size": 3},
+                md={"n_heads": 2},
             )
+
+    def test_non_positive_dims_rejected(self):
+        with pytest.raises(ConfigError, match="num_objects"):
+            MaskDecoder(
+                embed_dim=16,
+                num_objects=0,
+                num_layers=2,
+                class_net={"output_size": 3},
+                md={"n_heads": 2},
+            )
+        with pytest.raises(ConfigError, match="num_layers"):
+            MaskDecoder(
+                embed_dim=16,
+                num_objects=5,
+                num_layers=0,
+                class_net={"output_size": 3},
+                md={"n_heads": 2},
+            )
+
+    def test_declare_io_keys_and_shapes(self):
+        md = MaskDecoder(
+            embed_dim=16,
+            num_objects=5,
+            num_layers=2,
+            class_net={"output_size": 3},
+            md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+        )
+        md.name = "mask_decoder"
+        io = md.declare_io(Mode.FIT)
+        req = flatten_spec(io.requires)
+        assert set(req) == {"encoded.seq", "seq.mask"}
+        produces = flatten_spec(io.produces)
+        assert set(produces) == {
+            "objects.embed",
+            "objects.class_logits",
+            "objects.class_probs",
+            "objects.masks",
+        }
+        assert produces["objects.embed"].shape[1] == 5
+        assert produces["objects.class_logits"].shape[-1] == 3
+        # num_classes is C - 1 (last class = null)
+        assert md.num_classes == 2
+
+    def test_embed_dim_mismatch_at_bind_raises(self, norm_paths):
+        # the fixture's encoder produces a 16-wide encoded.seq; a decoder declaring
+        # embed_dim=32 must raise at bind (the queries cannot attend to a
+        # width-mismatched sequence; v1 maskformer.py:48,172)
+        modules = build_maskformer_decoder_modules(norm_paths[0])
+        modules["mask_decoder"] = MaskDecoder(
+            embed_dim=32,
+            num_objects=5,
+            num_layers=2,
+            class_net={"output_size": 3},
+            md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+        )
+        modules["mask_decoder"].name = "mask_decoder"
+        plan = compile_maskformer_decoder(modules, Mode.TEST)
+        with pytest.raises(ConfigError, match="embed_dim"):
+            bind_all(modules, resolve_bind_schema([plan]))
+
+    def test_forward_through_executor_shapes(self, norm_paths):
+        modules, test_plan, _ = self._build(norm_paths)
+        inputs, masks = make_gn2_batch(B, T)
+        b = Bundle()
+        for stream, x in inputs.items():
+            b.set(f"inputs.{stream}", x)
+        b.set("masks.tracks", masks["tracks"])
+        out = Executor(test_plan).run(b, debug=True)
+        d = modules["mask_decoder"]
+        emb = out.get("objects.embed")
+        assert emb.shape == (B, MASKFORMER_NUM_OBJECTS, d.embed_dim)
+        # the dummy token is stripped: masks span the T constituents (not T + 1)
+        assert out.get("objects.masks").shape == (B, MASKFORMER_NUM_OBJECTS, T)
+        # class_probs is a proper distribution over C
+        probs = out.get("objects.class_probs")
+        assert torch.allclose(probs.sum(-1), torch.ones(B, MASKFORMER_NUM_OBJECTS), atol=1e-5)
+
+    def test_forward_bitwise_vs_independent_v1(self, norm_paths):
+        # the four objects.* outputs == an INDEPENDENT v1 MaskDecoder BITWISE; the
+        # encoded.seq == an INDEPENDENT v1 Transformer(drop_registers=True) BITWISE
+        modules, test_plan, _ = self._build(norm_paths)
+        inputs, masks = make_gn2_batch(B, T)
+        b = Bundle()
+        for stream, x in inputs.items():
+            b.set(f"inputs.{stream}", x)
+        b.set("masks.tracks", masks["tracks"])
+        out = Executor(test_plan).run(b, debug=True)
+        # drop_registers parity
+        v1_enc = build_independent_v1_transformer_drop(modules["encoder"])
+        with torch.no_grad():
+            v1_encoded, v1_pad = v1_enc(
+                {"seq": out.get("seq.x").clone()}, pad_mask={"seq": out.get("seq.mask").clone()}
+            )
+        assert torch.equal(out.get("encoded.seq"), v1_encoded)
+        assert "REGISTERS" not in v1_pad
+        # decoder parity
+        v1_dec = build_independent_v1_mask_decoder(modules["mask_decoder"])
+        with torch.no_grad():
+            preds, _, _ = v1_dec(
+                {"embed_xs": out.get("encoded.seq").clone()},
+                tasks=[],
+                pad_mask=out.get("seq.mask").clone(),
+                labels=None,
+            )
+        obj = preds["objects"]
+        assert torch.equal(out.get("objects.embed"), obj["embed"])
+        assert torch.equal(out.get("objects.class_logits"), obj["class_logits"])
+        assert torch.equal(out.get("objects.class_probs"), obj["class_probs"])
+        assert torch.equal(out.get("objects.masks"), obj["masks"])
+
+    def test_zero_constituent_jet_is_finite(self):
+        # the dummy-token trick keeps a zero-length sequence from NaN-ing (ONNX)
+        md = MaskDecoder(
+            embed_dim=16,
+            num_objects=5,
+            num_layers=2,
+            class_net={"output_size": 3},
+            md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+        )
+        md.name = "mask_decoder"
+        b = Bundle()
+        b.set("encoded.seq", torch.zeros(1, 0, 16))
+        b.set("seq.mask", torch.zeros(1, 0, dtype=torch.bool))
+        out = md(b, Mode.ONNX)
+        assert torch.isfinite(out["objects.embed"]).all()
+        assert out["objects.masks"].shape == (1, 5, 0)
+
+    def test_binary_class_net_sigmoid_expands(self):
+        # output_size == 1 reproduces v1's sigmoid -> 2-column class_probs
+        # (maskformer.py:106-110)
+        md = MaskDecoder(
+            embed_dim=16,
+            num_objects=5,
+            num_layers=2,
+            class_net={"output_size": 1},
+            md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+        )
+        md.name = "mask_decoder"
+        b = Bundle()
+        b.set("encoded.seq", torch.randn(4, 7, 16))
+        b.set("seq.mask", torch.zeros(4, 7, dtype=torch.bool))
+        out = md(b, Mode.TEST)
+        probs = out["objects.class_probs"]
+        assert probs.shape[-1] == 2  # 1 logit sigmoid-expanded to [1-p, p]
+        assert torch.allclose(probs.sum(-1), torch.ones(4, 5), atol=1e-5)
 
 
 class TestVectorConcat:

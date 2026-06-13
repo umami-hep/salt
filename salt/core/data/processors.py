@@ -1,10 +1,13 @@
-"""Shipped dataset processors: `Features`, `Labels`, `MultiTarget` (design §6.2).
+"""Shipped dataset processors: `Features`, `Labels`, `MultiTarget`,
+`MaskFormerTargets` (design §6.2).
 
 Each replaces an if-branch of the v1 ``SaltDataset.__getitem__`` god-loop
 (``datasets.py:417-559``). `MultiTarget` (M5 sub-wave A3) ports v1's
-conditional target replacement (``datasets.py:237-248,648,695-739``). Further
-v1 branches (``Parameters``, ``MaskFormerTargets``) land with their workloads
-(TODO(M5/M6) per design §9.5) — the structure here is the template.
+conditional target replacement (``datasets.py:237-248,648,695-739``).
+`MaskFormerTargets` (M5 sub-wave C) ports v1's object-target construction
+(``datasets.py:549-553,636-644``, FD 1090-1110). Further v1 branches
+(``Parameters``) land with their workloads (TODO(M6) per design §9.5) — the
+structure here is the template.
 """
 
 from __future__ import annotations
@@ -20,9 +23,9 @@ from numpy.lib.recfunctions import structured_to_unstructured as s2u
 from salt.core.data.base import Processor, WorkerCtx
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.planner import PlanStep
-from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, sym_dim, unflatten_spec
 
-__all__ = ["Features", "Labels", "MultiTarget"]
+__all__ = ["Features", "Labels", "MaskFormerTargets", "MultiTarget"]
 
 # v1 OPERATORS (datasets.py:29-36) — the conditional-replacement comparators,
 # applied to the selection label against the configured value.
@@ -573,3 +576,276 @@ class MultiTarget(Processor):
             mask = _OPERATORS[rule["op"]](sel, rule["value"])
             running[stream, output] = np.where(mask, source, running[stream, output])
         return {f"labels.{stream}.{output}": arr for (stream, output), arr in running.items()}
+
+
+# the v2 bundle stream name for the reconstructed objects (FD uses labels.objects.*,
+# independent of the file group name the raw object features live in, e.g. truth_hadrons)
+_OBJECT_STREAM = "objects"
+
+
+class MaskFormerTargets(Processor):
+    """MaskFormer object targets: ``object_class`` + per-constituent ``masks`` (design §6.2).
+
+    Ports the v1 object-target construction (``datasets.py:549-553,636-644``;
+    FD 1090-1110) into a single demand-gated processor. From the truth-object
+    group it produces, under the ``objects`` bundle stream:
+
+    - ``labels.objects.object_class`` ``[B, M]`` int64 — the raw object class
+      label remapped through ``class_map`` (the v1 ``x[x == k] = v`` loop,
+      ``datasets.py:641-643``), with the **null class validated LAST** (FD 1108;
+      v1 ``MaskformerObjectConfig`` ``__post_init__``, configs.py:39-42).
+    - ``labels.objects.masks`` ``[B, M, T]`` bool — the per-object-by-constituent
+      truth mask: ``constituent_id == object_id`` (the v1 `build_target_masks`
+      equality, mask_utils.py:36-37) over the truncated constituent stream.
+    - ``labels.objects.<target>`` ``[B, M]`` float32 per ``regression_targets``
+      entry — the raw per-object regression labels the object-regression task
+      stacks + scales (v1 reads ``labels["objects"][target]``, task.py:458-460).
+
+    Two v1 IN-PLACE id mutations are eliminated (FD 1095, "NO in-place id
+    mutation"):
+
+    - v1's class remap mutates the loaded tensor sequentially (``x[x == k] = v``,
+      ``datasets.py:642``) — order-dependent and silently corrupting whenever a
+      ``mapped`` value collides with a not-yet-visited ``raw`` value. v2 builds
+      the mapped column from the ORIGINAL raw values via a single vectorised
+      ``np.select`` against a copy, so the mapping is atomic and collision-proof.
+    - v1's `build_target_masks` mutates the object-id tensor in place
+      (``object_ids[object_ids == -1] = -999``, mask_utils.py:36) before the
+      equality, leaking a sentinel back into the caller's labels dict. v2
+      computes the equality on a private sentinel-substituted COPY, so the
+      published ``object_class`` / id columns are never touched.
+
+    DEMAND-gated, not mode-gated (FD 1090-1095): all three product families are
+    declared in ALL modes; ordinary sink pruning removes the module from a plan
+    only when nothing demands its outputs. The `MaskFormerObjectWriter` demands
+    ``labels.objects.{object_class,masks}`` in TEST (truth columns), so this
+    module IS in the test plan — matching v1, where the object labels are built
+    stage-independently (``datasets.py:549``, ``process_labels`` has no stage
+    gate). It is pruned from ONNX (nothing demands truth there).
+
+    Parameters
+    ----------
+    object_class : str
+        Object class label field in the object group (v1 ``object.class_label``;
+        e.g. ``flavour``). Remapped through ``class_map`` to ``object_class``.
+    object_id : str
+        Object identity field used to build masks (v1 ``object.id_label``; e.g.
+        ``barcode``).
+    constituent_id : str
+        Constituent identity field tested against ``object_id`` to build masks
+        (v1 ``constituent.id_label``; e.g. ``ftagTruthParentBarcode``).
+    class_map : Mapping[str, Mapping[str, int]]
+        ``{name: {raw: int, mapped: int}}`` (v1 ``object.object_classes``). MUST
+        contain a ``null`` entry mapped LAST (``mapped == len(class_map) - 1``),
+        and the ``mapped`` values MUST be exactly ``range(len(class_map))`` (v1
+        configs.py:39-42). jsonargparse may parse the YAML ``null:`` key as a
+        Python ``None`` — both spellings are accepted, normalised to ``"null"``.
+    object_stream : str
+        File group holding the object features (v1 ``object.name``; e.g.
+        ``truth_hadrons``). The reader serves it as ``raw.<object_stream>``.
+    constituent_stream : str
+        File group holding the constituent features (v1 ``constituent.name``;
+        e.g. ``tracks``). The mask's last dim aligns with this stream's token
+        count.
+    regression_targets : Sequence[str] | None, optional
+        Per-object regression label fields published under
+        ``labels.objects.<target>`` (v1 reads them via the object-regression
+        task's ``get_targets``), by default None (no regression labels).
+    num_objects : int | None, optional
+        The number of object queries ``M`` (v1 ``num_objects``,
+        MaskFormer.yaml:36). When set, the produced shapes carry it as a
+        concrete dim (a static check that the file's object count matches the
+        decoder's query bank); None leaves ``M`` symbolic.
+
+    Raises
+    ------
+    ConfigError
+        On a missing ``null`` class, a null not mapped last, ``mapped`` values
+        that are not ``range(len(class_map))``, a duplicate regression target,
+        or a non-positive ``num_objects``.
+    """
+
+    def __init__(
+        self,
+        object_class: str,
+        object_id: str,
+        constituent_id: str,
+        class_map: Mapping[str, Mapping[str, int]],
+        object_stream: str,
+        constituent_stream: str,
+        regression_targets: Sequence[str] | None = None,
+        num_objects: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.object_class = str(object_class)
+        self.object_id = str(object_id)
+        self.constituent_id = str(constituent_id)
+        self.object_stream = str(object_stream)
+        self.constituent_stream = str(constituent_stream)
+        self._raw_to_mapped = self._checked_class_map(class_map)
+        self.regression_targets: tuple[str, ...] = tuple(regression_targets or ())
+        if len(set(self.regression_targets)) != len(self.regression_targets):
+            raise ConfigError(
+                f"MaskFormerTargets: duplicate regression targets in {self.regression_targets}"
+            )
+        if num_objects is not None and num_objects < 1:
+            raise ConfigError(f"MaskFormerTargets: num_objects must be >= 1, got {num_objects}")
+        self.num_objects = num_objects
+
+    @staticmethod
+    def _checked_class_map(class_map: Mapping[str, Mapping[str, int]]) -> dict[int, int]:
+        """Validate the class map (null LAST, mapped == range) and return raw->mapped.
+
+        Reproduces the v1 ``MaskformerObjectConfig`` invariants (configs.py:36-42)
+        WITHOUT mutating the loaded ids: ``null`` present (``None`` or the string
+        ``"null"`` accepted, jsonargparse may cast the YAML ``null:`` key to
+        ``None``), null mapped LAST, and the ``mapped`` set exactly
+        ``range(len(class_map))``.
+
+        Returns
+        -------
+        dict[int, int]
+            ``{raw: mapped}`` for every class.
+
+        Raises
+        ------
+        ConfigError
+            On a missing null, a null not mapped last, or a malformed mapped set.
+        """
+        if not class_map:
+            raise ConfigError("MaskFormerTargets: class_map must not be empty (FD 1108)")
+        # jsonargparse may parse a YAML ``null:`` key as Python None — accept both.
+        names = {
+            ("null" if name is None else str(name)): dict(spec) for name, spec in class_map.items()
+        }
+        if "null" not in names:
+            raise ConfigError(
+                "MaskFormerTargets: class_map must contain a 'null' (no-object) class "
+                "(v1 MaskformerObjectConfig, configs.py:36)"
+            )
+        n = len(names)
+        raw_to_mapped: dict[int, int] = {}
+        for name, spec in names.items():
+            if "mapped" not in spec:
+                raise ConfigError(
+                    f"MaskFormerTargets: class_map[{name!r}] is missing a 'mapped' index"
+                )
+            if name != "null" and "raw" not in spec:
+                raise ConfigError(
+                    f"MaskFormerTargets: class_map[{name!r}] is missing a 'raw' index "
+                    "(only the 'null' class may omit it; v1 object_classes)"
+                )
+            # the null class's raw id defaults to -1 (v1 MaskFormer.yaml:177: null raw -1)
+            raw_to_mapped[int(spec.get("raw", -1))] = int(spec["mapped"])
+        if names["null"]["mapped"] != n - 1:
+            raise ConfigError(
+                f"MaskFormerTargets: the 'null' class must be mapped LAST (to {n - 1}), got "
+                f"{names['null']['mapped']} (v1 configs.py:39 'Null class must be last')"
+            )
+        if set(raw_to_mapped.values()) != set(range(n)):
+            raise ConfigError(
+                f"MaskFormerTargets: mapped class indices {sorted(raw_to_mapped.values())} must be "
+                f"exactly range({n}) (v1 configs.py:42)"
+            )
+        return raw_to_mapped
+
+    @property
+    def null_index(self) -> int:
+        """The mapped index of the null/no-object class (== num_classes).
+
+        Returns
+        -------
+        int
+            ``len(class_map) - 1`` — the matcher's ``num_classes`` sentinel.
+        """
+        return len(self._raw_to_mapped) - 1
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare the raw object/constituent fields -> ``labels.objects.*`` (ALL modes).
+
+        Requires the object class + id + regression fields from
+        ``raw.<object_stream>`` and the constituent id from
+        ``raw.<constituent_stream>``; produces ``labels.objects.object_class``
+        ``[B, M]``, ``labels.objects.masks`` ``[B, M, T]`` and one
+        ``labels.objects.<target>`` ``[B, M]`` per regression target. Every
+        product is declared in ALL modes — the gate is DEMAND, not mode (FD
+        1090-1095); the planner prunes the module from a plan that demands none.
+
+        Returns
+        -------
+        IO
+            The declared interface.
+        """
+        del mode
+        obj_fields = (self.object_class, self.object_id, *self.regression_targets)
+        requires = {
+            f"raw.{self.object_stream}": TensorSpec(kind="data", fields=obj_fields),
+            f"raw.{self.constituent_stream}": TensorSpec(
+                kind="data", fields=(self.constituent_id,)
+            ),
+        }
+        m: int | str = self.num_objects if self.num_objects is not None else sym_dim("M", self.name)
+        tok = sym_dim("T", self.constituent_stream)
+        produces: dict[str, TensorSpec] = {
+            f"labels.{_OBJECT_STREAM}.object_class": TensorSpec(
+                shape=("B", m), dtype="int64", kind="label"
+            ),
+            f"labels.{_OBJECT_STREAM}.masks": TensorSpec(
+                shape=("B", m, tok), dtype="bool", kind="label"
+            ),
+        }
+        for target in self.regression_targets:
+            produces[f"labels.{_OBJECT_STREAM}.{target}"] = TensorSpec(
+                shape=("B", m), dtype="float32", kind="label"
+            )
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
+        """Build the object class, the truth masks, and the raw regression labels.
+
+        ``object_class`` is mapped from the ORIGINAL raw values via a single
+        vectorised ``np.select`` (no sequential in-place remap); ``masks`` is the
+        ``constituent_id == object_id`` broadcast over a private sentinel-
+        substituted COPY of the ids (no in-place id mutation). Regression labels
+        are copied out verbatim as float32.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            ``labels.objects.object_class`` ``[B, M]`` int64,
+            ``labels.objects.masks`` ``[B, M, T]`` bool, and one
+            ``labels.objects.<target>`` ``[B, M]`` float32 per regression target.
+        """
+        del rows, mode
+        obj = batch.get(f"raw.{self.object_stream}")
+        con = batch.get(f"raw.{self.constituent_stream}")
+        out: dict[str, np.ndarray] = {}
+
+        # object_class: map raw -> mapped from the ORIGINAL values (atomic, no
+        # sequential x[x==k]=v mutation; v1 datasets.py:641-643). Unmapped raw
+        # values fall through to the null index (v1 reads only configured classes,
+        # and any object whose raw class is not in the map is a no-object slot).
+        raw_class = np.asarray(obj[self.object_class])
+        conds = [raw_class == raw for raw in self._raw_to_mapped]
+        choices = [self._raw_to_mapped[raw] for raw in self._raw_to_mapped]
+        out[f"labels.{_OBJECT_STREAM}.object_class"] = np.select(
+            conds, choices, default=self.null_index
+        ).astype(np.int64)
+
+        # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T]. v1
+        # build_target_masks substitutes -1 ids with -999 IN PLACE before the
+        # equality (mask_utils.py:36); we do it on a private COPY so the published
+        # object_class / ids are untouched. The substitution makes invalid (-1)
+        # objects never match a constituent (constituent ids are non-negative).
+        object_ids = np.array(obj[self.object_id], copy=True)
+        object_ids[object_ids == -1] = -999
+        constituent_ids = np.asarray(con[self.constituent_id])
+        # [B, M, 1] == [B, 1, T] -> [B, M, T]
+        out[f"labels.{_OBJECT_STREAM}.masks"] = (
+            object_ids[:, :, None] == constituent_ids[:, None, :]
+        )
+
+        # raw per-object regression labels (float32; the task stacks + scales them)
+        for target in self.regression_targets:
+            out[f"labels.{_OBJECT_STREAM}.{target}"] = np.asarray(obj[target], dtype=np.float32)
+        return out

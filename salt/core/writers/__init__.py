@@ -24,6 +24,7 @@ from salt.core.writers.base import (
     task_modules,
 )
 from salt.core.writers.callback import DEFAULT_OUTPUT, WriterCallback
+from salt.core.writers.maskformer import MaskFormerObjectWriter
 from salt.core.writers.modules import InputCopyWriter, PadMaskWriter, TaskWriter
 from salt.core.writers.names import OBJECT_INDEX, VERTEX_INDEX, ModeSplitSuffix, pascal_case
 
@@ -33,6 +34,7 @@ __all__ = [
     "VERTEX_INDEX",
     "ExportOnlyWriter",
     "InputCopyWriter",
+    "MaskFormerObjectWriter",
     "ModeSplitSuffix",
     "PadMaskWriter",
     "TaskWriter",

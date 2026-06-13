@@ -20,6 +20,7 @@ import pytest
 import torch
 import yaml
 from lightning import Callback, Trainer
+from torch import nn
 
 from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
 from salt.core.graph import Bundle, ConfigError, Mode
@@ -453,6 +454,147 @@ class TestBoundaryDemandGuards:
         assert "'jets_classification' (config: model.modules.jets_classification)" in message
         assert "dataset boundary" in message
         assert "add or restore a module" in message
+
+
+class _AuxProbe(nn.Module):
+    """An aux head producing a preds key NO loss consumes — pruned in FIT/VAL
+    unless a callback declares it as a sink (the M5 MaskformerMetrics shape).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 2)  # carries params so it is a real model module
+        self.name = "aux"
+
+    def declare_io(self, mode):
+        from salt.core.graph.spec import IO, TensorSpec, unflatten_spec
+
+        del mode
+        return IO(
+            requires=unflatten_spec({"pooled.global": TensorSpec()}),
+            produces=unflatten_spec({"preds.jets.aux_probe": TensorSpec(shape=("B", 2))}),
+        )
+
+
+class _ProbeMetrics:
+    """Fixture FIT/VAL-sink callback (duck-typed `fit_val_demand`)."""
+
+    def __init__(self, *keys: str) -> None:
+        self._keys = keys
+
+    def fit_val_demand(self, model_modules):
+        del model_modules
+        return self._keys
+
+
+class TestCallbackSinks:
+    """FIT/VAL callback-declared sinks (M5 D-prereq; design §3.1 454-456, §3.4 667-671)."""
+
+    def _model_with_aux(self, data) -> SaltModule:
+        modules = build_gn2v2_modules(data["nd"])
+        modules["aux"] = _AuxProbe()
+        modules["loss"] = LossSum()
+        return SaltModule(modules, lrs_config=LRS)
+
+    def _attach(self, model: SaltModule, *callbacks) -> None:
+        from types import SimpleNamespace
+
+        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
+            callbacks=list(callbacks), datamodule=SimpleNamespace(reader=None)
+        )
+
+    def test_no_callback_fit_val_sinks_are_loss_only(self, data):
+        # the unchanged baseline: with no FIT/VAL-sink callback, sinks stay
+        # ['loss.total'] (the M2/M3 behaviour) in BOTH training modes
+        model = self._model_with_aux(data)
+        assert model._model_sinks(Mode.FIT) == ["loss.total"]  # noqa: SLF001
+        assert model._model_sinks(Mode.VAL) == ["loss.total"]  # noqa: SLF001
+
+    def test_callback_declaring_nothing_is_a_noop(self, data):
+        # a callback whose fit_val_demand returns no keys must not alter sinks
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics())
+        assert model._model_sinks(Mode.FIT) == ["loss.total"]  # noqa: SLF001
+
+    def test_declared_preds_becomes_fit_val_sink(self, data):
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics("preds.jets.aux_probe"))
+        for mode in (Mode.FIT, Mode.VAL):
+            sinks = model._model_sinks(mode)  # noqa: SLF001
+            assert sinks[0] == "loss.total"  # loss anchor stays first
+            assert "preds.jets.aux_probe" in sinks
+
+    def test_callback_demand_is_training_only(self, data):
+        # the TRAINING-mode mirror: callback demand never leaks into TEST/ONNX
+        # (those sinks are the writer manifest, not callback requires)
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics("preds.jets.aux_probe"))
+        assert model._callback_demand(Mode.TEST) == {}  # noqa: SLF001
+        assert model._callback_demand(Mode.ONNX) == {}  # noqa: SLF001
+
+    def test_pruned_producer_kept_alive_by_callback_sink(self, data):
+        # THE behaviour the deferral note describes: a preds.* key no task keeps
+        # alive is demand-PRUNED in FIT without the callback, and ALIVE with it
+        from salt.core.graph.planner import compile_plan
+        from salt.tests.core.gn2v2_fixture import gn2v2_sources
+
+        model = self._model_with_aux(data)
+        src = gn2v2_sources()
+        pruned = compile_plan(
+            model._graph_modules,  # noqa: SLF001
+            Mode.FIT,
+            sources=src,
+            sinks=model._model_sinks(Mode.FIT),  # noqa: SLF001
+        )
+        assert "aux" not in pruned.module_names  # negative control: pruned
+
+        self._attach(model, _ProbeMetrics("preds.jets.aux_probe"))
+        kept = compile_plan(
+            model._graph_modules,  # noqa: SLF001
+            Mode.FIT,
+            sources=src,
+            sinks=model._model_sinks(Mode.FIT),  # noqa: SLF001
+        )
+        assert "aux" in kept.module_names  # callback sink keeps the producer alive
+
+    def test_callback_label_demand_extends_boundary(self, data):
+        # a callback's dataset-namespace require not already task-demanded
+        # extends the FIT/VAL boundary demand, attributed to the callback
+        model = build_gn2v2_modules(data["nd"])
+        model["loss"] = LossSum()
+        model = SaltModule(model, lrs_config=LRS)
+        self._attach(model, _ProbeMetrics("labels.jets.extra_truth"))
+        demand, origins = model._boundary_demand()[Mode.FIT]  # noqa: SLF001
+        assert "labels.jets.extra_truth" in demand
+        assert "callback" in origins["labels.jets.extra_truth"]
+        assert "_ProbeMetrics" in origins["labels.jets.extra_truth"]
+
+    def test_already_task_demanded_label_not_duplicated(self, data):
+        # a callback re-declaring an existing task label is a no-op on the
+        # boundary demand list (no duplicate, no error)
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics("labels.jets.flavour_label"))
+        demand, _ = model._boundary_demand()[Mode.FIT]  # noqa: SLF001
+        assert demand.count("labels.jets.flavour_label") == 1
+
+    def test_undecidable_callback_key_raises_quality_error(self, data):
+        # negative control: a callback demanding a key that is neither
+        # model-produced nor a dataset namespace fails loudly, naming the
+        # key AND the callback (mirror of the TEST writer guard)
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics("bogus.namespace.key"))
+        with pytest.raises(ConfigError, match="bogus.namespace.key") as excinfo:
+            model._boundary_demand()  # noqa: SLF001
+        message = str(excinfo.value)
+        assert "callback" in message
+        assert "_ProbeMetrics" in message
+
+    def test_wildcard_callback_key_rejected(self, data):
+        # callback requires are concrete keys (design §2.2); a wildcard fails
+        model = self._model_with_aux(data)
+        self._attach(model, _ProbeMetrics("labels.jets.*"))
+        with pytest.raises(ConfigError, match="wildcard"):
+            model._boundary_demand()  # noqa: SLF001
 
 
 class TestClassNamesCheck:

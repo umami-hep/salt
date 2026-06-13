@@ -345,6 +345,31 @@ class SaltModule(lightning.LightningModule):
                     demand.append(key)
                     origins[key] = who
                 demand.append("meta.rows")
+            elif mode & Mode.TRAINING:
+                # FIT/VAL callback demand (design §3.1 454-456, §3.4 667-671 —
+                # the TRAINING mirror of the TEST writer block above): a metrics
+                # callback's dataset-namespace requires (labels/masks/meta) that
+                # no task already demands extend the boundary so their producers
+                # survive. Model-produced (preds.*) callback keys are anchored by
+                # `_model_sinks`, not here (they are already `in produced`).
+                for key, who in self._callback_demand(mode).items():
+                    if key in produced or key in required:
+                        continue  # a model-plan sink / already task-demanded
+                    if _WILDCARD_PARTS & set(key.split(KEY_SEP)):
+                        raise ConfigError(
+                            f"callback demand key {key!r} ({who}) contains a wildcard — "
+                            "callback requires are concrete keys (design §2.2, §3.1)"
+                        )
+                    if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
+                        raise ConfigError(
+                            f"[mode={mode.name}] key {key!r} is required by {who} but no "
+                            "model module produces it, and it cannot come from the dataset "
+                            f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
+                            "keys only, design §6.1, §3.1).\n  fix: correct the callback's "
+                            "requires, or add a module producing the key"
+                        )
+                    demand.append(key)
+                    origins[key] = who
             out[mode] = (demand, origins)
         return out
 
@@ -391,18 +416,85 @@ class SaltModule(lightning.LightningModule):
             return None
         return callback.writer_demand(self._graph_modules, reader)
 
-    def _model_sinks(self, mode: Mode, writers: Any = None, reader: Any = None) -> list[str]:
+    def _attached_callbacks(self) -> list[Any]:
+        """Attached callbacks declaring FIT/VAL plan sinks (design §3.1, §3.4).
+
+        Duck-typed (any callback exposing a callable ``fit_val_demand``) so
+        the model side stays free of a callbacks import — the SAME demand
+        symmetry the writer surface uses (`_attached_writer`), now for the
+        TRAINING-mode metrics family (e.g. `ConfusionMatrix`, the M5
+        `MaskformerMetrics`). The surface is STATIC (config-only, taking the
+        model-module dict): it does not depend on the callback's ``setup``
+        having run, so the static `salt2 graph` tooling sees the same FIT/VAL
+        sinks a real ``trainer.fit`` does.
+
+        Returns
+        -------
+        list[Any]
+            The attached FIT/VAL-sink callbacks in trainer order (empty when
+            none, or when no trainer is attached).
+        """
+        trainer = self._trainer
+        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+        return [cb for cb in callbacks or [] if callable(getattr(cb, "fit_val_demand", None))]
+
+    def _callback_demand(self, mode: Mode, callbacks: Any = None) -> dict[str, str]:
+        """Merged callback-declared FIT/VAL demand (design §3.1 454-456, §3.4 667-671).
+
+        The TRAINING-mode mirror of `_writer_demand` (TEST): configured
+        metrics-family callbacks DECLARE the bundle keys they read each VAL
+        epoch (e.g. a `preds.<stream>.<task>` no loss anchors), and those
+        keys become FIT/VAL plan sinks so their producers survive demand
+        pruning. Empty outside TRAINING modes (callbacks declare FIT/VAL
+        requires only; TEST/ONNX sinks are the writer manifest).
+
+        Parameters
+        ----------
+        mode : Mode
+            A primary mode. Non-TRAINING modes return ``{}``.
+        callbacks : Any, optional
+            An explicit iterable of FIT/VAL-sink callbacks (the static
+            `salt.core.cli` path passes the callbacks it parses from the
+            ``trainer.callbacks`` block so ``salt2 graph`` sees the same
+            FIT/VAL sinks as a real ``salt2 fit`` run — the writer
+            ``writers=`` precedent). None → discovered from the attached
+            trainer.
+
+        Returns
+        -------
+        dict[str, str]
+            ``{demanded key: demander description}`` in callback (config)
+            order, the values §4.1-grade attributions.
+        """
+        if not (mode & Mode.TRAINING):
+            return {}
+        if callbacks is None:
+            callbacks = self._attached_callbacks()
+        out: dict[str, str] = {}
+        for cb in callbacks:
+            who = f"callback {type(cb).__name__!r}"
+            for key in cb.fit_val_demand(self._graph_modules):
+                out.setdefault(key, who)
+        return out
+
+    def _model_sinks(
+        self, mode: Mode, writers: Any = None, reader: Any = None, callbacks: Any = None
+    ) -> list[str]:
         """The model-plan sink anchors for one mode (design §3.1, §8).
 
-        M5 deferral note (M3 review): FIT/VAL sinks are ``loss.total`` only.
-        Design §3.1/§3.4 additionally name the declared requires of
-        configured training callbacks (e.g. a metrics callback) as FIT/VAL
-        sinks — that wiring is deferred to M5 with the MaskFormer metrics
-        that first need it. Until then the shipped `ConfusionMatrix` works
-        because tasks publish ``preds.*`` in all modes and stay alive via
-        their losses; a future callback demanding a key no task keeps alive
-        would be demand-pruned (mirror the TEST ``writers=`` mechanism here
-        when porting).
+        FIT/VAL sinks (M5, D-prereq): ``loss.total`` PLUS the declared
+        requires of any configured training callback (design §3.1 454-456,
+        §3.4 667-671) — the TRAINING-mode mirror of the TEST writer-demand
+        mechanism. A metrics-family callback DECLARES the bundle keys it
+        reads each VAL epoch (`_callback_demand`); those keys anchor the
+        FIT/VAL plan so a callback-consumed ``preds.*`` key NO loss keeps
+        alive (the M5 `MaskformerMetrics` shape) survives demand pruning.
+        The shipped `ConfusionMatrix` already worked because tasks publish
+        ``preds.*`` in all modes and stay alive via their losses; this
+        wiring extends sink coverage to callbacks demanding a key no task
+        anchors. Unlike TEST, an unconsumed ``preds.*`` in FIT/VAL is NOT a
+        dead-preds error (the normal no-metric-callback case, design §3.3):
+        callback demand only ADDS sinks, never narrows.
 
         Parameters
         ----------
@@ -419,11 +511,18 @@ class SaltModule(lightning.LightningModule):
         reader : Any, optional
             The reader prototype matching `writers` (static path only), by
             default None — the attached datamodule's reader.
+        callbacks : Any, optional
+            An explicit iterable of FIT/VAL-sink callbacks (the static
+            `salt.core.cli` path passes the callbacks it parses from the
+            ``trainer.callbacks`` block — the ``writers=`` precedent), by
+            default None — discovered from the attached trainer. Consulted
+            in TRAINING modes only.
 
         Returns
         -------
         list[str]
-            ``["loss.total"]`` in FIT/VAL. In TEST with a writer callback
+            ``["loss.total"]`` plus the callback-declared FIT/VAL demand
+            keys in FIT/VAL. In TEST with a writer callback
             (attached or passed), the writer-demanded model-produced keys —
             demand-gating proper (design §8). In ONNX with a writer
             callback, the union of the writers' declared manifest ports
@@ -457,7 +556,11 @@ class SaltModule(lightning.LightningModule):
                     f"no module produces 'loss.total' in mode {mode.name} — training plans "
                     "anchor on it; add a LossSum module (design §3.3)"
                 )
-            return ["loss.total"]
+            sinks = ["loss.total"]
+            for key in self._callback_demand(mode, callbacks):
+                if key not in sinks:
+                    sinks.append(key)
+            return sinks
         preds = [key for key in produced if key.split(KEY_SEP, 1)[0] == "preds"]
         if mode is Mode.TEST:
             if writers is None or reader is None:

@@ -31,6 +31,7 @@ from salt.core.data import (
     GraphDataset,
     H5StructuredReader,
     Labels,
+    MaskFormerTargets,
     MultiTarget,
     create_vds,
 )
@@ -43,6 +44,7 @@ from salt.core.schema import dump_schema, save_schema
 from salt.data.datasets import SaltDataset
 from salt.data.transforms import GaussianNoise
 from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.utils.mask_utils import build_target_masks
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -235,7 +237,9 @@ class TestReader:
             len(GraphDataset(modules2, mode=Mode.FIT, sinks=SINKS))
 
     def test_transforms_fit_only(self, data):
-        noise = GaussianNoise(noise_params={"tracks": [{"variable": "d0", "mean": 5.0, "std": 0.01}]})
+        noise = GaussianNoise(
+            noise_params={"tracks": [{"variable": "d0", "mean": 5.0, "std": 0.01}]}
+        )
         rows = np.s_[0:100]
         clean = build_v2(data, mode=Mode.VAL)[rows]
         noisy_val = build_v2(data, mode=Mode.VAL, transforms=[noise])[rows]
@@ -243,7 +247,9 @@ class TestReader:
         assert torch.equal(noisy_val["inputs"]["tracks"], clean["inputs"]["tracks"])
         noisy_fit = build_v2(data, mode=Mode.FIT, transforms=[noise])[rows]
         mask = clean["masks"]["tracks"]
-        assert not torch.equal(noisy_fit["inputs"]["tracks"][~mask], clean["inputs"]["tracks"][~mask])
+        assert not torch.equal(
+            noisy_fit["inputs"]["tracks"][~mask], clean["inputs"]["tracks"][~mask]
+        )
         # labels and masks untouched by the input-variable noise
         assert torch.equal(noisy_fit["masks"]["tracks"], mask)
 
@@ -379,41 +385,96 @@ class TestMultiTarget:
         with pytest.raises(ConfigError, match="at least one"):
             MultiTarget(replacements=[])
         with pytest.raises(ConfigError, match="unknown operator"):
-            MultiTarget(replacements=[
-                {"stream": "jets", "sel_label": "f", "op": "~=", "value": 1, "source": "s",
-                 "target": "t"}
-            ])
+            MultiTarget(
+                replacements=[
+                    {
+                        "stream": "jets",
+                        "sel_label": "f",
+                        "op": "~=",
+                        "value": 1,
+                        "source": "s",
+                        "target": "t",
+                    }
+                ]
+            )
         with pytest.raises(ConfigError, match="both 'target' and 'custom_target'"):
-            MultiTarget(replacements=[
-                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
-                 "target": "t", "custom_target": "c"}
-            ])
+            MultiTarget(
+                replacements=[
+                    {
+                        "stream": "jets",
+                        "sel_label": "f",
+                        "op": "==",
+                        "value": 1,
+                        "source": "s",
+                        "target": "t",
+                        "custom_target": "c",
+                    }
+                ]
+            )
         with pytest.raises(ConfigError, match="either 'target' or 'custom_target'"):
-            MultiTarget(replacements=[
-                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s"}
-            ])
+            MultiTarget(
+                replacements=[
+                    {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s"}
+                ]
+            )
         with pytest.raises(ConfigError, match="mixes"):
             # same output, but one target: + one custom_target: — illegal mix
-            MultiTarget(replacements=[
-                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
-                 "target": "t"},
-                {"stream": "jets", "sel_label": "g", "op": ">", "value": 0, "source": "u",
-                 "custom_target": "t"},
-            ])
+            MultiTarget(
+                replacements=[
+                    {
+                        "stream": "jets",
+                        "sel_label": "f",
+                        "op": "==",
+                        "value": 1,
+                        "source": "s",
+                        "target": "t",
+                    },
+                    {
+                        "stream": "jets",
+                        "sel_label": "g",
+                        "op": ">",
+                        "value": 0,
+                        "source": "u",
+                        "custom_target": "t",
+                    },
+                ]
+            )
         with pytest.raises(ConfigError, match="itself a MultiTarget output"):
-            MultiTarget(replacements=[
-                {"stream": "jets", "sel_label": "f", "op": "==", "value": 1, "source": "s",
-                 "target": "a"},
-                {"stream": "jets", "sel_label": "a", "op": ">", "value": 0, "source": "u",
-                 "custom_target": "b"},
-            ])
+            MultiTarget(
+                replacements=[
+                    {
+                        "stream": "jets",
+                        "sel_label": "f",
+                        "op": "==",
+                        "value": 1,
+                        "source": "s",
+                        "target": "a",
+                    },
+                    {
+                        "stream": "jets",
+                        "sel_label": "a",
+                        "op": ">",
+                        "value": 0,
+                        "source": "u",
+                        "custom_target": "b",
+                    },
+                ]
+            )
 
     def test_target_mode_replaces_existing(self):
         """`target:` keeps source where the condition holds, raw target otherwise."""
-        mt = MultiTarget(replacements=[
-            {"stream": "jets", "sel_label": "flav", "op": "==", "value": 5, "source": "src",
-             "target": "tgt"}
-        ])
+        mt = MultiTarget(
+            replacements=[
+                {
+                    "stream": "jets",
+                    "sel_label": "flav",
+                    "op": "==",
+                    "value": 5,
+                    "source": "src",
+                    "target": "tgt",
+                }
+            ]
+        )
         mt.name = "multi_target"
         sel = [5, 0, 5, 1]
         source = [10.0, 20.0, 30.0, 40.0]
@@ -425,10 +486,18 @@ class TestMultiTarget:
 
     def test_custom_target_mode_nan_placeholder(self):
         """`custom_target:` is NaN where the condition is false (v1 placeholder)."""
-        mt = MultiTarget(replacements=[
-            {"stream": "jets", "sel_label": "flav", "op": ">=", "value": 4, "source": "src",
-             "custom_target": "newt"}
-        ])
+        mt = MultiTarget(
+            replacements=[
+                {
+                    "stream": "jets",
+                    "sel_label": "flav",
+                    "op": ">=",
+                    "value": 4,
+                    "source": "src",
+                    "custom_target": "newt",
+                }
+            ]
+        )
         mt.name = "multi_target"
         sel = [5, 0, 4, 1]
         source = [10.0, 20.0, 30.0, 40.0]
@@ -440,12 +509,26 @@ class TestMultiTarget:
 
     def test_declares_concrete_target_produce(self):
         """The output is a CONCRETE produce that beats the Labels wildcard."""
-        mt = MultiTarget(replacements=[
-            {"stream": "jets", "sel_label": "flav", "op": "==", "value": 5, "source": "src",
-             "target": "tgt"},
-            {"stream": "jets", "sel_label": "flav", "op": "<", "value": 0, "source": "src2",
-             "custom_target": "newt"},
-        ])
+        mt = MultiTarget(
+            replacements=[
+                {
+                    "stream": "jets",
+                    "sel_label": "flav",
+                    "op": "==",
+                    "value": 5,
+                    "source": "src",
+                    "target": "tgt",
+                },
+                {
+                    "stream": "jets",
+                    "sel_label": "flav",
+                    "op": "<",
+                    "value": 0,
+                    "source": "src2",
+                    "custom_target": "newt",
+                },
+            ]
+        )
         mt.name = "multi_target"
         io = mt.declare_io(Mode.FIT)
         produces = set(flatten_spec(io.produces))
@@ -468,19 +551,25 @@ class TestMultiTarget:
         sel = rng.integers(0, 6, size=64)
         source = rng.standard_normal(64).astype(np.float32)
         raw_target = rng.standard_normal(64).astype(np.float32)
-        mt = MultiTarget(replacements=[
-            {"stream": "jets", "sel_label": "flav", "op": ">=", "value": 4, "source": "src",
-             "target": "tgt"}
-        ])
+        mt = MultiTarget(
+            replacements=[
+                {
+                    "stream": "jets",
+                    "sel_label": "flav",
+                    "op": ">=",
+                    "value": 4,
+                    "source": "src",
+                    "target": "tgt",
+                }
+            ]
+        )
         mt.name = "multi_target"
         v2 = mt.process(self._bundle(sel, source, raw_target), np.s_[0:64], Mode.FIT)[
             "labels.jets.tgt"
         ]
         # v1 reference: torch.where(OPERATORS[op](sel, value), source, target)
         mask = V1_OPERATORS[">="](_torch.as_tensor(sel), 4)
-        v1 = _torch.where(
-            mask, _torch.as_tensor(source), _torch.as_tensor(raw_target)
-        ).numpy()
+        v1 = _torch.where(mask, _torch.as_tensor(source), _torch.as_tensor(raw_target)).numpy()
         np.testing.assert_array_equal(v2, v1)
 
     def test_two_rules_one_custom_output_chain_like_v1(self):
@@ -491,12 +580,26 @@ class TestMultiTarget:
         running array (v1 in-place mutation, datasets.py:709-739) — no NaN
         survives because the two conditions partition the rows.
         """
-        mt = MultiTarget(replacements=[
-            {"stream": "jets", "sel_label": "flav_id", "op": "==", "value": 15,
-             "source": "Pt", "custom_target": "pt_label_handle"},
-            {"stream": "jets", "sel_label": "flav_id", "op": "!=", "value": 15,
-             "source": "pt", "custom_target": "pt_label_handle"},
-        ])
+        mt = MultiTarget(
+            replacements=[
+                {
+                    "stream": "jets",
+                    "sel_label": "flav_id",
+                    "op": "==",
+                    "value": 15,
+                    "source": "Pt",
+                    "custom_target": "pt_label_handle",
+                },
+                {
+                    "stream": "jets",
+                    "sel_label": "flav_id",
+                    "op": "!=",
+                    "value": 15,
+                    "source": "pt",
+                    "custom_target": "pt_label_handle",
+                },
+            ]
+        )
         mt.name = "multi_target"
         # one rule's output, but the source differs per rule -> need both labels
         b = Bundle()
@@ -510,6 +613,148 @@ class TestMultiTarget:
         # rows 0,2 (ID==15) take Pt; rows 1,3 (ID!=15) take pt; no NaN remains
         np.testing.assert_array_equal(produced, [100.0, 22.0, 300.0, 44.0])
         assert not np.isnan(produced).any()
+
+
+class TestMaskFormerTargets:
+    """M5 sub-wave C: object class + truth masks + regression labels (v1 parity).
+
+    Mirrors v1's object-target construction (datasets.py:549-553,636-644;
+    FD 1090-1110): the class label remapped through ``class_map`` and the
+    per-object×constituent ``masks`` from ``build_target_masks`` — WITHOUT the v1
+    in-place id mutations.
+    """
+
+    CLASS_MAP = MappingProxyType({
+        "b": {"raw": 5, "mapped": 0},
+        "c": {"raw": 4, "mapped": 1},
+        "null": {"raw": -1, "mapped": 2},
+    })
+
+    @staticmethod
+    def _proc(**overrides) -> MaskFormerTargets:
+        kwargs = {
+            "object_class": "flavour",
+            "object_id": "barcode",
+            "constituent_id": "ftagTruthParentBarcode",
+            "class_map": dict(TestMaskFormerTargets.CLASS_MAP),
+            "object_stream": "truth_hadrons",
+            "constituent_stream": "tracks",
+            "regression_targets": ["pt", "mass"],
+            "num_objects": 3,
+        }
+        kwargs.update(overrides)
+        proc = MaskFormerTargets(**kwargs)
+        proc.name = "object_targets"
+        return proc
+
+    @staticmethod
+    def _batch(barcode, flavour, parent, pt=None, mass=None) -> Bundle:
+        b, m = np.asarray(barcode).shape
+        obj = np.zeros(
+            (b, m), dtype=[("barcode", "i8"), ("flavour", "i4"), ("pt", "f4"), ("mass", "f4")]
+        )
+        obj["barcode"] = barcode
+        obj["flavour"] = flavour
+        obj["pt"] = pt if pt is not None else np.zeros((b, m), dtype=np.float32)
+        obj["mass"] = mass if mass is not None else np.zeros((b, m), dtype=np.float32)
+        con = np.zeros(np.asarray(parent).shape, dtype=[("ftagTruthParentBarcode", "i8")])
+        con["ftagTruthParentBarcode"] = parent
+        bundle = Bundle()
+        bundle.set("raw.truth_hadrons", obj)
+        bundle.set("raw.tracks", con)
+        return bundle
+
+    def test_construct_validations(self):
+        with pytest.raises(ConfigError, match="must contain a 'null'"):
+            self._proc(class_map={"b": {"raw": 5, "mapped": 0}, "c": {"raw": 4, "mapped": 1}})
+        with pytest.raises(ConfigError, match="must be mapped LAST"):
+            self._proc(class_map={"b": {"raw": 5, "mapped": 1}, "null": {"raw": -1, "mapped": 0}})
+        with pytest.raises(ConfigError, match="must be exactly range"):
+            # null IS mapped last (to 2, n=3), but a gap remains in the mapped set
+            # (0, 2 — missing 1: the b and c entries collide on mapped 0)
+            self._proc(
+                class_map={
+                    "b": {"raw": 5, "mapped": 0},
+                    "c": {"raw": 4, "mapped": 0},
+                    "null": {"raw": -1, "mapped": 2},
+                }
+            )
+        with pytest.raises(ConfigError, match="duplicate regression targets"):
+            self._proc(regression_targets=["pt", "pt"])
+        with pytest.raises(ConfigError, match="num_objects must be >= 1"):
+            self._proc(num_objects=0)
+
+    def test_declare_io_all_modes(self):
+        """All ``labels.objects.*`` produces are declared in every mode (demand-gated)."""
+        proc = self._proc()
+        for mode in (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX):
+            produces = set(flatten_spec(proc.declare_io(mode).produces))
+            assert produces == {
+                "labels.objects.object_class",
+                "labels.objects.masks",
+                "labels.objects.pt",
+                "labels.objects.mass",
+            }
+
+    def test_object_class_vs_v1_classmap(self):
+        """object_class is the v1 class map applied to the ORIGINAL raw values (atomic)."""
+        proc = self._proc()
+        barcode = np.array([[101, 102, -1], [201, -1, -1]])
+        flavour = np.array([[5, 4, -1], [4, -1, -1]])
+        parent = np.array([[101, 102, 0], [201, 0, 0]])
+        out = proc.process(self._batch(barcode, flavour, parent), np.s_[0:2], Mode.FIT)
+        # b->0, c->1, null(-1)->2 (null LAST)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[0, 1, 2], [1, 2, 2]])
+        assert out["labels.objects.object_class"].dtype == np.int64
+
+    def test_masks_vs_v1_build_target_masks(self):
+        """Masks == v1 build_target_masks(object_ids, constituent_ids) BITWISE."""
+        proc = self._proc()
+        barcode = np.array([[101, 102, -1], [201, 202, -1]], dtype=np.int64)
+        flavour = np.array([[5, 4, -1], [5, 4, -1]], dtype=np.int32)
+        parent = np.array([[101, 102, 101, 0], [201, 0, 202, 202]], dtype=np.int64)
+        bundle = self._batch(barcode, flavour, parent)
+        out = proc.process(bundle, np.s_[0:2], Mode.FIT)
+        v1 = build_target_masks(torch.as_tensor(barcode.copy()), torch.as_tensor(parent)).numpy()
+        np.testing.assert_array_equal(out["labels.objects.masks"], v1)
+        assert out["labels.objects.masks"].dtype == np.bool_
+        # the published raw barcode column is byte-unchanged (NO in-place -1 -> -999)
+        np.testing.assert_array_equal(bundle.get("raw.truth_hadrons")["barcode"], barcode)
+
+    def test_atomic_classmap_no_collision(self):
+        """A class map where a mapped value collides with an unvisited raw value.
+
+        v1's sequential ``x[x==raw]=mapped`` would double-map here; the vectorised
+        np.select from the ORIGINAL values is collision-proof. raw 0->mapped 1,
+        raw 1->mapped 0 (a swap): v1 would turn every 0 into 1, then every 1
+        (incl. the just-written ones) into 0 — corrupting both. The atomic map keeps
+        them distinct.
+        """
+        proc = self._proc(
+            class_map={
+                "a": {"raw": 0, "mapped": 1},
+                "b": {"raw": 1, "mapped": 0},
+                "null": {"raw": -1, "mapped": 2},
+            }
+        )
+        barcode = np.array([[10, 11, -1]], dtype=np.int64)
+        flavour = np.array([[0, 1, -1]], dtype=np.int32)  # raw 0, 1, -1
+        parent = np.array([[10, 11, 0]], dtype=np.int64)
+        out = proc.process(self._batch(barcode, flavour, parent), np.s_[0:1], Mode.FIT)
+        # atomic swap: raw 0 -> 1, raw 1 -> 0, raw -1 -> 2 (NOT v1's double-map)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[1, 0, 2]])
+
+    def test_regression_labels_are_raw_float32(self):
+        proc = self._proc()
+        barcode = np.array([[101, -1, -1]], dtype=np.int64)
+        flavour = np.array([[5, -1, -1]], dtype=np.int32)
+        parent = np.array([[101, 0, 0]], dtype=np.int64)
+        pt = np.array([[12.5, 0.0, 0.0]], dtype=np.float32)
+        mass = np.array([[3.5, 0.0, 0.0]], dtype=np.float32)
+        out = proc.process(self._batch(barcode, flavour, parent, pt, mass), np.s_[0:1], Mode.FIT)
+        np.testing.assert_array_equal(out["labels.objects.pt"], pt)
+        np.testing.assert_array_equal(out["labels.objects.mass"], mass)
+        assert out["labels.objects.pt"].dtype == np.float32
 
 
 class TestDataModule:

@@ -23,6 +23,14 @@ Shipped callbacks:
   log dir; at test start NEXT TO THE CHECKPOINT (with the eval H5) so an
   eval run never splits its outputs across two places nor litters the cwd
   (M3-review fix).
+- `MaskformerMetrics` — the v1 ``MaskformerMetrics`` port (FD 1200-1202),
+  consuming the matcher-permuted ``matched.objects.*`` the
+  `MaskFormerMatchedLoss` publishes (NOT the raw query-order decoder
+  predictions v1 read): query-i is already truth-object-i aligned, so the
+  class/mask/regression metrics need no extra matching. Its `fit_val_demand`
+  declares the ``matched.objects.*`` keys as FIT/VAL plan sinks (the DP2
+  mechanism, design §3.1/§3.4) — without it the matched-loss products a
+  metric-only consumer reads would prune (no loss anchors ``matched.*``).
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ if TYPE_CHECKING:
     from salt.core.graph.bundle import Bundle
     from salt.core.graph.planner import Plan
 
-__all__ = ["ConfusionMatrix", "GraphArtifacts"]
+__all__ = ["ConfusionMatrix", "GraphArtifacts", "MaskformerMetrics"]
 
 
 class ConfusionMatrix(Callback):
@@ -111,26 +119,28 @@ class ConfusionMatrix(Callback):
         self.last_matrix: Tensor | None = None
         self.last_ignored: int = 0
 
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Resolve stream/label/class names from the named task module (fit only).
+    def _resolve_task(self, modules: Any) -> tuple[str, str, list[str]]:
+        """Resolve ``(stream, label, class_names)`` from the named task module.
+
+        Config-only duck-typing (the `ClassificationTaskModule` surface) so
+        both `setup` (runtime) and `fit_val_demand` (static §3.1 sink
+        declaration) share ONE resolution path.
+
+        Returns
+        -------
+        tuple[str, str, list[str]]
+            The task's stream, label name, and class names.
 
         Raises
         ------
         ConfigError
-            When `pl_module` carries no graph-module dict, or `task_name`
-            does not resolve to a module with the classification-task
-            surface (candidates are listed).
+            When `modules` is not a graph-module dict, or `task_name` does
+            not resolve to a classification-task module (candidates listed).
         """
-        del trainer
-        if stage != "fit":
-            return
-        self.truth_labels = []
-        self.pred_labels = []
-        modules = getattr(pl_module, "_graph_modules", None)
         if not isinstance(modules, dict):
             raise ConfigError(
                 f"ConfusionMatrix needs a SaltModule-style LightningModule with a graph-module "
-                f"dict, got {type(pl_module).__name__} (design §3.4)"
+                f"dict, got {type(modules).__name__} (design §3.4)"
             )
         module = modules.get(self.task_name)
         stream = getattr(module, "stream", None)
@@ -148,6 +158,48 @@ class ConfusionMatrix(Callback):
                 f"task module (needs stream/label/class_names — design §3.3). "
                 f"Configured candidates: {candidates or '<none>'}"
             )
+        return stream, label, list(class_names)
+
+    def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
+        """The bundle keys this callback reads each VAL epoch (design §3.1, §3.4).
+
+        The STATIC, config-only FIT/VAL-sink declaration `SaltModule`
+        consumes (`_callback_demand`) — the TRAINING-mode mirror of a
+        writer's `requires`: the demanded ``preds.<stream>.<task>`` anchors
+        the producing task in the FIT/VAL plan, and ``labels.<stream>.<label>``
+        keeps the truth column at the boundary. Does not depend on `setup`
+        having run (the static `salt2 graph` tooling calls this on a freshly
+        parsed config), so it re-resolves from `model_modules` directly.
+
+        Parameters
+        ----------
+        model_modules : Any
+            The model-side ``{instance name: GraphModule}`` dict.
+
+        Returns
+        -------
+        tuple[str, ...]
+            ``(preds.<stream>.<task>, labels.<stream>.<label>)``. Propagates
+            the `_resolve_task` `ConfigError` when `task_name` does not name
+            a classification task.
+        """
+        stream, label, _ = self._resolve_task(model_modules)
+        return (f"preds.{stream}.{self.task_name}", f"labels.{stream}.{label}")
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Resolve stream/label/class names from the named task module (fit only).
+
+        Propagates the `_resolve_task` `ConfigError` when `pl_module` carries
+        no graph-module dict, or `task_name` does not resolve to a module
+        with the classification-task surface (candidates are listed).
+        """
+        del trainer
+        if stage != "fit":
+            return
+        self.truth_labels = []
+        self.pred_labels = []
+        modules = getattr(pl_module, "_graph_modules", None)
+        stream, label, class_names = self._resolve_task(modules)
         self.task_stream = stream
         self.task_label_name = label
         if isinstance(self.class_names_override, dict):
@@ -243,6 +295,239 @@ class ConfusionMatrix(Callback):
             t[valid] * num_classes + p[valid], minlength=num_classes * num_classes
         ).reshape(num_classes, num_classes)
         return matrix, int((~valid).sum())
+
+
+class MaskformerMetrics(Callback):
+    """Log per-epoch MaskFormer object metrics from the matched predictions (FD 1200-1202).
+
+    The v1 ``MaskformerMetrics`` port (``maskformer_metrics.py``), consuming the
+    step bundle's ``matched.objects.*`` keys — the matcher-permuted predictions
+    + truth labels the `MaskFormerMatchedLoss` publishes (design's
+    single-ownership: the match is solved ONCE, in the loss). Query-i is already
+    aligned to truth-object-i, so the class/mask/regression metrics read straight
+    from ``matched.objects.{class_logits,object_class,masks,target_masks,
+    regression,target_regression}`` — no re-matching in the callback (v1 read the
+    raw ``preds["objects"]`` query-order outputs; v2 reads the matched ones).
+
+    Metrics (v1 set): class exact-match + micro/macro accuracy, per-class +
+    not-null efficiency/purity, mask reco efficiency/fake-rate per criterion, and
+    per-target regression MAE (computed in the SCALED space the matched loss
+    publishes — v1 inverted scaling via the task scaler; v2 keeps the metric in
+    the loss's own space to stay task-decoupled and bundle-native). Logged to the
+    attached logger and stashed on the callback (``last_metrics``) for logger-free
+    gate inspection (the W5 `ConfusionMatrix` precedent).
+
+    `fit_val_demand` declares the consumed ``matched.objects.*`` keys as FIT/VAL
+    plan sinks (the DP2 mechanism, design §3.1/§3.4): they keep the matched-loss
+    products alive even though no loss anchors them, so a metric-only consumer
+    does not get pruned. Pruned from TEST/ONNX (the matched loss is FIT|VAL-only).
+
+    Parameters
+    ----------
+    only_val : bool, optional
+        Log only on validation batches (v1 default — train logging slows the
+        loop), by default True.
+    mask_criteria : Mapping[str, tuple[float, float]] | None, optional
+        ``{name: (min_recall, min_purity)}`` mask-match criteria (v1 defaults
+        ``perfect (1, 1)`` / ``loose (0.5, 0.5)``), by default None.
+    input_stream : str, optional
+        The matched object stream name, by default ``objects`` — the
+        ``matched.<input_stream>.*`` keys it reads.
+    constituent_stream : str, optional
+        The constituent stream whose pad mask suppresses padded tokens in the
+        mask metrics (v1 ``pad_mask["tracks"]``), by default ``tracks``.
+    """
+
+    def __init__(
+        self,
+        only_val: bool = True,
+        mask_criteria: Mapping[str, tuple[float, float]] | None = None,
+        input_stream: str = "objects",
+        constituent_stream: str = "tracks",
+    ) -> None:
+        self.only_val = only_val
+        self.mask_criteria: dict[str, tuple[float, float]] = (
+            dict(mask_criteria) if mask_criteria else {"perfect": (1.0, 1.0), "loose": (0.5, 0.5)}
+        )
+        self.input_stream = str(input_stream)
+        self.constituent_stream = str(constituent_stream)
+        # stashed at epoch end for logger-free value comparison (gate inspection)
+        self.last_metrics: dict[str, float] = {}
+
+    def _matched_key(self, leaf: str) -> str:
+        """A ``matched.<input_stream>.<leaf>`` bundle key.
+
+        Returns
+        -------
+        str
+            The dotted matched-object key.
+        """
+        return f"matched.{self.input_stream}.{leaf}"
+
+    def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
+        """The ``matched.objects.*`` keys this callback reads each VAL epoch (design §3.4).
+
+        The DP2 FIT/VAL-sink declaration `SaltModule` consumes
+        (`_callback_demand`): the matcher-permuted class logits / object class /
+        masks / target masks anchor the `MaskFormerMatchedLoss` in the FIT/VAL
+        plan so its ``matched.*`` products survive demand pruning (no loss anchors
+        them). Static/config-only — does not depend on `setup` having run.
+
+        Parameters
+        ----------
+        model_modules : Any
+            The model-side ``{instance name: GraphModule}`` dict (unused — the
+            demand keys are config-derived from ``input_stream``).
+
+        Returns
+        -------
+        tuple[str, ...]
+            The ``matched.<input_stream>.{class_logits,object_class,masks,
+            target_masks}`` keys.
+        """
+        del model_modules
+        return (
+            self._matched_key("class_logits"),
+            self._matched_key("object_class"),
+            self._matched_key("masks"),
+            self._matched_key("target_masks"),
+        )
+
+    def on_validation_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        """Compute + log the object metrics from the step bundle's matched keys."""
+        del batch, batch_idx, dataloader_idx
+        if trainer.fast_dev_run:
+            return
+        metrics = self._compute(outputs["bundle"])
+        self.last_metrics = {k: float(v) for k, v in metrics.items()}
+        self._log(trainer, pl_module, metrics, "val")
+
+    def on_train_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Compute + log the object metrics on train batches when ``only_val`` is off."""
+        del batch, batch_idx
+        if self.only_val or trainer.fast_dev_run:
+            return
+        metrics = self._compute(outputs["bundle"])
+        self._log(trainer, pl_module, metrics, "train")
+
+    def _compute(self, bundle: Bundle) -> dict[str, Tensor]:
+        """Compute the v1 metric set from the matched object bundle keys.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{metric name: scalar tensor}`` (the v1 names).
+        """
+        from salt.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415 - heavy
+
+        class_logits = bundle.get(self._matched_key("class_logits")).detach()
+        object_class = bundle.get(self._matched_key("object_class")).detach()
+        pred_masks = bundle.get(self._matched_key("masks")).detach()
+        tgt_masks = bundle.get(self._matched_key("target_masks")).detach()
+
+        n_classes = class_logits.shape[-1]
+        null_index = n_classes - 1  # null is the LAST class (MaskFormerTargets contract)
+        obj_class_pred = class_logits.argmax(-1)
+
+        metrics: dict[str, Tensor] = {}
+        pred_flat, tgt_flat = obj_class_pred.reshape(-1), object_class.reshape(-1)
+        # class exact match per row (all M objects correct), micro/macro accuracy
+        metrics["class_exact_match"] = (obj_class_pred == object_class).all(-1).float().mean()
+        metrics["class_accuracy_micro"] = (pred_flat == tgt_flat).float().mean()
+        per_class_acc = torch.stack([
+            (pred_flat[tgt_flat == c] == c).float().mean()
+            for c in range(n_classes)
+            if (tgt_flat == c).any()
+        ])
+        metrics["class_accuracy_macro"] = per_class_acc.mean()
+
+        # per-class + not-null efficiency (recall) / purity (precision)
+        present_tgt = tgt_flat != null_index
+        present_pred = pred_flat != null_index
+        metrics["notnull_eff"] = _recall(present_pred, present_tgt)
+        metrics["notnull_pur"] = _precision(present_pred, present_tgt)
+        for c in range(null_index):  # every non-null class
+            is_tgt, is_pred = tgt_flat == c, pred_flat == c
+            metrics[f"class{c}_eff"] = _recall(is_pred, is_tgt)
+            metrics[f"class{c}_pur"] = _precision(is_pred, is_tgt)
+
+        # mask reco metrics: predicted masks suppressed on padded tokens + null
+        # objects (v1 mask_from_logits 'sigmoid' branch, maskformer_metrics.py:124)
+        pad_key = f"masks.{self.constituent_stream}"
+        pad_mask = bundle.get(pad_key).detach() if pad_key in bundle else None
+        recon = mask_from_logits(pred_masks, "sigmoid", pad_mask, obj_class_pred)
+        for name, (recall, purity) in self.mask_criteria.items():
+            eff, fake = reco_metrics(
+                recon, tgt_masks, min_recall=recall, min_purity=purity, reduce=True
+            )
+            metrics[f"query_{name}_match_eff"] = eff
+            metrics[f"query_{name}_match_fake"] = fake
+
+        # per-target regression MAE in the matched loss's SCALED space (v1 inverted
+        # via the task scaler; v2 keeps it task-decoupled, FD 1200-1202 note)
+        reg_key = self._matched_key("regression")
+        if reg_key in bundle:
+            reg_pred = bundle.get(reg_key).detach()
+            reg_tgt = bundle.get(self._matched_key("target_regression")).detach()
+            valid = object_class != null_index  # [B, M]
+            if valid.any():
+                metrics["query_regression_mae"] = torch.nn.functional.l1_loss(
+                    reg_pred[valid], reg_tgt[valid]
+                )
+        return metrics
+
+    def _log(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        metrics: Mapping[str, Tensor],
+        stage: str,
+    ) -> None:
+        """Log each metric through the LightningModule (sync across devices)."""
+        del trainer
+        for name, value in metrics.items():
+            pl_module.log(f"{stage}/{name}", value)
+
+
+def _recall(pred: Tensor, tgt: Tensor) -> Tensor:
+    """Binary recall TP / (TP + FN) (torchmetrics-free, 0.0 with no positives).
+
+    Returns
+    -------
+    Tensor
+        The recall scalar.
+    """
+    tp = (pred & tgt).sum().float()
+    denom = tgt.sum().float()
+    return tp / denom if denom > 0 else torch.zeros((), device=pred.device)
+
+
+def _precision(pred: Tensor, tgt: Tensor) -> Tensor:
+    """Binary precision TP / (TP + FP) (torchmetrics-free, 0.0 with no predictions).
+
+    Returns
+    -------
+    Tensor
+        The precision scalar.
+    """
+    tp = (pred & tgt).sum().float()
+    denom = pred.sum().float()
+    return tp / denom if denom > 0 else torch.zeros((), device=pred.device)
 
 
 class GraphArtifacts(Callback):
