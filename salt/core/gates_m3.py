@@ -359,7 +359,7 @@ def _v2_checkpoint(
         pin_memory=False,
     )
     modules = build_gn2v2_modules(norm_dict)
-    model = SaltModule(modules, lrs_config=dict(_LRS), name=RUN_NAME)
+    model = SaltModule(modules, lrs=dict(_LRS), name=RUN_NAME)
     # zero batches: the setup hooks (compile + bind) are all this run is for —
     # a FRESH Normaliser refuses forward before materialise (design §2.3), and
     # the buffers arrive via the strict state-dict load below
@@ -404,7 +404,9 @@ def _salt2_test_argv(
         f"--name={RUN_NAME}",  # the v1 column-prefix contract (see RUN_NAME)
         "--trainer.accelerator=cpu",
         "--trainer.devices=1",
-        "--trainer.enable_progress_bar=false",
+        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # enable_progress_bar=false cannot coexist with a configured bar
+        "--callbacks.progress=null",
         # GraphArtifacts (default-on, design §4.4) writes into the trainer
         # log dir — point it at the gate outdir, not the invocation cwd
         f"--trainer.default_root_dir={run_dir}",

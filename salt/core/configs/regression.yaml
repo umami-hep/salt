@@ -69,7 +69,7 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    lrs_config: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
     optimizer: AdamW
     modules:
       norm:

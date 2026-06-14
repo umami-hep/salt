@@ -8,6 +8,7 @@ checks stay green (the gates_m2/m3/m4 pattern, never exposed on the CLI).
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,9 @@ import salt.core.gates_m5 as gm5
 from salt.core.gates_m5 import (
     main,
     run_d1,
+    run_d2cfg,
+    run_d2ckpt,
+    run_d2expose,
     run_l1,
     run_l2,
     run_l3,
@@ -27,6 +31,7 @@ from salt.core.gates_m5 import (
     run_r3,
     run_r4,
 )
+from salt.core.onnx.reduces import registered_reduces
 
 
 class TestR1:
@@ -497,8 +502,6 @@ class TestD1:
         assert report["checks"]["register_reduce_residue_cleared"]
         # the shipped registry is exactly the five reduces after the gate runs (the
         # probe was cleaned up, so the in-process exact-set assertions hold)
-        from salt.core.onnx.reduces import registered_reduces
-
         assert set(registered_reduces()) == {
             "split_scalars",
             "argmax",
@@ -536,9 +539,179 @@ class TestD1:
         assert report["checks"]["duplicate_register_reduce_raises"]
 
 
+class TestD2ckpt:
+    def test_pass(self, tmp_path):
+        code, report = run_d2ckpt(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "d2ckpt_report.json").is_file()
+        # the v1 filename/monitor contract (stem + save_top_k=-1 + monitor + no auto-insert)
+        assert report["checks"]["filename_stem_is_v1_contract"]
+        assert report["checks"]["save_top_k_is_minus_one"]
+        assert report["checks"]["monitor_is_monitor_loss"]
+        assert report["checks"]["auto_insert_metric_name_off"]
+        assert report["checks"]["formatted_name_has_loss_tag"]
+        # the run-dir path inference: setup forces ckpts/ AND _best_checkpoint resolves it
+        assert report["checks"]["setup_forces_ckpts_dir"]
+        assert report["checks"]["inference_resolves_lowest_loss"]
+        assert report["checks"]["non_fit_setup_does_not_force_ckpts"]
+        assert report["checks"]["fast_dev_run_does_not_force_ckpts"]
+        assert report["checks"]["s3_log_dir_rejected_loudly"]
+        # the ProgressBar smoke (stock TQDMProgressBar under a salt-owned name)
+        assert report["checks"]["progressbar_attaches_without_error"]
+        assert report["checks"]["progressbar_is_stock_tqdm"]
+        assert report["checks"]["progressbar_refresh_rate_passthrough"]
+        # the gate claims ONLY the Checkpoint/ProgressBar slice + the real surfaces
+        assert "Checkpoint + ProgressBar slice" in report["scope_note"]
+        assert "NON-GATING" in report["scope_note"]
+        assert "_best_checkpoint" in report["surfaces_exercised"]
+        assert "ModelCheckpoint.setup" in report["surfaces_exercised"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # drop the 'loss=' tag from the written checkpoint stem -> _best_checkpoint
+        # can no longer resolve it (raises), so the run-dir inference check FAILS,
+        # while the contract / setup-dir / progress checks (independent of the
+        # written filename) stay green
+        code, report = run_d2ckpt(tmp_path, corruption=lambda name: name.replace("loss=", "val="))
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["inference_resolves_lowest_loss"]
+        # the contract, setup-dir, s3 and progress checks are independent and stay green
+        assert report["checks"]["filename_stem_is_v1_contract"]
+        assert report["checks"]["setup_forces_ckpts_dir"]
+        assert report["checks"]["s3_log_dir_rejected_loudly"]
+        assert report["checks"]["progressbar_is_stock_tqdm"]
+
+
+class TestD2expose:
+    def test_pass(self, tmp_path):
+        code, report = run_d2expose(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "d2expose_report.json").is_file()
+        # name-based origin_weighting: names resolve to v1's hardcoded ids + parity
+        assert report["checks"]["names_pending_before_resolution"]
+        assert report["checks"]["names_resolve_to_v1_heavy_ids"]
+        assert report["checks"]["names_resolve_to_v1_fake_ids"]
+        assert report["checks"]["origin_names_match_independent_v1"]
+        # the loud surfaces (unknown name, no-schema bind, integer no-op)
+        assert report["checks"]["unknown_name_rejected"]
+        assert report["checks"]["name_based_no_schema_bind_fails"]
+        assert report["checks"]["integer_ids_resolution_is_noop"]
+        # the expose opt-out: pred-port gating + plan pruning + real dead-preds path
+        assert report["checks"]["exposed_pred_active_in_fit"]
+        assert report["checks"]["exposed_pred_inactive_in_test"]
+        assert report["checks"]["exposed_task_kept_in_fit_plan"]
+        assert report["checks"]["exposed_task_pruned_from_test_plan"]
+        assert report["checks"]["default_task_triggers_dead_preds_error"]
+        assert report["checks"]["dead_preds_error_advertises_expose"]
+        assert report["checks"]["expose_silences_dead_preds_error"]
+        # the gate claims ONLY the model-feature slice + names the real surfaces
+        assert "expose opt-out + name-based" in report["scope_note"]
+        assert "INDEPENDENT v1 VertexingTask" in report["surfaces_exercised"]
+        assert "_model_sinks(Mode.TEST)" in report["surfaces_exercised"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # shift every origin id by +1 so the name-resolved heavy/fake ids no
+        # longer match v1's hardcoded (3,4,5)/1 -> the INDEPENDENT-v1 parity
+        # check FAILS, while the expose / resolution-count / loud-surface checks
+        # (independent of the corrupted ids) stay green
+        code, report = run_d2expose(
+            tmp_path, corruption=lambda index: {name: i + 1 for name, i in index.items()}
+        )
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["origin_names_match_independent_v1"]
+        # the resolution itself still produced v1 ids (corruption happens AFTER) and
+        # the expose checks are wholly independent of the origin ids — all green
+        assert report["checks"]["names_resolve_to_v1_heavy_ids"]
+        assert report["checks"]["exposed_task_pruned_from_test_plan"]
+        assert report["checks"]["default_task_triggers_dead_preds_error"]
+        assert report["checks"]["expose_silences_dead_preds_error"]
+
+
+class TestD2cfg:
+    def test_pass(self, tmp_path):
+        code, report = run_d2cfg(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "d2cfg_report.json").is_file()
+        # the producing leaf the validator unifies against is data/float32
+        assert report["checks"]["producer_leaf_is_data_float32"]
+        # writer TensorSpec kind/dtype validation: matching + unconstrained pass
+        assert report["checks"]["matching_require_passes"]
+        assert report["checks"]["unconstrained_dtype_require_passes"]
+        # the loud surfaces: wrong dtype/kind and missing non-optional producer
+        assert report["checks"]["wrong_dtype_raises_shape_error"]
+        assert report["checks"]["wrong_kind_raises_kind_error"]
+        assert report["checks"]["missing_nonoptional_require_raises_config_error"]
+        assert report["checks"]["optional_missing_require_is_silent"]
+        # the END-TO-END half: the SAME kind/dtype unification now runs inside
+        # `salt2 graph validate` (cli._cmd_validate, TEST) — a wrong writer
+        # kind/dtype FAILS the canonical static-validator command data-free, a
+        # matching writer PASSES it (the medium critic finding's fix)
+        assert report["checks"]["wrong_kind_writer_fails_graph_validate"]
+        assert report["checks"]["wrong_dtype_writer_fails_graph_validate"]
+        assert report["checks"]["matching_writer_passes_graph_validate"]
+        assert report["config"]["wrong_kind_rc"] != 0
+        assert report["config"]["wrong_dtype_rc"] != 0
+        assert report["config"]["matching_rc"] == 0
+        # lrs_config -> lrs migration: v2 config loads, no stale key, old key rejected
+        assert report["checks"]["migrated_config_graph_validate_ok"]
+        assert report["checks"]["no_v2_config_retains_lrs_config_key"]
+        assert report["checks"]["stale_lrs_config_key_rejected"]
+        # the migration check actually scanned the shipped configs (empty = clean)
+        assert report["config"]["stale_configs_found"] == []
+        # the gate claims ONLY the cfg slice + names the real surfaces
+        assert "writer TensorSpec kind/dtype validation + lrs_config->lrs" in report["scope_note"]
+        assert "WriterCallback.validate_specs" in report["surfaces_exercised"]
+        assert "salt2 graph validate" in report["surfaces_exercised"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # flip the jets_classification producer dtype to int64 so the MATCHING
+        # data/float32 probe is no longer dtype-compatible -> matching_require_passes
+        # FAILS, while the wrong-kind/dtype, existence and lrs-migration checks
+        # (independent of that producer dtype) stay green
+        def corrupt(specs):
+            key = "preds.jets.jets_classification"
+            specs[key] = dataclasses.replace(specs[key], dtype="int64")
+            return specs
+
+        code, report = run_d2cfg(tmp_path, corruption=corrupt)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["matching_require_passes"]
+        # the independent checks stay green
+        assert report["checks"]["wrong_dtype_raises_shape_error"]
+        assert report["checks"]["wrong_kind_raises_kind_error"]
+        assert report["checks"]["missing_nonoptional_require_raises_config_error"]
+        assert report["checks"]["migrated_config_graph_validate_ok"]
+        assert report["checks"]["no_v2_config_retains_lrs_config_key"]
+        assert report["checks"]["stale_lrs_config_key_rejected"]
+
+
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        for gate in ("r1", "r2", "r3", "r4", "l1", "l2", "l3", "mf1a", "mf1c", "mf2", "d1"):
+        gates = (
+            "r1",
+            "r2",
+            "r3",
+            "r4",
+            "l1",
+            "l2",
+            "l3",
+            "mf1a",
+            "mf1c",
+            "mf2",
+            "d1",
+            "d2ckpt",
+            "d2expose",
+            "d2cfg",
+        )
+        for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0
             assert (tmp_path / gate / f"{gate}_report.json").is_file()

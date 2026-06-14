@@ -32,7 +32,7 @@ from salt.tests.core.gn2_fixture import (
     TRACK_VARIABLES,
     write_parity_norm_dict,
 )
-from salt.tests.core.gn2v2_fixture import build_gn2v2_modules
+from salt.tests.core.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
 from salt.utils.inputs import write_dummy_file
 
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
@@ -80,7 +80,7 @@ def build_model(data, norm_dict=None, **kwargs) -> SaltModule:
     # GN2v2 module dict with an UN-narrowed LossSum (SaltModule must narrow it)
     modules = build_gn2v2_modules(norm_dict or data["nd"])
     modules["loss"] = LossSum()
-    kwargs.setdefault("lrs_config", LRS)
+    kwargs.setdefault("lrs", LRS)
     return SaltModule(modules, **kwargs)
 
 
@@ -162,8 +162,8 @@ class TestConstruction:
         assert set(demand[Mode.TEST]) == TEST_DEMAND
 
     def test_missing_lrs_keys_rejected(self, data):
-        with pytest.raises(ConfigError, match="lrs_config"):
-            build_model(data, lrs_config={"initial": 1e-3})
+        with pytest.raises(ConfigError, match="lrs is missing"):
+            build_model(data, lrs={"initial": 1e-3})
 
     def test_bad_optimizer_rejected(self, data):
         with pytest.raises(ConfigError, match="optimizer"):
@@ -189,7 +189,7 @@ class TestConstruction:
         for task in ("track_origin", "track_vertexing"):
             modules[task].weight = 1.0
         modules["loss"] = LossGLS()
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         loss = model.net["loss"]
         assert isinstance(loss, LossGLS)
         assert loss.narrowed
@@ -201,7 +201,7 @@ class TestConstruction:
         modules = build_gn2v2_modules(data["nd"])
         modules["loss"] = LossGLS()
         with pytest.raises(ConfigError, match="does not utilise task weights"):
-            SaltModule(modules, lrs_config=LRS)
+            SaltModule(modules, lrs=LRS)
 
 
 class TestFit:
@@ -352,7 +352,7 @@ class TestCheckpoint:
         """A config change between save and resume trips the FIT hash gate."""
         modules = build_gn2v2_modules(data["nd"], embed_dim=24)
         modules["loss"] = LossSum()
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         dm = build_datamodule(data)
         trainer = make_trainer(max_epochs=2)
         with pytest.raises(ConfigError, match="plan-hash mismatch for mode FIT"):
@@ -447,7 +447,7 @@ class TestBoundaryDemandGuards:
         # naming the consuming modules and their config addresses
         modules = build_gn2v2_modules(data["nd"])
         del modules["pool"]
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         with pytest.raises(ConfigError, match="pooled.global") as excinfo:
             model.sink_demand()
         message = str(excinfo.value)
@@ -494,7 +494,7 @@ class TestCallbackSinks:
         modules = build_gn2v2_modules(data["nd"])
         modules["aux"] = _AuxProbe()
         modules["loss"] = LossSum()
-        return SaltModule(modules, lrs_config=LRS)
+        return SaltModule(modules, lrs=LRS)
 
     def _attach(self, model: SaltModule, *callbacks) -> None:
         from types import SimpleNamespace
@@ -562,7 +562,7 @@ class TestCallbackSinks:
         # extends the FIT/VAL boundary demand, attributed to the callback
         model = build_gn2v2_modules(data["nd"])
         model["loss"] = LossSum()
-        model = SaltModule(model, lrs_config=LRS)
+        model = SaltModule(model, lrs=LRS)
         self._attach(model, _ProbeMetrics("labels.jets.extra_truth"))
         demand, origins = model._boundary_demand()[Mode.FIT]  # noqa: SLF001
         assert "labels.jets.extra_truth" in demand
@@ -644,4 +644,165 @@ class TestClassNamesCheck:
         model = build_model(data)
         model.net["jets_classification"].class_names = ("bjets", "ujets", "cjets")
         with pytest.raises(ConfigError, match="DIFFERENT ORDER"):
+            make_trainer().fit(model, build_datamodule(data))
+
+
+class TestExposeSilencesDeadPreds:
+    """The §4.2 opt-out at the real TEST writer-demand surface (`_model_sinks`)."""
+
+    def _model_with_origin_expose(self, data, expose):
+        from salt.core.nn.tasks import ClassificationTaskModule
+
+        modules = build_gn2v2_modules(data["nd"])
+        # rebuild track_origin (a tracks-stream aux task) with/without expose
+        modules["track_origin"] = ClassificationTaskModule(
+            stream="tracks", label="ftagTruthOriginLabel",
+            class_names=list(ORIGIN_CLASSES), context="pooled.global", weight=0.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=expose,
+        )
+        modules["track_origin"].name = "track_origin"
+        loss = LossSum()
+        loss.name = "loss"
+        loss.narrow(LossSum.collect_loss_keys(modules))
+        modules["loss"] = loss
+        return SaltModule(modules, lrs=LRS)
+
+    def _attach_jets_only_writer(self, model):
+        from types import SimpleNamespace
+
+        from salt.core.writers import TaskWriter, WriterCallback
+
+        # TaskWriter narrowed to jets — the tracks tasks' preds are unconsumed
+        wcb = WriterCallback(modules={"tasks": TaskWriter(streams=["jets"])})
+        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
+            callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
+        )
+        return wcb, reader
+
+    def test_default_task_dead_preds_errors(self, data):
+        # negative control: WITHOUT expose, the jets-only writer leaves the
+        # tracks-stream preds unconsumed → the TEST dead-preds hard error
+        model = self._model_with_origin_expose(data, expose=None)
+        wcb, reader = self._attach_jets_only_writer(model)
+        with pytest.raises(ConfigError, match="consumed by NO writer") as excinfo:
+            model._model_sinks(Mode.TEST, writers=wcb, reader=reader)  # noqa: SLF001
+        # the dead-preds fix advertises the real expose opt-out FIRST
+        message = str(excinfo.value)
+        assert "expose: [fit, val]" in message
+        assert "track_origin.init_args.expose=[fit,val]" in message
+
+    def test_expose_silences_dead_preds(self, data):
+        # WITH expose: [fit, val] on track_origin, the same jets-only writer
+        # produces NO dead-preds error — the pred is gated out of TEST. The
+        # vertexing task (still all-modes) IS the genuine remaining dead pred,
+        # so expose ONLY the tasks that opt out; here we expose both tracks
+        # tasks to prove the error clears.
+        from salt.core.nn.tasks import ClassificationTaskModule
+
+        model = self._model_with_origin_expose(data, expose=["fit", "val"])
+        # also opt the vertexing task out (the other tracks-stream pred)
+        modules = dict(model._graph_modules)  # noqa: SLF001
+        vtx = modules["track_vertexing"]
+        vtx_exposed = type(vtx)(
+            stream="tracks", label="ftagTruthVertexIndex",
+            origin_label="ftagTruthOriginLabel", context="pooled.global", weight=1.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=["fit", "val"],
+        )
+        vtx_exposed.name = "track_vertexing"
+        rebuilt = build_gn2v2_modules(data["nd"])
+        rebuilt["track_origin"] = ClassificationTaskModule(
+            stream="tracks", label="ftagTruthOriginLabel", class_names=list(ORIGIN_CLASSES),
+            context="pooled.global", weight=0.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=["fit", "val"],
+        )
+        rebuilt["track_origin"].name = "track_origin"
+        rebuilt["track_vertexing"] = vtx_exposed
+        loss = LossSum()
+        loss.name = "loss"
+        loss.narrow(LossSum.collect_loss_keys(rebuilt))
+        rebuilt["loss"] = loss
+        model = SaltModule(rebuilt, lrs=LRS)
+        wcb, reader = self._attach_jets_only_writer(model)
+        # no raise — only the jets pred is a TEST sink now
+        sinks = model._model_sinks(Mode.TEST, writers=wcb, reader=reader)  # noqa: SLF001
+        assert "preds.jets.jets_classification" in sinks
+        assert "preds.tracks.track_origin" not in sinks
+        assert "preds.tracks.track_vertexing" not in sinks
+
+
+class TestOriginWeightingResolvedAtSetup:
+    """Name-based origin_weighting resolves at fit/test setup (design §5.1, §2.6)."""
+
+    @staticmethod
+    def _schema_with_origin_attr(data):
+        # the dummy file's schema carries no tracks origin class-name attr;
+        # build an in-memory Schema that does (umami-preprocessing convention)
+        from salt.core.schema import GroupSchema, Schema, load_schema
+
+        schema = load_schema(data["schema"])
+        groups = dict(schema.groups)
+        tracks = groups["tracks"]
+        groups["tracks"] = GroupSchema(
+            fields=dict(tracks.fields),
+            attrs={**tracks.attrs, "ftagTruthOriginLabel": list(ORIGIN_CLASSES)},
+        )
+        return Schema(groups=groups, attrs=dict(schema.attrs))
+
+    def _datamodule_with_origin_schema(self, data) -> GraphDataModule:
+        schema = self._schema_with_origin_attr(data)
+        modules = {
+            "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=schema),
+            "features": Features(
+                variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
+            ),
+            "labels": Labels(),
+        }
+        return GraphDataModule(
+            modules,
+            batch_size=100,
+            num_workers=0,
+            train_file=data["h5"],
+            val_file=data["h5"],
+            test_file=data["h5"],
+        )
+
+    def test_setup_resolves_names_to_v1_ids(self, data):
+        from salt.core.nn.tasks import VertexingTaskModule
+
+        modules = build_gn2v2_modules(data["nd"])
+        modules["track_vertexing"] = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex",
+            origin_label="ftagTruthOriginLabel", context="pooled.global", weight=1.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"},
+            origin_weighting={"heavy": ["FromB", "FromBC", "FromC"], "fake": ["Fake"]},
+        )
+        modules["track_vertexing"].name = "track_vertexing"
+        modules["loss"] = LossSum()
+        model = SaltModule(modules, lrs=LRS)
+        assert model.net["track_vertexing"].heavy_ids is None  # unresolved pre-fit
+        # a real fit: setup resolves the names against the schema before bind
+        make_trainer().fit(model, self._datamodule_with_origin_schema(data))
+        vtx = model.net["track_vertexing"]
+        assert vtx.heavy_ids == (3, 4, 5)
+        assert vtx.fake_ids == (1,)
+        # the composed head got the resolved ids
+        assert vtx.task._heavy_ids == (3, 4, 5)  # noqa: SLF001
+
+    def test_name_based_without_schema_fails_loudly(self, data):
+        # a name-based config but the standard datamodule schema has no origin
+        # class-name attr → loud setup error (resolve_origin_names raises)
+        from salt.core.nn.tasks import VertexingTaskModule
+
+        modules = build_gn2v2_modules(data["nd"])
+        modules["track_vertexing"] = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex",
+            origin_label="ftagTruthOriginLabel", context="pooled.global", weight=1.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"},
+            origin_weighting={"heavy": ["FromB", "FromBC", "FromC"], "fake": ["Fake"]},
+        )
+        modules["track_vertexing"].name = "track_vertexing"
+        modules["loss"] = LossSum()
+        model = SaltModule(modules, lrs=LRS)
+        with pytest.raises(ConfigError, match="no string-list attr"):
             make_trainer().fit(model, build_datamodule(data))

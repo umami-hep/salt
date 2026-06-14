@@ -72,9 +72,9 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # lrs_config: == design §5.1 'lrs:' (the v1 ModelWrapper kwarg name is
-    # kept in M2; the rename to 'lrs' is an M3 cleanup)
-    lrs_config: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    # lrs: == design §5.1 OneCycleLR block (the v1 ModelWrapper 'lrs_config'
+    # kwarg, renamed to 'lrs' in M5 sub-wave D)
+    lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
     optimizer: AdamW
     modules:
       norm:

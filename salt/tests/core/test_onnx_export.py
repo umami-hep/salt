@@ -375,7 +375,7 @@ def cli_run(tmp_path_factory):
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     model = SaltModule(
         modules,
-        lrs_config={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
+        lrs={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
         name="GN2v2_dummy",
     )
     dm = GraphDataModule(

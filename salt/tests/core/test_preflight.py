@@ -62,7 +62,7 @@ class TestNormaliserPreflight:
         # bind via a SaltModule compile so _fields carries the feature list,
         # then strip one variable from the dict on disk
         modules = build_gn2v2_modules(norm_dict)
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         model.compile_mode(Mode.FIT, flatten_spec(gn2v2_sources()))
         model._ensure_bound()  # noqa: SLF001 - exercising the setup path piecewise
         payload = yaml.safe_load(norm_dict.read_text())
@@ -78,7 +78,7 @@ class TestNormaliserPreflight:
         payload["jets"][variable]["std"] = 0.0
         norm_dict.write_text(yaml.safe_dump(payload))
         modules = build_gn2v2_modules(norm_dict)
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         model.compile_mode(Mode.FIT, flatten_spec(gn2v2_sources()))
         model._ensure_bound()  # noqa: SLF001 - exercising the setup path piecewise
         with pytest.raises(ConfigError, match="zero standard deviation"):
@@ -107,7 +107,7 @@ class TestSaltModulePreflights:
 
     def test_run_preflights_propagates(self, tmp_path, norm_dict):
         modules = build_gn2v2_modules(norm_dict)
-        model = SaltModule(modules, lrs_config=LRS)
+        model = SaltModule(modules, lrs=LRS)
         model.compile_mode(Mode.FIT, flatten_spec(gn2v2_sources()))
         model._ensure_bound()  # noqa: SLF001 - exercising the setup path piecewise
         model._run_preflights()  # noqa: SLF001 - good dict passes

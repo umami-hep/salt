@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ class _TaskModuleBase(nn.Module):
         loss: str | dict[str, Any] | None,
         weight: float,
         default_loss: dict[str, Any],
+        expose: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.name = _UNNAMED
@@ -86,7 +88,27 @@ class _TaskModuleBase(nn.Module):
         self.dense_cfg = dict(dense or {})
         self.loss_cfg = _loss_cfg(loss, default_loss)
         self.weight = float(weight)
+        self.expose_modes = _parse_expose(expose, type(self).__name__)
         self.task: nn.Module | None = None
+
+    def _pred_spec(self, spec: TensorSpec) -> TensorSpec:
+        """Apply the ``expose:`` opt-out to a prediction port spec (design §4.2).
+
+        The ``preds.*`` port is active only in the configured ``expose`` modes
+        (default: all modes). A train-only aux task (``expose: [fit, val]``)
+        therefore produces NO prediction in TEST/ONNX, so the planner prunes it
+        from those plans and the TEST dead-preds hard error never fires — the
+        real opt-out the dead-preds message points users at, replacing the
+        ``--model.modules.X=null`` workaround.
+
+        Returns
+        -------
+        TensorSpec
+            `spec` re-stamped to the exposed modes (its kind/shape/dtype kept).
+        """
+        if self.expose_modes == Mode.ALL:
+            return spec
+        return replace(spec, modes=spec.modes & self.expose_modes)
 
     @property
     def pred_key(self) -> str:
@@ -157,6 +179,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         weight: float = 1.0,
         weight_source: Mapping[str, str] | None = None,
         label_map: dict[int, int] | None = None,
+        expose: Sequence[str] | None = None,
     ) -> None:
         """Capture config only (design §2.3).
 
@@ -191,14 +214,21 @@ class ClassificationTaskModule(_TaskModuleBase):
             (see class docstring), by default None.
         label_map : dict[int, int] | None, optional
             Integer label remap for training, by default None.
+        expose : Sequence[str] | None, optional
+            Modes the ``preds.*`` port is published in (design §4.2), by
+            default None (all modes). ``[fit, val]`` opts a train-only aux task
+            out of the TEST/ONNX plans.
 
         Raises
         ------
         ConfigError
-            On empty/duplicate class names, malformed `weight_source`, or a
-            literal loss weight combined with `weight_source`.
+            On empty/duplicate class names, malformed `weight_source`, a
+            literal loss weight combined with `weight_source`, or a bad
+            `expose` list.
         """
-        super().__init__(stream, label, input, context, dense, loss, weight, _DEFAULT_CLS_LOSS)
+        super().__init__(
+            stream, label, input, context, dense, loss, weight, _DEFAULT_CLS_LOSS, expose
+        )
         if not class_names:
             raise ConfigError(
                 f"ClassificationTaskModule: class_names is required and explicit for label "
@@ -254,7 +284,7 @@ class ClassificationTaskModule(_TaskModuleBase):
             )
         requires[self.label_key] = label_spec
         produces: dict[str, TensorSpec] = {
-            self.pred_key: pred_spec,
+            self.pred_key: self._pred_spec(pred_spec),
             self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
@@ -357,9 +387,17 @@ class VertexingTaskModule(_TaskModuleBase):
     ``labels.<stream>.<origin_label>``) instead of derived by string-replace
     and free-riding on another task's label collection (task.py:937).
     Origin weighting is explicit config: ``origin_weighting`` gives the
-    heavy/fake origin *ids* (defaults reproduce v1's hardcoded 3,4,5 / 1,
-    task.py:964 — bit-identical math). TODO(M3): name-based id resolution
-    against the schema's origin class names (design §5.1 uses names).
+    heavy/fake origins as integer *ids* OR class *names* (defaults reproduce
+    v1's hardcoded 3,4,5 / 1, task.py:964 — bit-identical math). Names (design
+    §5.1, the GN3 origin surface) are resolved to ids at fit/test setup against
+    the origin label's class-name attr in the dataset schema artifact
+    (``schema_group(stream).attrs[origin_label]``, the same source as the §2.6
+    class-names cross-check) — `resolve_origin_names`, driven by
+    `salt.core.saltmodule.resolve_origin_weighting` BEFORE bind. A name-based
+    config without a schema artifact is a loud `ConfigError` at bind (the names
+    cannot be resolved); an integer-id config never needs a schema and binds
+    standalone (unit-test path). Mixing names and ids inside one heavy/fake
+    list is rejected.
 
     Mode exception (design §3.3): TEST publishes per-node vertex
     assignments (v1 ``run_inference``: union-find + ``mask_fill_flattened``,
@@ -377,7 +415,8 @@ class VertexingTaskModule(_TaskModuleBase):
         dense: dict[str, Any] | None = None,
         loss: str | dict[str, Any] | None = None,
         weight: float = 1.0,
-        origin_weighting: Mapping[str, Sequence[int]] | None = None,
+        origin_weighting: Mapping[str, Sequence[int | str]] | None = None,
+        expose: Sequence[str] | None = None,
     ) -> None:
         """Capture config only (design §2.3).
 
@@ -390,7 +429,8 @@ class VertexingTaskModule(_TaskModuleBase):
             composed v1 loss derives the origin key by string-replace,
             task.py:937; absorbed at M7).
         origin_label : str
-            Declared origin-label dependency for edge weighting.
+            Declared origin-label dependency for edge weighting (and, for
+            name-based weighting, the schema attr the names resolve against).
         input : str | None, optional
             Input key, by default ``encoded.<stream>``.
         context : str | None, optional
@@ -403,17 +443,26 @@ class VertexingTaskModule(_TaskModuleBase):
             unreduced loss, task.py:938-947).
         weight : float, optional
             Scalar task-loss weight, by default 1.0.
-        origin_weighting : Mapping[str, Sequence[int]] | None, optional
-            ``{"heavy": [...], "fake": [...]}`` origin ids, by default v1's
-            ``{"heavy": [3, 4, 5], "fake": [1]}``.
+        origin_weighting : Mapping[str, Sequence[int | str]] | None, optional
+            ``{"heavy": [...], "fake": [...]}`` origin ids OR class names, by
+            default v1's ``{"heavy": [3, 4, 5], "fake": [1]}``. Names are
+            resolved at setup against the schema's origin class-name attr
+            (design §5.1); ids bind directly.
+        expose : Sequence[str] | None, optional
+            Modes the ``preds.*`` port is published in (design §4.2), by
+            default None (all modes). ``[fit, val]`` opts a train-only aux task
+            out of the TEST/ONNX plans.
 
         Raises
         ------
         ConfigError
-            If `label` lacks ``"VertexIndex"`` or `origin_weighting` has
-            unknown keys.
+            If `label` lacks ``"VertexIndex"``, `origin_weighting` has unknown
+            keys, a heavy/fake list mixes integer ids with class names, or
+            `expose` is a bad mode list.
         """
-        super().__init__(stream, label, input, context, dense, loss, weight, _DEFAULT_VTX_LOSS)
+        super().__init__(
+            stream, label, input, context, dense, loss, weight, _DEFAULT_VTX_LOSS, expose
+        )
         if "VertexIndex" not in label:
             raise ConfigError(
                 f"VertexingTaskModule: label {label!r} must contain 'VertexIndex' — the "
@@ -427,16 +476,19 @@ class VertexingTaskModule(_TaskModuleBase):
                 f"VertexingTaskModule: unknown origin_weighting keys {unknown} — expected "
                 "'heavy' and 'fake' (design §3.3)"
             )
-        try:
-            self.heavy_ids = tuple(int(i) for i in weighting.get("heavy", (3, 4, 5)))
-            self.fake_ids = tuple(int(i) for i in weighting.get("fake", (1,)))
-        except (TypeError, ValueError) as err:
-            raise ConfigError(
-                f"VertexingTaskModule: origin_weighting entries must be INTEGER origin ids in "
-                f"M2 (got {dict(weighting)!r}) — the design §5.1 name-based form (e.g. "
-                "heavy: [FromB, FromBC, FromC]) lands with the M3 schema-attr resolution; "
-                "v1's hardcoded ids are heavy: [3, 4, 5], fake: [1]"
-            ) from err
+        heavy = tuple(weighting.get("heavy", (3, 4, 5)))
+        fake = tuple(weighting.get("fake", (1,)))
+        # ids bind standalone; names defer to resolve_origin_names(reader) at
+        # setup. heavy_ids/fake_ids stay None until resolved so a name-based
+        # bind without a schema fails loudly instead of silently mis-weighting.
+        self._heavy_cfg, self._fake_cfg = heavy, fake
+        self._names_pending = _is_name_weighting(heavy, fake)
+        if self._names_pending:
+            self.heavy_ids: tuple[int, ...] | None = None
+            self.fake_ids: tuple[int, ...] | None = None
+        else:
+            self.heavy_ids = _coerce_origin_ids(heavy, "heavy")
+            self.fake_ids = _coerce_origin_ids(fake, "fake")
 
     @property
     def origin_label_key(self) -> str:
@@ -448,6 +500,88 @@ class VertexingTaskModule(_TaskModuleBase):
             ``labels.<stream>.<origin_label>``.
         """
         return f"labels.{self.stream}.{self.origin_label}"
+
+    def resolve_origin_names(self, reader: Any) -> bool:
+        """Resolve name-based ``origin_weighting`` to ids against the schema (design §5.1).
+
+        No-op for integer-id weighting (``heavy_ids``/``fake_ids`` already set
+        in ``__init__``). For name-based weighting, the origin label's
+        class-name attr (``schema_group(stream).attrs[origin_label]``, the §2.6
+        class-names source) maps each name to its index — the integer origin id
+        the v1 weighting math compares against (task.py:957-964). Called from
+        `salt.core.saltmodule.resolve_origin_weighting` at fit/test setup, after
+        the boundary readers exist and BEFORE bind, so the resolved ids are in
+        place when `bind` builds the composed head.
+
+        Parameters
+        ----------
+        reader : Any
+            The stage dataset reader; consulted via ``schema_group(stream)``
+            (duck-typed — a reader without schema support resolves nothing,
+            leaving a name-based config to fail loudly at bind).
+
+        Returns
+        -------
+        bool
+            True when names were resolved here (one resolution counted), False
+            when there was nothing to resolve (integer ids) or the reader has
+            no schema artifact.
+
+        Raises
+        ------
+        ConfigError
+            When the stream/origin-label class-name attr is absent or a
+            configured name is not among the schema's origin classes (design
+            §4.1 quality bar: names the unknown name and the known classes).
+        """
+        if not self._names_pending:
+            return False
+        schema_group = getattr(reader, "schema_group", None)
+        if not callable(schema_group):
+            return False
+        gschema = schema_group(self.stream)
+        attr = gschema.attrs.get(self.origin_label) if gschema is not None else None
+        if not (
+            isinstance(attr, (list, tuple)) and attr and all(isinstance(item, str) for item in attr)
+        ):
+            raise ConfigError(
+                f"VertexingTaskModule {self.name!r}: name-based origin_weighting needs the "
+                f"origin label's class names, but the schema artifact has no string-list "
+                f"attr {self.origin_label!r} on the {self.stream!r} group (config: "
+                f"model.modules.{self.name}.init_args.origin_weighting; design §5.1, §2.6) — "
+                "dump the schema with the origin class names, or use integer origin ids"
+            )
+        index = {name: i for i, name in enumerate(attr)}
+        self.heavy_ids = self._resolve_names("heavy", self._heavy_cfg, index, attr)
+        self.fake_ids = self._resolve_names("fake", self._fake_cfg, index, attr)
+        self._names_pending = False
+        return True
+
+    def _resolve_names(
+        self, role: str, names: Sequence[Any], index: Mapping[str, int], classes: Sequence[str]
+    ) -> tuple[int, ...]:
+        """Map one heavy/fake class-name list to integer origin ids.
+
+        Returns
+        -------
+        tuple[int, ...]
+            The resolved integer ids, in config order.
+
+        Raises
+        ------
+        ConfigError
+            On any name absent from the schema's origin classes.
+        """
+        ids: list[int] = []
+        for name in names:
+            if name not in index:
+                raise ConfigError(
+                    f"VertexingTaskModule {self.name!r}: origin_weighting {role!r} class "
+                    f"{name!r} is not among the {self.origin_label!r} classes {list(classes)} "
+                    f"(config: model.modules.{self.name}.init_args.origin_weighting; design §5.1)"
+                )
+            ids.append(index[name])
+        return tuple(ids)
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare input/context/mask (+ FIT|VAL vertex AND origin labels) -> preds/loss.
@@ -482,7 +616,7 @@ class VertexingTaskModule(_TaskModuleBase):
         if self.context is not None:
             requires[self.context] = TensorSpec(shape=None, dtype="float32")
         produces: dict[str, TensorSpec] = {
-            self.pred_key: TensorSpec(shape=None, dtype=None),
+            self.pred_key: self._pred_spec(TensorSpec(shape=None, dtype=None)),
             self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
@@ -496,9 +630,20 @@ class VertexingTaskModule(_TaskModuleBase):
         Raises
         ------
         ConfigError
-            If the configured loss does not use ``reduction="none"``
-            (per-edge weighting requires the unreduced loss).
+            If the configured loss does not use ``reduction="none"`` (per-edge
+            weighting requires the unreduced loss), or name-based
+            ``origin_weighting`` was never resolved (no schema artifact reached
+            `resolve_origin_names` before bind).
         """
+        if self._names_pending or self.heavy_ids is None or self.fake_ids is None:
+            raise ConfigError(
+                f"VertexingTaskModule {self.name!r}: name-based origin_weighting "
+                f"(heavy={list(self._heavy_cfg)}, fake={list(self._fake_cfg)}) was not resolved "
+                "to integer ids before bind — a dataset schema artifact carrying the "
+                f"{self.origin_label!r} class names is required (design §5.1, §2.6). "
+                "resolve_origin_names(reader) runs at fit/test setup; standalone bind needs "
+                "integer origin ids instead"
+            )
         init_args = dict(self.loss_cfg.get("init_args", {}))
         loss_module = _loss_class(self.loss_cfg)(**init_args)
         if getattr(loss_module, "reduction", "none") != "none":
@@ -644,6 +789,7 @@ class RegressionTaskModule(_TaskModuleBase):
         dense: dict[str, Any] | None = None,
         loss: str | dict[str, Any] | None = None,
         weight: float = 1.0,
+        expose: Sequence[str] | None = None,
     ) -> None:
         """Capture config only (design §2.3).
 
@@ -707,6 +853,10 @@ class RegressionTaskModule(_TaskModuleBase):
         weight : float, optional
             Scalar task-loss weight (applied INSIDE the composed v1 head,
             task.py:563), by default 1.0.
+        expose : Sequence[str] | None, optional
+            Modes the ``preds.*`` port is published in (design §4.2), by
+            default None (all modes). ``[fit, val]`` opts a train-only aux task
+            out of the TEST/ONNX plans.
 
         Raises
         ------
@@ -714,12 +864,12 @@ class RegressionTaskModule(_TaskModuleBase):
             On empty targets, a custom-output-name count mismatch, more than
             one scaling method (the v1 single-scaling guard surfaced at
             config time), a ``sample_weight`` with a non-``none`` loss
-            reduction, or a gaussian head combined with a functional
-            ``scaler`` / no scaling method.
+            reduction, a gaussian head combined with a functional ``scaler`` /
+            no scaling method, or a bad `expose` list.
         """
         self.gaussian = bool(gaussian)
         default_loss = _DEFAULT_GAUSS_LOSS if self.gaussian else _DEFAULT_REG_LOSS
-        super().__init__(stream, "", input, context, dense, loss, weight, default_loss)
+        super().__init__(stream, "", input, context, dense, loss, weight, default_loss, expose)
         # regression has no single `label` field; the demand is one label per
         # target (set below). `_TaskModuleBase.label` is left empty.
         self.targets = _opt_tuple(targets) or ()
@@ -940,7 +1090,7 @@ class RegressionTaskModule(_TaskModuleBase):
                     modes=Mode.ONNX,
                 )
         produces: dict[str, TensorSpec] = {
-            self.pred_key: pred_spec,
+            self.pred_key: self._pred_spec(pred_spec),
             self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
@@ -1146,6 +1296,105 @@ def _opt_tuple(value: str | Sequence[str] | None) -> tuple[str, ...] | None:
     if value is None:
         return None
     return tuple(listify(value))
+
+
+def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
+    """Whether an ``origin_weighting`` config is class-name based (design §5.1).
+
+    Name-based iff ANY heavy/fake entry is a string. A list mixing strings and
+    ints is rejected here so the caller fails at construction, not silently
+    half-resolved.
+
+    Returns
+    -------
+    bool
+        True for a (consistent) name-based config; False for all-integer ids.
+
+    Raises
+    ------
+    ConfigError
+        If any single role list mixes integer ids with class names.
+    """
+    for role, entries in (("heavy", heavy), ("fake", fake)):
+        has_name = any(isinstance(e, str) for e in entries)
+        has_id = any(not isinstance(e, str) for e in entries)
+        if has_name and has_id:
+            raise ConfigError(
+                f"VertexingTaskModule: origin_weighting {role!r} list mixes integer ids with "
+                f"class names ({list(entries)!r}) — use one or the other (design §5.1)"
+            )
+    return any(isinstance(e, str) for e in (*heavy, *fake))
+
+
+def _coerce_origin_ids(entries: Sequence[Any], role: str) -> tuple[int, ...]:
+    """Coerce an all-integer ``origin_weighting`` role list to a tuple of ids.
+
+    Returns
+    -------
+    tuple[int, ...]
+        The integer origin ids, in config order.
+
+    Raises
+    ------
+    ConfigError
+        On a non-integer entry (e.g. a float) — bool is rejected too (an origin
+        id is never True/False).
+    """
+    ids: list[int] = []
+    for e in entries:
+        if isinstance(e, bool) or not isinstance(e, int):
+            raise ConfigError(
+                f"VertexingTaskModule: origin_weighting {role!r} entries must be INTEGER origin "
+                f"ids or class NAMES (got {e!r} in {list(entries)!r}); v1's hardcoded ids are "
+                "heavy: [3, 4, 5], fake: [1] (design §5.1)"
+            )
+        ids.append(int(e))
+    return tuple(ids)
+
+
+def _parse_expose(expose: Sequence[str] | None, cls: str) -> Mode:
+    """Parse a task ``expose:`` mode-name list into a `Mode` flag (design §4.2).
+
+    ``None`` (the default) means all modes — the task publishes ``preds.*`` in
+    fit/val/test/onnx as before. A list of mode names (case-insensitive,
+    ``fit``/``val``/``test``/``onnx``) gates the prediction port to exactly
+    those modes: a train-only aux task uses ``expose: [fit, val]`` so its
+    prediction is pruned from the TEST/ONNX plans (and the TEST dead-preds
+    error is silenced) instead of needing the ``--model.modules.X=null``
+    deletion workaround.
+
+    Returns
+    -------
+    Mode
+        The exposed-modes flag (``Mode.ALL`` for the default).
+
+    Raises
+    ------
+    ConfigError
+        On a non-list value, an empty list, or an unknown mode name.
+    """
+    if expose is None:
+        return Mode.ALL
+    if isinstance(expose, str) or not isinstance(expose, Sequence):
+        raise ConfigError(
+            f"{cls}: expose must be a list of mode names (e.g. [fit, val]), got {expose!r} "
+            "(design §4.2)"
+        )
+    if not expose:
+        raise ConfigError(
+            f"{cls}: expose may not be an empty list — a task exposed in no mode is dead; "
+            "omit expose for all modes, or remove the task (design §4.2)"
+        )
+    valid = {m.name.lower(): m for m in (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX)}
+    modes = Mode.FIT & Mode.TEST  # empty seed (no mode); accumulate the named ones
+    for raw in expose:
+        if not isinstance(raw, str) or raw.lower() not in valid:
+            raise ConfigError(
+                f"{cls}: unknown expose mode {raw!r} — valid modes are "
+                f"{sorted(valid)} (design §4.2)"
+            )
+        modes |= valid[raw.lower()]
+    return modes
 
 
 def _checked_weight_source(weight_source: Mapping[str, str] | None) -> dict[str, str] | None:

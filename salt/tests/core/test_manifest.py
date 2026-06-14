@@ -705,7 +705,7 @@ class TestDemandUnification:
 
         model = SaltModule(
             dict(modules),
-            lrs_config={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
+            lrs={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
             name=RUN_NAME,
         )
         cb = WriterCallback(modules={"tasks": TaskWriter(onnx_tasks=["jets_classification"])})

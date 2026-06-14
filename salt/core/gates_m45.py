@@ -641,7 +641,9 @@ def run_u1(
         f"--ckpt_path={v2_ckpt}",
         "--trainer.accelerator=cpu",
         "--trainer.devices=1",
-        "--trainer.enable_progress_bar=false",
+        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # enable_progress_bar=false cannot coexist with a configured bar
+        "--callbacks.progress=null",
         f"--trainer.default_root_dir={outdir / 'test_run'}",
     ]
     rc_test = salt2_main(test_argv)

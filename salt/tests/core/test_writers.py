@@ -13,6 +13,7 @@ custom-writer journey (W4 shape).
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -21,8 +22,8 @@ import torch
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import TensorSpec
+from salt.core.graph.errors import ConfigError, KindError, ShapeError
+from salt.core.graph.spec import Mode, TensorSpec
 from salt.core.main import CONFIG_DIR, main
 from salt.core.schema import dump_schema, save_schema
 from salt.core.writers import (
@@ -90,6 +91,32 @@ class NamedFeatureWriter(Writer):
         idx = self.ctx.feature_fields["inputs.jets"].index("eta_btagJes")
         vals = bundle.get("inputs.jets").cpu().numpy()[:, idx : idx + 1].astype("f4")
         return {"jets": u2s(vals, self.DTYPE)}
+
+
+class WrongDtypeMaskWriter(Writer):
+    """A writer that DECLARES the wrong dtype for a consumed key (negative control).
+
+    Demands ``masks.tracks`` as ``float32`` though the dataset boundary serves
+    a ``bool`` pad mask — `WriterCallback.validate_specs` must reject this at
+    ``salt2 test`` setup, before the first batch (design §2.7/§8). The
+    ``columns``/``write`` halves are deliberately runnable so a BROKEN validator
+    would let the run reach the first batch (the genuine must-fail control).
+    """
+
+    DTYPE = np.dtype([("wrong_dtype_probe", "i4")])
+
+    def requires(self, ctx):
+        del ctx
+        return {"masks.tracks": TensorSpec(shape=None, dtype="float32", kind="pad_mask")}
+
+    def columns(self, ctx):
+        del ctx
+        return {"jets": self.DTYPE}
+
+    def write(self, bundle, rows):
+        del rows
+        mask = bundle.get("masks.tracks").cpu().numpy()
+        return {"jets": u2s((~mask).sum(-1, keepdims=True).astype("i4"), self.DTYPE)}
 
 
 @pytest.fixture(scope="module")
@@ -350,6 +377,184 @@ class TestWriterCallback:
 
 
 # ---------------------------------------------------------------------------
+# WriterCallback.validate_specs: kind/dtype unification on the writer->producer
+# edge, proven before the first batch (M5 sub-wave D; design §2.7/§8)
+# ---------------------------------------------------------------------------
+
+
+def _stub_reader() -> SimpleNamespace:
+    """A minimal H5StructuredReader surface for `WriterCallback._declare_ctx`."""
+    groups = {
+        "jets": SimpleNamespace(vector=True, dataset="jets"),
+        "tracks": SimpleNamespace(vector=False, dataset="tracks"),  # the sequence stream
+    }
+    return SimpleNamespace(streams=("jets", "tracks"), groups=groups)
+
+
+def _test_producer_specs(modules) -> dict[str, TensorSpec]:
+    """Model TEST-produced ports unioned with the real dataset-boundary leaves.
+
+    Reproduces `SaltModule._validate_writer_specs`'s union (model ports take
+    precedence) with the boundary specs the shipped writers consume: the
+    ``pad_mask`` masks (``PadMaskWriter``/``JetCountWriter``) and ``meta.rows``
+    (``InputCopyWriter``) carry the kinds/dtypes the dataset boundary serves.
+    """
+    boundary = {
+        "masks.jets": TensorSpec(shape=("B", "T:jets"), dtype="bool", kind="pad_mask"),
+        "masks.tracks": TensorSpec(shape=("B", "T:tracks"), dtype="bool", kind="pad_mask"),
+        "meta.rows": TensorSpec(shape=(2,), dtype="int64", kind="meta"),
+        "inputs.jets": TensorSpec(shape=("B", "F:jets"), dtype="float32", kind="data"),
+        "inputs.tracks": TensorSpec(shape=("B", "T:tracks", "F:tracks"), dtype="float32"),
+    }
+    return boundary | WriterCallback.model_producer_specs(modules)
+
+
+class TestValidateSpecs:
+    """`validate_specs` proves writer inputs exist AND kind/dtype-unify (§2.7)."""
+
+    def test_shipped_writers_pass(self, modules):
+        # the base2.yaml writer trio against real model ports + boundary
+        cb = WriterCallback(
+            modules={
+                "inputs_copy": InputCopyWriter(),
+                "tasks": TaskWriter(),
+                "pad_mask": PadMaskWriter(),
+            }
+        )
+        # no raise: TaskWriter's preds.* requires are dtype/kind unconstrained,
+        # PadMaskWriter's masks.* is bool/pad_mask (matches boundary), meta.rows
+        # is int64/meta (matches boundary)
+        cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_custom_writer_named_feature_passes(self, modules):
+        # NamedFeatureWriter requires inputs.jets float32/data — matches boundary
+        cb = WriterCallback(modules={"feat": NamedFeatureWriter(), "tasks": TaskWriter()})
+        cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_wrong_kind_is_loud(self, modules):
+        # a writer demanding the pad mask as plain data — the mask-polarity /
+        # label-vs-feature guard the kind type exists for
+        class WrongKind(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"masks.tracks": TensorSpec(shape=None, dtype="bool", kind="data")}
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"bad": WrongKind()})
+        with pytest.raises(KindError, match=r"kind='data'.*kind='pad_mask'|writer 'bad'"):
+            cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_wrong_dtype_is_loud(self, modules):
+        # the FD §2.7 ask: a deliberately wrong-dtype writer input caught at
+        # compile (the boundary serves masks.tracks as bool; the writer says f4)
+        class WrongDtype(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"masks.tracks": TensorSpec(shape=None, dtype="float32", kind="pad_mask")}
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"bad": WrongDtype()})
+        with pytest.raises(ShapeError, match="dtype mismatch on 'masks.tracks'"):
+            cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_wrong_dtype_on_model_pred_is_loud(self, modules):
+        # also catch a wrong dtype declared against a MODEL-produced port
+        # (classification publishes float32; the writer says int64)
+        class WrongPredDtype(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {
+                    "preds.jets.jets_classification": TensorSpec(dtype="int64", kind="data"),
+                }
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"bad": WrongPredDtype()})
+        with pytest.raises(ShapeError, match="preds.jets.jets_classification"):
+            cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_missing_required_input_is_loud(self, modules):
+        class MissingInput(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"preds.tracks.does_not_exist": TensorSpec(dtype=None, kind="data")}
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"bad": MissingInput()})
+        with pytest.raises(ConfigError, match="input does not exist"):
+            cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_optional_absent_require_is_fine(self, modules):
+        # an OPTIONAL require with no producer must NOT raise (the spec.optional
+        # short-circuit, mirroring the planner's optional-edge handling)
+        class OptionalAbsent(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {
+                    "preds.tracks.maybe": TensorSpec(dtype=None, kind="data", optional=True),
+                    "masks.tracks": TensorSpec(shape=None, dtype="bool", kind="pad_mask"),
+                }
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"ok": OptionalAbsent()})
+        cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+    def test_unconstrained_dtype_unifies_with_anything(self, modules):
+        # a writer leaving dtype=None accepts whatever the producer publishes —
+        # the TaskWriter's deliberately unconstrained preds.* contract stays
+        # legal even against a dtype-declared boundary key
+        class Unconstrained(Writer):
+            def requires(self, ctx):
+                del ctx
+                return {"masks.tracks": TensorSpec(shape=None, dtype=None, kind="pad_mask")}
+
+            def columns(self, ctx):
+                del ctx
+                return {"jets": np.dtype([("x", "i4")])}
+
+            def write(self, bundle, rows):
+                del bundle, rows
+                return {}
+
+        cb = WriterCallback(modules={"ok": Unconstrained()})
+        cb.validate_specs(modules, _stub_reader(), _test_producer_specs(modules))
+
+
+# ---------------------------------------------------------------------------
 # MaskFormerObjectWriter: TEST byte-parity vs v1 + the extra-group plumbing
 # (predictionwriter.py:267-308; M5 sub-wave C, plan 10)
 # ---------------------------------------------------------------------------
@@ -526,7 +731,9 @@ def overrides(data) -> list[str]:
         f"--data.modules.reader.init_args.schema={data['schema']}",
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         "--trainer.accelerator=cpu",
-        "--trainer.enable_progress_bar=false",
+        # null-delete the base2 ProgressBar (D2 default-on) — can't combine the
+        # stock enable_progress_bar=false with a configured ProgressBar callback
+        "--callbacks.progress=null",
     ]
 
 
@@ -636,13 +843,14 @@ class TestSalt2TestEndToEnd:
         assert (ckpt.parent / "resolved_io.yaml").exists()
 
     def test_no_ckpt_fallback_globs_v2_checkpoints(self, data, ckpt, tmp_path):
-        # M3-review fix: base2.yaml names checkpoints 'epoch=NNN-loss=...'
-        # under checkpoints/ and the fallback globs that dir next to the
-        # saved config — salt2 test now works without --ckpt_path on a
-        # v2-trained run dir (the old ckpts/-only 'loss=' glob NEVER matched)
-        assert "loss=" in ckpt.name  # the base2.yaml filename contract
+        # D2: the salt.core.callbacks.Checkpoint port names checkpoints
+        # 'epoch=NNN-loss=...' under ckpts/ (the v1 run-dir layout) and the
+        # fallback globs {ckpts,checkpoints}/ next to the saved config — salt2
+        # test works without --ckpt_path on a v2-trained run dir
+        assert "loss=" in ckpt.name  # the v1 Checkpoint filename contract
+        assert ckpt.parent.name == "ckpts"  # the D2 run-dir layout
         config = ckpt.parent.parent / "config.yaml"
-        assert config.is_file()  # the saved run config next to checkpoints/
+        assert config.is_file()  # the saved run config next to ckpts/
         out = tmp_path / "fallback.h5"
         rc = main([
             "test",
@@ -651,7 +859,7 @@ class TestSalt2TestEndToEnd:
             f"--data.test_file={data['h5']}",
             "--data.num_test=300",
             f"--writers.output={out}",
-            "--trainer.enable_progress_bar=false",
+            "--callbacks.progress=null",
         ])
         assert rc == 0
         assert out.exists()
@@ -711,6 +919,23 @@ class TestSalt2TestEndToEnd:
         assert "excludes" in err
         assert "model.modules.track_origin" in err
         assert "--model.modules.track_origin=null" in err
+
+    def test_wrong_dtype_writer_rejected_at_compile(self, data, ckpt, capsys):
+        # the FD §2.7 ask end to end: a deliberately wrong-dtype writer input
+        # is caught at salt2 test SETUP (validate_specs on the TEST path), loud,
+        # before the first batch — not a confusing in-write() failure
+        rc = run_test_cli(
+            data,
+            ckpt,
+            extra=[
+                '--writers.modules.wrong={"class_path": '
+                '"salt.tests.core.test_writers.WrongDtypeMaskWriter"}',
+            ],
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "dtype mismatch on 'masks.tracks'" in err
+        assert "writer 'wrong'" in err
 
     def test_writerless_eval_refused(self, data, ckpt, capsys):
         rc = run_test_cli(

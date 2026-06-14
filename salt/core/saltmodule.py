@@ -80,7 +80,7 @@ try:
 except ImportError:
     _lion_available = False
 
-__all__ = ["CKPT_KEY", "SaltModule", "check_class_names"]
+__all__ = ["CKPT_KEY", "SaltModule", "check_class_names", "resolve_origin_weighting"]
 
 CKPT_KEY = "salt_core"
 """Checkpoint dict key for the schema + plan-hash payload (design §2.3, §2.6)."""
@@ -107,11 +107,11 @@ class SaltModule(lightning.LightningModule):
         (``--model.modules.X=null`` parses to None and is filtered here).
         An un-narrowed `LossSum` is narrowed via `LossSum.collect_loss_keys`
         (the ``losses.**`` framework wildcard, design §3.3).
-    lrs_config : Mapping[str, float]
-        OneCycleLR schedule config, v1 schema kept wholesale
-        (modelwrapper.py:340-381): required keys ``initial``, ``max``,
-        ``end``, ``pct_start``; optional ``weight_decay`` (default 1e-5)
-        and ``last_epoch`` (default -1).
+    lrs : Mapping[str, float]
+        OneCycleLR schedule config (design §5.1; the v1 ``lrs_config`` kwarg
+        renamed to ``lrs`` — M3 cleanup, M5 sub-wave D): required keys
+        ``initial``, ``max``, ``end``, ``pct_start``; optional ``weight_decay``
+        (default 1e-5) and ``last_epoch`` (default -1).
     optimizer : str, optional
         One of ``"AdamW"`` (default), ``"lion"``, ``"HybridMuonAdamW"``
         (v1 surface minus the muP ``MuAdamW`` swap — M6).
@@ -125,13 +125,13 @@ class SaltModule(lightning.LightningModule):
     ------
     ConfigError
         For an empty module dict, a non-``nn.Module`` module, a bad
-        optimizer name, or missing `lrs_config` keys.
+        optimizer name, or missing `lrs` keys.
     """
 
     def __init__(
         self,
         modules: dict[str, GraphModule | None],
-        lrs_config: Mapping[str, float],
+        lrs: Mapping[str, float],
         optimizer: str = "AdamW",
         name: str = "salt",
         debug: bool = False,
@@ -160,9 +160,9 @@ class SaltModule(lightning.LightningModule):
             # (modelwrapper.py:139-142) — fail loudly here, before declare_io
             if isinstance(module, LossGLS):
                 LossGLS.check_task_weights(modules)
-        if missing := [k for k in _LRS_REQUIRED if k not in lrs_config]:
+        if missing := [k for k in _LRS_REQUIRED if k not in lrs]:
             raise ConfigError(
-                f"lrs_config is missing required keys {missing} — the OneCycleLR schema is "
+                f"lrs is missing required keys {missing} — the OneCycleLR schema is "
                 f"{list(_LRS_REQUIRED)} (+ optional weight_decay, last_epoch; design §3.4)"
             )
         if optimizer not in _OPTIMIZERS:
@@ -173,7 +173,7 @@ class SaltModule(lightning.LightningModule):
         # (design §3.4; load_from_checkpoint takes modules= explicitly)
         self.save_hyperparameters(logger=False, ignore=["modules"])
         self.name = name
-        self.lrs_config = dict(lrs_config)
+        self.lrs = dict(lrs)
         self.optimizer = optimizer
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
@@ -660,10 +660,32 @@ class SaltModule(lightning.LightningModule):
             self.compile_mode(Mode.VAL, self._boundary(dm.val_dset, "val"))
             self._assert_fit_val_identical()
             check_class_names(self._graph_modules, dm.train_dset.reader)
+            resolve_origin_weighting(self._graph_modules, dm.train_dset.reader)
         else:
             self.compile_mode(Mode.TEST, self._boundary(dm.test_dset, "test"))
             check_class_names(self._graph_modules, dm.test_dset.reader)
+            resolve_origin_weighting(self._graph_modules, dm.test_dset.reader)
+            self._validate_writer_specs(dm.test_dset)
         self._ensure_bound()
+
+    def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
+        """Static writer-input validation on the TEST path (design §2.7/§8).
+
+        Hands the attached `WriterCallback` (if any) the union of the model
+        modules' TEST-active produced ports and the test dataset's served
+        boundary leaves, so it can prove each writer-declared require exists
+        AND kind/dtype-unifies against its producer before the first batch
+        (`WriterCallback.validate_specs`). Model-produced ports take precedence
+        over a same-named boundary key (they are the executed leaf). No writer
+        callback (programmatic ``Trainer.test`` without writers) → no-op, as the
+        M2 anchor-on-all-preds path carries no writer requires to check.
+        """
+        writers, reader = self._attached_writer()
+        if writers is None or not callable(getattr(writers, "validate_specs", None)):
+            return
+        producer_specs = dict(test_dset.boundary_specs())
+        producer_specs.update(writers.model_producer_specs(self._graph_modules))
+        writers.validate_specs(self._graph_modules, reader, producer_specs)
 
     def _run_preflights(self) -> None:
         """Fail-fast data-free checks of file-backed `materialise` sources.
@@ -933,8 +955,8 @@ class SaltModule(lightning.LightningModule):
         """
         optimizer_class = self._get_optimizer_class()
         optimizer_kwargs = {
-            "lr": self.lrs_config["initial"],
-            "weight_decay": self.lrs_config.get("weight_decay", 1e-5),
+            "lr": self.lrs["initial"],
+            "weight_decay": self.lrs.get("weight_decay", 1e-5),
         }
         if optimizer_class is HybridMuonAdamW:
             opt = optimizer_class(self.named_parameters(), **optimizer_kwargs)
@@ -942,12 +964,12 @@ class SaltModule(lightning.LightningModule):
             opt = optimizer_class(self.parameters(), **optimizer_kwargs)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
-            max_lr=self.lrs_config["max"],
+            max_lr=self.lrs["max"],
             total_steps=self.trainer.estimated_stepping_batches,
-            div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
-            final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
-            pct_start=float(self.lrs_config["pct_start"]),
-            last_epoch=int(self.lrs_config.get("last_epoch", -1)),
+            div_factor=self.lrs["max"] / self.lrs["initial"],
+            final_div_factor=self.lrs["initial"] / self.lrs["end"],
+            pct_start=float(self.lrs["pct_start"]),
+            last_epoch=int(self.lrs.get("last_epoch", -1)),
             cycle_momentum=optimizer_class is not HybridMuonAdamW,
         )
         return [opt], [{"scheduler": scheduler, "interval": "step"}]
@@ -1043,9 +1065,10 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
     Names, per dead key, the producing task module and its config address;
     attributes the culprit when a configured writer's explicit ``streams``
     list excludes the dead streams (the §4.2 worked-example attribution,
-    M3-review fix); and spells out the null-deletion workaround for
-    train-only aux tasks (the per-task ``expose:`` opt-out of design §4.2 is
-    an M5 deferral and deliberately NOT advertised here).
+    M3-review fix); and offers the real per-task ``expose: [fit, val]`` opt-out
+    (design §4.2 — keeps the task training while pruning its prediction from
+    the TEST/ONNX plans) as the FIRST fix for train-only aux tasks, with the
+    heavier ``--model.modules.X=null`` deletion as the alternative.
 
     Parameters
     ----------
@@ -1087,10 +1110,20 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         fix += " — " + "; ".join(hints) + " —"
     targets = sorted({produced[key] for key in dead if key in produced})
     if targets:
+        expose_form = " / ".join(
+            f"--model.modules.{name}.init_args.expose=[fit,val]" for name in targets
+        )
         null_form = " / ".join(f"--model.modules.{name}=null" for name in targets)
-        fix += f", or remove the task module ({null_form})"
+        # the real opt-out: expose: [fit, val] keeps the task training while
+        # pruning its prediction from the TEST/ONNX plans (design §4.2). Listed
+        # FIRST; --model.modules.X=null (delete the task entirely) is the
+        # heavier alternative.
+        fix += (
+            f", or opt the task out of eval with expose: [fit, val] ({expose_form}), "
+            f"or remove the task module entirely ({null_form})"
+        )
     else:
-        fix += ", or remove the task module"
+        fix += ", or opt the task out of eval with expose: [fit, val], or remove the task module"
     lines.append(fix)
     return "\n".join(lines)
 
@@ -1168,6 +1201,44 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
                 "the file genuinely changed)"
             )
     return checked
+
+
+def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) -> int:
+    """Resolve name-based ``origin_weighting`` to ids before bind (design §5.1, §2.6).
+
+    For every module exposing a callable ``resolve_origin_names`` (the
+    `VertexingTaskModule` surface, duck-typed so user vertexing modules
+    participate too), the names are mapped to integer origin ids against the
+    schema artifact — the same ``schema_group(stream).attrs`` source the §2.6
+    class-names check consults. Runs at `SaltModule.setup` (fit/test) right after
+    `check_class_names`, BEFORE the two-phase bind, so the resolved ids are in
+    place when `VertexingTaskModule.bind` builds the composed head. Integer-id
+    weighting and readers without a schema are no-ops here; a name-based config
+    that resolves nothing then fails loudly at bind (the names can't be turned
+    into ids without the class-name attr).
+
+    A `ConfigError` from a module's `resolve_origin_names` (an unknown class
+    name, or a missing origin class-name attr for a name-based config)
+    propagates unchanged.
+
+    Parameters
+    ----------
+    modules : Mapping[str, GraphModule]
+        The model-side module dict.
+    reader : Any
+        The stage dataset reader (``schema_group`` consulted per module).
+
+    Returns
+    -------
+    int
+        The number of modules whose names were actually resolved here.
+    """
+    resolved = 0
+    for module in modules.values():
+        resolve = getattr(module, "resolve_origin_names", None)
+        if callable(resolve) and resolve(reader):
+            resolved += 1
+    return resolved
 
 
 def bundle_as_v1_outputs(bundle: Bundle) -> dict[str, Any]:

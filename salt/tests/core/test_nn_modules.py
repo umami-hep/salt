@@ -47,6 +47,7 @@ from salt.core.nn.tasks import (
     RegressionTaskModule,
     VertexingTaskModule,
 )
+from salt.core.schema import GroupSchema, Schema
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -1642,18 +1643,290 @@ class TestGn2V2Execution:
         nn.ModuleDict(modules)  # must not raise
 
 
+def _origin_schema_reader(origin_label: str = "ftagTruthOriginLabel") -> SimpleNamespace:
+    """A duck-typed reader exposing the tracks origin class names (design §2.6).
+
+    Mirrors the umami-preprocessing convention the §2.6 class-names check
+    consults: the stream's group attr named after the origin label holds the
+    index-aligned class-name list (``ORIGIN_CLASSES``: Fake=1, FromB=3,
+    FromBC=4, FromC=5 — the v1 default ids).
+    """
+    schema = Schema(groups={"tracks": GroupSchema(fields={}, attrs={origin_label: ORIGIN_CLASSES})})
+    return SimpleNamespace(schema_group=schema.groups.get)
+
+
 class TestOriginWeightingConfig:
-    def test_name_based_origin_weighting_rejected_with_pointer(self):
-        # design §5.1 uses class NAMES; M2 accepts integer ids only — the
-        # error must say so instead of a bare int() ValueError (stage-E fix)
-        with pytest.raises(ConfigError, match="INTEGER origin ids") as excinfo:
+    """Name-based origin_weighting (design §5.1, M5 sub-wave D): names resolve to ids."""
+
+    def _name_based(self) -> VertexingTaskModule:
+        task = VertexingTaskModule(
+            stream="tracks",
+            label="ftagTruthVertexIndex",
+            origin_label="ftagTruthOriginLabel",
+            origin_weighting={"heavy": ["FromB", "FromBC", "FromC"], "fake": ["Fake"]},
+        )
+        task.name = "track_vertexing"
+        return task
+
+    def test_names_pending_until_resolved(self):
+        # __init__ captures names but does NOT resolve them (no reader yet)
+        task = self._name_based()
+        assert task._names_pending is True  # noqa: SLF001
+        assert task.heavy_ids is None
+        assert task.fake_ids is None
+
+    def test_names_resolve_to_v1_default_ids(self):
+        # the GN3 origin names map to exactly v1's hardcoded heavy 3,4,5 / fake 1
+        task = self._name_based()
+        resolved = task.resolve_origin_names(_origin_schema_reader())
+        assert resolved is True
+        assert task.heavy_ids == (3, 4, 5)
+        assert task.fake_ids == (1,)
+        assert task._names_pending is False  # noqa: SLF001
+
+    def test_name_resolved_weights_match_independent_v1(self):
+        # parity: name-resolved ids produce weights bit-identical to a FRESH,
+        # independently-constructed v1 VertexingTask whose get_weights HARDCODES
+        # (3,4,5)/1 — never the v2 module's own head (gate-quality rule)
+        from salt.models.task import VertexingTask as V1VertexingTask
+
+        task = self._name_based()
+        task.resolve_origin_names(_origin_schema_reader())
+        task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
+        # independent v1 reference: a fresh head built from the same dense kwargs
+        indep_v1 = V1VertexingTask(
+            name="track_vertexing",
+            input_name="tracks",
+            label="ftagTruthVertexIndex",
+            loss=nn.BCEWithLogitsLoss(reduction="none"),
+            dense_config={"input_size": 32, "output_size": 1},
+        )
+        labels = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
+        n = labels.shape[1]
+        adjmat = ~torch.eye(n, dtype=torch.bool).unsqueeze(0)
+        v1_weights = V1VertexingTask.get_weights(indep_v1, labels, adjmat)
+        v2_weights = task.task.get_weights(labels, adjmat)
+        assert torch.equal(v1_weights, v2_weights)
+
+    def test_resolve_origin_weighting_module_helper(self):
+        # the saltmodule helper resolves over a module dict, counting resolutions
+        from salt.core.saltmodule import resolve_origin_weighting
+
+        task = self._name_based()
+        # an int-id sibling must NOT count (already resolved)
+        intd = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex", origin_label="o",
+            origin_weighting={"heavy": [3], "fake": [1]},
+        )
+        intd.name = "int_vtx"
+        n = resolve_origin_weighting(
+            {"track_vertexing": task, "int_vtx": intd}, _origin_schema_reader()
+        )
+        assert n == 1
+        assert task.heavy_ids == (3, 4, 5)
+
+    def test_unknown_name_raises_quality_error(self):
+        task = VertexingTaskModule(
+            stream="tracks",
+            label="ftagTruthVertexIndex",
+            origin_label="ftagTruthOriginLabel",
+            origin_weighting={"heavy": ["NotAClass"], "fake": ["Fake"]},
+        )
+        task.name = "vtx"
+        with pytest.raises(ConfigError, match="NotAClass") as excinfo:
+            task.resolve_origin_names(_origin_schema_reader())
+        assert "ftagTruthOriginLabel" in str(excinfo.value)
+
+    def test_no_schema_attr_raises(self):
+        # a name-based config but the schema has no origin class-name attr
+        task = self._name_based()
+        empty = SimpleNamespace(schema_group=lambda s: GroupSchema(fields={}, attrs={}))
+        with pytest.raises(ConfigError, match="no string-list attr"):
+            task.resolve_origin_names(empty)
+
+    def test_name_based_bind_without_resolution_fails_loudly(self):
+        # binding a name-based task that never reached a schema is a loud error,
+        # NOT a silent mis-weighting
+        task = self._name_based()
+        with pytest.raises(ConfigError, match="not resolved") as excinfo:
+            task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
+        assert "schema artifact" in str(excinfo.value)
+
+    def test_no_schema_reader_resolves_nothing(self):
+        # a reader without schema support leaves names pending (the bind error
+        # is the loud surface, not this no-op)
+        task = self._name_based()
+        assert task.resolve_origin_names(SimpleNamespace()) is False
+        assert task._names_pending is True  # noqa: SLF001
+
+    def test_integer_ids_are_noop_for_resolution(self):
+        task = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex", origin_label="o",
+            origin_weighting={"heavy": [3, 4, 5], "fake": [1]},
+        )
+        task.name = "vtx"
+        assert task.resolve_origin_names(_origin_schema_reader()) is False
+        assert task.heavy_ids == (3, 4, 5)
+
+    def test_mixed_ids_and_names_rejected(self):
+        with pytest.raises(ConfigError, match="mixes integer ids with class names"):
             VertexingTaskModule(
                 stream="tracks",
                 label="ftagTruthVertexIndex",
-                origin_label="ftagTruthOriginLabel",
-                origin_weighting={"heavy": ["FromB", "FromBC", "FromC"], "fake": ["Fake"]},
+                origin_label="o",
+                origin_weighting={"heavy": [3, "FromBC", 5], "fake": [1]},
             )
-        assert "M3" in str(excinfo.value)
+
+    def test_non_integer_id_rejected(self):
+        with pytest.raises(ConfigError, match="INTEGER origin ids or class NAMES"):
+            VertexingTaskModule(
+                stream="tracks",
+                label="ftagTruthVertexIndex",
+                origin_label="o",
+                origin_weighting={"heavy": [3.5], "fake": [1]},
+            )
+
+
+class TestExposeOptOut:
+    """Per-task ``expose: [fit, val]`` opt-out (design §4.2, M5 sub-wave D).
+
+    A train-only aux task gates its ``preds.*`` port to the listed modes so the
+    planner prunes it from the TEST/ONNX plans (silencing the dead-preds hard
+    error) while it keeps training. The default (no ``expose``) publishes in
+    every mode as before.
+    """
+
+    def test_parse_default_is_all_modes(self):
+        task = ClassificationTaskModule(
+            stream="jets", label="f", class_names=["a", "b"], input="pooled.global"
+        )
+        assert task.expose_modes == Mode.ALL
+
+    def test_parse_fit_val_gates_pred_port(self):
+        task = ClassificationTaskModule(
+            stream="tracks", label="o", class_names=["a", "b"],
+            context="pooled.global", expose=["fit", "val"],
+        )
+        task.name = "aux"
+        assert task.expose_modes == (Mode.FIT | Mode.VAL)
+        produced_fit = flatten_spec(task.declare_io(Mode.FIT).produces)
+        # the pred port is active in FIT/VAL but NOT in TEST/ONNX
+        pred = produced_fit[task.pred_key]
+        assert pred.active_in(Mode.FIT) and pred.active_in(Mode.VAL)
+        assert not pred.active_in(Mode.TEST)
+        assert not pred.active_in(Mode.ONNX)
+        # the loss is FIT|VAL regardless (the task still trains)
+        assert produced_fit[task.loss_key].active_in(Mode.FIT)
+
+    def test_parse_case_insensitive(self):
+        task = ClassificationTaskModule(
+            stream="jets", label="f", class_names=["a", "b"], input="pooled.global",
+            expose=["FIT", "Val"],
+        )
+        assert task.expose_modes == (Mode.FIT | Mode.VAL)
+
+    def test_empty_list_rejected(self):
+        with pytest.raises(ConfigError, match="empty list"):
+            ClassificationTaskModule(
+                stream="jets", label="f", class_names=["a"], input="pooled.global", expose=[]
+            )
+
+    def test_string_value_rejected(self):
+        with pytest.raises(ConfigError, match="list of mode names"):
+            ClassificationTaskModule(
+                stream="jets", label="f", class_names=["a"], input="pooled.global", expose="fit"
+            )
+
+    def test_unknown_mode_rejected(self):
+        with pytest.raises(ConfigError, match="unknown expose mode"):
+            ClassificationTaskModule(
+                stream="jets", label="f", class_names=["a"], input="pooled.global",
+                expose=["fit", "predict"],
+            )
+
+    def test_expose_on_regression_and_vertexing(self):
+        # the opt-out lives on the shared base, so all task families carry it:
+        # the pred port is declared but mode-inactive in TEST (planner-pruned)
+        reg = RegressionTaskModule(stream="jets", targets="x", input="pooled.global",
+                                   expose=["fit", "val"])
+        reg.name = "reg"
+        reg_pred = flatten_spec(reg.declare_io(Mode.TEST).produces)[reg.pred_key]
+        assert reg_pred.active_in(Mode.FIT) and not reg_pred.active_in(Mode.TEST)
+        vtx = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex", origin_label="o",
+            expose=["fit", "val"],
+        )
+        vtx.name = "vtx"
+        vtx_pred = flatten_spec(vtx.declare_io(Mode.TEST).produces)[vtx.pred_key]
+        assert vtx_pred.active_in(Mode.FIT) and not vtx_pred.active_in(Mode.TEST)
+
+    def _modules_with_exposed_aux(self, norm_dict):
+        modules = build_gn2v2_modules(norm_dict)
+        # rebuild track_origin with expose: [fit, val] (a train-only aux task)
+        modules["track_origin"] = ClassificationTaskModule(
+            stream="tracks", label="ftagTruthOriginLabel",
+            class_names=list(ORIGIN_CLASSES), context="pooled.global", weight=0.5,
+            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=["fit", "val"],
+        )
+        modules["track_origin"].name = "track_origin"
+        # fresh LossSum re-narrowed over the rebuilt module set (the prior one
+        # has already fixed its keys and cannot re-narrow)
+        loss = LossSum()
+        loss.name = "loss"
+        loss.narrow(LossSum.collect_loss_keys(modules))
+        modules["loss"] = loss
+        return modules
+
+    def test_exposed_task_kept_in_fit_plan(self, norm_paths):
+        modules = self._modules_with_exposed_aux(norm_paths[0])
+        plan = compile_plan(modules, Mode.FIT, sources=gn2v2_sources(), sinks=["loss.total"])
+        assert "track_origin" in plan.module_names
+
+    def test_exposed_task_pruned_from_test_plan(self, norm_paths):
+        modules = self._modules_with_exposed_aux(norm_paths[0])
+        # the exposed aux produces nothing in TEST → the planner prunes it from
+        # the TEST plan entirely (compile with its full preds set as sinks: the
+        # exposed pred is mode-inactive, so it cannot be demanded)
+        plan = compile_plan(
+            modules,
+            Mode.TEST,
+            sources=gn2v2_sources(),
+            sinks=["preds.jets.jets_classification", "preds.tracks.track_vertexing"],
+        )
+        assert "track_origin" not in plan.module_names
+        assert "jets_classification" in plan.module_names
+
+    def test_default_aux_alive_in_test_when_demanded(self, norm_paths):
+        # negative control: WITHOUT expose, the same task IS active in TEST — its
+        # pred is a legitimate TEST sink the planner keeps (the column expose
+        # would have removed). Proves the exposed/non-exposed difference is the
+        # pred port's TEST activity, not some other pruning.
+        modules = build_gn2v2_modules(norm_paths[0])
+        plan = compile_plan(
+            modules,
+            Mode.TEST,
+            sources=gn2v2_sources(),
+            sinks=[
+                "preds.jets.jets_classification",
+                "preds.tracks.track_origin",
+                "preds.tracks.track_vertexing",
+            ],
+        )
+        assert "track_origin" in plan.module_names
+
+    def test_exposed_pred_cannot_be_a_test_sink(self, norm_paths):
+        # the exposed pred is mode-inactive in TEST, so demanding it as a TEST
+        # sink is a no-producer error naming the FIT/VAL modes where it lives
+        from salt.core.graph.errors import GraphError
+
+        modules = self._modules_with_exposed_aux(norm_paths[0])
+        with pytest.raises(GraphError, match="FIT/VAL"):
+            compile_plan(
+                modules,
+                Mode.TEST,
+                sources=gn2v2_sources(),
+                sinks=["preds.tracks.track_origin"],
+            )
 
 
 class TestNoIOGuard:

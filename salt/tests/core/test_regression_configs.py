@@ -73,7 +73,9 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
         "--trainer.fast_dev_run=2",
-        "--trainer.enable_progress_bar=false",
+        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # enable_progress_bar=false cannot coexist with a configured bar
+        "--callbacks.progress=null",
     ])
     assert rc == 0, f"{config} failed fast_dev_run fit"
 

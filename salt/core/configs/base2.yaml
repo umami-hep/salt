@@ -20,28 +20,29 @@ trainer:
   # entries deep-merge across config files (design §5.3).
 
 # Dict-keyed, deep-mergeable callback defaults (design §5.3): override one key
-# (--callbacks.checkpoint.init_args.monitor=...), add an entry from any config
-# file, or delete one with `checkpoint: null`. Assembled into trainer.callbacks
-# ahead of any stock list entries. The salt.core.callbacks.Checkpoint port
-# (per-task monitor defaults incl. the design §5.3
-# val/jets_classification_loss monitor) is deferred to M5/M6 alongside the
-# run-dir layout it depends on — recorded in the study CLAUDE.md TODOs. The
-# design §5.3 lr_monitor and progress entries are ALSO deferred:
-# LearningRateMonitor needs a logger (Comet wiring is M6) and the salt
-# ProgressBar port is M5 — until then losses show on Lightning's stock
-# progress bar (prog_bar=True).
+# (--callbacks.checkpoint.init_args.monitor_loss=...), add an entry from any
+# config file, or delete one with `checkpoint: null`. Assembled into
+# trainer.callbacks ahead of any stock list entries. The
+# salt.core.callbacks.Checkpoint port (M5 sub-wave D) writes a checkpoint per
+# epoch into <log_dir>/ckpts/ with the 'loss=' filename stem the salt2-test
+# best-epoch glob keys on (per-task monitor via monitor_loss, design §5.3). The
+# salt.core.callbacks.ProgressBar port (M5) is the stock TQDMProgressBar under
+# a salt-owned name. The design §5.3 lr_monitor entry is STILL deferred:
+# LearningRateMonitor needs a logger (Comet wiring is M6).
 callbacks:
   checkpoint:
-    class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    class_path: salt.core.callbacks.Checkpoint
     init_args:
-      monitor: val/loss
-      mode: min
-      save_top_k: 1
-      # 'loss=' in the stem is the salt2-test no-ckpt_path fallback contract
-      # (salt/core/main.py _best_checkpoint; v1 utils/cli.py:55-79) — keep
-      # the filename and that glob in sync.
-      filename: "epoch={epoch:03d}-loss={val/loss:.5f}"
-      auto_insert_metric_name: false
+      # monitor_loss is BOTH the monitored metric and the filename loss tag;
+      # the resulting stem 'epoch=NNN-loss=<val/loss>.ckpt' under ckpts/ is the
+      # salt2-test no-ckpt_path fallback contract (salt/core/main.py
+      # _best_checkpoint; v1 utils/cli.py:55-79) — keep the Checkpoint default
+      # fname_string ('loss') and that glob in sync.
+      monitor_loss: val/loss
+  progress:
+    class_path: salt.core.callbacks.ProgressBar
+    init_args:
+      refresh_rate: 50
   model_summary:
     class_path: lightning.pytorch.callbacks.ModelSummary
     init_args:

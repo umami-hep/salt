@@ -480,7 +480,9 @@ def run_g2(
         "--trainer.log_every_n_steps=1",
         "--trainer.limit_val_batches=2",
         "--trainer.num_sanity_val_steps=0",
-        "--trainer.enable_progress_bar=false",
+        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # enable_progress_bar=false cannot coexist with a configured bar
+        "--callbacks.progress=null",
         f"--trainer.logger={json.dumps(logger_cfg)}",
     ]
     if schema is not None:
@@ -1374,7 +1376,7 @@ def run_g5(
 
     def make_model() -> SaltModule:
         torch.manual_seed(seed)
-        return SaltModule(build_gn2v2_modules(norm_dict), lrs_config=dict(_G5_LRS))
+        return SaltModule(build_gn2v2_modules(norm_dict), lrs=dict(_G5_LRS))
 
     def make_trainer(*callbacks: Callback) -> Trainer:
         return Trainer(
@@ -1463,7 +1465,7 @@ def run_g5(
             "k": k,
             "batch_size": batch_size,
             "seed": seed,
-            "lrs_config": dict(_G5_LRS),
+            "lrs": dict(_G5_LRS),
             "compile": "nn.Module.compile(backend='eager') on net.encoder.encoder, in place",
         },
     )

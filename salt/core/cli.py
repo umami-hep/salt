@@ -138,7 +138,15 @@ class GraphConfig:
     contract unchecked — design §4.1); ``validate`` reports them
     (promotable with ``--strict``). `sink_origins` enriches missing-sink
     planner errors with the demanding config address (e.g.
-    ``export.outputs``), per mode.
+    ``export.outputs``), per mode. `writers` carries the `WriterCallback`
+    built from the parsed ``writers:`` block (set on trainer configs), so
+    ``validate`` can run the TEST writer kind/dtype unification
+    (`WriterCallback.validate_specs`, design §2.7/§8) statically — the same
+    check `SaltModule._validate_writer_specs` runs at ``salt2 test`` setup,
+    now also gated by ``salt2 graph validate``. `model_modules` is the
+    model-side subdict (the `validate_specs` `model_modules` argument, kept
+    separate from the combined `modules` exactly as the runtime path passes
+    `SaltModule._graph_modules`).
     """
 
     modules: dict[str, GraphModule]
@@ -149,6 +157,8 @@ class GraphConfig:
     mode_errors: dict[Mode, str] = field(default_factory=dict)
     mode_warnings: dict[Mode, str] = field(default_factory=dict)
     sink_origins: dict[Mode, dict[str, str]] = field(default_factory=dict)
+    writers: Any | None = None
+    model_modules: dict[str, GraphModule] | None = None
 
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
@@ -450,6 +460,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         mode_errors=mode_errors,
         mode_warnings=mode_warnings,
         sink_origins=sink_origins,
+        writers=writer_cb,
+        model_modules=dict(model._graph_modules),  # noqa: SLF001 - same-package adapter
     )
 
 
@@ -796,6 +808,18 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     so ``--strict`` stays usable as the CI default on standard tagger
     configs.
 
+    For TEST, when a ``writers:`` block is configured, the writer kind/dtype
+    unification (design §2.7/§8) runs statically here too: each writer-declared
+    require's kind/dtype is unified against its producing leaf in the
+    just-compiled TEST plan (the static equivalent of the runtime
+    `SaltModule._validate_writer_specs` producer union), so a writer declaring
+    a wrong kind/dtype (e.g. ``preds.jets.classification`` as ``kind=label`` or
+    ``dtype=int64`` where the task publishes ``data``/``float32``) is a fatal
+    error HERE — at ``salt2 graph validate``, data-free, in CI — instead of
+    surfacing only at ``salt2 test`` setup. Skipped when the TEST sinks already
+    carry a stored mode error (the writers block already failed at demand
+    assembly; `WriterCallback.requires` would re-raise the same root cause).
+
     Returns
     -------
     int
@@ -856,6 +880,34 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
             bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
             bucket.append(line)
+        if (
+            mode is Mode.TEST
+            and cfg.writers is not None
+            and cfg.model_modules is not None
+            and mode not in cfg.mode_errors
+        ):
+            # writer kind/dtype unification, statically (design §2.7/§8) — the
+            # same check `SaltModule._validate_writer_specs` runs at `salt2 test`
+            # setup, now also gated by `salt2 graph validate` so a wrong writer
+            # kind/dtype fails data-free in CI instead of only at run setup. The
+            # producer universe is assembled from the JUST-COMPILED TEST plan:
+            # every step's produced leaves unioned with the mode-active boundary
+            # sources, the static equivalent of the runtime union of
+            # `model_producer_specs` and `GraphDataset.boundary_specs`. An
+            # executed step-produced leaf WINS over a same-named boundary source,
+            # exactly as runtime (`_validate_writer_specs` does `boundary_specs`
+            # then `.update` model_producer_specs); within the steps the first
+            # producer wins (plan order), mirroring the runtime `setdefault`.
+            producer_specs: dict[str, TensorSpec] = {}
+            for step in plan.steps:
+                for key, spec in step.produces.items():
+                    producer_specs.setdefault(key, spec)
+            for key, spec in plan.sources.items():
+                producer_specs.setdefault(key, spec)
+            try:
+                cfg.writers.validate_specs(cfg.model_modules, cfg.reader, producer_specs)
+            except GraphError as err:
+                errors.append(f"[mode=TEST] writer spec validation: {err}")
     for info in infos:
         print(f"info: {info}")
     for warning in warnings:
@@ -882,7 +934,10 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
     stored per-mode sink error (the writers-block dead-preds error,
     `GraphConfig.mode_errors`); unconsumed FIT/VAL preds are info (the normal
     no-metric-callback case, design §3.3); the rest are warnings
-    (report-only). TODO(M5): the per-task ``expose:`` opt-out.
+    (report-only). A per-task ``expose: [fit, val]`` opt-out (design §4.2, M5
+    sub-wave D) gates the prediction port out of TEST before this runs, so an
+    opted-out task surfaces here as a (warning-level) whole-module pruning
+    rather than a TEST preds error.
 
     Returns
     -------

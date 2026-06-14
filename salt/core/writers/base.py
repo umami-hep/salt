@@ -50,15 +50,25 @@ lengths for v1's ``maybe_pad`` re-expansion) which the model-side
 equivalent: the output schema is still declared up front, so the file and
 all datasets exist before the first batch (the empty-test-set fix, §8).
 
-Design-deviation note (M3 review): the `TensorSpec` VALUES of a writer's
-declared requires drive demand by KEY only — key serveability is validated
-end to end (a model-produced key anchors the TEST plan; an unserveable
-dataset-namespace key raises at `SaltModule._boundary_demand`) but
-kind/dtype/shape unification against the producing port is not yet run for
-writer sinks, so §2.7's "kind-typed requires, exactly like ``declare_io``"
-holds nominally. Threading the specs through plan compilation (reusing the
-planner's unification) is an M5 follow-up, recorded in the study CLAUDE.md
-TODOs.
+M5 sub-wave D — writer-spec validation LANDED: the `TensorSpec` VALUES of a
+writer's declared requires now drive both KEY demand AND a static kind/dtype
+check. Key serveability was always validated end to end (a model-produced key
+anchors the TEST plan; an unserveable dataset-namespace key raises at
+`SaltModule._boundary_demand`); `WriterCallback.validate_specs` (called from
+TWO entry points: `SaltModule.setup` on the TEST path at run setup, AND
+`salt2 graph validate` for the TEST mode data-free — `cli._cmd_validate`, the
+canonical CI static-validator command — both after the TEST plan compiles and
+before bind/the first batch) additionally unifies each writer-declared
+require's kind/dtype against the leaf that actually produces it — a model
+TEST-port or a dataset boundary source — reusing the planner's
+`_unify_edge`/`KindError` rules (kind must match; dtypes must match when both
+are declared, a ``None`` on either side unifies with anything). §2.7's
+"kind-typed requires, exactly like ``declare_io``" now holds for real on the
+writer→producer edge. SHAPE unification is intentionally not replayed: writer
+requires carry symbolic-dim shapes whose batch/token dims only bind against
+the live boundary inside the compiled plan (the plan's own `_unify_edge`
+unifies model-side shapes end to end), so the writer-specific gap was kind and
+dtype, which is what the validator closes.
 """
 
 from __future__ import annotations

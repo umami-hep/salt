@@ -87,9 +87,12 @@ from the dataset automatically and its loss joins `loss.total` via the
 (streams=null, onnx=true) persists its predictions in eval AND declares
 its ONNX output (`{model_name}_TrackType`, argmax int8) automatically —
 zero extra config, the M4.5 unified-manifest journey. If the aux head is
-a training-time regulariser that must NOT reach Athena, narrow the export
-surface explicitly (`onnx_tasks:`/`onnx: false` on the TaskWriter) and
-check with `salt2 export --manifest`.
+a training-time regulariser that must NOT reach eval OR Athena, set
+`expose: [fit, val]` on the task (design §4.2): its prediction is gated out
+of the TEST/ONNX plans (the task is pruned there) while it keeps training.
+To keep it in eval but out of Athena only, narrow the export surface instead
+(`onnx_tasks:`/`onnx: false` on the TaskWriter) and check with
+`salt2 export --manifest`.
 
 ## Evaluation: `salt2 test` + prediction writers (design §8)
 
@@ -134,8 +137,11 @@ a task fails loudly (naming the producing task's config address and the
 narrowed writer's `streams` entry) instead of silently dropping columns.
 The same error fires statically from `salt2 graph validate`/`deadcode`.
 Deleting all writers is refused on the `salt2 test` path. A train-only aux
-task currently needs `--model.modules.<task>=null` on the test invocation
-(the design §4.2 per-task `expose: [fit, val]` opt-out is an M5 deferral).
+task opts out of eval with the per-task `expose: [fit, val]` config (design
+§4.2): it stays trained (the loss is FIT/VAL anyway) while its `preds.*`
+port is gated out of the TEST/ONNX plans, so the planner prunes the task and
+the dead-preds error never fires. `--model.modules.<task>=null` (delete the
+task entirely) remains the heavier alternative.
 
 ### Writers are the SINGLE output manifest (M4.5 unified manifest)
 
@@ -252,13 +258,14 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from salt.core.graph.spec import TensorSpec
 from salt.core.writers import Writer
 
+
 class FirstTrackD0Writer(Writer):
     DTYPE = np.dtype([("first_track_d0", "f4")])
 
     def requires(self, ctx):  # static demand — keeps producers alive (§8)
         return {"inputs.tracks": TensorSpec(dtype="float32", kind="data")}
 
-    def columns(self, ctx):   # output schema, declared before any batch
+    def columns(self, ctx):  # output schema, declared before any batch
         return {"jets": self.DTYPE}
 
     def write(self, bundle, rows):
@@ -310,7 +317,12 @@ statically inspectable without a prior fit; with `--annotate` the comment
 block goes into the LAST `-c` file. The parsed
 `writers:` block enters the static TEST graph exactly as at runtime, so
 `validate`/`deadcode` fire the dead-preds error for a narrowed writer set
-before anything runs:
+before anything runs. `validate` also runs the writer kind/dtype unification
+for TEST (design §2.7/§8 — the same `WriterCallback.validate_specs` check
+`salt2 test` setup runs): a writer declaring a require with a kind/dtype that
+contradicts its producing leaf (e.g. `preds.jets.classification` as
+`kind=label` where the task publishes `data`) is a hard error here, data-free,
+not only at `salt2 test` setup:
 
 ```bash
 salt2 graph validate -c salt/core/configs/gn2v2-dummy.yaml \
@@ -409,21 +421,26 @@ MaskFormer metrics (see `SaltModule._model_sinks`).
 
 ## Notable M2 surface notes
 
-- `lrs_config:` is the design §5.1 `lrs:` block under its v1 name (rename is
-  an M3 cleanup). Schema: `{initial, max, end, pct_start[, weight_decay,
-  last_epoch]}` driving AdamW/lion/HybridMuonAdamW + OneCycleLR.
-- `VertexingTaskModule.origin_weighting` takes integer origin ids in M2
-  (defaults reproduce v1's `heavy: [3,4,5], fake: [1]`); the design's
-  name-based form lands in M3.
+- `lrs:` is the design §5.1 OneCycleLR block (renamed from the v1 ModelWrapper
+  `lrs_config:` kwarg — M3 cleanup, landed in M5 sub-wave D). Schema:
+  `{initial, max, end, pct_start[, weight_decay, last_epoch]}` driving
+  AdamW/lion/HybridMuonAdamW + OneCycleLR.
+- `VertexingTaskModule.origin_weighting` takes integer origin ids OR class
+  NAMES (defaults reproduce v1's `heavy: [3,4,5], fake: [1]`); names (the
+  design §5.1 / GN3 origin surface) are resolved to ids at fit/test setup
+  against the origin label's class-name attr in the schema artifact (M5
+  sub-wave D). A name-based config without a schema artifact is a loud bind
+  error.
 - Loggers (Comet) and run dirs are M6; losses show on the stock progress
   bar meanwhile (`train/loss`, `train/<task>_loss`).
 - `TaskWriter` writes the vertexing column as bare `VertexIndex` (i8) by
   default — the v1 byte-schema; the design §8 run-name prefix is opt-in via
   `prefix_vertex_column: true` (default polarity to be revisited when v1
   byte-parity gating retires — study CLAUDE.md TODO).
-- Per-task `expose: [fit, val]` (design §4.2) is not implemented yet (M5);
-  a train-only aux task needs `--model.modules.<task>=null` on each
-  `salt2 test` invocation.
+- Per-task `expose: [fit, val]` (design §4.2, M5 sub-wave D): a train-only
+  aux task gates its `preds.*` port to the listed modes — `[fit, val]` prunes
+  it from the TEST/ONNX plans (silencing the dead-preds error) while it keeps
+  training. `--model.modules.<task>=null` (full deletion) is the alternative.
 
 ## ONNX export: `salt2 export` (design §7)
 

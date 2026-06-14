@@ -177,6 +177,42 @@ Gate criteria (each justified in its ``run_r*`` docstring vs the design/v1 ref):
   §7.3). Plus the public `register_reduce` loud surfaces (duplicate name, bad
   dtype, non-string name). D1 makes NO model-parity claim (it is a planner/
   registry-assembly gate); the decoder/loss/writer parity are MF1a/MF1c/MF2.
+- **D2ckpt Checkpoint filename/monitor contract + run-dir path inference +
+  ProgressBar smoke** (sub-wave D-rest, plan 10 D2 row — THIS slice; the other D2
+  items live elsewhere). The REAL `salt.core.callbacks.Checkpoint` produces the v1
+  ``epoch=NNN-loss={monitor_loss:.5f}.ckpt`` stem (``save_top_k=-1``, per-task
+  monitor unmangled), its `setup("fit")` forces ``dirpath`` to ``<log_dir>/ckpts``
+  (driven through the actual `ModelCheckpoint.setup`, not a re-implementation), and
+  `salt.core.main._best_checkpoint` resolves the lowest-loss epoch from what the
+  callback wrote — the ``salt2 test`` no-``--ckpt_path`` run-dir path inference.
+  NON-GATING for model reproduction (it gates the eval run-dir discovery). The
+  `ProgressBar` smoke confirms the stock ``TQDMProgressBar`` attaches under a
+  salt-owned name (v1 ``callbacks/checkpoint.py:25-48``, ``base.yaml:38-39``).
+- **D2expose per-task expose opt-out + name-based origin_weighting** (sub-wave
+  D-rest, plan 10 D2 row — THIS slice). The per-task ``expose: [fit, val]`` gates a
+  task's ``preds.*`` to the exposed modes, so the planner KEEPS the task in the FIT
+  plan and PRUNES it from the TEST plan, and the REAL
+  `SaltModule._model_sinks(Mode.TEST)` writer-demand dead-preds path raises WITHOUT
+  expose (advertising the fix) but is silent WITH it; name-based
+  ``origin_weighting`` resolves CLASS NAMES to v1's hardcoded ids (3,4,5)/(1) via
+  the REAL `salt.core.saltmodule.resolve_origin_weighting`, and the composed head's
+  ``get_weights`` is bit-identical to an INDEPENDENT v1 `VertexingTask` (design
+  §4.2, §5.1; v1 ``task.py:957-964``).
+- **D2cfg writer TensorSpec kind/dtype validation + lrs_config->lrs migration**
+  (sub-wave D-rest, plan 10 D2 row — THIS slice; the LAST two D2 items). The REAL
+  `WriterCallback.validate_specs` (the static §2.7 writer-input validator driven
+  through the SAME ``model_producer_specs`` + boundary union `SaltModule._validate_
+  writer_specs` assembles) unifies a writer's declared require kind/dtype against
+  its producing leaf: a matching ``data``/``float32`` (and an unconstrained
+  ``None`` dtype) require PASSES; a wrong ``dtype`` raises `ShapeError`, a wrong
+  ``kind`` raises `KindError`, and a non-optional require with no producer raises
+  `ConfigError` (existence half), while an OPTIONAL missing require is silent. PLUS
+  the ``lrs_config`` -> ``lrs`` rename (M3 cleanup, design §5.1): a shipped v2
+  config (carrying ``lrs:``) loads + plan-compiles through the REAL ``salt2 graph
+  validate`` in all four modes, NO shipped v2 config retains a stale ``lrs_config:``
+  key, and a config carrying the old ``lrs_config:`` key FAILS the real
+  config-load path (the renamed kwarg is rejected — v1
+  ``modelwrapper.py``/``base.yaml:45``).
 
 Negative-control hooks (the pytest suite, ``test_gates_m5.py``): each ``run_*``
 takes a python-only ``corruption`` keyword applied to the v2 OBSERVED values (or
@@ -189,21 +225,24 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from lightning.pytorch.callbacks import Callback, TQDMProgressBar
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.callbacks import ConfusionMatrix, MaskformerMetrics
-from salt.core.data import MaskFormerTargets, MultiTarget
+from salt.core.callbacks import Checkpoint, ConfusionMatrix, MaskformerMetrics, ProgressBar
+from salt.core.data import H5StructuredReader, MaskFormerTargets, MultiTarget
 from salt.core.graph import Bundle, Executor, Mode
-from salt.core.graph.errors import ConfigError
+from salt.core.graph.errors import ConfigError, GraphError, KindError, ShapeError
 from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import IO, TensorSpec, unflatten_spec
+from salt.core.graph.spec import IO, TensorSpec, flatten_spec, unflatten_spec
+from salt.core.main import CONFIG_DIR, _best_checkpoint
+from salt.core.main import main as salt2_main
 from salt.core.nn import (
     LossGLS,
     LossSum,
@@ -216,7 +255,11 @@ from salt.core.nn import (
     resolve_bind_schema,
 )
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.tasks import RegressionTaskModule
+from salt.core.nn.tasks import (
+    ClassificationTaskModule,
+    RegressionTaskModule,
+    VertexingTaskModule,
+)
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
@@ -234,22 +277,27 @@ from salt.core.onnx.reduces import (
     registered_reduces,
     unregister_reduce,
 )
-from salt.core.saltmodule import SaltModule
+from salt.core.saltmodule import SaltModule, resolve_origin_weighting
+from salt.core.schema import GroupSchema, Schema
 from salt.core.writers import (
     OBJECT_INDEX,
     MaskFormerObjectWriter,
+    TaskWriter,
     WriteCtx,
+    Writer,
+    WriterCallback,
     WriterDeclareCtx,
 )
 from salt.data.datasets import OPERATORS as V1_OPERATORS
 from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
+from salt.models.task import VertexingTask as V1VertexingTask
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
     make_gn2_batch,
     write_parity_norm_dict,
 )
-from salt.tests.core.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
+from salt.tests.core.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules, gn2v2_sources
 from salt.tests.core.regression_fixture import (
     GLOBAL_VARIABLES,
     HYBRID_ENC_DIM,
@@ -296,6 +344,9 @@ __all__ = [
     "PARITY_ATOL",
     "main",
     "run_d1",
+    "run_d2cfg",
+    "run_d2ckpt",
+    "run_d2expose",
     "run_l1",
     "run_l2",
     "run_l3",
@@ -2973,7 +3024,7 @@ def run_d1(
         modules["aux_d1"] = _D1AuxProbe()
         modules["loss"] = LossSum()
         return SaltModule(
-            modules, lrs_config={"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
+            modules, lrs={"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
         )
 
     # baseline: NO FIT/VAL-sink callback -> sinks are loss.total only (M2/M3)
@@ -3171,18 +3222,963 @@ def _resolve_dtype_mismatch(export: ExportConfig, reduce_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# D2ckpt — Checkpoint monitor/filename contract + run-dir path inference;
+#          ProgressBar smoke (sub-wave D-rest, plan 10 D2 row, this slice)
+# ---------------------------------------------------------------------------
+
+
+def _ckpt_setup_trainer(log_dir: str, *, fast_dev_run: bool = False) -> Any:
+    """A minimal `ModelCheckpoint.setup`-compatible trainer stub.
+
+    The exact surface ``ModelCheckpoint.setup`` reads: ``fast_dev_run``,
+    ``log_dir``/``default_root_dir``, ``is_global_zero``, an empty ``loggers``
+    (so `__resolve_ckpt_dir` short-circuits on a pre-set ``dirpath``) and a
+    pass-through ``strategy.broadcast``. NOT a re-implementation — the gate
+    drives the REAL `Checkpoint.setup`, which calls ``super().setup``.
+
+    Returns
+    -------
+    SimpleNamespace
+        The stub trainer.
+    """
+    from types import SimpleNamespace  # noqa: PLC0415 - gate-local duck-typed trainer
+
+    return SimpleNamespace(
+        fast_dev_run=fast_dev_run,
+        log_dir=log_dir,
+        default_root_dir=log_dir,
+        is_global_zero=True,
+        loggers=[],
+        strategy=SimpleNamespace(broadcast=lambda x: x),
+    )
+
+
+def run_d2ckpt(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[str], str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """D2 (Checkpoint/ProgressBar slice): filename/monitor contract + run-dir inference.
+
+    The sub-wave-D-rest Checkpoint + ProgressBar ports (plan 10 D2 row, this
+    slice). NON-GATING for model reproduction — it gates the ``salt2 test``
+    no-``--ckpt_path`` run-dir checkpoint path inference, so the v1 filename +
+    ``ckpts/`` layout contract must hold end-to-end against the REAL
+    `salt.core.main._best_checkpoint`. Three slices, every surface real:
+
+    - **Filename + monitor contract** (v1 ``callbacks/checkpoint.py:25-27``). The
+      REAL `salt.core.callbacks.Checkpoint`'s `format_checkpoint_name` produces
+      ``epoch=NNN-{fname_string}={monitor_loss:.5f}.ckpt`` — the default
+      ``fname_string="loss"`` gives the ``loss=`` stem; ``save_top_k == -1``
+      (keep every epoch); ``monitor == monitor_loss``;
+      ``auto_insert_metric_name is False`` (the metric carries a ``/``). The
+      per-task monitor (``val/jets_classification_loss``) round-trips into the
+      stem unmangled.
+
+    - **Run-dir path inference** (the ``salt2 test`` contract,
+      `salt.core.main._best_checkpoint`). The REAL `Checkpoint.setup("fit")`
+      forces ``dirpath`` to ``<log_dir>/ckpts`` (v1 ``checkpoint.py:44-46``;
+      driven through the actual `ModelCheckpoint.setup` short-circuit, NOT a
+      re-implemented assignment); checkpoints named by the REAL
+      `format_checkpoint_name` are written there, and `_best_checkpoint`
+      (globbing ``{ckpts,checkpoints}/*.ckpt`` for the smallest ``loss=``)
+      resolves the lowest-loss epoch — proving discovery works on what the
+      callback writes. ``setup`` is a no-op on a non-fit stage / under
+      ``fast_dev_run`` (``dirpath`` is then super-resolved to ``checkpoints/``,
+      not forced to ``ckpts/`` — v1 ``checkpoint.py:30-32``), and an ``s3://``
+      log dir is a loud `ConfigError` (the v1 s3 branch deferred to M6).
+
+    - **ProgressBar smoke** (v1 stock ``TQDMProgressBar``, ``base.yaml:38-39``).
+      `salt.core.callbacks.ProgressBar` instantiates with ``refresh_rate``,
+      attaches as a `Callback`, and is a `TQDMProgressBar` (the stock bar under
+      a salt-owned name).
+
+    Negative control (``test_gates_m5.py``): the ``corruption`` hook rewrites the
+    written checkpoint STEM (dropping the ``loss=`` tag) before the inference
+    glob — `_best_checkpoint` must then raise (no ``loss=``-named checkpoint),
+    so ``inference_resolves_lowest_loss`` FAILS while the contract / setup-dir /
+    progress checks (independent of that filename) stay green.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print(
+        "D2ckpt Checkpoint filename/monitor contract + run-dir path inference + ProgressBar smoke"
+    )
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    # -- (a) filename + monitor contract (the REAL format_checkpoint_name) ------
+    per_task = Checkpoint(monitor_loss="val/jets_classification_loss")
+    checks["filename_stem_is_v1_contract"] = (
+        per_task.filename == "epoch={epoch:03d}-loss={val/jets_classification_loss:.5f}"
+    )
+    checks["save_top_k_is_minus_one"] = per_task.save_top_k == -1
+    checks["monitor_is_monitor_loss"] = per_task.monitor == "val/jets_classification_loss"
+    checks["auto_insert_metric_name_off"] = per_task.auto_insert_metric_name is False
+    # the per-task metric (carrying a '/') round-trips into the loss= stem
+    rendered = per_task.format_checkpoint_name({
+        "epoch": 9,
+        "val/jets_classification_loss": 0.64624,
+    })
+    checks["formatted_name_has_loss_tag"] = rendered == "epoch=009-loss=0.64624.ckpt"
+
+    # -- (b) run-dir path inference through the REAL setup + _best_checkpoint ---
+    from types import SimpleNamespace  # noqa: PLC0415 - gate-local duck-typed pl_module
+
+    run_dir = outdir / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_cb = Checkpoint(monitor_loss="val/loss")
+    ckpt_cb.setup(_ckpt_setup_trainer(str(run_dir)), SimpleNamespace(), stage="fit")
+    checks["setup_forces_ckpts_dir"] = str(ckpt_cb.dirpath) == str(run_dir / "ckpts")
+
+    ckpt_dir = Path(ckpt_cb.dirpath)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for epoch, loss in ((8, 0.70123), (9, 0.64624)):
+        name = ckpt_cb.format_checkpoint_name({"epoch": epoch, "val/loss": loss})
+        if corruption is not None:
+            name = corruption(name)
+        (ckpt_dir / name).write_text("ckpt-placeholder")
+        written.append(name)
+    config_yaml = run_dir / "config.yaml"  # the saved run config _best_checkpoint scans next to
+    config_yaml.write_text("class_path: salt.core.SaltModule\n")
+    try:
+        best = _best_checkpoint(config_yaml)
+        checks["inference_resolves_lowest_loss"] = Path(best).name == "epoch=009-loss=0.64624.ckpt"
+    except ConfigError:
+        # the negative control reaches here (no loss=-named ckpt after corruption)
+        checks["inference_resolves_lowest_loss"] = False
+
+    # non-fit / fast_dev_run setup do NOT force the ckpts/ layout (v1 :30-32)
+    non_fit = Checkpoint()
+    non_fit.setup(_ckpt_setup_trainer(str(run_dir)), SimpleNamespace(), stage="test")
+    checks["non_fit_setup_does_not_force_ckpts"] = not str(non_fit.dirpath).endswith("ckpts")
+    fdr = Checkpoint()
+    fdr.setup(_ckpt_setup_trainer(str(run_dir), fast_dev_run=True), SimpleNamespace(), stage="fit")
+    checks["fast_dev_run_does_not_force_ckpts"] = not str(fdr.dirpath).endswith("ckpts")
+    # an s3:// log dir is a loud ConfigError (the v1 s3 branch deferred to M6)
+    checks["s3_log_dir_rejected_loudly"] = _raises_config_error(
+        lambda: Checkpoint().setup(
+            _ckpt_setup_trainer("s3://bucket/run"), SimpleNamespace(), stage="fit"
+        )
+    )
+
+    # -- (c) ProgressBar smoke (the stock TQDMProgressBar under a salt name) ----
+    bar = ProgressBar(refresh_rate=50)
+    checks["progressbar_attaches_without_error"] = isinstance(bar, Callback)
+    checks["progressbar_is_stock_tqdm"] = isinstance(bar, TQDMProgressBar)
+    checks["progressbar_refresh_rate_passthrough"] = bar.refresh_rate == 50
+
+    passed = all(checks.values())
+    criterion = (
+        "the REAL salt.core.callbacks.Checkpoint produces the v1 "
+        "'epoch=NNN-loss={monitor_loss:.5f}.ckpt' stem with save_top_k=-1 and the per-task "
+        "monitor unmangled, its setup('fit') forces dirpath to <log_dir>/ckpts (driven through "
+        "the actual ModelCheckpoint.setup, not a re-implementation), and "
+        "salt.core.main._best_checkpoint resolves the lowest-loss epoch from what it wrote — the "
+        "salt2-test no-ckpt_path run-dir path inference (non-fit/fast_dev_run do NOT force ckpts/, "
+        "an s3:// log dir raises ConfigError); and ProgressBar is the stock TQDMProgressBar under "
+        "a salt-owned name (v1 callbacks/checkpoint.py:25-48, base.yaml:38-39; design §5.1 989-992 "
+        "/ §5.3 1233-1245)"
+    )
+    config = {"written_ckpts": written, "corrupted_by_test_hook": corruption is not None}
+    report = _base_report("d2ckpt_checkpoint_progressbar", passed, criterion, config)
+    report["checks"] = checks
+    report["scope_note"] = (
+        "the sub-wave-D-rest Checkpoint + ProgressBar slice ONLY (plan 10 D2 row); NON-GATING for "
+        "model reproduction — it gates the salt2-test run-dir checkpoint path inference. The other "
+        "D2 items (origin_weighting, TensorSpec validation, lrs_config->lrs) are out of this slice"
+    )
+    report["surfaces_exercised"] = (
+        "the REAL salt.core.callbacks.Checkpoint.format_checkpoint_name + setup (through "
+        "ModelCheckpoint.setup's pre-set-dirpath short-circuit) and the REAL "
+        "salt.core.main._best_checkpoint glob (not a re-implemented filename/inference)"
+    )
+    _print_checks(checks)
+    _print_verdict("d2ckpt", passed, criterion, _emit_report(report, outdir, "d2ckpt"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# D2-expose: per-task expose: [fit,val] opt-out + name-based origin_weighting
+# ---------------------------------------------------------------------------
+
+_D2_LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
+
+
+def _origin_schema_reader() -> H5StructuredReader:
+    """A reader whose schema carries the tracks origin class names (design §2.6).
+
+    ``ORIGIN_CLASSES`` is index-aligned so the GN3 names map to v1's hardcoded
+    ids: ``Fake``->1, ``FromB``->3, ``FromBC``->4, ``FromC``->5.
+
+    Returns
+    -------
+    H5StructuredReader
+        A reader with the origin class-name attr on the tracks group.
+    """
+    schema = Schema(
+        groups={
+            "jets": GroupSchema(fields={}),
+            "tracks": GroupSchema(fields={}, attrs={"ftagTruthOriginLabel": list(ORIGIN_CLASSES)}),
+        }
+    )
+    return H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=schema)
+
+
+def _name_based_vertexing() -> VertexingTaskModule:
+    """A `VertexingTaskModule` whose origin_weighting is CLASS NAMES (the GN3 surface).
+
+    Returns
+    -------
+    VertexingTaskModule
+        A named vertexing module with name-based heavy/fake origin weighting.
+    """
+    task = VertexingTaskModule(
+        stream="tracks",
+        label="ftagTruthVertexIndex",
+        origin_label="ftagTruthOriginLabel",
+        context="pooled.global",
+        weight=1.5,
+        dense={"hidden_layers": [16], "activation": "ReLU"},
+        origin_weighting={"heavy": ["FromB", "FromBC", "FromC"], "fake": ["Fake"]},
+    )
+    task.name = "track_vertexing"
+    return task
+
+
+def _d2_model(norm_dict: Path, *, expose: Sequence[str] | None) -> SaltModule:
+    """A real GN2v2 `SaltModule` with the tracks tasks optionally expose-gated.
+
+    Returns
+    -------
+    SaltModule
+        The assembled model (both tracks tasks carry `expose`).
+    """
+    modules = build_gn2v2_modules(norm_dict)
+    modules["track_origin"] = ClassificationTaskModule(
+        stream="tracks",
+        label="ftagTruthOriginLabel",
+        class_names=list(ORIGIN_CLASSES),
+        context="pooled.global",
+        weight=0.5,
+        dense={"hidden_layers": [16], "activation": "ReLU"},
+        expose=expose,
+    )
+    modules["track_origin"].name = "track_origin"
+    modules["track_vertexing"] = VertexingTaskModule(
+        stream="tracks",
+        label="ftagTruthVertexIndex",
+        origin_label="ftagTruthOriginLabel",
+        context="pooled.global",
+        weight=1.5,
+        dense={"hidden_layers": [16], "activation": "ReLU"},
+        expose=expose,
+    )
+    modules["track_vertexing"].name = "track_vertexing"
+    loss = LossSum()
+    loss.name = "loss"
+    loss.narrow(LossSum.collect_loss_keys(modules))
+    modules["loss"] = loss
+    return SaltModule(modules, lrs=_D2_LRS)
+
+
+def _jets_only_writer() -> tuple[Any, Any]:
+    """A `TaskWriter` narrowed to jets + a matching reader (tracks preds unconsumed).
+
+    Returns
+    -------
+    tuple[Any, Any]
+        ``(writer_callback, reader)`` for the `_model_sinks(Mode.TEST)` path.
+    """
+    wcb = WriterCallback(modules={"tasks": TaskWriter(streams=["jets"])})
+    reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    return wcb, reader
+
+
+def run_d2expose(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, int]], dict[str, int]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """D2 (expose + name-origin slice): per-task opt-out + name-based origin_weighting.
+
+    The two sub-wave-D-rest model-feature items (plan 10 D2 row). Both drive the
+    REAL surfaces — no re-implementation in the gate.
+
+    - **Name-based origin_weighting** (design §5.1; v1 ``task.py:957-964`` uses
+      HARDCODED ids 3,4,5 / 1). A `VertexingTaskModule` configured with class
+      NAMES (``heavy: [FromB, FromBC, FromC]``, ``fake: [Fake]``) leaves
+      ``heavy_ids``/``fake_ids`` None until the REAL
+      `salt.core.saltmodule.resolve_origin_weighting` resolves them at setup
+      against the schema's origin class-name attr — yielding exactly (3,4,5)/(1,).
+      PARITY: the composed v2 head's per-edge ``get_weights`` is BIT-IDENTICAL to
+      a FRESHLY, INDEPENDENTLY constructed v1 ``VertexingTask`` whose
+      ``get_weights`` hardcodes (3,4,5)/1 — never the v2 module's own head. Loud
+      surfaces: an unknown name (``ConfigError`` naming it), a name-based config
+      with no origin class-name attr (``ConfigError``), and a name-based bind that
+      never reached a schema (``ConfigError``) all raise; an integer-id config is
+      a resolution no-op and binds standalone.
+
+    - **Per-task expose: [fit, val] opt-out** (design §4.2). The pred port is
+      gated to the exposed modes: an exposed task's ``preds.*`` is active in
+      FIT/VAL but NOT in TEST/ONNX. End-to-end through the planner: the exposed
+      task is KEPT in the FIT plan and PRUNED from the TEST plan (compiled with
+      its full preds as sinks; the gated pred cannot be demanded). At the REAL
+      TEST writer-demand surface (`SaltModule._model_sinks(Mode.TEST)` with a
+      jets-only `TaskWriter`): WITHOUT expose the unconsumed tracks preds are the
+      dead-preds hard error (``ConfigError`` "consumed by NO writer", whose fix
+      now advertises ``expose: [fit, val]``); WITH expose the SAME writer raises
+      nothing and the only TEST sink is the jets pred.
+
+    Negative control (``test_gates_m5.py``): the ``corruption`` hook rewrites the
+    name->id resolution map (shifting every id by +1) before the parity weights
+    are computed, so the name-resolved ids DISAGREE with v1's hardcoded ids and
+    ``origin_names_match_independent_v1`` FAILS — while the expose / loud-surface
+    checks (independent of that map) stay green. Proves the parity check has
+    teeth.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("D2expose per-task expose:[fit,val] opt-out + name-based origin_weighting")
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+    checks: dict[str, bool] = {}
+
+    # -- (a) name-based origin_weighting: resolution + INDEPENDENT-v1 parity ----
+    task = _name_based_vertexing()
+    checks["names_pending_before_resolution"] = task.heavy_ids is None and task.fake_ids is None
+    reader = _origin_schema_reader()
+    n_resolved = resolve_origin_weighting({"track_vertexing": task}, reader)
+    checks["resolve_origin_weighting_counts_one"] = n_resolved == 1
+    checks["names_resolve_to_v1_heavy_ids"] = task.heavy_ids == (3, 4, 5)
+    checks["names_resolve_to_v1_fake_ids"] = task.fake_ids == (1,)
+
+    # the negative-control hook can corrupt the resolved ids before the parity
+    # weights are computed (python-only; default = identity)
+    heavy_ids, fake_ids = task.heavy_ids, task.fake_ids
+    if corruption is not None:
+        index = corruption({name: i for i, name in enumerate(ORIGIN_CLASSES)})
+        heavy_ids = tuple(index[n] for n in ("FromB", "FromBC", "FromC"))
+        fake_ids = tuple(index[n] for n in ("Fake",))
+        task.heavy_ids, task.fake_ids = heavy_ids, fake_ids
+
+    task.bind(ResolvedSchema(widths={"encoded.tracks": 16, "pooled.global": 16}))
+    # INDEPENDENT v1 reference: a fresh head whose get_weights hardcodes (3,4,5)/1
+    indep_v1 = V1VertexingTask(
+        name="track_vertexing",
+        input_name="tracks",
+        label="ftagTruthVertexIndex",
+        loss=torch.nn.BCEWithLogitsLoss(reduction="none"),
+        dense_config={"input_size": 32, "output_size": 1},
+    )
+    labels = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
+    n = labels.shape[1]
+    adjmat = ~torch.eye(n, dtype=torch.bool).unsqueeze(0)
+    v1_weights = V1VertexingTask.get_weights(indep_v1, labels, adjmat)
+    v2_weights = task.task.get_weights(labels, adjmat)
+    checks["origin_names_match_independent_v1"] = torch.equal(v1_weights, v2_weights)
+
+    # loud surfaces (independent of the corruption hook)
+    unknown = VertexingTaskModule(
+        stream="tracks",
+        label="ftagTruthVertexIndex",
+        origin_label="ftagTruthOriginLabel",
+        origin_weighting={"heavy": ["NotAClass"], "fake": ["Fake"]},
+    )
+    unknown.name = "u"
+    checks["unknown_name_rejected"] = _raises_config_error(
+        lambda: unknown.resolve_origin_names(_origin_schema_reader())
+    )
+    no_attr = _name_based_vertexing()
+    # a reader with NO schema artifact (vector set explicitly so it constructs)
+    no_attr_reader = H5StructuredReader(groups={"tracks": {"vector": False}})
+    checks["name_based_no_schema_bind_fails"] = _raises_config_error(
+        lambda: (
+            no_attr.resolve_origin_names(no_attr_reader),
+            no_attr.bind(ResolvedSchema(widths={"encoded.tracks": 16})),
+        )
+    )
+    int_task = VertexingTaskModule(
+        stream="tracks",
+        label="ftagTruthVertexIndex",
+        origin_label="o",
+        origin_weighting={"heavy": [3, 4, 5], "fake": [1]},
+    )
+    int_task.name = "i"
+    checks["integer_ids_resolution_is_noop"] = int_task.resolve_origin_names(
+        _origin_schema_reader()
+    ) is False and int_task.heavy_ids == (3, 4, 5)
+
+    # -- (b) expose: [fit,val] opt-out: planner pruning + REAL dead-preds path --
+    exposed = _d2_model(norm_dict, expose=["fit", "val"])
+    aux = exposed._graph_modules["track_origin"]  # noqa: SLF001
+    pred_fit = flatten_spec(aux.declare_io(Mode.FIT).produces)[aux.pred_key]
+    checks["exposed_pred_active_in_fit"] = pred_fit.active_in(Mode.FIT)
+    checks["exposed_pred_inactive_in_test"] = not pred_fit.active_in(Mode.TEST)
+
+    fit_plan = compile_plan(
+        exposed._graph_modules,  # noqa: SLF001
+        Mode.FIT,
+        sources=gn2v2_sources(),
+        sinks=["loss.total"],
+    )
+    checks["exposed_task_kept_in_fit_plan"] = "track_origin" in fit_plan.module_names
+    test_plan = compile_plan(
+        exposed._graph_modules,  # noqa: SLF001
+        Mode.TEST,
+        sources=gn2v2_sources(),
+        sinks=["preds.jets.jets_classification"],
+    )
+    checks["exposed_task_pruned_from_test_plan"] = "track_origin" not in test_plan.module_names
+
+    # negative control with teeth: WITHOUT expose, the SAME jets-only writer
+    # makes the tracks preds a dead-preds ERROR through the REAL _model_sinks
+    default = _d2_model(norm_dict, expose=None)
+    wcb, wreader = _jets_only_writer()
+    dead_err = ""
+    try:
+        default._model_sinks(Mode.TEST, writers=wcb, reader=wreader)  # noqa: SLF001
+    except ConfigError as err:
+        dead_err = str(err)
+    checks["default_task_triggers_dead_preds_error"] = "consumed by NO writer" in dead_err
+    checks["dead_preds_error_advertises_expose"] = "expose: [fit, val]" in dead_err
+
+    # WITH expose, the SAME writer raises nothing and only the jets pred sinks
+    exposed_w = _d2_model(norm_dict, expose=["fit", "val"])
+    wcb2, wreader2 = _jets_only_writer()
+    try:
+        sinks = exposed_w._model_sinks(Mode.TEST, writers=wcb2, reader=wreader2)  # noqa: SLF001
+        checks["expose_silences_dead_preds_error"] = sinks == ["preds.jets.jets_classification"]
+    except ConfigError:
+        checks["expose_silences_dead_preds_error"] = False
+
+    passed = all(checks.values())
+    criterion = (
+        "name-based origin_weighting resolves CLASS NAMES to v1's hardcoded ids (3,4,5)/(1) via "
+        "the REAL resolve_origin_weighting at setup and the composed head's get_weights is "
+        "bit-identical to an INDEPENDENT v1 VertexingTask (fresh instance, hardcoded ids — never "
+        "the v2 head); unknown names / no-schema / unresolved-bind raise ConfigError, integer ids "
+        "are a no-op. The per-task expose: [fit, val] opt-out gates preds.* to fit/val so the "
+        "planner KEEPS the task in the FIT plan and PRUNES it from the TEST plan, and at the REAL "
+        "SaltModule._model_sinks(Mode.TEST) writer-demand surface a jets-only TaskWriter raises "
+        "the dead-preds hard error WITHOUT expose (advertising the expose fix) but NOTHING with it "
+        "(design §4.2, §5.1; v1 task.py:957-964)"
+    )
+    config = {"corrupted_by_test_hook": corruption is not None, "resolved_count": n_resolved}
+    report = _base_report("d2expose_optout_name_origin", passed, criterion, config)
+    report["checks"] = checks
+    report["scope_note"] = (
+        "the sub-wave-D-rest model-feature slice: per-task expose opt-out + name-based "
+        "origin_weighting ONLY (plan 10 D2 row). Checkpoint/ProgressBar are d2ckpt; "
+        "TensorSpec kind/dtype validation + lrs_config->lrs migration are out of this slice"
+    )
+    report["surfaces_exercised"] = (
+        "the REAL salt.core.saltmodule.resolve_origin_weighting + VertexingTaskModule."
+        "resolve_origin_names/bind, an INDEPENDENT v1 VertexingTask.get_weights, the REAL "
+        "compile_plan demand pruning, and the REAL SaltModule._model_sinks(Mode.TEST) "
+        "writer-demand dead-preds path (not a re-implemented planner/sink list)"
+    )
+    _print_checks(checks)
+    _print_verdict("d2expose", passed, criterion, _emit_report(report, outdir, "d2expose"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# D2cfg — writer TensorSpec kind/dtype validation + lrs_config->lrs migration
+#         (sub-wave D-rest, plan 10 D2 row, the LAST two D2 items)
+# ---------------------------------------------------------------------------
+
+
+class _SpecProbeWriter(Writer):
+    """A gate-local `Writer` whose single declared require's kind/dtype is tunable.
+
+    `WriterCallback.validate_specs` consults ONLY `requires` (it is a static
+    config-validation surface — `columns`/`write` never run), so the gate
+    instantiates the writer with a chosen ``(key, kind, dtype, optional)`` and
+    drives the REAL validator. The abstract `columns`/`write` exist so the
+    `Writer` ABC instantiates; they are dead in this gate.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        *,
+        kind: str = "data",
+        dtype: str | None = None,
+        optional: bool = False,
+    ) -> None:
+        self._key = key
+        self._kind = kind
+        self._dtype = dtype
+        self._optional = optional
+
+    def requires(self, ctx: WriterDeclareCtx) -> dict[str, TensorSpec]:  # noqa: ARG002 - static probe
+        """The single tunable-kind/dtype require under validation.
+
+        Returns
+        -------
+        dict[str, TensorSpec]
+            ``{key: spec}`` with the gate-chosen kind/dtype (TEST-active).
+        """
+        return {
+            self._key: TensorSpec(
+                shape=("B", 3), kind=self._kind, dtype=self._dtype, optional=self._optional
+            )
+        }
+
+    def columns(self, ctx: WriteCtx) -> dict[str, Any]:  # noqa: ARG002 - never reached by validate_specs
+        """Dead in this gate (validate_specs never reaches the write lifecycle).
+
+        Returns
+        -------
+        dict[str, Any]
+            Always empty — never reached.
+        """
+        return {}
+
+    def write(self, bundle: Bundle, rows: slice) -> dict[str, Any]:  # noqa: ARG002 - dead
+        """Dead in this gate (validate_specs never reaches the write lifecycle).
+
+        Returns
+        -------
+        dict[str, Any]
+            Always empty — never reached.
+        """
+        return {}
+
+
+def _raises(fn: Callable[..., Any], exc: type[BaseException]) -> bool:
+    """Whether calling ``fn()`` raises ``exc`` (the kind/dtype loud-surface probe).
+
+    `KindError`/`ShapeError` are `GraphError` siblings of `ConfigError`, NOT
+    subclasses of it, so the existing `_raises_config_error` cannot catch them —
+    this gate-local helper takes the expected type explicitly.
+
+    Returns
+    -------
+    bool
+        True iff `fn` raised an instance of `exc`.
+    """
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
+def _validate_probe(
+    model_modules: dict[str, Any],
+    reader: Any,
+    producer_specs: Mapping[str, TensorSpec],
+    writer: _SpecProbeWriter,
+) -> None:
+    """Drive the REAL `WriterCallback.validate_specs` for one probe writer.
+
+    Builds a `WriterCallback` over the single probe and calls the actual
+    static validator with the SAME ``producer_specs`` union (model-produced +
+    boundary) that `SaltModule._validate_writer_specs` assembles — no
+    re-implementation of the kind/dtype unification in the gate.
+    """
+    WriterCallback(modules={"probe": writer}).validate_specs(
+        model_modules, reader, dict(producer_specs)
+    )
+
+
+def run_d2cfg(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, TensorSpec]], dict[str, TensorSpec]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """D2 (cfg slice): writer TensorSpec kind/dtype validation + lrs_config->lrs migration.
+
+    The LAST two sub-wave-D-rest D2 items (plan 10 D2 row). Both drive the REAL
+    surfaces — no re-implementation in the gate.
+
+    - **Writer TensorSpec kind/dtype validation** (design §2.7/§8; v2 demand was
+      key-existence-only, the ``writers/base.py`` deviation note now closed). The
+      REAL `WriterCallback.validate_specs` — the static validator
+      `SaltModule._validate_writer_specs` calls on the TEST path — is driven via
+      the REAL `WriterCallback.model_producer_specs` (the gn2v2 TEST-active
+      produced leaves; the model half of the `_validate_writer_specs` producer
+      union — every key this gate's probes consume is model-produced, so it takes
+      precedence over the boundary half regardless). It unifies a writer-declared
+      require's kind/dtype against its producing
+      leaf. Against the real ``preds.jets.jets_classification`` producer
+      (``kind="data"``, ``dtype="float32"``): a MATCHING ``data``/``float32``
+      require PASSES (no raise), an UNCONSTRAINED ``None``-dtype require PASSES (a
+      ``None`` unifies with anything — the TaskWriter's deliberate looseness stays
+      legal), a WRONG dtype (``int64``) raises `ShapeError`, a WRONG kind
+      (``label``) raises `KindError`, a NON-OPTIONAL require with NO producer
+      raises `ConfigError` (the existence half of the §2.7 contract), and an
+      OPTIONAL missing require is SILENT. The validator is the REAL one (loud and
+      static, before the first batch), not a re-implemented check.
+
+    - **Writer kind/dtype unification THROUGH `salt2 graph validate`** (the
+      end-to-end half — design §2.7/§8; the medium critic finding's fix). The
+      kind/dtype unification is now wired into ``cli._cmd_validate`` for TEST, so
+      the canonical static-validator command — the one the M5-CONV gate runs
+      across the 23 configs — invokes it data-free. A shipped config carrying a
+      gate-local probe writer (`_SpecProbeWriter`) declaring
+      ``preds.jets.jets_classification`` as ``kind="label"`` (or ``dtype="int64"``
+      where the task publishes ``data``/``float32``) FAILS ``salt2 graph validate
+      --mode test`` (rc != 0) — NOT only later at ``salt2 test`` setup; the
+      MATCHING ``data``/``float32`` probe PASSES the same command (rc=0), the
+      inert positive control. A writer kind/dtype mismatch is an ERROR-level
+      finding, so the wrong-config failures are attributable to the WRITER check
+      itself (no ``--strict`` — they do not lean on the promotable no-schema
+      warning). Driven through the REAL command end to end, never a re-parsed
+      dict.
+
+    - **lrs_config -> lrs migration** (M3 cleanup, design §5.1; v1
+      ``modelwrapper.py`` ``lrs_config`` kwarg / ``base.yaml:45``). A shipped v2
+      config (``gn2v2-dummy.yaml``, carrying ``lrs:``) LOADS + plan-compiles through
+      the REAL ``salt2 graph validate`` (all four modes, rc=0); NO shipped v2
+      ``salt/core/configs/*.yaml`` retains a stale ``lrs_config:`` key (a literal
+      scan — comment mentions documenting the rename are excluded); and a config
+      that re-introduces the OLD ``lrs_config:`` key FAILS the real config-load path
+      (``SaltModule`` takes ``lrs``, not ``lrs_config`` — jsonargparse rejects the
+      renamed kwarg, rc != 0). The migration is exercised THROUGH the real
+      config-load/plan-compile surface, never asserted on a re-parsed dict.
+
+    Negative control (``test_gates_m5.py``): the ``corruption`` hook rewrites the
+    ``producer_specs`` map (flipping the ``jets_classification`` producer dtype to
+    ``int64``) before the MATCHING-require validation, so the matching probe is no
+    longer dtype-compatible and ``matching_require_passes`` FAILS — while the
+    wrong-kind / wrong-dtype / existence / lrs-migration checks (independent of
+    that producer dtype) stay green. Proves the matching check has teeth.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if every check passed.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("D2cfg writer TensorSpec kind/dtype validation + lrs_config->lrs migration")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    # -- (a) writer TensorSpec kind/dtype validation (the REAL validate_specs) --
+    norm_dict = _norm_dict(outdir)
+    model_modules = build_gn2v2_modules(norm_dict)
+    reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    producer_specs = WriterCallback.model_producer_specs(model_modules)
+    produced_key = "preds.jets.jets_classification"
+    # the producing leaf this gate unifies against (kind="data", dtype="float32")
+    checks["producer_leaf_is_data_float32"] = (
+        produced_key in producer_specs
+        and producer_specs[produced_key].kind == "data"
+        and producer_specs[produced_key].dtype == "float32"
+    )
+
+    # the negative-control hook can break the producer dtype before the MATCHING
+    # validation (python-only; default = identity)
+    match_specs = dict(producer_specs)
+    if corruption is not None:
+        match_specs = corruption(dict(producer_specs))
+
+    # MATCHING data/float32 -> PASSES (no raise of any GraphError)
+    checks["matching_require_passes"] = not _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            match_specs,
+            _SpecProbeWriter(produced_key, kind="data", dtype="float32"),
+        ),
+        GraphError,
+    )
+    # UNCONSTRAINED None dtype -> PASSES (None unifies with the float32 producer)
+    checks["unconstrained_dtype_require_passes"] = not _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            dict(producer_specs),
+            _SpecProbeWriter(produced_key, kind="data", dtype=None),
+        ),
+        GraphError,
+    )
+    # WRONG dtype -> ShapeError (the planner's _unify_edge rule on the writer edge)
+    checks["wrong_dtype_raises_shape_error"] = _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            dict(producer_specs),
+            _SpecProbeWriter(produced_key, kind="data", dtype="int64"),
+        ),
+        ShapeError,
+    )
+    # WRONG kind -> KindError (design §2.2 kind-typed requires)
+    checks["wrong_kind_raises_kind_error"] = _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            dict(producer_specs),
+            _SpecProbeWriter(produced_key, kind="label", dtype="float32"),
+        ),
+        KindError,
+    )
+    # NON-OPTIONAL require with NO producer -> ConfigError (existence half, §2.7)
+    checks["missing_nonoptional_require_raises_config_error"] = _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            dict(producer_specs),
+            _SpecProbeWriter("preds.jets.does_not_exist", kind="data", optional=False),
+        ),
+        ConfigError,
+    )
+    # OPTIONAL missing require -> SILENT (no raise of any GraphError)
+    checks["optional_missing_require_is_silent"] = not _raises(
+        lambda: _validate_probe(
+            model_modules,
+            reader,
+            dict(producer_specs),
+            _SpecProbeWriter("preds.jets.does_not_exist", kind="data", optional=True),
+        ),
+        GraphError,
+    )
+
+    # -- (a-e2e) the END-TO-END `salt2 graph validate` writer kind/dtype check --
+    # the canonical static-validator command (the one the M5-CONV gate runs)
+    # now invokes the writer kind/dtype unification for TEST (cli._cmd_validate),
+    # so a config with a genuinely WRONG writer kind/dtype FAILS `salt2 graph
+    # validate` data-free — not only later at `salt2 test` setup. Driven through
+    # the REAL command, end to end (the medium critic finding's fix). NB no
+    # `--strict` here: a writer kind/dtype mismatch is an ERROR-level finding
+    # (not a promotable warning), so the wrong-config failures are attributable
+    # to the WRITER check specifically — they do NOT lean on the no-schema
+    # warning `--strict` would promote (which would make the matching positive
+    # control fail too and the negative results ambiguous; the no-schema config
+    # is deliberate — this gate validates the writer edge, not field spellings).
+    nd_e2e = outdir / "norm_dict.yaml"  # _norm_dict already wrote it above
+    set_norm_e2e = f"model.modules.norm.init_args.norm_dict={nd_e2e}"
+    wrong_kind_cfg = _write_probe_writer_config(
+        outdir, kind="label", dtype="float32", fname="probe_wrong_kind.yaml"
+    )
+    wrong_kind_rc = salt2_main([
+        "graph",
+        "validate",
+        "--mode",
+        "test",
+        "-c",
+        str(wrong_kind_cfg),
+        "--set",
+        set_norm_e2e,
+    ])
+    checks["wrong_kind_writer_fails_graph_validate"] = wrong_kind_rc != 0
+
+    wrong_dtype_cfg = _write_probe_writer_config(
+        outdir, kind="data", dtype="int64", fname="probe_wrong_dtype.yaml"
+    )
+    wrong_dtype_rc = salt2_main([
+        "graph",
+        "validate",
+        "--mode",
+        "test",
+        "-c",
+        str(wrong_dtype_cfg),
+        "--set",
+        set_norm_e2e,
+    ])
+    checks["wrong_dtype_writer_fails_graph_validate"] = wrong_dtype_rc != 0
+
+    # the inert positive control: a MATCHING probe (data/float32) passes the
+    # REAL `salt2 graph validate --mode test` (rc=0) — proves the e2e check has
+    # no false positive and the wired-in path is otherwise transparent (the
+    # no-schema warning stays a non-fatal warning without --strict)
+    matching_cfg = _write_probe_writer_config(
+        outdir, kind="data", dtype="float32", fname="probe_matching.yaml"
+    )
+    matching_rc = salt2_main([
+        "graph",
+        "validate",
+        "--mode",
+        "test",
+        "-c",
+        str(matching_cfg),
+        "--set",
+        set_norm_e2e,
+    ])
+    checks["matching_writer_passes_graph_validate"] = matching_rc == 0
+
+    # -- (b) lrs_config -> lrs migration (the REAL salt2 config-load/compile) ---
+    nd_path = outdir / "norm_dict.yaml"  # _norm_dict already wrote it above
+    set_norm = f"model.modules.norm.init_args.norm_dict={nd_path}"
+    # a shipped v2 config (carrying lrs:) loads + plan-compiles in all four modes
+    migrated_rc = salt2_main([
+        "graph",
+        "validate",
+        "-c",
+        str(CONFIG_DIR / "gn2v2-dummy.yaml"),
+        "--set",
+        set_norm,
+    ])
+    checks["migrated_config_graph_validate_ok"] = migrated_rc == 0
+
+    # NO shipped v2 config retains a stale `lrs_config:` KEY (comment mentions of
+    # the rename are excluded — only an actual YAML key counts)
+    def _has_lrs_config_key(text: str) -> bool:
+        for line in text.splitlines():
+            stripped = line.split("#", 1)[0].strip()  # drop trailing/whole-line comments
+            if stripped.startswith("lrs_config:") or stripped == "lrs_config":
+                return True
+        return False
+
+    stale_configs = sorted(
+        cfg.name for cfg in CONFIG_DIR.glob("*.yaml") if _has_lrs_config_key(cfg.read_text())
+    )
+    checks["no_v2_config_retains_lrs_config_key"] = stale_configs == []
+
+    # a config re-introducing the OLD lrs_config: key FAILS the real load path
+    # (SaltModule takes `lrs`, not `lrs_config` — jsonargparse rejects the renamed
+    # kwarg + the missing required `lrs`). Built data-free from the shipped config.
+    stale_yaml = _write_stale_lrs_config(outdir)
+    stale_rc = salt2_main([
+        "graph",
+        "validate",
+        "-c",
+        str(stale_yaml),
+        "--set",
+        set_norm,
+    ])
+    checks["stale_lrs_config_key_rejected"] = stale_rc != 0
+
+    passed = all(checks.values())
+    criterion = (
+        "the REAL WriterCallback.validate_specs (the static §2.7 writer-input validator "
+        "SaltModule._validate_writer_specs calls on TEST) driven via the REAL "
+        "model_producer_specs (the model half of the producer union; every probe key is "
+        "model-produced) unifies a writer require's kind/dtype against its producing leaf: "
+        "a matching data/float32 require and an unconstrained None-dtype require PASS, a wrong "
+        "dtype raises "
+        "ShapeError, a wrong kind raises KindError, a non-optional missing producer raises "
+        "ConfigError, an optional missing require is silent; AND — the end-to-end half — the "
+        "SAME kind/dtype unification is now wired into salt2 graph validate (cli._cmd_validate, "
+        "TEST), so a config with a wrong writer kind (label) or dtype (int64) FAILS `salt2 graph "
+        "validate --mode test` (rc != 0, an ERROR-level finding) data-free while a matching "
+        "data/float32 writer PASSES it (rc=0) — the canonical static-validator command the "
+        "M5-CONV gate runs now has the writer kind/dtype teeth; AND a shipped v2 config (carrying "
+        "lrs:) loads + plan-compiles through the REAL salt2 graph validate while NO shipped v2 "
+        "config retains a stale lrs_config: key and a config re-introducing lrs_config: FAILS the "
+        "real config-load path (the renamed kwarg is rejected) — design §2.7/§8, §5.1; v1 "
+        "modelwrapper.py/base.yaml:45"
+    )
+    config = {
+        "stale_configs_found": stale_configs,
+        "migrated_rc": migrated_rc,
+        "stale_rc": stale_rc,
+        "wrong_kind_rc": wrong_kind_rc,
+        "wrong_dtype_rc": wrong_dtype_rc,
+        "matching_rc": matching_rc,
+        "corrupted_by_test_hook": corruption is not None,
+    }
+    report = _base_report("d2cfg_writer_spec_lrs_migration", passed, criterion, config)
+    report["checks"] = checks
+    report["scope_note"] = (
+        "the sub-wave-D-rest cfg slice: writer TensorSpec kind/dtype validation + lrs_config->lrs "
+        "migration ONLY (plan 10 D2 row, the LAST two D2 items). Checkpoint/ProgressBar are "
+        "d2ckpt; per-task expose opt-out + name-based origin_weighting are d2expose"
+    )
+    report["surfaces_exercised"] = (
+        "the REAL WriterCallback.validate_specs + model_producer_specs (not a re-implemented "
+        "kind/dtype unification), the REAL salt2 graph validate end-to-end (a wrong-kind/dtype "
+        "writer fails the command, a matching writer passes — the wired-in cli._cmd_validate TEST "
+        "check), and the REAL salt2 graph validate config-load/plan-compile path "
+        "(not a re-parsed config dict)"
+    )
+    _print_checks(checks)
+    _print_verdict("d2cfg", passed, criterion, _emit_report(report, outdir, "d2cfg"))
+    return (0 if passed else 1), report
+
+
+def _write_stale_lrs_config(outdir: Path) -> Path:
+    """Write a v2 config carrying the OLD ``lrs_config:`` key into ``outdir``.
+
+    Derived from the shipped ``gn2v2-dummy.yaml`` by renaming its ``lrs:`` block
+    back to ``lrs_config:`` — the exact pre-rename spelling. The real
+    config-load path must reject it (``SaltModule`` takes ``lrs``).
+
+    Returns
+    -------
+    Path
+        The written stale-config YAML path.
+    """
+    import yaml  # noqa: PLC0415 - gate-local: shipped-config round-trip for the negative control
+
+    spec = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())
+    init = spec["model"]["init_args"]
+    init["lrs_config"] = init.pop("lrs")
+    path = outdir / "stale_lrs_config.yaml"
+    path.write_text(yaml.safe_dump(spec))
+    return path
+
+
+def _write_probe_writer_config(outdir: Path, *, kind: str, dtype: str | None, fname: str) -> Path:
+    """Write a config that adds a `_SpecProbeWriter` to the `writers:` block.
+
+    Derived from the shipped ``gn2v2-dummy.yaml``: a gate-local probe writer
+    (``salt.core.gates_m5._SpecProbeWriter``) is wired into ``writers.modules``
+    declaring a require on ``preds.jets.jets_classification`` with the chosen
+    ``(kind, dtype)``. The producer of that key is the jets `ClassificationTask`
+    (``kind="data"``, ``dtype="float32"``), so a ``kind="label"`` or
+    ``dtype="int64"`` require is a genuine writer/producer contract mismatch.
+
+    This drives the END-TO-END ``salt2 graph validate`` path — the canonical
+    static-validator command the M5-CONV gate runs — so the writer kind/dtype
+    unification (now wired into ``_cmd_validate`` for TEST) is proven to fail
+    data-free there, not only at ``salt2 test`` setup. A MATCHING
+    ``kind="data"``/``dtype="float32"`` probe is the inert positive control
+    (``salt2 graph validate`` rc=0).
+
+    Returns
+    -------
+    Path
+        The written probe-writer config YAML path.
+    """
+    import yaml  # noqa: PLC0415 - gate-local: shipped-config round-trip for the e2e probe
+
+    spec = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())
+    # base2.yaml ships writers.modules (inputs_copy/tasks/pad_mask); the trainer
+    # parser deep-merges this addition into them, so the probe joins the real
+    # writer set the runtime TEST path carries.
+    writers = spec.setdefault("writers", {}).setdefault("modules", {})
+    init_args: dict[str, Any] = {"key": "preds.jets.jets_classification", "kind": kind}
+    if dtype is not None:
+        init_args["dtype"] = dtype
+    writers["spec_probe"] = {
+        "class_path": "salt.core.gates_m5._SpecProbeWriter",
+        "init_args": init_args,
+    }
+    path = outdir / fname
+    path.write_text(yaml.safe_dump(spec))
+    return path
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the gate subcommand parser (R1-R4, L1-L3, MF1a/MF1c/MF2, D1).
+    """Build the gate subcommand parser (R1-R4, L1-L3, MF1a/MF1c/MF2, D1, D2ckpt/D2expose/D2cfg).
 
     Returns
     -------
     argparse.ArgumentParser
         Parser with the ``r1``/``r2``/``r3``/``r4``/``l1``/``l2``/``l3``/
-        ``mf1a``/``mf1c``/``mf2``/``d1`` subcommands.
+        ``mf1a``/``mf1c``/``mf2``/``d1``/``d2ckpt``/``d2expose``/``d2cfg``
+        subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m5", description=__doc__.splitlines()[0]
@@ -3200,6 +4196,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "mf1c": "MaskFormerMatchedLoss + matcher + MaskFormerTargets parity (sub-wave C)",
         "mf2": "MaskFormerObjectWriter TEST byte-parity + ONNX object reduces (sub-wave C)",
         "d1": "FIT/VAL callback-sink assembly + register_reduce live registry/dtypes (sub-wave D)",
+        "d2ckpt": "Checkpoint filename/monitor contract + run-dir path inference + ProgressBar "
+        "smoke (sub-wave D-rest)",
+        "d2expose": "per-task expose:[fit,val] opt-out + name-based origin_weighting parity "
+        "(sub-wave D-rest)",
+        "d2cfg": "writer TensorSpec kind/dtype validation + lrs_config->lrs migration "
+        "(sub-wave D-rest)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -3228,6 +4230,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "mf1c": run_mf1c,
         "mf2": run_mf2,
         "d1": run_d1,
+        "d2ckpt": run_d2ckpt,
+        "d2expose": run_d2expose,
+        "d2cfg": run_d2cfg,
     }[args.gate]
     code, _ = runner(args.outdir)
     return code

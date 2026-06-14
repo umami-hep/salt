@@ -9,6 +9,17 @@ migration; everything here is bundle-native.
 
 Shipped callbacks:
 
+- `Checkpoint` — the v1 ``salt.callbacks.Checkpoint`` port (D2 gate): a
+  `ModelCheckpoint` subclass with the per-task ``monitor_loss`` + the ``loss=``
+  filename contract and ``save_top_k=-1``, writing into a ``ckpts/`` sub-dir of
+  the trainer log dir. The filename stem and the ``ckpts/`` location are the two
+  halves the ``salt2 test`` no-``--ckpt_path`` best-epoch glob
+  (`salt.core.main._best_checkpoint`) relies on — keep all three in sync (v1
+  ``callbacks/checkpoint.py:14,25-48``; design §5.1 989-992 / §5.3 1233-1245).
+- `ProgressBar` — the v1 stock ``TQDMProgressBar`` (``base.yaml:38-39`` has no
+  custom subclass): the v2 named entry ``base2.yaml`` wires under
+  ``callbacks.progress`` so the per-task losses surface during a run (design
+  §5.3 — until the M6 logger wiring lands the stock bar is the only UX).
 - `ConfusionMatrix` — the v1 ``ConfusionMatrixCallback`` port (W5 gate):
   accumulates argmax predictions vs truth labels over validation batches and
   logs a confusion matrix to Comet at epoch end. Bundle requires are declared
@@ -42,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import yaml
 from lightning import Callback, LightningModule, Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers.comet import CometLogger
 
 from salt.core.graph.errors import ConfigError, GraphError
@@ -58,7 +70,122 @@ if TYPE_CHECKING:
     from salt.core.graph.bundle import Bundle
     from salt.core.graph.planner import Plan
 
-__all__ = ["ConfusionMatrix", "GraphArtifacts", "MaskformerMetrics"]
+__all__ = [
+    "Checkpoint",
+    "ConfusionMatrix",
+    "GraphArtifacts",
+    "MaskformerMetrics",
+    "ProgressBar",
+]
+
+
+class Checkpoint(ModelCheckpoint):
+    """Save a checkpoint per epoch under ``ckpts/`` with the ``loss=`` stem (D2).
+
+    The v1 ``salt.callbacks.Checkpoint`` port (``callbacks/checkpoint.py``): a
+    `ModelCheckpoint` subclass whose filename is
+    ``epoch={epoch:03d}-{fname_string}={monitor_loss:.5f}`` (the v1 ctor
+    string, ``checkpoint.py:26``) with ``save_top_k=-1`` (keep every epoch) and
+    ``auto_insert_metric_name=False`` (the metric name carries a ``/`` so
+    Lightning's auto-insertion would mangle it). On fit `setup` the checkpoint
+    directory is forced to ``<trainer.log_dir>/ckpts`` (``checkpoint.py:44-46``)
+    — the v1 run-dir layout the ``salt2 test`` best-epoch glob scans.
+
+    This filename + directory pair is a **contract**, not cosmetics: ``salt2
+    test`` without ``--ckpt_path`` resolves the best epoch by globbing
+    ``<config dir>/{ckpts,checkpoints}/*.ckpt`` and parsing the smallest
+    ``loss=<value>`` out of each name (`salt.core.main._best_checkpoint`). The
+    default ``fname_string="loss"`` therefore makes the stem
+    ``epoch=NNN-loss=<val/loss>.ckpt`` — the exact pattern that glob matches
+    (v1 used ``val_loss``, which also contains the ``loss=`` substring; ``loss``
+    is the cleaner v2 default and matches ``base2.yaml``). Keep the stem and the
+    glob in sync.
+
+    v2 deviations from v1 (documented): the v1 ``s3://`` log-dir branch
+    (``checkpoint.py:34-43``) is dropped — S3 checkpointing rides with the M6
+    Comet/run-dir wiring; until then the local ``ckpts/`` path is the only
+    layout. A non-fit `setup` stage / ``fast_dev_run`` is a no-op (v1
+    ``checkpoint.py:30-32``) so the directory is only fixed for real training.
+
+    Parameters
+    ----------
+    monitor_loss : str
+        The metric key to monitor and embed in the filename, e.g.
+        ``val/jets_classification_loss`` or ``val/loss`` (design §5.3). The
+        metric must exist in ``trainer.callback_metrics`` at checkpoint time —
+        the loss module / a task publishes it.
+    fname_string : str, optional
+        The filename loss tag, by default ``"loss"`` — the ``loss=`` stem the
+        ``salt2 test`` best-epoch glob keys on (v1 default was ``"val_loss"``).
+    mode : str, optional
+        ``min``/``max`` selection direction passed to `ModelCheckpoint`, by
+        default ``"min"`` (a loss is minimised — v1 left it at the Lightning
+        default, which is ``min`` for a ``loss``-named monitor).
+    save_top_k : int, optional
+        How many checkpoints to keep, by default ``-1`` (every epoch — the v1
+        ``checkpoint.py:27`` value; the per-epoch artifacts the best-epoch glob
+        chooses among).
+    dirname : str, optional
+        The log-dir sub-directory checkpoints land in, by default ``"ckpts"``
+        (the v1 layout; the ``salt2 test`` glob also scans ``checkpoints/``).
+    """
+
+    def __init__(
+        self,
+        monitor_loss: str = "val/loss",
+        fname_string: str = "loss",
+        mode: str = "min",
+        save_top_k: int = -1,
+        dirname: str = "ckpts",
+    ) -> None:
+        filename = "epoch={epoch:03d}-" + fname_string + "={" + monitor_loss + ":.5f}"
+        super().__init__(
+            monitor=monitor_loss,
+            mode=mode,
+            save_top_k=save_top_k,
+            filename=filename,
+            auto_insert_metric_name=False,
+        )
+        self.dirname = dirname
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit (v1 port).
+
+        Mirrors v1 ``checkpoint.py:29-48`` minus the S3 branch: only on the
+        ``fit`` stage outside ``fast_dev_run`` is ``dirpath`` set to the
+        ``ckpts/`` sub-dir of the trainer log dir — the location the ``salt2
+        test`` best-epoch glob scans. The S3 log-dir path is an explicit
+        `ConfigError` (it rides with the M6 wiring) rather than silently
+        writing to the wrong place.
+
+        Raises
+        ------
+        ConfigError
+            When the trainer log dir is an ``s3://`` path (deferred to M6).
+        """
+        if stage == "fit" and not trainer.fast_dev_run:
+            log_dir = trainer.log_dir or trainer.default_root_dir
+            if log_dir is not None and str(log_dir).startswith(("s3://", "s3:/")):
+                raise ConfigError(
+                    "salt.core.callbacks.Checkpoint does not support s3:// log dirs yet "
+                    "(rides with the M6 Comet/run-dir wiring); use a local trainer.log_dir "
+                    "(v1 checkpoint.py:34-43 s3 branch deferred)"
+                )
+            self.dirpath = str(Path(log_dir) / self.dirname)
+        super().setup(trainer=trainer, pl_module=pl_module, stage=stage)
+
+
+class ProgressBar(TQDMProgressBar):
+    """The v2 progress-bar entry — the v1 stock ``TQDMProgressBar`` (D2).
+
+    v1 wires the unmodified ``lightning.pytorch.callbacks.TQDMProgressBar``
+    (``base.yaml:38-39``; no custom subclass), so the v2 port is the stock bar
+    surfaced under one salt-owned name `base2.yaml` can wire in the dict-keyed
+    ``callbacks.progress`` slot (design §5.3). Subclassing (rather than a bare
+    re-export) keeps a single place to retarget if the M6 logger wiring needs a
+    salt-specific bar; until then it is behaviour-identical to the stock
+    `TQDMProgressBar` (``refresh_rate`` etc. pass straight through).
+    """
 
 
 class ConfusionMatrix(Callback):

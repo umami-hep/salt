@@ -45,8 +45,8 @@ from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import GraphModule
+from salt.core.graph.errors import ConfigError, KindError, ShapeError
+from salt.core.graph.spec import GraphModule, Mode, TensorSpec, flatten_spec
 from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
 from salt.utils.array_utils import join_structured_arrays
@@ -173,6 +173,147 @@ class WriterCallback(Callback):
         ctx = self._declare_ctx(model_modules, reader)
         self._validate_writer_roles(ctx)
         return {name: list(writer.requires(ctx)) for name, writer in self._writers.items()}
+
+    def validate_specs(
+        self,
+        model_modules: dict[str, GraphModule],
+        reader: Any,
+        producer_specs: Mapping[str, TensorSpec],
+    ) -> None:
+        """Prove every writer's TEST inputs exist AND kind/dtype-unify, before the first batch.
+
+        The static validator design §2.7 / §8 promises: "the static validator
+        proves the writer's inputs exist before a single batch is read". Until
+        M5 the `Writer.requires` `TensorSpec` VALUES drove demand by KEY only
+        (the `salt.core.writers.base` deviation note) — key serveability was
+        enforced (a model-produced key anchors the TEST plan; an unserveable
+        dataset-namespace key raises at `SaltModule._boundary_demand`), but the
+        kind/dtype each writer DECLARES for a consumed key was never unified
+        against the port that actually produces it. A writer demanding
+        ``preds.jets.classification`` as ``kind="label"`` (or ``dtype="int64"``
+        where the task publishes ``float32``) was silently accepted: the demand
+        map only looked at the dotted key, so a genuinely wrong consumer
+        contract surfaced — if at all — as a confusing first-batch shape/dtype
+        error inside ``write()``, not a config error.
+
+        This closes the gap with the planner's own edge unification
+        (`salt.core.graph.planner._bind_edges` / `_unify_edge`): for each
+        writer-declared require with a non-optional, TEST-active spec, look up
+        the producing leaf (a model-produced TEST port OR a dataset-boundary
+        source — `producer_specs` is their union) and check
+
+        - **existence** — a non-optional require with no producer is the §2.7
+          "input does not exist" failure (normally pre-empted by the demand
+          machinery; covered here so the validator's contract is honest
+          standalone);
+        - **kind** — consumer kind must equal producer kind (`KindError`,
+          design §2.2 — the mask-polarity / label-vs-feature guard);
+        - **dtype** — when BOTH sides declare a dtype, they must match
+          (`ShapeError`, the planner's `_unify_edge` rule). A ``None`` on
+          either side is "unconstrained" and unifies with anything (the
+          `TaskWriter`'s deliberately unconstrained ``preds.*`` requires, which
+          accept whatever dtype a task family publishes, stay legal).
+
+        Shape unification is deliberately NOT replayed here: writer requires
+        carry symbolic-dim shapes (``("B", ...)``) whose batch/token dims only
+        bind against the live boundary inside the compiled plan, and the plan's
+        own `_unify_edge` already unifies model-side shapes end to end. The
+        writer-specific gap was kind/dtype on the writer→producer edge, which
+        the plan never builds (writers are sinks demanded by KEY).
+
+        Called from TWO sites: `SaltModule.setup` on the TEST path at run
+        setup, AND `salt2 graph validate` for the TEST mode (`cli._cmd_validate`,
+        the canonical CI static-validator command) data-free — both right after
+        the TEST plan compiled (so `producer_specs` — model-produced ports plus
+        the dataset boundary — is available) and before bind/the first batch.
+        The data-free caller assembles `producer_specs` from the compiled TEST
+        plan's steps + sources (the static equivalent of the runtime union of
+        `model_producer_specs` and `GraphDataset.boundary_specs`).
+
+        Parameters
+        ----------
+        model_modules : dict[str, GraphModule]
+            The model-side module dict.
+        reader : Any
+            The configured reader prototype (`_declare_ctx` surface).
+        producer_specs : Mapping[str, TensorSpec]
+            Flat ``{dotted key: spec}`` of every TEST producer: the model
+            modules' TEST-active produced ports unioned with the dataset
+            boundary's served leaves (``masks``/``labels``/``meta``/``inputs``).
+            Model-produced keys take precedence over a same-named boundary key
+            (they are the executed leaf).
+
+        Raises
+        ------
+        KindError
+            A writer declares a consumed key with a kind differing from its
+            producer (design §2.2).
+        ShapeError
+            A writer declares a consumed key with a dtype differing from its
+            producer's declared dtype (both non-``None``; the `_unify_edge`
+            rule).
+        ConfigError
+            A non-optional writer require has no TEST producer at all
+            (existence half of the §2.7 contract).
+        """
+        ctx = self._declare_ctx(model_modules, reader)
+        for name, writer in self._writers.items():
+            where = f"writer {name!r} (config: writers.modules.{name})"
+            for key, cspec in writer.requires(ctx).items():
+                if not cspec.active_in(Mode.TEST):
+                    continue  # not a TEST input (e.g. an ONNX-only require)
+                pspec = producer_specs.get(key)
+                if pspec is None:
+                    if cspec.optional:
+                        continue
+                    raise ConfigError(
+                        f"[mode=TEST] {where} declares require {key!r} but no model module "
+                        "or dataset source produces it — the writer's input does not exist "
+                        "(static-validator contract, design §2.7/§8).\n  fix: correct the "
+                        f"writer's requires, or add a module/source producing {key!r}"
+                    )
+                if pspec.kind != cspec.kind:
+                    raise KindError(
+                        f"[mode=TEST] {where} declares require {key!r} with kind="
+                        f"{cspec.kind!r}, but its producer provides kind={pspec.kind!r} "
+                        "(design §2.2; writer requires are kind-typed exactly like a "
+                        "module's declare_io)"
+                    )
+                if (
+                    pspec.dtype is not None
+                    and cspec.dtype is not None
+                    and pspec.dtype != cspec.dtype
+                ):
+                    raise ShapeError(
+                        f"[mode=TEST] dtype mismatch on {key!r}: {where} declares require "
+                        f"dtype={cspec.dtype!r}, but its producer declares {pspec.dtype!r} "
+                        "(the planner's _unify_edge rule extended to writer sinks, design "
+                        "§2.7)"
+                    )
+
+    @staticmethod
+    def model_producer_specs(
+        model_modules: Mapping[str, GraphModule],
+    ) -> dict[str, TensorSpec]:
+        """The model modules' TEST-active produced leaves, in declaration order.
+
+        Helper for `SaltModule.setup` to assemble the `validate_specs`
+        ``producer_specs`` argument (model side); the dataset half comes from
+        the TEST `GraphDataset.boundary_specs()`. First producer wins on a
+        duplicate key (declaration order), mirroring
+        `SaltModule._model_sinks`'s ``setdefault``.
+
+        Returns
+        -------
+        dict[str, TensorSpec]
+            ``{dotted key: spec}`` for every TEST-active produced port.
+        """
+        out: dict[str, TensorSpec] = {}
+        for module in model_modules.values():
+            for key, spec in flatten_spec(module.declare_io(Mode.TEST).produces).items():
+                if spec.active_in(Mode.TEST):
+                    out.setdefault(key, spec)
+        return out
 
     # -- the ONNX-manifest assembly (M4.5 amendment §4) --------------------------
 

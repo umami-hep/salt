@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
+from salt.core.callbacks import Checkpoint, ProgressBar
 from salt.core.data import GraphDataModule
 from salt.core.main import CONFIG_DIR, Salt2CLI, main
 from salt.core.nn.tasks import ClassificationTaskModule
@@ -179,7 +180,7 @@ class TestDeepMerge:
         task = cli.model.net["track_type"]
         assert isinstance(task, ClassificationTaskModule)
         # sibling init_args of the model itself survive the partial restate
-        assert cli.model.lrs_config["max"] == pytest.approx(1.0e-3)
+        assert cli.model.lrs["max"] == pytest.approx(1.0e-3)
         # the un-restated sibling modules keep their config
         assert cli.model.net["track_origin"].weight == pytest.approx(0.5)
 
@@ -254,17 +255,23 @@ class TestDottedOverrides:
 
 class TestCallbacksDict:
     def test_base2_defaults_assembled(self, data):
+        # base2.yaml ships the salt.core.callbacks.Checkpoint port (a
+        # ModelCheckpoint subclass) + ProgressBar + ModelSummary (D2)
         cli = make_cli(data)
-        kinds = [type(cb) for cb in cli.trainer.callbacks]
-        assert ModelCheckpoint in kinds
-        assert ModelSummary in kinds
+        assert any(isinstance(cb, Checkpoint) for cb in cli.trainer.callbacks)
+        assert any(isinstance(cb, ProgressBar) for cb in cli.trainer.callbacks)
+        assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
-        assert ckpt.monitor == "val/loss"  # base2.yaml default
+        assert ckpt.monitor == "val/loss"  # base2.yaml monitor_loss default
+        assert ckpt.save_top_k == -1  # the v1 Checkpoint keeps every epoch
 
     def test_one_key_override(self, data):
-        cli = make_cli(data, extra=["--callbacks.checkpoint.init_args.monitor=train/loss"])
+        # monitor_loss is the new D2 Checkpoint arg (it sets BOTH the monitor
+        # and the filename loss tag)
+        cli = make_cli(data, extra=["--callbacks.checkpoint.init_args.monitor_loss=train/loss"])
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
         assert ckpt.monitor == "train/loss"
+        assert ckpt.filename == "epoch={epoch:03d}-loss={train/loss:.5f}"
         # the sibling dict entry survives the one-key override
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
 
@@ -373,14 +380,18 @@ class TestFitSmoke:
             "--trainer.limit_val_batches=2",
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
-            "--trainer.enable_progress_bar=false",
+            # null-delete the base2 ProgressBar (can't combine with the stock
+            # enable_progress_bar=false; the D2 ProgressBar is default-on now)
+            "--callbacks.progress=null",
         ])
         assert rc == 0
-        # base2's ModelCheckpoint wrote a checkpoint under the run dir, with
-        # the 'loss=' stem the salt2-test fallback globs (M3-review fix)
+        # base2's Checkpoint (D2) wrote a checkpoint under the run dir's ckpts/,
+        # with the 'loss=' stem the salt2-test fallback globs (M3-review fix)
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"
         assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
+        # the D2 Checkpoint forces the v1 'ckpts/' run-dir layout
+        assert any(ckpt.parent.name == "ckpts" for ckpt in ckpts), [str(c) for c in ckpts]
         # the resolved config was persisted (SaveConfigCallback, design §5)
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
@@ -425,7 +436,7 @@ class TestFitRetryLoop:
             "--trainer.limit_val_batches=2",
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
-            "--trainer.enable_progress_bar=false",
+            "--callbacks.progress=null",  # see test_two_step_fit
         ]
         assert main(list(args)) == 0
         assert "salt2 fit artifacts" in capsys.readouterr().out
@@ -606,6 +617,96 @@ class TestGraphFitConfigAdapter:
             main(["graph", "validate", "-c", str(DUMMY_CFG), "--strict", *self.set_flags(data)])
             == 0
         )
+
+    @staticmethod
+    def _probe_writer_cfg(tmp_path, *, kind, dtype):
+        # an override config adding a probe writer that declares a require on
+        # preds.jets.jets_classification with a chosen (kind, dtype). The probe
+        # is a real importable Writer; validate's TEST writer kind/dtype
+        # unification (cli._cmd_validate) consults its `requires` only.
+        import yaml
+
+        init_args = {"key": "preds.jets.jets_classification", "kind": kind}
+        if dtype is not None:
+            init_args["dtype"] = dtype
+        spec = {
+            "writers": {
+                "modules": {
+                    "spec_probe": {
+                        "class_path": "salt.core.gates_m5._SpecProbeWriter",
+                        "init_args": init_args,
+                    }
+                }
+            }
+        }
+        path = tmp_path / f"probe_{kind}_{dtype}.yaml"
+        path.write_text(yaml.safe_dump(spec))
+        return path
+
+    def test_validate_wrong_writer_kind_fails_test_mode(self, data, tmp_path, capsys):
+        # the medium critic finding's fix: the writer kind/dtype unification now
+        # runs inside `salt2 graph validate` for TEST (cli._cmd_validate), so a
+        # writer declaring preds.jets.jets_classification as kind=label (the task
+        # publishes kind=data) FAILS the canonical static-validator command
+        # data-free — not only later at `salt2 test` setup
+        override = self._probe_writer_cfg(tmp_path, kind="label", dtype="float32")
+        rc = main([
+            "graph",
+            "validate",
+            "--strict",
+            "--mode",
+            "test",
+            "-c",
+            str(DUMMY_CFG),
+            "-c",
+            str(override),
+            *self.set_flags(data),
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "writer spec validation" in err
+        assert "preds.jets.jets_classification" in err
+        assert "kind=" in err  # the KindError surface
+
+    def test_validate_wrong_writer_dtype_fails_test_mode(self, data, tmp_path, capsys):
+        # the dtype half: a writer declaring int64 where the task publishes
+        # float32 fails the same command with the ShapeError dtype-mismatch surface
+        override = self._probe_writer_cfg(tmp_path, kind="data", dtype="int64")
+        rc = main([
+            "graph",
+            "validate",
+            "--strict",
+            "--mode",
+            "test",
+            "-c",
+            str(DUMMY_CFG),
+            "-c",
+            str(override),
+            *self.set_flags(data),
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "writer spec validation" in err
+        assert "dtype mismatch" in err
+
+    def test_validate_matching_writer_passes_test_mode(self, data, tmp_path):
+        # the inert positive control: a probe declaring the CORRECT data/float32
+        # require passes `salt2 graph validate --strict --mode test` — the
+        # wired-in check has no false positive (and is transparent to a sound config)
+        override = self._probe_writer_cfg(tmp_path, kind="data", dtype="float32")
+        rc = main([
+            "graph",
+            "validate",
+            "--strict",
+            "--mode",
+            "test",
+            "-c",
+            str(DUMMY_CFG),
+            "-c",
+            str(override),
+            *self.set_flags(data),
+        ])
+        assert rc == 0
 
     def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
         # M4.5: export.outputs was removed — a pre-amendment config carrying

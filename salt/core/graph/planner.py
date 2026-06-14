@@ -21,8 +21,10 @@ ONNX sinks are the export ports. The kernel takes them as an explicit
 ``sinks`` argument — either a flat iterable of dotted keys for the compiled
 mode, or a ``{Mode: keys}`` mapping enabling full per-mode demand analysis
 for the all-modes-dead check (design §1 principle 10). Modules that declare
-requires but no produces (writers) are terminal consumers and anchor demand
-themselves.
+requires but no produces in ANY mode (writers) are terminal consumers and
+anchor demand themselves; a module producing nothing only in THIS mode because
+its ports are mode-gated out (the §4.2 ``expose:`` opt-out) is a prunable
+producer, not a terminal.
 """
 
 from __future__ import annotations
@@ -284,10 +286,14 @@ def deadcode(
     the Athena surface below the eval surface is legitimate — the §4.2
     export-pruning story; never promoted by ``--strict``).
     Everything else is a ``"warning"``.
-    TODO(M5): the per-task ``expose:`` opt-out (design §4.2) silences the
-    TEST error and prunes the task from the TEST plan; once configured
-    callbacks' declared requires enter FIT/VAL sinks (§3.1/§3.4, also M5),
-    a callback-consumed pred stops appearing here at all.
+    The per-task ``expose:`` opt-out (design §4.2, M5 sub-wave D) gates the
+    ``preds.*`` port to the configured modes BEFORE this report runs: a
+    ``expose: [fit, val]`` task produces no prediction in TEST, so the planner
+    prunes it (a warning-level whole-module pruning, never the TEST preds
+    error) — the opt-out both silences the error and prunes the task. Once
+    configured callbacks' declared requires enter FIT/VAL sinks (§3.1/§3.4,
+    landed in M5 sub-wave C), a callback-consumed pred stops appearing here at
+    all.
 
     Returns
     -------
@@ -759,11 +765,47 @@ def _drop_unconsumed_narrowed(alive: dict[str, _Node], edges: list[Edge]) -> Non
             del node.narrowed[key]
 
 
+def _is_terminal_consumer(module: GraphModule) -> bool:
+    """Whether a no-current-produces module is a genuine terminal consumer/no-op.
+
+    A module producing nothing in THIS mode anchors demand (like a writer) ONLY
+    if it has no CONCRETE produced port active in any OTHER mode. This keeps the
+    two legitimate no-current-produces shapes alive:
+
+    - true terminal consumers (writers): no produces in any mode at all;
+    - demand-driven wildcard producers (`Labels`'s ``labels.**``): only a
+      pattern port, which narrows to nothing in a mode with no demand (the
+      module's own docstring: "the kernel keeps wildcard producers with bound
+      requires alive as terminal consumers").
+
+    It does NOT keep an `expose: [fit, val]` task alive in test/onnx: that task
+    declares a CONCRETE ``preds.*`` port active in fit/val, so it is a prunable
+    producer here, not a sink — the opt-out the §4.2 mechanism relies on.
+
+    Returns
+    -------
+    bool
+        True when `module` has no concrete (non-wildcard) produced port active
+        in any primary mode.
+    """
+    for m in PRIMARY_MODES:
+        for key, spec in flatten_spec(module.declare_io(m).produces).items():
+            if not _is_pattern(key) and spec.active_in(m):
+                return False
+    return True
+
+
 def _demand_closure(nodes: dict[str, _Node], sink_keys: list[str]) -> set[str]:
     """Reverse demand walk: modules whose outputs (transitively) reach a sink.
 
     Terminal consumers (active requires, no produces — writers) anchor demand
-    alongside the explicit sink keys (design §3.1).
+    alongside the explicit sink keys (design §3.1). A module that produces
+    nothing only because every one of its produced ports is mode-gated OUT of
+    this mode (the design §4.2 per-task ``expose: [fit, val]`` opt-out — its
+    ``preds.*``/``losses.*`` are inactive here) is NOT such a terminal: it has
+    live produces in other modes, so it is a prunable producer here, never a
+    sink. Only a module producing nothing in ANY primary mode is a genuine
+    terminal consumer (a writer-shaped node).
 
     Returns
     -------
@@ -773,7 +815,7 @@ def _demand_closure(nodes: dict[str, _Node], sink_keys: list[str]) -> set[str]:
     needed_keys = set(sink_keys)
     needed: set[str] = set()
     for name, node in nodes.items():
-        if not node.all_produces():
+        if not node.all_produces() and _is_terminal_consumer(node.module):
             needed.add(name)
             needed_keys |= set(node.bound)
     changed = True
