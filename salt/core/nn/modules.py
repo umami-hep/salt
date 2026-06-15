@@ -409,9 +409,37 @@ class StreamEmbed(nn.Module):
     axis), exactly as `Normaliser`'s ``[B, F]`` global-object path traces today
     (no special-casing, design ONNX note plan 12 sub-wave D).
 
-    TODO(M6): ``mup:`` flag; TODO(M7): pos_enc / featurewise blocks
+    muP — the ``mup:`` flag (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/
+    BREAK-routing): the model-side embed is the first stage of the muP-parametrised
+    forward (v1 ``InitNet(mup=True)`` -> ``Dense(mup=True)``, initnet.py:67-68,
+    dense.py:48,88-89). When ``mup: true`` the composed v1 `Dense` is built with
+    ``mup=True`` at `bind`, which runs the muP weight init in ``Dense.__init__``
+    (``_reset_parameters``: every linear weight ``~N(0, 1/fan_out)``, bias zeroed,
+    dense.py:96-102) instead of the default torch init. NOTHING else about the
+    embed changes — the forward math (``net(attach_context(x))``) is byte-identical
+    to the non-muP path; muP affects ONLY the initial parameter distribution
+    (training dynamics), not the frozen forward. (Note: v1 ``InitNet(mup=True)``
+    re-runs the reset via the misnamed ``self.net.reset_parameters()`` call,
+    initnet.py:69 — but `Dense` exposes only ``_reset_parameters`` (with the
+    underscore, dense.py:96) and ``nn.Module`` has no ``reset_parameters``, so this
+    call RAISES ``AttributeError: 'Dense' object has no attribute 'reset_parameters'``
+    at InitNet construction. v1's ``InitNet(mup=True)`` path is therefore BROKEN at
+    construction — not merely a redundant no-op. v2 relies on ``Dense(mup=True)``'s
+    own ``__init__`` reset (dense.py:88-89,96-102), which IS the intended muP init,
+    so the v2 single-reset-in-``__init__`` is byte-faithful to v1's intended muP
+    embed distribution, not a behaviour drop.) The ``apply_to`` ROUTING half
+    (which named modules carry ``mup: true``, the shape-path/MuAdamW wiring) is a
+    SEPARATE later stage — this is the architectural port only.
+
+    TODO(M7): pos_enc / featurewise blocks
     (design §6.4) when `InitNet` is absorbed.
     """
+
+    MUP_WIDTH_ARG = "out_dim"
+    """The init_arg the muP shape-generation tooling sweeps for this module
+    (design §3.4; v1 ``parameter_name: output_size`` for ``init_nets``,
+    GN2_muP.yaml:12-15). ``salt2 mup-shapes`` mutates ``init_args.out_dim`` to
+    the base/delta widths to produce the infshapes."""
 
     def __init__(
         self,
@@ -421,6 +449,7 @@ class StreamEmbed(nn.Module):
         context: Sequence[str] = (),
         input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
         vector: bool = False,
+        mup: bool = False,
     ) -> None:
         """Capture config only (design §2.3).
 
@@ -445,6 +474,13 @@ class StreamEmbed(nn.Module):
             (``[B, T, F]`` -> ``[B, T, D]``); by default False. The model-side
             mirror of the reader's ``vector:`` flag and `Normaliser`'s
             ``global_object`` rank-2 handling (DL1 jets-only MLP, M6-6).
+        mup : bool, optional
+            Whether to use the muP parametrisation for the embed's internal
+            `Dense` (M6 sub-wave B), by default False. When True the composed v1
+            `Dense` is built with ``mup=True`` at `bind`, applying the muP weight
+            init (``~N(0, 1/fan_out)`` weights, zeroed biases, dense.py:96-102);
+            the forward is unchanged (muP affects init only). The v1 surface is
+            ``init_net.dense_config.mup: True`` (GN2_muP.yaml:35).
 
         Raises
         ------
@@ -457,12 +493,19 @@ class StreamEmbed(nn.Module):
         if out_dim < 1:
             raise ConfigError(f"StreamEmbed: out_dim must be >= 1, got {out_dim}")
         _reject_width_keys("StreamEmbed", dense, ("input_size", "output_size", "context_size"))
+        if "mup" in (dense or {}):
+            raise ConfigError(
+                "StreamEmbed: set mup on the module (init_args.mup), not inside dense — the flag "
+                "is threaded into the composed v1 Dense at bind (design §3.4 muP architectural "
+                "port)"
+            )
         self.stream = stream
         self.out_dim = out_dim
         self.dense_cfg = dict(dense or {})
         self.context = tuple(context)
         self.input_key = input if input is not None else f"normed.{stream}"
         self.vector = vector
+        self.mup = bool(mup)
         self.net: nn.Module | None = None
 
     def _shape(self, width: int | str) -> tuple[int | str, ...]:
@@ -517,10 +560,14 @@ class StreamEmbed(nn.Module):
 
         ``input_size = width(input) + sum(width(ctx))`` — exactly v1's
         inference (initnet.py:54-59) driven by the resolved schema instead
-        of CLI variable injection.
+        of CLI variable injection. When ``self.mup`` the `Dense` is built with
+        ``mup=True`` so its ``__init__`` applies the muP weight init
+        (``_reset_parameters``, dense.py:88-89,96-102); the forward is unchanged.
         """
         input_size = schema.width(self.input_key) + sum(schema.width(key) for key in self.context)
-        self.net = V1Dense(input_size=input_size, output_size=self.out_dim, **self.dense_cfg)
+        self.net = V1Dense(
+            input_size=input_size, output_size=self.out_dim, mup=self.mup, **self.dense_cfg
+        )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Attach context (prepended, v1 order) and project.
@@ -827,7 +874,70 @@ class TransformerEncoder(nn.Module):
     the composed v1 layer (transformer.py:350-356,421); the wrapper only
     threads the flag through the `Transformer` ``**kwargs`` passthrough.
 
-    TODO(M6): ``mup:`` flag; TODO(M7): ``featurewise:`` / ``edges:`` ports
+    muP — the ``mup:`` flag (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/
+    BREAK-routing). When ``mup: true`` the composed v1 `Transformer` is built with
+    ``mup=True``. **IMPORTANT — what this flag actually does is NARROWER than the
+    name suggests, and this is a faithful port of v1's behaviour.** v1
+    ``Transformer.__init__`` takes ``mup`` as a *named* parameter
+    (transformer.py:563), so it is consumed by `Transformer` and does NOT flow into
+    its ``**kwargs``; when it builds its ``EncoderLayer`` list (transformer.py:604-614)
+    it does NOT pass ``mup`` down. ``EncoderLayer`` therefore defaults to
+    ``mup=False`` and never sets ``attn_kwargs["mup"]/dense_kwargs["mup"]``
+    (transformer.py:362-364). The ONLY thing ``mup=True`` wires from the encoder flag
+    is the **out-proj swap**: ``nn.Linear`` -> ``mup.MuReadout`` with weight AND bias
+    zeroed (transformer.py:623-628), an output-scaling Linear subclass.
+
+    Consequently, for THIS code path (the production GN2_muP encoder, built via
+    ``class_path: salt.models.Transformer`` with ``mup: true``):
+
+    - the attention softmax scale STAYS ``1/sqrt(head_dim)`` — the muP ``1/head_dim``
+      scale (attention.py:275) is **NOT** active;
+    - the attention muP init (Q-projection zeroed + K/V scaled, attention.py:319-326)
+      is **NOT** run — the Q-rows of ``in_proj_weight`` are non-zero;
+    - the GLU/dense-linear muP init (transformer.py:99-103, dense.py:96-102) is
+      **NOT** engaged inside the encoder.
+
+    Those attention/dense-level muP behaviours live in ``Attention(mup=True)`` /
+    ``Dense(mup=True)``, which v1 only constructs when ``mup`` is threaded all the
+    way down — something v1's ``Transformer(mup=True)`` does not do. So they were
+    inactive in v1's production GN2_muP encoder too, and the v2 port is byte-faithful
+    to v1's ACTUAL encoder-mup behaviour (MU1's bitwise ``torch.equal`` vs an
+    independent v1 ``Transformer(mup=True)`` passes; the dense/embed muP init that IS
+    active lives on the embed's ``Dense(mup=True)``, see `StreamEmbed`). This matches
+    the MU1 gate's faithfulness_note verbatim. (If full attention-level muP were
+    desired for correct attention HP-transfer, that would be a v1 *behaviour change*,
+    out of scope for a parity-faithful port — raise it explicitly; do not assume the
+    encoder's attention is muP-parametrised.)
+
+    The flag is the ONLY init_arg taken here — the M7 ``featurewise:`` / ``edges:``
+    ports stay out (their TODO line is below). The ``apply_to`` ROUTING half (which
+    named modules carry ``mup: true``, ``mup-shapes``, the MuAdamW swap) is a
+    SEPARATE later stage — this is the architectural port only.
+
+    MuReadout needs ``infshape`` (set via ``mup.set_base_shapes``) before its
+    ``forward`` / ``width_mult()`` work. The ROUTING stage applies a real shape
+    file; here, the architectural default sets the base shapes from the module
+    onto ITSELF with ``rescale_params=False`` — ``width_mult() == 1.0`` and the
+    zeroed weights are untouched — so a ``mup: true`` encoder is forward-runnable
+    and traceable standalone (a non-unit ``width_mult`` only enters once a wider
+    model is set against a narrower base by the routing stage).
+
+    ONNX export contract (load-bearing; plan 12 sub-wave B). ``MuReadout`` is a
+    NON-``nn.Linear`` subclass whose forward applies an output multiplier
+    (``output_mult * x / width_mult``) before the linear — tracing it as-is risks
+    an unsupported/incorrect graph. At export (`set_export_mode`, the §7.2 protocol
+    the `OnnxAdapter` invokes on every submodule) the multiplier is FOLDED into the
+    weight/bias and the out-proj is swapped for a plain ``nn.Linear`` in the traced
+    graph: ``W_folded = (output_mult / width_mult) * W`` and ``bias_folded = bias``
+    (the multiplier scales only the ``x @ Wᵀ`` term, NOT the bias — see the
+    MuReadout forward). The folded Linear's forward is numerically EQUAL to the
+    MuReadout forward (bitwise when ``output_mult/width_mult == 1.0``, the
+    architectural default; ``<=1e-6`` otherwise — the float32 multiply-order is the
+    only difference). Inference math is then identity to a standard Linear (muP
+    affects training, not the frozen forward), so the exported graph is a plain
+    transformer.
+
+    TODO(M7): ``featurewise:`` / ``edges:`` ports
     (design §6.4, §6.7) when the v1 internals are absorbed.
     """
 
@@ -835,6 +945,12 @@ class TransformerEncoder(nn.Module):
     """The encoder-layer norm placements the wrapper forwards (v1 EncoderLayer,
     transformer.py:307-308,350-356). ``"none"`` is a residual-only v1 mode with
     no shipped v2 config — rejected loudly here rather than silently passed."""
+
+    MUP_WIDTH_ARG = "dim"
+    """The init_arg the muP shape-generation tooling sweeps for this module
+    (design §3.4; v1 ``parameter_name: embed_dim`` for ``encoder``,
+    GN2_muP.yaml:12-15). ``salt2 mup-shapes`` mutates ``init_args.dim`` to the
+    base/delta widths to produce the infshapes."""
 
     def __init__(
         self,
@@ -847,6 +963,7 @@ class TransformerEncoder(nn.Module):
         num_registers: int = 1,
         norm_type: str = "pre",
         drop_registers: bool = False,
+        mup: bool = False,
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -888,12 +1005,24 @@ class TransformerEncoder(nn.Module):
             default False. Registers stay visible to every attention layer; only
             the OUTPUT sequence is sliced back to the stream tokens, and no
             ``masks.registers`` key is produced (see the class docstring).
+        mup : bool, optional
+            Whether to use the muP parametrisation (M6 sub-wave B), by default
+            False. When True the composed v1 `Transformer` is built with
+            ``mup=True``, which (faithfully to v1) wires ONLY the `MuReadout`
+            out-proj swap — v1's ``Transformer(mup=True)`` does NOT pass ``mup``
+            down to its EncoderLayers, so the 1/d attention scale and the
+            attention/dense muP init are NOT active in this encoder path (see the
+            class docstring for the full explanation). v1 surface is the encoder's
+            ``mup: True`` (GN2_muP.yaml:51). Requires an out projection (``out_dim``
+            set) — `MuReadout` is the last muP layer (v1 transformer.py:594-597).
+            The export-time fold to a plain `nn.Linear` happens in `set_export_mode`.
 
         Raises
         ------
         ConfigError
-            If `attention` is missing ``num_heads``, or `norm_type` is not one
-            of ``{"pre", "post", "hybrid"}``.
+            If `attention` is missing ``num_heads``, `norm_type` is not one of
+            ``{"pre", "post", "hybrid"}``, or `mup` is set without an `out_dim`
+            (MuReadout has no layer to live on — v1 transformer.py:594-597).
         """
         super().__init__()
         self.name = _UNNAMED
@@ -907,11 +1036,18 @@ class TransformerEncoder(nn.Module):
                 f"TransformerEncoder: norm_type must be one of {self._NORM_TYPES}, got "
                 f"{norm_type!r}"
             )
+        if mup and out_dim is None:
+            raise ConfigError(
+                "TransformerEncoder: mup requires an out_dim — the MuReadout out-proj is the last "
+                "muP layer of the model and has no layer to live on without one "
+                "(v1 transformer.py:594-597)"
+            )
         attn_kwargs = dict(attention)
         attn_type = attn_kwargs.pop("attn_type", "torch-math")
         self.dim = dim
         self.norm_type = norm_type
         self.drop_registers = bool(drop_registers)
+        self.mup = bool(mup)
         self.encoder = V1Transformer(
             num_layers=num_layers,
             embed_dim=dim,
@@ -924,7 +1060,21 @@ class TransformerEncoder(nn.Module):
             attn_kwargs=attn_kwargs,
             dense_kwargs=dict(dense) if dense is not None else None,
             norm_type=norm_type,
+            mup=self.mup,
         )
+        if self.mup:
+            # MuReadout.forward/width_mult() assert ``infshape`` is set (via
+            # mup.set_base_shapes). The ROUTING stage supplies a real shape file;
+            # the architectural default sets the base shapes from the module onto
+            # ITSELF with rescale_params=False — width_mult()==1.0, the zeroed
+            # MuReadout weights untouched — so a standalone mup encoder is
+            # forward-runnable and traceable (a non-unit width_mult enters only
+            # when a wider model is set against a narrower base by the routing
+            # stage). Import locally to keep the module import surface lean and to
+            # avoid a hard mup dependency for non-mup encoders.
+            from mup import set_base_shapes  # noqa: PLC0415
+
+            set_base_shapes(self.encoder, self.encoder, rescale_params=False)
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
 
@@ -960,8 +1110,56 @@ class TransformerEncoder(nn.Module):
         )
 
     def set_export_mode(self) -> None:
-        """Force the deterministic torch-math backend (design §2.5, test/ONNX semantics)."""
+        """Prepare the encoder for tracing: torch-math backend + MuReadout fold.
+
+        Two export-time transformations (design §2.5/§7.2; the `OnnxAdapter`
+        invokes this on every submodule, adapter.py:285-295):
+
+        1. Force the deterministic torch-math attention backend (test/ONNX
+           semantics, the v1 ``change_attn_backends`` replacement).
+        2. **muP MuReadout -> plain nn.Linear fold** (plan 12 sub-wave B export
+           contract). When ``self.mup`` the v1 out projection is a
+           ``mup.MuReadout`` whose forward applies an output multiplier
+           (``output_mult * x / width_mult``) before the linear — a
+           NON-``nn.Linear`` op that traces to an unsupported/incorrect graph.
+           `_fold_mu_readout` swaps it for a plain ``nn.Linear`` with the
+           multiplier baked into the weights: ``W_folded = (output_mult /
+           width_mult) * W``, ``bias_folded = bias`` (the multiplier scales only
+           the ``x @ Wᵀ`` term, NOT the bias). The folded forward is numerically
+           equal to the MuReadout forward (bitwise when
+           ``output_mult/width_mult == 1.0``, the architectural default; ``<=1e-6``
+           otherwise). Idempotent — a second call no-ops once the swap has
+           happened (the out-proj is then already a plain `nn.Linear`).
+        """
         self.encoder.set_backend("torch-math")
+        if self.mup:
+            self._fold_mu_readout()
+
+    def _fold_mu_readout(self) -> None:
+        """Fold the composed v1 `MuReadout` out-proj into a plain `nn.Linear` for export.
+
+        Deterministic and numerically equal to the `MuReadout` forward within
+        parity tolerance (plan 12 sub-wave B). No-op unless the encoder has a
+        `MuReadout` out projection (a non-mup encoder, or an already-folded one,
+        is left untouched — idempotent).
+        """
+        from mup import MuReadout  # noqa: PLC0415
+
+        proj = getattr(self.encoder, "out_proj", None)
+        if not isinstance(proj, MuReadout):
+            return  # non-mup / no out-proj / already folded — nothing to do
+        # output_mult and width_mult scale only the linear term, not the bias
+        # (MuReadout.forward: super().forward(output_mult * x / width_mult)).
+        mult = float(proj.output_mult) / float(proj.width_mult())
+        has_bias = proj.bias is not None
+        folded = nn.Linear(proj.in_features, proj.out_features, bias=has_bias)
+        with torch.no_grad():
+            folded.weight.copy_(proj.weight * mult)
+            if has_bias:
+                folded.bias.copy_(proj.bias)
+        folded.to(proj.weight.device, proj.weight.dtype)
+        folded.eval()
+        self.encoder.out_proj = folded
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Encode the sequence; publish the register mask as a NEW key.

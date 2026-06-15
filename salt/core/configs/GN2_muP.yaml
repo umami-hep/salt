@@ -1,0 +1,207 @@
+# GN2_muP.yaml — GN2 with muP (Maximal Update Parametrization) in the v2 schema
+# (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/BREAK-routing).
+#
+# The v2-native MIGRATED fixture for legacy salt/configs/GN2/GN2_muP.yaml (v1
+# name: GN2). muP makes hyper-parameters (LR, init scale) TRANSFER across model
+# widths: a tagger tuned at a small width keeps its optimum as the width grows.
+# GN2_muP is the canonical exercise of the muP architectural + routing port
+# (plan 12 sub-wave B; gates MU1/MU2 + the MU-HUMAN coord-check sign-off).
+#
+# THE M6 FEATURE — muP, two halves (design §3.4 line 677-695):
+#
+# 1. ARCHITECTURAL half (port the internals onto the modules; KEEP architecture):
+#    `mup: true` on the `track_embed` StreamEmbed and the `encoder`
+#    TransformerEncoder. v1 wired muP through `init_net.dense_config.mup: True`
+#    (GN2_muP.yaml:35) + the encoder's `mup: True` (GN2_muP.yaml:51); v2 lifts
+#    the same flags onto the v2 module init_args. The StreamEmbed flag builds its
+#    composed v1 `Dense` with `mup=True` (the muP weight init, dense.py:96-102);
+#    the TransformerEncoder flag builds its composed v1 `Transformer` with
+#    `mup=True` — the SINGLE switch that swaps the out projection from `nn.Linear`
+#    to `mup.MuReadout` (the zeroed-readout last layer, transformer.py:625-628).
+#
+# 2. ROUTING half (replace v1's regex zip with an EXPLICIT module-name list;
+#    BREAK routing): `model.init_args.mup: {shape_path, apply_to}`. v1 routed muP
+#    via a regex/zip engine (`apply_to` x `parameter_name` x base|delta into the
+#    model init_args, configuration_muP.py:98-115); v2 names the muP-parametrised
+#    modules EXPLICITLY in `apply_to: [track_embed, encoder]`. The validator
+#    (salt2 graph validate) ERRORS if `apply_to` names a module lacking a `mup`
+#    init_arg and WARNS if a `mup: true` module is left out of `apply_to`
+#    (design §3.4 line 695). `optimizer` is swapped to `mup.optim.MuAdamW`
+#    whenever a `mup` block is configured (SaltModule._get_optimizer_class).
+#
+# THE SHAPE FILE (`shape_path`) — REQUIRED override (NO machine path committed,
+# design §5 placeholder policy). muP needs base/delta INFSHAPES: generate them
+# data-free with `salt2 mup-shapes` (the casing-fixed `setup_mup` console entry
+# forwards here), which builds a BASE model (narrow `apply_to` widths) and a
+# DELTA model (wider) and writes `mup.make_base_shapes(base, delta, savefile)`.
+# The file is applied at bind (SaltModule._apply_mup_shapes -> set_base_shapes)
+# so `MuReadout.width_mult()` / `MuAdamW` resolve against the REAL base widths.
+# v1's pickled shape files are legacy-path only — REGENERATE under v2. From the
+# REPO ROOT (use `python -m salt.core.main` when the salt2 script is not
+# installed):
+#
+#   # 1. generate the infshapes (data-free; defaults base=128/delta=256):
+#   salt2 mup-shapes --config salt/core/configs/GN2_muP.yaml \
+#     --save-path /path/to/shape_mup.bsh \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+#
+#   # 2. train, pointing shape_path at the generated file:
+#   salt2 fit --config salt/core/configs/GN2_muP.yaml \
+#     --model.init_args.mup.shape_path /path/to/shape_mup.bsh \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml
+#
+# ONNX export contract (load-bearing; plan 12 sub-wave B / MU1 export-fold): the
+# encoder out-proj is a `mup.MuReadout` (a NON-`nn.Linear` op applying
+# `output_mult * x / width_mult`) at training time — it would trace to an
+# unsupported/incorrect graph. At export the `TransformerEncoder.set_export_mode`
+# hook FOLDS the multiplier into a plain `nn.Linear` (`W_folded =
+# (output_mult/width_mult) * W`, `bias` unchanged) — the inference math is then
+# IDENTITY to a standard Linear (muP affects TRAINING dynamics, not the frozen
+# forward), so the traced ONNX graph is a plain transformer. `--mode onnx` STAYS
+# in the M6-CONV gate for GN2_muP (the fold makes it export-representable).
+#
+# attn_type stays torch-math here: flash-varlen is the M6 cluster follow-up
+# (plan 05 hardware note). The track variables match v1 GN2.yaml; the 3-class
+# (b/c/u) head reproduces v1 GN2_muP.yaml's `output_size: 3`.
+
+name: GN2_muP
+
+data:
+  batch_size: 400
+  num_workers: 40
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        # the ONE place column order is defined (design §5.1) — v1 GN2.yaml
+        # variables (the IP3D_signed_* track significances)
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # lrs: == design §5.1 OneCycleLR block (the v1 ModelWrapper 'lrs_config'
+    # kwarg, renamed to 'lrs' in M5 sub-wave D); v1 GN2_muP.yaml:4-9
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    # optimizer is auto-swapped to mup.optim.MuAdamW because the mup block below
+    # is configured (SaltModule._get_optimizer_class; v1 ModelWrapper MuAdamW path)
+    optimizer: AdamW
+    # muP ROUTING block (design §3.4 line 685): explicit module-name list, NOT
+    # v1's regex zip. shape_path is a REQUIRED override (see header) — generate
+    # it with `salt2 mup-shapes` and point fit/test/onnx at the file.
+    mup:
+      shape_path: shape_mup.bsh # REQUIRED override (see header) — REGENERATE per v2
+      apply_to: [track_embed, encoder]
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: 256 # v1 GN2_muP.yaml:&embed_dim 256 (the muP-swept width)
+          dense: {hidden_layers: [256], activation: ReLU}
+          mup: true # v1 init_net.dense_config.mup: True (GN2_muP.yaml:35)
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks]} # registers live in the encoder in M2
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: 256 # v1 GN2_muP.yaml:&embed_dim 256 (the muP-swept width)
+          out_dim: 128 # v1 GN2_muP.yaml:&out_dim 128 (the MuReadout slot)
+          num_layers: 4
+          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          dense: {activation: ReLU, gated: false}
+          mup: true # v1 encoder mup: True (GN2_muP.yaml:51) — MuReadout out-proj swap
+      split:
+        class_path: salt.core.nn.Split # production task path (design §3.3)
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [bjets, cjets, ujets] # v1 GN2_muP.yaml output_size: 3
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight: 0.5
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          weight: 1.5
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
+      loss:
+        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+
+export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
+  model_name: GN2muP # Athena name: no '_'/'-' (validated at export only)
+  inputs:
+    - { port: inputs.jets, name: jet_features } # [1, F] global
+    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
+  # default TaskWriter declares GN2muP_pb/_pc/_pu (split_scalars from the 3-class
+  # head's class_names), _TrackOrigin (argmax int8) and _VertexIndex
+  # (vertex_union_find int8). The encoder MuReadout out-proj is FOLDED to a plain
+  # nn.Linear at trace time (TransformerEncoder.set_export_mode; plan 12 sub-wave
+  # B), so the ONNX graph is a standard transformer. Inspect with
+  # `salt2 export --manifest -c <this file>` or `salt2 graph resolve --annotate`.
+
+trainer:
+  max_epochs: 40
+  precision: 32-true # 16-mixed on GPU clusters (M6 follow-up; accelerator/devices
+  # are cluster-override concerns — see gn2v2-cluster-override.yaml)

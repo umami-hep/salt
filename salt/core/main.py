@@ -56,7 +56,7 @@ __all__ = ["CONFIG_DIR", "DeepMergeParser", "Salt2CLI", "main"]
 CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base2.yaml`` and the worked GN2v2 configs (design §5.1)."""
 
-_GRAPH_COMMANDS = frozenset({"graph", "schema"})
+_GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
 _EXPORT_COMMAND = "export"
 
 # --model.modules.X=null (also the explicit --model.init_args.modules.X=null):
@@ -427,8 +427,9 @@ class Salt2CLI(LightningCLI):
 def main(args: Sequence[str] | None = None) -> int:
     """``salt2`` console entry point (pyproject ``[project.scripts]``).
 
-    ``salt2 graph …`` / ``salt2 schema …`` dispatch to the static graph
-    tooling (`salt.core.cli.main`, design §4) and ``salt2 export`` to the
+    ``salt2 graph …`` / ``salt2 schema …`` / ``salt2 mup-shapes`` /
+    ``salt2 mup-coord-check`` dispatch to the static graph + muP tooling
+    (`salt.core.cli.main`, design §4, §3.4) and ``salt2 export`` to the
     ONNX exporter (`salt.core.onnx.export.main`, design §7); everything
     else goes to `Salt2CLI` (``salt2 fit`` / ``salt2 test``, design §5).
     Console use (``args is None``) passes ``args=None`` through so
@@ -472,8 +473,9 @@ def main(args: Sequence[str] | None = None) -> int:
             print(
                 "\nsee also: 'salt2 graph --help' (static graph tooling: validate/plan/plot/"
                 "why/deadcode/resolve, design §4), 'salt2 schema --help' (schema artifacts, "
-                "§2.6) and 'salt2 export --help' (ONNX export, §7; --manifest prints the "
-                "writer-derived output manifest)"
+                "§2.6), 'salt2 mup-shapes --help' / 'salt2 mup-coord-check --help' (muP base/"
+                "delta infshapes + coord-check, design §3.4) and 'salt2 export --help' (ONNX "
+                "export, §7; --manifest prints the writer-derived output manifest)"
             )
         raise
     except GraphError as err:

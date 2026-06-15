@@ -1,4 +1,4 @@
-"""M6 gates harness — LB1 + VS1 + M6-CONV (sub-waves A/D) (plan 12; design §9.5, FD 1303-1304).
+"""M6 gates harness — LB1 + VS1 + MU1 + M6-CONV (sub-waves A/D/B) (plan 12; design §9.5).
 
 Standalone gates, each a subcommand of ``python -m salt.core.gates_m6``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -57,9 +57,37 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   eager adapter. Negative control: perturbing the v2 embed weights breaks the
   bitwise parity while the structural (no-T / rank-2) checks stay green.
 
+- **MU1 muP forward-init parity + export-fold (v1-decidable)** — the muP
+  ARCHITECTURAL port (M6 sub-wave B; design §3.4 KEEP-architecture/BREAK-routing):
+  the ``mup: true`` init_arg on `StreamEmbed` (-> ``Dense(mup=True)``) and
+  `TransformerEncoder` (-> ``Transformer(mup=True)``) reproduces v1's encoder-flag
+  muP path BITWISE. MU1 builds a GN2_muP-shaped model and asserts: (a) the v2 mup
+  embed + encoder forward is BITWISE identical to an INDEPENDENT v1 reference
+  (separately built ``Dense(mup=True)`` + ``Transformer(mup=True)``, weight-loaded
+  from the v2 modules, run through v1 forward) — deterministic init values, NO
+  training; (b) the muP machinery is wired as v1 wires it from the encoder flag —
+  the encoder out-proj is a ``mup.MuReadout`` with weight AND bias zeroed at init
+  (transformer.py:623-628), the embed's `Dense` carries ``mup=True``; (c) the
+  **export-fold check** — folding the `MuReadout` to a plain ``nn.Linear``
+  (``set_export_mode``, ``W_folded = (output_mult/width_mult) * W``,
+  ``bias_folded = bias``) gives an output EQUAL to the MuReadout forward (bitwise
+  at the architectural default ``width_mult==1.0``, ``<=1e-6`` once a non-unit
+  multiplier enters via the routing stage), and the swapped out-proj is a plain
+  ``nn.Linear`` in the traced graph. HONEST faithfulness note recorded in the
+  report: v1's ``Transformer(mup=True)`` does NOT propagate muP to its
+  EncoderLayers/Attention — the encoder flag wires ONLY the MuReadout out-proj
+  swap (the 1/d softmax scale + Q-zero attention init live in
+  ``Attention(mup=True)``, which the v1 encoder flag does not pass down,
+  transformer.py:604-614). The v2 port composes ``Transformer(mup=True)`` and is
+  therefore byte-faithful to v1's ACTUAL encoder-mup behaviour. The coord-curve
+  comparison (multi-step, stochastic) + the "is it muP-flat?" plot judgment are
+  MU2/MU-HUMAN, NOT this gate. Negative control: perturbing the v2 forward breaks
+  the bitwise parity while the structural (MuReadout / fold) checks stay green.
+
 - **M6-CONV — the M7-slice acceptance (this wave's slice)** — the
   newly-authored v2-native M6 configs (sub-wave A: GN3X, GN2X_qcdsplit; sub-wave
-  D: DL1; later M6 waves EXTEND ``_CONV_M6_CONFIGS``) exist as v2-native fixtures in
+  D: DL1; sub-wave B: GN2_muP; later M6 waves EXTEND ``_CONV_M6_CONFIGS``) exist
+  as v2-native fixtures in
   ``salt/core/configs/`` AND pass the REAL ``salt2 graph validate`` (the
   canonical static validator, the d2cfg command path) in fit + test + onnx with
   rc == 0. The authoritative config list is embedded VERBATIM in
@@ -69,17 +97,27 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   the parity norm dict written into ``--outdir`` (jets/tracks/electrons
   resolve; the GN3X flow / GN2X_qcdsplit flow+truth_hadrons streams emit
   non-fatal "missing input type" preflight WARNINGS, not errors — so NO
-  ``--strict``, the same rationale as M5-CONV). Both M6 configs are standard
-  traces (no muP/edge export hazards — those land in the later B/C waves), so
-  onnx stays in the gate for both. Moves the 2 configs 🔷→✅ in the 39
-  denominator.
+  ``--strict``, the same rationale as M5-CONV). GN3X/GN2X_qcdsplit/DL1 are
+  standard traces; for GN2_muP, ``--mode onnx`` here is a STATIC plan-compile +
+  writer-manifest validation (cli.py:381-423) — it does NOT call
+  ``torch.onnx.export``/``set_export_mode``, so the CONV onnx leg proves the onnx
+  PLAN compiles, not the fold itself. The MuReadout->plain-Linear fold that makes
+  the real export traceable is exercised + proven by MU1's export-fold check
+  (``set_export_mode`` on the live module). GN2_muP's base/delta infshapes are
+  generated data-free (``_conv_mup_shape_path``) before validation so the plan-
+  compile succeeds; with the fold proven by MU1, onnx stays in the gate for it too
+  — only GN2XE's edge dynamic-T register pad (C) is a deferred export hazard. This
+  split mirrors the M5-CONV precedent (run_conv is also static validate). Moves the
+  4 configs 🔷→✅ in the 39 denominator.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import warnings
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -100,9 +138,12 @@ from salt.core.graph.spec import TensorSpec, flatten_spec, unflatten_spec
 from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
 from salt.core.nn import (
+    Concat,
+    GlobalAttentionPooling,
     LossSum,
     Normaliser,
     StreamEmbed,
+    TransformerEncoder,
     bind_all,
     materialise_all,
     resolve_bind_schema,
@@ -119,6 +160,8 @@ from salt.core.onnx import (
     make_session,
     resolve_export_config,
 )
+from salt.core.saltmodule import SaltModule, validate_mup_routing
+from salt.models import Transformer as V1Transformer
 from salt.models.initnet import InitNet as V1InitNet
 from salt.models.task import ClassificationTask as V1ClassificationTask
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
@@ -933,22 +976,720 @@ def run_vs1(
 
 
 # ---------------------------------------------------------------------------
+# MU1 — muP forward-init parity + MuReadout export-fold (sub-wave B, plan 12)
+# ---------------------------------------------------------------------------
+
+# A GN2_muP-shaped fixture (GN2_muP.yaml): tracks stream embedded with a muP
+# Dense, a muP transformer encoder with an out-projection (the MuReadout slot),
+# a global-attention pool, and a jet flavour head. Small dims keep the gate fast;
+# the muP wiring (not the size) is what is under test.
+_MU1_TRACK_VARIABLES: tuple[str, ...] = ("d0", "z0SinTheta", "dphi", "deta", "qOverP")
+_MU1_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
+_MU1_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")
+_MU1_EMBED_DIM = 16  # GN2_muP.yaml:&embed_dim 256 (scaled down)
+_MU1_OUT_DIM = 8  # GN2_muP.yaml:&out_dim 128 (scaled down)
+_MU1_NUM_HEADS = 2  # GN2_muP.yaml:&num_heads 8 (scaled down)
+_MU1_NUM_LAYERS = 2  # GN2_muP.yaml:num_layers 4 (scaled down)
+_MU1_B = 6  # batch size
+_MU1_T = 5  # track count
+
+
+def _mu1_norm_dict(outdir: Path) -> Path:
+    """Write a jets+tracks norm dict for the GN2_muP-shaped fixture.
+
+    MU1's parity is about the muP embed/encoder wiring, not normalisation — the
+    norm dict supplies distinct per-variable constants so a field-order bug can't
+    pass silently.
+
+    Returns
+    -------
+    Path
+        The norm-dict YAML path.
+    """
+    import yaml  # noqa: PLC0415 - keep the module import surface lean
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    nd: dict[str, Any] = {
+        "jets": {
+            v: {"mean": 0.5 + i, "std": 1.0 + 0.5 * i} for i, v in enumerate(_MU1_JET_VARIABLES)
+        },
+        "tracks": {
+            v: {"mean": -0.25 + 0.1 * i, "std": 1.25 + 0.2 * i}
+            for i, v in enumerate(_MU1_TRACK_VARIABLES)
+        },
+    }
+    path = outdir / "mu1_norm_dict.yaml"
+    path.write_text(yaml.safe_dump(nd))
+    return path
+
+
+def _mu1_modules(norm_dict: Path) -> dict[str, Any]:
+    """Build the GN2_muP-shaped v2 module dict (mup embed + mup encoder + pool + head).
+
+    Mirrors GN2_muP.yaml: a ``mup: true`` `StreamEmbed` on tracks (with jets
+    context), a ``mup: true`` `TransformerEncoder` with an out-projection (the
+    MuReadout slot, GN2_muP.yaml:&out_dim), a `GlobalAttentionPooling`, and a jet
+    flavour `ClassificationTaskModule`. The two mup flags are the architectural
+    port under test; the routing (apply_to lists, shape file) is a later stage.
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named modules with `LossSum` already narrowed.
+    """
+    modules: dict[str, Any] = {
+        "norm": Normaliser(norm_dict=norm_dict, streams=["jets", "tracks"], global_object="jets"),
+        "track_embed": StreamEmbed(
+            stream="tracks",
+            out_dim=_MU1_EMBED_DIM,
+            dense={"hidden_layers": [_MU1_EMBED_DIM], "activation": "ReLU"},
+            context=["normed.jets"],
+            mup=True,
+        ),
+        "concat": Concat(streams=["tracks"]),
+        "encoder": TransformerEncoder(
+            dim=_MU1_EMBED_DIM,
+            num_layers=_MU1_NUM_LAYERS,
+            out_dim=_MU1_OUT_DIM,
+            attention={"num_heads": _MU1_NUM_HEADS, "attn_type": "torch-math"},
+            dense={"activation": "ReLU"},
+            mup=True,
+        ),
+        "pool": GlobalAttentionPooling(input="encoded.seq", out="pooled.global"),
+        "jets_classification": ClassificationTaskModule(
+            stream="jets",
+            label="flavour_label",
+            class_names=list(_MU1_CLASS_NAMES),
+            input="pooled.global",
+            dense={"hidden_layers": [_MU1_OUT_DIM], "activation": "ReLU"},
+        ),
+        "loss": LossSum(),
+    }
+    for name, module in modules.items():
+        module.name = name
+    modules["loss"].narrow(LossSum.collect_loss_keys(modules))
+    return modules
+
+
+def _mu1_sources():
+    """The GN2_muP dataset boundary: rank-3 tracks + rank-2 jets + a flavour label.
+
+    Returns
+    -------
+    NestedSpec
+        The nested source spec for `compile_plan`.
+    """
+    return unflatten_spec({
+        "inputs.jets": TensorSpec(
+            shape=("B", len(_MU1_JET_VARIABLES)),
+            dtype="float32",
+            fields=tuple(_MU1_JET_VARIABLES),
+        ),
+        "inputs.tracks": TensorSpec(
+            shape=("B", "T:tracks", len(_MU1_TRACK_VARIABLES)),
+            dtype="float32",
+            fields=tuple(_MU1_TRACK_VARIABLES),
+        ),
+        "masks.tracks": TensorSpec(shape=("B", "T:tracks"), dtype="bool", kind="pad_mask"),
+        "labels.jets.flavour_label": TensorSpec(
+            shape=("B",), dtype="int64", kind="label", modes=Mode.TRAINING
+        ),
+    })
+
+
+def _mu1_v1_encoder_reference(
+    v2_encoder: TransformerEncoder, seq_x: torch.Tensor, seq_mask: torch.Tensor
+) -> torch.Tensor:
+    """Run an INDEPENDENT v1 ``Transformer(mup=True)`` on the SAME concatenated sequence.
+
+    Constructs a SEPARATE v1 `Transformer` with ``mup=True`` (NOT the v2 module's
+    composed instance), weight-loads it from the v2 encoder's composed v1
+    Transformer, and runs v1's exact forward — the byte-faithful reference for the
+    v2 encoder-mup path (the encoder flag wires the MuReadout out-proj swap; v1's
+    ``Transformer(mup=True)`` does NOT pass mup to its EncoderLayers/Attention,
+    transformer.py:604-614, so this reference and the v2 module share that
+    behaviour exactly). The returned tensor is the register-augmented
+    ``encoded.seq`` (v1 keeps the register rows).
+
+    Returns
+    -------
+    torch.Tensor
+        The v1 ``[B, T+R, out_dim]`` encoded sequence.
+    """
+    ref = V1Transformer(
+        num_layers=_MU1_NUM_LAYERS,
+        embed_dim=_MU1_EMBED_DIM,
+        out_dim=_MU1_OUT_DIM,
+        norm="LayerNorm",
+        attn_type="torch-math",
+        do_final_norm=True,
+        num_registers=v2_encoder.num_registers,
+        attn_kwargs={"num_heads": _MU1_NUM_HEADS},
+        dense_kwargs={"activation": "ReLU"},
+        mup=True,
+    )
+    from mup import set_base_shapes  # noqa: PLC0415
+
+    set_base_shapes(ref, ref, rescale_params=False)
+    ref.load_state_dict(v2_encoder.encoder.state_dict())
+    ref.eval()
+    with torch.no_grad():
+        xs = {"seq": seq_x}
+        pad = {"seq": seq_mask}
+        encoded, _ = ref(xs, pad_mask=pad)
+    return encoded
+
+
+def run_mu1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """MU1: muP forward-init parity vs v1 + MuReadout export-fold (sub-wave B).
+
+    The muP ARCHITECTURAL port (design §3.4 KEEP-architecture/BREAK-routing): the
+    ``mup: true`` init_arg on `StreamEmbed` and `TransformerEncoder` reproduces
+    v1's encoder-flag muP path. MU1 drives a GN2_muP-shaped v2 plan (`_mu1_modules`:
+    mup embed + mup encoder + pool + head) through the REAL compiler / two-phase
+    bind / executor and asserts:
+
+    - **structural muP wiring (v1-decidable)** — the embed's composed `Dense`
+      carries ``mup=True`` (the muP weight init ran, dense.py:88-89,96-102); the
+      encoder's out projection is a ``mup.MuReadout`` (transformer.py:625-628) with
+      weight AND bias zeroed at init (the v1 zeroed-readout, transformer.py:627-628);
+
+    - **forward-init parity (BITWISE)** — the v2 encoder forward (``encoded.seq``)
+      is BITWISE identical to an INDEPENDENT v1 ``Transformer(mup=True)``
+      (`_mu1_v1_encoder_reference`: a separately built v1 Transformer, weight-loaded
+      from the v2 encoder, run through v1 forward). Same instances' weights, same
+      torch-math math -> no float reordering, so the claim is BITWISE. This is the
+      byte/parity-decidable leg (deterministic init values, NO training);
+
+    - **export-fold (numerically equal)** — folding the `MuReadout` to a plain
+      ``nn.Linear`` via the export protocol (``encoder.set_export_mode()``,
+      ``W_folded = (output_mult/width_mult) * W``, ``bias_folded = bias``) leaves
+      the encoder forward EQUAL to the pre-fold MuReadout forward (BITWISE at the
+      architectural default ``width_mult==1.0``; ``<=1e-6`` once a non-unit
+      multiplier enters via the routing stage — proven non-vacuous in-gate by ALSO
+      folding a probe MuReadout given a synthetic ``width_mult != 1`` and checking
+      the ``<=1e-6`` equality), and the out-proj is then a plain ``nn.Linear`` in
+      the traced graph (so onnx sees a standard transformer, not the unsupported
+      MuReadout multiplier op).
+
+    HONEST faithfulness note (recorded in the report): v1's ``Transformer(mup=True)``
+    wires ONLY the MuReadout out-proj swap from the encoder flag — it does NOT pass
+    mup down to its EncoderLayers/Attention, so the 1/d softmax scale + Q-zero
+    attention init (attention.py:275,319) are NOT active in v1's encoder-mup path
+    (they live in ``Attention(mup=True)``, constructed independently). The v2 port
+    composes ``Transformer(mup=True)`` and is byte-faithful to that ACTUAL v1
+    behaviour. The coord-curve comparison + "is it muP-flat?" judgment are
+    MU2/MU-HUMAN, not MU1.
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook perturbs the
+    v2 encoded sequence — the bitwise parity check must FAIL while the structural
+    (MuReadout / mup-Dense) and export-fold checks stay green.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    from mup import MuReadout, set_base_shapes  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("MU1 muP forward-init BITWISE parity vs v1 Transformer(mup=True) + MuReadout export-fold")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    norm_dict = _mu1_norm_dict(outdir)
+    modules = _mu1_modules(norm_dict)
+
+    # -- (a) structural muP wiring -------------------------------------------
+    checks["embed_dense_is_mup"] = modules["track_embed"].mup is True
+    checks["encoder_is_mup"] = modules["encoder"].mup is True
+    out_proj = modules["encoder"].encoder.out_proj
+    checks["out_proj_is_mu_readout"] = isinstance(out_proj, MuReadout)
+    checks["out_proj_weight_zeroed_at_init"] = bool((out_proj.weight == 0).all())
+    checks["out_proj_bias_zeroed_at_init"] = out_proj.bias is not None and bool(
+        (out_proj.bias == 0).all()
+    )
+
+    # -- compile + bind + materialise the GN2_muP plan -----------------------
+    fit_plan = compile_plan(modules, Mode.FIT, sources=_mu1_sources(), sinks=["loss.total"])
+    test_plan = compile_plan(
+        modules,
+        Mode.TEST,
+        sources=_mu1_sources(),
+        sinks=["preds.jets.jets_classification"],
+    )
+    bind_all(modules, resolve_bind_schema([fit_plan, test_plan]))
+    materialise_all(modules)
+    checks["embed_net_built_with_mup"] = modules["track_embed"].net.mup is True
+
+    # give the encoder + embed NON-ZERO weights so the parity test is meaningful
+    # (a zeroed readout would make every forward all-zero post-norm) — the muP
+    # INIT distribution is asserted structurally above; the forward parity tests
+    # that the v2 graph routes the SAME weights through the SAME math as v1.
+    gen = torch.Generator().manual_seed(23)
+    with torch.no_grad():
+        for p in modules["encoder"].encoder.parameters():
+            p.copy_(torch.randn(p.shape, generator=gen) * 0.1)
+        for p in modules["track_embed"].net.parameters():
+            p.copy_(torch.randn(p.shape, generator=gen) * 0.1)
+
+    # -- (b) forward-init BITWISE parity vs the INDEPENDENT v1 encoder --------
+    jets = torch.randn(_MU1_B, len(_MU1_JET_VARIABLES), generator=gen)
+    tracks = torch.randn(_MU1_B, _MU1_T, len(_MU1_TRACK_VARIABLES), generator=gen)
+    track_mask = torch.zeros(_MU1_B, _MU1_T, dtype=torch.bool)
+    labels = torch.randint(0, len(_MU1_CLASS_NAMES), (_MU1_B,), generator=gen)
+    b = Bundle()
+    b.set("inputs.jets", jets)
+    b.set("inputs.tracks", tracks)
+    b.set("masks.tracks", track_mask)
+    b.set("labels.jets.flavour_label", labels)
+    out = Executor(fit_plan).run(b, debug=True)
+    v2_encoded = out.get("encoded.seq")
+    if corruption is not None:
+        v2_encoded = corruption(v2_encoded)
+    # the v1 reference runs on the SAME seq.x/seq.mask the v2 graph produced
+    seq_x = out.get("seq.x")
+    seq_mask = out.get("seq.mask")
+    v1_encoded = _mu1_v1_encoder_reference(modules["encoder"], seq_x, seq_mask)
+    checks["encoder_forward_bitwise_vs_v1_mup"] = v2_encoded.shape == v1_encoded.shape and (
+        torch.equal(v2_encoded, v1_encoded)
+    )
+
+    # -- (c) MuReadout export-fold equals the MuReadout forward ---------------
+    # snapshot the eager (MuReadout) encoded.seq, then fold via the export
+    # protocol and confirm the post-fold forward is numerically equal. The fold
+    # is applied to the LIVE encoder module the executor runs (set_export_mode is
+    # what the OnnxAdapter invokes at trace time).
+    fresh = Bundle()
+    fresh.set("inputs.jets", jets)
+    fresh.set("inputs.tracks", tracks)
+    fresh.set("masks.tracks", track_mask)
+    pre_fold = Executor(test_plan).run(fresh).get("encoded.seq").clone()
+    modules["encoder"].set_export_mode()
+    checks["out_proj_folded_to_plain_linear"] = (
+        type(modules["encoder"].encoder.out_proj) is torch.nn.Linear
+    )
+    fresh2 = Bundle()
+    fresh2.set("inputs.jets", jets)
+    fresh2.set("inputs.tracks", tracks)
+    fresh2.set("masks.tracks", track_mask)
+    post_fold = Executor(test_plan).run(fresh2).get("encoded.seq")
+    fold_max_abs = float((pre_fold - post_fold).abs().max())
+    # at the architectural default width_mult==1.0 the fold is the identity
+    # multiplier, so the equality is BITWISE; the <=1e-6 path is exercised by the
+    # non-unit probe below.
+    checks["export_fold_equals_mu_readout_bitwise_at_unit_mult"] = torch.equal(pre_fold, post_fold)
+    checks["export_fold_within_tolerance"] = fold_max_abs <= 1e-6
+    # idempotent: a second set_export_mode leaves the plain Linear in place
+    modules["encoder"].set_export_mode()
+    checks["export_fold_is_idempotent"] = (
+        type(modules["encoder"].encoder.out_proj) is torch.nn.Linear
+    )
+
+    # -- (d) NON-VACUOUS fold check: a non-unit width_mult still folds <=1e-6 -
+    # the unit-mult fold is bitwise but exercises only output_mult/width_mult==1.
+    # Build a probe MuReadout with a real (>1) width_mult by setting it against a
+    # NARROWER base, give it non-zero weights, and confirm the same fold formula
+    # (W_folded=(output_mult/width_mult)*W, bias unchanged) matches the MuReadout
+    # forward within 1e-6 — proving the fold is correct for the multipliers the
+    # routing stage will introduce, not just the trivial identity.
+    probe = MuReadout(_MU1_OUT_DIM, len(_MU1_CLASS_NAMES), output_mult=2.5)
+    base = MuReadout(_MU1_OUT_DIM // 2, len(_MU1_CLASS_NAMES))
+    set_base_shapes(probe, base, rescale_params=False)  # width_mult = 2.0
+    with torch.no_grad():
+        probe.weight.copy_(torch.randn(probe.weight.shape, generator=gen))
+        probe.bias.copy_(torch.randn(probe.bias.shape, generator=gen))
+    probe.eval()
+    mult = float(probe.output_mult) / float(probe.width_mult())
+    folded = torch.nn.Linear(probe.in_features, probe.out_features)
+    with torch.no_grad():
+        folded.weight.copy_(probe.weight * mult)
+        folded.bias.copy_(probe.bias)
+    folded.eval()
+    x_probe = torch.randn(_MU1_B, _MU1_OUT_DIM, generator=gen)
+    with torch.no_grad():
+        probe_ref = probe(x_probe)
+        probe_folded = folded(x_probe)
+    probe_max_abs = float((probe_ref - probe_folded).abs().max())
+    checks["nonunit_width_mult_fold_within_tolerance"] = (
+        not math.isclose(probe.width_mult(), 1.0) and probe_max_abs <= 1e-6
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the muP ARCHITECTURAL port (M6 sub-wave B; design §3.4 KEEP-architecture/BREAK-routing): "
+        "the mup: true init_arg on StreamEmbed (-> Dense(mup=True)) and TransformerEncoder "
+        "(-> Transformer(mup=True)) reproduces v1's encoder-flag muP path. The encoder out-proj is "
+        "a mup.MuReadout with weight+bias zeroed at init (transformer.py:625-628) and the embed "
+        "Dense carries mup=True; the v2 encoder forward is BITWISE identical to an INDEPENDENT v1 "
+        "Transformer(mup=True) (weight-loaded, run through v1 forward) on deterministic init "
+        "values with NO training; and the MuReadout->plain-Linear export fold (set_export_mode, "
+        "W_folded="
+        "(output_mult/width_mult)*W, bias unchanged) is numerically equal to the MuReadout forward "
+        "(bitwise at width_mult==1.0, <=1e-6 for a non-unit probe). The coord-curve comparison + "
+        "muP-flat plot judgment are MU2/MU-HUMAN, not MU1."
+    )
+    report = _base_report(
+        "mu1_mup_forward_init_parity",
+        passed,
+        criterion,
+        {
+            "track_variables": list(_MU1_TRACK_VARIABLES),
+            "jet_variables": list(_MU1_JET_VARIABLES),
+            "class_names": list(_MU1_CLASS_NAMES),
+            "embed_dim": _MU1_EMBED_DIM,
+            "out_dim": _MU1_OUT_DIM,
+            "num_heads": _MU1_NUM_HEADS,
+            "num_layers": _MU1_NUM_LAYERS,
+            "batch": _MU1_B,
+            "n_tracks": _MU1_T,
+            "norm_dict": str(norm_dict),
+            "fold_max_abs_diff": fold_max_abs,
+            "nonunit_probe_width_mult": float(probe.width_mult()),
+            "nonunit_probe_max_abs_diff": probe_max_abs,
+            "approach": "compose v1 Transformer(mup=True)/Dense(mup=True); export-fold MuReadout",
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "INDEPENDENT v1 reference (instance independence, NOT a math re-implementation): a "
+        "separately-instantiated v1 Transformer(mup=True) — a distinct object from the v2 "
+        "encoder's composed instance, weight-loaded from it — run through v1's forward. The "
+        "bitwise torch.equal tests that the v2 GRAPH PATH (compile -> two-phase bind -> executor) "
+        "routes tensors through the SAME muP-parametrised v1 math; it does not re-derive it."
+    )
+    report["faithfulness_note"] = (
+        "v1's Transformer(mup=True) wires ONLY the MuReadout out-proj swap from the encoder flag — "
+        "it does NOT pass mup down to its EncoderLayers/Attention (transformer.py:604-614), so the "
+        "1/d softmax scale + Q-zero attention init (attention.py:275,319-326) are NOT active in "
+        "v1's encoder-mup path; they live in Attention(mup=True), constructed independently. The "
+        "v2 TransformerEncoder(mup=True) composes Transformer(mup=True) and is therefore "
+        "byte-faithful to v1's ACTUAL encoder-mup behaviour. The embed's Dense(mup=True) DOES "
+        "apply the muP linear init (dense.py:96-102), reproducing v1 InitNet's intended muP init "
+        "(v1 InitNet's own re-reset call, initnet.py:69, RAISES AttributeError: Dense exposes "
+        "only _reset_parameters and nn.Module has no reset_parameters, so v1's InitNet(mup=True) "
+        "path is broken at construction; v2 relies on Dense(mup=True)'s own __init__ reset "
+        "(dense.py:88-89,96-102), which is the intended muP distribution)."
+    )
+    report["export_fold"] = (
+        "MuReadout.forward applies output_mult*x/width_mult before the linear; the export fold "
+        "bakes that multiplier into the weight (W_folded=(output_mult/width_mult)*W) and leaves "
+        "the bias unchanged (the multiplier scales only the x@Wt term), then swaps the out-proj "
+        "for a plain nn.Linear. Inference math is then identity to a standard Linear, so the "
+        "traced ONNX graph is a plain transformer (no unsupported MuReadout multiplier op). "
+        "Deterministic, idempotent."
+    )
+    _print_checks(checks)
+    _print_verdict("mu1", passed, criterion, _emit_report(report, outdir, "mu1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# MU2 — muP routing validator (design-conformance, sub-wave B)
+# ---------------------------------------------------------------------------
+
+_MU2_LRS = {"initial": 1e-4, "max": 5e-4, "end": 1e-5, "pct_start": 0.1}
+
+
+def _mu2_mup_override(outdir: Path, shape_path: Path) -> Path:
+    """Write the GN2_muP-routing override config (stacked on gn2v2-dummy.yaml).
+
+    The minimal v2-native muP ROUTING surface (NOT the GN2_muP corpus config —
+    that is the next stage): adds ``mup: true`` to the dummy config's
+    track_embed/encoder and the ``model.init_args.mup: {shape_path, apply_to}``
+    routing block. Stacked on the shipped ``gn2v2-dummy.yaml`` so MU2 exercises
+    the REAL ``salt2 mup-shapes`` / ``salt2 graph validate`` tooling on a true
+    config file, not just in-process module dicts.
+
+    Returns
+    -------
+    Path
+        The override YAML path.
+    """
+    import yaml  # noqa: PLC0415 - keep the module import surface lean
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    override = {
+        "name": "GN2muP_mu2_fixture",
+        "model": {
+            "init_args": {
+                "optimizer": "AdamW",
+                "mup": {
+                    "shape_path": str(shape_path),
+                    "apply_to": ["track_embed", "encoder"],
+                },
+                "modules": {
+                    "track_embed": {"init_args": {"mup": True}},
+                    "encoder": {"init_args": {"mup": True}},
+                },
+            }
+        },
+    }
+    path = outdir / "mu2_mup_override.yaml"
+    path.write_text(yaml.safe_dump(override, sort_keys=False))
+    return path
+
+
+def run_mu2(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """MU2: muP ROUTING validator (design-conformance, sub-wave B; design §3.4 line 695).
+
+    The muP ROUTING half (design §3.4 KEEP-architecture/BREAK-routing): the v1
+    regex routing (``apply_to`` x ``parameter_name`` zip into the model init_args,
+    configuration_muP.py:98-115) is replaced by an EXPLICIT module-name list
+    ``SaltModule.mup.apply_to``. MU2 asserts the design-conformance contract:
+
+    - **validator rule 1 (ERROR)** — ``apply_to`` naming a module that lacks a
+      ``mup`` init_arg (`module_supports_mup` False, e.g. the pool) raises
+      `ConfigError`; an ``apply_to`` naming a non-existent module raises too;
+    - **validator rule 2 (WARN)** — a module with ``mup: true`` left OUT of
+      ``apply_to`` emits a warning (its base shapes / MuAdamW grouping silently
+      diverge);
+    - **MuAdamW swap** — ``SaltModule._get_optimizer_class`` returns
+      ``mup.optim.MuAdamW`` whenever a ``mup`` block is configured (regardless of
+      the ``optimizer`` name), and plain ``AdamW`` when it is not;
+    - **entry-point casing fix** — the v1 ``setup_mup`` console entry pointed at
+      ``salt.utils.mup_utils.main_mup`` (lowercase) but the module is
+      ``muP_utils/main_muP.py`` (capital P) — a broken entry point
+      (pyproject.toml:95). v2 resolves ``setup_mup`` to ``salt.core.mup:setup_mup``
+      (importable + callable);
+    - **tooling end-to-end (real config + real CLI)** — ``salt2 mup-shapes`` on
+      the GN2_muP-routing fixture writes an infshape file; the file applied at
+      bind makes the `MuReadout.width_mult()` resolve to the real base ratio
+      (NOT the architectural default 1.0); ``salt2 graph validate`` prints the
+      muP-routing OK line.
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook mutates the
+    routing config (e.g. injects a non-mup module into ``apply_to``) — the
+    validator must then ERROR, flipping the gate.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    from torch.optim import AdamW  # noqa: PLC0415
+
+    from salt.core.mup import setup_mup as _setup_mup_entry  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("MU2 muP ROUTING validator (apply_to name-lists, MuAdamW swap, setup_mup casing)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    norm_dict = _mu1_norm_dict(outdir)
+    mup_block = {"apply_to": ["track_embed", "encoder"]}
+    if corruption is not None:
+        mup_block = corruption(mup_block)
+
+    # -- (a) validator rules over the in-process module dict ------------------
+    valid_modules = _mu1_modules(norm_dict)
+    try:
+        normalised = validate_mup_routing(mup_block, valid_modules)
+        checks["valid_apply_to_accepted"] = normalised is not None and normalised["apply_to"] == [
+            "track_embed",
+            "encoder",
+        ]
+    except ConfigError:
+        checks["valid_apply_to_accepted"] = False
+
+    # rule 1: apply_to a module WITHOUT a mup init_arg (pool) -> ConfigError
+    checks["apply_to_non_mup_module_errors"] = _raises(
+        ConfigError, validate_mup_routing, {"apply_to": ["pool"]}, _mu1_modules(norm_dict)
+    )
+    # rule 1: apply_to a NON-EXISTENT module -> ConfigError
+    checks["apply_to_unknown_module_errors"] = _raises(
+        ConfigError, validate_mup_routing, {"apply_to": ["does_not_exist"]}, _mu1_modules(norm_dict)
+    )
+    # rule 2: a mup:true module OUTSIDE apply_to -> WARNING
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        validate_mup_routing({"apply_to": ["track_embed"]}, _mu1_modules(norm_dict))
+    checks["mup_on_module_outside_apply_to_warns"] = any("NOT in" in str(w.message) for w in caught)
+    # unknown key / empty apply_to -> ConfigError
+    checks["unknown_mup_key_errors"] = _raises(
+        ConfigError, validate_mup_routing, {"apply_to": ["encoder"], "bogus": 1}, valid_modules
+    )
+    checks["empty_apply_to_errors"] = _raises(
+        ConfigError, validate_mup_routing, {"apply_to": []}, valid_modules
+    )
+
+    # -- (b) MuAdamW swap when mup configured, AdamW when not -----------------
+    from mup.optim import MuAdamW  # noqa: PLC0415
+
+    mup_model = SaltModule(
+        modules=_mu1_modules(norm_dict), lrs=_MU2_LRS, mup={"apply_to": ["track_embed", "encoder"]}
+    )
+    checks["muadamw_selected_when_mup_configured"] = (
+        mup_model._get_optimizer_class() is MuAdamW  # noqa: SLF001
+    )
+    plain_model = SaltModule(modules=_mu1_modules(norm_dict), lrs=_MU2_LRS)
+    checks["adamw_selected_when_no_mup"] = (
+        plain_model._get_optimizer_class() is AdamW  # noqa: SLF001
+        and plain_model.mup_cfg is None
+    )
+
+    # -- (c) setup_mup console entry resolves (casing fix) -------------------
+    checks["setup_mup_entry_point_callable"] = callable(_setup_mup_entry)
+
+    # -- (d) end-to-end tooling on a REAL GN2_muP-routing config + CLI -------
+    shape_path = outdir / "mu2_shapes.bsh"
+    dummy_cfg = str(CONFIG_DIR / "gn2v2-dummy.yaml")
+    override = _mu2_mup_override(outdir, shape_path)
+    set_norm = f"model.modules.norm.init_args.norm_dict={norm_dict}"
+    shapes_rc = salt2_main([
+        "mup-shapes",
+        "-c",
+        dummy_cfg,
+        "-c",
+        str(override),
+        "--set",
+        set_norm,
+        "--base-width",
+        "8",
+        "--delta-width",
+        "16",
+    ])
+    checks["salt2_mup_shapes_runs"] = shapes_rc == 0 and shape_path.is_file()
+
+    # the generated shape file, applied at bind, makes width_mult resolve to the
+    # real base ratio (16 model / 8 base = 2.0) — proving the routing-stage shape
+    # application (SaltModule._apply_mup_shapes), not the architectural default 1.0
+    width_mult = _mu2_bound_width_mult(dummy_cfg, str(override), set_norm)
+    checks["shape_file_applied_at_bind_width_mult_2"] = width_mult is not None and math.isclose(
+        width_mult, 2.0
+    )
+
+    validate_rc = salt2_main([
+        "graph",
+        "validate",
+        "--mode",
+        "fit",
+        "-c",
+        dummy_cfg,
+        "-c",
+        str(override),
+        "--set",
+        set_norm,
+    ])
+    checks["salt2_graph_validate_mup_routing_ok"] = validate_rc == 0
+
+    passed = all(checks.values())
+    criterion = (
+        "the muP ROUTING half (M6 sub-wave B; design §3.4 KEEP-architecture/BREAK-routing line "
+        "695): apply_to is an EXPLICIT module-name list (NOT v1's regex zip, "
+        "configuration_muP.py:98-115). The validator ERRORS when apply_to names a module without a "
+        "mup init_arg or a non-existent module, and WARNS when a mup:true module is left out of "
+        "apply_to; SaltModule swaps the optimizer to mup.optim.MuAdamW when mup is configured "
+        "(AdamW otherwise); the setup_mup console entry resolves (casing fix from the broken v1 "
+        "salt.utils.mup_utils.main_mup -> salt.core.mup:setup_mup); and salt2 mup-shapes + "
+        "salt2 graph validate run end-to-end on a real GN2_muP-routing config, with the generated "
+        "shape file applied at bind so MuReadout.width_mult resolves to the real base ratio."
+    )
+    report = _base_report(
+        "mu2_mup_routing_validator",
+        passed,
+        criterion,
+        {
+            "apply_to": ["track_embed", "encoder"],
+            "base_width": 8,
+            "delta_width": 16,
+            "resolved_width_mult": width_mult,
+            "norm_dict": str(norm_dict),
+            "shape_path": str(shape_path),
+            "override_config": str(override),
+            "approach": (
+                "validate_mup_routing over module dicts + SaltModule MuAdamW branch + setup_mup "
+                "entry + salt2 mup-shapes/graph validate on a real config"
+            ),
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 routing engine update_config (configuration_muP.py:98) zips apply_to x parameter_name "
+        "x base|delta and asserts each apply_to key exists in init_args (:111-113); v2 replaces "
+        "the regex/zip with an explicit instance-name list + a typed validator. v1 "
+        "store_shapes_mup (:251) + make_base_shapes (:257) + generate_base_delta_config (:119) -> "
+        "salt2 mup-shapes; "
+        "v1 coord-check substring match (:448,460) -> salt2 mup-coord-check net.<name>.* traversal."
+    )
+    report["entry_point_fix"] = (
+        "v1 pyproject.toml:95 setup_mup -> salt.utils.mup_utils.main_mup:main (lowercase mup_utils/"
+        "main_mup) but the real module is salt/utils/muP_utils/main_muP.py (capital P) — a broken "
+        "entry point. v2 normalises the casing: setup_mup -> salt.core.mup:setup_mup, a thin alias "
+        "for salt2 mup-shapes."
+    )
+    _print_checks(checks)
+    _print_verdict("mu2", passed, criterion, _emit_report(report, outdir, "mu2"))
+    return (0 if passed else 1), report
+
+
+def _mu2_bound_width_mult(dummy_cfg: str, override: str, set_norm: str) -> float | None:
+    """Bind the GN2_muP-routing config and read the encoder MuReadout ``width_mult``.
+
+    Exercises `SaltModule._apply_mup_shapes` end-to-end: parse the real config,
+    compile + bind the combined graph (which applies the shape file), and read
+    the live `MuReadout.width_mult()`. Returns None if the out-proj is not a
+    `MuReadout` (a wiring regression).
+
+    Returns
+    -------
+    float | None
+        The resolved width multiplier (2.0 for a 16-width model on an 8-width
+        base), or None on a wiring failure.
+    """
+    from mup import MuReadout  # noqa: PLC0415
+
+    from salt.core.mup import _combined_graph, _parse_cli  # noqa: PLC0415
+
+    cli = _parse_cli([dummy_cfg, override], [set_norm])
+    model = cli.model
+    combined = _combined_graph(cli)
+    plan = compile_plan(combined, Mode.FIT, sources={}, sinks=["loss.total"])
+    model._bind(resolve_bind_schema([plan]))  # noqa: SLF001
+    out_proj = model.net["encoder"].encoder.out_proj
+    if not isinstance(out_proj, MuReadout):
+        return None
+    return float(out_proj.width_mult())
+
+
+# ---------------------------------------------------------------------------
 # M6-CONV — the M7-slice acceptance for the M6-authored configs (sub-wave A
 # bootstraps it; later M6 waves EXTEND _CONV_M6_CONFIGS)
 # ---------------------------------------------------------------------------
 
 # The AUTHORITATIVE M6-CONV config list (plan 12 M6-CONV row: "embed the
 # authoritative _CONV_M6_CONFIGS list verbatim"). Sub-wave A (Labeller) landed
-# the FIRST two; sub-wave D (vector-stream) adds DL1 (now 3); later waves append
-# GN2_muP (B) and GN2XE (C) until all 5 config-gating needs-M6 configs are here.
+# the FIRST two; sub-wave D (vector-stream) added DL1; sub-wave B (muP) adds
+# GN2_muP (now 4); sub-wave C (edges) will append GN2XE until all 5
+# config-gating needs-M6 configs are here.
 #
 # `norm_global` is False for all (none carries a SECOND `norm_global` Normaliser
 # — that is the VectorConcat/global-stream pattern, absent here). `onnx ==
-# "validate"` for all three: GN3X, GN2X_qcdsplit AND DL1 are STANDARD traces — no
-# muP MuReadout fold (B) or edge dynamic-T register pad (C) export hazard — so
-# onnx stays in the gate (plan 12 M6-CONV per-config export contracts: "GN3X/
-# GN2X_qcdsplit/DL1 are standard traces"; DL1's rank-2 [B, F] embed is a plain
-# nn.Linear stack with B the sole dynamic axis, sub-wave D / VS1).
+# "validate"` for all four: GN3X, GN2X_qcdsplit AND DL1 are STANDARD traces. For
+# GN2_muP, this CONV `onnx` leg is a STATIC plan-compile (salt2 graph validate
+# --mode onnx does not call torch.onnx.export/set_export_mode); the MuReadout->
+# plain-nn.Linear fold that makes the REAL export traceable (set_export_mode; plan
+# 12 sub-wave B export contract) is proven by MU1's export-fold check, not by this
+# plan-compile. With the fold proven by MU1, onnx stays in the gate for GN2_muP
+# too (plan 12 M6-CONV per-config export contracts: "GN3X/GN2X_qcdsplit/DL1 are
+# standard traces; GN2_muP exports with the MuReadout out-proj folded to plain
+# Linear"). The only export hazard deferred to a later
+# wave is GN2XE's edge dynamic-T register pad (C). DL1's rank-2 [B, F] embed is a
+# plain nn.Linear stack with B the sole dynamic axis (sub-wave D / VS1). A muP
+# config carries a `mup: True` marker: it needs its base/delta infshape file
+# generated data-free before validation (`_conv_mup_shape_path`).
 _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
     {
         "name": "GN3X",
@@ -980,6 +1721,23 @@ _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
             "head, NO encoder/pool (the M6-6 deliverable, gate VS1); 3-class CE; LossSum"
         ),
     },
+    {
+        "name": "GN2_muP",
+        "cfg": ("GN2_muP.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "mup",
+        "mup": True,  # needs a generated shape file (see _conv_mup_shape_path / run_conv)
+        "note": (
+            "GN2 with muP: mup: true on track_embed (StreamEmbed) + encoder (TransformerEncoder) "
+            "+ model.init_args.mup {shape_path, apply_to} routing (the M6-B deliverable, gates "
+            "MU1/MU2). The encoder out-proj is a mup.MuReadout FOLDED to a plain nn.Linear at "
+            "trace time (set_export_mode) at REAL export; this CONV onnx leg is a static plan-"
+            "compile (no torch.onnx.export), so the fold is proven by MU1's export-fold check, not "
+            "here — with that proof, --mode onnx STAYS in the gate; shape file generated data-free "
+            "by salt2 mup-shapes and supplied via --set model.init_args.mup.shape_path"
+        ),
+    },
 )
 
 
@@ -1001,14 +1759,21 @@ def _conv_norm_dict(outdir: Path) -> Path:
     return nd
 
 
-def _conv_set_args(entry: dict[str, Any], norm_dict: Path) -> list[str]:
-    """Build the data-free ``--set`` overrides for one config (norm + norm_global).
+def _conv_set_args(
+    entry: dict[str, Any], norm_dict: Path, shape_path: Path | None = None
+) -> list[str]:
+    """Build the data-free ``--set`` overrides for one config (norm + norm_global + mup shapes).
 
     Every shipped v2 config materialises its `Normaliser` from a norm dict at
     setup; static validation supplies it data-free via the documented
     ``--set model.modules.norm.init_args.norm_dict=<path>`` (each config header,
     gates_m5.py:4439). A config with a SECOND `norm_global` Normaliser needs its
-    own override (neither M6-A config has one).
+    own override (none of the M6 configs has one). A muP config additionally
+    needs its base/delta infshape file: the committed config carries a
+    placeholder ``shape_path`` (NO machine path, design §5), so the gate
+    generates the shapes data-free and overrides
+    ``model.init_args.mup.shape_path`` (`SaltModule._apply_mup_shapes` raises if
+    the file is missing — plan 12 sub-wave B).
 
     Returns
     -------
@@ -1018,7 +1783,52 @@ def _conv_set_args(entry: dict[str, Any], norm_dict: Path) -> list[str]:
     args = ["--set", f"model.modules.norm.init_args.norm_dict={norm_dict}"]
     if entry["norm_global"]:
         args += ["--set", f"model.modules.norm_global.init_args.norm_dict={norm_dict}"]
+    if entry.get("mup") and shape_path is not None:
+        args += ["--set", f"model.init_args.mup.shape_path={shape_path}"]
     return args
+
+
+def _conv_mup_shape_path(entry: dict[str, Any], norm_dict: Path, outdir: Path) -> Path:
+    """Generate a muP config's base/delta infshapes data-free; return the file path.
+
+    Runs the REAL ``salt2 mup-shapes`` command (`salt2_main`) on the muP config
+    with the data-free norm dict, writing the infshape file into ``outdir``. This
+    mirrors MU2's end-to-end tooling exercise (run_mu2: salt2 mup-shapes on a
+    real config) and the v1 ``store_shapes_mup`` step — every v1 muP run
+    generated shapes before training, and v1's pickled shapes are legacy-path
+    only (plan 12 sub-wave B: "REGENERATED under v2"). The generated file is what
+    ``SaltModule.mup.shape_path`` consumes at bind so `MuReadout.width_mult()` /
+    `MuAdamW` resolve against the real base widths.
+
+    Returns
+    -------
+    Path
+        The written infshape file (``<outdir>/<name>_shape_mup.bsh``).
+
+    Raises
+    ------
+    RuntimeError
+        When ``salt2 mup-shapes`` fails (rc != 0) or writes no file.
+    """
+    shape_path = outdir / f"{entry['name']}_shape_mup.bsh"
+    cargs: list[str] = []
+    for cfg_name in entry["cfg"]:
+        cargs += ["-c", str(CONFIG_DIR / cfg_name)]
+    rc = salt2_main([
+        "mup-shapes",
+        *cargs,
+        "--save-path",
+        str(shape_path),
+        "--set",
+        f"model.modules.norm.init_args.norm_dict={norm_dict}",
+    ])
+    if rc != 0 or not shape_path.is_file():
+        raise RuntimeError(
+            f"salt2 mup-shapes failed for {entry['name']} (rc={rc}, file={shape_path}) — the "
+            "muP shape generation is a prerequisite for the M6-CONV validation of a muP config "
+            "(plan 12 sub-wave B)"
+        )
+    return shape_path
 
 
 def _conv_modes(entry: dict[str, Any]) -> tuple[tuple[str, str], ...]:
@@ -1048,7 +1858,8 @@ def run_conv(
     """M6-CONV: the M7-slice acceptance for the M6-authored v2-native configs.
 
     For EVERY M6 config landed so far (``_CONV_M6_CONFIGS`` — sub-wave A: GN3X,
-    GN2X_qcdsplit; sub-wave D: DL1; later waves EXTEND the list), this drives the canonical static
+    GN2X_qcdsplit; sub-wave D: DL1; sub-wave B: GN2_muP; later waves EXTEND the
+    list), this drives the canonical static
     validator — the REAL ``salt2 graph validate`` subcommand (``salt2_main``, the
     SAME command path d2cfg / M5-CONV exercise) — in fit + test (+ onnx where the
     config is export-representable) and asserts rc == 0 for every applicable mode.
@@ -1118,7 +1929,6 @@ def run_conv(
         cargs: list[str] = []
         for cfg_name in entry["cfg"]:
             cargs += ["-c", str(CONFIG_DIR / cfg_name)]
-        set_args = _conv_set_args(entry, norm_dict)
         row: dict[str, Any] = {
             "name": entry["name"],
             "family": entry["family"],
@@ -1132,6 +1942,16 @@ def run_conv(
         # a missing config file cannot be validated — leave the mode rows False
         # (the file-present check already fails the gate) and skip the calls
         files_present = all((CONFIG_DIR / c).is_file() for c in entry["cfg"])
+        # a muP config needs its base/delta infshapes generated data-free first
+        # (the committed shape_path is a placeholder; SaltModule._apply_mup_shapes
+        # raises if the file is missing — plan 12 sub-wave B). The generation step
+        # is also a per-config gate: if mup-shapes fails the config cannot validate.
+        shape_path: Path | None = None
+        if files_present and entry.get("mup"):
+            shape_path = _conv_mup_shape_path(entry, norm_dict, outdir)
+            row["shape_path"] = str(shape_path)
+            checks[f"{entry['name']}:mup_shapes_generated"] = shape_path.is_file()
+        set_args = _conv_set_args(entry, norm_dict, shape_path)
         if files_present:
             for cli_mode, report_key in _conv_modes(entry):
                 rc = salt2_main(["graph", "validate", "--mode", cli_mode, *cargs, *set_args])
@@ -1182,12 +2002,19 @@ def run_conv(
         "M6-CONV is the consolidated convert+validate+plan-compile acceptance for the M6-authored "
         "v2-native configs (plan 12 M6-CONV row): static validation ONLY (salt2 graph validate "
         "fit/test/onnx). It makes NO forward-parity claim — the Labeller label-derivation parity "
-        "is owned by LB1, the vector-stream forward parity by VS1. Sub-wave A (Labeller) landed "
-        "GN3X + GN2X_qcdsplit; sub-wave D (vector-stream) adds DL1 (now 3); later M6 waves EXTEND "
-        "_CONV_M6_CONFIGS with GN2_muP (B) and GN2XE (C). All three current configs are standard "
-        "traces (no muP MuReadout fold or edge dynamic-T register-pad export hazard; DL1's rank-2 "
-        "[B, F] embed is a plain nn.Linear stack with B the sole dynamic axis), so onnx stays in "
-        "the gate for all. The 3 configs move 🔷->✅ in the 39 denominator."
+        "is owned by LB1, the vector-stream forward parity by VS1, the muP forward-init parity + "
+        "MuReadout export-fold by MU1/MU2. Sub-wave A (Labeller) landed GN3X + GN2X_qcdsplit; "
+        "sub-wave D (vector-stream) added DL1; sub-wave B (muP) adds GN2_muP (now 4); sub-wave C "
+        "(edges) will EXTEND _CONV_M6_CONFIGS with GN2XE. GN3X/GN2X_qcdsplit/DL1 are standard "
+        "traces (DL1's rank-2 [B, F] embed is a plain nn.Linear stack with B the sole dynamic "
+        "axis); GN2_muP's --mode onnx here is a STATIC plan-compile + writer-manifest validation "
+        "(cli.py:381-423, the M5-CONV run_conv path) — it does NOT call torch.onnx.export/"
+        "set_export_mode, so the CONV onnx leg proves the onnx PLAN compiles, not the fold. The "
+        "MuReadout->plain-Linear fold that makes the real export traceable is exercised + proven "
+        "by MU1's export-fold check (set_export_mode on the live module), NOT this plan-compile. "
+        "With the fold proven by MU1, onnx stays in the gate for GN2_muP too; the only deferred "
+        "export hazard is GN2XE's edge dynamic-T register pad (C). The 4 configs move 🔷->✅ in "
+        "the 39 denominator."
     )
     report["no_strict_rationale"] = (
         "no --strict: a data-free validation cannot satisfy it. --strict promotes EVERY warning to "
@@ -1225,12 +2052,12 @@ def run_conv(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the gate subcommand parser (LB1, M6-CONV; later M6 waves append theirs).
+    """Build the gate subcommand parser (LB1, VS1, MU1, MU2, M6-CONV; later waves append theirs).
 
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``lb1`` and ``conv`` subcommands.
+        Parser with the ``lb1``, ``vs1``, ``mu1``, ``mu2`` and ``conv`` subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m6", description=__doc__.splitlines()[0]
@@ -1239,6 +2066,8 @@ def _build_parser() -> argparse.ArgumentParser:
     helps = {
         "lb1": "Labeller label-derivation parity vs v1 + named-error guards (sub-wave A)",
         "vs1": "Vector-stream rank-2 [B,F] embed -> head parity vs v1 DL1 + onnx no-T (sub-wave D)",
+        "mu1": "muP forward-init parity vs v1 Transformer(mup=True) + MuReadout export-fold (B)",
+        "mu2": "muP routing validator: apply_to name-lists + MuAdamW swap + setup_mup casing (B)",
         "conv": "M6-CONV: salt2 graph validate (fit/test/onnx) on the M6-authored configs",
     }
     for gate, help_text in helps.items():
@@ -1259,6 +2088,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner = {
         "lb1": run_lb1,
         "vs1": run_vs1,
+        "mu1": run_mu1,
+        "mu2": run_mu2,
         "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)

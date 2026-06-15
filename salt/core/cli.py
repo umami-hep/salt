@@ -75,6 +75,7 @@ import argparse
 import importlib
 import sys
 import warnings
+import warnings as stdlib_warnings  # stable handle; `warnings` is shadowed by a local list
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -159,6 +160,7 @@ class GraphConfig:
     sink_origins: dict[Mode, dict[str, str]] = field(default_factory=dict)
     writers: Any | None = None
     model_modules: dict[str, GraphModule] | None = None
+    mup_cfg: dict[str, Any] | None = None
 
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
@@ -462,6 +464,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         sink_origins=sink_origins,
         writers=writer_cb,
         model_modules=dict(model._graph_modules),  # noqa: SLF001 - same-package adapter
+        mup_cfg=getattr(model, "mup_cfg", None),
     )
 
 
@@ -842,6 +845,28 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
             print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order (§2.6)")
+    if cfg.model_modules is not None:
+        # muP routing validator (design §3.4 line 695): apply_to naming a module
+        # without a mup init_arg ERRORS; a mup:true module outside apply_to WARNS.
+        # The same `validate_mup_routing` SaltModule construction runs, surfaced
+        # here as `salt2 graph validate` findings (warnings promotable under
+        # --strict). The hard errors would already abort the parse above; this is
+        # the first-class CI check + the warning capture.
+        from salt.core.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
+
+        with stdlib_warnings.catch_warnings(record=True) as caught:
+            stdlib_warnings.simplefilter("always")
+            try:
+                normalised = validate_mup_routing(cfg.mup_cfg, cfg.model_modules)
+            except ConfigError as err:
+                errors.append(f"muP routing: {err}")
+                normalised = None
+        warnings.extend(str(w.message) for w in caught)
+        if normalised is not None:
+            print(
+                f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
+                "init_arg, no mup:true module left out (§3.4)"
+            )
     # data-free module preflights (design §2.3): duck-typed `preflight()`
     # checks file-backed materialise sources (e.g. the Normaliser norm dict).
     # WARNING-level here — `validate` must stay runnable on data-less machines
@@ -1544,7 +1569,54 @@ def _build_parser() -> argparse.ArgumentParser:
     dump.add_argument("-o", "--output", required=True, help="output schema.yaml path")
     dump.set_defaults(func=_cmd_schema_dump)
 
+    _add_mup_parsers(sub)
+
     return parser
+
+
+def _add_mup_parsers(sub: Any) -> None:
+    """Add the ``mup-shapes`` / ``mup-coord-check`` subcommands (design §3.4, §9.2).
+
+    Deferred to `salt.core.mup` handlers (heavy mup/pandas imports stay out of
+    the graph-tooling startup path). The casing-fixed ``setup_mup`` console
+    entry forwards to ``mup-shapes`` (pyproject.toml).
+    """
+    from salt.core.mup import cmd_mup_coord_check, cmd_mup_shapes  # noqa: PLC0415
+
+    shapes = sub.add_parser(
+        "mup-shapes",
+        help="generate muP base/delta infshapes for a config (design §3.4, §9.2; the "
+        "setup_mup console entry forwards here)",
+    )
+    _add_config_arg(shapes)
+    shapes.add_argument(
+        "--save-path",
+        default=None,
+        help="output infshape file (defaults to the config's model.init_args.mup.shape_path)",
+    )
+    shapes.add_argument("--base-width", type=int, default=None, help="base (narrow) apply_to width")
+    shapes.add_argument(
+        "--delta-width", type=int, default=None, help="delta (wider) apply_to width"
+    )
+    shapes.set_defaults(func=cmd_mup_shapes)
+
+    coord = sub.add_parser(
+        "mup-coord-check",
+        help="run the muP coordinate-check at several widths; write coord-data CSV + plot "
+        "(design §3.4 690-694)",
+    )
+    _add_config_arg(coord)
+    coord.add_argument(
+        "--widths",
+        nargs="+",
+        required=True,
+        help="apply_to widths to sweep, e.g. --widths 16 32 64 128",
+    )
+    coord.add_argument("-o", "--output", required=True, help="output plot path (.png/.pdf)")
+    coord.add_argument("--nsteps", type=int, default=3, help="training steps per width")
+    coord.add_argument("--nseeds", type=int, default=1, help="random-seed repeats")
+    coord.add_argument("--lr", type=float, default=1e-2, help="coord-check learning rate (large)")
+    coord.set_defaults(func=cmd_mup_coord_check)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

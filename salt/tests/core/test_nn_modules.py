@@ -48,6 +48,7 @@ from salt.core.nn.tasks import (
     VertexingTaskModule,
 )
 from salt.models import Dense as V1Dense
+from salt.models import Transformer as V1Transformer
 from salt.core.schema import GroupSchema, Schema
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
@@ -329,6 +330,65 @@ class TestStreamEmbedVector:
         assert torch.equal(out["embed.jets"], ref(x))
 
 
+class TestStreamEmbedMup:
+    """The ``mup:`` flag on `StreamEmbed` (M6 sub-wave B, plan 12 muP arch port).
+
+    The flag threads into the composed v1 `Dense(mup=True)` at bind, applying the
+    muP weight init (``~N(0, 1/fan_out)`` weights, zeroed biases); the forward is
+    unchanged. The flag must NOT be accepted inside ``dense`` (it is a module-level
+    init_arg, not a Dense width key) — that path is the routing/config surface.
+    """
+
+    def test_default_is_not_mup(self):
+        embed = StreamEmbed(stream="tracks", out_dim=8)
+        assert embed.mup is False
+
+    def test_mup_flag_threads_into_dense_at_bind(self):
+        embed = StreamEmbed(stream="tracks", out_dim=8, mup=True)
+        embed.name = "track_embed"
+        embed.bind(ResolvedSchema(widths={"normed.tracks": 5}))
+        assert embed.mup is True
+        assert embed.net.mup is True
+
+    def test_mup_in_dense_rejected(self):
+        # mup is a module-level init_arg, not a dense width/option key
+        with pytest.raises(ConfigError, match="set mup on the module"):
+            StreamEmbed(stream="tracks", out_dim=8, dense={"mup": True})
+
+    def test_mup_init_matches_independent_v1_dense_mup(self):
+        """The bound mup Dense has the SAME parameter distribution as a v1 Dense(mup=True).
+
+        Both run ``Dense.__init__``'s ``_reset_parameters`` (dense.py:96-102) under
+        the same seed, so the initialised weights are BITWISE identical — the muP
+        init is genuinely active (not the default torch init).
+        """
+        torch.manual_seed(0)
+        embed = StreamEmbed(stream="tracks", out_dim=4, dense={"hidden_layers": [8]}, mup=True)
+        embed.name = "track_embed"
+        embed.bind(ResolvedSchema(widths={"normed.tracks": 5}))
+        torch.manual_seed(0)
+        ref = V1Dense(input_size=5, output_size=4, hidden_layers=[8], mup=True)
+        for (k1, p1), (k2, p2) in zip(
+            embed.net.state_dict().items(), ref.state_dict().items(), strict=True
+        ):
+            assert k1 == k2
+            assert torch.equal(p1, p2), k1
+
+    def test_mup_forward_is_unchanged(self):
+        """muP affects init only — the forward math is the standard Dense forward."""
+        torch.manual_seed(1)
+        embed = StreamEmbed(stream="tracks", out_dim=4, dense={"hidden_layers": [8]}, mup=True)
+        embed.name = "track_embed"
+        embed.bind(ResolvedSchema(widths={"normed.tracks": 5}))
+        ref = V1Dense(input_size=5, output_size=4, hidden_layers=[8], mup=True)
+        ref.load_state_dict(embed.net.state_dict())
+        x = torch.randn(B, T, 5)
+        b = Bundle()
+        b.set("normed.tracks", x)
+        out = embed(b, Mode.FIT)
+        assert torch.equal(out["embed.tracks"], ref(x))
+
+
 class TestConcat:
     def test_registers_rejected_in_m2(self):
         with pytest.raises(ConfigError, match="registers are internal to TransformerEncoder"):
@@ -437,6 +497,137 @@ class TestTransformerEncoder:
         # registers stripped: encoded.seq is the T stream rows only, no +num_registers
         assert out["encoded.seq"].shape == (B, T, 16)
         assert "masks.registers" not in out
+
+
+class TestTransformerEncoderMup:
+    """The ``mup:`` flag on `TransformerEncoder` (M6 sub-wave B, plan 12 muP arch port).
+
+    The flag threads into the composed v1 `Transformer(mup=True)`: the encoder
+    out-proj becomes a ``mup.MuReadout`` (weight+bias zeroed at init), and
+    ``mup.set_base_shapes(enc, enc, rescale_params=False)`` is applied so the
+    MuReadout is forward-runnable (``width_mult == 1`` — the architectural default
+    before the routing stage applies a real shape file). At export the MuReadout is
+    folded to a plain `nn.Linear` (``set_export_mode``).
+    """
+
+    def test_default_is_not_mup(self):
+        enc = TransformerEncoder(dim=16, num_layers=1, out_dim=8, attention={"num_heads": 2})
+        assert enc.mup is False
+        assert type(enc.encoder.out_proj) is nn.Linear
+
+    def test_mup_requires_out_dim(self):
+        with pytest.raises(ConfigError, match="mup requires an out_dim"):
+            TransformerEncoder(dim=16, num_layers=1, attention={"num_heads": 2}, mup=True)
+
+    def test_mup_swaps_out_proj_for_zeroed_mu_readout(self):
+        from mup import MuReadout
+
+        enc = TransformerEncoder(
+            dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
+        )
+        assert enc.mup is True
+        assert isinstance(enc.encoder.out_proj, MuReadout)
+        # v1 zeroes both weight and bias of the readout at init (transformer.py:627-628)
+        assert bool((enc.encoder.out_proj.weight == 0).all())
+        assert bool((enc.encoder.out_proj.bias == 0).all())
+        # set_base_shapes was applied at construction -> width_mult resolves to 1
+        assert enc.encoder.out_proj.width_mult() == 1.0
+
+    def test_mup_forward_runs_standalone(self):
+        # without set_base_shapes the MuReadout forward would assert on infshape;
+        # the construction-time set_base_shapes makes a standalone mup encoder
+        # forward-runnable
+        enc = TransformerEncoder(
+            dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
+        )
+        enc.name = "encoder"
+        b = Bundle()
+        b.set("seq.x", torch.randn(B, T, 16))
+        b.set("seq.mask", torch.zeros(B, T, dtype=torch.bool))
+        out = enc(b, Mode.FIT)
+        assert out["encoded.seq"].shape == (B, T + 1, 8)
+
+    def test_mup_forward_bitwise_vs_independent_v1(self):
+        """The v2 mup encoder forward == an INDEPENDENT v1 Transformer(mup=True).
+
+        A separately built v1 ``Transformer(mup=True)``, weight-loaded from the v2
+        encoder, run through v1 forward must agree BITWISE (same weights, same
+        torch-math math — no reordering). This is the module-level analogue of the
+        MU1 gate's forward-init parity.
+        """
+        torch.manual_seed(2)
+        enc = TransformerEncoder(
+            dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
+        )
+        enc.name = "encoder"
+        # non-zero weights so the comparison is meaningful (zeroed readout -> all 0)
+        with torch.no_grad():
+            for p in enc.encoder.parameters():
+                p.copy_(torch.randn(p.shape) * 0.1)
+        from mup import set_base_shapes
+
+        ref = V1Transformer(
+            num_layers=2,
+            embed_dim=16,
+            out_dim=8,
+            norm="LayerNorm",
+            attn_type="torch-math",
+            do_final_norm=True,
+            num_registers=enc.num_registers,
+            attn_kwargs={"num_heads": 2},
+            dense_kwargs={"activation": "SiLU"},
+            mup=True,
+        )
+        set_base_shapes(ref, ref, rescale_params=False)
+        ref.load_state_dict(enc.encoder.state_dict())
+        ref.eval()
+        enc.encoder.eval()
+        seq_x = torch.randn(B, T, 16)
+        seq_mask = torch.zeros(B, T, dtype=torch.bool)
+        b = Bundle()
+        b.set("seq.x", seq_x)
+        b.set("seq.mask", seq_mask)
+        with torch.no_grad():
+            v2 = enc(b, Mode.FIT)["encoded.seq"]
+            v1, _ = ref({"seq": seq_x}, pad_mask={"seq": seq_mask})
+        assert torch.equal(v2, v1)
+
+    def test_set_export_mode_folds_mu_readout_to_plain_linear(self):
+        """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged.
+
+        At the architectural default (``width_mult == 1``, ``output_mult == 1``) the
+        fold is the identity multiplier, so the pre/post-fold forward is BITWISE
+        identical. The out-proj becomes a plain ``nn.Linear`` (no MuReadout
+        multiplier op left for the tracer). Idempotent.
+        """
+        torch.manual_seed(3)
+        enc = TransformerEncoder(
+            dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
+        )
+        enc.name = "encoder"
+        # non-zero readout weights so the fold is a real comparison
+        with torch.no_grad():
+            enc.encoder.out_proj.weight.copy_(torch.randn(8, 16))
+            enc.encoder.out_proj.bias.copy_(torch.randn(8))
+        b = Bundle()
+        b.set("seq.x", torch.randn(B, T, 16))
+        b.set("seq.mask", torch.zeros(B, T, dtype=torch.bool))
+        pre = enc(b, Mode.ONNX)["encoded.seq"].clone()
+        enc.set_export_mode()
+        assert type(enc.encoder.out_proj) is nn.Linear
+        post = enc(b, Mode.ONNX)["encoded.seq"]
+        assert torch.equal(pre, post)
+        # idempotent: a second call leaves the plain Linear in place
+        enc.set_export_mode()
+        assert type(enc.encoder.out_proj) is nn.Linear
+
+    def test_set_export_mode_no_mup_is_noop_on_out_proj(self):
+        # a non-mup encoder keeps its plain Linear out-proj through set_export_mode
+        enc = TransformerEncoder(dim=16, num_layers=1, out_dim=8, attention={"num_heads": 2})
+        before = enc.encoder.out_proj
+        enc.set_export_mode()
+        assert enc.encoder.out_proj is before
+        assert type(enc.encoder.out_proj) is nn.Linear
 
 
 class TestMaskDecoder:
