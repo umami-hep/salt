@@ -1,0 +1,225 @@
+# GN3X.yaml — boosted GN3X in the v2 schema (M6 sub-wave A, Labeller family).
+#
+# The v2-native MIGRATED fixture for legacy salt/configs/GN3X.yaml (v1 name:
+# GN3XPV01). A two-stream (tracks + flow) boosted GN3 body feeding 3 task heads,
+# combined with the GEOMETRIC-MEAN LossGLS (v1 `loss_mode: GLS`), the `lion`
+# optimiser, and — the M6 deliverable — an ON-THE-FLY 9-class flavour labeller.
+#
+# THE M6 FEATURE — on-the-fly Labeller (plan 12 sub-wave A; FD §6.2 1303-1304):
+# v1 GN3X.yaml:106-109 ships a `labeller_config` (use_labeller:True, 9 classes,
+# require_labels:True) that relabels jets on the fly via the ftag `Labeller`
+# (the GN3X boosted-Higgs classes are NOT a precomputed `flavour_label` column —
+# they are derived from R10TruthLabel_R22v1 + the ghost-hadron counts at read
+# time). In v2 the labeller is NO LONGER heuristically triggered: it is an
+# OPT-IN set of init_args on the `Labels` PROCESSOR (data.modules.labels),
+# mirroring v1 `LabellerConfig` (use_labeller / class_names / require_labels):
+#
+#   - `use_labeller: True`  — turn the labeller on (empty-class guard fires if
+#                             class_names is empty, v1 configs.py:189);
+#   - `class_names: [...]`   — the 9 GN3X boosted classes (the labeller's target
+#                             set; ftag composes Labeller(class_names,
+#                             require_labels), labeller.py:13);
+#   - `require_labels: True` — raise on an unlabelled jet (v1 GN3X behaviour;
+#                             ftag labeller.py:70). The labeller declares its
+#                             cut variables (R10TruthLabel_R22v1, ghost counts)
+#                             as the read fields for `labels.jets.flavour_label`
+#                             (FD §6.1 1280-1282), and derives that int64 label
+#                             post-read / pre-torch via Labeller.get_labels.
+#
+# `labeller_stream`/`labeller_label` default to jets/flavour_label (v1's
+# implicit global_object + 'flavour_label' gate, datasets.py:616-617), so the
+# jets_classification head simply consumes `labels.jets.flavour_label` as
+# usual — the head's own `class_names` (below) MUST match the labeller's 9
+# classes index-for-index (LB1 gates the derivation; the head list IS the v1
+# GN3X.yaml:57-58 order).
+#
+# Other v1 GN3X faithfulness notes:
+#   - jets_classification: explicit per-class CrossEntropyLoss weights (v1
+#     GN3X.yaml:64-66 — the class_dict has no entry for the new boosted
+#     subclasses, so v1 hard-codes the weight list); output width 9.
+#   - track_origin: 8-class ftag track-origin, v1 `use_class_dict:True` ->
+#     `weight_source: null` here (the v2 use_class_dict surface; design §5.1).
+#   - track_vertexing: per-track vertex edges (v1 VertexingTask).
+#   - LossGLS requires every loss-producing task weight == 1.0 (v1 GLS guard,
+#     modelwrapper.py:139-142; v2 LossGLS.check_task_weights). v1 GN3X's heads
+#     never set a `weight:`, so NO head here declares one. The explicit CE
+#     `weight:` LIST on jets_classification is the per-CLASS weight buffer (a
+#     loss kwarg), NOT the per-TASK scalar weight LossGLS gates — the two are
+#     orthogonal (ClassificationTaskModule.weight vs loss.init_args.weight).
+#
+# Shrunk encoder widths (16-dim 2-layer) for fast static validation — widths are
+# config values, irrelevant to the graph wiring this gates; the 3-head boosted
+# architecture + the on-the-fly labeller ARE faithful.
+#
+# NO machine paths are committed (design §5 placeholder policy). A typical
+# invocation FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2
+# script is not installed):
+#
+#   salt2 fit --config salt/core/configs/GN3X.yaml \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml \
+#     --model.modules.track_origin.init_args.weight_source='{"from_class_dict": "'$DATA'/class_dict.yaml"}'
+#
+# Static validation (no data) supplies required init_args data-free:
+#   python -m salt.core.main graph validate -c salt/core/configs/GN3X.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3XPV01
+
+data:
+  batch_size: 2500
+  num_workers: 10
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false, truncate: 100}
+          flow: {vector: false, truncate: 100}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, mass]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              lifetimeSignedD0Significance,
+              lifetimeSignedZ0SinThetaSignificance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+              leptonID,
+            ]
+          flow: [flow_pt, flow_energy, flow_deta, flow_dphi]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args:
+        dtype_policy: int64-for-int
+        # --- THE M6 FEATURE: on-the-fly 9-class flavour labeller -------------
+        # v1 GN3X.yaml:106-109 labeller_config (use_labeller / class_names /
+        # require_labels). labeller_stream/labeller_label default to
+        # jets/flavour_label (v1's implicit global_object gate). The 9 classes
+        # MUST match jets_classification.class_names index-for-index (LB1).
+        use_labeller: True
+        require_labels: True
+        class_names: [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
+    lrs: {initial: 2.0e-8, max: 1.0e-5, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: lion # v1 GN3X GLS lion optimiser
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks, flow]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: &embed_dim 16
+          dense: {hidden_layers: [16], activation: ReLU}
+      flow_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: flow
+          context: [normed.jets]
+          out_dim: *embed_dim # equal embed width is a Concat constraint
+          dense: {hidden_layers: [16], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks, flow]} # v1 init_nets insertion order
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 16
+          num_layers: 2
+          num_registers: 8 # v1 GN3X.yaml:42 — 8 learned register tokens
+          attention: {num_heads: 2, attn_type: torch-math} # v1 flash-varlen: M6
+          dense: {activation: ReLU, gated: true, dropout: 0.1}
+      split:
+        # only tracks has per-token tasks; flow contributes to the encoder
+        # attention but feeds no flow-level head, so do not split it out
+        class_path: salt.core.nn.Split
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      # head 1/3: 9-class boosted flavour — consumes labels.jets.flavour_label
+      # DERIVED by the on-the-fly labeller (data.modules.labels). class_names
+      # match the labeller's 9 classes index-for-index (v1 GN3X.yaml:57-58).
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
+          # v1 GN3X.yaml:64-66 explicit per-CLASS CE weights (class_dict has no
+          # entry for the new boosted subclasses). This is a LOSS kwarg (the
+          # weight buffer), NOT the per-TASK scalar weight LossGLS gates.
+          loss:
+            class_path: torch.nn.CrossEntropyLoss
+            init_args:
+              weight: [8.0, 2.0, 2.0, 4.0, 20.0, 20.0, 10.0, 1.5, 16.0]
+          dense: {hidden_layers: [16], activation: ReLU}
+      # head 2/3: 8-class ftag track-origin (v1 use_class_dict:True ->
+      # weight_source: null override; LossGLS requires weight == 1.0, so NO
+      # per-task weight)
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight_source: null # v1 use_class_dict — override (see header)
+          dense: {hidden_layers: [16], activation: ReLU}
+      # head 3/3: per-track vertex edges (v1 VertexingTask)
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          dense: {hidden_layers: [16], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN3XPV01 # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    - {port: inputs.flow, name: flow_features, sequence: true, dyn_axis: n_flow} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
+  # default TaskWriter declares GN3XPV01_p{htautauhad,...} (split_scalars from
+  # the 9-class boosted head), _TrackOrigin (argmax int8) and _VertexIndex
+  # (vertex_union_find int8). Inspect with `salt2 graph resolve -c <this file>`.
+
+trainer:
+  max_epochs: 25
+  precision: 32-true # bf16-mixed on GPU clusters (M6 follow-up)

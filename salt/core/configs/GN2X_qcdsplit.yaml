@@ -1,0 +1,235 @@
+# GN2X_qcdsplit.yaml — GN2X with QCD-split labels in the v2 schema (M6 sub-wave
+# A, Labeller family).
+#
+# The v2-native MIGRATED fixture for legacy salt/configs/GN2/GN2X_qcdsplit.yaml.
+# A THREE-stream (tracks + flow + truth_hadrons) GN2X body feeding 3 task heads,
+# with the M6 deliverable: an ON-THE-FLY QCD-split flavour labeller with
+# `require_labels: False` (unlabelled jets DROPPED, not raised).
+#
+# THE M6 FEATURE — on-the-fly Labeller, require_labels:False (plan 12 sub-wave A;
+# FD §6.2 1303-1304): v1 GN2X_qcdsplit.yaml:100-103 ships a `labeller_config`
+# (use_labeller:True, 7 classes, require_labels:False) that splits the QCD class
+# into b/c-content subclasses on the fly via the ftag `Labeller`. In v2 the
+# labeller is an OPT-IN set of init_args on the `Labels` PROCESSOR
+# (data.modules.labels), mirroring v1 `LabellerConfig`:
+#
+#   - `use_labeller: True`    — turn the labeller on (empty-class guard fires
+#                               if class_names is empty, v1 configs.py:189);
+#   - `class_names: [...]`     — the 7 QCD-split classes (the labeller's target
+#                               set; ftag Labeller(class_names, require_labels),
+#                               labeller.py:13);
+#   - `require_labels: False`  — DROP unlabelled jets rather than raise (the v1
+#                               GN2X_qcdsplit behaviour; ftag labeller.py:73).
+#                               The derived `labels.jets.flavour_label` array is
+#                               SHORTER than the read batch when some jets match
+#                               no class (LB1 gates exactly this drop semantics).
+#
+# *** ftag-CATALOGUE SUBSTITUTION (environment, documented in gates_m6.py
+#     QCDSPLIT_CLASSES) ***: v1 GN2X_qcdsplit's 7th class is `qcdxx`, which is
+#     ABSENT from this container's ftag Flavours catalogue (atlas-ftag-tools
+#     v0.2.17 ships qcd/qcdbb/qcdnonbb/qcdbx/qcdcx/qcdll but NOT qcdxx — a
+#     private/newer flavour from the original GN2X_qcdsplit author's env).
+#     Constructing Labeller([...,"qcdxx"], ...) raises KeyError at config load,
+#     so the verbatim v1 list would make `salt2 graph validate` fail RC!=0 here.
+#     This fixture therefore uses the SAME 7-class resolvable subset the LB1
+#     gate documents (gates_m6.py:135 QCDSPLIT_CLASSES) — `qcdll` in place of
+#     `qcdxx` — which exercises the IDENTICAL require_labels:False
+#     drop-unlabelled semantics. When the ftag catalogue gains qcdxx, swap the
+#     last class back (here AND in gates_m6.QCDSPLIT_CLASSES) — the graph wiring
+#     is unchanged.
+#
+# `labeller_stream`/`labeller_label` default to jets/flavour_label (v1's
+# implicit global_object gate, datasets.py:616-617), so jets_classification
+# consumes `labels.jets.flavour_label` as usual — the head's `class_names` MUST
+# match the labeller's 7 classes index-for-index.
+#
+# Other v1 GN2X_qcdsplit faithfulness notes:
+#   - truth_hadrons: a THIRD encoder stream with its own init_net (v1
+#     GN2X_qcdsplit.yaml:25-29) -> a v2 StreamEmbed (`truth_hadrons_embed`)
+#     wired into the Normaliser + Concat lists; it feeds the encoder attention
+#     but bears NO task head, so it is NOT split out (an unconsumed
+#     encoded.truth_hadrons would be a dead-output warning, design §4.2).
+#   - jets_classification: 7-class, default unweighted CrossEntropyLoss (v1
+#     GN2X_qcdsplit.yaml:63-64 — no class weights); output width 7.
+#   - track_origin: weight 0.33 (v1 GN2X_qcdsplit.yaml:76); track_vertexing:
+#     weight 0.75 (v1 :89). NO loss_mode:GLS in v1 -> LossSum (the v1 base
+#     default sum-of-weighted-losses) + AdamW, so per-task weights are kept.
+#
+# NO machine paths are committed (design §5 placeholder policy). A typical
+# invocation FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2
+# script is not installed):
+#
+#   salt2 fit --config salt/core/configs/GN2X_qcdsplit.yaml \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml
+#
+# Static validation (no data) supplies required init_args data-free:
+#   python -m salt.core.main graph validate -c salt/core/configs/GN2X_qcdsplit.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN2X_qcdsplit
+
+data:
+  batch_size: 500
+  num_workers: 20
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false, truncate: 100}
+          flow: {vector: false, truncate: 100}
+          truth_hadrons: {vector: false}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+              leptonID,
+            ]
+          flow: [flow_pt, flow_energy, flow_deta, flow_dphi]
+          truth_hadrons: [charge, pt, mass, energy, eta, phi, deta, dphi, dr, Lxy]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args:
+        dtype_policy: int64-for-int
+        # --- THE M6 FEATURE: on-the-fly 7-class QCD-split labeller -----------
+        # v1 GN2X_qcdsplit.yaml:100-103 labeller_config (require_labels:False ->
+        # drop unlabelled). See the ftag-CATALOGUE SUBSTITUTION note above:
+        # qcdll stands in for the catalogue-absent qcdxx. The 7 classes MUST
+        # match jets_classification.class_names index-for-index (LB1).
+        use_labeller: True
+        require_labels: False
+        class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
+    lrs: {initial: 1.0e-7, max: 3.0e-4, end: 5.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW # v1 base default (no GLS/lion override in GN2X_qcdsplit)
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks, flow, truth_hadrons]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: &embed_dim 256
+          dense: {hidden_layers: [256], activation: ReLU}
+      flow_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: flow
+          context: [normed.jets]
+          out_dim: *embed_dim # equal embed width is a Concat constraint
+          dense: {hidden_layers: [256], activation: ReLU}
+      # the third init_net (v1 input_name: truth_hadrons); equal embed width
+      truth_hadrons_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: truth_hadrons
+          context: [normed.jets]
+          out_dim: *embed_dim
+          dense: {hidden_layers: [256], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks, flow, truth_hadrons]} # v1 init_nets order
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 128
+          num_layers: 8
+          num_registers: 8 # v1 GN2X_qcdsplit.yaml:46 — 8 learned register tokens
+          attention: {num_heads: 8, attn_type: torch-math} # v1 flash-varlen: M6
+          dense: {activation: ReLU, gated: true, dropout: 0.1}
+      split:
+        # only tracks has per-token tasks; flow + truth_hadrons feed the encoder
+        # attention but bear no per-token head, so do not split them out
+        class_path: salt.core.nn.Split
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      # head 1/3: 7-class QCD-split flavour — consumes labels.jets.flavour_label
+      # DERIVED on the fly by the require_labels:False labeller (drops
+      # unlabelled jets). class_names match the labeller's 7 classes
+      # index-for-index (v1 GN2X_qcdsplit.yaml:61-62, qcdll for qcdxx — see
+      # header).
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
+          loss: torch.nn.CrossEntropyLoss # v1 default unweighted CE
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      # head 2/3: 8-class ftag track-origin, v1 weight 0.33
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight: 0.33 # v1 GN2X_qcdsplit.yaml:76
+          loss: torch.nn.CrossEntropyLoss
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      # head 3/3: per-track vertex edges, v1 weight 0.75
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          weight: 0.75 # v1 GN2X_qcdsplit.yaml:89
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossSum # v1 default sum-of-weighted-losses
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN2Xqcdsplit # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    - {port: inputs.flow, name: flow_features, sequence: true, dyn_axis: n_flow} # [L, F]
+    - {port: inputs.truth_hadrons, name: truth_hadron_features, sequence: true, dyn_axis: n_truth_hadrons} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
+  # default TaskWriter declares GN2Xqcdsplit_p{hbb,...} (split_scalars from the
+  # 7-class QCD-split head), _TrackOrigin (argmax int8) and _VertexIndex
+  # (vertex_union_find int8). Inspect with `salt2 graph resolve -c <this file>`.
+
+trainer:
+  max_epochs: 20
+  precision: 32-true # bf16 on GPU clusters (M6 follow-up)

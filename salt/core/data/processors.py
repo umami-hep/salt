@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+from ftag import Labeller
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 
 from salt.core.data.base import Processor, WorkerCtx
@@ -177,7 +178,28 @@ class Labels(Processor):
     alive as terminal consumers); it contributes no read fields, so no I/O
     is wasted.
 
-    TODO(M6): the on-the-fly ftag ``Labeller`` opt-in (design §6.2).
+    On-the-fly Labeller (M6 sub-wave A; design §6.2, FD 1303-1304)
+    -------------------------------------------------------------
+    The ftag ``Labeller`` (NOT v1-salt — ``ftag/labeller.py``) is an OPT-IN
+    init-arg, "no longer heuristically triggered" (v1 gated implicitly on
+    ``input_name == global_object and label == 'flavour_label'``,
+    ``datasets.py:609-626``). Set ``use_labeller: true`` plus ``class_names``
+    (the v1 ``LabellerConfig{use_labeller, class_names, require_labels}``,
+    ``configs.py:154-197``) and the one ``labeller_stream.labeller_label`` key
+    the labeller serves. When that exact narrowed key is demanded, this module
+    derives it on the fly from the raw structured array via
+    ``Labeller.get_labels`` (post-`Reader.read`, pre-torch boundary, FD
+    §2.4) — int -> int64 under ``dtype_policy``, no longer read from the file.
+    The labeller's cut variables (``Labeller.variables``) are declared as extra
+    read fields so they enter the per-mode demand-narrowed read set (FD §6.1
+    1280-1282); the derived label field itself is NOT read from disk.
+
+    With ``require_labels: true`` (v1 GN3X) the labeller RAISES (ftag
+    ``labeller.py:70``) on any object that matches no class; with
+    ``require_labels: false`` (v1 GN2X_qcdsplit) unmatched objects are dropped
+    (``labeller.py:73``), so the derived label array may be shorter than the
+    batch — exactly v1's ``self.labeller.get_labels(batch)`` behaviour
+    (``datasets.py:626``).
 
     Parameters
     ----------
@@ -196,11 +218,43 @@ class Labels(Processor):
     recover_malformed : bool, optional
         Recover (warn + map to -1) instead of raising on out-of-range label
         values, by default False.
+    use_labeller : bool, optional
+        Enable the on-the-fly ftag `Labeller` (v1 ``LabellerConfig.use_labeller``).
+        Requires ``class_names`` (the empty-class guard, v1 ``configs.py:189``).
+        By default False (the labeller is OFF; ``labeller_*`` args are ignored).
+    class_names : Sequence[str] | None, optional
+        Target ftag flavour class names, in label-index order (v1
+        ``LabellerConfig.class_names``; GN3X 9-class, GN2X_qcdsplit 7-class).
+        Required when ``use_labeller`` is set.
+    require_labels : bool, optional
+        Whether every object must be labelled (v1
+        ``LabellerConfig.require_labels``): True raises on an unlabelled
+        object, False drops it. By default True. Ignored when
+        ``use_labeller`` is False.
+    labeller_stream : str, optional
+        The stream the labeller relabels (v1's implicit ``global_object``;
+        default ``"jets"``). The labeller's cut variables are demanded from
+        ``raw.<labeller_stream>``.
+    labeller_label : str, optional
+        The label key the labeller produces (v1's implicit ``"flavour_label"``;
+        default ``"flavour_label"``). Only ``labels.<labeller_stream>.
+        <labeller_label>`` is derived on the fly; every other demanded label is
+        read from the file as before.
 
     Raises
     ------
     ConfigError
-        On an unknown ``dtype_policy`` or malformed ``valid_ranges``.
+        On an unknown ``dtype_policy``, malformed ``valid_ranges``, or
+        ``use_labeller`` set without ``class_names`` (the empty-class guard,
+        v1 ``configs.py:189``). NOTE the deliberate exception-TYPE promotion: v1's
+        empty-class guard raises a bare ``ValueError`` (``configs.py:189``); v2
+        standardises structural config-validation failures on ``ConfigError`` (the
+        framework's named config-error type, NOT a ``ValueError`` subclass — see
+        ``graph/errors.py``), as every M1-M5 processor does. The other two
+        labeller guards (missing-field, require_labels-on-unlabelled) keep v1's
+        ``ValueError`` (raised at ``process`` time, not construction). An M7
+        v1->v2 converter wiring v1 exception expectations should map the v1
+        ``LabellerConfig`` ``ValueError`` contract to ``ConfigError``.
     """
 
     allow_wildcards: ClassVar[bool] = True  # framework wildcard capability (design §2.2)
@@ -211,6 +265,11 @@ class Labels(Processor):
         dtype_policy: Literal["int64-for-int", "file"] = "int64-for-int",
         valid_ranges: Mapping[str, Sequence[int]] | None = None,
         recover_malformed: bool = False,
+        use_labeller: bool = False,
+        class_names: Sequence[str] | None = None,
+        require_labels: bool = True,
+        labeller_stream: str = "jets",
+        labeller_label: str = "flavour_label",
     ) -> None:
         super().__init__()
         if dtype_policy not in {"int64-for-int", "file"}:
@@ -228,6 +287,35 @@ class Labels(Processor):
                 )
             self.valid_ranges[label] = bounds
         self.recover_malformed = recover_malformed
+        # -- on-the-fly Labeller (M6 sub-wave A) -------------------------------
+        # mirror v1 LabellerConfig (configs.py:154-197): use_labeller off -> the
+        # labeller args are inert (v1 __post_init__ zeroes them, configs.py:178-185);
+        # use_labeller on -> the empty-class guard (v1 configs.py:189) MUST fire.
+        self.use_labeller = bool(use_labeller)
+        self.labeller_stream = str(labeller_stream)
+        self.labeller_label = str(labeller_label)
+        self.labeller: Labeller | None = None
+        self.class_names: tuple[str, ...] = ()
+        self.require_labels = bool(require_labels)
+        if self.use_labeller:
+            if not class_names:
+                raise ConfigError(
+                    f"Labels module {self.name!r}: use_labeller is True but class_names is empty — "
+                    "specify the target classes for relabelling (v1 LabellerConfig empty-class "
+                    "guard, configs.py:189)"
+                )
+            self.class_names = tuple(class_names)
+            # the ftag Labeller IS the parity reference (ftag/labeller.py); v1
+            # builds it identically (Labeller(class_names, require_labels),
+            # datasets.py:205)
+            self.labeller = Labeller(list(self.class_names), self.require_labels)
+        elif class_names:
+            warnings.warn(
+                f"Labels module {self.name!r}: class_names is set but use_labeller is False — "
+                "the labeller config is ignored (v1 configs.py:178-185)",
+                stacklevel=2,
+            )
+            self.require_labels = False
         self._targets: tuple[tuple[str, str, str], ...] | None = None
 
     def bind_streams(self, streams: Sequence[str]) -> None:
@@ -300,19 +388,61 @@ class Labels(Processor):
         assert ctx.step is not None
         self._targets = self._parse_targets(ctx.step)
 
+    def _is_labeller_target(self, stream: str, label: str) -> bool:
+        """Whether ``(stream, label)`` is the on-the-fly labeller's output key.
+
+        Returns
+        -------
+        bool
+            True when the labeller is active and this key is the configured
+            ``labeller_stream.labeller_label`` (the v1 gate
+            ``input_name == global_object and label == 'flavour_label'``,
+            ``datasets.py:616-617``).
+        """
+        return (
+            self.labeller is not None
+            and stream == self.labeller_stream
+            and label == self.labeller_label
+        )
+
+    def _labeller_variables(self) -> tuple[str, ...]:
+        """The labeller's cut variables, de-duplicated, in first-seen order.
+
+        ``Labeller.variables`` (``labeller.py:45``) is a flat sum over the
+        per-class cut variables, so it carries duplicates — dedupe before
+        declaring them as read fields.
+
+        Returns
+        -------
+        tuple[str, ...]
+            The unique cut variables the labeller reads from the raw stream.
+        """
+        assert self.labeller is not None
+        return tuple(dict.fromkeys(self.labeller.variables))
+
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
         """Demand exactly the narrowed label fields from the reader (design §6.1).
+
+        For an ordinary label the demanded field IS the label name. For the
+        on-the-fly labeller target the label field is NOT on disk (it is
+        derived), so instead the labeller's cut variables (``Labeller.
+        variables``, deduped) are demanded from ``raw.<labeller_stream>`` — the
+        explicit "declare the extra read fields" rule (FD §6.1 1280-1282) that
+        lets them enter the per-mode demand-narrowed read set.
 
         Returns
         -------
         dict[str, dict[str, str]]
-            ``{stream: {label_field: this module}}`` from the narrowed
-            produces — the wildcard-producer override of the default
-            requires-fields rule.
+            ``{stream: {field: this module}}`` from the narrowed produces —
+            the wildcard-producer override of the default requires-fields rule.
         """
         out: dict[str, dict[str, str]] = {}
         for _key, stream, label in self._parse_targets(step):
-            out.setdefault(stream, {})[label] = self.name
+            if self._is_labeller_target(stream, label):
+                for var in self._labeller_variables():
+                    out.setdefault(stream, {}).setdefault(var, self.name)
+            else:
+                out.setdefault(stream, {})[label] = self.name
         return out
 
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
@@ -329,12 +459,19 @@ class Labels(Processor):
         ------
         ValueError
             On out-of-range values for a ``valid_ranges`` label when
-            ``recover_malformed`` is off (v1 ``datasets.py:832-836``).
+            ``recover_malformed`` is off (v1 ``datasets.py:832-836``), or — for
+            the on-the-fly labeller target — when a labeller cut variable is
+            missing from the raw stream (v1 missing-field guard,
+            ``datasets.py:622-624``) or an object is unlabelled under
+            ``require_labels`` (ftag ``labeller.py:70``).
         """
         del rows, mode
         assert self._targets is not None, "Labels.process called before bind()"
         out: dict[str, np.ndarray] = {}
         for key, stream, label in self._targets:
+            if self._is_labeller_target(stream, label):
+                out[key] = self._derive_labeller(batch.get(f"raw.{stream}"), stream)
+                continue
             values = batch.get(f"raw.{stream}")[label]
             if (bounds := self.valid_ranges.get(label)) is not None:
                 bad = (values < bounds[0]) | (values > bounds[1])
@@ -357,6 +494,57 @@ class Labels(Processor):
             else:
                 out[key] = np.array(values, copy=True)  # keep file dtype (possibly f2)
         return out
+
+    def _derive_labeller(self, raw: np.ndarray, stream: str) -> np.ndarray:
+        """Derive the on-the-fly labeller labels from the raw structured array.
+
+        Mirrors v1 ``process_labels`` (``datasets.py:619-626``): the
+        missing-field guard (every ``Labeller.variables`` cut variable must be
+        present, ``datasets.py:622-624``) then ``Labeller.get_labels`` on the
+        WHOLE structured array, cast to int64 under ``dtype_policy``. The
+        ``get_labels`` output is a fresh array (``labeller.py:66-73``), so it
+        never aliases the reader buffer.
+
+        Returns
+        -------
+        np.ndarray
+            The derived int64 labels (or file dtype under
+            ``dtype_policy='file'``). With ``require_labels=False`` unmatched
+            objects are dropped, so the array may be shorter than the batch
+            (ftag ``labeller.py:73``; v1 parity). This is faithful v1 parity AT
+            THE LABEL-DERIVATION LEVEL (LB1's scope): v1 likewise does NOT
+            row-filter the inputs/other-label columns to the dropped subset
+            (``datasets.py`` ``process_labels`` has no such filter), so the v1
+            bundle is itself length-mismatched (inputs vs flavour_label) under
+            ``require_labels=False``. The full-batch length-coherence reconciliation
+            is NOT exercised here (sub-wave A is data-free) and belongs to the M7
+            data-path wave — a data-bearing GN2X_qcdsplit forward/integration test
+            must decide whether to row-filter the whole bundle or to confirm v1's
+            length-mismatch is handled identically, and record it as a Key Decision.
+
+        Raises
+        ------
+        ValueError
+            If a labeller cut variable is absent from the raw stream (the v1
+            field-subset check, ``datasets.py:622-624``), or — under
+            ``require_labels`` — if any object matches no class (ftag
+            ``labeller.py:70``).
+        """
+        assert self.labeller is not None
+        present = set(raw.dtype.names or ())
+        missing = [var for var in self._labeller_variables() if var not in present]
+        if missing:
+            raise ValueError(
+                f"Labels module {self.name!r}: not enough fields to apply labelling cuts on "
+                f"stream {stream!r} — missing labeller variables {missing} (v1 field-subset "
+                "check, datasets.py:622-624)"
+            )
+        # get_labels raises under require_labels on an unlabelled object
+        # (labeller.py:70) and otherwise drops it (labeller.py:73) — v1 parity.
+        derived = self.labeller.get_labels(raw)
+        if self.dtype_policy == "int64-for-int" and np.issubdtype(derived.dtype, np.integer):
+            return derived.astype(np.int64)
+        return np.array(derived, copy=True)
 
 
 class MultiTarget(Processor):
