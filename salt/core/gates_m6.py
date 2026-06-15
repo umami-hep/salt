@@ -1,4 +1,4 @@
-"""M6 gates harness — LB1 + M6-CONV (sub-wave A, Labeller) (plan 12; design §9.5, FD 1303-1304).
+"""M6 gates harness — LB1 + VS1 + M6-CONV (sub-waves A/D) (plan 12; design §9.5, FD 1303-1304).
 
 Standalone gates, each a subcommand of ``python -m salt.core.gates_m6``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -38,9 +38,28 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   variable is absent from the raw stream; and ``require_labels: True`` raises
   (ftag ``labeller.py:70``) on an unlabelled object.
 
+- **VS1 vector-stream forward parity (v1-decidable)** — the model-side rank-2
+  ``[B, F]`` vector-stream embed (M6-6 / plan 12 sub-wave D): a `StreamEmbed`
+  with ``vector: true`` projects ``normed.<s> [B, F]`` -> ``embed.<s> [B, D]``
+  (no token axis), consumed DIRECTLY by a ``sequence: false`` task head with NO
+  encoder and NO pooling — the v2 reproduction of v1's jets-only DL1 MLP
+  (``legacy/DL1.yaml`` single init_net ``attach_global: false`` -> the
+  no-encoder/no-pool `SaltModel` path ``saltmodel.py:90-92`` guard, ``:155-156``
+  ``embed_xs = flatten(xs)``, ``:170-172`` ``global_rep = embed_xs``). VS1 runs
+  the DL1-shaped v2 plan through the real compiler/bind/executor and asserts the
+  raw logits are BITWISE identical to an INDEPENDENT v1 reference (a separately
+  constructed v1 ``InitNet(attach_global=False)`` + v1 ``ClassificationTask``,
+  weight-loaded from the v2 modules, run through v1's no-encoder/no-pool forward
+  math). PLUS an ONNX leg: the rank-2 embed is a plain ``nn.Linear``-stack with
+  no T axis, so the traced graph carries B as the SOLE dynamic axis and NO token
+  (``n_*``) dynamic axis anywhere (mirrors `Normaliser`'s ``[B, F]``
+  global-object handling — no special-casing), and onnxruntime agrees with the
+  eager adapter. Negative control: perturbing the v2 embed weights breaks the
+  bitwise parity while the structural (no-T / rank-2) checks stay green.
+
 - **M6-CONV — the M7-slice acceptance (this wave's slice)** — the
-  newly-authored v2-native M6 configs (this wave: GN3X, GN2X_qcdsplit; later M6
-  waves EXTEND ``_CONV_M6_CONFIGS``) exist as v2-native fixtures in
+  newly-authored v2-native M6 configs (sub-wave A: GN3X, GN2X_qcdsplit; sub-wave
+  D: DL1; later M6 waves EXTEND ``_CONV_M6_CONFIGS``) exist as v2-native fixtures in
   ``salt/core/configs/`` AND pass the REAL ``salt2 graph validate`` (the
   canonical static validator, the d2cfg command path) in fit + test + onnx with
   rc == 0. The authoritative config list is embedded VERBATIM in
@@ -68,17 +87,40 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+import torch
 from ftag import Labeller as V1Labeller
 
 from salt.core.data import H5StructuredReader  # noqa: F401 (parity with gates_m5 import surface)
 from salt.core.data.base import WorkerCtx
 from salt.core.data.processors import Labels
-from salt.core.graph import Bundle, Mode
+from salt.core.graph import Bundle, Executor, Mode, compile_plan
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.planner import PlanStep
-from salt.core.graph.spec import TensorSpec
+from salt.core.graph.spec import TensorSpec, flatten_spec, unflatten_spec
 from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
+from salt.core.nn import (
+    LossSum,
+    Normaliser,
+    StreamEmbed,
+    bind_all,
+    materialise_all,
+    resolve_bind_schema,
+)
+from salt.core.nn.tasks import ClassificationTaskModule
+from salt.core.onnx import (
+    ExportConfig,
+    ExportInput,
+    ExportOutput,
+    OnnxAdapter,
+    attach_manifest,
+    check_onnx,
+    export_graph,
+    make_session,
+    resolve_export_config,
+)
+from salt.models.initnet import InitNet as V1InitNet
+from salt.models.task import ClassificationTask as V1ClassificationTask
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
 
 # ---------------------------------------------------------------------------
@@ -488,21 +530,425 @@ def run_lb1(
 
 
 # ---------------------------------------------------------------------------
+# VS1 — vector-stream forward parity vs v1 (sub-wave D, plan 12 M6-6)
+# ---------------------------------------------------------------------------
+
+# DL1's two jet input variables (legacy/DL1.yaml:35-36 pt/eta; input_size:2).
+# The v2 source declares inputs.jets as the rank-2 [B, F] vector boundary the
+# reader's `vector:` flag produces (reader.py GroupConfig -> Features rank-2).
+_VS1_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
+# DL1's 3-class jet flavour head (legacy/DL1.yaml:28 output_size:3).
+_VS1_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")
+_VS1_EMBED_DIM = 64  # legacy/DL1.yaml:13 init_net output_size
+_VS1_HIDDEN = [128, 128, 128]  # legacy/DL1.yaml:12 init_net hidden_layers
+_VS1_HEAD_HIDDEN = [128]  # legacy/DL1.yaml:29 task hidden_layers
+_VS1_B = 8  # batch size for the parity fixture
+
+
+def _vs1_norm_dict(outdir: Path) -> Path:
+    """Write a jets-only identity-ish norm dict for the DL1 vector stream.
+
+    VS1's parity is about the embed/head wiring, not normalisation — the norm
+    dict supplies the two jet variables so `Normaliser.materialise` resolves
+    (distinct per-variable constants, so a field-order bug can't pass silently).
+
+    Returns
+    -------
+    Path
+        The norm-dict YAML path.
+    """
+    import yaml  # noqa: PLC0415 - keep the module import surface lean
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    nd = {
+        "jets": {
+            "pt_btagJes": {"mean": 1.5, "std": 2.0},
+            "eta_btagJes": {"mean": -0.25, "std": 1.25},
+        }
+    }
+    path = outdir / "vs1_norm_dict.yaml"
+    path.write_text(yaml.safe_dump(nd))
+    return path
+
+
+def _vs1_modules(norm_dict: Path) -> dict[str, Any]:
+    """Build the DL1-shaped v2 module dict: rank-2 embed -> head, no encoder/pool.
+
+    Mirrors the v1 jets-only MLP (legacy/DL1.yaml): a single ``vector: true``
+    `StreamEmbed` on the global ``jets`` stream feeds a ``sequence: false``
+    `ClassificationTaskModule` reading ``embed.jets`` DIRECTLY — no `Concat`,
+    no `TransformerEncoder`, no `Split`, no pooling (v1 saltmodel.py:90-92
+    guard / :155-156 / :170-172).
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named modules with `LossSum` already narrowed.
+    """
+    modules: dict[str, Any] = {
+        "norm": Normaliser(norm_dict=norm_dict, streams=["jets"], global_object="jets"),
+        "jets_embed": StreamEmbed(
+            stream="jets",
+            out_dim=_VS1_EMBED_DIM,
+            dense={"hidden_layers": list(_VS1_HIDDEN), "activation": "Mish"},
+            vector=True,
+        ),
+        "jets_classification": ClassificationTaskModule(
+            stream="jets",
+            label="flavour_label",
+            class_names=list(_VS1_CLASS_NAMES),
+            input="embed.jets",  # consume the rank-2 embed directly (no pool)
+            sequence=False,
+            dense={"hidden_layers": list(_VS1_HEAD_HIDDEN), "activation": "Mish"},
+        ),
+        "loss": LossSum(),
+    }
+    for name, module in modules.items():
+        module.name = name
+    modules["loss"].narrow(LossSum.collect_loss_keys(modules))
+    return modules
+
+
+def _vs1_sources():
+    """The DL1 dataset boundary: a rank-2 vector ``inputs.jets`` + its label.
+
+    ``inputs.jets`` is ``[B, F]`` (the reader ``vector:`` boundary, no token
+    axis); the flavour label is ``[B]`` and TRAINING-gated.
+
+    Returns
+    -------
+    NestedSpec
+        The nested source spec for `compile_plan`.
+    """
+    return unflatten_spec({
+        "inputs.jets": TensorSpec(
+            shape=("B", len(_VS1_JET_VARIABLES)),
+            dtype="float32",
+            fields=tuple(_VS1_JET_VARIABLES),
+        ),
+        "labels.jets.flavour_label": TensorSpec(
+            shape=("B",), dtype="int64", kind="label", modes=Mode.TRAINING
+        ),
+    })
+
+
+def _vs1_v1_reference(modules: dict[str, Any], jets: torch.Tensor) -> torch.Tensor:
+    """Run the INDEPENDENT v1 no-encoder/no-pool DL1 path on ``normed jets``.
+
+    Constructs a SEPARATE v1 ``InitNet(attach_global=False)`` + v1
+    ``ClassificationTask`` (NOT the v2 modules' composed instances) and loads
+    them from the v2 modules' weights, then runs v1's exact forward math:
+
+    - ``embed_xs = init_net({"jets": x})`` (InitNet.forward: x = inputs[name];
+      attach_global=False so NO context; x = net(x), initnet.py:72-89);
+    - ``global_rep = embed_xs`` (no pool_net, saltmodel.py:170-172);
+    - ``logits = task.net(global_rep)`` (ClassificationTask raw logits).
+
+    `x` is the SAME ``normed.jets`` the v2 `Normaliser` produced, so the only
+    thing under test is the embed/head wiring, not normalisation.
+
+    Returns
+    -------
+    torch.Tensor
+        The ``[B, n_classes]`` raw logits from the v1 reference path.
+    """
+    embed = modules["jets_embed"]
+    head = modules["jets_classification"]
+    # an INDEPENDENT v1 InitNet (attach_global=False -> jets-only, no context),
+    # weight-loaded from the v2 StreamEmbed's composed Dense
+    init_net = V1InitNet(
+        input_name="jets",
+        dense_config={
+            "input_size": len(_VS1_JET_VARIABLES),
+            "output_size": _VS1_EMBED_DIM,
+            "hidden_layers": list(_VS1_HIDDEN),
+            "activation": "Mish",
+        },
+        variables={"jets": list(_VS1_JET_VARIABLES)},
+        global_object="jets",
+        attach_global=False,
+    )
+    init_net.net.load_state_dict(embed.net.state_dict())
+    # an INDEPENDENT v1 ClassificationTask, weight-loaded from the v2 head
+    ref_task = V1ClassificationTask(
+        name="jets_classification",
+        input_name="jets",
+        label="flavour_label",
+        class_names=list(_VS1_CLASS_NAMES),
+        loss=torch.nn.CrossEntropyLoss(),
+        dense_config={
+            "input_size": _VS1_EMBED_DIM,
+            "output_size": len(_VS1_CLASS_NAMES),
+            "hidden_layers": list(_VS1_HEAD_HIDDEN),
+            "activation": "Mish",
+        },
+    )
+    ref_task.net.load_state_dict(head.task.net.state_dict())
+    init_net.eval()
+    ref_task.eval()
+    with torch.no_grad():
+        embed_xs = init_net({"jets": jets})  # [B, D] — no token axis, no context
+        global_rep = embed_xs  # no pool_net (saltmodel.py:170-172)
+        logits, _ = ref_task(global_rep, labels_dict=None, pad_masks=None, context=None)
+    return logits
+
+
+def run_vs1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """VS1: rank-2 ``[B, F]`` vector-stream embed -> task head, parity vs v1 DL1.
+
+    Drives the DL1-shaped v2 plan (rank-2 ``vector: true`` `StreamEmbed` ->
+    ``sequence: false`` `ClassificationTaskModule`, NO encoder/pool — `_vs1_modules`)
+    through the REAL compiler / two-phase bind / executor and asserts:
+
+    - **bitwise forward parity** — the v2 raw FIT logits (``preds.jets.
+      jets_classification``) are BITWISE identical to an INDEPENDENT v1
+      no-encoder/no-pool reference (`_vs1_v1_reference`: a separately built v1
+      ``InitNet(attach_global=False)`` + ``ClassificationTask`` weight-loaded
+      from the v2 modules, run through v1's ``saltmodel.py:90-92,155-172``
+      forward math). A plain ``nn.Linear``-stack on ``[B, F]`` reorders no
+      floats, so the claim is BITWISE;
+    - **rank-2 structural shape** — the embed declares/produces ``[B, F]`` ->
+      ``[B, D]`` (no token axis) and the head's prediction is ``[B, n_classes]``;
+    - **no-encoder/no-pool plan** — the compiled plan contains no encoder, no
+      pool, and no ``seq.*`` / ``encoded.*`` / ``pooled.*`` edges;
+    - **ONNX no-T leg** — the model exports under a real ``Mode.ONNX`` trace
+      with B as the SOLE dynamic axis and NO token (``n_*``) dynamic axis (the
+      rank-2 embed has no T axis — mirrors `Normaliser`'s ``[B, F]`` global
+      handling, no special-casing); the loaded graph's single input is rank-2
+      and onnxruntime agrees with the eager adapter within 1e-6. The no-T claim
+      is made NON-VACUOUS in-gate by a negative control: a PROBE adapter over
+      the SAME ONNX plan but with ``inputs.jets`` flagged ``sequence: true``
+      DOES register an ``n_<stream>`` axis (proving the same machinery would
+      emit a token axis for a sequence input, so the DL1 graph's absence of one
+      is by-design, not a vacuously-passing iteration).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook perturbs
+    the v2 logits — the bitwise parity check must FAIL while the structural
+    (rank-2 / no-T / no-encoder) checks stay green.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("VS1 rank-2 [B,F] vector-stream embed -> head BITWISE parity vs v1 DL1 no-enc/no-pool")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    norm_dict = _vs1_norm_dict(outdir)
+    modules = _vs1_modules(norm_dict)
+
+    # -- (a) the embed declares/produces rank-2 [B, F] -> [B, D] (no T axis) ---
+    embed_io = modules["jets_embed"].declare_io(Mode.FIT)
+    req = flatten_spec(embed_io.requires)
+    prod = flatten_spec(embed_io.produces)
+    checks["embed_input_is_rank2"] = len(req["normed.jets"].shape) == 2
+    checks["embed_output_is_rank2"] = len(prod["embed.jets"].shape) == 2
+    checks["embed_out_dim_matches"] = prod["embed.jets"].shape[-1] == _VS1_EMBED_DIM
+
+    # -- (b) compile the DL1 plan: no encoder, no pool, no seq/encoded edges --
+    fit_plan = compile_plan(modules, Mode.FIT, sources=_vs1_sources(), sinks=["loss.total"])
+    test_plan = compile_plan(
+        modules,
+        Mode.TEST,
+        sources=_vs1_sources(),
+        sinks=["preds.jets.jets_classification"],
+    )
+    names = set(fit_plan.module_names)
+    checks["no_encoder_in_plan"] = "encoder" not in names
+    checks["no_pool_in_plan"] = "pool" not in names
+    checks["no_seq_or_pooled_edges"] = all(
+        not (
+            edge.key.startswith("seq.")
+            or edge.key.startswith("encoded.")
+            or edge.key.startswith("pooled.")
+        )
+        for plan in (fit_plan, test_plan)
+        for edge in plan.edges
+    )
+    # the head consumes the embed DIRECTLY (the embed.jets -> head edge exists)
+    checks["head_consumes_embed_directly"] = any(
+        edge.key == "embed.jets" for edge in fit_plan.edges
+    )
+
+    # -- (c) bitwise forward parity vs the INDEPENDENT v1 reference -----------
+    bind_all(modules, resolve_bind_schema([fit_plan, test_plan]))
+    materialise_all(modules)
+    gen = torch.Generator().manual_seed(17)
+    jets = torch.randn(_VS1_B, len(_VS1_JET_VARIABLES), generator=gen)
+    labels = torch.randint(0, len(_VS1_CLASS_NAMES), (_VS1_B,), generator=gen)
+    b = Bundle()
+    b.set("inputs.jets", jets)
+    b.set("labels.jets.flavour_label", labels)
+    out = Executor(fit_plan).run(b, debug=True)
+    v2_logits = out.get("preds.jets.jets_classification")
+    checks["pred_is_rank2_b_nclasses"] = tuple(v2_logits.shape) == (
+        _VS1_B,
+        len(_VS1_CLASS_NAMES),
+    )
+    if corruption is not None:
+        v2_logits = corruption(v2_logits)
+    # the v1 reference runs on the SAME normed.jets the v2 Normaliser produced
+    normed_jets = out.get("normed.jets")
+    v1_logits = _vs1_v1_reference(modules, normed_jets)
+    checks["forward_bitwise_vs_v1"] = v2_logits.shape == v1_logits.shape and torch.equal(
+        v2_logits, v1_logits
+    )
+
+    # -- (d) ONNX no-T leg: B the sole dynamic axis, no n_* token axis --------
+    onnx_path = outdir / "vs1_dl1.onnx"
+    head = modules["jets_classification"]
+    export = ExportConfig(
+        model_name="DL1v2",
+        inputs=[ExportInput(port="inputs.jets", name="jet_features")],  # global, NOT sequence
+    )
+    manifest = [
+        ExportOutput(port="preds.jets.jets_classification", names=list(head.class_suffixes))
+    ]
+    result = export_graph(
+        modules,
+        export,
+        {"jets": list(_VS1_JET_VARIABLES)},
+        onnx_path,
+        outputs=manifest,
+        run_name="DL1v2",
+    )
+    # the adapter declares NO token (n_*) dynamic axis at all (no sequence input,
+    # no per-token output) — only B is the moving axis (Normaliser [B,F] parity).
+    # A sequence stream would register {0: 'n_<stream>'} (adapter.dynamic_axes);
+    # a rank-2 DL1 graph registers none.
+    dyn_axes = result.adapter.dynamic_axes
+    checks["no_token_dynamic_axis"] = not any(
+        str(name).startswith("n_") for axmap in dyn_axes.values() for name in axmap.values()
+    )
+    # negative control — prove the no-T claim is NON-VACUOUS within the gate
+    # (not merely "the empty dynamic_axes mapping iterated zero items"). Build a
+    # PROBE adapter over the SAME compiled ONNX plan (result.adapter.plan) but
+    # with inputs.jets flagged `sequence: true`, run through the REAL
+    # resolve_export_config + attach_manifest + OnnxAdapter machinery (the
+    # export.py:267-272 path): it MUST register the default n_<stream> axis.
+    # This demonstrates the same adapter code that produced {} for DL1 WOULD
+    # emit an n_* axis for a sequence input, so the DL1 graph's absence of one
+    # is BY-DESIGN, not a vacuously-passing iteration (adapter.py:201-205,
+    # config.py:713 dyn_axis=(entry.dyn_axis or f"n_{stream}")).
+    seq_probe_cfg = attach_manifest(
+        resolve_export_config(
+            ExportConfig(
+                model_name="DL1v2SeqProbe",
+                inputs=[ExportInput(port="inputs.jets", name="jet_features", sequence=True)],
+            ),
+            run_name="DL1v2SeqProbe",
+        ),
+        manifest,
+    )
+    probe = OnnxAdapter(result.adapter.plan, seq_probe_cfg, {"jets": tuple(_VS1_JET_VARIABLES)})
+    probe_axes = probe.dynamic_axes
+    checks["no_token_axis_check_is_non_vacuous"] = any(
+        str(name).startswith("n_") for axmap in probe_axes.values() for name in axmap.values()
+    )
+    # inspect the loaded ONNX graph: the single input is rank-2 (no T dim)
+    import onnx  # noqa: PLC0415 - heavy import, onnx-leg only
+
+    graph = onnx.load(str(onnx_path)).graph
+    in_dims = graph.input[0].type.tensor_type.shape.dim
+    checks["onnx_input_is_rank2"] = len(in_dims) == 2
+    # B is the SOLE dynamic axis: re-trace with the batch axis marked dynamic
+    # and confirm onnxruntime accepts batch > 1 (the [B, F] embed is batch-poly).
+    dyn_onnx = outdir / "vs1_dl1_dynB.onnx"
+    torch.onnx.export(
+        result.adapter,
+        result.adapter.example_inputs(),
+        str(dyn_onnx),
+        opset_version=20,
+        input_names=result.adapter.input_names,
+        output_names=result.adapter.output_names,
+        dynamic_axes={"jet_features": {0: "batch"}},
+        dynamo=False,
+    )
+    session = make_session(dyn_onnx)
+    multi = torch.rand(5, len(_VS1_JET_VARIABLES))
+    ort_out = session.run(None, {"jet_features": multi.numpy()})
+    with torch.no_grad():
+        eager_out = result.adapter(multi)
+    checks["onnx_batch_axis_is_dynamic"] = ort_out[0].shape[0] == 5
+    checks["onnx_runtime_matches_eager_multibatch"] = all(
+        np.max(np.abs(np.asarray(o) - e.numpy())) <= 1e-6
+        for o, e in zip(ort_out, eager_out, strict=True)
+    )
+    # torch-vs-onnxruntime sweep on the static (B=1) graph (the O1 pattern)
+    sweep = check_onnx(result.adapter, result.onnx_path, trials=2, float_rtol=1e-6, float_atol=1e-6)
+    checks["onnx_check_passes"] = sweep.passed
+
+    passed = all(checks.values())
+    criterion = (
+        "the model-side rank-2 [B, F] vector-stream embed (M6-6 / plan 12 VS1): a vector: true "
+        "StreamEmbed projects normed.jets [B, F] -> embed.jets [B, D] (no token axis) consumed "
+        "DIRECTLY by a sequence: false ClassificationTaskModule with NO encoder and NO pooling; "
+        "the v2 FIT logits are BITWISE identical to an INDEPENDENT v1 no-encoder/no-pool reference "
+        "(separately built InitNet(attach_global:false) + ClassificationTask weight-loaded from "
+        "the v2 modules, run through v1 saltmodel.py:90-92,155-172 math); the compiled plan has no "
+        "encoder/pool/seq/encoded/pooled edges; and the ONNX trace carries B as the SOLE dynamic "
+        "axis with NO token (n_*) axis (Normaliser [B, F] parity), onnxruntime agreeing with the "
+        "eager adapter (<=1e-6) at batch 1 and batch 5; the no-T claim is non-vacuous — a "
+        "sequence:true PROBE adapter over the SAME plan DOES register an n_<stream> axis"
+    )
+    report = _base_report(
+        "vs1_vector_stream_parity",
+        passed,
+        criterion,
+        {
+            "jet_variables": list(_VS1_JET_VARIABLES),
+            "class_names": list(_VS1_CLASS_NAMES),
+            "embed_dim": _VS1_EMBED_DIM,
+            "batch": _VS1_B,
+            "norm_dict": str(norm_dict),
+            "onnx_path": str(onnx_path),
+            "approach": "StreamEmbed rank-2 vector path (mirrors Normaliser global_object)",
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["dynamic_axes"] = {k: {str(a): n for a, n in v.items()} for k, v in dyn_axes.items()}
+    report["v1_reference"] = (
+        "INDEPENDENT v1 reference (instance independence, NOT a math re-implementation): "
+        "separately-instantiated v1 modules — a fresh InitNet(attach_global=False) + "
+        "ClassificationTask, distinct objects from the v2 modules' composed instances, "
+        "weight-loaded from them — run through v1's no-encoder/no-pool forward "
+        "(saltmodel.py:90-92 guard, :155-156 embed_xs, :170-172 global_rep=embed_xs). The "
+        "bitwise torch.equal therefore tests that the v2 GRAPH PATH (compile -> two-phase "
+        "bind -> executor -> sequence:false head reading embed.jets directly, no encoder/"
+        "pool) routes tensors through the SAME Dense math as v1's hand-wired saltmodel.py "
+        "no-pool path; it does not (and does not claim to) independently re-derive the Dense "
+        "arithmetic"
+    )
+    _print_checks(checks)
+    _print_verdict("vs1", passed, criterion, _emit_report(report, outdir, "vs1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # M6-CONV — the M7-slice acceptance for the M6-authored configs (sub-wave A
 # bootstraps it; later M6 waves EXTEND _CONV_M6_CONFIGS)
 # ---------------------------------------------------------------------------
 
 # The AUTHORITATIVE M6-CONV config list (plan 12 M6-CONV row: "embed the
-# authoritative _CONV_M6_CONFIGS list verbatim"). This wave (sub-wave A,
-# Labeller) lands the FIRST two; later waves append GN2_muP (B), GN2XE (C),
-# legacy/DL1 (D) until all 5 config-gating needs-M6 configs are here.
+# authoritative _CONV_M6_CONFIGS list verbatim"). Sub-wave A (Labeller) landed
+# the FIRST two; sub-wave D (vector-stream) adds DL1 (now 3); later waves append
+# GN2_muP (B) and GN2XE (C) until all 5 config-gating needs-M6 configs are here.
 #
-# `norm_global` is False for both (neither config carries a SECOND `norm_global`
-# Normaliser — that is the VectorConcat/global-stream pattern, absent here).
-# `onnx == "validate"` for both: GN3X and GN2X_qcdsplit are STANDARD traces — no
+# `norm_global` is False for all (none carries a SECOND `norm_global` Normaliser
+# — that is the VectorConcat/global-stream pattern, absent here). `onnx ==
+# "validate"` for all three: GN3X, GN2X_qcdsplit AND DL1 are STANDARD traces — no
 # muP MuReadout fold (B) or edge dynamic-T register pad (C) export hazard — so
 # onnx stays in the gate (plan 12 M6-CONV per-config export contracts: "GN3X/
-# GN2X_qcdsplit/DL1 are standard traces").
+# GN2X_qcdsplit/DL1 are standard traces"; DL1's rank-2 [B, F] embed is a plain
+# nn.Linear stack with B the sole dynamic axis, sub-wave D / VS1).
 _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
     {
         "name": "GN3X",
@@ -521,6 +967,17 @@ _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
         "note": (
             "GN2X 7-class QCD-split Labeller (require_labels:False, drop-unlabelled) + "
             "truth_hadrons third stream; LossSum"
+        ),
+    },
+    {
+        "name": "DL1",
+        "cfg": ("DL1.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "vector-stream",
+        "note": (
+            "jets-only MLP: rank-2 [B, F] vector-stream embed (vector: true) -> sequence: false "
+            "head, NO encoder/pool (the M6-6 deliverable, gate VS1); 3-class CE; LossSum"
         ),
     },
 )
@@ -590,8 +1047,8 @@ def run_conv(
 ) -> tuple[int, dict[str, Any]]:
     """M6-CONV: the M7-slice acceptance for the M6-authored v2-native configs.
 
-    For EVERY M6 config landed so far (``_CONV_M6_CONFIGS`` — this wave: GN3X,
-    GN2X_qcdsplit; later waves EXTEND the list), this drives the canonical static
+    For EVERY M6 config landed so far (``_CONV_M6_CONFIGS`` — sub-wave A: GN3X,
+    GN2X_qcdsplit; sub-wave D: DL1; later waves EXTEND the list), this drives the canonical static
     validator — the REAL ``salt2 graph validate`` subcommand (``salt2_main``, the
     SAME command path d2cfg / M5-CONV exercise) — in fit + test (+ onnx where the
     config is export-representable) and asserts rc == 0 for every applicable mode.
@@ -725,11 +1182,12 @@ def run_conv(
         "M6-CONV is the consolidated convert+validate+plan-compile acceptance for the M6-authored "
         "v2-native configs (plan 12 M6-CONV row): static validation ONLY (salt2 graph validate "
         "fit/test/onnx). It makes NO forward-parity claim — the Labeller label-derivation parity "
-        "is owned by LB1. This wave (sub-wave A, Labeller) lands GN3X + GN2X_qcdsplit; later M6 "
-        "waves EXTEND _CONV_M6_CONFIGS with GN2_muP (B), GN2XE (C) and legacy/DL1 (D). Both M6-A "
-        "configs are standard traces (no muP MuReadout fold or edge dynamic-T register-pad export "
-        "hazard), so onnx stays in the gate for both. The 2 configs move 🔷->✅ in the 39 "
-        "denominator."
+        "is owned by LB1, the vector-stream forward parity by VS1. Sub-wave A (Labeller) landed "
+        "GN3X + GN2X_qcdsplit; sub-wave D (vector-stream) adds DL1 (now 3); later M6 waves EXTEND "
+        "_CONV_M6_CONFIGS with GN2_muP (B) and GN2XE (C). All three current configs are standard "
+        "traces (no muP MuReadout fold or edge dynamic-T register-pad export hazard; DL1's rank-2 "
+        "[B, F] embed is a plain nn.Linear stack with B the sole dynamic axis), so onnx stays in "
+        "the gate for all. The 3 configs move 🔷->✅ in the 39 denominator."
     )
     report["no_strict_rationale"] = (
         "no --strict: a data-free validation cannot satisfy it. --strict promotes EVERY warning to "
@@ -780,6 +1238,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="gate", required=True)
     helps = {
         "lb1": "Labeller label-derivation parity vs v1 + named-error guards (sub-wave A)",
+        "vs1": "Vector-stream rank-2 [B,F] embed -> head parity vs v1 DL1 + onnx no-T (sub-wave D)",
         "conv": "M6-CONV: salt2 graph validate (fit/test/onnx) on the M6-authored configs",
     }
     for gate, help_text in helps.items():
@@ -799,6 +1258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     runner = {
         "lb1": run_lb1,
+        "vs1": run_vs1,
         "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)

@@ -1,0 +1,150 @@
+# DL1.yaml — the jets-only MLP tagger in the v2 schema (M6 sub-wave D,
+# vector-stream embed family).
+#
+# The v2-native MIGRATED fixture for legacy salt/configs/legacy/DL1.yaml (v1
+# name: DL1). DL1 is the SIMPLEST salt model: a single per-jet GLOBAL feature
+# vector -> a 3-layer MLP -> a 3-class flavour head. NO constituents, NO
+# encoder, NO pooling — a pure [B, F] -> head path. It is the canonical
+# exercise of the M6-6 deliverable: the model-side RANK-2 [B, F] vector-stream
+# embed (plan 12 sub-wave D; gate VS1).
+#
+# THE M6 FEATURE — rank-2 [B, F] vector-stream embed (plan 12 sub-wave D / VS1;
+# FD §2.1 line 167 `embed.<s>` is [B, T, D] / [B, D]):
+# v1 DL1 reaches a jets-only MLP through a single `init_net` with
+# `attach_global: false` and NO encoder/pool_net, hitting the v1 no-encoder/
+# no-pool model path (saltmodel.py:90-92 guard, :155-156 `embed_xs`, :170-172
+# `global_rep = embed_xs`). v2 expresses the SAME shape with two coupled flags:
+#
+#   - the reader's `vector: true` flag on the `jets` group (reader.py GroupConfig
+#     `vector:`) -> `inputs.jets` is RANK-2 [B, F] (no token axis, no pad mask,
+#     the explicit replacement for v1's magic global-object exclusion, design
+#     §6.1); the `Normaliser(global_object: jets)` already produces `normed.jets`
+#     [B, F] (the rank-2 precedent this embed mirrors, Normaliser._spec);
+#   - the model-side `vector: true` flag on the `jets` `StreamEmbed` (M6-6) ->
+#     `embed.jets` is RANK-2 [B, D] (StreamEmbed._shape / declare_io; the planner
+#     ties the embed's declared rank to the rank-2 producer chain,
+#     planner.py:1083 — a rank-3 embed on a rank-2 stream raises ShapeError).
+#
+# The internal v1 `Dense` is rank-agnostic (nn.Linear over [..., F]), so the
+# embed forward math is IDENTICAL to v1's InitNet — only the declared spec rank
+# moves from [B, T, F] to [B, F] (VS1 gates BITWISE forward parity vs an
+# independent v1 InitNet(attach_global:false) + ClassificationTask).
+#
+# THE NO-POOL DIRECT-TO-HEAD PATH: `embed.jets` [B, D] is consumed DIRECTLY by a
+# `sequence: false` `ClassificationTaskModule` (input: embed.jets) — NO `Concat`,
+# NO `TransformerEncoder`, NO `Split`, NO pooling. (Encoder-less POOLING shipped
+# in M5 — regression.yaml's init_nets+pool DiPS body; DL1 is distinct: it has NO
+# pooling either, because there is no constituent sequence to pool. The head
+# reads the [B, D] global embed straight, mirroring v1 `global_rep = embed_xs`.)
+#
+# v1 DL1 faithfulness notes:
+#   - jets-only, two input variables (v1 legacy/DL1.yaml:34-35 pt/eta_btagJes,
+#     `input_size: 2`); the GN1*/GN2*/DL1d* prior-tagger inputs are COMMENTED in
+#     v1 (legacy/DL1.yaml:37-48) and stay out here;
+#   - init_net: hidden [128, 128, 128] -> out 64, Mish (v1 legacy/DL1.yaml:11-14);
+#   - jets_classification: 3-class (b/c/u), head hidden [128], Mish, plain
+#     unweighted CrossEntropyLoss, output width 3 (v1 legacy/DL1.yaml:20-30);
+#   - single task -> the v1 base default sum-of-(one)-weighted-loss; v2 uses
+#     `LossSum` (one task, the unweighted CE), matching the v1 ModelWrapper
+#     loss_mode default (NO loss_mode:GLS in v1 DL1).
+#
+# NO machine paths are committed (design §5 placeholder policy). A typical
+# invocation FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2
+# script is not installed):
+#
+#   salt2 fit --config salt/core/configs/DL1.yaml \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml
+#
+# Static validation (no data) supplies the required norm_dict data-free:
+#   python -m salt.core.main graph validate -c salt/core/configs/DL1.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: DL1
+
+data:
+  batch_size: 2000
+  num_workers: 15
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          # the ONLY stream: a per-jet GLOBAL vector (rank-2 [B, F], no pad
+          # mask) — the reader `vector:` boundary the model-side embed mirrors
+          jets: {vector: true}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          # v1 legacy/DL1.yaml:34-35 (input_size: 2); the GN1*/GN2*/DL1d*
+          # prior-tagger columns are COMMENTED in v1 and stay out here
+          jets: [pt_btagJes, eta_btagJes]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header). global_object: jets ->
+          # normed.jets is the rank-2 [B, F] producer the embed consumes
+          streams: [jets]
+          global_object: jets
+      # THE M6 FEATURE: the rank-2 [B, F] vector-stream embed (vector: true).
+      # normed.jets [B, F] -> embed.jets [B, D] (no token axis). NO context
+      # (v1 attach_global: false — the jets vector IS the global object, there
+      # is nothing to attach). The internal Dense is v1's InitNet MLP.
+      jets_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: jets
+          vector: true # M6-6: rank-2 [B, F] -> [B, D], no token axis
+          out_dim: 64 # v1 legacy/DL1.yaml:13 init_net output_size
+          dense: {hidden_layers: [128, 128, 128], activation: Mish} # v1 :12,14
+      # the SINGLE task head: consumes embed.jets [B, D] DIRECTLY (sequence:
+      # false) — NO Concat / encoder / Split / pooling between embed and head.
+      # This IS the v1 no-encoder/no-pool path (global_rep = embed_xs).
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: embed.jets # the rank-2 embed, consumed directly (no pool)
+          sequence: false # [B, D] -> [B, n_classes] (vector head, not per-token)
+          label: flavour_label
+          class_names: [bjets, cjets, ujets] # v1 DL1 3-class (output_size: 3)
+          loss: torch.nn.CrossEntropyLoss # v1 default unweighted CE
+          dense: {hidden_layers: [128], activation: Mish} # v1 legacy/DL1.yaml:29
+      loss:
+        class_path: salt.core.nn.LossSum # one task, v1 default (no GLS)
+
+writers:
+  modules:
+    # jets-only: NO sequence stream -> no pad mask to write. Delete the
+    # base2.yaml default (design §5.3 null-deletion), mirroring regression.yaml.
+    # InputCopyWriter + TaskWriter keep their jets-stream roles (the 3 flavour
+    # probability columns DL1_p{b,c,u} from the split_scalars of the 3-class
+    # head).
+    pad_mask: null
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: DL1 # Athena name: no '_'/'-'
+  inputs:
+    # the SOLE input: the rank-2 [B, F] global jet vector (no sequence axis ->
+    # B is the only dynamic ONNX axis, mirroring Normaliser's [B, F] path)
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
+  # default TaskWriter declares DL1_p{bjets,cjets,ujets} (split_scalars from the
+  # 3-class jets_classification head). Inspect with
+  # `salt2 graph resolve -c salt/core/configs/DL1.yaml`.
+
+trainer:
+  max_epochs: 100
+  precision: 32-true # 16-mixed on GPU clusters (v1 legacy/DL1.yaml:64)

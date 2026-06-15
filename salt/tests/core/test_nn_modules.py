@@ -47,6 +47,7 @@ from salt.core.nn.tasks import (
     RegressionTaskModule,
     VertexingTaskModule,
 )
+from salt.models import Dense as V1Dense
 from salt.core.schema import GroupSchema, Schema
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
@@ -266,6 +267,66 @@ class TestStreamEmbed:
             dim=-1,
         )
         assert torch.equal(out["embed.tracks"], modules["track_embed"].net(x))
+
+
+class TestStreamEmbedVector:
+    """The rank-2 ``vector:`` path (M6-6 / plan 12 sub-wave D, DL1 jets-only MLP).
+
+    Mirrors `TestNormaliser.test_global_object_is_rank_two`: a ``vector: true``
+    stream declares/produces ``[B, F]`` -> ``[B, D]`` (no token axis) while a
+    default stream stays rank-3. The forward math is identity to v1's
+    no-context `InitNet`/`Dense` (initnet.py:72-89) on a ``[B, F]`` input.
+    """
+
+    def test_declare_io_is_rank_two(self):
+        embed = StreamEmbed(stream="jets", out_dim=8, vector=True)
+        embed.name = "jet_embed"
+        io = embed.declare_io(Mode.FIT)
+        req = flatten_spec(io.requires)
+        prod = flatten_spec(io.produces)
+        assert set(req) == {"normed.jets"}
+        assert set(prod) == {"embed.jets"}
+        # [B, F] -> [B, D]: rank 2 on BOTH sides, no T axis
+        assert len(req["normed.jets"].shape) == 2
+        assert len(prod["embed.jets"].shape) == 2
+        assert prod["embed.jets"].shape == ("B", 8)
+
+    def test_default_stream_stays_rank_three(self):
+        embed = StreamEmbed(stream="tracks", out_dim=8)  # vector defaults False
+        embed.name = "track_embed"
+        io = embed.declare_io(Mode.FIT)
+        assert len(flatten_spec(io.requires)["normed.tracks"].shape) == 3
+        assert len(flatten_spec(io.produces)["embed.tracks"].shape) == 3
+
+    def test_bind_infers_vector_width(self):
+        """A vector stream's Dense input width is the resolved [B, F] width."""
+        embed = StreamEmbed(stream="jets", out_dim=16, dense={"hidden_layers": [32]})
+        embed.name = "jet_embed"
+        embed.bind(ResolvedSchema(widths={"normed.jets": 2}))
+        assert embed.net.input_size == 2
+        assert embed.net.output_size == 16
+
+    def test_forward_rank_two_bitwise_vs_independent_v1(self):
+        """[B, F] embed forward == an INDEPENDENT v1 no-context InitNet/Dense.
+
+        The v2 `StreamEmbed.forward` on a ``[B, F]`` stream is ``net(x)`` with
+        no context (the DL1 ``attach_global: false`` path, initnet.py:72-89);
+        copying the bound Dense's weights into a fresh v1 `Dense` reference and
+        running it on the SAME input must agree BITWISE (no float reordering).
+        """
+        torch.manual_seed(0)
+        embed = StreamEmbed(stream="jets", out_dim=4, dense={"hidden_layers": [8, 8]})
+        embed.name = "jet_embed"
+        embed.bind(ResolvedSchema(widths={"normed.jets": 2}))
+        # independent v1 reference Dense with the SAME hyper-params + weights
+        ref = V1Dense(input_size=2, output_size=4, hidden_layers=[8, 8])
+        ref.load_state_dict(embed.net.state_dict())
+        x = torch.randn(B, 2)
+        b = Bundle()
+        b.set("normed.jets", x)
+        out = embed(b, Mode.FIT)
+        assert out["embed.jets"].shape == (B, 4)
+        assert torch.equal(out["embed.jets"], ref(x))
 
 
 class TestConcat:

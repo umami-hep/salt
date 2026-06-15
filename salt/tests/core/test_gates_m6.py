@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 import salt.core.gates_m6 as gm6
-from salt.core.gates_m6 import main, run_conv, run_lb1
+from salt.core.gates_m6 import main, run_conv, run_lb1, run_vs1
 
 
 class TestLB1:
@@ -54,14 +54,70 @@ class TestLB1:
         assert report["checks"]["require_labels_true_raises_on_unlabelled"]
 
 
+class TestVS1:
+    """VS1 — the model-side rank-2 [B, F] vector-stream embed (plan 12 sub-wave D).
+
+    Pins the bitwise forward parity vs the INDEPENDENT v1 no-encoder/no-pool DL1
+    path, the rank-2 / no-encoder structural checks, the ONNX no-T leg (B the
+    sole dynamic axis), and the corruption teeth (a perturbed v2 logit fails the
+    parity while the structural checks stay green).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_vs1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "vs1_report.json").is_file()
+        # rank-2 [B, F] -> [B, D] embed, no token axis
+        assert report["checks"]["embed_input_is_rank2"]
+        assert report["checks"]["embed_output_is_rank2"]
+        assert report["checks"]["pred_is_rank2_b_nclasses"]
+        # no-encoder / no-pool plan; head reads the embed directly
+        assert report["checks"]["no_encoder_in_plan"]
+        assert report["checks"]["no_pool_in_plan"]
+        assert report["checks"]["no_seq_or_pooled_edges"]
+        assert report["checks"]["head_consumes_embed_directly"]
+        # bitwise forward parity vs the INDEPENDENT v1 reference
+        assert report["checks"]["forward_bitwise_vs_v1"]
+        assert "INDEPENDENT v1 reference" in report["v1_reference"]
+        # ONNX no-T leg: B sole dynamic axis, onnxruntime agrees with eager
+        assert report["checks"]["no_token_dynamic_axis"]
+        # the no-T claim is non-vacuous — a sequence:true PROBE over the SAME
+        # plan DOES register an n_<stream> axis (negative control)
+        assert report["checks"]["no_token_axis_check_is_non_vacuous"]
+        assert report["checks"]["onnx_input_is_rank2"]
+        assert report["checks"]["onnx_batch_axis_is_dynamic"]
+        assert report["checks"]["onnx_runtime_matches_eager_multibatch"]
+        assert report["checks"]["onnx_check_passes"]
+        # the chosen approach is the StreamEmbed rank-2 path (recorded in report)
+        assert "StreamEmbed rank-2" in report["config"]["approach"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # perturb the v2 logits -> the bitwise parity check must FAIL, while the
+        # structural (rank-2 / no-encoder / no-T) checks stay green
+        code, report = run_vs1(tmp_path, corruption=lambda t: t + 1.0)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["forward_bitwise_vs_v1"]
+        # the structural + onnx checks are independent of the logit values
+        assert report["checks"]["embed_input_is_rank2"]
+        assert report["checks"]["embed_output_is_rank2"]
+        assert report["checks"]["no_encoder_in_plan"]
+        assert report["checks"]["no_pool_in_plan"]
+        assert report["checks"]["no_token_dynamic_axis"]
+        assert report["checks"]["no_token_axis_check_is_non_vacuous"]
+        assert report["checks"]["onnx_input_is_rank2"]
+
+
 class TestConv:
     """M6-CONV — the M7-slice acceptance for the M6-authored v2-native configs.
 
     The gate drives the REAL ``salt2 graph validate`` (fit/test/onnx) on every
-    config landed so far (``_CONV_M6_CONFIGS`` — this wave: GN3X, GN2X_qcdsplit)
-    and embeds the authoritative list verbatim. These tests pin: the
-    file-present check, the per-config mode bookkeeping (both standard traces ->
-    onnx validated), and the corruption teeth (a missing file fails the gate).
+    config landed so far (``_CONV_M6_CONFIGS`` — sub-wave A: GN3X, GN2X_qcdsplit;
+    sub-wave D: DL1) and embeds the authoritative list verbatim. These tests pin:
+    the file-present check, the per-config mode bookkeeping (all standard traces
+    -> onnx validated), and the corruption teeth (a missing file fails the gate).
     """
 
     def test_structure_and_files_present(self, tmp_path):
@@ -70,12 +126,12 @@ class TestConv:
         # every embedded config file exists in salt/core/configs/
         assert report["checks"]["all_m6_conv_config_files_present"]
         assert report["config"]["missing_config_files"] == []
-        # this wave lands exactly the 2 Labeller configs, names embedded verbatim
+        # waves A + D land exactly these 3 configs, names embedded verbatim
         names = {c["name"] for c in report["configs"]}
-        assert names == {"GN3X", "GN2X_qcdsplit"}
+        assert names == {"GN3X", "GN2X_qcdsplit", "DL1"}
         # the report embeds the authoritative _CONV_M6_CONFIGS list verbatim
-        assert report["conv_m6_configs"] == ["GN3X", "GN2X_qcdsplit"]
-        assert report["config"]["total_configs"] == 2
+        assert report["conv_m6_configs"] == ["GN3X", "GN2X_qcdsplit", "DL1"]
+        assert report["config"]["total_configs"] == 3
         # no --strict (flow/truth_hadrons preflight warnings inherent — documented)
         assert report["config"]["strict"] is False
         assert "no --strict" in report["no_strict_rationale"]
@@ -83,8 +139,8 @@ class TestConv:
         assert "NO forward-parity claim" in report["scope_note"]
 
     def test_both_configs_validate_all_modes(self, tmp_path):
-        # GN3X + GN2X_qcdsplit convert+validate+plan-compile in fit/test/onnx —
-        # both are standard traces, so onnx is validated for each
+        # GN3X + GN2X_qcdsplit + DL1 convert+validate+plan-compile in
+        # fit/test/onnx — all are standard traces, so onnx is validated for each
         code, report = run_conv(tmp_path)
         for c in report["configs"]:
             assert c["validateFit"], c
@@ -93,7 +149,7 @@ class TestConv:
             assert c["rc"]["fit"] == 0, c
             assert c["rc"]["test"] == 0, c
             assert c["rc"]["onnx"] == 0, c
-        assert report["config"]["validated_configs"] == 2
+        assert report["config"]["validated_configs"] == 3
         assert code == 0
         assert report["passed"]
 
@@ -114,7 +170,7 @@ class TestConv:
 
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        gates = ("lb1", "conv")
+        gates = ("lb1", "vs1", "conv")
         for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0
