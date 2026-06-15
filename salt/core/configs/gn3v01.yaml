@@ -1,29 +1,48 @@
-# gn3v01.yaml — the GN3V01 flagship in the v2 schema (M5 sub-wave B, design §6.6).
+# gn3v01.yaml — the GN3V01 FLAGSHIP in the v2 schema (M5; design §6.6; matrix
+# §4 GN3-flagship forward-parity representative).
 #
-# Exercises the three sub-wave-B features end-to-end through `salt2 graph
-# validate`: (1) the encoder's `norm_type: hybrid` placement (design §9.2;
-# v1 transformer.py:350-356); (2) the GN3 `global` stream fed PAST the encoder
-# and concatenated onto the pooled representation via `VectorConcat` (design
-# §6.6; v1 saltmodel.py:175-177 `cat([global_rep, global_feats])` -> the
-# `&pooled_dim 258` every GN3 task consumes); (3) the ONNX `export.inputs
-# alias:` that clones one Athena jet tensor into the `global` port (design
-# §6.6/§7; v1 to_onnx.py:377-378). GN3V01's exact identity case: `global` and
-# `jets` BOTH declare [pt_btagJes, eta_btagJes], so the alias gather is the
-# identity clone.
+# Faithful v2-native port of legacy salt/configs/GN3v01/GN3V01.yaml. Exercises
+# ALL FOUR flagship features at once (matrix §4: "VectorConcat, GLS, regression,
+# norm_type at once"):
+#   1. LossGLS                — geometric-mean loss (v1 `loss_mode: GLS`), every
+#                               loss-producing task weight == 1.0
+#   2. norm_type: hybrid      — encoder pre/post placement (design §9.2; v1
+#                               transformer.py:350-356)
+#   3. VectorConcat + alias   — the GN3 `global` stream fed PAST the encoder and
+#                               concatenated onto the pooled rep (design §6.6; v1
+#                               saltmodel.py:175-177 cat([global_rep,
+#                               global_feats]) -> the `&pooled_dim 258` every GN3
+#                               task consumes) + the ONNX `export.inputs alias:`
+#                               that clones one Athena jet tensor into the global
+#                               port (design §6.6/§7; v1 to_onnx.py:377-378).
+#                               Identity case: `global`==`jets` cols.
+#   4. RegressionTaskModule   — jet_pt_regression (ratio target/denominator)
+#
+# v1 GN3V01 head list (GN3V01.yaml:58-141) reproduced — 6 heads:
+#   - jets_classification : 6-class split-light flavour (v1 use_class_dict)
+#   - track_origin        : 8-class ftag track-origin (v1 use_class_dict)
+#   - track_vertexing     : per-track vertex edges
+#   - track_type          : 6-class signed-particle track type (label_map)
+#   - jet_pt_regression   : jet-pT ratio regression (RegressionTaskModule)
+#   - jets_charge         : 3-class b-jet charge (~300-entry PdgId label_map)
+#
+# LossGLS REQUIRES every loss-producing task weight == 1.0 (v1 GLS guard,
+# modelwrapper.py:139-142; LossGLS.check_task_weights, modules.py:1377). v1
+# GN3V01's heads all default to 1.0 (jets_charge sets `weight: 1` explicitly) —
+# so NO head deviates from 1.0.
 #
 # This is the v2-native MIGRATED fixture for GN3V01 (the M7 converter later
-# proves the automated legacy->v2 path matches it). Shrunk to the gn2v2_fixture
-# widths (16-dim, 2 layers, 2 heads) for fast static validation — NOT the
-# production 256-dim/8-layer config (those widths are config values, irrelevant
-# to the graph wiring this gates).
+# proves the automated legacy->v2 path matches it). Shrunk encoder widths (16-dim
+# 2-layer) for fast static validation — widths are config values, irrelevant to
+# the graph wiring this gates; the 6-head architecture + all four features ARE
+# faithful.
 #
 # NO machine paths are committed (design §5 placeholder policy). Static
 # validation (no data) from the REPO ROOT:
 #
 #   python -m salt.core.main graph validate -c salt/core/configs/gn3v01.yaml \
 #     --set model.modules.norm.init_args.norm_dict=unused.yaml \
-#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml \
-#     --strict
+#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml
 
 name: GN3V01
 
@@ -77,8 +96,8 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
-    optimizer: AdamW
+    lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: lion # v1 GN3V01 GLS lion optimiser
     modules:
       # the encoder-stream normaliser (jets is the global context object)
       norm:
@@ -111,7 +130,9 @@ model:
           dim: 16
           out_dim: 16
           num_layers: 2
+          num_registers: 8 # v1 GN3v01/GN3V01.yaml:48 — 8 register tokens
           # the GN3V01 flagship: hybrid norm placement (design §9.2; sub-wave B)
+          norm: RMSNorm # v1 GN3v01/GN3V01.yaml:41 — RMSNorm (not the LayerNorm default)
           norm_type: hybrid
           attention: {num_heads: 2, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
@@ -130,18 +151,21 @@ model:
         init_args:
           inputs: [pooled.global, normed.global]
           out: vconcat.global
+      # head 1/6: 6-class split-light flavour (v1 use_class_dict, GN3V01.yaml:58)
       jets_classification:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: jets
-          input: vconcat.global # the augmented &pooled_dim (design §6.6)
-          label: HadronConeExclTruthLabelID
-          class_names: [ujets, cjets, bjets]
+          input: vconcat.global # the augmented &pooled_dim 258 (design §6.6)
+          label: flavour_label
+          class_names: [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
+          weight_source: null # v1 use_class_dict — override (see header)
           dense: {hidden_layers: [16], activation: SiLU}
-      # a track-level task consuming `encoded.tracks` (via Split) with the
-      # augmented `vconcat.global` as context — the GN3 pattern where every task
-      # sees the global features (design §6.6; consumes the split so the encoder
-      # output is not dead).
+      # head 2/6: 8-class ftag track-origin (v1 use_class_dict, GN3V01.yaml:71).
+      # Consumes `encoded.tracks` (via Split) with the augmented `vconcat.global`
+      # as context — the GN3 pattern where every task sees the global features.
+      # NO weight override: LossGLS requires every loss weight == 1.0 (v1 GN3V01
+      # track_origin defaults to 1.0).
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
@@ -149,10 +173,83 @@ model:
           context: vconcat.global
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight: 0.5
+          weight_source: null # v1 use_class_dict — override (see header)
+          dense: {hidden_layers: [16], activation: SiLU}
+      # head 3/6: per-track vertex edges (v1 VertexingTask, GN3V01.yaml:84)
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: vconcat.global
+          dense: {hidden_layers: [16], activation: SiLU}
+      # head 4/6: 6-class signed-particle track type (v1 label_map, GN3V01.yaml:99)
+      track_type:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: vconcat.global
+          label: ftagTruthTypeLabel
+          label_map: {-2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5}
+          class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
+          dense: {hidden_layers: [16], activation: SiLU}
+      # head 5/6: jet-pT ratio regression — the RegressionTaskModule flagship
+      # feature (v1 RegressionTask jet_pt_regression, GN3V01.yaml:115). Ratio
+      # target/denominator: pt_btagJes is a declared input Feature (ONNX
+      # denominator-in-Features rule, FD §3.3).
+      jet_pt_regression:
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: vconcat.global
+          targets: ptFromTruthDressedWZJet
+          target_denominators: pt_btagJes
+          loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
+          dense: {hidden_layers: [16], activation: SiLU}
+      # head 6/6: 3-class b-jet charge folded from raw PdgId (v1 jets_charge,
+      # GN3V01.yaml:129; the ~300-entry label_map -> {bquark, antibquark, other})
+      jets_charge:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: vconcat.global
+          label: HadronGhostInitialTruthLabelPdgId
+          class_names: [bquark, antibquark, other]
+          weight: 1 # the ONLY weight LossGLS allows (== 1.0)
+          label_map:
+            {
+              0: 2, 15: 2, -15: 2, 511: 1, -511: 0, 513: 1, -513: 0, 521: 1, -521: 0,
+              523: 1, -523: 0, 10511: 1, -10511: 0, 531: 1, -531: 0, 541: 1, -541: 0,
+              543: 1, -543: 0, 10551: 0, 100551: 0, 110551: 1, 20553: 1, 100553: 0,
+              100555: 1, 200553: 0, 120553: 1, 551: 0, 553: 1, 555: 0, 431: 2, -431: 2,
+              421: 2, -421: 2, 411: 2, -411: 2, 441: 2, 443: 2, 445: 2, 4122: 2,
+              -4122: 2, 4132: 2, -4132: 2, 4114: 2, -4114: 2, 4232: 2, -4232: 2,
+              4332: 2, -4332: 2, 10441: 2, 10443: 2, 20443: 2, 100441: 2, 100443: 2,
+              30443: 2, 5122: 0, -5122: 1, 5132: 0, -5132: 1, 5232: 0, -5232: 1,
+              5332: 0, -5332: 1, 4412: 2, 4422: 2, -4412: 2, -4422: 2, 4414: 2,
+              4424: 2, -4414: 2, -4424: 2, 4432: 2, -4432: 2, 4434: 2, -4434: 2,
+              4444: 2, -4444: 2, -4322: 2, 4322: 2, 5142: 0, 5242: 0, -5142: 1,
+              -5242: 1, 5412: 0, 5422: 0, -5412: 1, -5422: 1, 5414: 0, 5424: 0,
+              -5414: 1, -5424: 1, 5342: 0, -5342: 1, 5432: 0, -5432: 1, 5434: 0,
+              -5434: 1, 5442: 0, -5442: 1, 5444: 0, -5444: 1, 5512: 0, -5512: 1,
+              5522: 0, -5522: 1, 5514: 0, -5514: 1, 5532: 0, -5532: 1, 5534: 0,
+              -5534: 1, 5542: 0, -5542: 1, 5544: 0, -5544: 1, 5554: 0, -5554: 1,
+              20433: 2, -20433: 2, 10431: 2, -10431: 2, 4334: 2, -4334: 2, 4324: 2,
+              -4324: 2, 4314: 2, -4314: 2, 4312: 2, -4312: 2, 4224: 2, -4224: 2,
+              4222: 2, -4222: 2, 4214: 2, -4214: 2, 4212: 2, -4212: 2, 4112: 2,
+              -4112: 2, 433: 2, -433: 2, 425: 2, -425: 2, 423: 2, -423: 2, 413: 2,
+              -413: 2, 14122: 2, -14122: 2, 10433: 2, -10433: 2, 10423: 2, -10423: 2,
+              10421: 2, -10421: 2, 10413: 2, -10413: 2, 10411: 2, -10411: 2, 4124: 2,
+              -4124: 2, 20413: 2, -20413: 2, 20423: 2, -20423: 2, 9010443: 2, 435: 2,
+              -435: 2, 415: 2, -415: 2, -5334: 1, 5334: 0, 5324: 0, -5324: 1, 5322: 0,
+              -5322: 1, 5314: 0, -5314: 1, 5312: 0, -5312: 1, 5224: 0, -5224: 1,
+              5222: 0, -5222: 1, 5214: 0, -5214: 1, 5212: 0, -5212: 1, 5114: 0,
+              -5114: 1, 5112: 0, -5112: 1, 533: 1, -533: 0,
+            }
           dense: {hidden_layers: [16], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
 
 writers:
   modules: {} # base2.yaml defaults: InputCopyWriter, PadMaskWriter, TaskWriter

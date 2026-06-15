@@ -1,0 +1,71 @@
+# GN3_Charge.yaml — overlay on GN3V00.yaml that ADDS the b-jet charge task
+# (M5-CONV, GN3 family). The v2-native port of legacy
+# salt/configs/GN3v01/GN3_Charge.yaml ("to be used on top of GN3_Hybrid or
+# GN3V00", adds B-jet charge classification).
+#
+# v1 GN3_Charge re-states the GN3V00 body and appends a 6th task `jets_charge`:
+# a 3-class (bquark / antibquark / other) ClassificationTask whose label is the
+# raw `HadronGhostInitialTruthLabelPdgId` folded through a ~300-entry PdgId
+# label_map (every b/c/light hadron PDG id -> {0,1,2}). Because GN3V00.yaml
+# already declares the identical first five heads, this v2 overlay only ADDS the
+# `jets_charge` module (deep-merge into model.modules, design §5.3); everything
+# else (LossGLS, lion, the 5 base tasks, the tracks+flows body) is inherited.
+#
+# LossGLS guard: the charge head carries `weight: 1` in v1 (GN3_Charge.yaml:117)
+# — 1.0 is the ONLY weight LossGLS permits (modelwrapper.py:139-142;
+# LossGLS.check_task_weights, modules.py:1377), so it is kept explicit and equal
+# to 1.
+#
+# Static validation (STACK GN3V00 first, then this overlay):
+#   python -m salt.core.main graph validate \
+#     -c salt/core/configs/GN3V00.yaml \
+#     -c salt/core/configs/GN3_Charge.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3_Charge
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    modules:
+      # B-jet charge: raw PdgId label folded to 3 classes by the ~300-entry
+      # label_map (v1 GN3_Charge.yaml:115). LossGLS -> weight 1.0.
+      jets_charge:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: HadronGhostInitialTruthLabelPdgId
+          class_names: [bquark, antibquark, other]
+          weight: 1 # the ONLY weight LossGLS allows (== 1.0)
+          label_map:
+            {
+              0: 2, 15: 2, -15: 2, 511: 1, -511: 0, 513: 1, -513: 0, 521: 1, -521: 0,
+              523: 1, -523: 0, 10511: 1, -10511: 0, 531: 1, -531: 0, 541: 1, -541: 0,
+              543: 1, -543: 0, 10551: 0, 100551: 0, 110551: 1, 20553: 1, 100553: 0,
+              100555: 1, 200553: 0, 120553: 1, 551: 0, 553: 1, 555: 0, 431: 2, -431: 2,
+              421: 2, -421: 2, 411: 2, -411: 2, 441: 2, 443: 2, 445: 2, 4122: 2,
+              -4122: 2, 4132: 2, -4132: 2, 4114: 2, -4114: 2, 4232: 2, -4232: 2,
+              4332: 2, -4332: 2, 10441: 2, 10443: 2, 20443: 2, 100441: 2, 100443: 2,
+              30443: 2, 5122: 0, -5122: 1, 5132: 0, -5132: 1, 5232: 0, -5232: 1,
+              5332: 0, -5332: 1, 4412: 2, 4422: 2, -4412: 2, -4422: 2, 4414: 2,
+              4424: 2, -4414: 2, -4424: 2, 4432: 2, -4432: 2, 4434: 2, -4434: 2,
+              4444: 2, -4444: 2, -4322: 2, 4322: 2, 5142: 0, 5242: 0, -5142: 1,
+              -5242: 1, 5412: 0, 5422: 0, -5412: 1, -5422: 1, 5414: 0, 5424: 0,
+              -5414: 1, -5424: 1, 5342: 0, -5342: 1, 5432: 0, -5432: 1, 5434: 0,
+              -5434: 1, 5442: 0, -5442: 1, 5444: 0, -5444: 1, 5512: 0, -5512: 1,
+              5522: 0, -5522: 1, 5514: 0, -5514: 1, 5532: 0, -5532: 1, 5534: 0,
+              -5534: 1, 5542: 0, -5542: 1, 5544: 0, -5544: 1, 5554: 0, -5554: 1,
+              20433: 2, -20433: 2, 10431: 2, -10431: 2, 4334: 2, -4334: 2, 4324: 2,
+              -4324: 2, 4314: 2, -4314: 2, 4312: 2, -4312: 2, 4224: 2, -4224: 2,
+              4222: 2, -4222: 2, 4214: 2, -4214: 2, 4212: 2, -4212: 2, 4112: 2,
+              -4112: 2, 433: 2, -433: 2, 425: 2, -425: 2, 423: 2, -423: 2, 413: 2,
+              -413: 2, 14122: 2, -14122: 2, 10433: 2, -10433: 2, 10423: 2, -10423: 2,
+              10421: 2, -10421: 2, 10413: 2, -10413: 2, 10411: 2, -10411: 2, 4124: 2,
+              -4124: 2, 20413: 2, -20413: 2, 20423: 2, -20423: 2, 9010443: 2, 435: 2,
+              -435: 2, 415: 2, -415: 2, -5334: 1, 5334: 0, 5324: 0, -5324: 1, 5322: 0,
+              -5322: 1, 5314: 0, -5314: 1, 5312: 0, -5312: 1, 5224: 0, -5224: 1,
+              5222: 0, -5222: 1, 5214: 0, -5214: 1, 5212: 0, -5212: 1, 5114: 0,
+              -5114: 1, 5112: 0, -5112: 1, 533: 1, -533: 0,
+            }
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}

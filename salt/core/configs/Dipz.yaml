@@ -1,0 +1,125 @@
+# Dipz.yaml — the DIPZ Gaussian PV-z regression in the v2 schema (M5-CONV,
+# Gaussian-PVz family). The v2-native MIGRATED fixture for legacy
+# salt/configs/legacy/Dipz.yaml (HLT lineage).
+#
+# Dipz is the ENCODER-LESS sibling of hitz: a single `super_tracks` constituent
+# stream is embedded (init_nets) and globally attention-pooled with NO encoder
+# (v1 Dipz.yaml:15-27 — init_nets + pool_net, zero `encoder:` block; v1
+# saltmodel.py:90-93), feeding ONE pooled GAUSSIAN regression head predicting
+# the per-jet primary-vertex z (`TruthJetPVz`). Exactly the M5 encoder-less
+# pooling + GaussianRegressionTask path (the GAP `masks.registers` require is
+# optional, so with no encoder producing it the config plan-compiles).
+#
+# v1 single head (Dipz.yaml:33-45):
+#   - gaussian_regression : pooled global head, mean/std norm_params, TruthJetPVz
+#
+# The Gaussian head publishes ONE [B, 2R] array (R means then R stddevs, FD
+# 1567-1568 one-array contract); the TaskWriter owns the `_stddev` suffix split.
+# The ONNX stddev = sqrt(softplus(var)) is traced in-graph (design-conformance,
+# no v1 ONNX golden — v1 onnx/to_onnx.py has zero Gaussian handling).
+#
+# CONDITIONAL DROP (matrix §5.1, user-adjudicated 2026-06-12): Dipz drops from
+# the M5 working scope the moment hitz reproduces in v2 (same Gaussian z-head).
+# It is authored here best-effort and validated for completeness; per the matrix
+# it can be dropped rather than block.
+#
+# v1 `jets` carries [eta] only (Dipz.yaml:57-58) as the global context object.
+#
+# NO machine paths committed (design §5 placeholder policy). Static validation
+# (no data) FROM THE REPO ROOT (use `python -m salt.core.main`):
+#   python -m salt.core.main graph validate -c salt/core/configs/Dipz.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: Dipz
+
+data:
+  batch_size: 2048
+  num_workers: 4
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          super_tracks: {vector: false}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [eta]
+          super_tracks:
+            [
+              z0RelativeToBeamspot,
+              pt,
+              d0,
+              deta,
+              dphi,
+              chiSquared,
+              numberDoF,
+              qOverP,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
+    lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-7, pct_start: 0.2}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, super_tracks]
+          global_object: jets
+      super_track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: super_tracks # requires normed.super_tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: 32 # v1 Dipz.yaml:19 init_nets output_size 32
+          dense: {hidden_layers: [128, 128, 128], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask (no encoder)
+        init_args: {streams: [super_tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args:
+          input: seq.x # the Concat output (encoder-less: no encoded.seq)
+          out: pooled.global
+      gaussian_regression:
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          gaussian: true # mu/sigma head, output_size == 2 (v1 task.py:645)
+          targets: TruthJetPVz
+          # v1 Dipz.yaml:38 — mean 0, std 37.81209182739258
+          norm_params: {mean: 0.0, std: 37.81209182739258}
+          loss: GaussianNLLLoss
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+
+writers:
+  modules:
+    # the only task is a pooled GLOBAL gaussian head (no sequence-stream task),
+    # so there is no pad mask to write — delete the base2.yaml default (design
+    # §5.3 null-deletion). InputCopyWriter + TaskWriter keep their jets roles.
+    pad_mask: null
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: Dipz # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.super_tracks, name: super_track_features, sequence: true, dyn_axis: n_super_tracks} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the default
+  # TaskWriter declares Dipz_TruthJetPVz + Dipz_TruthJetPVz_stddev (split_scalars).
+  # Inspect with `salt2 graph resolve -c <this file>`.
+
+trainer:
+  max_epochs: 40
+  precision: 16-mixed

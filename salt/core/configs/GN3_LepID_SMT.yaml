@@ -1,0 +1,57 @@
+# GN3_LepID_SMT.yaml — data-only overlay on the GN3_baseline -> loose -> flow
+# stack (M5-CONV, GN3 family). The v2-native port of legacy
+# salt/configs/GN3_dev/GN3_LepID_SMT.yaml.
+#
+# Adds the lepton-ID + soft-muon-tagging (SMT) track variables (leptonID,
+# muon_quality, muon_qOverPratio, muon_momentumBalanceSignificance,
+# muon_scatteringNeighbourSignificance) to the `tracks` feature list — purely a
+# data-side change (v1 only extends `data.variables.tracks`, GN3_LepID_SMT.yaml:
+# 36-40). The model graph is unchanged: the StreamEmbed's per-track input width
+# grows by 5, which the bind-time width inference picks up; no module is added.
+# The features `variables.<stream>` value is a list, so it REPLACES rather than
+# deep-merges (design §5.3) — this overlay re-states the full tracks list with
+# the SMT vars appended (matching the v1 overlay re-stating it).
+#
+# Static validation (STACK base -> loose -> flow -> this):
+#   python -m salt.core.main graph validate \
+#     -c salt/core/configs/GN3_baseline.yaml \
+#     -c salt/core/configs/GN3_baseline_loose.yaml \
+#     -c salt/core/configs/GN3_flow.yaml \
+#     -c salt/core/configs/GN3_LepID_SMT.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3_LepID_SMT
+
+data:
+  modules:
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          tracks: # GN3_baseline tracks + the LepID/SMT soft-muon variables
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+              leptonID,
+              muon_quality,
+              muon_qOverPratio,
+              muon_momentumBalanceSignificance,
+              muon_scatteringNeighbourSignificance,
+            ]

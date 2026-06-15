@@ -1,0 +1,65 @@
+# GN3_tracklabel.yaml — overlay on the GN3_baseline -> loose -> flow ->
+# LepID_SMT stack (M5-CONV, GN3 family). The v2-native port of legacy
+# salt/configs/GN3_dev/GN3_tracklabel.yaml.
+#
+# v1 REPLACES the task list with 5 heads: the GN3_baseline three
+# (jets_classification / track_origin / track_vertexing) PLUS a 10-class signed
+# `track_type` and a 7-class `track_source`. There is NO regression task in this
+# variant (matrix §2: "no regression task in this variant"). Because the base's
+# first three tasks are identical, the v2 overlay only ADDS the two new task
+# modules (deep-merge into model.modules, design §5.3) — the loss stays the
+# GN3_baseline LossGLS.
+#
+# The 10-class track_type uses a SIGNED label_map (charge-aware: NegMuon ..
+# Muon, v1 GN3_tracklabel.yaml:60); track_source is `use_class_dict` (7-class,
+# weight_source null override at fit). Both are LossGLS tasks, so weight == 1.0
+# (NO weight declared) — the GLS guard (modelwrapper.py:139-142).
+#
+# Static validation (STACK base -> loose -> flow -> LepID_SMT -> this):
+#   python -m salt.core.main graph validate \
+#     -c salt/core/configs/GN3_baseline.yaml \
+#     -c salt/core/configs/GN3_baseline_loose.yaml \
+#     -c salt/core/configs/GN3_flow.yaml \
+#     -c salt/core/configs/GN3_LepID_SMT.yaml \
+#     -c salt/core/configs/GN3_tracklabel.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3_tracklabel
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    modules:
+      # 10-class SIGNED particle-type track label (charge-aware; v1 label_map
+      # GN3_tracklabel.yaml:60). use_class_dict in v1 -> weight_source null here.
+      track_type:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthTypeLabel
+          label_map: {-6: 0, -5: 1, -3: 2, -2: 3, 0: 4, 1: 5, 2: 6, 3: 7, 5: 8, 6: 9}
+          class_names:
+            [NegMuon, NegElectron, NegKaon, NegPion, NoTruth, Other, Pion, Kaon, Electron, Muon]
+          weight_source: null # v1 use_class_dict — override at fit
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      # 7-class track source (v1 use_class_dict, GN3_tracklabel.yaml:70)
+      track_source:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthSourceLabel
+          # 7 source classes (v1 use_class_dict autodiscovered; names baked here)
+          class_names:
+            [
+              NoTruth,
+              FromB,
+              FromBC,
+              FromC,
+              FromTau,
+              FromFragmentation,
+              FromSecondary,
+            ]
+          weight_source: null # v1 use_class_dict — override at fit
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}

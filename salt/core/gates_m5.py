@@ -213,6 +213,24 @@ Gate criteria (each justified in its ``run_r*`` docstring vs the design/v1 ref):
   key, and a config carrying the old ``lrs_config:`` key FAILS the real
   config-load path (the renamed kwarg is rejected — v1
   ``modelwrapper.py``/``base.yaml:45``).
+- **CONV (M5-CONV) the consolidated acceptance gate** (plan 10 §4 / matrix §4 —
+  the M7-slice acceptance for M5). For EVERY needs-M5 config (the matrix §2 ``🔶``
+  rows + the plan-10-adjudicated ``regression_multi_target``; the AUTHORITATIVE
+  list is embedded VERBATIM in ``_CONV_CONFIGS`` and the report) it drives the
+  REAL ``salt2 graph validate`` (the canonical static validator, the d2cfg command
+  path) in fit + test (+ onnx where the config is export-representable;
+  ``event_classifier`` is fit/test-only — a non-feature ratio denominator, no
+  ``export:`` block) and asserts rc == 0 (no error-level finding — design §4.2:
+  convert+validate+plan-compile). The gate exits non-zero if any matrix ``🔶``
+  config is MISSING from the list or FAILS a mode. NO ``--strict``: a data-free
+  validation cannot satisfy it (the no-``schema:`` warning, cli.py:832-836, fires
+  for every config without a schema artifact — derived from a real H5, none
+  data-free — and ``--strict`` promotes it, cli.py:919-920; the same rationale
+  d2cfg + every config header record). CONV makes NO new forward-parity claim —
+  the family-representative forward parity is owned by R1-R4 / L1-L3 / MF1a/MF1c/
+  MF2 (plan 10 §4.4). Its corruption hook transforms the embedded config LIST
+  (inject a missing/bogus entry) to give the completeness + per-config assertions
+  teeth.
 
 Negative-control hooks (the pytest suite, ``test_gates_m5.py``): each ``run_*``
 takes a python-only ``corruption`` keyword applied to the v2 OBSERVED values (or
@@ -343,6 +361,7 @@ from salt.utils.scalers import RegressionTargetScaler
 __all__ = [
     "PARITY_ATOL",
     "main",
+    "run_conv",
     "run_d1",
     "run_d2cfg",
     "run_d2ckpt",
@@ -4166,18 +4185,530 @@ def _write_probe_writer_config(outdir: Path, *, kind: str, dtype: str | None, fn
 
 
 # ---------------------------------------------------------------------------
+# M5-CONV — the consolidated acceptance gate (plan 10 §4 / matrix §4)
+# ---------------------------------------------------------------------------
+
+# The AUTHORITATIVE needs-M5 config list — config-coverage-matrix.md §2/§4, the
+# 23 `🔶 needs-M5` rows, PLUS `regression_multi_target` (matrix §2 marks it
+# `🔷 needs-M6` for the MultiTarget processor, but plan 10 ADJUDICATED the
+# processor INTO M5 — its R4 gate, its `RegressionTaskModule`/pooling parts, and
+# the study CLAUDE.md's "7 already-existing needs-M5 configs" all place it in
+# M5; co-locating it here keeps the regression family undivided, plan 10 l.62-66).
+#
+# Each entry pins, for the v2-native MIGRATED fixture in `salt/core/configs/`:
+#   name           — the matrix §2 v1 config it reproduces (the report key)
+#   cfg            — the v2 config filenames to stack with `-c` (overlays carry
+#                    their FULL declared base chain first, then the overlay; the
+#                    exact stack in each config's header — design §5.3 list/dict
+#                    merge semantics mean an overlay is only valid composed)
+#   norm_global    — True when the config has a SECOND `norm_global` Normaliser
+#                    (the GN3/GN2 `global` post-pooling concat stream) needing its
+#                    own data-free `--set ...norm_global...norm_dict` override
+#   onnx           — "validate" when the config (its stack's base) declares an
+#                    `export:` block so `salt2 graph validate --mode onnx` gates a
+#                    real export plan; "na" when the config has NO ONNX export
+#                    representation (event_classifier: a non-feature ratio
+#                    denominator + no `export:` block — fit/test only, design §3.3
+#                    + the config header)
+#   family         — the matrix §2 grouping (for the report table)
+#   note           — the M5 feature(s) this config's validation exercises
+#
+# This list IS the §4 acceptance denominator embedded in the report (plan 10
+# M5-CONV row: "the exact config names embedded in the report"); a `🔶` matrix
+# config absent here, or any config that fails its modes, fails the gate.
+_CONV_CONFIGS: tuple[dict[str, Any], ...] = (
+    # -- regression family (encoder-less pooling + RegressionTaskModule) -------
+    {
+        "name": "regression",
+        "cfg": ("regression.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "RegressionTask all variants + encoder-less pooling + ONNX denom-in-Features",
+    },
+    {
+        "name": "regression_gaussian",
+        "cfg": ("regression_gaussian.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "GaussianRegressionTask (mu/sigma) + ONNX stddev + encoder-less pooling",
+    },
+    {
+        "name": "regression_weighted",
+        "cfg": ("regression_weighted.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "RegressionTask sample_weight + encoder-less pooling",
+    },
+    {
+        "name": "regression_multi_target",
+        "cfg": ("regression_multi_target.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "MultiTarget processor (plan 10 ADJUDICATED into M5) + RegressionTask",
+    },
+    {
+        "name": "nan_regression",
+        "cfg": ("nan_regression.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "RegressionTask NaN-target masking + encoder-less pooling",
+    },
+    {
+        "name": "legacy/dips",
+        "cfg": ("dips.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "regression",
+        "note": "encoder-less pooling (the primary CI smoke fixture, KEEP despite legacy/)",
+    },
+    # -- GN3 family (LossGLS + RegressionTask; standalone + overlay stacks) -----
+    {
+        "name": "GN3V00",
+        "cfg": ("GN3V00.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "LossGLS + RegressionTask (the GN3 dev baseline body)",
+    },
+    {
+        "name": "GN3_v00",
+        "cfg": ("GN3_v00.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "standalone dev twin of GN3V00 (IP3D-named vars); LossGLS + RegressionTask",
+    },
+    {
+        "name": "GN3_baseline",
+        "cfg": ("GN3_baseline.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "LossGLS + track selections (the GN3_dev overlay-stack base)",
+    },
+    {
+        "name": "GN3_Hybrid",
+        "cfg": ("GN3V00.yaml", "GN3_Hybrid.yaml"),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "norm_type:hybrid passthrough overlay on GN3V00; (stack) LossGLS",
+    },
+    {
+        "name": "GN3_Charge",
+        "cfg": ("GN3V00.yaml", "GN3_Charge.yaml"),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "b-jet charge task overlay on GN3V00; (stack) LossGLS + RegressionTask",
+    },
+    {
+        "name": "GN3_baseline_loose",
+        "cfg": ("GN3_baseline.yaml", "GN3_baseline_loose.yaml"),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "selections:null overlay on GN3_baseline; (stack) LossGLS",
+    },
+    {
+        "name": "GN3_dR",
+        "cfg": ("GN3_baseline.yaml", "GN3_dR.yaml"),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "dR-matched tracks retarget overlay on GN3_baseline; (stack) LossGLS",
+    },
+    {
+        "name": "GN3_flow",
+        "cfg": ("GN3_baseline.yaml", "GN3_baseline_loose.yaml", "GN3_flow.yaml"),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "pflow-stream overlay on GN3_baseline->loose; (stack) LossGLS",
+    },
+    {
+        "name": "GN3_LepID_SMT",
+        "cfg": (
+            "GN3_baseline.yaml",
+            "GN3_baseline_loose.yaml",
+            "GN3_flow.yaml",
+            "GN3_LepID_SMT.yaml",
+        ),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "lepton-ID+SMT data overlay on GN3_baseline->loose->flow; (stack) LossGLS",
+    },
+    {
+        "name": "GN3_tracklabel",
+        "cfg": (
+            "GN3_baseline.yaml",
+            "GN3_baseline_loose.yaml",
+            "GN3_flow.yaml",
+            "GN3_LepID_SMT.yaml",
+            "GN3_tracklabel.yaml",
+        ),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "GN3",
+        "note": "5-task track_type/track_source overlay (deepest stack); (stack) LossGLS",
+    },
+    # -- concat/global family (VectorConcat + export.inputs alias) --------------
+    {
+        "name": "GN3V01",
+        "cfg": ("gn3v01.yaml",),
+        "norm_global": True,
+        "onnx": "validate",
+        "family": "concat",
+        "note": "flagship GN3: VectorConcat+alias + LossGLS + norm_type:hybrid + RegressionTask",
+    },
+    {
+        "name": "GN2emu",
+        "cfg": ("GN2emu.yaml",),
+        "norm_global": True,
+        "onnx": "na",
+        "family": "concat",
+        "note": (
+            "VectorConcat (soft-muon global concat) outside the GN3 family; fit+test ONLY "
+            "— no export: block. The 14-var soft-muon `global` has no ONNX representation: v1 "
+            "only clones `global` from global_object (=jets, 2 vars; to_onnx.py:377-378), which "
+            "is width-incoherent for the 14-wide slot (pooled_dim 142) — v1 never exported it"
+        ),
+    },
+    {
+        "name": "GN3_SoftE",
+        "cfg": ("GN3V00.yaml", "GN3_SoftE.yaml"),
+        "norm_global": True,
+        "onnx": "validate",
+        "family": "concat",
+        "note": "electrons stream + global concat overlay on GN3V00; (stack) LossGLS",
+    },
+    {
+        "name": "GN3EPCLV01",
+        "cfg": ("GN3EPCLV01.yaml",),
+        "norm_global": True,
+        "onnx": "validate",
+        "family": "concat",
+        "note": "GN3 3-stream: LossGLS + norm_type:hybrid + VectorConcat+alias + RegressionTask",
+    },
+    # -- Gaussian-PVz / event-level / MaskFormer -------------------------------
+    {
+        "name": "hitz",
+        "cfg": ("hitz.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "gaussian",
+        "note": "GaussianRegressionTask on an encoder (HLT hits PV-z)",
+    },
+    {
+        "name": "legacy/Dipz",
+        "cfg": ("Dipz.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "gaussian",
+        "note": "encoder-less GaussianRegressionTask; CONDITIONAL DROP (drops once hitz validates)",
+    },
+    {
+        "name": "event_classifier",
+        "cfg": ("event_classifier.yaml",),
+        "norm_global": False,
+        "onnx": "na",
+        "family": "event",
+        "note": (
+            "RegressionTask TEST de-scaling from a NON-feature label (design §3.3 fallback); "
+            "fit+test ONLY — no export: block, the ratio denominator is not an input Feature so "
+            "there is no ONNX representation (config header; v1 never exported it)"
+        ),
+    },
+    {
+        "name": "MaskFormer",
+        "cfg": ("MaskFormer.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "maskformer",
+        "note": "MaskDecoder + MaskFormerMatchedLoss + MaskFormerTargets + object writer + metrics",
+    },
+)
+
+
+def _conv_set_args(entry: dict[str, Any], norm_dict: Path) -> list[str]:
+    """Build the data-free ``--set`` overrides for one config (norm + norm_global).
+
+    Every shipped v2 config materialises its `Normaliser` from a norm dict at
+    setup; static validation supplies it data-free via the documented
+    ``--set model.modules.norm.init_args.norm_dict=<path>`` (design §5 / each
+    config header). The concat/global configs carry a SECOND ``norm_global``
+    Normaliser that needs its own override.
+
+    Returns
+    -------
+    list[str]
+        The ``--set KEY=VALUE`` flag pairs (already split for ``salt2_main``).
+    """
+    args = ["--set", f"model.modules.norm.init_args.norm_dict={norm_dict}"]
+    if entry["norm_global"]:
+        args += ["--set", f"model.modules.norm_global.init_args.norm_dict={norm_dict}"]
+    return args
+
+
+def _conv_modes(entry: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Resolve the (mode, key) pairs to validate for one config.
+
+    Always fit + test; onnx only when the config is export-representable (the
+    ``onnx`` field is ``"validate"``). event_classifier (``onnx == "na"``) has
+    no ONNX representation, so its onnx slot is reported ``na``, never validated.
+
+    Returns
+    -------
+    tuple[tuple[str, str], ...]
+        ``((cli_mode, report_key), ...)`` — the modes `salt2 graph validate`
+        is actually invoked for.
+    """
+    modes = [("fit", "validateFit"), ("test", "validateTest")]
+    if entry["onnx"] == "validate":
+        modes.append(("onnx", "validateOnnx"))
+    return tuple(modes)
+
+
+def run_conv(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """M5-CONV: the consolidated acceptance gate (plan 10 §4 / matrix §4).
+
+    For EVERY needs-M5 config (the matrix §2 ``🔶`` rows + the M5-adjudicated
+    ``regression_multi_target``), this drives the canonical static validator —
+    the REAL ``salt2 graph validate`` subcommand (``salt2_main``, the SAME
+    command path d2cfg exercises) — in fit + test (+ onnx where the config is
+    export-representable) and asserts rc == 0 for every applicable mode. The
+    authoritative config list (``_CONV_CONFIGS``) is embedded VERBATIM in the
+    report (plan 10 M5-CONV row: "the exact config names embedded in the
+    report"). The gate exits non-zero if any matrix ``🔶`` config is MISSING from
+    the list or if any config FAILS a mode (plan 10 §4.2/§4.3: convert +
+    statically validate + plan-compile for every applicable mode).
+
+    Why NO ``--strict``: a data-free validation cannot satisfy ``--strict``. The
+    acceptance level is ``rc == 0`` (no ERROR-level finding: a GraphError, an
+    error-level deadcode finding, or a stored mode error — design §4.2), which IS
+    the convert+validate+plan-compile criterion. ``--strict`` promotes EVERY
+    warning to an error (cli.py:919-920), and several warnings are inherent to
+    data-free validation and orthogonal to convertibility:
+
+    1. the no-``schema:`` warning ("field spellings cannot be checked
+       statically", cli.py:832-836) — emitted for every config lacking a
+       `schema:` artifact (derived from a real H5 via `salt2 schema dump`, none
+       data-free);
+    2. warning-level deadcode such as ``[mode=TEST] concat/seq.layout: produced
+       but never consumed`` (the Concat layout helper is consumed only by
+       flash-varlen attention paths absent in the torch-math fixtures) and the
+       per-mode "produced but never consumed" prediction infos;
+    3. `Normaliser` preflight warnings for streams the parity norm dict does not
+       supply (it covers jets/tracks/electrons but NOT the GN3 `global` or the
+       event `events` stream, so GN3V01/GN2emu/GN3_SoftE/GN3EPCLV01 and
+       event_classifier emit "missing input type 'global'/'events'").
+
+    So ``--strict`` is unusable here for reasons BEYOND the no-schema warning —
+    the report does NOT claim no-schema is the only blocker. This is exactly why
+    d2cfg's end-to-end `salt2 graph validate` probes and EVERY config header
+    validate WITHOUT ``--strict`` (the d2cfg docstring records the same
+    rationale). The parity norm dict is still written so the jets/tracks/
+    electrons preflight resolves and the bind succeeds — the remaining
+    global/events preflight warnings are data-shape artifacts, not graph errors.
+
+    Forward-parity: M5-CONV makes NO new forward-parity claim. The family
+    representatives' forward parity is owned by the R/L/MF gates (R1-R4, L1-L3,
+    MF1a/MF1c/MF2); this gate is the static convert+validate+plan-compile slice
+    (plan 10 §4.4: "forward-parity spot-checks only for family reps already
+    covered by R/L/MF gates").
+
+    Parameters
+    ----------
+    outdir : Path | str
+        Report output directory (the parity norm dict is written here too).
+    corruption : Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        Test-only hook (the gates_m2/m3/m4 pattern): transforms the embedded
+        config list before validation (e.g. inject a missing/bogus config) to
+        prove the completeness + per-config assertions have teeth. Never on CLI.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)`` — 0 only if the list is complete AND every
+        config validated every applicable mode.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print(
+        "M5-CONV consolidated acceptance — salt2 graph validate (fit/test/onnx) on needs-M5 configs"
+    )
+    print("=" * 96)
+    norm_dict = _norm_dict(outdir)
+
+    configs: list[dict[str, Any]] = [dict(e) for e in _CONV_CONFIGS]
+    if corruption is not None:
+        configs = corruption(configs)
+
+    # -- completeness: every matrix §2 `🔶` config has an entry here -----------
+    # the AUTHORITATIVE needs-M5 names (matrix §2 `🔶` rows; v1 config names).
+    # `regression_multi_target` is matrix-`🔷` but plan-10-ADJUDICATED into M5
+    # (so it is REQUIRED here, not optional — see the _CONV_CONFIGS preamble).
+    matrix_needs_m5 = {
+        "GN2emu",
+        "GN3V01",
+        "GN3V00",
+        "GN3_Hybrid",
+        "GN3_Charge",
+        "GN3_SoftE",
+        "GN3_baseline",
+        "GN3_baseline_loose",
+        "GN3_dR",
+        "GN3_flow",
+        "GN3_LepID_SMT",
+        "GN3_tracklabel",
+        "GN3_v00",
+        "event_classifier",
+        "GN3EPCLV01",
+        "hitz",
+        "MaskFormer",
+        "nan_regression",
+        "regression",
+        "regression_gaussian",
+        "regression_weighted",
+        "legacy/dips",
+        "legacy/Dipz",
+        "regression_multi_target",  # matrix-🔷, plan-10-adjudicated into M5
+    }
+    present = {e["name"] for e in configs}
+    missing = sorted(matrix_needs_m5 - present)
+
+    checks: dict[str, bool] = {}
+    checks["all_matrix_needs_m5_configs_present"] = missing == []
+
+    # -- per-config validation across the applicable modes --------------------
+    results: list[dict[str, Any]] = []
+    for entry in configs:
+        cargs: list[str] = []
+        for cfg_name in entry["cfg"]:
+            cargs += ["-c", str(CONFIG_DIR / cfg_name)]
+        set_args = _conv_set_args(entry, norm_dict)
+        row: dict[str, Any] = {
+            "name": entry["name"],
+            "family": entry["family"],
+            "cfg_stack": list(entry["cfg"]),
+            "note": entry["note"],
+            "validateFit": False,
+            "validateTest": False,
+            "validateOnnx": entry["onnx"] if entry["onnx"] == "na" else False,
+            "rc": {},
+        }
+        for cli_mode, report_key in _conv_modes(entry):
+            rc = salt2_main(["graph", "validate", "--mode", cli_mode, *cargs, *set_args])
+            row["rc"][cli_mode] = rc
+            ok = rc == 0
+            row[report_key] = ok
+            checks[f"{entry['name']}:{cli_mode}"] = ok
+        results.append(row)
+
+    passed = all(checks.values())
+    n_total = len(configs)
+    n_validated = sum(
+        1
+        for r in results
+        if r["validateFit"] and r["validateTest"] and r["validateOnnx"] in {True, "na"}
+    )
+
+    criterion = (
+        "the M7-slice acceptance (plan 10 §4 / matrix §4): EVERY needs-M5 config (the matrix §2 "
+        f"🔶 rows + the plan-10-adjudicated regression_multi_target; {n_total} configs, names "
+        "embedded in the report) has a v2-native MIGRATED fixture in salt/core/configs/ that the "
+        "REAL salt2 graph validate (the canonical static validator, the d2cfg command path) "
+        "convert+validates+plan-compiles in fit + test (+ onnx where export-representable; "
+        "event_classifier is fit/test-only — no ONNX representation) with rc == 0; the list is "
+        "complete vs the matrix and exits non-zero if any config is missing or fails. No --strict "
+        "(the no-schema warning is inherent to data-free validation — see the docstring); no new "
+        "forward-parity claim (owned by R/L/MF)."
+    )
+    report = _base_report(
+        "m5_conv_acceptance",
+        passed,
+        criterion,
+        {
+            "norm_dict": str(norm_dict),
+            "strict": False,
+            "total_configs": n_total,
+            "validated_configs": n_validated,
+            "missing_matrix_configs": missing,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["configs"] = results
+    report["matrix_needs_m5"] = sorted(matrix_needs_m5)
+    report["scope_note"] = (
+        "M5-CONV is the consolidated convert+validate+plan-compile acceptance (plan 10 §4 / "
+        "matrix §4): static validation ONLY (salt2 graph validate fit/test/onnx). It makes NO "
+        "forward-parity claim — the family-representative forward parity is owned by R1-R4 / "
+        "L1-L3 / MF1a/MF1c/MF2. regression_multi_target is included (matrix-🔷 but "
+        "plan-10-adjudicated into M5). legacy/Dipz is VALIDATED here for completeness but is "
+        "NOT counted in the matrix §1 M7 denominator (39) — it is a CONDITIONAL DROP that drops "
+        "once hitz reproduces in v2; hitz now validates here too, so Dipz is droppable at M7 "
+        "(validating a drop candidate is harmless/conservative). The M5-CONV total (24) thus "
+        "exceeds the M7 denominator's GN3/regression slice by this one drop candidate. "
+        "event_classifier validates fit+test only (no ONNX export representation)."
+    )
+    report["no_strict_rationale"] = (
+        "no --strict: a data-free validation cannot satisfy it. --strict promotes EVERY warning to "
+        "an error (cli.py:919-920) and SEVERAL warnings are inherent to data-free validation, "
+        "orthogonal to convertibility — NOT just the no-schema one: (1) the no-schema warning "
+        "(cli.py:832-836, every config lacking a schema: artifact, derived from a real H5 via "
+        "salt2 schema dump — none data-free); (2) warning-level deadcode like '[mode=TEST] "
+        "concat/seq.layout produced but never consumed' (the Concat layout helper feeds only "
+        "flash-varlen attention, absent in the torch-math fixtures) + the per-mode unconsumed-pred "
+        "infos; (3) Normaliser preflight warnings for the GN3 'global' / event 'events' streams "
+        "the parity norm dict does not supply (it covers jets/tracks/electrons only). The parity "
+        "norm dict resolves the jets/tracks/electrons preflight so bind succeeds; the "
+        "global/events warnings are data-shape artifacts, not graph errors. Same rationale as "
+        "d2cfg and every "
+        "config header. rc == 0 (no ERROR-level finding, design §4.2) IS the "
+        "convert+validate+plan-compile criterion."
+    )
+
+    # -- stdout table ----------------------------------------------------------
+    print(f"{'config':<26}{'family':<12}{'fit':>5}{'test':>6}{'onnx':>7}   stack / note")
+    for r in results:
+        onnx_disp = "na" if r["validateOnnx"] == "na" else ("PASS" if r["validateOnnx"] else "FAIL")
+        print(
+            f"{r['name']:<26}{r['family']:<12}"
+            f"{'PASS' if r['validateFit'] else 'FAIL':>5}"
+            f"{'PASS' if r['validateTest'] else 'FAIL':>6}"
+            f"{onnx_disp:>7}   {'+'.join(r['cfg_stack'])}"
+        )
+    if missing:
+        print(f"\nMISSING matrix 🔶 configs (no _CONV_CONFIGS entry): {missing}")
+    print(f"\n{n_validated}/{n_total} configs validated all applicable modes")
+    _print_verdict("conv", passed, criterion, _emit_report(report, outdir, "conv"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the gate subcommand parser (R1-R4, L1-L3, MF1a/MF1c/MF2, D1, D2ckpt/D2expose/D2cfg).
+    """Build the gate subcommand parser (R1-R4, L1-L3, MF1a/MF1c/MF2, D1, D2*, CONV).
 
     Returns
     -------
     argparse.ArgumentParser
         Parser with the ``r1``/``r2``/``r3``/``r4``/``l1``/``l2``/``l3``/
-        ``mf1a``/``mf1c``/``mf2``/``d1``/``d2ckpt``/``d2expose``/``d2cfg``
+        ``mf1a``/``mf1c``/``mf2``/``d1``/``d2ckpt``/``d2expose``/``d2cfg``/``conv``
         subcommands.
     """
     parser = argparse.ArgumentParser(
@@ -4202,6 +4733,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "(sub-wave D-rest)",
         "d2cfg": "writer TensorSpec kind/dtype validation + lrs_config->lrs migration "
         "(sub-wave D-rest)",
+        "conv": "M5-CONV consolidated acceptance: salt2 graph validate (fit/test/onnx) on "
+        "EVERY needs-M5 config (plan 10 §4 / matrix §4)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -4233,6 +4766,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "d2ckpt": run_d2ckpt,
         "d2expose": run_d2expose,
         "d2cfg": run_d2cfg,
+        "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)
     return code

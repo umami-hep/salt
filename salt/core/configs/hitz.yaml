@@ -1,0 +1,126 @@
+# hitz.yaml — the HLT hits-based PV-z GaussianRegressionTask in the v2 schema
+# (M5-CONV, Gaussian-PVz family). The v2-native MIGRATED fixture for the legacy
+# top-level salt/configs/hitz.yaml.
+#
+# A SINGLE constituent stream (HLT `hits`) is embedded to 32 dims (v1 init_nets
+# output_size 32, hitz.yaml:17), run through a `TransformerEncoder` (v1
+# hitz.yaml:22-31 — 6 layers, embed_dim 32 -> out_dim 128, NOT encoder-less; v1
+# re-anchors out_dim 128 at hitz.yaml:27), globally attention-pooled at 128, and
+# fed to ONE pooled GAUSSIAN regression head
+# predicting the per-jet primary-vertex z (`TruthJetPVz`). The Gaussian head
+# emits 2 x targets (mu ‖ raw variance), softplus variance, Gaussian NLL, and a
+# `stddev = sqrt(softplus(var))` inference de-scaling (v1
+# salt.models.GaussianRegressionTask, task.py:645) — the M5 RegressionTaskModule
+# `gaussian: true` path.
+#
+# v1 single head (hitz.yaml:47-59):
+#   - gaussian_regression : pooled global head, mean/std norm_params, TruthJetPVz
+#
+# The Gaussian head publishes ONE [B, 2R] array (R means then R stddevs, FD
+# 1567-1568 one-array contract); the TaskWriter owns the `_stddev` suffix split.
+# The ONNX stddev representation is the M4.5 deferral-(b) design-conformance
+# (stddev = sqrt(softplus(var)) traced in-graph) — there is NO v1 ONNX golden
+# (v1 onnx/to_onnx.py has zero Gaussian handling).
+#
+# v1 `jets` carries [pt, eta] (hitz.yaml:73-75) as the global context object the
+# hits embedding attaches; the regression head is on the `jets` stream.
+#
+# NO machine paths committed (design §5 placeholder policy). Static validation
+# (no data) FROM THE REPO ROOT (use `python -m salt.core.main`):
+#   python -m salt.core.main graph validate -c salt/core/configs/hitz.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: Hitz
+
+data:
+  batch_size: 128
+  num_workers: 4
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          hits: {vector: false}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta]
+          hits: [layer, j, a, b]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
+    lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-7, pct_start: 0.2}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, hits]
+          global_object: jets
+      hits_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: hits # requires normed.hits
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          # v1 init_nets output_size 32 (hitz.yaml:17) — the init_net embeds hits
+          # to 32; the encoder then projects 32 -> 128 (v1 re-anchors out_dim 128
+          # at hitz.yaml:27, so embed_dim 32 feeds the encoder, out_dim 128 leaves)
+          out_dim: &embed_dim 32
+          dense: {hidden_layers: [128, 128, 128], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask
+        init_args: {streams: [hits]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim # v1 encoder embed_dim 32 (= init_net output_size)
+          out_dim: &out_dim 128 # v1 encoder out_dim 128 (hitz.yaml:27)
+          num_layers: 6 # v1 hitz.yaml:25
+          attention: {num_heads: 2, attn_type: torch-math} # flash-varlen: M6
+          dense: {activation: ReLU, gated: false}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      gaussian_regression:
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          gaussian: true # mu/sigma head, output_size == 2 (v1 task.py:645)
+          targets: TruthJetPVz
+          # v1 hitz.yaml:52 — mean 0, std 37.81209182739258
+          norm_params: {mean: 0.0, std: 37.81209182739258}
+          loss: GaussianNLLLoss
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+
+writers:
+  modules:
+    # the only task is a pooled GLOBAL gaussian head (no sequence-stream task),
+    # so there is no pad mask to write — delete the base2.yaml default (design
+    # §5.3 null-deletion). InputCopyWriter + TaskWriter keep their jets-stream
+    # roles (gaussian columns: <run>_TruthJetPVz + _stddev, split_scalars).
+    pad_mask: null
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: Hitz # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the default
+  # TaskWriter declares Hitz_TruthJetPVz + Hitz_TruthJetPVz_stddev (split_scalars).
+  # The stddev = sqrt(softplus(var)) is traced in-graph (design-conformance, no v1
+  # ONNX golden). Inspect with `salt2 graph resolve -c <this file>`.
+
+trainer:
+  max_epochs: 100
+  precision: 16-mixed

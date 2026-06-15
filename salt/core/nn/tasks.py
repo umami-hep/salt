@@ -54,6 +54,18 @@ __all__ = ["ClassificationTaskModule", "RegressionTaskModule", "VertexingTaskMod
 _UNNAMED = "unnamed"
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 
+# Streams that are a fixed-count query bank rather than a variable-length,
+# pad-masked constituent sequence. The MaskFormer ``objects`` stream is M
+# learnable object queries from the `MaskDecoder` (`objects.embed` is
+# ``[B, M, D]`` with M fixed) — there is NO padding and so NO ``masks.objects``
+# pad mask anywhere in the graph. A sequence-mode task on such a stream must NOT
+# require/consume a pad mask, mirroring v1 ``RegressionTask.forward`` /
+# ``ClassificationTask.forward`` which EXEMPT the objects stream (task.py:547:
+# ``if pad_masks is not None and self.input_name != "objects"``). Without this,
+# an objects-stream sequence head demands ``masks.objects`` and fails graph
+# validation with a ConnectivityError (no module produces it).
+_NO_PAD_MASK_STREAMS = frozenset({"objects"})
+
 _DEFAULT_CLS_LOSS: dict[str, Any] = {"class_path": "torch.nn.CrossEntropyLoss"}
 _DEFAULT_VTX_LOSS: dict[str, Any] = {
     "class_path": "torch.nn.BCEWithLogitsLoss",
@@ -142,6 +154,24 @@ class _TaskModuleBase(nn.Module):
             ``labels.<stream>.<label>``.
         """
         return f"labels.{self.stream}.{self.label}"
+
+    @property
+    def has_pad_mask(self) -> bool:
+        """Whether this (sequence) head consumes a per-stream pad mask.
+
+        True for a normal variable-length constituent stream; False for a
+        non-sequence head OR a fixed-count query bank (the MaskFormer
+        ``objects`` stream — M learnable queries with no padding, so no
+        ``masks.objects`` exists). Mirrors v1's objects-stream exemption
+        (task.py:547 ``self.input_name != "objects"``): such a head neither
+        declares nor consumes ``masks.<stream>``.
+
+        Returns
+        -------
+        bool
+            ``self.sequence and self.stream not in _NO_PAD_MASK_STREAMS``.
+        """
+        return self.sequence and self.stream not in _NO_PAD_MASK_STREAMS
 
 
 class ClassificationTaskModule(_TaskModuleBase):
@@ -278,7 +308,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         requires: dict[str, TensorSpec] = {self.input_key: input_spec}
         if self.context is not None:
             requires[self.context] = TensorSpec(shape=None, dtype="float32")
-        if self.sequence:
+        if self.has_pad_mask:
             requires[f"masks.{self.stream}"] = TensorSpec(
                 shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
             )
@@ -369,10 +399,11 @@ class ClassificationTaskModule(_TaskModuleBase):
         assert self.task is not None, "forward before bind()"
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
-        mask = b.get(f"masks.{self.stream}") if self.sequence else None
+        # objects-stream (query-bank) heads have no pad mask (v1 task.py:547)
+        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
         if mode & Mode.TRAINING:
             labels_dict = {self.stream: {self.label: b.get(self.label_key)}}
-            pad_masks = {self.stream: mask} if self.sequence else None
+            pad_masks = {self.stream: mask} if self.has_pad_mask else None
             preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
         # TEST|ONNX: identical, already-converted physical values (design §3.3)
@@ -786,6 +817,7 @@ class RegressionTaskModule(_TaskModuleBase):
         custom_output_names: str | Sequence[str] | None = None,
         gaussian: bool = False,
         sample_weight: str | None = None,
+        publish_targets: bool = False,
         dense: dict[str, Any] | None = None,
         loss: str | dict[str, Any] | None = None,
         weight: float = 1.0,
@@ -841,6 +873,18 @@ class RegressionTaskModule(_TaskModuleBase):
             task.py:429-435), by default None. REQUIRES ``loss.reduction ==
             'none'`` (the v1 assert, task.py:379-382) — surfaced at config
             time.
+        publish_targets : bool, optional
+            Also publish the SCALED regression targets under
+            ``targets.<stream>.<instance-name>`` in FIT|VAL (the v1
+            ``maskformer_loss.py:329-332`` contract: the object-regression
+            head's ``get_targets`` output is stored in the labels dict so the
+            Hungarian matcher can use the scaled-space targets as a cost term),
+            by default False. The ONLY consumer is `MaskFormerMatchedLoss`,
+            which requires ``targets.objects.regression`` alongside
+            ``preds.objects.regression``; a plain regression head leaves it off
+            and publishes ONLY its prediction. The scaling applied is exactly
+            the head's own (``scaler``/``norm_params``/``target_denominators``)
+            via the composed v1 ``get_targets`` — matched-space, FD §5.2.
         dense : dict[str, Any] | None, optional
             Extra v1 `Dense` kwargs (no width keys), by default None.
         loss : str | dict[str, Any] | None, optional
@@ -883,6 +927,7 @@ class RegressionTaskModule(_TaskModuleBase):
         self.scaler_scales = dict(scaler) if scaler is not None else None
         self.custom_output_names = _opt_tuple(custom_output_names)
         self.sample_weight = sample_weight
+        self.publish_targets = bool(publish_targets)
         n_methods = sum(
             x is not None for x in (self.target_denominators, self.norm_params, self.scaler_scales)
         )
@@ -1026,6 +1071,18 @@ class RegressionTaskModule(_TaskModuleBase):
         """
         return f"labels.{self.stream}.{self.sample_weight}"
 
+    @property
+    def targets_key(self) -> str:
+        """The published SCALED-targets key (``publish_targets``, FIT|VAL only).
+
+        Returns
+        -------
+        str
+            ``targets.<stream>.<instance-name>`` — the matched-loss matcher's
+            scaled-space target source (v1 maskformer_loss.py:332).
+        """
+        return f"targets.{self.stream}.{self.name}"
+
     def declare_io(self, mode: Mode) -> IO:
         """Declare input/context/masks (+ target/denominator deps) -> preds (+ loss).
 
@@ -1056,7 +1113,7 @@ class RegressionTaskModule(_TaskModuleBase):
         requires: dict[str, TensorSpec] = {self.input_key: input_spec}
         if self.context is not None:
             requires[self.context] = TensorSpec(shape=None, dtype="float32")
-        if self.sequence:
+        if self.has_pad_mask:
             requires[f"masks.{self.stream}"] = TensorSpec(
                 shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
             )
@@ -1089,10 +1146,27 @@ class RegressionTaskModule(_TaskModuleBase):
                     dtype="float32",
                     modes=Mode.ONNX,
                 )
-        produces: dict[str, TensorSpec] = {
-            self.pred_key: self._pred_spec(pred_spec),
-            self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
-        }
+        produces: dict[str, TensorSpec] = {self.pred_key: self._pred_spec(pred_spec)}
+        # The matched-loss object head (publish_targets) is a pure feature +
+        # scaled-target producer: v1 DISCARDS its standalone loss (``task_pred, _
+        # = task(...)``, maskformer_loss.py:330) and the MaskFormerMatchedLoss
+        # owns ``losses.regression`` (the matched regression component) — so this
+        # head emits NO ``losses.<name>`` to avoid a two-producer collision on
+        # that key. A plain head emits its own FIT|VAL loss as usual.
+        if not self.publish_targets:
+            produces[self.loss_key] = TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
+        else:
+            # the SCALED targets (width R = len(targets), even for a gaussian
+            # head — targets are never doubled) for the matched-loss matcher,
+            # FIT|VAL only (v1 maskformer_loss.py:329-332)
+            tgt_shape: tuple[int | str, ...] = (
+                ("B", _stream_len(self.stream), len(self.targets))
+                if self.sequence
+                else ("B", len(self.targets))
+            )
+            produces[self.targets_key] = TensorSpec(
+                shape=tgt_shape, dtype="float32", modes=Mode.TRAINING
+            )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
@@ -1194,8 +1268,11 @@ class RegressionTaskModule(_TaskModuleBase):
         assert self.task is not None, "forward before bind()"
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
-        mask = b.get(f"masks.{self.stream}") if self.sequence else None
-        pad_masks = {self.stream: mask} if self.sequence else None
+        # objects-stream (query-bank) heads have no pad mask (v1 task.py:547):
+        # the composed v1 head's own exemption keys on input_name == "objects",
+        # so passing pad_masks=None here matches its non-masking branch exactly.
+        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+        pad_masks = {self.stream: mask} if self.has_pad_mask else None
         if mode & Mode.TRAINING:
             targets_dict = {
                 self.stream: {
@@ -1209,6 +1286,16 @@ class RegressionTaskModule(_TaskModuleBase):
             if self.sample_weight is not None:
                 targets_dict[self.stream][self.sample_weight] = b.get(self.weight_label_key)
             preds, loss = self.task(x, targets_dict, pad_masks, context=ctx)
+            if self.publish_targets:
+                # matched-loss feature head: publish preds + the SCALED targets
+                # the matcher uses (v1 maskformer_loss.py:329 stores
+                # task.get_targets(labels) under labels["objects"][name]); the
+                # standalone loss is DISCARDED (v1 :330) — the matched loss owns
+                # losses.regression
+                return {
+                    self.pred_key: preds,
+                    self.targets_key: self.task.get_targets(targets_dict),
+                }
             return {self.pred_key: preds, self.loss_key: loss}
         # TEST|ONNX: de-scaled physical values (design §3.3). v1 forward with an
         # empty targets dict returns raw preds; run_inference inverts scaling.

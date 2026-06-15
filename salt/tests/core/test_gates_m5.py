@@ -16,6 +16,7 @@ import numpy as np
 import salt.core.gates_m5 as gm5
 from salt.core.gates_m5 import (
     main,
+    run_conv,
     run_d1,
     run_d2cfg,
     run_d2ckpt,
@@ -693,6 +694,114 @@ class TestD2cfg:
         assert report["checks"]["stale_lrs_config_key_rejected"]
 
 
+class TestConv:
+    """M5-CONV — the consolidated convert+validate+plan-compile acceptance gate.
+
+    The gate drives the REAL ``salt2 graph validate`` (fit/test/onnx) on EVERY
+    needs-M5 config and embeds the authoritative list in its report. These tests
+    pin: the completeness check (every matrix-🔶 config present + the adjudicated
+    regression_multi_target), the per-config mode bookkeeping, the
+    event_classifier ONNX = ``na`` carve-out, and the corruption teeth.
+
+    MaskFormer parity (M5-CONV fix): MaskFormer.yaml now validates end-to-end in
+    all 3 modes. The fix honoured the v1 objects-stream pad-mask exemption (v1
+    ``RegressionTask.forward`` / ``ClassificationTask.forward``:
+    ``salt/models/task.py:547`` ``if pad_masks is not None and self.input_name
+    != "objects"``) — a sequence-mode task on the fixed-count ``objects`` query
+    bank no longer requires/consumes ``masks.objects`` (``_NO_PAD_MASK_STREAMS``
+    in ``tasks.py``). It also wired the matched-loss contract end-to-end: the
+    object-regression head is named ``regression`` (so it produces
+    ``preds.objects.regression``), publishes its scaled targets as
+    ``targets.objects.regression`` (``publish_targets: true``, the v1
+    maskformer_loss.py:329-332 contract), discards its standalone loss (the
+    matched loss owns ``losses.regression``), is ``expose: [fit, val, onnx]``
+    (v1 never writes object-regression preds in eval), and the encoder gains a
+    ``Split`` (track_origin reads ``encoded.tracks``). The MF1a/MF1c/MF2 gates'
+    ``_ObjectRegressionStub`` covers forward parity; M5-CONV proves the full
+    config assembly. So ALL 24 needs-M5 configs validate and the gate PASSES.
+    """
+
+    def test_structure_and_completeness(self, tmp_path):
+        _code, report = run_conv(tmp_path)
+        assert (tmp_path / "conv_report.json").is_file()
+        # the list is COMPLETE vs the matrix §2 🔶 rows + adjudicated multi_target
+        assert report["checks"]["all_matrix_needs_m5_configs_present"]
+        assert report["config"]["missing_matrix_configs"] == []
+        assert report["config"]["total_configs"] == 24
+        # every embedded config name is a matrix needs-M5 name (no stray entries)
+        names = {c["name"] for c in report["configs"]}
+        assert names == set(report["matrix_needs_m5"])
+        # regression_multi_target is included (matrix-🔷, plan-10-adjudicated M5)
+        assert "regression_multi_target" in names
+        # event_classifier validates fit+test only — ONNX carve-out (no export)
+        ev = next(c for c in report["configs"] if c["name"] == "event_classifier")
+        assert ev["validateFit"]
+        assert ev["validateTest"]
+        assert ev["validateOnnx"] == "na"
+        assert "onnx" not in ev["rc"]  # the gate never invoked an onnx validate
+        # no --strict (data-free no-schema warning is inherent — documented)
+        assert report["config"]["strict"] is False
+        assert "no --strict" in report["no_strict_rationale"]
+        # the gate makes NO forward-parity claim (owned by R/L/MF)
+        assert "NO forward-parity claim" in report["scope_note"]
+
+    def test_all_24_configs_validate(self, tmp_path):
+        # EVERY needs-M5 config (incl. MaskFormer) convert+validates+plan-compiles
+        # in all applicable modes — the M5-CONV acceptance criterion is met
+        code, report = run_conv(tmp_path)
+        for c in report["configs"]:
+            assert c["validateFit"], c
+            assert c["validateTest"], c
+            assert c["validateOnnx"] in {True, "na"}, c
+        assert report["config"]["validated_configs"] == 24
+        assert code == 0
+        assert report["passed"]
+
+    def test_maskformer_validates_all_modes(self, tmp_path):
+        # MaskFormer.yaml validates fit/test/onnx after the objects-stream pad-mask
+        # exemption + the matched-loss contract wiring (see the class docstring).
+        _code, report = run_conv(tmp_path)
+        mf = next(c for c in report["configs"] if c["name"] == "MaskFormer")
+        assert mf["rc"]["fit"] == 0
+        assert mf["rc"]["test"] == 0
+        assert mf["rc"]["onnx"] == 0
+        assert mf["validateFit"]
+        assert mf["validateTest"]
+        assert mf["validateOnnx"]
+
+    def test_corruption_missing_config_fails_completeness(self, tmp_path):
+        # drop a config from the embedded list -> the completeness check fails
+        # (the gate exits non-zero if any matrix 🔶 config is missing)
+        def drop_regression(configs):
+            return [c for c in configs if c["name"] != "regression"]
+
+        code, report = run_conv(tmp_path, corruption=drop_regression)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["all_matrix_needs_m5_configs_present"]
+        assert "regression" in report["config"]["missing_matrix_configs"]
+
+    def test_corruption_bogus_config_fails(self, tmp_path):
+        # inject a config whose stack does not exist -> salt2 graph validate
+        # errors (rc != 0), so the gate fails on that config's modes
+        def add_bogus(configs):
+            return [
+                *configs,
+                {
+                    "name": "regression",  # reuse a matrix name so completeness still passes
+                    "cfg": ("does_not_exist_conv_probe.yaml",),
+                    "norm_global": False,
+                    "onnx": "validate",
+                    "family": "regression",
+                    "note": "bogus corruption probe",
+                },
+            ]
+
+        code, report = run_conv(tmp_path, corruption=add_bogus)
+        assert code == 1
+        assert not report["passed"]
+
+
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
         gates = (
@@ -715,6 +824,13 @@ class TestCli:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0
             assert (tmp_path / gate / f"{gate}_report.json").is_file()
+
+    def test_conv_runs_and_writes_report(self, tmp_path):
+        # conv passes (rc=0) — all 24 needs-M5 configs validate; the per-config
+        # pass/fail semantics are covered by TestConv above.
+        code = main(["conv", "--outdir", str(tmp_path / "conv")])
+        assert code == 0
+        assert (tmp_path / "conv" / "conv_report.json").is_file()
 
 
 def test_no_machine_paths_in_module():

@@ -1,0 +1,150 @@
+# GN3_SoftE.yaml — overlay on GN3V00.yaml that ADDS an electrons stream and the
+# GN3 `global` post-pooling concat (M5-CONV, CONCAT/GLOBAL family). The v2-native
+# port of legacy salt/configs/GN3v01/GN3_SoftE.yaml ("On top of GN3_Hybrid or
+# GN3_Charge — adds electrons and concatenates jet features to the global jet
+# representation"). It stacks on the group-A GN3V00 base.
+#
+# v1 GN3_SoftE re-states the GN3V00 body with the electrons init_net added and
+# every task's `input_size` bumped to `&pooled_dim 258` (= 256 + 2): it switches
+# the pooled representation from the bare `pooled.global` (256) to the
+# `global`-concatenated `vconcat.global` (258). This v2 overlay therefore:
+#
+#   1. ADDS the `electrons` reader group + features, the `global` reader group +
+#      features (the 2-var jet-feature concat stream), a `norm_global`
+#      normaliser, an `electron_embed`, and the `vconcat` VectorConcat module.
+#   2. RE-STATES the list-valued fields that GROW (norm.streams, concat.streams
+#      — jsonargparse merges DICT leaves key-by-key but REPLACES list leaves, so
+#      a list that gains a member must be re-stated in full, design §5.3).
+#   3. REWIRES each inherited task's `input`/`context` from `pooled.global` ->
+#      `vconcat.global` (scalar leaves, key-level overridden by the deep-merge).
+#
+# The M5 features exercised: VectorConcat + ONNX `export.inputs alias:` (the
+# `global` concat), on top of GN3V00's inherited LossGLS + RegressionTaskModule.
+# `non_finite_to_num` is NOT set in v1 GN3_SoftE (it inherits GN3V00's default).
+#
+# Static validation (STACK GN3V00 first, then this overlay):
+#   python -m salt.core.main graph validate \
+#     -c salt/core/configs/GN3V00.yaml \
+#     -c salt/core/configs/GN3_SoftE.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml \
+#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml
+
+name: GN3_SoftE
+
+data:
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          # GN3V00's jets/tracks/flows groups survive the key-level merge; ADD
+          # the electrons stream and the `global` jet-feature concat stream.
+          electrons: {vector: false}
+          global: {vector: true}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          # the `global` jet-feature concat stream (v1 GN3_SoftE.yaml:107-109):
+          # the SAME 2 columns as jets -> the ONNX alias is an identity clone
+          global: [pt_btagJes, eta_btagJes]
+          electrons:
+            [
+              pt,
+              ptfrac,
+              ptrel,
+              dr,
+              abs_eta,
+              eta,
+              phi,
+              ftag_et,
+              qOverP,
+              d0RelativeToBeamspot,
+              d0RelativeToBeamspotSignificance,
+              ftag_ptVarCone30OverPt,
+              numberOfPixelHits,
+              numberOfSCTHitsInclDead,
+              ftag_deltaPOverP,
+              eProbabilityHT,
+              deltaEta1,
+              deltaPhiRescaled2,
+              ftag_energyOverP,
+              Rhad,
+              Rhad1,
+              Eratio,
+              weta2,
+              Rphi,
+              Reta,
+              wtots1,
+              f1,
+              f3,
+            ]
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    modules:
+      # norm.streams GROWS (adds electrons) -> re-state the full list (list
+      # leaves are replaced, not merged). global_object stays jets.
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          streams: [jets, tracks, flows, electrons]
+          global_object: jets
+      # a SECOND normaliser for the `global` vector stream fed past the encoder
+      norm_global:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [global]
+          global_object: global
+      # the new electron init_net (v1 GN3_SoftE.yaml:20-22) — same width as the
+      # inherited tracks/flows embeds (512, a Concat constraint)
+      electron_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: electrons
+          context: [normed.jets]
+          out_dim: 512
+          dense: {hidden_layers: [512], activation: SiLU}
+      # concat.streams GROWS (adds electrons) -> re-state the full list
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks, flows, electrons]}
+      # the GN3 `global` post-pooling concat -> &pooled_dim 258 (256 + 2).
+      # ORDER is the list: pooled FIRST, global features LAST (design §6.6
+      # 1390-1391), matching v1 cat([global_rep, global_feats]).
+      vconcat:
+        class_path: salt.core.nn.VectorConcat
+        init_args:
+          inputs: [pooled.global, normed.global]
+          out: vconcat.global
+      # REWIRE each inherited task: pooled.global (256) -> vconcat.global (258).
+      # Only the `input` (global tasks) / `context` (sequence tasks) scalar is
+      # overridden; everything else is inherited from GN3V00 via key-level merge.
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args: {input: vconcat.global}
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args: {context: vconcat.global}
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args: {context: vconcat.global}
+      track_type:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args: {context: vconcat.global}
+      jet_pt_regression:
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args: {input: vconcat.global}
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN3SoftE # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
+    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
+    # the GN3 alias: ONE Athena jet tensor cloned into the global port (design
+    # §6.6/§7; v1 to_onnx.py:377-378). Identity gather here (global==jets cols).
+    - {port: inputs.global, alias: inputs.jets}

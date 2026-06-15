@@ -1,0 +1,33 @@
+# GN3_Hybrid.yaml — thin overlay on GN3V00.yaml that switches the encoder to
+# RMSNorm + hybrid norm placement (M5-CONV, GN3 family). The v2-native port of
+# the legacy salt/configs/GN3v01/GN3_Hybrid.yaml ("Adds hybrid norm to the
+# encoder").
+#
+# v1 overrides ONLY the encoder `norm: RMSNorm` + `norm_type: hybrid`
+# (GN3_Hybrid.yaml:11-12). In v2 these are the TransformerEncoder `norm` and
+# `norm_type` init_args (modules.py:799,801) — deep-merged onto GN3V00's encoder
+# block (design §5.3), so the rest of the encoder (dim/out_dim/layers/heads/
+# gated dense) and the whole 5-task GN3V00 body + LossGLS are inherited. This
+# exercises the M5-4 `norm_type: hybrid` passthrough (the GN3 flagship feature).
+#
+# `norm_type: hybrid` makes each composed v1 EncoderLayer force do_qk/v_norm and
+# apply the pre/post placement logic (transformer.py:350-356,421) — the wrapper
+# only forwards the flag (modules.py:828-837).
+#
+# Static validation (STACK GN3V00 first, then this overlay):
+#   python -m salt.core.main graph validate \
+#     -c salt/core/configs/GN3V00.yaml \
+#     -c salt/core/configs/GN3_Hybrid.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3_Hybrid
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    modules:
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          norm: RMSNorm # v1 GN3_Hybrid: switch LayerNorm -> RMSNorm
+          norm_type: hybrid # M5-4 hybrid pre/post placement passthrough

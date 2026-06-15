@@ -1,0 +1,148 @@
+# GN3_baseline.yaml — the GN3 dev baseline in the v2 schema (M5-CONV, GN3
+# family). The v2-native MIGRATED fixture for legacy
+# salt/configs/GN3_dev/GN3_baseline.yaml, and the BASE of the GN3_dev overlay
+# stack (loose / dR / flow / LepID_SMT / tracklabel layer on top of it).
+#
+# A SINGLE track stream (256/128, 4 layers) feeding 3 task heads, combined with
+# the geometric-mean LossGLS (v1 `loss_mode: GLS`). The three tasks:
+#
+#   - jets_classification : 4-class flavour (v1 use_class_dict, output_size 4 —
+#                           the un-split-light dev baseline; GN3_baseline.yaml:55)
+#   - track_origin        : 8-class ftag track-origin
+#   - track_vertexing     : per-track vertex edges (origin-weighted)
+#
+# Track SELECTIONS reproduce v1's `selections: {tracks: [d0 < 3.5, NSHARED <
+# 1.1]}` (GN3_baseline.yaml:89-90) via the H5StructuredReader `selections:` (ftag
+# Cuts; reader.py:163-175). The GN3_baseline_loose overlay nulls them.
+#
+# LossGLS REQUIRES every loss-producing task weight == 1.0 (v1 GLS guard,
+# modelwrapper.py:139-142) — NO task declares a weight, faithful to v1.
+#
+# NO machine paths committed (design §5 placeholder policy). Static validation:
+#   python -m salt.core.main graph validate -c salt/core/configs/GN3_baseline.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN3_baseline
+
+data:
+  batch_size: 2000
+  num_workers: 8
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false, dataset: tracks_ghost} # v1 input_map
+        # v1 selections: {tracks: [d0 < 3.5, NSHARED < 1.1]} (ftag Cuts)
+        selections:
+          tracks: ["d0 < 3.5", "NSHARED < 1.1"]
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          tracks: &gn3_baseline_track_vars
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: lion
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: &embed_dim 256
+          dense: {hidden_layers: [256], activation: SiLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 128
+          num_layers: 4
+          num_registers: 8 # v1 GN3_dev/GN3_baseline.yaml:36 — 8 register tokens
+          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          dense: {activation: SiLU, gated: true}
+      split:
+        class_path: salt.core.nn.Split
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          # 4-class dev baseline (v1 output_size 4, un-split light)
+          class_names: &gn3_baseline_flavour [bjets, cjets, ujets, taujets]
+          weight_source: null # v1 use_class_dict — override (see header)
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: &origin_classes
+            [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight_source: null # v1 use_class_dict — override (see header)
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      loss:
+        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN3baseline # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest).
+
+trainer:
+  max_epochs: 20
+  precision: 32-true # bf16-mixed on GPU clusters (M6 follow-up)
