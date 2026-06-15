@@ -59,10 +59,11 @@ callbacks:
 # set to null is deleted (--writers.modules.pad_mask=null). Module ORDER is
 # the per-group COLUMN order — inputs_copy -> tasks -> pad_mask reproduces the
 # v1 PredictionWriter layout (input copies, task columns in model declaration
-# order, the boolean mask last). TaskWriter/InputCopyWriter default to "every
-# stream with a configured task" (v1 derive-from-the-model), so a new aux task
-# is persisted automatically; narrowing TaskWriter streams trips the TEST
-# dead-preds hard error for any prediction no writer consumes (design §4.2).
+# order, the boolean mask last). TaskWriter defaults to "every configured
+# task" and InputCopyWriter to "every stream with a configured task" (v1
+# derive-from-the-model), so a new aux task is persisted automatically;
+# narrowing the TaskWriter `tasks` list trips the TEST dead-preds hard error
+# for any prediction no writer consumes (design §4.2).
 #
 # M4.5 unified manifest: the writers are ALSO the ONNX output manifest —
 # TaskWriter (onnx: true by default) declares the export outputs from the

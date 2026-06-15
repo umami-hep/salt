@@ -7,39 +7,42 @@ task columns next in model declaration order (``:201-205, 255-261``), the
 boolean ``mask`` column last (``:208-211``).
 
 M4.5 unified manifest: `TaskWriter` additionally declares its
-ONNX-manifest entries (`TaskWriter.onnx_outputs`) from the SAME per-family
-suffix helpers that name the TEST columns — one owner per family, both
-representations co-located and gated together (amendment §2.2/§3).
+ONNX-manifest entries (`TaskWriter.onnx_outputs`) from the SAME tasks that
+name the TEST columns — one owner per family, both representations rendered
+by the task and gated together (amendment §2.2/§3).
 `InputCopyWriter` and `PadMaskWriter` are eval-only by design: input
 copies are meaningless in ONNX (Athena feeds the inputs) and a pad-mask
 output has no Athena consumer (the adapter constructs all-valid masks) —
 they keep the base ``onnx_outputs() == []``.
+
+**Where the per-family knowledge lives** (the M-modular refactor): the TEST
+column schema/values and the ONNX `ExportOutput` entry for each family are
+rendered by the TASK (`salt.core.nn.tasks` ``output_names`` / ``get_h5`` /
+``onnx_outputs``, mirroring v1's `task.py` placement). `TaskWriter` is pure
+ORCHESTRATION — it selects tasks by instance name, groups their columns by
+stream, prefixes with the run name, pads per-token fragments, applies the
+``onnx_names`` overrides, orders ONNX entries global-before-sequence, and
+owns the file I/O — but it never branches on the task family.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from typing import Any
 
 import h5py
 import numpy as np
-from ftag import Flavours
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
-from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec
-from salt.core.nn.tasks import RegressionTaskModule, VertexingTaskModule
 from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx, task_modules
-from salt.core.writers.names import VERTEX_INDEX, pascal_case
 from salt.utils.array_utils import join_structured_arrays
 
 __all__ = ["InputCopyWriter", "PadMaskWriter", "TaskWriter"]
-
-_VERTEX_COLUMN = VERTEX_INDEX
-"""Back-compat alias — the constant moved to `salt.core.writers.names`
-(M4.5 merge condition 4: one shared suffix module for both modes)."""
 
 
 def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
@@ -62,65 +65,80 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def _render_method(module: GraphModule, attr: str, what: str) -> Any:
+    """The task's render method (``output_names``/``get_h5``/``onnx_outputs``), or raise.
+
+    The per-family rendering lives on the TASK now (mirroring v1's `task.py`
+    placement); `task_modules` discovers task modules by DUCK TYPING (string
+    ``pred_key`` + ``stream``), so a user task that does not subclass
+    `_TaskModuleBase` may be selected without shipping a rendering. A
+    `_TaskModuleBase` subclass raises the unsupported-family `ConfigError`
+    from its own base guard; a duck-typed task missing the method entirely
+    would otherwise surface a cryptic ``AttributeError`` — restore the SAME
+    loud `ConfigError` here (design §8, the v1 "write a custom Writer"
+    journey), so the error is identical regardless of how the task is
+    discovered.
+
+    Returns
+    -------
+    Any
+        The bound render method.
+
+    Raises
+    ------
+    ConfigError
+        For a discovered task that ships no ``attr`` rendering.
+    """
+    method = getattr(module, attr, None)
+    if not callable(method):
+        name = getattr(module, "name", "unnamed")
+        raise ConfigError(
+            f"task {name!r} ({type(module).__name__}) ships no {what} rendering — "
+            "supported families are ClassificationTaskModule, VertexingTaskModule and "
+            "RegressionTaskModule; give a custom task module output_names/get_h5/onnx_outputs "
+            "methods, or write a custom Writer for its outputs (design §8)"
+        )
+    return method
+
+
 class TaskWriter(Writer):
-    """Persist task predictions with v1 column naming/dtypes (design §8).
+    """Orchestrate task-rendered prediction columns + ONNX entries (design §8).
 
-    Consumes the inference-ready ``preds.<stream>.<task>`` leaves (tasks
-    publish converted values in TEST, design §3.3) and formats them exactly
-    as v1's writer-side ``get_h5`` chain:
+    Pure ORCHESTRATION: the per-family rendering (column names/dtypes/values
+    and the ONNX `ExportOutput`) lives on the TASK modules
+    (`salt.core.nn.tasks` ``output_names`` / ``get_h5`` / ``onnx_outputs``,
+    mirroring v1's `task.py` placement). This writer selects which tasks to
+    persist, groups their columns by stream, prefixes with the run name, pads
+    per-token fragments to the file sequence length, and owns the file I/O —
+    it never branches on the task family.
 
-    - classification: one ``f4`` column per class named
-      ``{run_name}_{Flavours[c].px or 'p'+c}`` (``task.py:140-151``), from
-      the already-softmaxed probabilities (padded positions read 0.0);
-    - vertexing: a single ``('VertexIndex', 'i8')`` column from the
-      TEST-mode node assignments via the exact v1 op chain
-      ``preds.int().cpu()`` then u2s (``task.py:988-1005``) — padded
-      positions read the int32 cast of ``-inf`` (-2147483648);
-    - regression (M5 sub-wave A): one ``f4`` column per target named
-      ``{run_name}_{suffix}`` where the suffix is ``custom_output_names``
-      when set else the target (v1 ``RegressionTask.output_names`` +
-      ``get_h5``, ``task.py:512-518,604``), from the de-scaled values the
-      task publishes in TEST (mode-split de-scaling, design §3.3).
-
-    **v1-compat decision (M3, re-recorded at M4.5)**: the vertexing column
-    is BARE ``VertexIndex`` by default — no run-name prefix — because the
-    W1 gate's byte-schema bar is v1's output (``task.py:1003``). The design
-    §8 run-name-prefix fix is available behind ``prefix_vertex_column:
-    true`` (the config converter will set the compat flag, design §8).
-    Under the unified manifest the asymmetry is a declared, single-file
-    property (amendment §5 rule 6): ONE suffix constant
-    (`salt.core.writers.names.VERTEX_INDEX`) feeds BOTH modes, TEST
-    prefixes it only when ``prefix_vertex_column`` is set, ONNX always
-    prefixes with ``export.model_name`` (v1 parity, ``to_onnx.py:287``).
-    Flipping the flag at the M7 adjudication aligns the two names up to the
-    prefix value by construction.
-
-    **ONNX manifest** (M4.5): with ``onnx: true`` (default) the writer
-    declares one `ExportOutput` per selected task from the SAME suffix
-    helpers as the TEST columns — global classification ->
-    ``split_scalars`` per-class suffixes, sequence classification -> one
-    ``argmax`` int8 entry (Pascal-case of the task instance name,
-    ``onnx_names:`` to override), vertexing -> ``vertex_union_find`` int8
-    on `VERTEX_INDEX`, regression -> ``split_scalars`` per-target suffixes
-    (rename via the task's ``custom_output_names``). Global-stream entries
-    are emitted before
-    sequence-stream entries regardless of module declaration order (the v1
-    ``output_names`` order, ``to_onnx.py:258-292`` — O2/O5 byte parity).
-    Adding an aux task therefore lands in eval AND export with zero extra
-    config; narrow explicitly with ``onnx_streams``/``onnx_tasks``.
+    - **TEST columns/values**: each selected task renders its own columns
+      (``task.output_names(run_name)``) and structured values
+      (``task.get_h5(bundle)``); the writer concatenates same-stream
+      fragments, checks for duplicate column names, and pads. Classification
+      -> ``f4`` per class, vertexing -> a single ``i8`` ``VertexIndex``
+      column (bare by default, ``VertexingTaskModule.prefix_vertex_column``
+      flips on the run-name prefix), regression -> ``f4`` per target.
+    - **ONNX manifest** (M4.5): with ``onnx: true`` (default) the writer
+      collects each selected task's ``onnx_outputs()`` entry (global
+      classification -> per-class ``split_scalars``; sequence classification
+      -> ``argmax`` int8; vertexing -> ``vertex_union_find`` int8;
+      regression -> per-target ``split_scalars``), applies the per-task
+      ``onnx_names`` overrides, and emits global-stream entries before
+      sequence-stream entries (the v1 ``output_names`` order,
+      ``to_onnx.py:258-292`` — O2/O5 byte parity). Adding an aux task lands
+      in eval AND export with zero extra config; narrow with
+      ``onnx``/``onnx_streams``/``onnx_tasks``.
 
     Parameters
     ----------
-    streams : Sequence[str] | None, optional
-        Streams to persist. ``None`` (default) means EVERY stream with a
+    tasks : Sequence[str] | None, optional
+        Task INSTANCE names to persist. ``None`` (default) means EVERY
         configured task — v1's derive-from-the-model behaviour, so
         ``base2.yaml`` ships one generic writer and a new aux task is
         persisted automatically (design §8). An explicit list narrows it;
-        the TEST dead-preds error catches a narrowed-list-forgot-a-stream
+        the TEST dead-preds error catches a narrowed-list-forgot-a-task
         mistake.
-    prefix_vertex_column : bool, optional
-        Name the vertexing column ``{run_name}_VertexIndex`` instead of the
-        v1-compatible bare ``VertexIndex``, by default False.
     onnx : bool, optional
         Participate in the ONNX manifest, by default True (the M4.5
         polarity adjudication: greenfield defaults to full participation;
@@ -128,7 +146,7 @@ class TaskWriter(Writer):
         ``False`` makes this writer eval-only.
     onnx_streams : Sequence[str] | None, optional
         Narrow ONNX participation to these task streams (a subset of the
-        TEST ``streams`` selection), by default None — every TEST-selected
+        selected tasks' streams), by default None — every selected task's
         stream exports.
     onnx_tasks : Sequence[str] | None, optional
         Task-grained narrowing by task INSTANCE name (amendment merge
@@ -140,23 +158,22 @@ class TaskWriter(Writer):
         Per-task suffix override (amendment merge condition 6), by default
         None. A ``str`` renames a single-output (argmax) entry; a ``list``
         replaces a classification entry's per-class suffixes (length
-        validated against ``class_names`` — the collision-fix path for two
-        classification tasks with overlapping class names). Vertexing
-        entries are NOT renameable here: their suffix is the shared
-        `VERTEX_INDEX` constant (amendment §2.2).
+        validated against the entry's suffix count — the collision-fix path
+        for two classification tasks with overlapping class names).
+        Vertexing/regression entries are NOT renameable here (the task owns
+        their names: vertexing's shared `VERTEX_INDEX` constant, regression's
+        ``custom_output_names``; ``Task.onnx_renameable``, amendment §2.2).
     """
 
     def __init__(
         self,
-        streams: Sequence[str] | None = None,
-        prefix_vertex_column: bool = False,
+        tasks: Sequence[str] | None = None,
         onnx: bool = True,
         onnx_streams: Sequence[str] | None = None,
         onnx_tasks: Sequence[str] | None = None,
         onnx_names: Mapping[str, str | list[str]] | None = None,
     ) -> None:
-        self.streams = tuple(streams) if streams is not None else None
-        self.prefix_vertex_column = prefix_vertex_column
+        self.tasks = tuple(tasks) if tasks is not None else None
         self.onnx = onnx
         self.onnx_streams = tuple(onnx_streams) if onnx_streams is not None else None
         self.onnx_tasks = tuple(onnx_tasks) if onnx_tasks is not None else None
@@ -179,19 +196,18 @@ class TaskWriter(Writer):
         Raises
         ------
         ConfigError
-            When an explicit ``streams`` entry matches no configured task.
+            When an explicit ``tasks`` entry matches no configured task.
         """
         tasks = task_modules(model_modules)
-        if self.streams is None:
+        if self.tasks is None:
             return tasks
-        known = {module.stream for module in tasks.values()}
-        if unknown := sorted(set(self.streams) - known):
+        if unknown := sorted(set(self.tasks) - set(tasks)):
             raise ConfigError(
-                f"TaskWriter {self.name!r} (config: writers.modules.{self.name}): streams "
-                f"{unknown} have no configured task — task streams are {sorted(known)} "
+                f"TaskWriter {self.name!r} (config: writers.modules.{self.name}): tasks "
+                f"{unknown} name no configured task — task instances are {sorted(tasks)} "
                 "(design §8)"
             )
-        return {name: m for name, m in tasks.items() if m.stream in self.streams}
+        return {name: m for name, m in tasks.items() if name in self.tasks}
 
     def requires(self, ctx: WriterDeclareCtx) -> dict[str, TensorSpec]:
         """Declare the consumed ``preds.*`` leaves (design §8).
@@ -209,6 +225,10 @@ class TaskWriter(Writer):
     def columns(self, ctx: WriteCtx) -> dict[str, np.dtype]:
         """Declare the per-stream task columns, in task declaration order.
 
+        Delegates the per-family naming/dtype to each task's
+        ``output_names(run_name)`` (the task owns its column schema); the
+        writer only groups by stream and rejects colliding column names.
+
         Returns
         -------
         dict[str, np.dtype]
@@ -217,14 +237,13 @@ class TaskWriter(Writer):
         Raises
         ------
         ConfigError
-            For a task family this writer cannot format, or colliding
-            column names between two tasks on one stream.
+            For a task that ships no TEST rendering (raised by the task), or
+            colliding column names between two tasks on one stream.
         """
         descrs: dict[str, list[tuple[str, str]]] = {}
-        for name, module in self._selected(ctx.model_modules).items():
-            descrs.setdefault(module.stream, []).extend(
-                self._task_descr(name, module, ctx.run_name)
-            )
+        for module in self._selected(ctx.model_modules).values():
+            output_names = _render_method(module, "output_names", "TEST columns")
+            descrs.setdefault(module.stream, []).extend(output_names(ctx.run_name))
         out: dict[str, np.dtype] = {}
         for stream, descr in descrs.items():
             if len({field for field, _ in descr}) != len(descr):
@@ -236,63 +255,6 @@ class TaskWriter(Writer):
             out[stream] = np.dtype(descr)
         return out
 
-    @staticmethod
-    def _class_suffixes(module: GraphModule) -> list[str]:
-        """A classification task's per-class logical suffixes — ONE owner, BOTH modes.
-
-        The v1 ``ClassificationTask.output_names`` derivation
-        (``task.py:140-151``): ``Flavours[c].px`` when the class is a known
-        flavour, else ``p{c}``. TEST columns prefix these with the run name
-        (`_task_descr`), the ONNX manifest carries them bare for the
-        exporter's ``{model_name}_`` prefix (`onnx_outputs`) — the M4.5
-        single-ownership refactor (amendment §2.2; byte parity re-gated by
-        W1-W5).
-
-        Returns
-        -------
-        list[str]
-            One suffix per ``class_names`` entry, in class order.
-        """
-        class_names = module.class_names
-        return [Flavours[c].px if c in Flavours else f"p{c}" for c in class_names]
-
-    def _task_descr(self, name: str, module: GraphModule, run_name: str) -> list[tuple[str, str]]:
-        """One task's output dtype descr (v1 naming contract).
-
-        Returns
-        -------
-        list[tuple[str, str]]
-            ``(column, format)`` pairs.
-
-        Raises
-        ------
-        ConfigError
-            For an unsupported task family.
-        """
-        if getattr(module, "class_names", None) is not None:
-            # v1 ClassificationTask.output_names (task.py:140-151)
-            return [(f"{run_name}_{px}", "f4") for px in self._class_suffixes(module)]
-        if isinstance(module, VertexingTaskModule):
-            column = f"{run_name}_{VERTEX_INDEX}" if self.prefix_vertex_column else VERTEX_INDEX
-            return [(column, "i8")]  # v1 task.py:1003
-        if isinstance(module, RegressionTaskModule):
-            # M5 sub-wave A: regression is a supported family — one
-            # `{run_name}_{suffix}` f4 column per target, the suffix being the
-            # custom output name when set else the target (v1
-            # RegressionTask.output_names + get_h5, task.py:512-518,604). The
-            # SAME `output_suffixes` ownership feeds `onnx_outputs` (amendment
-            # §2.2 single ownership; M5 decision in callback.
-            # _validate_writer_roles + README M4.5 addendum).
-            return [(f"{run_name}_{suffix}", "f4") for suffix in module.output_suffixes]
-        # The raise stays as the guard for families with no representation at
-        # all (e.g. a genuinely custom writer-role task).
-        raise ConfigError(
-            f"TaskWriter {self.name!r} cannot format predictions of module {name!r} "
-            f"({type(module).__name__}) — supported families are classification "
-            "(class_names attr) and VertexingTaskModule; write a custom Writer for other "
-            "outputs (design §8), or narrow this writer's streams"
-        )
-
     def column_manifest(self, ctx: WriterDeclareCtx, run_name: str) -> dict[str, list[str]]:
         """The statically-derivable eval columns (design §4.4 annotation surface).
 
@@ -300,95 +262,46 @@ class TaskWriter(Writer):
         -------
         dict[str, list[str]]
             ``{stream: [column names]}`` — the same names `columns`
-            declares at run time (same `_task_descr` helper).
+            declares at run time (the task's ``output_names``).
         """
         out: dict[str, list[str]] = {}
-        for name, module in self._selected(ctx.model_modules).items():
-            cols = [column for column, _ in self._task_descr(name, module, run_name)]
+        for module in self._selected(ctx.model_modules).values():
+            output_names = _render_method(module, "output_names", "TEST columns")
+            cols = [column for column, _ in output_names(run_name)]
             out.setdefault(module.stream, []).extend(cols)
         return out
 
     # -- ONNX role: the manifest declarations (M4.5 amendment §2.2) -------------
 
     def onnx_outputs(self, ctx: WriterDeclareCtx) -> list[ExportOutput]:
-        """The selected tasks' export entries, from the TEST suffix helpers.
+        """The selected tasks' export entries, each rendered by its task.
 
-        Emission order is v1's ``output_names`` order (``to_onnx.py:
-        258-292``): global-stream entries first, then sequence-stream aux
-        entries — regardless of module declaration order, so converted
-        goldens byte-match O2/O5 (amendment §5 rule 5).
+        The task owns its per-family `ExportOutput` (``task.onnx_outputs()``);
+        the writer collects the entries, applies the ``onnx_names`` overrides,
+        and emits them in v1's ``output_names`` order (``to_onnx.py:258-292``):
+        global-stream entries first, then sequence-stream aux entries —
+        regardless of module declaration order, so converted goldens
+        byte-match O2/O5 (amendment §5 rule 5). Unknown
+        ``onnx_streams``/``onnx_tasks``/``onnx_names`` entries, a malformed
+        ``onnx_names`` value, or a task that ships no export representation
+        propagate a `ConfigError` from `_onnx_selected` / `_check_onnx_names`
+        / the task's own ``onnx_outputs``.
 
         Returns
         -------
         list[ExportOutput]
             One entry per ONNX-selected task (empty with ``onnx: false``).
-
-        Raises
-        ------
-        ConfigError
-            For unknown ``onnx_streams``/``onnx_tasks``/``onnx_names``
-            entries, a malformed ``onnx_names`` value (condition 6), or a
-            task family without an export representation.
         """
         if not self.onnx:
             return []
         selected = self._onnx_selected(ctx)
-        self._check_onnx_names(selected, ctx)
+        self._check_onnx_names(selected)
         ordered = [it for it in selected.items() if it[1].stream not in ctx.sequence_streams]
         ordered += [it for it in selected.items() if it[1].stream in ctx.sequence_streams]
         out: list[ExportOutput] = []
         for name, module in ordered:
-            class_names = getattr(module, "class_names", None)
-            if class_names is not None and module.stream not in ctx.sequence_streams:
-                suffixes = self._onnx_class_suffixes(name, module)
-                out.append(ExportOutput(port=module.pred_key, names=suffixes))
-            elif class_names is not None:
-                out.append(
-                    ExportOutput(
-                        port=module.pred_key,
-                        name=self._onnx_aux_name(name),
-                        reduce="argmax",
-                        dtype="int8",
-                    )
-                )
-            elif isinstance(module, VertexingTaskModule):
-                # the SAME constant as the TEST column — that is the point
-                # (amendment §2.2; v1 to_onnx.py:286-288)
-                out.append(
-                    ExportOutput(
-                        port=module.pred_key,
-                        name=VERTEX_INDEX,
-                        reduce="vertex_union_find",
-                        dtype="int8",
-                    )
-                )
-            elif isinstance(module, RegressionTaskModule):
-                # M5 sub-wave A: regression is export-representable — one
-                # `split_scalars` scalar per target (v1 get_onnx splits the
-                # de-scaled `[B, R]` preds into R squeezed scalars,
-                # task.py:625-642). The suffixes ARE the TEST `output_suffixes`
-                # (custom_output_names else targets) minus the run-name prefix;
-                # the exporter prepends `{model_name}_` (amendment §2.2 single
-                # ownership). A regression task an author declines to export
-                # uses onnx/onnx_tasks/onnx_streams narrowing (handled above).
-                out.append(
-                    ExportOutput(
-                        port=module.pred_key,
-                        names=list(module.output_suffixes),
-                        reduce="split_scalars",
-                    )
-                )
-            else:
-                # The raise stays for a genuinely unrepresentable family (e.g.
-                # a custom writer-role task with no shipped reduce).
-                raise ConfigError(
-                    f"TaskWriter {self.name!r} cannot derive an ONNX output for module "
-                    f"{name!r} ({type(module).__name__}) — supported families are "
-                    "classification (class_names attr) and VertexingTaskModule; exclude it "
-                    f"(onnx_tasks/onnx_streams) or declare it from a custom writer's "
-                    "onnx_outputs with a shipped reduce (salt.core.onnx.config."
-                    "KNOWN_REDUCES; design §8, M4.5 amendment §3)"
-                )
+            onnx_outputs = _render_method(module, "onnx_outputs", "ONNX output")
+            out.extend(self._apply_onnx_name(name, entry) for entry in onnx_outputs())
         return out
 
     def _onnx_selected(self, ctx: WriterDeclareCtx) -> dict[str, GraphModule]:
@@ -402,7 +315,7 @@ class TaskWriter(Writer):
         Raises
         ------
         ConfigError
-            For ``onnx_streams`` entries outside the TEST stream selection
+            For ``onnx_streams`` entries outside the selected tasks' streams
             or ``onnx_tasks`` entries naming no selected task.
         """
         tasks = self._selected(ctx.model_modules)
@@ -411,9 +324,9 @@ class TaskWriter(Writer):
             if unknown := sorted(set(self.onnx_streams) - known):
                 raise ConfigError(
                     f"TaskWriter {self.name!r} (config: writers.modules.{self.name}): "
-                    f"onnx_streams {unknown} match no TEST-selected task stream — selected "
-                    f"streams are {sorted(known)} (onnx_streams narrows WITHIN the TEST "
-                    "'streams' selection, M4.5 amendment §2.2)"
+                    f"onnx_streams {unknown} match no selected task stream — selected "
+                    f"streams are {sorted(known)} (onnx_streams narrows WITHIN the selected "
+                    "'tasks', M4.5 amendment §2.2)"
                 )
             tasks = {n: m for n, m in tasks.items() if m.stream in self.onnx_streams}
         if self.onnx_tasks is not None:
@@ -426,17 +339,21 @@ class TaskWriter(Writer):
             tasks = {n: m for n, m in tasks.items() if n in self.onnx_tasks}
         return tasks
 
-    def _check_onnx_names(self, selected: Mapping[str, GraphModule], ctx: WriterDeclareCtx) -> None:
+    def _check_onnx_names(self, selected: Mapping[str, GraphModule]) -> None:
         """Validate the ``onnx_names`` mapping against the selected tasks (condition 6).
+
+        The task decides whether its ONNX suffix is renameable
+        (``Task.onnx_renameable`` — classification yes, vertexing/regression
+        no, since the task owns those names). For a renameable task the value
+        shape must match the rendered entry: a per-class ``names`` entry takes
+        a LIST (length == the entry's suffix count), a single-``name`` entry a
+        string.
 
         Raises
         ------
         ConfigError
-            For an entry naming no ONNX-selected task, a vertexing entry
-            (the suffix is the shared `VERTEX_INDEX` constant), or a value
-            of the wrong shape for the task's family: classification
-            entries take a per-class LIST (length == ``class_names``),
-            sequence (argmax) entries a single string.
+            For an entry naming no ONNX-selected task, a non-renameable task,
+            or a value of the wrong shape for the rendered entry.
         """
         for task_name, value in self.onnx_names.items():
             module = selected.get(task_name)
@@ -446,32 +363,26 @@ class TaskWriter(Writer):
                     f"onnx_names entry {task_name!r} names no ONNX-selected task — "
                     f"candidates are {sorted(selected)}"
                 )
-            if isinstance(module, VertexingTaskModule):
+            if not getattr(module, "onnx_renameable", False):
                 raise ConfigError(
-                    f"TaskWriter {self.name!r}: onnx_names cannot rename vertexing task "
-                    f"{task_name!r} — its suffix is the shared cross-mode constant "
-                    f"{VERTEX_INDEX!r} (salt.core.writers.names; amendment §2.2)"
+                    f"TaskWriter {self.name!r}: onnx_names cannot rename task {task_name!r} "
+                    f"({type(module).__name__}) — the task owns its ONNX suffix (vertexing's "
+                    "shared VertexIndex constant / regression's custom_output_names; rename "
+                    "those via the task, amendment §2.2 single ownership)"
                 )
-            if isinstance(module, RegressionTaskModule):
-                raise ConfigError(
-                    f"TaskWriter {self.name!r}: onnx_names cannot rename regression task "
-                    f"{task_name!r} — its per-target suffixes ARE the cross-mode "
-                    f"output_suffixes; rename via the task's custom_output_names instead "
-                    "(amendment §2.2 single ownership)"
-                )
-            class_names = getattr(module, "class_names", None)
-            if class_names is not None and module.stream not in ctx.sequence_streams:
+            entry = self._single_onnx_entry(task_name, module)
+            if entry.names is not None:
                 if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                     raise ConfigError(
                         f"TaskWriter {self.name!r}: onnx_names[{task_name!r}] must be a LIST "
                         f"of per-class suffixes for a global classification task, got "
                         f"{value!r} (amendment merge condition 6)"
                     )
-                if len(value) != len(class_names):
+                if len(value) != len(entry.names):
                     raise ConfigError(
                         f"TaskWriter {self.name!r}: onnx_names[{task_name!r}] lists "
-                        f"{len(value)} suffixes but the task has {len(class_names)} classes "
-                        f"({list(class_names)}) — one suffix per class, in class order "
+                        f"{len(value)} suffixes but the task has {len(entry.names)} classes "
+                        f"({list(entry.names)}) — one suffix per class, in class order "
                         "(amendment merge condition 6)"
                     )
             elif not isinstance(value, str):
@@ -481,37 +392,55 @@ class TaskWriter(Writer):
                     "(amendment merge condition 6)"
                 )
 
-    def _onnx_class_suffixes(self, name: str, module: GraphModule) -> list[str]:
-        """A global classification task's ONNX suffixes (override or shared helper).
+    @staticmethod
+    def _single_onnx_entry(name: str, module: GraphModule) -> ExportOutput:
+        """The task's single ONNX entry (the renameable families produce exactly one).
 
         Returns
         -------
-        list[str]
-            The ``onnx_names`` override when given (length pre-validated),
-            else the SAME `_class_suffixes` list the TEST columns use.
-        """
-        override = self.onnx_names.get(name)
-        if override is not None:
-            return list(override)
-        return self._class_suffixes(module)
+        ExportOutput
+            The task's lone export entry.
 
-    def _onnx_aux_name(self, name: str) -> str:
-        """A sequence task's single ONNX suffix (override or Pascal-case default).
+        Raises
+        ------
+        ConfigError
+            If a renameable task does not render exactly one entry (``onnx_names``
+            targets one entry by task name — a multi-entry renameable task has
+            no unambiguous target).
+        """
+        entries = _render_method(module, "onnx_outputs", "ONNX output")()
+        if len(entries) != 1:
+            raise ConfigError(
+                f"TaskWriter: onnx_names targets task {name!r} but it renders {len(entries)} "
+                "ONNX entries — onnx_names renames a single-entry task (amendment condition 6)"
+            )
+        return entries[0]
+
+    def _apply_onnx_name(self, name: str, entry: ExportOutput) -> ExportOutput:
+        """Apply an ``onnx_names`` override to one rendered entry (else pass through).
 
         Returns
         -------
-        str
-            ``onnx_names[name]`` when given, else `pascal_case` of the
-            task instance name — reproducing v1's hand-built strings
-            (``track_origin -> TrackOrigin``, ``to_onnx.py:283-292``).
+        ExportOutput
+            The entry with its suffix(es) replaced by the ``onnx_names``
+            value when one is configured (validated in `_check_onnx_names`),
+            else the task-rendered entry unchanged.
         """
         override = self.onnx_names.get(name)
-        if override is not None:
-            return str(override)
-        return pascal_case(name)
+        if override is None:
+            return entry
+        if entry.names is not None:
+            return replace(entry, names=list(override))
+        return replace(entry, name=str(override))
 
     def write(self, bundle: Bundle, rows: slice) -> dict[str, np.ndarray]:
         """Convert this batch's predictions to structured arrays.
+
+        Delegates the per-family value formatting to each task's
+        ``get_h5(bundle, run_name)`` (the task reads its own ``preds.*`` leaf
+        and renders the run-name-prefixed structured array); the writer pads
+        per-token fragments to the file sequence length and concatenates
+        same-stream fragments.
 
         Returns
         -------
@@ -522,10 +451,9 @@ class TaskWriter(Writer):
         del rows
         ctx = self.ctx
         frags: dict[str, list[np.ndarray]] = {}
-        for name, module in self._selected(ctx.model_modules).items():
-            preds = bundle.get(module.pred_key)
-            dtype = np.dtype(self._task_descr(name, module, ctx.run_name))
-            arr = self._convert(module, preds, dtype)
+        for module in self._selected(ctx.model_modules).values():
+            get_h5 = _render_method(module, "get_h5", "TEST values")
+            arr = get_h5(bundle, ctx.run_name)
             if arr.ndim == 2:
                 arr = _pad_to(arr, ctx.seq_lengths[module.stream])
             frags.setdefault(module.stream, []).append(arr)
@@ -533,26 +461,6 @@ class TaskWriter(Writer):
             stream: arrays[0] if len(arrays) == 1 else join_structured_arrays(arrays)
             for stream, arrays in frags.items()
         }
-
-    @staticmethod
-    def _convert(module: GraphModule, preds: Tensor, dtype: np.dtype) -> np.ndarray:
-        """Apply the v1 writer-side tensor->structured conversion per family.
-
-        Returns
-        -------
-        np.ndarray
-            The structured array (``[B]`` or ``[B, L]``).
-        """
-        if getattr(module, "class_names", None) is not None:
-            # v1 ClassificationTask.get_h5 (task.py:266-283): probs -> f4 u2s
-            return u2s(preds.float().cpu().numpy(), dtype)
-        if isinstance(module, RegressionTaskModule):
-            # v1 RegressionTask.get_h5 (task.py:604-623): de-scaled values
-            # (the forward already inverted scaling in TEST) -> f4 u2s
-            return u2s(preds.float().cpu().numpy(), dtype)
-        # v1 VertexingTask.get_h5 (task.py:988-1005): the EXACT op chain —
-        # float assignments (-inf padded) -> .int() (int32 cast) -> u2s i8
-        return u2s(preds.int().cpu().numpy(), dtype)
 
 
 class InputCopyWriter(Writer):

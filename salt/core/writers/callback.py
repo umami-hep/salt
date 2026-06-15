@@ -446,7 +446,9 @@ class WriterCallback(Callback):
         (``onnx_outputs`` returns ``[]`` before the family dispatch, so the
         eval-only shape stays legal). Full rationale + the A2 consequence:
         ``salt/core/README.md`` (M4.5 amendment addendum). The loud raises
-        (``writers/modules.py`` ``_task_descr`` / ``onnx_outputs``) stay.
+        (``salt/core/nn/tasks.py`` ``_TaskModuleBase.output_names`` /
+        ``get_h5`` / ``onnx_outputs`` — the per-family rendering now lives on
+        the task, not the writer) stay.
 
         Raises
         ------

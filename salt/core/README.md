@@ -226,13 +226,16 @@ global regression export (GN2X-class, one line in v1)" as the family that
 must NOT become a custom-writer authoring task. So "derive-only-export-
 representable" and "keep the loud error" are not in tension *for
 regression*: regression simply joins classification + vertexing as a
-representable family in `TaskWriter._task_descr` (TEST) and
-`TaskWriter.onnx_outputs` (ONNX, a `split_scalars`-style per-target
-manifest entry), built from ONE shared per-family suffix helper exactly as
-the amendment §2.2 single-ownership rule requires. The loud
-unsupported-family raises (`writers/modules.py` `_task_descr` and
-`onnx_outputs`) stay — they remain the right error for a future family
-with no export math — but a regression config no longer reaches them.
+representable family via its own `output_names`/`get_h5` (TEST) and
+`onnx_outputs` (ONNX, a `split_scalars`-style per-target manifest entry) on
+`RegressionTaskModule` (`salt/core/nn/tasks.py`; the per-family rendering
+lives on the TASK now, mirroring v1's `task.py` placement — `TaskWriter` is
+pure orchestration), built from ONE shared per-family suffix helper exactly
+as the amendment §2.2 single-ownership rule requires. The loud
+unsupported-family raises (`salt/core/nn/tasks.py`
+`_TaskModuleBase.output_names`/`get_h5`/`onnx_outputs`) stay — they remain
+the right error for a future family with no export math — but a regression
+config no longer reaches them.
 
 Consequence for A2: when `RegressionTaskModule` lands, the default
 `TaskWriter` formats it in TEST and ONNX, so `salt2 test` demand assembly

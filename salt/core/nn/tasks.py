@@ -33,8 +33,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
+from ftag import Flavours
+from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
@@ -42,6 +45,8 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.modules import _reject_width_keys, _stream_len
+from salt.core.onnx.config import ExportOutput
+from salt.core.writers.names import VERTEX_INDEX, pascal_case
 from salt.models.task import ClassificationTask as V1ClassificationTask
 from salt.models.task import GaussianRegressionTask as V1GaussianRegressionTask
 from salt.models.task import RegressionTask as V1RegressionTask
@@ -173,6 +178,123 @@ class _TaskModuleBase(nn.Module):
         """
         return self.sequence and self.stream not in _NO_PAD_MASK_STREAMS
 
+    # -- output rendering: TEST columns + values, ONNX manifest (mirrors v1) ----
+    #
+    # The per-family rendering knowledge lives on the task — v1's `output_names`
+    # / `get_h5` / `get_onnx` placement (task.py). `TaskWriter` is pure
+    # orchestration: it groups, prefixes-by-stream, pads, and writes; it never
+    # branches on the task family. A family that ships no rendering inherits
+    # these guards, so a writer-role task with no representation raises a loud
+    # `ConfigError` at the point the writer asks for its columns / export entry
+    # (the unsupported-family error, design §8 — moved here from the writer).
+
+    onnx_renameable: bool = False
+    """Whether `TaskWriter` ``onnx_names`` may override this task's ONNX suffix.
+
+    Classification is renameable (overlapping class names across two
+    classification tasks is the collision-fix path, amendment merge condition
+    6). Vertexing's suffix is the shared cross-mode `VERTEX_INDEX` constant and
+    regression's suffixes ARE its ``custom_output_names`` — both reject the
+    writer-side ``onnx_names`` rename (single ownership, amendment §2.2). The
+    family owns this naming policy alongside its rendering; the writer reads it
+    instead of branching on the task type.
+    """
+
+    def output_names(self, run_name: str) -> list[tuple[str, str]]:
+        """The TEST column schema for this task — ``(column_name, np_dtype_str)``.
+
+        Mirrors v1's per-family ``output_names`` property plus the column
+        dtype the writer's old ``_task_descr`` carried. The ``run_name``
+        prefix matches the existing data flow (v1's ``model_name`` column
+        prefix, task.py:140-151); a bare property cannot see it. The
+        per-family override returns the same names+formats the writer used to
+        derive in its isinstance ladder, so the eval byte-schema is unchanged.
+        The base raises for a task family that ships no TEST rendering (the
+        unsupported-family guard, moved here from `TaskWriter`).
+
+        Parameters
+        ----------
+        run_name : str
+            The run ``name:`` — the TEST column prefix (v1 ``model_name``).
+
+        Raises
+        ------
+        ConfigError
+            For a task family that ships no TEST rendering.
+        """
+        del run_name
+        raise ConfigError(self._no_render_msg("TEST columns"))
+
+    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
+        """Render this task's formatted TEST values as a structured array (v1 ``get_h5``).
+
+        Mirrors v1's per-family ``get_h5`` (task.py:266/604/988): reads the
+        task's published ``preds.*`` leaf from `b` and renders it to the
+        structured array whose dtype is exactly
+        ``np.dtype(self.output_names(run_name))`` — the FINAL run-name-prefixed
+        field names, so the values line up with the columns `columns` declares.
+        (The v1 per-family bundle inputs — pad mask, de-scaling labels — were
+        consumed by the task's TEST forward, which publishes the already
+        converted/de-scaled values, so this only needs the ``preds.*`` leaf.)
+        The writer owns padding to the file sequence length and the I/O; this
+        is the value-formatting the writer's ``write``/``_convert`` used to do.
+        The base raises for a task family that ships no TEST rendering.
+
+        Parameters
+        ----------
+        b : Bundle
+            The executed TEST bundle (carries the converted ``preds.*`` leaf).
+        run_name : str
+            The run ``name:`` — the TEST column prefix (matches `output_names`).
+
+        Raises
+        ------
+        ConfigError
+            For a task family that ships no TEST rendering.
+        """
+        del b, run_name
+        raise ConfigError(self._no_render_msg("TEST values"))
+
+    def onnx_outputs(self) -> list[ExportOutput]:
+        """Render this task's ONNX-manifest entries (mirrors v1 ``get_onnx`` + naming).
+
+        One `ExportOutput` per family entry, referencing a shipped reduce by
+        key (no change to the reduce registry): global classification ->
+        ``split_scalars`` per-class suffixes; sequence classification -> one
+        ``argmax`` int8 entry; vertexing -> ``vertex_union_find`` int8 on the
+        shared `VERTEX_INDEX` constant; regression -> ``split_scalars``
+        per-target suffixes. The exporter prepends ``{model_name}_`` to the
+        suffixes (amendment §5 rule 3) — the task carries them bare, the SAME
+        suffixes its TEST columns use.
+
+        `TaskWriter` decides WHICH tasks export (the ``onnx``/``onnx_tasks``/
+        ``onnx_streams`` narrowing, the global-before-sequence emission order,
+        the ``onnx_names`` per-instance overrides); the task only knows how to
+        render ITS own entry. The base raises for a task family that ships no
+        ONNX rendering.
+
+        Raises
+        ------
+        ConfigError
+            For a task family that ships no ONNX rendering.
+        """
+        raise ConfigError(self._no_render_msg("ONNX output"))
+
+    def _no_render_msg(self, what: str) -> str:
+        """The unsupported-family error message (moved off the writer).
+
+        Returns
+        -------
+        str
+            Naming the task instance, its type, and the missing rendering.
+        """
+        return (
+            f"task {self.name!r} ({type(self).__name__}) ships no {what} rendering — "
+            "supported families are ClassificationTaskModule, VertexingTaskModule and "
+            "RegressionTaskModule; give a custom task module output_names/get_h5/onnx_outputs "
+            "methods, or write a custom Writer for its outputs (design §8)"
+        )
+
 
 class ClassificationTaskModule(_TaskModuleBase):
     """Classification head over a pooled vector or a per-stream sequence (design §3.3).
@@ -195,6 +317,9 @@ class ClassificationTaskModule(_TaskModuleBase):
     A literal ``loss.init_args.weight`` list remains valid and is exclusive
     with ``weight_source``.
     """
+
+    onnx_renameable = True
+    """Classification ONNX suffixes are overridable via ``onnx_names`` (condition 6)."""
 
     def __init__(
         self,
@@ -410,6 +535,75 @@ class ClassificationTaskModule(_TaskModuleBase):
         preds, _ = self.task(x, None, None, context=ctx)
         return {self.pred_key: self.task.run_inference(preds, mask)}
 
+    # -- output rendering (v1 ClassificationTask.output_names/get_h5/get_onnx) --
+
+    @property
+    def class_suffixes(self) -> list[str]:
+        """Per-class logical suffixes — ``Flavours[c].px`` else ``p{c}`` (v1 task.py:140-151).
+
+        ONE owner, BOTH modes: the TEST columns prefix these with the run name
+        (`output_names`), the ONNX manifest carries them bare for the
+        exporter's ``{model_name}_`` prefix (`onnx_outputs`).
+
+        Returns
+        -------
+        list[str]
+            One suffix per ``class_names`` entry, in class order.
+        """
+        return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
+
+    def output_names(self, run_name: str) -> list[tuple[str, str]]:
+        """One ``f4`` column per class, named ``{run_name}_{px}`` (v1 task.py:140-151,282).
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            ``(column, "f4")`` pairs, one per class, in class order.
+        """
+        return [(f"{run_name}_{px}", "f4") for px in self.class_suffixes]
+
+    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
+        """The already-softmaxed probabilities as ``f4`` columns (v1 task.py:266-283).
+
+        The TEST forward publishes converted probabilities (design §3.3), so
+        this is the writer-side ``probs -> f4 u2s`` conversion verbatim
+        (padded positions read 0.0).
+
+        Returns
+        -------
+        np.ndarray
+            ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
+        """
+        preds = b.get(self.pred_key)
+        dtype = np.dtype(self.output_names(run_name))
+        return u2s(preds.float().cpu().numpy(), dtype)
+
+    def onnx_outputs(self) -> list[ExportOutput]:
+        """Global -> per-class ``split_scalars``; sequence -> one ``argmax`` int8.
+
+        Mirrors v1's two classification export shapes (``to_onnx.py:258-292``):
+        a global (pooled) classification head emits one float32 scalar per
+        class (suffixes = `class_suffixes`); a per-token sequence head emits a
+        single int8 argmax entry whose suffix is the Pascal-case of the task
+        instance name (``track_origin -> TrackOrigin``). The `TaskWriter`
+        owns ``onnx_names`` overrides and the global-before-sequence order.
+
+        Returns
+        -------
+        list[ExportOutput]
+            One entry (per-class scalars, or a single argmax).
+        """
+        if not self.sequence:
+            return [ExportOutput(port=self.pred_key, names=list(self.class_suffixes))]
+        return [
+            ExportOutput(
+                port=self.pred_key,
+                name=pascal_case(self.name),
+                reduce="argmax",
+                dtype="int8",
+            )
+        ]
+
 
 class VertexingTaskModule(_TaskModuleBase):
     """Edge-classification vertexing head (design §3.3, composes v1 `VertexingTask`).
@@ -447,6 +641,7 @@ class VertexingTaskModule(_TaskModuleBase):
         loss: str | dict[str, Any] | None = None,
         weight: float = 1.0,
         origin_weighting: Mapping[str, Sequence[int | str]] | None = None,
+        prefix_vertex_column: bool = False,
         expose: Sequence[str] | None = None,
     ) -> None:
         """Capture config only (design §2.3).
@@ -479,6 +674,16 @@ class VertexingTaskModule(_TaskModuleBase):
             default v1's ``{"heavy": [3, 4, 5], "fake": [1]}``. Names are
             resolved at setup against the schema's origin class-name attr
             (design §5.1); ids bind directly.
+        prefix_vertex_column : bool, optional
+            Name the TEST vertexing column ``{run_name}_VertexIndex`` instead
+            of the v1-compatible bare ``VertexIndex``, by default False. The
+            task owns its column naming now (moved off `TaskWriter`); the W1
+            byte-schema bar is v1's bare output (``task.py:1003``), and the
+            design §8 run-name-prefix fix is opt-in behind this flag (the
+            config converter sets the compat flag, design §8). The ONNX name
+            is ALWAYS the shared `VERTEX_INDEX` constant (the exporter
+            prefixes ``{model_name}_`` — v1 ``to_onnx.py:287``), so flipping
+            the flag aligns the two names up to the prefix value.
         expose : Sequence[str] | None, optional
             Modes the ``preds.*`` port is published in (design §4.2), by
             default None (all modes). ``[fit, val]`` opts a train-only aux task
@@ -501,6 +706,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 "label.replace('VertexIndex', 'OriginLabel') (task.py:937; absorbed at M7)"
             )
         self.origin_label = origin_label
+        self.prefix_vertex_column = bool(prefix_vertex_column)
         weighting = dict(origin_weighting or {"heavy": [3, 4, 5], "fake": [1]})
         if unknown := sorted(set(weighting) - {"heavy", "fake"}):
             raise ConfigError(
@@ -734,6 +940,62 @@ class VertexingTaskModule(_TaskModuleBase):
             return {self.pred_key: self.task.run_inference(preds, mask)}
         # ONNX: raw edge scores; union-find lives in the export reduce (§3.3)
         return {self.pred_key: preds}
+
+    # -- output rendering (v1 VertexingTask.output_names/get_h5 + naming) -------
+
+    def output_names(self, run_name: str) -> list[tuple[str, str]]:
+        """A single ``('VertexIndex', 'i8')`` column (v1 task.py:1003-1004).
+
+        The column is BARE ``VertexIndex`` by default (v1 byte parity); with
+        ``prefix_vertex_column`` it is ``{run_name}_VertexIndex`` (design §8).
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            One ``(column, "i8")`` pair.
+        """
+        column = f"{run_name}_{VERTEX_INDEX}" if self.prefix_vertex_column else VERTEX_INDEX
+        return [(column, "i8")]
+
+    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
+        """Per-node vertex assignments as one ``i8`` column (v1 task.py:988-1005).
+
+        The TEST forward publishes the union-find assignments (design §3.3),
+        so this is the writer-side EXACT v1 op chain ``preds.int().cpu()`` ->
+        u2s i8 verbatim — padded positions read the int32 cast of ``-inf``
+        (-2147483648).
+
+        Returns
+        -------
+        np.ndarray
+            ``[B, L]`` structured array with one ``i8`` field.
+        """
+        preds = b.get(self.pred_key)
+        dtype = np.dtype(self.output_names(run_name))
+        return u2s(preds.int().cpu().numpy(), dtype)
+
+    def onnx_outputs(self) -> list[ExportOutput]:
+        """One ``vertex_union_find`` int8 entry on the shared `VERTEX_INDEX` suffix.
+
+        The export suffix is the SAME `VERTEX_INDEX` constant the TEST column
+        uses (amendment §2.2; v1 ``to_onnx.py:286-288``) — the exporter
+        prepends ``{model_name}_``. The in-graph union-find lives in the
+        shipped ``vertex_union_find`` reduce (referenced by key, no registry
+        change); ONNX publishes raw edge scores that the reduce consumes.
+
+        Returns
+        -------
+        list[ExportOutput]
+            One ``vertex_union_find`` int8 entry.
+        """
+        return [
+            ExportOutput(
+                port=self.pred_key,
+                name=VERTEX_INDEX,
+                reduce="vertex_union_find",
+                dtype="int8",
+            )
+        ]
 
 
 class RegressionTaskModule(_TaskModuleBase):
@@ -1338,6 +1600,61 @@ class RegressionTaskModule(_TaskModuleBase):
                 for denom, key in zip(self.target_denominators, self.denom_label_keys, strict=True)
             }
         }
+
+    # -- output rendering (v1 RegressionTask.output_names/get_h5/get_onnx) ------
+
+    def output_names(self, run_name: str) -> list[tuple[str, str]]:
+        """One ``f4`` column per output, named ``{run_name}_{suffix}`` (v1 task.py:511-517).
+
+        The suffixes ARE `output_suffixes` (``custom_output_names`` else the
+        targets; doubled for a gaussian head — R means then R ``_stddev``),
+        the SAME suffixes the ONNX manifest carries.
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            ``(column, "f4")`` pairs, one per output, in column order.
+        """
+        return [(f"{run_name}_{suffix}", "f4") for suffix in self.output_suffixes]
+
+    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
+        """The de-scaled values as ``f4`` columns (v1 task.py:604-623).
+
+        The TEST forward already inverted the scaling and concatenated a
+        gaussian head's means ‖ stddevs into one ``[..., 2R]`` array (design
+        §3.3), so this is the writer-side ``de-scaled values -> f4 u2s``
+        conversion verbatim.
+
+        Returns
+        -------
+        np.ndarray
+            ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
+        """
+        preds = b.get(self.pred_key)
+        dtype = np.dtype(self.output_names(run_name))
+        return u2s(preds.float().cpu().numpy(), dtype)
+
+    def onnx_outputs(self) -> list[ExportOutput]:
+        """Per-target ``split_scalars`` float32 entry (v1 get_onnx, task.py:625-642).
+
+        One ``split_scalars`` reduce splitting the de-scaled ``[B, R]`` preds
+        into R squeezed scalars; the suffixes ARE `output_suffixes` (minus the
+        run-name prefix — the exporter prepends ``{model_name}_``). Rename via
+        the task's ``custom_output_names``, NOT the writer's ``onnx_names``
+        (single ownership, amendment §2.2).
+
+        Returns
+        -------
+        list[ExportOutput]
+            One ``split_scalars`` entry.
+        """
+        return [
+            ExportOutput(
+                port=self.pred_key,
+                names=list(self.output_suffixes),
+                reduce="split_scalars",
+            )
+        ]
 
 
 class _OriginWeightedVertexing(V1VertexingTask):

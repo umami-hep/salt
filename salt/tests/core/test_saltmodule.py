@@ -672,8 +672,8 @@ class TestExposeSilencesDeadPreds:
 
         from salt.core.writers import TaskWriter, WriterCallback
 
-        # TaskWriter narrowed to jets — the tracks tasks' preds are unconsumed
-        wcb = WriterCallback(modules={"tasks": TaskWriter(streams=["jets"])})
+        # TaskWriter narrowed to the jets task — the tracks tasks' preds are unconsumed
+        wcb = WriterCallback(modules={"tasks": TaskWriter(tasks=["jets_classification"])})
         reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
         model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
             callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)

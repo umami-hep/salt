@@ -1063,8 +1063,8 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
     """Build the TEST dead-preds hard error at the design §4.2 quality bar.
 
     Names, per dead key, the producing task module and its config address;
-    attributes the culprit when a configured writer's explicit ``streams``
-    list excludes the dead streams (the §4.2 worked-example attribution,
+    attributes the culprit when a configured writer's explicit ``tasks``
+    list excludes the dead tasks (the §4.2 worked-example attribution,
     M3-review fix); and offers the real per-task ``expose: [fit, val]`` opt-out
     (design §4.2 — keeps the task training while pruning its prediction from
     the TEST/ONNX plans) as the FIRST fix for train-only aux tasks, with the
@@ -1078,7 +1078,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         Produced key -> producing module instance name.
     writers : Any
         The writer callback (duck-typed ``writers`` mapping for the
-        streams-narrowing hint; absent attributes degrade gracefully).
+        tasks-narrowing hint; absent attributes degrade gracefully).
 
     Returns
     -------
@@ -1094,16 +1094,16 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         "an unconsumed preds.* port in TEST means a computed prediction is never "
         "persisted (design §4.2, §8)."
     )
-    dead_streams = {
-        parts[1]
+    dead_tasks = {
+        parts[2]
         for key in dead
         if len(parts := key.split(KEY_SEP)) > 2  # preds.<stream>.<task>
     }
     hints = [
-        f"writers.modules.{wname}.init_args.streams: {list(streams)} currently excludes {excluded}"
+        f"writers.modules.{wname}.init_args.tasks: {list(tasks)} currently excludes {excluded}"
         for wname, writer in (getattr(writers, "writers", None) or {}).items()
-        if (streams := getattr(writer, "streams", None)) is not None
-        and (excluded := sorted(dead_streams - set(streams)))
+        if (tasks := getattr(writer, "tasks", None)) is not None
+        and (excluded := sorted(dead_tasks - set(tasks)))
     ]
     fix = "  fix: widen the writers"
     if hints:

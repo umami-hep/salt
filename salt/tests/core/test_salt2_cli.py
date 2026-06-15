@@ -565,15 +565,15 @@ class TestGraphFitConfigAdapter:
             "test",
             *self.set_flags(data),
             "--set",
-            'writers.modules.tasks.init_args.streams=["jets"]',
+            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
         ])
         out = capsys.readouterr().out
         assert rc == 1
         assert "consumed by NO writer" in out
         assert "track_origin" in out and "track_vertexing" in out
         # §4.2-exemplar attribution: the culprit writer address + excluded
-        # streams, and the per-task config addresses
-        assert "writers.modules.tasks.init_args.streams" in out
+        # tasks, and the per-task config addresses
+        assert "writers.modules.tasks.init_args.tasks" in out
         assert "excludes" in out
         assert "model.modules.track_origin" in out
 
@@ -587,7 +587,7 @@ class TestGraphFitConfigAdapter:
             str(DUMMY_CFG),
             *self.set_flags(data),
             "--set",
-            'writers.modules.tasks.init_args.streams=["jets"]',
+            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
         ])
         out, err = capsys.readouterr()
         assert rc == 1
@@ -604,7 +604,7 @@ class TestGraphFitConfigAdapter:
             "test",
             *self.set_flags(data),
             "--set",
-            'writers.modules.tasks.init_args.streams=["jets"]',
+            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
         ])
         assert rc == 1
         assert "consumed by NO writer" in capsys.readouterr().err

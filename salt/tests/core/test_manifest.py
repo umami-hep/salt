@@ -174,6 +174,48 @@ class TestManifestDerivation:
 
 
 # ---------------------------------------------------------------------------
+# The single-ownership (amendment §2.2) is now realised ON THE TASK: the same
+# task renders BOTH its TEST columns and its ONNX entry from one suffix list.
+# These units assert that property directly on the task render methods — the
+# writer's old `_class_suffixes`/`_onnx_class_suffixes` helpers are gone.
+# ---------------------------------------------------------------------------
+
+
+class TestTaskOwnsBothModes:
+    def test_one_suffix_list_feeds_test_and_onnx(self, modules):
+        # the cross-mode single owner is now the task: TEST column suffixes
+        # (modulo the run-name prefix) == the ONNX entry suffixes, both from
+        # `class_suffixes` — co-located on the task, not derived twice
+        task = modules["jets_classification"]
+        test_suffixes = [col.removeprefix("run_") for col, _ in task.output_names("run")]
+        (onnx_entry,) = task.onnx_outputs()
+        assert test_suffixes == onnx_entry.names == task.class_suffixes == ["pb", "pc", "pu"]
+
+    def test_class_names_permutation_on_the_task_moves_both(self, modules):
+        # the U1(c) drift control, proved on the TASK: permuting class_names
+        # moves the TEST columns AND the ONNX suffixes in lockstep because one
+        # list (`class_suffixes`) feeds both render methods
+        import copy
+
+        task = copy.deepcopy(modules["jets_classification"])
+        task.class_names = ["ujets", "bjets", "cjets"]
+        test_cols = [col for col, _ in task.output_names("run")]
+        (onnx_entry,) = task.onnx_outputs()
+        assert test_cols == ["run_pu", "run_pb", "run_pc"]
+        assert onnx_entry.names == ["pu", "pb", "pc"]
+
+    def test_regression_task_renders_its_own_split_scalars(self, modules):
+        # the regression family's ONNX entry is rendered BY THE TASK from the
+        # same `output_suffixes` (custom_output_names) its TEST columns use —
+        # the writer no longer reaches into output_suffixes
+        reg = _regression_modules(modules)["jets_regression"]
+        test_suffixes = [col.removeprefix("run_") for col, _ in reg.output_names("run")]
+        (onnx_entry,) = reg.onnx_outputs()
+        assert test_suffixes == onnx_entry.names == ["truthMass", "truthPt"]
+        assert onnx_entry.reduce == "split_scalars"
+
+
+# ---------------------------------------------------------------------------
 # condition 1: onnx / onnx_streams / onnx_tasks narrowing
 # ---------------------------------------------------------------------------
 
@@ -287,7 +329,14 @@ class TestSuffixConstants:
         assert onnx_entry.name == VERTEX_INDEX
         bare = task_writer().column_manifest(ctx, "run")["tracks"][-1]
         assert bare == VERTEX_INDEX
-        prefixed = task_writer(prefix_vertex_column=True).column_manifest(ctx, "run")["tracks"][-1]
+        # prefix_vertex_column moved onto the VertexingTaskModule (the task owns
+        # its column naming); flip it on the task, not the writer
+        import copy
+
+        prefixed_modules = dict(modules)
+        prefixed_modules["track_vertexing"] = copy.deepcopy(modules["track_vertexing"])
+        prefixed_modules["track_vertexing"].prefix_vertex_column = True
+        prefixed = task_writer().column_manifest(declare_ctx(prefixed_modules), "run")["tracks"][-1]
         assert prefixed == f"run_{VERTEX_INDEX}"
 
     def test_object_index_divergence_is_pinned(self):

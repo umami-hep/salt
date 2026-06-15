@@ -1083,11 +1083,14 @@ def run_w3(
         batch_size=batch_size,
         num_test=num_test,
         extra=[
-            '--writers.modules.tasks.init_args.streams=["jets"]',
+            '--writers.modules.tasks.init_args.tasks=["jets_classification"]',
             f"--writers.output={dead_out}",
         ],
     )
-    print("control (2): salt2 test with TaskWriter narrowed to streams=['jets'] MUST hard-error")
+    print(
+        "control (2): salt2 test with TaskWriter narrowed to tasks=['jets_classification'] "
+        "MUST hard-error"
+    )
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
         rc = salt2_main(argv)

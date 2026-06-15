@@ -3508,14 +3508,14 @@ def _d2_model(norm_dict: Path, *, expose: Sequence[str] | None) -> SaltModule:
 
 
 def _jets_only_writer() -> tuple[Any, Any]:
-    """A `TaskWriter` narrowed to jets + a matching reader (tracks preds unconsumed).
+    """A `TaskWriter` narrowed to the jets task + a matching reader (tracks preds unconsumed).
 
     Returns
     -------
     tuple[Any, Any]
         ``(writer_callback, reader)`` for the `_model_sinks(Mode.TEST)` path.
     """
-    wcb = WriterCallback(modules={"tasks": TaskWriter(streams=["jets"])})
+    wcb = WriterCallback(modules={"tasks": TaskWriter(tasks=["jets_classification"])})
     reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
     return wcb, reader
 

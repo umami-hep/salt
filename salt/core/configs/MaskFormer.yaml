@@ -235,12 +235,13 @@ writers:
   modules:
     inputs_copy: {class_path: salt.core.writers.InputCopyWriter}
     # the jet + track tasks ONLY — the object-class/mask/regression are owned by
-    # the object writer + matched loss, NOT the TaskWriter. Narrow to jets+tracks
-    # so the objects-stream regression head's preds.objects.regression is the
-    # object writer's export port alone (no two-writer ONNX-port collision)
+    # the object writer + matched loss, NOT the TaskWriter. Select by task
+    # INSTANCE name so the objects-stream `regression` head's
+    # preds.objects.regression is the object writer's export port alone (no
+    # two-writer ONNX-port collision); `regression` is deliberately omitted
     tasks:
       class_path: salt.core.writers.TaskWriter
-      init_args: {streams: [jets, tracks]}
+      init_args: {tasks: [jets_classification, track_origin]}
     pad_mask: {class_path: salt.core.writers.PadMaskWriter}
     # the MaskFormer object writer (AM §3; FD 1186-1213): TEST class probs +
     # MaskIndex + object_masks group; ONNX leading_object + object_index reduces
