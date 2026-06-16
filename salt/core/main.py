@@ -26,12 +26,23 @@ The ``writers:`` block (M3, design §8) is assembled into ONE `WriterCallback`
 appended after the ``callbacks:`` dict entries; ``salt2 test`` keeps the v1
 eval ergonomics (single config, best-checkpoint glob without ``--ckpt_path``,
 ``logger=False``, forced single device — ``utils/cli.py:312-332``).
-Comet logger wiring and run-dir timestamping are M6; ``base2.yaml`` ships
-``logger: false``.
+
+The Comet logger wiring lands in M6 (sub-wave E, gate CM1; FD §6.5): the
+``comet_ml``-before-lightning import order is preserved at the top of this
+module (v1 ``main.py:5``), ``--name`` is linked to the configured logger's
+``experiment_name`` (v1 glue ``cli.py:101``), and ``before_instantiate_classes``
+replicates the v1 fit-stage Comet setup (``cli.py:281-294``): ``dict_kwargs:
+{name}``, ``online: false`` when no ``COMET_API_KEY`` / under ``fast_dev_run``,
+the ``COMET_OFFLINE_DIRECTORY`` env + its mkdir, and ``logger=False`` on test
+(``cli.py:317``). ``base2.yaml`` still ships ``logger: false`` (local runs need
+no tracking), and `LearningRateMonitor` is a dict-keyed ``callbacks: lr_monitor``
+entry that only does anything once a logger is attached (FD §13 E3). Run-dir
+timestamping rides with a later wave.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import warnings
@@ -42,6 +53,7 @@ from typing import Any
 import comet_ml  # noqa: F401 - import-order contract: comet before lightning (v1 main.py:5, §5)
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
+from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.trainer import Trainer
 
 from salt.core import cli as graph_cli
@@ -124,6 +136,56 @@ class DeepMergeParser(LightningArgumentParser):
         if isinstance(args, Sequence) and not isinstance(args, str):
             args = [_normalise_module_null(arg) if isinstance(arg, str) else arg for arg in args]
         return super().parse_args(args, *pargs, **kwargs)
+
+
+def _needs_logger(callback: Any) -> bool:
+    """Whether a callback hard-requires an attached experiment logger to run.
+
+    The stock `LearningRateMonitor` raises a ``MisconfigurationException`` on a
+    logger-less trainer (``lr_monitor.py``). ``base2.yaml`` ships ``logger:
+    false`` by default and the ``callbacks.lr_monitor`` LearningRateMonitor
+    entry, so the assembly drops such callbacks on a logger-less run (M6 sub-wave
+    E) — keeping the default local fit/test path runnable.
+
+    Parameters
+    ----------
+    callback : Any
+        An assembled callback instance.
+
+    Returns
+    -------
+    bool
+        True for a `LearningRateMonitor` (the only logger-hard-required default).
+    """
+    from lightning.pytorch.callbacks import LearningRateMonitor  # noqa: PLC0415 - cheap, local
+
+    return isinstance(callback, LearningRateMonitor)
+
+
+def _comet_accepts_dict_kwargs() -> bool:
+    """Whether this Lightning `CometLogger` still accepts the v1 ``dict_kwargs`` kwarg.
+
+    The v1 Comet wiring injected ``dict_kwargs={name}`` (the column-prefix
+    label, ``cli.py:287``); newer Lightning `CometLogger` drops that kwarg (the
+    run label flows through ``experiment_name`` / ``name`` instead). Introspect
+    the constructor so the wiring stays compatible across both API generations.
+
+    Returns
+    -------
+    bool
+        True only when ``dict_kwargs`` is an EXPLICIT named parameter of
+        `CometLogger.__init__`. A bare ``**kwargs`` does NOT count: the modern
+        logger accepts ``**kwargs`` but forwards them to a Comet
+        ``ExperimentConfig`` that rejects the v1 ``dict_kwargs`` name, so only an
+        explicit parameter is a safe signal.
+    """
+    import inspect  # noqa: PLC0415 - one-shot introspection, wiring-only
+
+    try:
+        params = inspect.signature(CometLogger.__init__).parameters
+    except (ValueError, TypeError):  # pragma: no cover - builtin/uninspectable
+        return False
+    return "dict_kwargs" in params
 
 
 def _best_checkpoint(config_path: Path) -> str:
@@ -330,13 +392,27 @@ class Salt2CLI(LightningCLI):
         ``trainer.callbacks`` list (design §5.3 assembly order); ``None``
         values are filtered — the assembly-time half of null-deletion.
 
+        The ``base2.yaml`` default ``callbacks.lr_monitor`` LearningRateMonitor
+        is dropped when no experiment logger is attached (M6 sub-wave E): the
+        stock LearningRateMonitor hard-raises a ``MisconfigurationException`` on
+        a logger-less trainer, and ``base2.yaml`` ships ``logger: false``, so the
+        callback only survives once the user opts into a logger — it would
+        otherwise break every default local fit/test run. Mirrors the v1 intent
+        (LR monitoring is meaningful only with a logger; base.yaml:37 pairs it
+        with the CometLogger).
+
         Returns
         -------
         Trainer
             The instantiated trainer.
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
-        assembled = [cb for cb in callbacks_dict.values() if cb is not None]
+        has_logger = bool(self._get(self.config_init, "trainer.logger"))
+        assembled = [
+            cb
+            for cb in callbacks_dict.values()
+            if cb is not None and (has_logger or not _needs_logger(cb))
+        ]
         writer_modules = {
             name: writer
             for name, writer in (self._get(self.config_init, "writers.modules") or {}).items()
@@ -356,15 +432,24 @@ class Salt2CLI(LightningCLI):
         return super().instantiate_trainer(**kwargs)
 
     def before_instantiate_classes(self) -> None:
-        """``salt2 test`` ergonomics — the v1 eval surface kept (utils/cli.py:312-332).
+        """Per-stage config patches — the v1 eval + Comet surface kept (utils/cli.py:281-332).
 
-        No resolved-config dump and no experiment logger on eval runs; a
-        missing ``--ckpt_path`` triggers the v1 best-checkpoint glob (which
-        requires exactly ONE user ``--config``, the saved run config next to
-        ``ckpts/`` or ``checkpoints/``); multi-device eval is rejected/forced
-        to one device; a
-        writer-less eval is refused up front (TEST predictions would be
-        computed and never persisted — design §4.2, §8).
+        On ``fit`` a configured experiment logger is wired the v1 way (the M6
+        CometLogger half, sub-wave E / gate CM1, ``cli.py:281-294``): the run
+        ``--name`` drives ``experiment_name`` and ``dict_kwargs: {name}``,
+        ``online`` is forced ``false`` when ``COMET_API_KEY`` is absent or under
+        ``fast_dev_run``, and ``COMET_OFFLINE_DIRECTORY`` is set + created
+        alongside the trainer log dir. ``base2.yaml`` ships ``logger: false``,
+        so this is a no-op on the default local run — it only fires once the
+        user opts into a logger.
+
+        On ``test`` the v1 eval surface is kept (``cli.py:312-332``): no
+        resolved-config dump and no experiment logger on eval runs; a missing
+        ``--ckpt_path`` triggers the v1 best-checkpoint glob (which requires
+        exactly ONE user ``--config``, the saved run config next to ``ckpts/``
+        or ``checkpoints/``); multi-device eval is rejected/forced to one
+        device; a writer-less eval is refused up front (TEST predictions would
+        be computed and never persisted — design §4.2, §8).
 
         Raises
         ------
@@ -372,7 +457,11 @@ class Salt2CLI(LightningCLI):
             On a writer-less test config, an ambiguous config list without
             ``--ckpt_path``, or an explicit multi-device list.
         """
-        if getattr(self.config, "subcommand", None) != "test":
+        subcommand = getattr(self.config, "subcommand", None)
+        if subcommand == "fit":
+            self._wire_experiment_logger(self.config["fit"])
+            return
+        if subcommand != "test":
             return
         cfg = self.config["test"]
         self.save_config_callback = None  # v1: no config.yaml dump on test (cli.py:312-316)
@@ -404,6 +493,58 @@ class Salt2CLI(LightningCLI):
                 cfg.trainer.devices = "1"
         elif isinstance(devices, list) and len(devices) > 1:
             raise ConfigError("salt2 test requires a single device (design §8, v1 cli.py:330)")
+
+    @staticmethod
+    def _wire_experiment_logger(cfg: Any) -> None:
+        """Wire a configured fit-stage experiment logger the v1 way (cli.py:281-294).
+
+        A no-op unless ``trainer.logger`` is a configured logger block (the
+        ``base2.yaml`` default ``logger: false`` skips this entirely). For a
+        `CometLogger` block the run ``--name`` is threaded into
+        ``experiment_name`` and ``dict_kwargs: {name}`` (the run label Comet
+        shows + the column-prefix source), ``online`` is forced ``false`` when
+        ``COMET_API_KEY`` is absent or under ``fast_dev_run`` (the v1 offline
+        fallback, so a key-less / smoke run never blocks on the Comet API), and
+        ``COMET_OFFLINE_DIRECTORY`` is set to — and created at — the trainer log
+        dir so offline runs have somewhere to write. Non-Comet loggers are left
+        untouched (only the Comet path carries the v1 special-casing,
+        ``CLAUDE.md`` logger convention).
+
+        Parameters
+        ----------
+        cfg : Any
+            The ``fit`` subcommand config namespace.
+        """
+        logger = cfg.trainer.logger
+        # base2 ships `logger: false`; a bare False/None means no tracking
+        if not logger:
+            return
+        run_name = cfg.get("name") or "salt"
+        init_args = getattr(logger, "init_args", None)
+        # only the CometLogger block carries the v1 special-casing (class_path
+        # check by name keeps this working on the un-instantiated config block)
+        class_path = getattr(logger, "class_path", "")
+        is_comet = class_path.endswith(CometLogger.__name__) or "comet" in class_path.lower()
+        if init_args is None or not is_comet:
+            return
+        # the run name drives experiment_name + (on older CometLogger versions)
+        # the dict_kwargs label (v1 set experiment_name via link_arguments +
+        # dict_kwargs={name} in before_instantiate_classes, cli.py:101,287)
+        init_args.experiment_name = run_name
+        # dict_kwargs was the v1 column-prefix mechanism; newer Lightning
+        # CometLogger drops it (the name now flows through experiment_name), so
+        # only inject it when the constructor still accepts it — version-robust
+        if _comet_accepts_dict_kwargs():
+            dict_kwargs = getattr(init_args, "dict_kwargs", None) or {}
+            dict_kwargs["name"] = run_name
+            init_args.dict_kwargs = dict_kwargs
+        # offline when no API key or smoke run (v1 cli.py:289-290)
+        if not os.getenv("COMET_API_KEY") or cfg.trainer.fast_dev_run:
+            init_args.online = False
+        # the offline output dir (v1 cli.py:293-294)
+        log_dir = cfg.trainer.default_root_dir or "logs"
+        os.environ["COMET_OFFLINE_DIRECTORY"] = str(log_dir)
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     def after_fit(self) -> None:
         """Tell the user where the run artifacts went (M6 run dirs pending).

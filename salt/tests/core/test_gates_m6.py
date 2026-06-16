@@ -11,16 +11,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from jsonargparse import Namespace
 
 import salt.core.gates_m6 as gm6
 from salt.core.gates_m6 import (
     main,
+    run_cm1,
     run_conv,
     run_ed1,
     run_ed2,
+    run_ig1,
     run_lb1,
+    run_lr1,
     run_mu1,
     run_mu2,
+    run_s31,
     run_vs1,
 )
 
@@ -472,9 +477,193 @@ class TestConv:
         assert "GN3X" in report["config"]["missing_config_files"]
 
 
+class TestCM1:
+    """CM1 — Comet logger + LearningRateMonitor wiring (plan 12 sub-wave E; NON-gating).
+
+    Pins the comet-before-lightning import order, the fit-stage Comet wiring
+    (experiment_name + run-name label + online-auto-false + offline dir), the
+    test-path logger=False contract, the base2 LearningRateMonitor entry, and the
+    corruption teeth (blanking the logger block no-ops the wiring).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_cm1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "cm1_report.json").is_file()
+        # comet-before-lightning import order (v1 main.py:5)
+        assert report["checks"]["comet_imported_before_lightning"]
+        # fit-stage Comet wiring (experiment_name + name label + online + offline)
+        assert report["checks"]["logger_experiment_name_is_run_name"]
+        assert report["checks"]["logger_run_name_label_set"]
+        assert report["checks"]["online_auto_set_false_without_api_key"]
+        assert report["checks"]["offline_directory_set_and_created"]
+        assert report["checks"]["comet_logger_instantiates"]
+        # test path forces logger off + LearningRateMonitor in base2 callbacks dict
+        assert report["checks"]["test_path_disables_logger_in_source"]
+        assert report["checks"]["lr_monitor_in_base2_callbacks_dict"]
+        assert report["checks"]["lr_monitor_instantiates"]
+        # NON-gating UX (no model-reproduction assertion)
+        assert report["config"]["non_gating"] is True
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # blank the logger block on the fit namespace -> the wiring no-ops, so the
+        # logger-wiring checks fail; the import-order / base2 invariants stay green
+        def blank_logger(cfg: Namespace) -> Namespace:
+            cfg.trainer.logger = False
+            return cfg
+
+        code, report = run_cm1(tmp_path, corruption=blank_logger)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["logger_block_configured"]
+        assert not report["checks"]["logger_experiment_name_is_run_name"]
+        # value-independent invariants stay green
+        assert report["checks"]["comet_imported_before_lightning"]
+        assert report["checks"]["lr_monitor_in_base2_callbacks_dict"]
+
+
+class TestLR1:
+    """LR1 — lion/HybridMuonAdamW explicit routing (plan 12 sub-wave E; NON-gating).
+
+    Pins the default==v1-regex behaviour, the explicit exclude (forces AdamW) /
+    include (overrides the regex) lists, the zero-match warning, the shipped
+    optimizer selection, and the corruption teeth.
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_lr1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "lr1_report.json").is_file()
+        # default empty-list policy == v1 regex-only routing
+        assert report["checks"]["default_partition_nonempty"]
+        assert report["checks"]["default_matches_v1_regex_routing"]
+        # explicit exclude/include lists (the v2 hardening)
+        assert report["checks"]["exclude_moves_layers_to_adamw"]
+        assert report["checks"]["include_overrides_regex_exclude"]
+        assert report["checks"]["include_targets_were_regex_excluded"]
+        # zero-match validator warning
+        assert report["checks"]["zero_match_token_warns"]
+        assert report["checks"]["matching_token_does_not_warn"]
+        # shipped optimizer selection intact
+        assert report["checks"]["hybrid_selectable"]
+        assert report["checks"]["adamw_default"]
+        assert report["config"]["non_gating"] is True
+        assert "already shipped" in report["v1_reference"].lower()
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # blank the include list -> the include-override check fails; the
+        # value-independent default-routing + zero-match checks stay green
+        code, report = run_lr1(tmp_path, corruption=lambda _kw: {})
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["include_overrides_regex_exclude"]
+        assert report["checks"]["default_matches_v1_regex_routing"]
+        assert report["checks"]["zero_match_token_warns"]
+
+
+class TestS31:
+    """S31 — move_files_temp / S3 staging smoke (plan 12 sub-wave E; NON-gating).
+
+    Pins the default-off (unchanged) read path, the opt-in staging lifecycle
+    (prepare_data copies, setup repoints, teardown removes) on a dummy local
+    fixture, the S3 helper surface, and the corruption teeth (forcing
+    move_files_temp=None breaks the active-path checks).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_s31(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "s31_report.json").is_file()
+        # default-off path unchanged
+        assert report["checks"]["default_off_staging_inactive"]
+        assert report["checks"]["default_off_paths_untouched"]
+        # opt-in staging lifecycle
+        assert report["checks"]["accepts_move_files_temp_arg"]
+        assert report["checks"]["prepare_data_copies_to_temp"]
+        assert report["checks"]["originals_survive_copy"]
+        assert report["checks"]["setup_repoints_to_temp"]
+        assert report["checks"]["teardown_removes_staged_copies"]
+        assert report["checks"]["teardown_keeps_originals"]
+        # S3 helper surface ported
+        assert report["checks"]["s3_helpers_importable"]
+        assert report["config"]["non_gating"] is True
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # force move_files_temp=None -> staging inactive on the "set" path, so the
+        # active-path checks (accept/copy/repoint/teardown) fail; the default-off
+        # checks stay green
+        code, report = run_s31(tmp_path, corruption=lambda _mft: None)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["prepare_data_copies_to_temp"]
+        assert report["checks"]["default_off_staging_inactive"]
+        assert report["checks"]["s3_helpers_importable"]
+
+
+class TestIG1:
+    """IG1 — IntegratedGradientWriter (plan 12 sub-wave E; user-decided IN M6; NON-gating).
+
+    Pins the IG-attribution columns (one per input feature), the integrated-
+    gradient parity vs the linear closed form + completeness, the eval-only
+    contract (onnx_outputs()==[], not export_only), the WriterCallback
+    integration with the shipped writers (no demand collision / namespace
+    disjoint from the task/MaskFormer families), sequence-stream pooling, the
+    malformed-shape negative control, and the corruption teeth (a constant
+    forward zeros the gradient so the closed-form parity fails).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_ig1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "ig1_report.json").is_file()
+        # IG-attribution columns, one per input feature
+        assert report["checks"]["columns_on_attributed_stream"]
+        assert report["checks"]["one_ig_column_per_feature"]
+        # integrated-gradient parity (decidable) + completeness
+        assert report["checks"]["ig_matches_linear_closed_form"]
+        assert report["checks"]["ig_satisfies_completeness"]
+        assert report["config"]["ig_max_abs_err"] < 1e-4
+        # eval-only contract
+        assert report["checks"]["onnx_outputs_empty"]
+        assert report["checks"]["not_export_only"]
+        assert report["checks"]["test_requires_nonempty"]
+        # WriterCallback integration alongside the shipped writers
+        assert report["checks"]["writercallback_role_validation_ok"]
+        assert report["checks"]["ig_demand_is_inputs_jets"]
+        assert report["checks"]["no_demand_collision_with_shipped_writers"]
+        assert report["checks"]["ig_namespace_disjoint_from_task_mf_families"]
+        # sequence-stream pooling + negative control
+        assert report["checks"]["sequence_stream_pools_to_per_jet"]
+        assert report["checks"]["malformed_attribution_shape_rejected"]
+        assert report["config"]["non_gating"] is True
+        assert "integrated_gradients_writer.py" in report["v1_reference"]
+        assert report["ig_columns"] == [f"GN2_IG_{n}" for n in ("pt", "eta", "d0", "z0", "phi")]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # swap the linear forward for a constant (zero-gradient) map -> the
+        # computed IG is all zeros, breaking the closed-form parity + completeness;
+        # the value-independent structural checks (columns, eval-only, role
+        # integration, negative control) stay green
+        code, report = run_ig1(tmp_path, corruption=lambda _fwd: lambda x: x.new_zeros(x.shape[0]))
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["ig_matches_linear_closed_form"]
+        assert report["checks"]["onnx_outputs_empty"]
+        assert report["checks"]["one_ig_column_per_feature"]
+        assert report["checks"]["malformed_attribution_shape_rejected"]
+
+
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        gates = ("lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "conv")
+        gates = ("lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "cm1", "lr1", "s31", "ig1", "conv")
         for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0

@@ -470,15 +470,30 @@ def coord_check(
     nsteps: int = 3,
     nseeds: int = 1,
     lr: float = 1e-2,
+    shape_file: str | Path | None = None,
     set_overrides: Sequence[str] = (),
 ) -> pd.DataFrame:
     """Run the muP coord-check at several widths (replaces v1 get_coord_data).
 
-    For each ``width`` build a muP model, set its base shapes from a self-base
-    (so MuAdamW resolves) at that width, then train it for `nsteps` steps on a
-    FIXED batch, recording each ``apply_to`` submodule's output L1 coordinate
-    norm via a forward hook. A muP-correct net has these norms INVARIANT across
-    widths (the "muP-flat" property MU-HUMAN judges from the plot).
+    For each ``width`` build a muP model, apply a SHARED base/delta shape file
+    (so each width resolves a CORRECT ``width_mult`` — see below), then train it
+    for `nsteps` steps on a FIXED batch, recording each ``apply_to`` submodule's
+    output L1 coordinate norm via a forward hook. A muP-correct net has these
+    norms INVARIANT across widths (the "muP-flat" property MU-HUMAN judges from
+    the plot).
+
+    **Shared-base protocol (the MU-HUMAN tooling fix, M6 sub-wave E)**: the muP
+    coord-check is only meaningful when every swept width is parametrised against
+    ONE base/delta infshape file. The earlier shipped tool set base shapes from a
+    SELF-BASE at each width (``set_base_shapes(model.net, model.net)``), which
+    forces ``width_mult == 1`` at every width — so the `MuReadout` readout is
+    never damped and its coord curve slopes steeply upward (~+0.9), a misleading
+    NON-flat artifact of the tooling, not a muP bug. This function now generates a
+    base (narrowest swept width) + delta (a wider reference) infshape file ONCE,
+    or accepts an explicit `shape_file`, and applies it to ALL widths. Wider
+    models then see ``width_mult > 1`` and the readout is correctly damped — the
+    whole-model curves collapse to the muP-flat regime (readout slope ~+0.25,
+    matching v1).
 
     The v2 module SELECTION break: v1 filters by a substring match on
     ``model.named_modules()`` names (configuration_muP.py:448,460); v2 records
@@ -502,6 +517,12 @@ def coord_check(
         Random-seed repeats, by default 1.
     lr : float, optional
         The (large) coord-check learning rate, by default 1e-2.
+    shape_file : str | Path | None, optional
+        A pre-generated base/delta infshape file to apply at EVERY width (the
+        ``salt2 mup-shapes`` output, or the config's ``mup.shape_path``). When
+        None, one is generated on the fly (base = min(widths), delta = a wider
+        reference) so the shared-base protocol holds without a prior
+        ``mup-shapes`` run, by default None.
     set_overrides : Sequence[str], optional
         Extra ``--set`` overrides, by default ().
 
@@ -515,6 +536,7 @@ def coord_check(
     from mup import set_base_shapes  # noqa: PLC0415 - mup is optional
     from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional
 
+    shared_shapes = _resolve_coord_shape_file(configs, widths, shape_file, set_overrides)
     records: list[dict[str, Any]] = []
     for seed in range(nseeds):
         for width in widths:
@@ -523,10 +545,13 @@ def coord_check(
                 configs, width, set_overrides, bind=True, materialise=batch is None
             )
             cfg = _require_mup_cfg(model)
-            # self-base shapes at this width so MuReadout.width_mult()/MuAdamW
-            # resolve (the architectural default already set width-1 base shapes
-            # per module at construction; re-set over the whole net here)
-            set_base_shapes(model.net, model.net, rescale_params=False)
+            # SHARED base shapes (NOT a per-width self-base): the model at this
+            # width is parametrised against the ONE base/delta infshape file, so
+            # MuReadout.width_mult() resolves to width/base_width (> 1 for wider
+            # models) and the readout is correctly damped — the MU-HUMAN tooling
+            # fix replacing set_base_shapes(model.net, model.net) which forced
+            # width_mult == 1 at every width (a misleading non-flat readout).
+            set_base_shapes(model.net, str(shared_shapes), rescale_params=False)
             coord_plan = model._mup_coord_plan  # noqa: SLF001 - same-package tooling
             fixed = _coord_batch(coord_plan) if batch is None else batch
             optimizer = MuAdamW(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -548,6 +573,74 @@ def coord_check(
                 for handle in handles:
                     handle.remove()
     return pd.DataFrame.from_records(records, columns=["width", "module", "t", "l1"])
+
+
+def _resolve_coord_shape_file(
+    configs: Sequence[str | Path],
+    widths: Sequence[int],
+    shape_file: str | Path | None,
+    set_overrides: Sequence[str],
+) -> Path:
+    """Resolve the SHARED base/delta infshape file the coord-check applies at every width.
+
+    The shared-base protocol (the MU-HUMAN tooling fix): the coord-check is only
+    meaningful when every swept width is parametrised against ONE base/delta
+    infshape file (not a per-width self-base, which forces ``width_mult == 1``).
+    When `shape_file` is given it is used as-is; otherwise base/delta infshapes
+    are generated ONCE via :func:`generate_shapes` — base = the narrowest swept
+    width, delta = a strictly-wider reference (the widest swept width, or
+    ``2 * base`` for a single-width sweep) — into a temp file. Wider models then
+    resolve ``width_mult = width / base_width > 1`` and the readout is damped.
+
+    Parameters
+    ----------
+    configs : Sequence[str | Path]
+        The trainer config stack.
+    widths : Sequence[int]
+        The swept ``apply_to`` widths.
+    shape_file : str | Path | None
+        An explicit infshape file, or None to generate one.
+    set_overrides : Sequence[str]
+        Extra ``--set`` overrides (e.g. the data-free norm_dict).
+
+    Returns
+    -------
+    Path
+        The shared infshape file path (existing).
+
+    Raises
+    ------
+    ConfigError
+        When `widths` is empty, or a generated file's base/delta would be equal.
+    """
+    if shape_file is not None:
+        path = Path(shape_file)
+        if not path.is_file():
+            raise ConfigError(
+                f"mup-coord-check --shape-file {path} does not exist — generate it with "
+                "salt2 mup-shapes first, or omit --shape-file to auto-generate a shared base"
+            )
+        return path
+    if not widths:
+        raise ConfigError("mup-coord-check needs at least one width to sweep")
+    base_w = min(widths)
+    delta_w = max(widths) if max(widths) != base_w else base_w * 2
+    import tempfile  # noqa: PLC0415 - tooling-only, generated-shape path
+
+    out = Path(tempfile.mkdtemp(prefix="salt2_coord_shapes_")) / "coord_check.bsh"
+    generate_shapes(
+        configs,
+        save_path=out,
+        base_width=base_w,
+        delta_width=delta_w,
+        set_overrides=set_overrides,
+    )
+    print(
+        f"salt2 mup-coord-check: generated SHARED base/delta infshapes (base_width={base_w}, "
+        f"delta_width={delta_w}) at {out} — applied at EVERY swept width so width_mult is "
+        "correct (the MU-HUMAN shared-base protocol, not a per-width self-base)"
+    )
+    return out
 
 
 def _attach_apply_to_hooks(
@@ -738,6 +831,7 @@ def cmd_mup_coord_check(args: Any) -> int:
         nsteps=args.nsteps,
         nseeds=args.nseeds,
         lr=args.lr,
+        shape_file=getattr(args, "shape_file", None),
         set_overrides=args.set or [],
     )
     out = Path(args.output)

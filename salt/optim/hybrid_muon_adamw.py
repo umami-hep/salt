@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -15,15 +16,46 @@ class MuonParamPolicy:
     """Policy for deciding which parameters should be optimized by Muon.
 
     This policy determines whether a parameter is assigned to the Muon optimizer
-    based on both its tensor dimensionality (must be 2D) and its name. Certain
-    parameter name patterns (e.g. biases, normalization parameters, embeddings,
-    classifier heads) are excluded by default.
+    based on its tensor dimensionality (must be 2D), explicit module-name
+    include/exclude lists, and — as a documented fallback — broad name regexes.
+
+    Selection order (M6 sub-wave E explicit-routing hardening; FD §3.4 696-699):
+
+    1. Non-2D or non-trainable parameters always go to AdamW (Muon needs 2D
+       weight matrices).
+    2. ``exclude`` — an EXPLICIT module-name substring match forces the
+       parameter to AdamW (the highest-priority routing decision; e.g.
+       ``("readout", "task")`` keeps every head on AdamW regardless of name).
+    3. ``include`` — an EXPLICIT module-name substring match forces the
+       parameter to Muon, OVERRIDING the broad ``exclude_name_patterns``
+       regexes (e.g. ``("encoder.layers",)`` puts the transformer block
+       matrices on Muon even though a sub-name might match a default regex).
+    4. ``exclude_name_patterns`` — the v1 broad regexes (``hybrid_muon_adamw.py:
+       36-41``), kept ONLY as documented DEFAULTS the converter can cite: a 2D
+       parameter whose lowercased name matches any pattern goes to AdamW. With
+       empty ``include``/``exclude`` lists the behaviour is byte-identical to
+       v1's regex-only policy (the GN3-family default).
+
+    The explicit lists are the v2 hardening over v1's regex-only routing: a
+    GN3-family config can pin exactly which modules Muon optimizes by instance
+    name, decoupled from how the parameters happen to be spelled. A policy whose
+    ``include`` / ``exclude`` list matches ZERO parameters is surfaced as a
+    warning by `HybridMuonAdamW` (a dead routing entry — design §3.4 validator
+    rule, the lion/HybridMuonAdamW analogue of the muP zero-match warning).
 
     Parameters
     ----------
     exclude_name_patterns : tuple[str, ...]
-        Case-insensitive regex patterns. If a parameter name matches any of
-        these patterns, it will be excluded from Muon optimization even if it is 2D.
+        Case-insensitive regex patterns. If a 2D parameter's name matches any
+        of these (and no ``include`` entry overrides it), it is excluded from
+        Muon. The v1 defaults are kept verbatim.
+    include : tuple[str, ...]
+        Explicit module-name substrings that FORCE a 2D parameter onto Muon,
+        overriding ``exclude_name_patterns`` (but not ``exclude``). Empty by
+        default (pure-regex, v1-identical behaviour).
+    exclude : tuple[str, ...]
+        Explicit module-name substrings that FORCE a parameter onto AdamW,
+        taking precedence over everything else. Empty by default.
 
     Attributes
     ----------
@@ -31,6 +63,10 @@ class MuonParamPolicy:
         Regex patterns used to filter out parameters that should *not* be
         optimized by Muon. Typically includes biases, LayerNorm/BatchNorm
         parameters, embeddings, and output heads.
+    include : tuple[str, ...]
+        Explicit module-name substrings forcing Muon.
+    exclude : tuple[str, ...]
+        Explicit module-name substrings forcing AdamW.
     """
 
     exclude_name_patterns: tuple[str, ...] = (
@@ -39,9 +75,16 @@ class MuonParamPolicy:
         r"embedding|embeddings|\bembed\b",
         r"\bhead\b|classifier|output|out_proj|final",
     )
+    include: tuple[str, ...] = field(default_factory=tuple)
+    exclude: tuple[str, ...] = field(default_factory=tuple)
 
     def is_muon_param(self, name: str, param: nn.Parameter) -> bool:
         """Return whether a parameter should be optimized by Muon.
+
+        Applies the selection order documented on the class: 2D/trainable gate,
+        explicit ``exclude`` (forces AdamW), explicit ``include`` (forces Muon,
+        overriding the regexes), then the broad ``exclude_name_patterns``
+        defaults.
 
         Parameters
         ----------
@@ -60,6 +103,13 @@ class MuonParamPolicy:
         if param.ndim != 2:
             return False
 
+        # explicit exclude wins over everything (AdamW)
+        if any(token in name for token in self.exclude):
+            return False
+        # explicit include overrides the broad regexes (Muon)
+        if any(token in name for token in self.include):
+            return True
+
         lname = name.lower()
         return all(not re.search(pat, lname) for pat in self.exclude_name_patterns)
 
@@ -75,12 +125,6 @@ class HybridMuonAdamW(Optimizer):
 
     Use ``model.named_parameters()`` as input to enable name-based exclusions
     (biases/norms/embeddings/heads).
-
-    Notes
-    -----
-    - If initialized with ``model.parameters()`` (no names), the selection falls
-      back to a simple rule: **Muon for params with ``ndim == 2``**, AdamW for
-      everything else.
 
     Parameters
     ----------
@@ -130,6 +174,12 @@ class HybridMuonAdamW(Optimizer):
         If no parameters are selected for AdamW
     TypeError
         If parameters to HybridMuonAdamW are not Parameters or (name, Parameter) pairs.
+
+    Notes
+    -----
+    - If initialized with ``model.parameters()`` (no names), the selection falls
+      back to a simple rule: **Muon for params with ``ndim == 2``**, AdamW for
+      everything else.
     """
 
     def __init__(
@@ -169,6 +219,8 @@ class HybridMuonAdamW(Optimizer):
         self._adamw_names: list[str] = []
 
         if named:
+            all_names = [name for name, _ in items]  # type: ignore[misc]
+            self._warn_dead_routing(self.policy, all_names)
             for name, p in items:  # type: ignore[misc]
                 if not p.requires_grad:
                     continue
@@ -251,6 +303,37 @@ class HybridMuonAdamW(Optimizer):
 
         # Ensure internal optimizers start consistent with the wrappers base LR.
         self._sync_lrs_from_wrapper()
+
+    @staticmethod
+    def _warn_dead_routing(policy: MuonParamPolicy, names: Sequence[str]) -> None:
+        """Warn when an explicit ``include`` / ``exclude`` token matches no parameter.
+
+        The lion/HybridMuonAdamW routing analogue of the muP zero-match
+        validator (FD §3.4 696-699; design §3.4 validator rule): an explicit
+        module-name token that matches ZERO parameter names is a DEAD routing
+        entry — a likely typo or a renamed module — and is surfaced loudly
+        rather than silently ignored (v1's broad regexes never had this safety
+        net). No-op when the policy carries no explicit lists. A staticmethod so
+        the validator can be exercised WITHOUT constructing the optimizer (whose
+        internal ``torch.optim.Muon`` needs torch >= 2.9).
+
+        Parameters
+        ----------
+        policy : MuonParamPolicy
+            The routing policy whose explicit include/exclude lists to check.
+        names : Sequence[str]
+            Every parameter name (``named_parameters()`` keys) the optimizer
+            received.
+        """
+        for label, tokens in (("include", policy.include), ("exclude", policy.exclude)):
+            for token in tokens:
+                if not any(token in name for name in names):
+                    warnings.warn(
+                        f"HybridMuonAdamW policy.{label} entry {token!r} matched 0 parameter "
+                        f"names — a dead routing entry (typo or renamed module?). Known prefixes: "
+                        f"{sorted({name.split('.')[0] for name in names})} (FD §3.4 696-699).",
+                        stacklevel=3,
+                    )
 
     def _sync_lrs_from_wrapper(self) -> None:
         """Synchronize internal optimizer learning rates from wrapper param groups.

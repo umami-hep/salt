@@ -13,8 +13,21 @@ batch order only, rank-0 VDS pre-creation + dist barrier
 Differences from v1, by design: the val dataset compiles the VAL plan
 (v1 passed ``stage='fit'`` to the val dataset, leaking parameter
 randomisation into validation — design §6.2 fixes this), and read-time
-transforms are FIT-only (design §6.1). ``move_files_temp`` / S3 staging are
-M6 ports (design §6.1).
+transforms are FIT-only (design §6.1).
+
+``move_files_temp`` / S3 staging (M6 sub-wave E, gate S31; FD §6.1 1292, §10
+1779 "ported as-is in M6"): an OPT-IN, default-off file-staging surface ported
+from v1 ``datamodules.py`` (ctor ``move_files_temp`` :91, prepare/setup/teardown
+:191-204,274-280) on top of the shared ``salt.utils.file_utils`` S3 helpers
+(``download_from_S3`` :375, ``move_files_temp`` :91, ``get_temp_path`` :27). When
+``move_files_temp`` is set the fit train/val files are copied to that root
+(typically a RAM disk like ``/dev/shm``) in ``prepare_data``, the stage files
+are repointed at the temp copies in ``setup('fit')``, and the copies are removed
+in ``teardown('fit')``. With ``move_files_temp=None`` (the default) every hook is
+a no-op and the read path is byte-identical to before this port. The v1
+``config_s3`` auto-download glue (file_utils ``import_data_S3`` / ``setup_S3_CLI``)
+stays a CLI-side concern reachable via the ``download_S3`` console entry — it is
+NOT wired into the datamodule (the v2 reader takes already-local paths).
 """
 
 from __future__ import annotations
@@ -63,6 +76,13 @@ class GraphDataModule(lightning.LightningDataModule):
         Suffix appended to the eval-file ``{sample}`` name by the writer
         callback (v1 ``SaltDataModule.test_suff``, ``datamodules.py:113``;
         design §8), by default None.
+    move_files_temp : str | None, optional
+        OPT-IN staging root (e.g. ``/dev/shm/<user>/tmp``) for the fit
+        train/val files (M6 sub-wave E, gate S31; v1 ``datamodules.py:91``).
+        When set, ``prepare_data`` copies the train/val files there, ``setup``
+        repoints the fit files at the copies, and ``teardown('fit')`` removes
+        them. ``None`` (default) leaves the read path untouched. Ignored under
+        ``fast_dev_run`` (v1 ``datamodules.py:191,201``).
     train_vds_path, val_vds_path, test_vds_path : str | Path | None, optional
         Explicit VDS output paths for wildcard files.
     sinks : Mapping[Mode, Iterable[str]] | None, optional
@@ -103,6 +123,7 @@ class GraphDataModule(lightning.LightningDataModule):
         num_val: int = -1,
         num_test: int = -1,
         test_suff: str | None = None,
+        move_files_temp: str | None = None,
         train_vds_path: str | Path | None = None,
         val_vds_path: str | Path | None = None,
         test_vds_path: str | Path | None = None,
@@ -137,6 +158,9 @@ class GraphDataModule(lightning.LightningDataModule):
         self.num_val = num_val
         self.num_test = num_test
         self.test_suff = test_suff
+        # opt-in staging root (M6 sub-wave E, gate S31; v1 datamodules.py:91).
+        # None -> every staging hook is a no-op (default-off read path).
+        self.move_files_temp = move_files_temp
         self.train_vds_path = train_vds_path
         self.val_vds_path = val_vds_path
         self.test_vds_path = test_vds_path
@@ -279,11 +303,48 @@ class GraphDataModule(lightning.LightningDataModule):
                 self.test_file, self.num_test, self.test_vds_path
             ).prepare()
 
+    def _staging_active(self) -> bool:
+        """Whether the opt-in temp-file staging is on for this run (S31, v1 port).
+
+        True only when a ``move_files_temp`` root is configured AND the run is
+        not a ``fast_dev_run`` (the v1 guard, ``datamodules.py:191,201,275``).
+        With ``move_files_temp=None`` (the default) this is always False, so the
+        staging hooks short-circuit and the read path is unchanged.
+
+        Returns
+        -------
+        bool
+            True if files should be staged to/cleaned from the temp root.
+        """
+        if not self.move_files_temp:
+            return False
+        return not (self.trainer is not None and self.trainer.fast_dev_run)
+
+    def prepare_data(self) -> None:
+        """Copy the fit train/val files to the temp root when staging is on (S31).
+
+        Port of v1 ``datamodules.py:190-195``: a no-op unless ``move_files_temp``
+        is set (and not ``fast_dev_run``). Lightning calls ``prepare_data`` once
+        per node before ``setup``, so the copy happens before any worker opens a
+        handle. The original files are left in place (``file_utils.copy_file``
+        skips an already-present destination).
+        """
+        if not self._staging_active() or self.train_file is None or self.val_file is None:
+            return
+        from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+
+        print("-" * 100)
+        print(f"Moving train/val files to {self.move_files_temp}")
+        print("-" * 100)
+        fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
+
     def setup(self, stage: str) -> None:
         """Build the per-stage datasets (``datamodules.py:197-245`` contract).
 
         Train compiles the FIT plan, val the VAL plan (fixing v1's
-        ``stage='fit'`` leak into validation), test the TEST plan.
+        ``stage='fit'`` leak into validation), test the TEST plan. When opt-in
+        temp staging is active the fit train/val files are repointed at the temp
+        copies (v1 ``datamodules.py:201-204``) BEFORE the datasets are built.
 
         Raises
         ------
@@ -291,6 +352,11 @@ class GraphDataModule(lightning.LightningDataModule):
             If the stage's file or the sinks are unset.
         """
         self._auto_sinks()
+        if stage == "fit" and self._staging_active():
+            from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+
+            self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
+            self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
         if stage in {"fit", "test"} and self.trainer is not None:
             self._precreate_vds_rank0(stage)
             self._dist_barrier()
@@ -373,3 +439,30 @@ class GraphDataModule(lightning.LightningDataModule):
         """
         assert self.test_dset is not None, "setup('test') has not run"
         return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
+
+    def teardown(self, stage: str | None = None) -> None:
+        """Remove the staged temp files after fit when staging is on (S31, v1 port).
+
+        Port of v1 ``datamodules.py:271-281``: a no-op unless ``move_files_temp``
+        is set (and not ``fast_dev_run``); only the global-zero rank cleans up,
+        and only after the ``fit`` stage. ``file_utils.remove_files_temp`` deletes
+        the two copies and best-effort-removes their (now-empty) parent dir. With
+        ``move_files_temp=None`` this never touches the filesystem.
+
+        Parameters
+        ----------
+        stage : str | None, optional
+            The Lightning stage being torn down, by default None.
+        """
+        if stage != "fit" or not self._staging_active():
+            return
+        if self.trainer is not None and not self.trainer.is_global_zero:
+            return
+        from pathlib import Path as _Path  # noqa: PLC0415 - opt-in staging path only
+
+        from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+
+        print("-" * 100)
+        print(f"Removing staged training files:\n\t{self.train_file}\n\t{self.val_file}")
+        fu.remove_files_temp(_Path(self.train_file), _Path(self.val_file))
+        print("-" * 100)

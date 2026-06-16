@@ -1633,6 +1633,14 @@ def _add_mup_parsers(sub: Any) -> None:
     coord.add_argument("--nsteps", type=int, default=3, help="training steps per width")
     coord.add_argument("--nseeds", type=int, default=1, help="random-seed repeats")
     coord.add_argument("--lr", type=float, default=1e-2, help="coord-check learning rate (large)")
+    coord.add_argument(
+        "--shape-file",
+        default=None,
+        help="SHARED base/delta infshape file applied at EVERY swept width (salt2 mup-shapes "
+        "output). Omit to auto-generate one (base=min width, delta=max width) — the shared-base "
+        "protocol that gives a correct width_mult so the MuReadout is damped (the MU-HUMAN fix, "
+        "replacing the per-width self-base that forced width_mult==1)",
+    )
     coord.set_defaults(func=cmd_mup_coord_check)
 
 

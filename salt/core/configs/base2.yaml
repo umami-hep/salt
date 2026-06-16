@@ -11,8 +11,17 @@ seed_everything: 42
 trainer:
   accelerator: auto
   devices: 1
-  # Experiment loggers (Comet) are wired in M6 — design §5 keeps the v1
-  # comet-before-lightning import order in salt/core/main.py meanwhile.
+  # Local runs need no experiment tracking, so the default is logger: false.
+  # The M6 CometLogger wiring (sub-wave E, gate CM1; FD §6.5) lives in
+  # salt/core/main.py Salt2CLI.before_instantiate_classes: opt in with e.g.
+  #   trainer:
+  #     logger:
+  #       class_path: lightning.pytorch.loggers.comet.CometLogger
+  #       init_args: {project: salt}
+  # and --name then drives experiment_name + dict_kwargs:{name}; online is
+  # auto-set false without COMET_API_KEY / under fast_dev_run; the offline dir
+  # is the trainer log dir (v1 cli.py:281-294). The comet-before-lightning
+  # import order is held at the top of salt/core/main.py (v1 main.py:5).
   logger: false
   log_every_n_steps: 50
   # The raw trainer.callbacks list is reserved for STOCK Lightning callbacks
@@ -27,8 +36,12 @@ trainer:
 # epoch into <log_dir>/ckpts/ with the 'loss=' filename stem the salt2-test
 # best-epoch glob keys on (per-task monitor via monitor_loss, design §5.3). The
 # salt.core.callbacks.ProgressBar port (M5) is the stock TQDMProgressBar under
-# a salt-owned name. The design §5.3 lr_monitor entry is STILL deferred:
-# LearningRateMonitor needs a logger (Comet wiring is M6).
+# a salt-owned name. lr_monitor wires the stock LearningRateMonitor (M6
+# sub-wave E, FD §13 E3): the stock LearningRateMonitor HARD-RAISES on a
+# logger-less trainer, so Salt2CLI.instantiate_trainer DROPS this entry when no
+# logger is attached (the default logger:false run) and KEEPS it the moment a
+# Comet logger is opted in — it then logs the OneCycleLR schedule each step
+# (delete entirely with `lr_monitor: null`).
 callbacks:
   checkpoint:
     class_path: salt.core.callbacks.Checkpoint
@@ -43,6 +56,10 @@ callbacks:
     class_path: salt.core.callbacks.ProgressBar
     init_args:
       refresh_rate: 50
+  lr_monitor:
+    class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
   model_summary:
     class_path: lightning.pytorch.callbacks.ModelSummary
     init_args:

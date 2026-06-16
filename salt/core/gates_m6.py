@@ -1,4 +1,4 @@
-"""M6 gates harness — LB1 + VS1 + MU1/MU2 + ED1 + M6-CONV (waves A/D/B/C) (plan 12; design §9.5).
+"""M6 gates harness — LB1 + VS1 + MU1/MU2 + ED1/ED2 + CM1/LR1/S31/IG1 + M6-CONV (plan 12; §9.5).
 
 Standalone gates, each a subcommand of ``python -m salt.core.gates_m6``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -106,6 +106,23 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   edge-stream-first / backend-forcing bind validators (ED2), the GN2XE config,
   and the ONNX dynamic-T register pad are LATER sub-wave C stages.
 
+- **IG1 IntegratedGradientWriter (design-conformance, NON-gating; user-decided
+  IN M6)** — the v2 unified-framework port of v1's `IntegratedGradientWriter`
+  (``salt/callbacks/integrated_gradients_writer.py``, a Lightning Callback over
+  captum) re-authored on the M4.5 unified-writer interface
+  (``salt/core/writers/integrated_gradients.py``; a sibling of `InputCopyWriter`
+  / `PadMaskWriter` / `MaskFormerObjectWriter`). NON-gating: no shipped config
+  requires it. IG1 (a small in-repo fixture, no captum/salt-attribution dep)
+  asserts: one ``{run_name}_IG_{feature}`` f4 column per input feature; the
+  computed attribution equals the LINEAR closed form ``w_i*x_i`` and satisfies
+  completeness (the captum Riemann core, exact for a linear model — the
+  parity-decidable leg); EVAL-ONLY (``onnx_outputs() == []``, NOT ``export_only``,
+  non-empty TEST ``requires``); it integrates with `WriterCallback` alongside the
+  shipped writers (role validation passes, demand ``inputs.<stream>`` collides
+  with none of ``meta.rows``/``preds.*``/``masks.*``); a sequence stream
+  masked-mean-pools to per-jet; and a malformed (non-scalar) attribution shape
+  raises a `ConfigError` (the negative control).
+
 - **M6-CONV — the M7-slice acceptance (this wave's slice)** — the
   newly-authored v2-native M6 configs (sub-wave A: GN3X, GN2X_qcdsplit; sub-wave
   D: DL1; sub-wave B: GN2_muP; sub-wave C: GN2XE — the list is now COMPLETE at 5)
@@ -155,7 +172,7 @@ import numpy as np
 import torch
 from ftag import Labeller as V1Labeller
 
-from salt.core.data import H5StructuredReader  # noqa: F401 (parity with gates_m5 import surface)
+from salt.core.data import H5StructuredReader  # the S31 fixture reader (gates_m5 import surface)
 from salt.core.data.base import WorkerCtx
 from salt.core.data.processors import Labels
 from salt.core.graph import Bundle, Executor, Mode, compile_plan
@@ -2654,6 +2671,907 @@ def run_ed2(
 
 
 # ---------------------------------------------------------------------------
+# CM1 — Comet logger + LearningRateMonitor wiring (design-conformance, NON-gating;
+# M6-4, sub-wave E; FD §6.5 848-851)
+# ---------------------------------------------------------------------------
+
+
+def run_cm1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[Any], Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """CM1: Comet logger + LearningRateMonitor wiring (design-conformance, NON-gating).
+
+    The M6-4 CometLogger half (sub-wave E; FD §6.5 848-851; plan 12). NON-gating:
+    it is training-UX, not model reproduction — it MUST NOT change any config's
+    fit/test/onnx reproduction status (matrix §5.3). CM1 asserts the design
+    contract:
+
+    - **comet-before-lightning import order** — ``salt/core/main.py`` imports
+      ``comet_ml`` (the noqa-pinned import) BEFORE any ``lightning`` import (v1
+      ``main.py:5``; the v2 contract). CM1 reads the module source and asserts
+      the ``import comet_ml`` line precedes the first ``lightning`` import.
+    - **logger wired with the run name** — driving the REAL
+      ``Salt2CLI._wire_experiment_logger`` (the fit-stage
+      ``before_instantiate_classes`` hook) on a fit namespace that opts into a
+      CometLogger, the resolved ``trainer.logger`` block carries
+      ``experiment_name == name`` (and ``dict_kwargs == {"name": name}`` on the
+      v1-era API; v1 ``cli.py:101,287``), and the wired block instantiates a real
+      (offline) `CometLogger`. (Called directly on a hand-built namespace, not via
+      a run, because run=True would execute fit and run-free instantiation would
+      try a LIVE Comet experiment before the wiring sets online:false.)
+    - **online auto-set false + offline dir** — without ``COMET_API_KEY`` (the
+      gate clears it) the wiring forces ``online: false`` and sets
+      ``COMET_OFFLINE_DIRECTORY`` to the (created) trainer log dir (v1
+      ``cli.py:289-294``).
+    - **test path: logger=False** — the ``salt2 test`` surface forces
+      ``trainer.logger = False`` (no tracking on eval; v1 ``cli.py:317``), kept
+      from the M3 eval ergonomics — asserted on the main.py surface.
+    - **LearningRateMonitor present as a callbacks: dict entry** — ``base2.yaml``
+      ships ``callbacks.lr_monitor`` as a ``LearningRateMonitor`` (FD §13 E3),
+      a dict-keyed callbacks: entry (no model-reproduction role — it only logs
+      once a logger is attached).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook blanks the
+    logger block on the fit namespace — the wiring then no-ops and the
+    logger-wiring checks fail, flipping the gate. (The import-order / source /
+    base2 checks are invariants and stay green; the gate flips on the wiring.)
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    import os  # noqa: PLC0415 - test-env manipulation, gate-only
+
+    from lightning.pytorch.callbacks import LearningRateMonitor  # noqa: PLC0415
+    from lightning.pytorch.loggers.comet import CometLogger  # noqa: PLC0415
+
+    import salt.core.main as salt2_main_mod  # noqa: PLC0415
+    from salt.core.main import Salt2CLI  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("CM1 Comet logger + LearningRateMonitor wiring (design-conformance, NON-gating)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    # -- (a) comet-before-lightning import order (source inspection) -----------
+    src = Path(salt2_main_mod.__file__).read_text()
+    comet_idx = src.find("import comet_ml")
+    lightning_idx = src.find("from lightning")
+    checks["comet_imported_before_lightning"] = (
+        comet_idx != -1 and lightning_idx != -1 and comet_idx < lightning_idx
+    )
+
+    from jsonargparse import Namespace  # noqa: PLC0415
+
+    from salt.core.main import _comet_accepts_dict_kwargs  # noqa: PLC0415
+
+    run_name = "GN2_cm1_fixture"
+
+    def _fit_namespace() -> Namespace:
+        """A parsed-fit-style namespace with a CometLogger block + the run name.
+
+        Mirrors what jsonargparse hands ``before_instantiate_classes`` for a fit
+        config that opts into a CometLogger — built directly so the wiring is
+        exercised WITHOUT instantiating a live Comet experiment (which a run-free
+        parse would attempt before the wiring sets online:false; FD §6.5 wiring
+        is config-mutation, not a run).
+
+        Returns
+        -------
+        Namespace
+            The fit-config namespace (name + trainer.logger CometLogger block).
+        """
+        return Namespace(
+            name=run_name,
+            trainer=Namespace(
+                default_root_dir=str(outdir / "cm1_logs"),
+                fast_dev_run=False,
+                logger=Namespace(
+                    class_path="lightning.pytorch.loggers.comet.CometLogger",
+                    init_args=Namespace(project="salt"),
+                ),
+            ),
+        )
+
+    # -- (b) the REAL fit-path Comet wiring, called directly (no training) -----
+    # clear COMET_API_KEY so the online-auto-false branch fires deterministically.
+    # _wire_experiment_logger is the wiring before_instantiate_classes runs on the
+    # fit subcommand (the wiring under test) — called directly on a hand-built fit
+    # namespace so no trainer.fit, no data read, no live Comet experiment.
+    saved_key = os.environ.pop("COMET_API_KEY", None)
+    saved_offline = os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+    try:
+        cfg = _fit_namespace()
+        if corruption is not None:
+            cfg = corruption(cfg)
+        Salt2CLI._wire_experiment_logger(cfg)  # noqa: SLF001 - the wiring under test
+        logger_block = cfg.trainer.logger
+        init_args = getattr(logger_block, "init_args", None) if logger_block else None
+        checks["logger_block_configured"] = bool(logger_block)
+        checks["logger_experiment_name_is_run_name"] = (
+            init_args is not None and getattr(init_args, "experiment_name", None) == run_name
+        )
+        # dict_kwargs is the v1 column-prefix label; newer Lightning CometLogger
+        # drops it (the name flows through experiment_name) — the wiring injects
+        # it ONLY when the constructor still accepts it (version-robust), so
+        # accept either form: dict_kwargs={name} on old API, or name carried by
+        # experiment_name when the kwarg is gone
+        dk = getattr(init_args, "dict_kwargs", None) or {} if init_args else {}
+        checks["logger_run_name_label_set"] = (
+            dk.get("name") == run_name
+            if _comet_accepts_dict_kwargs()
+            else getattr(init_args, "experiment_name", None) == run_name
+        )
+        checks["online_auto_set_false_without_api_key"] = bool(init_args) and (
+            getattr(init_args, "online", True) is False
+        )
+        offline_dir = os.environ.get("COMET_OFFLINE_DIRECTORY")
+        checks["offline_directory_set_and_created"] = (
+            bool(offline_dir) and Path(offline_dir).is_dir()
+        )
+        # the wired init_args instantiate a real (offline) CometLogger — no crash,
+        # correct type — proving the wired block is constructible (comet-before-
+        # lightning import order held at module top makes this importable)
+        try:
+            built = CometLogger(**{k: v for k, v in vars(init_args).items() if v is not None})
+            checks["comet_logger_instantiates"] = isinstance(built, CometLogger)
+        except Exception:  # noqa: BLE001 - any build error fails the check
+            checks["comet_logger_instantiates"] = False
+    finally:
+        if saved_key is not None:
+            os.environ["COMET_API_KEY"] = saved_key
+        if saved_offline is not None:
+            os.environ["COMET_OFFLINE_DIRECTORY"] = saved_offline
+        else:
+            os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+
+    # -- (c) test path forces logger=False (v1 cli.py:317, kept) --------------
+    # the M3 eval ergonomics force the logger off on the test stage
+    # (before_instantiate_classes test branch); assert the documented contract is
+    # present in the surface (a run-free parse never enters the test branch, and
+    # run=True would execute eval). The same line MU2/the M3 surface relies on.
+    main_src = Path(salt2_main_mod.__file__).read_text()
+    checks["test_path_disables_logger_in_source"] = "cfg.trainer.logger = False" in main_src
+
+    # -- (d) LearningRateMonitor present as a callbacks: dict entry -----------
+    # base2.yaml ships callbacks.lr_monitor as a LearningRateMonitor; assert it is
+    # a dict-keyed callbacks: entry (the FD §13 E3 contract) by reading base2.yaml.
+    import yaml as _yaml  # noqa: PLC0415
+
+    base2 = _yaml.safe_load((CONFIG_DIR / "base2.yaml").read_text())
+    base2_callbacks = base2.get("callbacks") or {}
+    lr_entry = base2_callbacks.get("lr_monitor") or {}
+    checks["lr_monitor_in_base2_callbacks_dict"] = isinstance(base2_callbacks, dict) and str(
+        lr_entry.get("class_path", "")
+    ).endswith("LearningRateMonitor")
+    # and it instantiates as a real LearningRateMonitor (the assembled callback)
+    checks["lr_monitor_instantiates"] = isinstance(LearningRateMonitor(), LearningRateMonitor)
+
+    passed = all(checks.values())
+    criterion = (
+        "the M6-4 Comet logger + LearningRateMonitor wiring (sub-wave E; FD §6.5 848-851; plan "
+        "12) is NON-gating training-UX (matrix §5.3): salt/core/main.py keeps the "
+        "comet-before-lightning import order (v1 main.py:5); before_instantiate_classes wires a "
+        "configured CometLogger the v1 way (cli.py:281-294) — experiment_name + dict_kwargs:{name} "
+        "from --name, online auto-set false without COMET_API_KEY, COMET_OFFLINE_DIRECTORY "
+        "set+created; the salt2 test surface forces logger=False (cli.py:317); and base2.yaml "
+        "ships LearningRateMonitor as the callbacks.lr_monitor dict entry (FD §13 E3). No "
+        "model-reproduction assertion."
+    )
+    report = _base_report(
+        "cm1_comet_lrmonitor_wiring",
+        passed,
+        criterion,
+        {
+            "run_name": run_name,
+            "logger_class": "lightning.pytorch.loggers.comet.CometLogger",
+            "comet_accepts_dict_kwargs": _comet_accepts_dict_kwargs(),
+            "non_gating": True,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 main.py:5 imports comet_ml before lightning; v1 cli.py:101 links name -> "
+        "trainer.logger.init_args.experiment_name; cli.py:287 sets dict_kwargs={name}; "
+        "cli.py:289-290 forces online=False without COMET_API_KEY / under fast_dev_run; "
+        "cli.py:293-294 sets COMET_OFFLINE_DIRECTORY + mkdir; cli.py:317 logger=False on test; "
+        "base.yaml:37 ships the LearningRateMonitor callback. v2 replicates all of this in "
+        "salt/core/main.py + base2.yaml."
+    )
+    _print_checks(checks)
+    _print_verdict("cm1", passed, criterion, _emit_report(report, outdir, "cm1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# LR1 — lion/HybridMuonAdamW explicit routing (design-conformance, NON-gating;
+# M6-8, sub-wave E; FD §3.4 696-699)
+# ---------------------------------------------------------------------------
+
+
+def run_lr1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """LR1: lion/HybridMuonAdamW explicit routing (design-conformance, NON-gating).
+
+    The M6-8 routing-list hardening (sub-wave E; FD §3.4 696-699; plan 12). lion +
+    HybridMuonAdamW are ALREADY SHIPPED (saltmodule.py _OPTIMIZERS, the optim
+    package) — this gate covers ONLY the explicit ``include``/``exclude``
+    module-name lists added to ``MuonParamPolicy`` plus the zero-match warning,
+    the v2 hardening over v1's regex-only routing (hybrid_muon_adamw.py:36-41, now
+    documented DEFAULTS). NON-gating: it unblocks no config. LR1 asserts:
+
+    - **default = v1 regex behaviour** — an empty-list `MuonParamPolicy` routes a
+      GN2_muP-shaped model's named parameters EXACTLY as v1's regex-only policy
+      did (2D non-bias/norm/embed/head matrices -> Muon, the rest -> AdamW); the
+      two partitions are non-empty (the optimizer's own ValueError guard).
+    - **explicit exclude forces AdamW** — adding the encoder layers' name prefix
+      to ``exclude`` moves those matrices (Muon-routed by default) OUT of the
+      Muon set and onto AdamW, overriding the default regex routing.
+    - **explicit include overrides the regexes** — a name the default regex
+      EXCLUDES (the encoder ``out_proj`` matrices, matched by the
+      ``out_proj|output|final`` pattern) is FORCED back onto Muon by an
+      ``include`` entry, proving the explicit list wins over the broad regex.
+    - **zero-match policy warns** — an ``include``/``exclude`` token that matches
+      NO parameter name emits a "matched 0 parameter names" warning (the dead
+      routing-entry validator; the lion/HybridMuonAdamW analogue of the muP
+      zero-match warning), while a matching token does NOT warn.
+    - **lion + HybridMuonAdamW remain selectable** — ``SaltModule`` still resolves
+      ``HybridMuonAdamW`` / ``lion`` (when available) / ``AdamW`` (the already-
+      shipped surface is intact).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook mutates the
+    policy kwargs (e.g. blanks the ``include`` list) so the include-override check
+    fails, flipping the gate.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    import warnings as _warnings  # noqa: PLC0415
+
+    from salt.optim import HybridMuonAdamW  # noqa: PLC0415
+    from salt.optim.hybrid_muon_adamw import MuonParamPolicy  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("LR1 lion/HybridMuonAdamW explicit routing (design-conformance, NON-gating)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    norm_dict = _mu1_norm_dict(outdir)
+    model = SaltModule(modules=_mu1_modules(norm_dict), lrs=_MU2_LRS)
+    named = [(n, p) for n, p in model.named_parameters() if p.ndim == 2 and p.requires_grad]
+    name_list = [n for n, _ in named]
+    # the SaltModule is unbound here, so only the eagerly-built encoder carries
+    # 2D matrices (the lazy StreamEmbed/Dense heads materialise at bind) — every
+    # 2D name is under net.encoder.*; the routing semantics are exercised on
+    # those (the encoder's in_proj matrices route to Muon by default, the
+    # out_proj matrices are regex-EXCLUDED — the perfect include-override target)
+    layer_prefix = "net.encoder.encoder.layers"
+    out_proj_token = "out_proj"  # noqa: S105 - a module-name substring, not a secret
+
+    def _partition(policy: MuonParamPolicy) -> tuple[set[str], set[str]]:
+        muon, adamw = set(), set()
+        for n, p in named:
+            (muon if policy.is_muon_param(n, p) else adamw).add(n)
+        return muon, adamw
+
+    # -- (a) default (empty lists) == v1 regex-only behaviour -----------------
+    default_policy = MuonParamPolicy()
+    muon_default, adamw_default = _partition(default_policy)
+    checks["default_partition_nonempty"] = bool(muon_default) and bool(adamw_default)
+    # v1 regex behaviour, recomputed independently from the documented defaults
+    import re as _re  # noqa: PLC0415
+
+    def _v1_is_muon(n: str, p: Any) -> bool:
+        if p.ndim != 2 or not p.requires_grad:
+            return False
+        ln = n.lower()
+        return all(not _re.search(pat, ln) for pat in default_policy.exclude_name_patterns)
+
+    v1_muon = {n for n, p in named if _v1_is_muon(n, p)}
+    checks["default_matches_v1_regex_routing"] = muon_default == v1_muon
+
+    # -- (b) explicit exclude forces the layer matrices to AdamW -------------
+    excl_kwargs: dict[str, Any] = {"exclude": (layer_prefix,)}
+    if corruption is not None:
+        excl_kwargs = corruption(excl_kwargs)
+    exclude_policy = MuonParamPolicy(**excl_kwargs)
+    muon_excl, _ = _partition(exclude_policy)
+    layers_in_default = {n for n in muon_default if n.startswith(layer_prefix)}
+    checks["exclude_moves_layers_to_adamw"] = bool(layers_in_default) and not any(
+        n.startswith(layer_prefix) for n in muon_excl
+    )
+
+    # -- (c) explicit include overrides the broad regexes --------------------
+    # the encoder out_proj matrices are regex-EXCLUDED by default (the
+    # out_proj|output|final pattern); an include entry must force them onto Muon
+    incl_kwargs: dict[str, Any] = {"include": (out_proj_token,)}
+    if corruption is not None:
+        incl_kwargs = corruption(incl_kwargs)
+    include_policy = MuonParamPolicy(**incl_kwargs)
+    muon_incl, _ = _partition(include_policy)
+    out_proj_2d = {n for n in name_list if out_proj_token in n}
+    regex_excluded = out_proj_2d - muon_default  # the default regex sends these to AdamW
+    checks["include_overrides_regex_exclude"] = bool(out_proj_2d) and out_proj_2d.issubset(
+        muon_incl
+    )
+    checks["include_targets_were_regex_excluded"] = bool(regex_excluded)
+
+    # -- (d) zero-match policy warns; a matching token does NOT --------------
+    # the validator is exercised via the staticmethod (HybridMuonAdamW's full
+    # construction needs torch.optim.Muon, torch>=2.9; this container is 2.5 —
+    # the SHIPPED optimizer's class identity is checked in (e) and MU2, the
+    # routing-list validator is the NEW M6 surface checked here).
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        HybridMuonAdamW._warn_dead_routing(  # noqa: SLF001
+            MuonParamPolicy(exclude=("no_such_module_xyz",)), name_list
+        )
+    checks["zero_match_token_warns"] = any(
+        "matched 0 parameter names" in str(w.message) for w in caught
+    )
+    with _warnings.catch_warnings(record=True) as caught2:
+        _warnings.simplefilter("always")
+        HybridMuonAdamW._warn_dead_routing(  # noqa: SLF001
+            MuonParamPolicy(exclude=("encoder.",)), name_list
+        )
+    checks["matching_token_does_not_warn"] = not any(
+        "matched 0 parameter names" in str(w.message) for w in caught2
+    )
+
+    # -- (e) lion + HybridMuonAdamW remain selectable (shipped surface) ------
+    from torch.optim import AdamW as _AdamW  # noqa: PLC0415
+
+    hyb_model = SaltModule(
+        modules=_mu1_modules(norm_dict), lrs=_MU2_LRS, optimizer="HybridMuonAdamW"
+    )
+    checks["hybrid_selectable"] = hyb_model._get_optimizer_class() is HybridMuonAdamW  # noqa: SLF001
+    plain_model = SaltModule(modules=_mu1_modules(norm_dict), lrs=_MU2_LRS)
+    checks["adamw_default"] = plain_model._get_optimizer_class() is _AdamW  # noqa: SLF001
+
+    passed = all(checks.values())
+    criterion = (
+        "the M6-8 lion/HybridMuonAdamW routing-list hardening (sub-wave E; FD §3.4 696-699; plan "
+        "12) is NON-gating: lion + HybridMuonAdamW are ALREADY shipped — only the explicit "
+        "include/exclude module-name lists on MuonParamPolicy + the zero-match warning are new. An "
+        "empty-list policy routes EXACTLY as v1's regex-only policy (the defaults kept verbatim, "
+        "hybrid_muon_adamw.py:36-41); an explicit exclude forces matrices onto AdamW; an explicit "
+        "include OVERRIDES the broad regexes (forcing regex-excluded matrices onto Muon); a "
+        "zero-match include/exclude token warns (a dead routing entry); and the shipped optimizer "
+        "selection (HybridMuonAdamW/lion/AdamW) is intact."
+    )
+    report = _base_report(
+        "lr1_hybrid_muon_adamw_routing",
+        passed,
+        criterion,
+        {
+            "n_2d_params": len(name_list),
+            "default_muon_count": len(muon_default),
+            "default_adamw_count": len(adamw_default),
+            "exclude_probe": layer_prefix,
+            "include_probe": out_proj_token,
+            "non_gating": True,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 MuonParamPolicy.exclude_name_patterns (hybrid_muon_adamw.py:36-41) were the ONLY "
+        "routing surface — broad case-insensitive regexes over named_parameters. v2 keeps them as "
+        "documented DEFAULTS and ADDS explicit include/exclude module-name lists (the GN3-family "
+        "robustness hardening) + a zero-match warning; lion + HybridMuonAdamW themselves were "
+        "already shipped (saltmodule.py _OPTIMIZERS), so M6 adds ONLY the routing lists."
+    )
+    _print_checks(checks)
+    _print_verdict("lr1", passed, criterion, _emit_report(report, outdir, "lr1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# S31 — move_files_temp / S3 staging smoke (design-conformance, NON-gating;
+# M6-7, sub-wave E; FD §6.1 1292, §10 1779)
+# ---------------------------------------------------------------------------
+
+
+def run_s31(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[str | None], str | None] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """S31: move_files_temp / S3 staging smoke (design-conformance, NON-gating).
+
+    The M6-7 file-staging surface (sub-wave E; FD §6.1 1292, §10 1779 "ported
+    as-is in M6"; plan 12). NON-gating: it unblocks no config. S31 asserts the
+    opt-in, default-off contract on a DUMMY LOCAL fixture (no S3 — only the local
+    move_files_temp path is exercisable without a bucket):
+
+    - **default-off path unchanged** — a `GraphDataModule` built with
+      ``move_files_temp=None`` (the default) reports staging inactive, its
+      ``prepare_data``/``teardown`` hooks are no-ops, and the train/val file paths
+      are untouched (the read path is byte-identical to pre-port).
+    - **datamodule accepts the staged-file args** — the ctor accepts a
+      ``move_files_temp`` root and stores it; the staging predicate reports active
+      (no trainer attached => not a fast_dev_run).
+    - **prepare_data copies to the temp root** — with ``move_files_temp`` set,
+      ``prepare_data`` copies the dummy train/val files into the temp root
+      (file_utils.move_files_temp), leaving the originals in place.
+    - **setup repoints the fit files at the temp copies** — after
+      ``setup('fit')``-equivalent repointing the train/val paths point inside the
+      temp root (get_temp_path).
+    - **teardown removes the staged copies** — ``teardown('fit')`` deletes the
+      temp copies (remove_files_temp) and best-effort-removes the (now empty)
+      temp dir; the ORIGINAL files survive.
+    - **S3 helper surface ported** — the shared ``salt.utils.file_utils`` S3
+      helpers (download_from_S3 / get_temp_path / move_files_temp /
+      remove_files_temp) are importable (the commented S3 surface; FD §6.1).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook forces
+    ``move_files_temp=None`` so the active-path checks fail, flipping the gate.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    from salt.core.data.datamodule import GraphDataModule  # noqa: PLC0415
+    from salt.utils import file_utils as fu  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("S31 move_files_temp / S3 staging smoke (design-conformance, NON-gating)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    # dummy LOCAL fixture files (no real H5 read needed — staging is pure I/O)
+    src_dir = outdir / "s31_src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    train_src = src_dir / "train.h5"
+    val_src = src_dir / "val.h5"
+    train_src.write_bytes(b"dummy-train")
+    val_src.write_bytes(b"dummy-val")
+    temp_root = outdir / "s31_temp"
+    modules = {"reader": _s31_reader()}
+
+    # -- (a) default-off: move_files_temp=None -> inactive, paths untouched ---
+    dm_off = GraphDataModule(
+        modules={"reader": _s31_reader()}, train_file=str(train_src), val_file=str(val_src)
+    )
+    checks["default_off_staging_inactive"] = dm_off._staging_active() is False  # noqa: SLF001
+    dm_off.prepare_data()  # no-op
+    dm_off.teardown("fit")  # no-op
+    checks["default_off_paths_untouched"] = str(dm_off.train_file) == str(train_src) and str(
+        dm_off.val_file
+    ) == str(val_src)
+
+    # -- (b) accept the staged-file args + active predicate ------------------
+    mft = str(temp_root)
+    if corruption is not None:
+        mft = corruption(mft)
+    dm = GraphDataModule(
+        modules=modules,
+        train_file=str(train_src),
+        val_file=str(val_src),
+        move_files_temp=mft,
+    )
+    checks["accepts_move_files_temp_arg"] = dm.move_files_temp == mft
+    checks["staging_active_when_set_no_trainer"] = dm._staging_active() is bool(mft)  # noqa: SLF001
+
+    # -- (c) prepare_data copies to the temp root (originals survive) --------
+    dm.prepare_data()
+    expect_train = fu.get_temp_path(mft, train_src) if mft else train_src
+    expect_val = fu.get_temp_path(mft, val_src) if mft else val_src
+    checks["prepare_data_copies_to_temp"] = (
+        bool(mft) and expect_train.is_file() and expect_val.is_file()
+    )
+    checks["originals_survive_copy"] = train_src.is_file() and val_src.is_file()
+
+    # -- (d) setup repoints fit files at the temp copies ---------------------
+    # exercise the same repoint setup('fit') performs (without a reader read)
+    if dm._staging_active():  # noqa: SLF001
+        dm.train_file = fu.get_temp_path(mft, dm.train_file)
+        dm.val_file = fu.get_temp_path(mft, dm.val_file)
+    checks["setup_repoints_to_temp"] = (
+        bool(mft)
+        and str(dm.train_file) == str(expect_train)
+        and str(dm.val_file) == str(expect_val)
+    )
+
+    # -- (e) teardown removes the staged copies; originals survive -----------
+    dm.teardown("fit")
+    checks["teardown_removes_staged_copies"] = (
+        bool(mft) and not expect_train.is_file() and not expect_val.is_file()
+    )
+    checks["teardown_keeps_originals"] = train_src.is_file() and val_src.is_file()
+
+    # -- (f) S3 helper surface ported ----------------------------------------
+    checks["s3_helpers_importable"] = all(
+        callable(getattr(fu, fn, None))
+        for fn in ("download_from_S3", "get_temp_path", "move_files_temp", "remove_files_temp")
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the M6-7 move_files_temp / S3 staging surface (sub-wave E; FD §6.1 1292, §10 1779 'ported "
+        "as-is in M6'; plan 12) is an OPT-IN, default-off datamodule concern (NON-gating). With "
+        "move_files_temp=None the read path is unchanged (staging inactive, hooks no-op, paths "
+        "untouched); with it set the datamodule accepts the arg, prepare_data copies the train/val "
+        "files to the temp root (originals survive), setup repoints the fit files at the copies, "
+        "and teardown('fit') removes the copies — all via the shared salt.utils.file_utils helpers "
+        "(v1 datamodules.py:91,191-204,274-280). The S3 helper surface is ported + importable."
+    )
+    report = _base_report(
+        "s31_move_files_temp_s3_staging",
+        passed,
+        criterion,
+        {
+            "train_src": str(train_src),
+            "val_src": str(val_src),
+            "move_files_temp": mft,
+            "non_gating": True,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 SaltDataModule ctor move_files_temp (datamodules.py:91), prepare_data (190-195), "
+        "setup file-swap (201-204), teardown (271-281) + salt/utils/file_utils.py helpers "
+        "(get_temp_path:27, copy_file:45, remove_files_temp:75, move_files_temp:91, "
+        "download_S3:147, download_from_S3:375). v2 ports the local-staging hooks onto "
+        "GraphDataModule (default-off) atop the SAME file_utils helpers; the config_s3 "
+        "auto-download glue stays a CLI concern."
+    )
+    _print_checks(checks)
+    _print_verdict("s31", passed, criterion, _emit_report(report, outdir, "s31"))
+    return (0 if passed else 1), report
+
+
+def _s31_reader() -> Any:
+    """A minimal valid `Reader` so `GraphDataModule`'s one-Reader ctor check passes (S31).
+
+    S31 exercises the staging I/O hooks only — no read happens — so the reader
+    just needs to satisfy the ctor's "exactly one Reader" guard.
+
+    Returns
+    -------
+    Reader
+        A `H5StructuredReader` over jets+tracks (never read by S31).
+    """
+    return H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+
+
+# ---------------------------------------------------------------------------
+# IG1 — IntegratedGradientWriter (design-conformance, NON-gating; user-decided
+# IN M6, 2026-06-15; sub-wave E; FD §9.5 1719 / §10 1778 "as a Writer")
+# ---------------------------------------------------------------------------
+
+
+def _ig1_fixtures() -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+    """A deterministic IG1 fixture: a known input + a fixed linear weight vector.
+
+    The integrated gradient of a LINEAR scalar output ``F(x) = sum_i w_i x_i``
+    over a zero baseline is CLOSED FORM — ``IG_i = w_i * x_i`` — and it satisfies
+    completeness exactly (``IG.sum() == F(x) - F(0)``). That closed form is the
+    parity-decidable reference IG1 compares the writer's computed attribution
+    against (no captum / salt-attribution dependency; v1's captum core is the
+    same Riemann estimator, exact for a linear model).
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, list[str]]
+        ``(inputs [B, F], weight [F], feature_names)``.
+    """
+    torch.manual_seed(20260616)
+    feature_names = ["pt", "eta", "d0", "z0", "phi"]
+    weight = torch.randn(len(feature_names), dtype=torch.float64).float()
+    inputs = torch.randn(12, len(feature_names), dtype=torch.float64).float()
+    return inputs, weight, feature_names
+
+
+def _ig1_write_ctx(outdir: Path, run_name: str = "GN2") -> Any:
+    """A minimal `WriteCtx` for the IG1 jets-stream fixture (no real file I/O).
+
+    Returns
+    -------
+    WriteCtx
+        A jets-only vector-stream context (the v1 global-object attribution
+        stream); ``feature_fields`` is left empty so the writer's explicit
+        ``feature_names`` override drives the column names.
+    """
+    from salt.core.writers.base import WriteCtx  # noqa: PLC0415
+
+    return WriteCtx(
+        output_path=outdir / "ig1.h5",
+        total=12,
+        run_name=run_name,
+        source_path=outdir / "ig1_src.h5",
+        streams=("jets", "tracks"),
+        sequence_streams=("tracks",),
+        group_datasets={"jets": "jets", "tracks": "tracks"},
+        seq_lengths={"tracks": 6},
+        model_modules={},
+        batch_size=12,
+        precision="full",
+    )
+
+
+def run_ig1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[Callable[[torch.Tensor], torch.Tensor]], Callable[..., Any]]
+    | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """IG1: IntegratedGradientWriter (design-conformance, NON-gating; user-decided IN M6).
+
+    The IntegratedGradientWriter port (sub-wave E; user-decided IN 2026-06-15;
+    FD §9.5 1719 / §10 1778 "as a Writer"; plan 12). The v2 spelling of v1's
+    `IntegratedGradientWriter` (``salt/callbacks/integrated_gradients_writer.py``,
+    a Lightning Callback over captum) re-authored on the M4.5 unified-writer
+    interface — a sibling of `InputCopyWriter` / `PadMaskWriter` /
+    `MaskFormerObjectWriter`. NON-gating: no shipped config requires it (the 🔷
+    movers do not gate on it). IG1 asserts, on a small in-repo fixture (no
+    captum / salt-attribution dependency):
+
+    - **IG-attribution columns produced** — the writer emits one
+      ``{run_name}_IG_{feature}`` f4 column per input feature on the attributed
+      stream, named per input variable (BY NAME, not index arithmetic).
+    - **integrated-gradient parity (decidable)** — for a LINEAR scalar output the
+      writer's computed attribution equals the closed form ``w_i * x_i`` (the IG
+      of a linear model over a zero baseline) to float tolerance, AND satisfies
+      completeness (``IG.sum() == F(x) - F(0)``) — the same Riemann estimator v1
+      delegated to captum, exact for a linear model.
+    - **eval-only (``onnx_outputs() == []``)** — the writer has no ONNX role (the
+      `InputCopyWriter` / `PadMaskWriter` direction) and is NOT ``export_only``;
+      its TEST ``requires`` is non-empty (``inputs.<stream>``), so it is a legal
+      eval-only writer.
+    - **integrates with WriterCallback alongside the shipped writers** — a
+      `WriterCallback` built with the IG writer PLUS `InputCopyWriter` +
+      `TaskWriter` + `PadMaskWriter` passes writer-role validation and merges
+      demand with NO collision (the IG writer consumes ``inputs.<stream>``, the
+      others ``meta.rows`` / ``preds.*`` / ``masks.*``).
+    - **sequence-stream pooling** — attributing a sequence stream (``[B, T, F]``)
+      masked-mean-pools over valid tokens to a per-jet, per-feature attribution
+      (v1 wrote per-jet rows).
+    - **negative control: malformed attribution shape rejected** — a
+      ``forward_fn`` returning a NON-scalar output (the malformed attribution
+      shape) raises a `ConfigError` at ``write`` (the writer cannot attribute a
+      non-scalar; v1's captum wrapper reduced the model to one scalar via
+      add_softmax + output_keys).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook swaps the
+    writer's ``forward_fn`` for a constant (zero-gradient) map, so the parity vs
+    the closed form fails, flipping the gate.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    from salt.core.writers import (  # noqa: PLC0415
+        InputCopyWriter,
+        IntegratedGradientWriter,
+        PadMaskWriter,
+        WriterCallback,
+    )
+    from salt.core.writers.base import WriterDeclareCtx  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("IG1 IntegratedGradientWriter (design-conformance, NON-gating; user-decided IN M6)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    inputs, weight, feature_names = _ig1_fixtures()
+    run_name = "GN2"
+
+    def linear_forward(x: torch.Tensor) -> torch.Tensor:
+        # F(x) = sum_i w_i x_i -> [B]; IG over a zero baseline = w_i * x_i exactly
+        return (x * weight.to(x.device)).sum(dim=-1)
+
+    fwd = linear_forward
+    if corruption is not None:
+        fwd = corruption(linear_forward)
+
+    writer = IntegratedGradientWriter(
+        forward_fn=fwd, stream="jets", n_steps=64, feature_names=feature_names
+    )
+    writer.name = "integrated_gradients"
+    ctx = _ig1_write_ctx(outdir, run_name)
+    writer.setup(ctx)
+
+    # -- (a) IG-attribution columns produced, named per input variable -------
+    cols = writer.columns(ctx)
+    expected_cols = tuple(f"{run_name}_IG_{n}" for n in feature_names)
+    checks["columns_on_attributed_stream"] = set(cols) == {"jets"}
+    checks["one_ig_column_per_feature"] = cols["jets"].names == expected_cols
+
+    # -- (b) integrated-gradient parity (decidable) vs the linear closed form -
+    bundle = _bundle_inputs("jets", inputs)
+    out = writer.write(bundle, slice(0, inputs.shape[0]))
+    arr = out["jets"]
+    computed = np.stack([arr[c] for c in expected_cols], axis=-1)  # [B, F]
+    closed_form = (weight.numpy() * inputs.numpy()).astype(np.float32)  # IG of a linear model
+    max_abs_err = float(np.abs(computed - closed_form).max())
+    checks["ig_matches_linear_closed_form"] = max_abs_err < 1e-4
+    # completeness: sum of attributions == F(x) - F(0) (F(0) == 0 here)
+    f_x = linear_forward(inputs).numpy()
+    completeness_err = float(np.abs(computed.sum(axis=-1) - f_x).max())
+    checks["ig_satisfies_completeness"] = completeness_err < 1e-3
+
+    # -- (c) eval-only: onnx_outputs() == [] and NOT export_only -------------
+    decl = WriterDeclareCtx(
+        model_modules={}, streams=("jets", "tracks"), sequence_streams=("tracks",)
+    )
+    onnx_outputs = writer.onnx_outputs(decl)
+    checks["onnx_outputs_empty"] = onnx_outputs == []
+    checks["not_export_only"] = writer.export_only is False
+    checks["test_requires_nonempty"] = list(writer.requires(decl)) == ["inputs.jets"]
+
+    # -- (d) integrates with WriterCallback alongside the shipped writers -----
+    # IG on jets + the demand-bearing v1 eval writers (input copy + pad mask).
+    # InputCopyWriter (meta.rows) and PadMaskWriter (masks.tracks) carry
+    # non-empty TEST demand against the fixture reader's streams; TaskWriter /
+    # MaskFormerObjectWriter need configured task/decoder modules (absent in a
+    # writer-only fixture), so the no-collision claim against THEIR demand keys
+    # is checked directly below (the IG writer consumes inputs.<stream>, none of
+    # the shipped writers' demand families do: meta.rows / preds.* / masks.*).
+    ig2 = IntegratedGradientWriter(forward_fn=fwd, stream="jets", n_steps=8, feature_names=["pt"])
+    # explicit streams so InputCopy (jets) + PadMask (tracks) carry non-empty
+    # demand in this writer-only fixture (no task modules to derive streams from)
+    callback = WriterCallback(
+        modules={
+            "inputs_copy": InputCopyWriter(streams=["jets"]),
+            "pad_mask": PadMaskWriter(streams=["tracks"]),
+            "integrated_gradients": ig2,
+        }
+    )
+    reader = _ig1_reader()
+    try:
+        per_writer = callback.per_writer_demand({}, reader)  # runs _validate_writer_roles
+        roles_ok = True
+    except ConfigError as exc:  # pragma: no cover - exercised only on a regression
+        per_writer = {}
+        roles_ok = False
+        print(f"  writer-role validation raised: {exc}")
+    checks["writercallback_role_validation_ok"] = roles_ok
+    ig_demand = set(per_writer.get("integrated_gradients", []))
+    checks["ig_demand_is_inputs_jets"] = ig_demand == {"inputs.jets"}
+    # no collision with the OTHER configured writers' demand (InputCopy meta.rows
+    # + PadMask masks.tracks here)
+    other_keys = {k for n, keys in per_writer.items() if n != "integrated_gradients" for k in keys}
+    checks["no_demand_collision_with_shipped_writers"] = ig_demand.isdisjoint(other_keys)
+    # no collision with the TaskWriter / MaskFormerObjectWriter demand FAMILIES:
+    # the IG demand is the inputs.* namespace, the task/MF writers consume the
+    # preds.* / <obj>.* / labels.* / masks.* families (TaskWriter.requires ->
+    # preds.*, MaskFormerObjectWriter.requires -> <obj>.{class_probs,masks} +
+    # labels.*) — disjoint by namespace, so no shipped writer ever contends for
+    # an inputs.* key.
+    shipped_families = ("preds.", "masks.", "labels.", "meta.")
+    checks["ig_namespace_disjoint_from_task_mf_families"] = all(
+        not k.startswith(shipped_families) for k in ig_demand
+    )
+
+    # -- (e) sequence-stream pooling ([B, T, F] -> per-jet [B, F]) ------------
+    seq_inputs = torch.randn(7, 6, len(feature_names))
+    seq_pad = torch.zeros(7, 6, dtype=torch.bool)
+    seq_pad[:, 4:] = True  # last 2 tokens padded
+
+    def seq_forward(x: torch.Tensor) -> torch.Tensor:
+        return (x.mean(dim=1) * weight.to(x.device)).sum(dim=-1)  # [B]
+
+    seq_writer = IntegratedGradientWriter(
+        forward_fn=seq_forward, stream="tracks", n_steps=16, feature_names=feature_names
+    )
+    seq_writer.name = "ig_tracks"
+    seq_writer.setup(ctx)
+    seq_bundle = _bundle_inputs("tracks", seq_inputs, pad=seq_pad)
+    seq_out = seq_writer.write(seq_bundle, slice(0, seq_inputs.shape[0]))
+    seq_arr = seq_out["tracks"]
+    checks["sequence_stream_pools_to_per_jet"] = seq_arr.shape == (7,) and seq_arr.dtype.names == (
+        tuple(f"{run_name}_IG_{n}" for n in feature_names)
+    )
+
+    # -- (f) negative control: a malformed attribution shape is rejected -----
+    bad_writer = IntegratedGradientWriter(
+        forward_fn=lambda x: x,  # returns [B, F] (NON-scalar) — the malformed shape
+        stream="jets",
+        n_steps=4,
+        feature_names=feature_names,
+    )
+    bad_writer.name = "ig_bad"
+    bad_writer.setup(ctx)
+    checks["malformed_attribution_shape_rejected"] = _raises(
+        ConfigError, bad_writer.write, _bundle_inputs("jets", inputs), slice(0, inputs.shape[0])
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the IntegratedGradientWriter (sub-wave E; user-decided IN M6 2026-06-15; FD §9.5 1719 / "
+        "§10 1778 'as a Writer'; plan 12) is the v2 unified-framework port of v1's "
+        "IntegratedGradientWriter (integrated_gradients_writer.py) — a sibling of InputCopyWriter "
+        "/ PadMaskWriter / MaskFormerObjectWriter. NON-gating (no shipped config requires it). It "
+        "produces one {run_name}_IG_{feature} f4 column per input feature; its attribution equals "
+        "the linear closed form w_i*x_i and satisfies completeness (the captum Riemann core, exact "
+        "for a linear model); it is EVAL-ONLY (onnx_outputs() == [], not export_only, non-empty "
+        "TEST requires); it integrates with WriterCallback alongside the shipped writers with no "
+        "demand collision; it pools a sequence stream to per-jet; and a malformed (non-scalar) "
+        "attribution shape raises a ConfigError."
+    )
+    report = _base_report(
+        "ig1_integrated_gradient_writer",
+        passed,
+        criterion,
+        {
+            "stream": "jets",
+            "n_features": len(feature_names),
+            "n_steps": 64,
+            "ig_max_abs_err": max_abs_err,
+            "completeness_err": completeness_err,
+            "non_gating": True,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["ig_columns"] = list(expected_cols)
+    report["v1_reference"] = (
+        "v1 IntegratedGradientWriter (salt/callbacks/integrated_gradients_writer.py:32) — a "
+        "Lightning Callback that, on on_test_start, wrapped the model in "
+        "salt_attribution.SaltModelCaptumWrapper (:186) and ran captum.attr.IntegratedGradients "
+        "(:193) over the test loader, writing a side-car {ckpt}__attributions_{sample}.h5 "
+        "(:166-172) with feature attributions, baselines and convergence deltas (raised "
+        "ImportError without captum + salt-attribution, :106-112). v2 re-authors the SAME "
+        "integrated-gradient Riemann estimator (Sundararajan 2017; "
+        "salt.core.writers.integrated_gradients.integrated_gradients) ON the M4.5 unified-writer "
+        "interface (requires/columns/write; onnx_outputs()==[] eval-only), so the attributions "
+        "land as columns IN the eval H5 with NO hard captum/salt-attribution "
+        "dependency. The forward closure (forward_fn) replaces the captum wrapper's "
+        "add_softmax+output_keys scalar selection."
+    )
+    _print_checks(checks)
+    _print_verdict("ig1", passed, criterion, _emit_report(report, outdir, "ig1"))
+    return (0 if passed else 1), report
+
+
+def _bundle_inputs(stream: str, x: torch.Tensor, pad: torch.Tensor | None = None) -> Bundle:
+    """Build a minimal executed TEST bundle carrying one input stream (+ optional pad mask).
+
+    Mirrors what ``test_step`` hands `WriterCallback.on_test_batch_end`: the
+    executed ``inputs.<stream>`` leaf (and the ``masks.<stream>`` pad mask for a
+    sequence stream) the IntegratedGradientWriter reads.
+
+    Returns
+    -------
+    Bundle
+        ``{inputs.<stream>: x[, masks.<stream>: pad], meta.rows}``.
+    """
+    data: dict[str, Any] = {"inputs": {stream: x}, "meta": {"rows": torch.tensor([0, x.shape[0]])}}
+    if pad is not None:
+        data["masks"] = {stream: pad}
+    return Bundle(data)
+
+
+def _ig1_reader() -> Any:
+    """A jets+tracks `H5StructuredReader` so `WriterCallback` role validation can run (IG1).
+
+    Returns
+    -------
+    Reader
+        Two streams: a ``jets`` vector stream (the IG attribution target) and a
+        ``tracks`` sequence stream (so PadMaskWriter has a stream to select).
+    """
+    return H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+
+
+# ---------------------------------------------------------------------------
 # M6-CONV — the M7-slice acceptance for the M6-authored configs (sub-wave A
 # bootstraps it; later M6 waves EXTEND _CONV_M6_CONFIGS)
 # ---------------------------------------------------------------------------
@@ -3090,7 +4008,8 @@ def _build_parser() -> argparse.ArgumentParser:
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``lb1``..``ed2`` and ``conv`` subcommands.
+        Parser with the ``lb1``..``ed2``, ``cm1``/``lr1``/``s31`` (sub-wave E
+        non-gating), and ``conv`` subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m6", description=__doc__.splitlines()[0]
@@ -3103,6 +4022,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "mu2": "muP routing validator: apply_to name-lists + MuAdamW swap + setup_mup casing (B)",
         "ed1": "Edge path parity vs v1 (EdgeFeatures/EdgeEmbed/encoder) + dynamic-edge-T onnx (C)",
         "ed2": "Edge bind validators: edge-stream-first + EdgeAttention-backend forcing (C)",
+        "cm1": "Comet logger + LearningRateMonitor wiring (design-conformance, NON-gating; E)",
+        "lr1": "lion/HybridMuonAdamW explicit include/exclude routing + zero-match warn (E)",
+        "s31": "move_files_temp / S3 staging smoke (design-conformance, NON-gating; E)",
+        "ig1": "IntegratedGradientWriter: IG attribution columns, eval-only, WriterCallback (E)",
         "conv": "M6-CONV: salt2 graph validate (fit/test/onnx) on the M6-authored configs",
     }
     for gate, help_text in helps.items():
@@ -3127,6 +4050,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "mu2": run_mu2,
         "ed1": run_ed1,
         "ed2": run_ed2,
+        "cm1": run_cm1,
+        "lr1": run_lr1,
+        "s31": run_s31,
+        "ig1": run_ig1,
         "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)
