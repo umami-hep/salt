@@ -13,7 +13,16 @@ from pathlib import Path
 import numpy as np
 
 import salt.core.gates_m6 as gm6
-from salt.core.gates_m6 import main, run_conv, run_lb1, run_mu1, run_mu2, run_vs1
+from salt.core.gates_m6 import (
+    main,
+    run_conv,
+    run_ed1,
+    run_ed2,
+    run_lb1,
+    run_mu1,
+    run_mu2,
+    run_vs1,
+)
 
 
 class TestLB1:
@@ -144,7 +153,7 @@ class TestMU1:
         assert report["checks"]["export_fold_is_idempotent"]
         # the <=1e-6 leg is non-vacuous: a non-unit width_mult probe still folds
         assert report["checks"]["nonunit_width_mult_fold_within_tolerance"]
-        assert report["config"]["nonunit_probe_width_mult"] != 1.0
+        assert not np.isclose(report["config"]["nonunit_probe_width_mult"], 1.0)
         # the honest faithfulness note (v1 encoder flag wires only the out-proj)
         assert "does NOT pass mup down to its EncoderLayers" in report["faithfulness_note"]
         assert "MuReadout out-proj swap" in report["faithfulness_note"]
@@ -202,7 +211,7 @@ class TestMU2:
         # end-to-end tooling: shapes generated, applied at bind, validate OK
         assert report["checks"]["salt2_mup_shapes_runs"]
         assert report["checks"]["shape_file_applied_at_bind_width_mult_2"]
-        assert report["config"]["resolved_width_mult"] == 2.0
+        assert np.isclose(report["config"]["resolved_width_mult"], 2.0)
         assert report["checks"]["salt2_graph_validate_mup_routing_ok"]
         # the v1->v2 routing reference (regex zip -> explicit name list)
         assert "configuration_muP.py:98" in report["v1_reference"]
@@ -210,7 +219,7 @@ class TestMU2:
     def test_corruption_fails_the_gate(self, tmp_path):
         # inject a non-mup module (pool) into apply_to -> the validator ERRORS,
         # so valid_apply_to_accepted flips False and the gate exits 1
-        def break_apply_to(block):
+        def break_apply_to(_block):
             return {"apply_to": ["track_embed", "pool"]}
 
         code, report = run_mu2(tmp_path, corruption=break_apply_to)
@@ -223,17 +232,163 @@ class TestMU2:
         assert report["checks"]["muadamw_selected_when_mup_configured"]
 
 
+class TestED1:
+    """ED1 — the edge path end-to-end (plan 12 sub-wave C; FD §6.7 1418-1431).
+
+    Pins the bitwise forward parity of EdgeFeatures vs an INDEPENDENT v1
+    EdgeConstructor (per-feature for dR/kt/z), of EdgeEmbed vs an INDEPENDENT v1
+    Dense, AND of the FULL GN2XE-shaped encoder edge path vs an INDEPENDENT v1
+    Transformer(edge_embed_dim>0, update_edges=True); the rank-4 / raw-input /
+    shared-T-symbol structural checks (incl. the encoder's edge port); the
+    dynamic-edge-T ONNX-trace assertion (both edge T axes dynamic + shape-derived
+    register pad, proven by an onnxruntime length sweep from a single trace); the
+    write-once guarantee; the named-error guards; and the corruption teeth (a
+    perturbed v2 edge tensor fails the parity while the structural + ONNX + guard
+    checks stay green).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_ed1(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "ed1_report.json").is_file()
+        # declared-IO structure: raw input (not normed), pad mask, square rank-4
+        assert report["checks"]["edge_features_requires_raw_input"]
+        assert report["checks"]["edge_features_not_consuming_normed"]
+        assert report["checks"]["edge_features_requires_pad_mask"]
+        assert report["checks"]["edges_tensor_is_rank4"]
+        assert report["checks"]["edges_both_token_axes_share_stream_symbol"]
+        assert report["checks"]["edges_last_dim_is_feature_count"]
+        assert report["checks"]["edge_embed_is_rank4"]
+        assert report["checks"]["edge_embed_token_axes_share_stream_symbol"]
+        assert report["checks"]["edge_embed_out_dim_matches"]
+        # indices_map resolved by NAME from the declared fields (v1 parity)
+        assert report["checks"]["indices_map_resolved_by_name"]
+        # runtime shapes [B, T, T, E] / [B, T, T, D_e]
+        assert report["checks"]["edges_runtime_shape"]
+        assert report["checks"]["edge_embed_runtime_shape"]
+        # write-once: inputs.tracks never mutated (both the edge-only + encoder plans)
+        assert report["checks"]["inputs_not_mutated"]
+        assert report["checks"]["encoder_inputs_not_mutated"]
+        # bitwise forward parity vs the INDEPENDENT v1 references
+        assert report["checks"]["edge_features_bitwise_vs_v1"]
+        # all 5 edge features pinned column-by-column (kinematic + non-kinematic)
+        assert report["checks"]["edge_feature_dR_bitwise_vs_v1"]
+        assert report["checks"]["edge_feature_z_bitwise_vs_v1"]
+        assert report["checks"]["edge_feature_kt_bitwise_vs_v1"]
+        assert report["checks"]["edge_feature_subjetIndex_bitwise_vs_v1"]
+        assert report["checks"]["edge_feature_isSelfLoop_bitwise_vs_v1"]
+        assert report["checks"]["edge_embed_bitwise_vs_v1"]
+        assert "INDEPENDENT v1 reference" in report["v1_reference"]
+        # encoder edge path: requires the rank-4 edge port (both axes T:tracks),
+        # encoded.seq matches an INDEPENDENT v1 Transformer(edge, update_edges)
+        assert report["checks"]["encoder_requires_edge_port"]
+        assert report["checks"]["encoder_edge_port_is_rank4"]
+        assert report["checks"]["encoder_edge_port_token_axes_share_stream_symbol"]
+        assert report["checks"]["encoder_edge_port_width_matches"]
+        assert report["checks"]["encoder_encoded_runtime_shape"]
+        assert report["checks"]["encoder_edge_forward_bitwise_vs_v1"]
+        # the dynamic-edge-T ONNX trace: track axis dynamic, register pad
+        # shape-derived, onnxruntime agrees across multiple track counts
+        assert report["checks"]["edge_track_axis_is_dynamic"]
+        assert report["checks"]["onnx_track_input_token_dim_symbolic"]
+        assert report["checks"]["register_pad_shape_derived_ops_present"]
+        assert report["checks"]["onnx_dynamic_edge_T_sweep_passes"]
+        assert report["checks"]["onnx_sweep_covered_multiple_lengths"]
+        assert report["dynamic_axes"]["track_features"] == {"0": "n_tracks"}
+        # named-error guards all fire
+        assert report["checks"]["unknown_feature_raises_configerror"]
+        assert report["checks"]["empty_features_raises_configerror"]
+        assert report["checks"]["missing_required_var_raises_valueerror"]
+        assert report["checks"]["edge_embed_width_key_raises_configerror"]
+        # the scope note records that the GN2XE corpus config is the next stage
+        assert "GN2XE corpus config is the next sub-wave C stage" in report["config"]["stage_scope"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # perturb the v2 edge tensor AND the encoded sequence -> the bitwise
+        # parities must FAIL, while the structural + ONNX + guard checks stay green
+        code, report = run_ed1(tmp_path, corruption=lambda t: t + 1.0)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["edge_features_bitwise_vs_v1"]
+        assert not report["checks"]["edge_feature_dR_bitwise_vs_v1"]
+        assert not report["checks"]["edge_feature_subjetIndex_bitwise_vs_v1"]
+        assert not report["checks"]["edge_feature_isSelfLoop_bitwise_vs_v1"]
+        assert not report["checks"]["encoder_edge_forward_bitwise_vs_v1"]
+        # structural + ONNX + guard checks are independent of the edge values
+        assert report["checks"]["edges_tensor_is_rank4"]
+        assert report["checks"]["edge_features_requires_raw_input"]
+        assert report["checks"]["edge_embed_out_dim_matches"]
+        assert report["checks"]["encoder_requires_edge_port"]
+        assert report["checks"]["onnx_dynamic_edge_T_sweep_passes"]
+        assert report["checks"]["register_pad_shape_derived_ops_present"]
+        assert report["checks"]["unknown_feature_raises_configerror"]
+        assert report["checks"]["missing_required_var_raises_valueerror"]
+        assert report["checks"]["edge_embed_width_key_raises_configerror"]
+
+
+class TestED2:
+    """ED2 — the edge bind-time validators (plan 12 sub-wave C; FD §6.7 1425-1431).
+
+    Pins the two named constraints (edge-stream-first / EdgeAttention-backend
+    forcing), the ctor-level edge guards, the design-conformance that the SAME
+    validator runs in SaltModule.__init__ + is exported for the CLI path, and the
+    corruption teeth (reordering the concat so the edge stream is no longer first
+    flips the validator to ERROR).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_ed2(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "ed2_report.json").is_file()
+        # rule (a) edge-stream-first
+        assert report["checks"]["valid_edge_order_accepted"]
+        assert report["checks"]["edge_stream_not_first_errors"]
+        assert report["checks"]["edge_port_without_concat_errors"]
+        # rule (b) EdgeAttention-backend forcing
+        assert report["checks"]["non_edge_backend_errors"]
+        assert report["checks"]["no_edge_encoder_is_noop"]
+        # ctor-level edge guards
+        assert report["checks"]["edges_without_dim_raises_configerror"]
+        assert report["checks"]["edge_dim_without_edges_raises_configerror"]
+        assert report["checks"]["update_edges_without_edges_raises_configerror"]
+        # same validator both places (SaltModule.__init__ + CLI export)
+        assert report["checks"]["saltmodule_accepts_valid_edge_order"]
+        assert report["checks"]["saltmodule_rejects_misordered_edge_concat"]
+        assert report["checks"]["validate_edge_port_exported"]
+        # the reference records v1 had NO validators (the two silent hacks)
+        assert "v1 had NO edge validators" in report["v1_reference"]
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # reorder the concat so the edge stream (tracks) is no longer first ->
+        # the valid-order acceptance check flips False and the gate exits 1
+        code, report = run_ed2(tmp_path, corruption=lambda streams: list(reversed(streams)))
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["valid_edge_order_accepted"]
+        # the value-independent validator-rule checks stay green (they build their
+        # own module dicts, untouched by the corruption hook)
+        assert report["checks"]["edge_stream_not_first_errors"]
+        assert report["checks"]["non_edge_backend_errors"]
+        assert report["checks"]["saltmodule_rejects_misordered_edge_concat"]
+
+
 class TestConv:
     """M6-CONV — the M7-slice acceptance for the M6-authored v2-native configs.
 
     The gate drives the REAL ``salt2 graph validate`` (fit/test/onnx) on every
-    config landed so far (``_CONV_M6_CONFIGS`` — sub-wave A: GN3X, GN2X_qcdsplit;
-    sub-wave D: DL1; sub-wave B: GN2_muP) and embeds the authoritative list
+    config in ``_CONV_M6_CONFIGS`` — sub-wave A: GN3X, GN2X_qcdsplit; sub-wave D:
+    DL1; sub-wave B: GN2_muP; sub-wave C: GN2XE (the list is COMPLETE at 5, the
+    FINAL config-gating wave) — and embeds the authoritative list
     verbatim. These tests pin:
     the file-present check, the per-config mode bookkeeping (all standard traces
     -> onnx validated; GN2_muP's MuReadout out-proj folded to plain Linear at
-    trace time), the muP shape-generation prerequisite, and the corruption teeth
-    (a missing file fails the gate).
+    trace time; GN2XE's edge path tracing with dynamic edge T-axes, ED1), the muP
+    shape-generation prerequisite, and the corruption teeth (a missing file fails
+    the gate).
     """
 
     def test_structure_and_files_present(self, tmp_path):
@@ -242,12 +397,18 @@ class TestConv:
         # every embedded config file exists in salt/core/configs/
         assert report["checks"]["all_m6_conv_config_files_present"]
         assert report["config"]["missing_config_files"] == []
-        # waves A + D + B land exactly these 4 configs, names embedded verbatim
+        # waves A + D + B + C land exactly these 5 configs, names embedded verbatim
         names = {c["name"] for c in report["configs"]}
-        assert names == {"GN3X", "GN2X_qcdsplit", "DL1", "GN2_muP"}
+        assert names == {"GN3X", "GN2X_qcdsplit", "DL1", "GN2_muP", "GN2XE"}
         # the report embeds the authoritative _CONV_M6_CONFIGS list verbatim
-        assert report["conv_m6_configs"] == ["GN3X", "GN2X_qcdsplit", "DL1", "GN2_muP"]
-        assert report["config"]["total_configs"] == 4
+        assert report["conv_m6_configs"] == [
+            "GN3X",
+            "GN2X_qcdsplit",
+            "DL1",
+            "GN2_muP",
+            "GN2XE",
+        ]
+        assert report["config"]["total_configs"] == 5
         # no --strict (flow/truth_hadrons preflight warnings inherent — documented)
         assert report["config"]["strict"] is False
         assert "no --strict" in report["no_strict_rationale"]
@@ -255,9 +416,10 @@ class TestConv:
         assert "NO forward-parity claim" in report["scope_note"]
 
     def test_all_configs_validate_all_modes(self, tmp_path):
-        # GN3X + GN2X_qcdsplit + DL1 + GN2_muP convert+validate+plan-compile in
-        # fit/test/onnx — all export-representable (GN2_muP via the MuReadout
-        # fold), so onnx is validated for each
+        # GN3X + GN2X_qcdsplit + DL1 + GN2_muP + GN2XE convert+validate+
+        # plan-compile in fit/test/onnx — all export-representable (GN2_muP via
+        # the MuReadout fold, GN2XE via the dynamic-edge-T trace proven by ED1),
+        # so onnx is validated for each
         code, report = run_conv(tmp_path)
         for c in report["configs"]:
             assert c["validateFit"], c
@@ -266,7 +428,7 @@ class TestConv:
             assert c["rc"]["fit"] == 0, c
             assert c["rc"]["test"] == 0, c
             assert c["rc"]["onnx"] == 0, c
-        assert report["config"]["validated_configs"] == 4
+        assert report["config"]["validated_configs"] == 5
         assert code == 0
         assert report["passed"]
 
@@ -278,6 +440,22 @@ class TestConv:
         gn2_mup = next(c for c in report["configs"] if c["name"] == "GN2_muP")
         assert Path(gn2_mup["shape_path"]).is_file()
         assert gn2_mup["family"] == "mup"
+
+    def test_edge_config_validates_onnx(self, tmp_path):
+        # GN2XE (sub-wave C, edges family) is the FINAL config-gating mover. Its
+        # --mode onnx STAYS in the gate (static plan-compile here; the load-bearing
+        # dynamic-T trace is proven by ED1) — NOT scoped out. The 39-denominator
+        # closes with this 5th config.
+        _code, report = run_conv(tmp_path)
+        gn2xe = next(c for c in report["configs"] if c["name"] == "GN2XE")
+        assert gn2xe["family"] == "edges"
+        assert gn2xe["validateFit"]
+        assert gn2xe["validateTest"]
+        assert gn2xe["validateOnnx"] is True
+        assert gn2xe["rc"]["onnx"] == 0
+        # the scope note records the 39-denominator is now CLOSED
+        assert "CLOSED" in report["scope_note"]
+        assert "NOT scoped out" in report["scope_note"]
 
     def test_corruption_missing_file_fails(self, tmp_path):
         # point a config at a non-existent file -> the file-present check fails
@@ -296,7 +474,7 @@ class TestConv:
 
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        gates = ("lb1", "vs1", "mu1", "mu2", "conv")
+        gates = ("lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "conv")
         for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0

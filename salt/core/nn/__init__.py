@@ -27,6 +27,8 @@ from salt.core.nn.maskdecoder import MaskDecoder
 from salt.core.nn.maskformer_loss import MaskFormerMatchedLoss
 from salt.core.nn.modules import (
     Concat,
+    EdgeEmbed,
+    EdgeFeatures,
     GlobalAttentionPooling,
     LossGLS,
     LossSum,
@@ -47,6 +49,8 @@ __all__ = [
     "BindError",
     "ClassificationTaskModule",
     "Concat",
+    "EdgeEmbed",
+    "EdgeFeatures",
     "GlobalAttentionPooling",
     "LossGLS",
     "LossSum",

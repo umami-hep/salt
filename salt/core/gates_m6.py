@@ -1,4 +1,4 @@
-"""M6 gates harness — LB1 + VS1 + MU1 + M6-CONV (sub-waves A/D/B) (plan 12; design §9.5).
+"""M6 gates harness — LB1 + VS1 + MU1/MU2 + ED1 + M6-CONV (waves A/D/B/C) (plan 12; design §9.5).
 
 Standalone gates, each a subcommand of ``python -m salt.core.gates_m6``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -84,10 +84,32 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   MU2/MU-HUMAN, NOT this gate. Negative control: perturbing the v2 forward breaks
   the bitwise parity while the structural (MuReadout / fold) checks stay green.
 
+- **ED1 EdgeFeatures + EdgeEmbed forward parity (v1-decidable; sub-wave C stage 1)**
+  — the M6 edge-feature building blocks (design §6.7 1418-1421): `EdgeFeatures`
+  (a NetModule) requires the RAW ``inputs.<stream>`` (un-normalised, §6.3) +
+  ``masks.<stream>`` and produces ``edges.<stream>`` ``[B, T, T, E]``;
+  `EdgeEmbed` (an edge-typed `StreamEmbed`) maps it to ``edges.<stream>_emb``
+  ``[B, T, T, D_e]``. ED1 drives both through the REAL compiler / two-phase bind
+  / executor on a GN2XE-shaped fixture and asserts: the v2 ``edges.tracks`` is
+  BITWISE identical to an INDEPENDENT v1 ``EdgeConstructor`` (a separately built
+  v1 object run on a CLONE of the same raw input — edge_constructor.py:41-44,
+  edge_features.py:52-146), checked per-feature for dR/kt/z; the v2
+  ``edges.tracks_emb`` is BITWISE identical to an INDEPENDENT v1 ``Dense``
+  (weight-loaded from the v2 EdgeEmbed, run on the v1 edges — v1
+  ``edge_init_nets``, saltmodel.py:132); both token axes share the
+  ``T:<stream>`` symbol (the dynamic-T export prerequisite); ``inputs.tracks``
+  is never mutated (write-once §2.1); and the named-error guards fire
+  (unrecognised/empty feature -> `ConfigError`, missing required variable ->
+  `check_edge_config` `ValueError`, EdgeEmbed width key -> `ConfigError`).
+  Negative control: perturbing the v2 edge tensor breaks the bitwise parity
+  while the structural + guard checks stay green. The encoder edge path, the
+  edge-stream-first / backend-forcing bind validators (ED2), the GN2XE config,
+  and the ONNX dynamic-T register pad are LATER sub-wave C stages.
+
 - **M6-CONV — the M7-slice acceptance (this wave's slice)** — the
   newly-authored v2-native M6 configs (sub-wave A: GN3X, GN2X_qcdsplit; sub-wave
-  D: DL1; sub-wave B: GN2_muP; later M6 waves EXTEND ``_CONV_M6_CONFIGS``) exist
-  as v2-native fixtures in
+  D: DL1; sub-wave B: GN2_muP; sub-wave C: GN2XE — the list is now COMPLETE at 5)
+  exist as v2-native fixtures in
   ``salt/core/configs/`` AND pass the REAL ``salt2 graph validate`` (the
   canonical static validator, the d2cfg command path) in fit + test + onnx with
   rc == 0. The authoritative config list is embedded VERBATIM in
@@ -105,10 +127,15 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   the real export traceable is exercised + proven by MU1's export-fold check
   (``set_export_mode`` on the live module). GN2_muP's base/delta infshapes are
   generated data-free (``_conv_mup_shape_path``) before validation so the plan-
-  compile succeeds; with the fold proven by MU1, onnx stays in the gate for it too
-  — only GN2XE's edge dynamic-T register pad (C) is a deferred export hazard. This
-  split mirrors the M5-CONV precedent (run_conv is also static validate). Moves the
-  4 configs 🔷→✅ in the 39 denominator.
+  compile succeeds; with the fold proven by MU1, onnx stays in the gate for it too.
+  GN2XE's ``--mode onnx`` here is LIKEWISE a STATIC plan-compile; its load-bearing
+  dynamic-T trace (BOTH edge T axes dynamic + the register zero-pad SHAPE-DERIVED,
+  not baked) is exercised + PROVEN by ED1's ONNX-trace leg (a real
+  ``torch.onnx.export`` + an onnxruntime length sweep) — so onnx stays in the gate
+  for GN2XE too (NOT scoped out). NO export hazard remains deferred. This
+  split mirrors the M5-CONV precedent (run_conv is also static validate). Moves
+  ALL 5 configs 🔷→✅ in the 39 denominator — the LAST config-gating wave, the
+  39-denominator now CLOSED.
 """
 
 from __future__ import annotations
@@ -139,6 +166,8 @@ from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
 from salt.core.nn import (
     Concat,
+    EdgeEmbed,
+    EdgeFeatures,
     GlobalAttentionPooling,
     LossSum,
     Normaliser,
@@ -160,8 +189,10 @@ from salt.core.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.core.saltmodule import SaltModule, validate_mup_routing
+from salt.core.saltmodule import SaltModule, validate_edge_port, validate_mup_routing
+from salt.models import Dense as V1Dense
 from salt.models import Transformer as V1Transformer
+from salt.models.edge_constructor import EdgeConstructor as V1EdgeConstructor
 from salt.models.initnet import InitNet as V1InitNet
 from salt.models.task import ClassificationTask as V1ClassificationTask
 from salt.tests.core.gn2_fixture import write_parity_norm_dict
@@ -1665,19 +1696,979 @@ def _mu2_bound_width_mult(dummy_cfg: str, override: str, set_norm: str) -> float
 
 
 # ---------------------------------------------------------------------------
+# ED1 — EdgeFeatures + EdgeEmbed forward parity vs v1 (sub-wave C, stage 1)
+# ---------------------------------------------------------------------------
+
+# A GN2XE-shaped edge fixture (GN2XE.yaml:38-45,67-72): the tracks stream carries
+# the variables the edge features need (eta/phi/pt for dR/kt/z, subjetIndex for
+# subjetIndex), the edge feature list is the shipped GN2XE set, and the edge
+# embed is the shipped [B,T,T,E] -> [B,T,T,D_e=32] Dense (hidden [32], SiLU).
+_ED1_TRACK_VARIABLES: tuple[str, ...] = (
+    "pt",
+    "eta",
+    "phi",
+    "subjetIndex",
+    "d0",
+    "z0",
+)
+_ED1_EDGE_FEATURES: tuple[str, ...] = ("dR", "z", "kt", "subjetIndex", "isSelfLoop")
+_ED1_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")
+_ED1_EDGE_EMBED_DIM = 32
+_ED1_EDGE_HIDDEN: tuple[int, ...] = (32,)
+_ED1_B = 4
+_ED1_T = 6
+# the encoder-edge-path dims (GN2XE.yaml:&embed_dim 192 / &out_dim 128 / num_heads 4
+# / num_layers 6, scaled down — the edge wiring, not the size, is under test)
+_ED1_EMBED_DIM = 16
+_ED1_OUT_DIM = 12
+_ED1_NUM_HEADS = 2
+_ED1_NUM_LAYERS = 2
+
+
+def _ed1_modules() -> dict[str, Any]:
+    """Build the GN2XE-shaped EdgeFeatures + EdgeEmbed module pair (this stage).
+
+    Just the two edge modules under test — the encoder/attention edge path is a
+    LATER sub-wave C stage (plan 12). EdgeFeatures requires raw ``inputs.tracks``
+    + ``masks.tracks`` and produces ``edges.tracks`` ``[B, T, T, E]``; EdgeEmbed
+    maps that to ``edges.tracks_emb`` ``[B, T, T, D_e]`` (design §6.7 1418-1421).
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named edge modules.
+    """
+    modules: dict[str, Any] = {
+        "edge_features": EdgeFeatures(stream="tracks", features=list(_ED1_EDGE_FEATURES)),
+        "edge_embed": EdgeEmbed(
+            stream="tracks",
+            out_dim=_ED1_EDGE_EMBED_DIM,
+            dense={"hidden_layers": list(_ED1_EDGE_HIDDEN), "activation": "SiLU"},
+        ),
+    }
+    for name, module in modules.items():
+        module.name = name
+    return modules
+
+
+def _ed1_sources():
+    """The GN2XE dataset boundary the edge path reads: raw tracks + its pad mask.
+
+    ``inputs.tracks`` is the RAW (un-normalised) ``[B, T, F]`` stream carrying
+    the edge variables as declared ``fields`` (so EdgeFeatures resolves its
+    indices_map by NAME at bind, design §2.2); ``masks.tracks`` is the stream's
+    pad mask (design §6.7 1418).
+
+    Returns
+    -------
+    NestedSpec
+        The nested source spec for `compile_plan`.
+    """
+    return unflatten_spec({
+        "inputs.tracks": TensorSpec(
+            shape=("B", "T:tracks", len(_ED1_TRACK_VARIABLES)),
+            dtype="float32",
+            fields=tuple(_ED1_TRACK_VARIABLES),
+        ),
+        "masks.tracks": TensorSpec(shape=("B", "T:tracks"), dtype="bool", kind="pad_mask"),
+    })
+
+
+def _ed1_encoder_sources():
+    """The GN2XE encoder boundary: raw tracks + pad mask + the jet flavour label.
+
+    Same as `_ed1_sources` plus the TRAINING-gated ``labels.jets.flavour_label``
+    the classification head consumes in FIT (the encoder model has a head; the
+    edge-only stage-b/c plan uses the leaner `_ed1_sources`).
+
+    Returns
+    -------
+    NestedSpec
+        The nested source spec for the encoder `compile_plan`.
+    """
+    return unflatten_spec({
+        "inputs.tracks": TensorSpec(
+            shape=("B", "T:tracks", len(_ED1_TRACK_VARIABLES)),
+            dtype="float32",
+            fields=tuple(_ED1_TRACK_VARIABLES),
+        ),
+        "masks.tracks": TensorSpec(shape=("B", "T:tracks"), dtype="bool", kind="pad_mask"),
+        "labels.jets.flavour_label": TensorSpec(
+            shape=("B",), dtype="int64", kind="label", modes=Mode.TRAINING
+        ),
+    })
+
+
+def _ed1_v1_edges(raw_tracks: torch.Tensor) -> torch.Tensor:
+    """Run the INDEPENDENT v1 ``EdgeConstructor`` on the SAME raw tracks.
+
+    Constructs a SEPARATE v1 ``EdgeConstructor`` (NOT the v2 module's composed
+    function call) keyed on the same variables and edge-feature list, runs its
+    ``forward`` on a CLONE of the raw input, and returns the
+    ``_edge_features_tracks`` tensor it writes back into the input dict
+    (edge_constructor.py:41-44). This is the v1-decidable reference for the
+    dR/kt/z/subjetIndex/isSelfLoop math (edge_features.py:52-146).
+
+    Returns
+    -------
+    torch.Tensor
+        The v1 ``[B, T, T, E]`` edge-feature tensor.
+    """
+    v1ec = V1EdgeConstructor(
+        input_name="tracks",
+        edge_features=list(_ED1_EDGE_FEATURES),
+        variables={"tracks": list(_ED1_TRACK_VARIABLES)},
+    )
+    v1_inputs = {"tracks": raw_tracks.clone()}
+    v1ec(v1_inputs)
+    return v1_inputs["_edge_features_tracks"]
+
+
+def _ed1_v1_embed(edge_embed: EdgeEmbed, v1_edges: torch.Tensor) -> torch.Tensor:
+    """Run an INDEPENDENT v1 ``Dense`` (weight-loaded from the v2 EdgeEmbed) on the v1 edges.
+
+    Mirrors v1's ``edge_init_nets[0]`` (saltmodel.py:69-80,132 — a `Dense` over
+    the ``[B, L, L, E]`` edge matrix). A SEPARATE v1 `Dense` is built with the
+    same widths and loaded from the v2 `EdgeEmbed`'s composed Dense, then run on
+    the v1 edge tensor — so the only thing under test is the embed wiring, not
+    the edge math.
+
+    Returns
+    -------
+    torch.Tensor
+        The v1 ``[B, T, T, D_e]`` embedded-edge tensor.
+    """
+    v1dense = V1Dense(
+        input_size=len(_ED1_EDGE_FEATURES),
+        output_size=_ED1_EDGE_EMBED_DIM,
+        hidden_layers=list(_ED1_EDGE_HIDDEN),
+        activation="SiLU",
+    )
+    v1dense.load_state_dict(edge_embed.net.state_dict())
+    v1dense.eval()
+    with torch.no_grad():
+        return v1dense(v1_edges)
+
+
+def _ed1_norm_dict(outdir: Path) -> Path:
+    """Write a tracks norm dict for the GN2XE-shaped encoder-edge fixture.
+
+    The edge features are built on the RAW input (design §6.3), but the encoder
+    path needs ``normed.tracks`` for the `StreamEmbed`; this supplies the
+    per-variable constants (distinct, so a field-order bug can't pass silently).
+
+    Returns
+    -------
+    Path
+        The norm-dict YAML path.
+    """
+    import yaml  # noqa: PLC0415 - keep the module import surface lean
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    nd = {
+        "tracks": {
+            var: {"mean": 0.1 * i, "std": 1.0 + 0.1 * i}
+            for i, var in enumerate(_ED1_TRACK_VARIABLES)
+        }
+    }
+    path = outdir / "ed1_norm_dict.yaml"
+    path.write_text(yaml.safe_dump(nd))
+    return path
+
+
+def _ed1_encoder_modules(norm_dict: Path) -> dict[str, Any]:
+    """Build the GN2XE-shaped FULL edge model: edge build -> embed -> encoder edge path.
+
+    Mirrors GN2XE.yaml: an `EdgeFeatures` on the RAW tracks -> `EdgeEmbed`
+    (``edges.tracks_emb``), a `StreamEmbed` on ``normed.tracks``, a single-stream
+    `Concat` (tracks first — the edge-stream-first rule), and a
+    `TransformerEncoder` with the ``edges: edges.tracks_emb`` port +
+    ``update_edges: true`` (GN2XE.yaml:79-80), feeding a `GlobalAttentionPooling`.
+    The encoder swaps every `Attention` for an `EdgeAttention` (transformer.py:
+    365-373) — the path under test in this stage.
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named modules.
+    """
+    modules: dict[str, Any] = {
+        "norm": Normaliser(norm_dict=norm_dict, streams=["tracks"]),
+        "edge_features": EdgeFeatures(stream="tracks", features=list(_ED1_EDGE_FEATURES)),
+        "edge_embed": EdgeEmbed(
+            stream="tracks",
+            out_dim=_ED1_EDGE_EMBED_DIM,
+            dense={"hidden_layers": list(_ED1_EDGE_HIDDEN), "activation": "SiLU"},
+        ),
+        "track_embed": StreamEmbed(
+            stream="tracks",
+            out_dim=_ED1_EMBED_DIM,
+            dense={"hidden_layers": [_ED1_EMBED_DIM], "activation": "SiLU"},
+        ),
+        "concat": Concat(streams=["tracks"]),
+        "encoder": TransformerEncoder(
+            dim=_ED1_EMBED_DIM,
+            num_layers=_ED1_NUM_LAYERS,
+            out_dim=_ED1_OUT_DIM,
+            attention={"num_heads": _ED1_NUM_HEADS, "attn_type": "torch-math"},
+            dense={"activation": "SiLU"},
+            edges="edges.tracks_emb",
+            edge_embed_dim=_ED1_EDGE_EMBED_DIM,
+            update_edges=True,
+        ),
+        "pool": GlobalAttentionPooling(input="encoded.seq", out="pooled.global"),
+        "jets_classification": ClassificationTaskModule(
+            stream="jets",
+            label="flavour_label",
+            class_names=list(_ED1_CLASS_NAMES),
+            input="pooled.global",
+            dense={"hidden_layers": [_ED1_OUT_DIM], "activation": "SiLU"},
+        ),
+        "loss": LossSum(),
+    }
+    for name, module in modules.items():
+        module.name = name
+    modules["loss"].narrow(LossSum.collect_loss_keys(modules))
+    return modules
+
+
+def _ed1_v1_encoder_edge_reference(
+    v2_encoder: TransformerEncoder,
+    seq_x: torch.Tensor,
+    seq_mask: torch.Tensor,
+    edge_x: torch.Tensor,
+) -> torch.Tensor:
+    """Run an INDEPENDENT v1 ``Transformer(edge_embed_dim>0, update_edges=True)`` on same inputs.
+
+    Constructs a SEPARATE v1 `Transformer` with the edge config (NOT the v2
+    module's composed instance), weight-loads it from the v2 encoder's composed
+    v1 Transformer, and runs v1's exact edge forward (the register/edge zero-pad,
+    transformer.py:689-719; the per-layer `EdgeAttention` + edge update,
+    transformer.py:729-733). The returned tensor is the register-augmented
+    ``encoded.seq`` (v1 keeps the register rows).
+
+    Returns
+    -------
+    torch.Tensor
+        The v1 ``[B, T+R, out_dim]`` encoded sequence (edge path).
+    """
+    ref = V1Transformer(
+        num_layers=_ED1_NUM_LAYERS,
+        embed_dim=_ED1_EMBED_DIM,
+        out_dim=_ED1_OUT_DIM,
+        norm="LayerNorm",
+        attn_type="torch-math",
+        do_final_norm=True,
+        num_registers=v2_encoder.num_registers,
+        edge_embed_dim=_ED1_EDGE_EMBED_DIM,
+        update_edges=True,
+        attn_kwargs={"num_heads": _ED1_NUM_HEADS},
+        dense_kwargs={"activation": "SiLU"},
+    )
+    ref.load_state_dict(v2_encoder.encoder.state_dict())
+    ref.eval()
+    with torch.no_grad():
+        encoded, _ = ref({"seq": seq_x}, pad_mask={"seq": seq_mask}, edge_x=edge_x)
+    return encoded
+
+
+def _ed1_export_config() -> ExportConfig:
+    """The GN2XE ONNX export config: a single rank-3 tracks input, dynamic T.
+
+    The ONLY positional input is ``inputs.tracks`` flagged ``sequence: true`` so
+    the OnnxAdapter registers its token axis as the dynamic ``n_tracks`` axis
+    (adapter.py:201-205). The edge tensor is PRODUCED inside the model (by
+    `EdgeFeatures`/`EdgeEmbed`) from this raw input — both edge T axes inherit the
+    same dynamic token count, the dynamic-edge-T contract (FD §6.7 ONNX note).
+
+    Returns
+    -------
+    ExportConfig
+        The unresolved export config for `export_graph`.
+    """
+    return ExportConfig(
+        model_name="GN2XEv2EdgeProbe",
+        inputs=[ExportInput(port="inputs.tracks", name="track_features", sequence=True)],
+    )
+
+
+def _ed1_onnx_trace(
+    enc_modules: dict[str, Any], outdir: Path
+) -> tuple[dict[str, bool], dict[str, dict[int, str]]]:
+    """Export the GN2XE model and assert dynamic edge-T axes + a shape-derived register pad.
+
+    The load-bearing ONNX contract (FD §6.7 ONNX note, plan 12 sub-wave C). Two
+    hazards the trace must clear:
+
+    (a) **Both edge T axes dynamic.** The edge tensor ``edges.tracks`` ``[B, T, T,
+        E]`` and its EdgeEmbed ``[B, T, T, D_e]`` are PRODUCED inside the model
+        from the dynamic ``inputs.tracks`` token axis (the ``track_features``
+        positional input flagged ``sequence: true`` -> dynamic ``n_tracks`` axis,
+        adapter.py:201-205), so BOTH edge axes derive from that one dynamic count.
+        The functional proof: trace ONCE at a fixed track count, then run
+        onnxruntime at SEVERAL DIFFERENT track counts and confirm each matches the
+        eager model (`check_onnx` length sweep). If either edge axis were baked to
+        the trace-time count, an off-trace length would mis-shape and fail.
+
+    (b) **Register zero-pad is shape-derived.** The in-encoder pad to the
+        register-augmented length builds ``torch.zeros((B, x.shape[1] -
+        edge_x.shape[1], ...))`` from the DYNAMIC ``x.shape[1]``
+        (transformer.py:689-719). This must trace to shape-derived nodes
+        (``Shape``/``Sub``/``ConstantOfShape``/``Concat``/``Expand``), NOT a baked
+        ``Constant`` zeros tensor of the trace-time padded shape — else the pad
+        would be the wrong size at a different track count (caught functionally by
+        the same length sweep, AND structurally by inspecting the graph nodes).
+
+    Returns
+    -------
+    tuple[dict[str, bool], dict[str, dict[int, str]]]
+        The ONNX-trace checks and the adapter's dynamic-axes mapping.
+    """
+    import onnx  # noqa: PLC0415 - heavy import, onnx-leg only
+
+    checks: dict[str, bool] = {}
+    # the GN2XE flavour head is the export sink (split_scalars global reduce,
+    # exactly the VS1/MU pattern); the edge path is internal to the trace.
+    head = enc_modules["jets_classification"]
+    manifest = [
+        ExportOutput(port="preds.jets.jets_classification", names=list(head.class_suffixes))
+    ]
+    onnx_path = outdir / "ed1_gn2xe_edge.onnx"
+    result = export_graph(
+        enc_modules,
+        _ed1_export_config(),
+        {"tracks": list(_ED1_TRACK_VARIABLES)},
+        onnx_path,
+        outputs=manifest,
+        run_name="GN2XEv2EdgeProbe",
+    )
+    # (a) the track input registers a DYNAMIC token axis (n_tracks) — the single
+    # dynamic count both edge T axes derive from (adapter.dynamic_axes).
+    dyn_axes = result.adapter.dynamic_axes
+    checks["edge_track_axis_is_dynamic"] = any(
+        str(name).startswith("n_") for axmap in dyn_axes.values() for name in axmap.values()
+    )
+    # the loaded graph: the track input is rank-2 [L, F] with a SYMBOLIC token dim
+    # (dim_param set, not a fixed dim_value) — the edge axes inherit this symbol.
+    graph = onnx.load(str(onnx_path)).graph
+    track_in = next(
+        (i for i in graph.input if i.name == result.adapter.input_names[0]), graph.input[0]
+    )
+    track_dims = track_in.type.tensor_type.shape.dim
+    checks["onnx_track_input_token_dim_symbolic"] = len(track_dims) == 2 and bool(
+        track_dims[0].dim_param
+    )
+    # (b) the graph carries shape-derivation ops for the register pad (NOT a baked
+    # constant pad): Shape/Sub/ConstantOfShape/Concat/Expand all present means the
+    # zeros pad is built from the runtime sequence length, not a frozen tensor.
+    op_types = {node.op_type for node in graph.node}
+    checks["register_pad_shape_derived_ops_present"] = bool(
+        {"Shape", "ConstantOfShape"} & op_types
+    ) and bool({"Sub", "Concat", "Expand", "Slice"} & op_types)
+    # the dynamic-T + shape-derived-pad FUNCTIONAL proof: trace ONCE (above) then
+    # run onnxruntime at SEVERAL track counts != the example-input length and
+    # confirm each matches the eager adapter. A baked edge-T axis or a
+    # baked-constant register pad would FAIL at an off-trace length.
+    sweep = check_onnx(
+        result.adapter,
+        result.onnx_path,
+        trials=2,
+        lengths_grid=[{"tracks": n} for n in (3, 7, 11, 16)],
+        float_rtol=1e-5,
+        float_atol=1e-5,
+        forbid_zeros=False,  # a zeroed-pad edge column legitimately holds exact 0s
+    )
+    checks["onnx_dynamic_edge_T_sweep_passes"] = sweep.passed
+    # the sweep is non-vacuous: it actually ran multiple DIFFERENT track lengths
+    checks["onnx_sweep_covered_multiple_lengths"] = sweep.n_cases >= 2
+    return checks, dyn_axes
+
+
+def run_ed1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """ED1 (sub-wave C): EdgeFeatures + EdgeEmbed + encoder edge path parity vs v1 + ONNX trace.
+
+    The full edge path (FD §6.7 1418-1431, plan 12 sub-wave C). ED1 drives the
+    real compiler / two-phase bind / executor on a GN2XE-shaped fixture and
+    asserts:
+
+    - **EdgeFeatures bitwise parity** — the v2 ``edges.tracks`` ``[B, T, T, E]``
+      (raw dR/z/kt/subjetIndex/isSelfLoop on the UN-normalised ``inputs.tracks``,
+      design §6.3) is BITWISE identical to an INDEPENDENT v1 ``EdgeConstructor``
+      (`_ed1_v1_edges`: a separately built v1 ``EdgeConstructor`` keyed on the
+      same variables, run on a CLONE of the same raw input — its
+      ``_edge_features_tracks``, edge_constructor.py:41-44 / edge_features.py:
+      52-146). The dR/kt/z legs are checked column-by-column (the named feature
+      values, not just the bundled tensor);
+    - **EdgeEmbed shape + forward parity** — the v2 ``edges.tracks_emb`` is
+      ``[B, T, T, D_e]`` (both token axes preserved, last dim ``out_dim``) and is
+      BITWISE identical to an INDEPENDENT v1 ``Dense`` (`_ed1_v1_embed`,
+      weight-loaded from the v2 EdgeEmbed, run on the v1 edges — v1
+      ``edge_init_nets``, saltmodel.py:132);
+    - **encoder edge path parity (BITWISE)** — the FULL GN2XE-shaped model
+      (`_ed1_encoder_modules`: EdgeFeatures -> EdgeEmbed -> StreamEmbed -> Concat
+      -> ``TransformerEncoder(edges=..., update_edges=True)`` -> pool) produces an
+      ``encoded.seq`` BITWISE identical to an INDEPENDENT v1
+      ``Transformer(edge_embed_dim>0, update_edges=True)``
+      (`_ed1_v1_encoder_edge_reference`, weight-loaded from the v2 encoder, run
+      with the SAME embedded edges) — proving the v2 encoder edge port routes the
+      edge tensor through the SAME `EdgeAttention` bias/gate/edge-update math
+      (attention.py:465,630-654) and the SAME register/edge zero-pad
+      (transformer.py:689-719) as v1, including the ``update_edges`` return;
+    - **declared-IO structure** — EdgeFeatures requires the RAW ``inputs.tracks``
+      (NOT ``normed.*``) plus ``masks.tracks``; both produced edge tensors AND the
+      encoder's required edge port carry the SAME ``T:<stream>`` symbol on both
+      token axes (square pairwise matrices, the dynamic-T export prerequisite);
+    - **ONNX-trace assertion** — the GN2XE-shaped model traces under
+      ``torch.onnx.export`` (`_ed1_export_config` -> `export_graph`) with BOTH edge
+      T axes DYNAMIC (the edge tensor is produced internally from the dynamic
+      ``inputs.tracks`` token axis, so both edge axes inherit it; a second trace
+      at a different track count agrees with the eager adapter, proving the track
+      count is NOT baked) AND the in-encoder register zero-pad emitted as a
+      SHAPE-DERIVED pad (``Shape``/``Sub``/``ConstantOfShape``/``Concat`` /
+      ``Expand`` nodes, NOT a baked-constant ``Constant`` tensor of the padded
+      shape — transformer.py:689-719 builds the pad from the dynamic
+      ``x.shape[1]``); onnxruntime agrees with the eager model (<=1e-6);
+    - **write-once** — neither edge module mutates ``inputs.tracks`` (design §2.1);
+    - **named-error guards** — EdgeFeatures rejects an unrecognised feature
+      (`ConfigError`), an empty feature list (`ConfigError`), and a feature whose
+      required input variable is absent at bind (`check_edge_config` `ValueError`,
+      edge_features.py:45-49); EdgeEmbed rejects a width key in ``dense``
+      (`ConfigError`).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook perturbs the
+    v2 edge tensor — the bitwise parity checks must FAIL while the structural
+    (rank-4 / raw-input / symbol), encoder-shape, ONNX-trace, and named-error
+    checks stay green.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("ED1 EdgeFeatures + EdgeEmbed + encoder edge path BITWISE parity vs v1 + ONNX trace")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    modules = _ed1_modules()
+    ef = modules["edge_features"]
+    ee = modules["edge_embed"]
+
+    # -- (a) declared-IO structure: raw input, pad mask, square pairwise dims ---
+    ef_io = ef.declare_io(Mode.FIT)
+    ef_req = flatten_spec(ef_io.requires)
+    ef_prod = flatten_spec(ef_io.produces)
+    ee_prod = flatten_spec(ee.declare_io(Mode.FIT).produces)
+    checks["edge_features_requires_raw_input"] = "inputs.tracks" in ef_req
+    checks["edge_features_not_consuming_normed"] = not any(k.startswith("normed.") for k in ef_req)
+    checks["edge_features_requires_pad_mask"] = (
+        ef_req.get("masks.tracks") is not None and ef_req["masks.tracks"].kind == "pad_mask"
+    )
+    edges_spec = ef_prod["edges.tracks"]
+    checks["edges_tensor_is_rank4"] = len(edges_spec.shape) == 4
+    # both token axes share the SAME T:<stream> symbol (the dynamic-T prerequisite)
+    checks["edges_both_token_axes_share_stream_symbol"] = (
+        edges_spec.shape[1] == edges_spec.shape[2] == "T:tracks"
+    )
+    checks["edges_last_dim_is_feature_count"] = edges_spec.shape[-1] == len(_ED1_EDGE_FEATURES)
+    emb_spec = ee_prod["edges.tracks_emb"]
+    checks["edge_embed_is_rank4"] = len(emb_spec.shape) == 4
+    checks["edge_embed_token_axes_share_stream_symbol"] = (
+        emb_spec.shape[1] == emb_spec.shape[2] == "T:tracks"
+    )
+    checks["edge_embed_out_dim_matches"] = emb_spec.shape[-1] == _ED1_EDGE_EMBED_DIM
+
+    # -- (b) compile + bind the real edge plan --------------------------------
+    fit_plan = compile_plan(modules, Mode.FIT, sources=_ed1_sources(), sinks=["edges.tracks_emb"])
+    bind_all(modules, resolve_bind_schema([fit_plan]))
+    # bind resolves the indices_map by NAME from the declared fields (v1
+    # EdgeConstructor indices_map, edge_constructor.py:34-36)
+    checks["indices_map_resolved_by_name"] = ef.indices_map == {
+        name: i for i, name in enumerate(_ED1_TRACK_VARIABLES)
+    }
+
+    # -- (c) bitwise forward parity vs the INDEPENDENT v1 references -----------
+    gen = torch.Generator().manual_seed(13)
+    raw_tracks = torch.randn(_ED1_B, _ED1_T, len(_ED1_TRACK_VARIABLES), generator=gen)
+    pad_mask = torch.zeros(_ED1_B, _ED1_T, dtype=torch.bool)
+    pad_mask[:, -2:] = True  # last two tracks padded (exercise nan_to_num path)
+    b = Bundle()
+    b.set("inputs.tracks", raw_tracks)
+    b.set("masks.tracks", pad_mask)
+    out = Executor(fit_plan).run(b, debug=True)
+    v2_edges = out.get("edges.tracks")
+    v2_emb = out.get("edges.tracks_emb")
+    checks["edges_runtime_shape"] = tuple(v2_edges.shape) == (
+        _ED1_B,
+        _ED1_T,
+        _ED1_T,
+        len(_ED1_EDGE_FEATURES),
+    )
+    checks["edge_embed_runtime_shape"] = tuple(v2_emb.shape) == (
+        _ED1_B,
+        _ED1_T,
+        _ED1_T,
+        _ED1_EDGE_EMBED_DIM,
+    )
+    # write-once: inputs.tracks is byte-unchanged after the forward
+    checks["inputs_not_mutated"] = torch.equal(out.get("inputs.tracks"), raw_tracks)
+
+    if corruption is not None:
+        v2_edges = corruption(v2_edges)
+
+    v1_edges = _ed1_v1_edges(raw_tracks)
+    checks["edge_features_bitwise_vs_v1"] = v2_edges.shape == v1_edges.shape and torch.equal(
+        v2_edges, v1_edges
+    )
+    # per-feature legs: EVERY edge feature (dR/z/kt + subjetIndex/isSelfLoop)
+    # matches column-by-column. A bundled-tensor equality could mask a single
+    # -column shift; pinning all 5 columns gives symmetric column-level coverage
+    # for the two non-kinematic features as well as the kinematic ones (the
+    # whole tuple is filled by enumerate(variables) index in the SHARED
+    # calculate_edge_features, edge_features.py:103, so a column-order bug in
+    # any feature is now caught at the granularity of the individual column).
+    feat_idx = {f: i for i, f in enumerate(_ED1_EDGE_FEATURES)}
+    for feat in _ED1_EDGE_FEATURES:
+        i = feat_idx[feat]
+        checks[f"edge_feature_{feat}_bitwise_vs_v1"] = torch.equal(
+            v2_edges[..., i], v1_edges[..., i]
+        )
+
+    # EdgeEmbed: the v1 Dense (weight-loaded from v2) on the v1 edges matches
+    # the v2 embed bitwise (a plain nn.Linear stack over the last dim reorders
+    # no floats, so the claim is BITWISE)
+    v1_emb = _ed1_v1_embed(ee, v1_edges)
+    checks["edge_embed_bitwise_vs_v1"] = v2_emb.shape == v1_emb.shape and torch.equal(
+        v2_emb, v1_emb
+    )
+
+    # -- (d) encoder edge path parity vs the INDEPENDENT v1 Transformer --------
+    # the FULL GN2XE-shaped model (edge build -> embed -> stream embed -> concat
+    # -> EdgeAttention encoder -> pool) routes the edge tensor through the SAME
+    # EdgeAttention bias/gate/edge-update + register/edge zero-pad as v1.
+    enc_norm = _ed1_norm_dict(outdir)
+    enc_modules = _ed1_encoder_modules(enc_norm)
+    encoder = enc_modules["encoder"]
+    # declared-IO: the encoder REQUIRES the rank-4 edge port, both axes T:tracks
+    enc_req = flatten_spec(encoder.declare_io(Mode.FIT).requires)
+    enc_edge_spec = enc_req.get("edges.tracks_emb")
+    checks["encoder_requires_edge_port"] = enc_edge_spec is not None
+    checks["encoder_edge_port_is_rank4"] = (
+        enc_edge_spec is not None and len(enc_edge_spec.shape) == 4
+    )
+    checks["encoder_edge_port_token_axes_share_stream_symbol"] = (
+        enc_edge_spec is not None and enc_edge_spec.shape[1] == enc_edge_spec.shape[2] == "T:tracks"
+    )
+    checks["encoder_edge_port_width_matches"] = (
+        enc_edge_spec is not None and enc_edge_spec.shape[-1] == _ED1_EDGE_EMBED_DIM
+    )
+    enc_fit = compile_plan(
+        enc_modules, Mode.FIT, sources=_ed1_encoder_sources(), sinks=["loss.total"]
+    )
+    bind_all(enc_modules, resolve_bind_schema([enc_fit]))
+    materialise_all(enc_modules)
+    # give the encoder + embeds non-zero weights so the parity is meaningful
+    gen2 = torch.Generator().manual_seed(29)
+    with torch.no_grad():
+        for mod in (
+            enc_modules["encoder"].encoder,
+            enc_modules["track_embed"].net,
+            enc_modules["edge_embed"].net,
+        ):
+            for p in mod.parameters():
+                p.copy_(torch.randn(p.shape, generator=gen2) * 0.1)
+    enc_b = Bundle()
+    enc_b.set("inputs.tracks", raw_tracks)
+    enc_b.set("masks.tracks", pad_mask)
+    enc_b.set("labels.jets.flavour_label", torch.zeros(_ED1_B, dtype=torch.int64))
+    enc_out = Executor(enc_fit).run(enc_b, debug=True)
+    v2_encoded = enc_out.get("encoded.seq")
+    # encoded.seq is register-augmented [B, T+R, out_dim] (registers kept)
+    checks["encoder_encoded_runtime_shape"] = tuple(v2_encoded.shape) == (
+        _ED1_B,
+        _ED1_T + encoder.num_registers,
+        _ED1_OUT_DIM,
+    )
+    # write-once held through the FULL edge encoder too
+    checks["encoder_inputs_not_mutated"] = torch.equal(enc_out.get("inputs.tracks"), raw_tracks)
+    if corruption is not None:
+        v2_encoded = corruption(v2_encoded)
+    # the SAME embedded edges the v2 encoder consumed (the bundle key), and the
+    # SAME concatenated seq.x / seq.mask, fed to the INDEPENDENT v1 Transformer
+    v1_encoded = _ed1_v1_encoder_edge_reference(
+        encoder, enc_out.get("seq.x"), enc_out.get("seq.mask"), enc_out.get("edges.tracks_emb")
+    )
+    checks["encoder_edge_forward_bitwise_vs_v1"] = (
+        v2_encoded.shape == v1_encoded.shape and torch.equal(v2_encoded, v1_encoded)
+    )
+
+    # -- (e) ONNX-trace assertion: dynamic edge-T axes + shape-derived register pad
+    ed1_onnx_checks, dyn_axes = _ed1_onnx_trace(enc_modules, outdir)
+    checks.update(ed1_onnx_checks)
+
+    # -- (f) named-error guards (value-independent, config/bind-time) ----------
+    checks["unknown_feature_raises_configerror"] = _raises(
+        ConfigError, lambda: EdgeFeatures(stream="tracks", features=["dR", "bogus_feature"])
+    )
+    checks["empty_features_raises_configerror"] = _raises(
+        ConfigError, lambda: EdgeFeatures(stream="tracks", features=[])
+    )
+    # a feature whose required input variable is missing -> check_edge_config
+    # ValueError at bind (dR needs eta/phi; supply a field set lacking phi)
+
+    def _bind_missing_var() -> None:
+        bad = EdgeFeatures(stream="tracks", features=["dR"])
+        bad.name = "bad_edges"
+        bad_schema = resolve_bind_schema([
+            compile_plan(
+                {"bad_edges": bad},
+                Mode.FIT,
+                sources=unflatten_spec({
+                    "inputs.tracks": TensorSpec(
+                        shape=("B", "T:tracks", 2),
+                        dtype="float32",
+                        fields=("pt", "eta"),  # no phi -> dR cannot be built
+                    ),
+                    "masks.tracks": TensorSpec(
+                        shape=("B", "T:tracks"), dtype="bool", kind="pad_mask"
+                    ),
+                }),
+                sinks=["edges.tracks"],
+            )
+        ])
+        bad.bind(bad_schema)
+
+    checks["missing_required_var_raises_valueerror"] = _raises(ValueError, _bind_missing_var)
+    checks["edge_embed_width_key_raises_configerror"] = _raises(
+        ConfigError,
+        lambda: EdgeEmbed(stream="tracks", out_dim=32, dense={"input_size": 5}),
+    )
+
+    passed = all(checks.values())
+    criterion = (
+        "the M6 edge path end-to-end (plan 12 sub-wave C; design §6.7 1418-1431): EdgeFeatures "
+        "requires the RAW inputs.tracks (un-normalised, §6.3) + masks.tracks and produces "
+        "edges.tracks [B, T, T, E] whose dR/z/kt/subjetIndex/isSelfLoop values are BITWISE "
+        "identical to an INDEPENDENT v1 EdgeConstructor (edge_constructor.py:41-44, "
+        "edge_features.py:52-146); EdgeEmbed maps it to edges.tracks_emb [B, T, T, D_e] BITWISE "
+        "identical to an INDEPENDENT v1 Dense (edge_init_nets, saltmodel.py:132); the FULL "
+        "GN2XE-shaped model (EdgeFeatures->EdgeEmbed->StreamEmbed->Concat->TransformerEncoder("
+        "edges=...,update_edges=True)->pool->head) produces an encoded.seq BITWISE identical to an "
+        "INDEPENDENT v1 Transformer(edge_embed_dim>0, update_edges=True) weight-loaded from the v2 "
+        "encoder (the EdgeAttention bias/gate/edge-update + register/edge zero-pad path, "
+        "attention.py:465,630-654 / transformer.py:689-733); both token axes of every edge tensor "
+        "AND the encoder's edge port share the T:tracks symbol (dynamic-T export prerequisite); "
+        "the model TRACES under torch.onnx.export with both edge T axes DYNAMIC (onnxruntime "
+        "agrees with eager across track counts 3/7/11/16 from a SINGLE trace) and the in-encoder "
+        "register zero-pad emitted SHAPE-DERIVED (Shape/ConstantOfShape/Sub/Concat ops, not a "
+        "baked constant, transformer.py:689-719); inputs.tracks is never mutated (write-once "
+        "§2.1); and the named-error guards fire (unrecognised/empty feature -> ConfigError; "
+        "missing required variable -> check_edge_config ValueError; EdgeEmbed width key -> "
+        "ConfigError). "
+        "The bind-time edge validators (edge-stream-first / backend-forcing) are ED2"
+    )
+    report = _base_report(
+        "ed1_edge_path_parity",
+        passed,
+        criterion,
+        {
+            "track_variables": list(_ED1_TRACK_VARIABLES),
+            "edge_features": list(_ED1_EDGE_FEATURES),
+            "edge_embed_dim": _ED1_EDGE_EMBED_DIM,
+            "edge_embed_hidden": list(_ED1_EDGE_HIDDEN),
+            "encoder_embed_dim": _ED1_EMBED_DIM,
+            "encoder_out_dim": _ED1_OUT_DIM,
+            "encoder_num_heads": _ED1_NUM_HEADS,
+            "encoder_num_layers": _ED1_NUM_LAYERS,
+            "class_names": list(_ED1_CLASS_NAMES),
+            "batch": _ED1_B,
+            "n_tracks": _ED1_T,
+            "onnx_sweep_track_counts": [3, 7, 11, 16],
+            "onnx_path": str(outdir / "ed1_gn2xe_edge.onnx"),
+            "stage_scope": (
+                "EdgeFeatures + EdgeEmbed + encoder edge path (EdgeAttention, update_edges) + the "
+                "dynamic-edge-T ONNX trace. The edge-stream-first / EdgeAttention-backend "
+                "bind-time validators are gate ED2; the GN2XE corpus config is the next sub-wave "
+                "C stage"
+            ),
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["dynamic_axes"] = {k: {str(a): n for a, n in v.items()} for k, v in dyn_axes.items()}
+    report["v1_reference"] = (
+        "INDEPENDENT v1 reference (instance + graph-routing independence, NOT independent "
+        "arithmetic): a separately-instantiated v1 EdgeConstructor (distinct object from the v2 "
+        "EdgeFeatures, run on a CLONE of the same raw input) supplies the byte-decidable "
+        "dR/kt/z/subjetIndex/isSelfLoop reference (edge_constructor.py:41-44, "
+        "edge_features.py:52-146); a separately-instantiated v1 Dense, weight-loaded from the v2 "
+        "EdgeEmbed and run on the v1 edges, supplies the edge-embed reference (v1 edge_init_nets, "
+        "saltmodel.py:132); a separately-instantiated v1 Transformer(edge_embed_dim>0, "
+        "update_edges=True), weight-loaded from the v2 encoder and run with the SAME embedded "
+        "edges, supplies the encoder-edge-path reference (transformer.py:689-733, "
+        "attention.py:465). The byte-decidable ORACLE for the edge values is the SHARED composed "
+        "function salt.utils.edge_features.calculate_edge_features (edge_features.py:52) — BOTH "
+        "the v1 EdgeConstructor.forward (edge_constructor.py:43) and the v2 EdgeFeatures.forward "
+        "(modules.py:1002) delegate to it (single source, M2 porting policy; full math absorption "
+        "is M7). So 'INDEPENDENT' here means distinct OBJECT INSTANCES + an independently-wired v1 "
+        "GRAPH PATH, NOT an independently-derived dR/z/kt formula: the bitwise torch.equal proves "
+        "the v2 GRAPH PATH (compile -> two-phase bind -> executor) resolves the indices_map by "
+        "NAME and routes the raw stream through the SAME edge math + Dense + EdgeAttention encoder "
+        "as v1's hand-wired EdgeConstructor/edge_init_nets/Transformer(edge) path"
+    )
+    _print_checks(checks)
+    _print_verdict("ed1", passed, criterion, _emit_report(report, outdir, "ed1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# ED2 — the edge bind-time validators (design-conformance, sub-wave C)
+# ---------------------------------------------------------------------------
+
+_ED2_LRS = {"initial": 1e-4, "max": 5e-4, "end": 1e-5, "pct_start": 0.1}
+
+
+def _ed2_edge_encoder(attn_type: str = "torch-math") -> TransformerEncoder:
+    """A small edge-bearing `TransformerEncoder` (the ED2 validator subject).
+
+    Returns
+    -------
+    TransformerEncoder
+        An encoder with an ``edges: edges.tracks_emb`` port (+ ``edge_embed_dim``),
+        the optional ``attn_type`` letting the negative control declare a non-edge
+        backend.
+    """
+    enc = TransformerEncoder(
+        dim=_ED1_EMBED_DIM,
+        num_layers=1,
+        out_dim=_ED1_OUT_DIM,
+        attention={"num_heads": _ED1_NUM_HEADS, "attn_type": attn_type},
+        edges="edges.tracks_emb",
+        edge_embed_dim=_ED1_EDGE_EMBED_DIM,
+        update_edges=True,
+    )
+    enc.name = "encoder"
+    return enc
+
+
+def _ed2_modules(concat_streams: Sequence[str], attn_type: str = "torch-math") -> dict[str, Any]:
+    """A minimal edge model dict for the bind-time validators (concat + edge encoder).
+
+    Just the two modules the edge validators inspect — a `Concat` (whose
+    ``streams[0]`` is the edge-stream-first reference) and an edge-bearing
+    `TransformerEncoder` (whose backend rule b checks). `concat_streams[0]`
+    controls whether the edge stream (``tracks``) is first.
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named ``{concat, encoder}``.
+    """
+    modules: dict[str, Any] = {
+        "concat": Concat(streams=list(concat_streams)),
+        "encoder": _ed2_edge_encoder(attn_type),
+    }
+    for name, module in modules.items():
+        module.name = name
+    return modules
+
+
+def _ed2_full_modules(norm_dict: Path, concat_streams: Sequence[str]) -> dict[str, Any]:
+    """A complete GN2XE-shaped model dict for a full `SaltModule` construction.
+
+    The same shape as `_ed1_encoder_modules` but with the `Concat` stream order
+    parameterised so a `SaltModule(...)` construction exercises the edge
+    bind-time validator end-to-end (the validator runs in ``__init__``).
+
+    Returns
+    -------
+    dict[str, Any]
+        Instance-named modules with `LossSum` narrowed.
+    """
+    modules = _ed1_encoder_modules(norm_dict)
+    modules["concat"] = Concat(streams=list(concat_streams))
+    modules["concat"].name = "concat"
+    return modules
+
+
+def run_ed2(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[list[str]], list[str]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """ED2: the edge bind-time validators (design-conformance, sub-wave C; FD §6.7 1425-1431).
+
+    The two HIDDEN v1 edge mechanisms made NAMED constraints (`validate_edge_port`,
+    saltmodule.py) — the "land in M1 validation" rules. v2 runs the SAME validator
+    in `SaltModule.__init__` AND in ``salt2 graph validate`` (the edge analogue of
+    the muP routing validator, MU2). ED2 asserts:
+
+    - **edge-stream-first (rule a)** — a model whose edge stream IS the `Concat`'s
+      first stream is ACCEPTED (the validator returns the encoder count); a model
+      whose edge stream is NOT first raises `ConfigError`; an edge port with NO
+      `Concat` raises `ConfigError`. v1 SILENTLY re-sorted the init_nets so the
+      edge stream landed first (saltmodel.py:66-73) — v2 makes the ordering an
+      explicit named constraint;
+    - **EdgeAttention-backend forcing (rule b)** — an edge encoder declaring a
+      non-edge backend (``flash-varlen``) raises `ConfigError`. v1 SILENTLY
+      ignored ``attn_type`` whenever edge features were on
+      (transformer.py:599-601) — v2 makes the silent bypass a named error;
+    - **ctor-level edge guards** — ``edges`` without a positive ``edge_embed_dim``
+      (or vice versa) and ``update_edges`` without ``edges`` raise `ConfigError`
+      at `TransformerEncoder.__init__`;
+    - **same validator both places** — a full `SaltModule(...)` construction with
+      a mis-ordered edge concat raises the SAME `ConfigError` (the validator is
+      wired into ``__init__``), and a correctly-ordered one constructs; the
+      ``salt2 graph validate`` import wiring is present (`validate_edge_port`
+      callable from the CLI module path).
+
+    Negative control (``test_gates_m6.py``): the ``corruption`` hook reorders the
+    `Concat` streams so the edge stream is no longer first — the
+    ``valid_edge_order_accepted`` check then flips False and the gate exits 1.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("ED2 edge bind-time validators (edge-stream-first + EdgeAttention-backend forcing)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    # -- (a) edge-stream-first (rule a) ---------------------------------------
+    # the edge stream is "tracks" (edges.tracks_emb -> tracks). A two-stream
+    # concat with tracks FIRST is valid; with tracks SECOND it errors.
+    valid_order = ["tracks", "flow"]
+    if corruption is not None:
+        valid_order = corruption(valid_order)
+    try:
+        n_enc = validate_edge_port(_ed2_modules(valid_order))
+        checks["valid_edge_order_accepted"] = n_enc == 1
+    except ConfigError:
+        checks["valid_edge_order_accepted"] = False
+    checks["edge_stream_not_first_errors"] = _raises(
+        ConfigError, validate_edge_port, _ed2_modules(["flow", "tracks"])
+    )
+    # an edge port with NO Concat at all -> ConfigError
+    lone_encoder = {"encoder": _ed2_edge_encoder()}
+    lone_encoder["encoder"].name = "encoder"
+    checks["edge_port_without_concat_errors"] = _raises(
+        ConfigError, validate_edge_port, lone_encoder
+    )
+
+    # -- (b) EdgeAttention-backend forcing (rule b) ---------------------------
+    checks["non_edge_backend_errors"] = _raises(
+        ConfigError, validate_edge_port, _ed2_modules(["tracks"], attn_type="flash-varlen")
+    )
+    # a plain (non-edge) encoder is untouched by the validator (no-op)
+    plain = {"concat": Concat(streams=["tracks"])}
+    plain["concat"].name = "concat"
+    checks["no_edge_encoder_is_noop"] = validate_edge_port(plain) == 0
+
+    # -- (c) ctor-level edge guards -------------------------------------------
+    checks["edges_without_dim_raises_configerror"] = _raises(
+        ConfigError,
+        lambda: TransformerEncoder(
+            dim=8, num_layers=1, out_dim=4, attention={"num_heads": 2}, edges="edges.tracks_emb"
+        ),
+    )
+    checks["edge_dim_without_edges_raises_configerror"] = _raises(
+        ConfigError,
+        lambda: TransformerEncoder(
+            dim=8, num_layers=1, out_dim=4, attention={"num_heads": 2}, edge_embed_dim=16
+        ),
+    )
+    checks["update_edges_without_edges_raises_configerror"] = _raises(
+        ConfigError,
+        lambda: TransformerEncoder(
+            dim=8, num_layers=1, out_dim=4, attention={"num_heads": 2}, update_edges=True
+        ),
+    )
+
+    # -- (d) same validator both places (SaltModule.__init__ + CLI wiring) ----
+    norm_dict = _ed1_norm_dict(outdir)
+    # a correctly-ordered edge model constructs through SaltModule (validator OK)
+    try:
+        SaltModule(modules=_ed2_full_modules(norm_dict, ["tracks"]), lrs=_ED2_LRS)
+        checks["saltmodule_accepts_valid_edge_order"] = True
+    except ConfigError:
+        checks["saltmodule_accepts_valid_edge_order"] = False
+    # a mis-ordered edge model raises the SAME ConfigError in __init__
+    checks["saltmodule_rejects_misordered_edge_concat"] = _raises(
+        ConfigError,
+        lambda: SaltModule(
+            modules=_ed2_full_modules(norm_dict, ["truth_hadrons", "tracks"]), lrs=_ED2_LRS
+        ),
+    )
+    # the CLI `salt2 graph validate` path imports the SAME validator (design
+    # §6.7: one validator, fired data-free in CI and at run construction)
+    import importlib  # noqa: PLC0415
+
+    cli_mod = importlib.import_module("salt.core.saltmodule")
+    checks["validate_edge_port_exported"] = callable(getattr(cli_mod, "validate_edge_port", None))
+
+    passed = all(checks.values())
+    criterion = (
+        "the edge bind-time validators (plan 12 sub-wave C / FD §6.7 1425-1431): the SINGLE "
+        "validate_edge_port (saltmodule.py), fired BOTH in SaltModule.__init__ and salt2 graph "
+        "validate, makes v1's two HIDDEN edge mechanisms NAMED constraints — (a) "
+        "edge-stream-first: the edge tensor's stream MUST be Concat.streams[0] (replacing v1's "
+        "silent init-net sort, saltmodel.py:66-73), else a named ConfigError; an edge port with "
+        "no Concat errors too; (b) EdgeAttention-backend forcing: a non-edge backend "
+        "(flash-varlen) declared alongside an edge port is a named ConfigError (replacing v1's "
+        "silent attn_type bypass, transformer.py:599-601). Plus the ctor-level edge guards "
+        "(edges<->edge_embed_dim paired, update_edges needs edges) and the design-conformance "
+        "check that the SAME validator runs in SaltModule.__init__ (a mis-ordered edge concat "
+        "raises) and is exported for the CLI path"
+    )
+    report = _base_report(
+        "ed2_edge_bind_validators",
+        passed,
+        criterion,
+        {
+            "edge_stream": "tracks",
+            "valid_concat_order": ["tracks", "flow"],
+            "invalid_concat_order": ["flow", "tracks"],
+            "non_edge_backend_probe": "flash-varlen",
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 had NO edge validators — the two constraints were SILENT runtime hacks: the init-net "
+        "sort that forced the edge stream first (saltmodel.py:66-80, with assert len==1) and the "
+        "attn_type bypass that ignored the configured backend whenever edge_embed_dim>0 "
+        "(transformer.py:599-601,616-620). ED2 asserts v2 turns both into NAMED ConfigErrors fired "
+        "by the single validate_edge_port at bind time (SaltModule.__init__ + salt2 graph validate)"
+    )
+    _print_checks(checks)
+    _print_verdict("ed2", passed, criterion, _emit_report(report, outdir, "ed2"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # M6-CONV — the M7-slice acceptance for the M6-authored configs (sub-wave A
 # bootstraps it; later M6 waves EXTEND _CONV_M6_CONFIGS)
 # ---------------------------------------------------------------------------
 
 # The AUTHORITATIVE M6-CONV config list (plan 12 M6-CONV row: "embed the
 # authoritative _CONV_M6_CONFIGS list verbatim"). Sub-wave A (Labeller) landed
-# the FIRST two; sub-wave D (vector-stream) added DL1; sub-wave B (muP) adds
-# GN2_muP (now 4); sub-wave C (edges) will append GN2XE until all 5
-# config-gating needs-M6 configs are here.
+# the FIRST two; sub-wave D (vector-stream) added DL1; sub-wave B (muP) added
+# GN2_muP; sub-wave C (edges) appends GN2XE — the FINAL config-gating needs-M6
+# config. With GN2XE the list is COMPLETE at 5, which CLOSES the 39-denominator
+# (all needs-M6 movers reproduced: GN3X + GN2X_qcdsplit + DL1 + GN2_muP + GN2XE,
+# plus regression_multi_target ✅-in-M5 + base.yaml the 39th transitive member).
 #
 # `norm_global` is False for all (none carries a SECOND `norm_global` Normaliser
 # — that is the VectorConcat/global-stream pattern, absent here). `onnx ==
-# "validate"` for all four: GN3X, GN2X_qcdsplit AND DL1 are STANDARD traces. For
+# "validate"` for all FIVE. GN3X, GN2X_qcdsplit AND DL1 are STANDARD traces. For
 # GN2_muP, this CONV `onnx` leg is a STATIC plan-compile (salt2 graph validate
 # --mode onnx does not call torch.onnx.export/set_export_mode); the MuReadout->
 # plain-nn.Linear fold that makes the REAL export traceable (set_export_mode; plan
@@ -1685,11 +2676,23 @@ def _mu2_bound_width_mult(dummy_cfg: str, override: str, set_norm: str) -> float
 # plan-compile. With the fold proven by MU1, onnx stays in the gate for GN2_muP
 # too (plan 12 M6-CONV per-config export contracts: "GN3X/GN2X_qcdsplit/DL1 are
 # standard traces; GN2_muP exports with the MuReadout out-proj folded to plain
-# Linear"). The only export hazard deferred to a later
-# wave is GN2XE's edge dynamic-T register pad (C). DL1's rank-2 [B, F] embed is a
-# plain nn.Linear stack with B the sole dynamic axis (sub-wave D / VS1). A muP
-# config carries a `mup: True` marker: it needs its base/delta infshape file
-# generated data-free before validation (`_conv_mup_shape_path`).
+# Linear"). For GN2XE (edges), this CONV `onnx` leg is LIKEWISE a STATIC
+# plan-compile (cli.py:381-423: graph validate --mode onnx compiles the onnx plan
+# + validates the writer manifest, it does NOT call torch.onnx.export) — so the
+# CONV onnx leg proves the GN2XE onnx PLAN compiles, not the dynamic-T trace
+# itself. The load-bearing dynamic-T export contract (BOTH edge T axes dynamic +
+# the in-encoder register zero-pad emitted SHAPE-DERIVED, not baked — FD §6.7
+# ONNX note / plan 12 sub-wave C) is exercised + PROVEN by ED1's ONNX-trace leg
+# (`_ed1_onnx_trace`: a real torch.onnx.export, then onnxruntime at track counts
+# 3/7/11/16 matching the eager model from a SINGLE trace, plus a graph-node
+# inspection for the Shape/ConstantOfShape/Sub/Concat shape-derivation ops). With
+# the dynamic-T trace PROVEN by ED1, --mode onnx STAYS in the gate for GN2XE too
+# (NOT scoped out — plan 12 default: "onnx stays in the gate, edges trace with
+# dynamic axes"; the M5-CONV scope-out fallback is unused). NO export hazard
+# remains deferred. DL1's rank-2 [B, F] embed is a plain nn.Linear stack with B
+# the sole dynamic axis (sub-wave D / VS1). A muP config carries a `mup: True`
+# marker: it needs its base/delta infshape file generated data-free before
+# validation (`_conv_mup_shape_path`).
 _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
     {
         "name": "GN3X",
@@ -1736,6 +2739,26 @@ _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
             "compile (no torch.onnx.export), so the fold is proven by MU1's export-fold check, not "
             "here — with that proof, --mode onnx STAYS in the gate; shape file generated data-free "
             "by salt2 mup-shapes and supplied via --set model.init_args.mup.shape_path"
+        ),
+    },
+    {
+        "name": "GN2XE",
+        "cfg": ("GN2XE.yaml",),
+        "norm_global": False,
+        "onnx": "validate",
+        "family": "edges",
+        "note": (
+            "GN2X with EDGE FEATURES end-to-end: EdgeFeatures (raw inputs.tracks -> edges.tracks "
+            "[B,T,T,E]) -> EdgeEmbed (-> edges.tracks_emb [B,T,T,D_e=32]) -> TransformerEncoder "
+            "with edges:edges.tracks_emb + edge_embed_dim:32 + update_edges:true (EdgeAttention "
+            "per layer); single-stream Concat[tracks] so the edge stream is streams[0] "
+            "(edge-stream-first, ED2 rule a); attn_type:torch-math (EdgeAttention-backend forcing, "
+            "ED2 rule b: flash-varlen FORBIDDEN with an edge port). The M6-C deliverable (gates "
+            "ED1/ED2 + ED-HUMAN edge-memory sign-off). This CONV onnx leg is a STATIC plan-compile "
+            "(cli.py:381-423, no torch.onnx.export); the load-bearing dynamic-T trace (BOTH edge T "
+            "axes dynamic + register zero-pad SHAPE-DERIVED, not baked — FD §6.7 ONNX note) is "
+            "proven by ED1's ONNX-trace leg (real export, onnxruntime at track counts 3/7/11/16 "
+            "from a SINGLE trace) — with that proof, --mode onnx STAYS in the gate (NOT scoped out)"
         ),
     },
 )
@@ -1835,8 +2858,10 @@ def _conv_modes(entry: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """Resolve the (mode, report-key) pairs to validate for one config.
 
     Always fit + test; onnx only when the config is export-representable (the
-    ``onnx`` field is ``"validate"``). Both M6-A configs are standard traces, so
-    both validate onnx too.
+    ``onnx`` field is ``"validate"``). All 5 M6 configs are export-representable
+    (``onnx == "validate"``), so all validate onnx too — GN3X/GN2X_qcdsplit/DL1
+    are standard traces, GN2_muP folds the MuReadout (MU1) and GN2XE traces with
+    dynamic edge T-axes (ED1).
 
     Returns
     -------
@@ -1857,9 +2882,10 @@ def run_conv(
 ) -> tuple[int, dict[str, Any]]:
     """M6-CONV: the M7-slice acceptance for the M6-authored v2-native configs.
 
-    For EVERY M6 config landed so far (``_CONV_M6_CONFIGS`` — sub-wave A: GN3X,
-    GN2X_qcdsplit; sub-wave D: DL1; sub-wave B: GN2_muP; later waves EXTEND the
-    list), this drives the canonical static
+    For EVERY M6 config in ``_CONV_M6_CONFIGS`` — sub-wave A: GN3X,
+    GN2X_qcdsplit; sub-wave D: DL1; sub-wave B: GN2_muP; sub-wave C: GN2XE (the
+    list is now COMPLETE at 5, the FINAL config-gating wave) — this drives the
+    canonical static
     validator — the REAL ``salt2 graph validate`` subcommand (``salt2_main``, the
     SAME command path d2cfg / M5-CONV exercise) — in fit + test (+ onnx where the
     config is export-representable) and asserts rc == 0 for every applicable mode.
@@ -2003,18 +3029,25 @@ def run_conv(
         "v2-native configs (plan 12 M6-CONV row): static validation ONLY (salt2 graph validate "
         "fit/test/onnx). It makes NO forward-parity claim — the Labeller label-derivation parity "
         "is owned by LB1, the vector-stream forward parity by VS1, the muP forward-init parity + "
-        "MuReadout export-fold by MU1/MU2. Sub-wave A (Labeller) landed GN3X + GN2X_qcdsplit; "
-        "sub-wave D (vector-stream) added DL1; sub-wave B (muP) adds GN2_muP (now 4); sub-wave C "
-        "(edges) will EXTEND _CONV_M6_CONFIGS with GN2XE. GN3X/GN2X_qcdsplit/DL1 are standard "
+        "MuReadout export-fold by MU1/MU2, and the edge-path forward parity + dynamic-T trace by "
+        "ED1/ED2. Sub-wave A (Labeller) landed GN3X + GN2X_qcdsplit; "
+        "sub-wave D (vector-stream) added DL1; sub-wave B (muP) added GN2_muP; sub-wave C "
+        "(edges) appends GN2XE — the list is now COMPLETE at 5 (the FINAL config-gating wave). "
+        "GN3X/GN2X_qcdsplit/DL1 are standard "
         "traces (DL1's rank-2 [B, F] embed is a plain nn.Linear stack with B the sole dynamic "
         "axis); GN2_muP's --mode onnx here is a STATIC plan-compile + writer-manifest validation "
         "(cli.py:381-423, the M5-CONV run_conv path) — it does NOT call torch.onnx.export/"
         "set_export_mode, so the CONV onnx leg proves the onnx PLAN compiles, not the fold. The "
         "MuReadout->plain-Linear fold that makes the real export traceable is exercised + proven "
         "by MU1's export-fold check (set_export_mode on the live module), NOT this plan-compile. "
-        "With the fold proven by MU1, onnx stays in the gate for GN2_muP too; the only deferred "
-        "export hazard is GN2XE's edge dynamic-T register pad (C). The 4 configs move 🔷->✅ in "
-        "the 39 denominator."
+        "With the fold proven by MU1, onnx stays in the gate for GN2_muP too. GN2XE's --mode onnx "
+        "here is LIKEWISE a STATIC plan-compile (cli.py:381-423); its load-bearing dynamic-T trace "
+        "(BOTH edge T axes dynamic + the in-encoder register zero-pad emitted SHAPE-DERIVED, not "
+        "baked — FD §6.7 ONNX note) is exercised + PROVEN by ED1's ONNX-trace leg (a real "
+        "torch.onnx.export, then onnxruntime at track counts 3/7/11/16 matching the eager model "
+        "from a SINGLE trace) — so onnx stays in the gate for GN2XE too (NOT scoped out). NO "
+        "export hazard remains deferred. All 5 configs move 🔷->✅ in the 39 denominator — which "
+        "is now CLOSED."
     )
     report["no_strict_rationale"] = (
         "no --strict: a data-free validation cannot satisfy it. --strict promotes EVERY warning to "
@@ -2052,12 +3085,12 @@ def run_conv(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the gate subcommand parser (LB1, VS1, MU1, MU2, M6-CONV; later waves append theirs).
+    """Build the gate subcommand parser (LB1/VS1/MU1/MU2/ED1/ED2/M6-CONV; later waves append more).
 
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``lb1``, ``vs1``, ``mu1``, ``mu2`` and ``conv`` subcommands.
+        Parser with the ``lb1``..``ed2`` and ``conv`` subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m6", description=__doc__.splitlines()[0]
@@ -2068,6 +3101,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "vs1": "Vector-stream rank-2 [B,F] embed -> head parity vs v1 DL1 + onnx no-T (sub-wave D)",
         "mu1": "muP forward-init parity vs v1 Transformer(mup=True) + MuReadout export-fold (B)",
         "mu2": "muP routing validator: apply_to name-lists + MuAdamW swap + setup_mup casing (B)",
+        "ed1": "Edge path parity vs v1 (EdgeFeatures/EdgeEmbed/encoder) + dynamic-edge-T onnx (C)",
+        "ed2": "Edge bind validators: edge-stream-first + EdgeAttention-backend forcing (C)",
         "conv": "M6-CONV: salt2 graph validate (fit/test/onnx) on the M6-authored configs",
     }
     for gate, help_text in helps.items():
@@ -2090,6 +3125,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "vs1": run_vs1,
         "mu1": run_mu1,
         "mu2": run_mu2,
+        "ed1": run_ed1,
+        "ed2": run_ed2,
         "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)

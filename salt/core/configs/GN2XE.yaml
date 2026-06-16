@@ -1,0 +1,272 @@
+# GN2XE.yaml — GN2X with EDGE FEATURES end-to-end in the v2 schema (M6 sub-wave
+# C, edges family; plan 12; design §6.7 1407-1437).
+#
+# The v2-native MIGRATED fixture for legacy salt/configs/GN2/GN2XE.yaml (v1 name:
+# GN2X). GN2XE is the Xbb tagger WITH pairwise EDGE FEATURES injected into the
+# transformer attention — the canonical exercise of the M6 edge-feature port
+# (plan 12 sub-wave C; gates ED1/ED2 + the ED-HUMAN edge-memory sign-off).
+#
+# *** EDGES → M6 (design §9.5 line 1715 AUTHORITATIVE over the code TODO(M7)
+#     label, user-confirmed 2026-06-15) ***: the in-code TODO at nn/modules.py
+#     dual-labels edges as M7, but FD §9.5 places the edge-feature milestone in
+#     M6 and the study CLAUDE.md + plan 12 Open-Question 1 resolve it to M6. This
+#     fixture + the ED1/ED2 gates are that resolution.
+#
+# THE M6 FEATURE — edge features end-to-end (design §6.7 1418-1431), four parts:
+#
+# 1. `EdgeFeatures` (a NetModule) on the RAW tracks (design §6.3): v1 wired this
+#    as `data.edge_constructors` (GN2XE.yaml:38-45) — an EdgeConstructor that
+#    computed pairwise dR/z/kt/subjetIndex/isSelfLoop on the UN-normalised track
+#    kinematics and wrote `inputs[_edge_features_tracks]` back into the input
+#    dict (edge_constructor.py:41-44). In v2 it is an ordinary graph module
+#    (`edge_features`) requiring `inputs.tracks` `[B, T, F]` (RAW, design §6.3 —
+#    edges are built on un-normalised values, which is exactly why `inputs.*` and
+#    `normed.*` are distinct keys) + `masks.tracks`, producing `edges.tracks`
+#    `[B, T, T, E]` (E = len(features) = 5). NEVER mutates inputs.* (design §2.1
+#    write-once — replacing v1's in-place hack). The dR/kt/z math is the COMPOSED
+#    v1 `calculate_edge_features` (byte-faithful, gate ED1).
+#
+# 2. `EdgeEmbed` (an edge-typed StreamEmbed): v1 `edge_init_nets` (GN2XE.yaml:
+#    67-73) — a Dense over the `[B, L, L, E]` edge matrix. v2's `edge_embed`
+#    maps `edges.tracks` `[B, T, T, E]` -> `edges.tracks_emb` `[B, T, T, D_e=32]`
+#    with the SAME Dense (hidden [32], SiLU, output 32). v1's sort-first hack
+#    (assert len(edge_init_nets)==1 + re-sort so the edge stream lands first,
+#    saltmodel.py:69-80) is GONE — replaced by the edge-stream-first VALIDATOR
+#    (part 4).
+#
+# 3. ENCODER edge port (design §6.7 1422-1424): the `TransformerEncoder` gains
+#    `edges: edges.tracks_emb` + `edge_embed_dim: 32` + `update_edges: true`
+#    (v1 encoder `edge_embed_dim`/`update_edges`, GN2XE.yaml:79-80). Every
+#    composed v1 EncoderLayer swaps its Attention for an EdgeAttention
+#    (transformer.py:365-373): the embedded edge tensor BIASES the attention
+#    scores + GATES the softmax output, and (update_edges:true) the edge tensor
+#    is UPDATED each layer (attention.py:630-654, edge-out projection
+#    attention.py:641-644). The register zero-pad to the register-augmented
+#    sequence length stays INSIDE the encoder (transformer.py:689-719). Gate ED1
+#    asserts BITWISE encoder-edge-path parity vs an independent v1
+#    `Transformer(edge_embed_dim>0, update_edges=True)`.
+#
+# 4. BIND-TIME edge VALIDATORS (design §6.7 1425-1431; gate ED2): v1's two HIDDEN
+#    edge mechanisms become NAMED constraints (validate_edge_port, saltmodule.py;
+#    fired in SaltModule.__init__ AND salt2 graph validate):
+#      (a) EDGE-STREAM-FIRST — the edge tensor's stream (`tracks`, from
+#          edges.tracks_emb) MUST be `concat.streams[0]`, else a named
+#          ConfigError. Here `concat.streams: [tracks]` is single-stream so
+#          tracks IS first trivially; the rule replaces v1's silent init-net
+#          re-sort (saltmodel.py:66-80).
+#      (b) EdgeATTENTION-BACKEND FORCING — an edge encoder declaring a non-edge
+#          backend (flash-varlen) is a named ConfigError. v1 SILENTLY ignored
+#          attn_type whenever edge_embed_dim>0 (transformer.py:599-601); v2 makes
+#          the silent bypass a named error. Hence `attn_type: torch-math` here
+#          (the EdgeAttention-compatible backend — flash-varlen is NOT just a
+#          cluster follow-up for edge configs, it is FORBIDDEN with edges).
+#
+# ONNX export contract (load-bearing; plan 12 sub-wave C / ED1 ONNX-trace; FD
+# §6.7 ONNX note): the edge path must trace end-to-end with DYNAMIC T. The edge
+# tensors `edges.tracks` `[B, T, T, E]` and `edges.tracks_emb` `[B, T, T, D_e]`
+# are PRODUCED inside the model from the `inputs.tracks` token axis (the
+# `track_features` positional input flagged `sequence: true` + `dyn_axis:
+# n_tracks`), so BOTH edge T axes inherit that one dynamic token count — neither
+# is baked to the trace-time track count. The in-encoder register zero-pad builds
+# `torch.zeros((B, x.shape[1] - edge_x.shape[1], ...))` from the DYNAMIC
+# `x.shape[1]` (transformer.py:689-719), tracing to SHAPE-DERIVED nodes
+# (Shape/Sub/ConstantOfShape/Concat/Expand), NOT a baked constant of the
+# trace-time padded shape. ED1's ONNX leg PROVES this: a single trace, then
+# onnxruntime at track counts 3/7/11/16 matching the eager model. `--mode onnx`
+# STAYS in the M6-CONV gate for GN2XE (the dynamic-T trace is export-representable
+# — NOT scoped out).
+#
+# Other v1 GN2XE faithfulness notes:
+#   - jets_classification: 4-class Xbb flavour (hbb/hcc/top/qcd — the standard
+#     GN2X Xbb scheme; v1 GN2XE.yaml output_size:4 with an external class_dict),
+#     default unweighted CrossEntropyLoss; `flavour_label` is a PRECOMPUTED
+#     column (v1 GN2XE has NO labeller_config — contrast GN3X/GN2X_qcdsplit).
+#   - track_origin: 8-class ftag track-origin, weight 0.5 (v1 GN2XE.yaml:117).
+#   - track_vertexing: per-track vertex edges, weight 1.5 (v1 GN2XE.yaml:153),
+#     origin-weighted via the declared origin_label dependency (design §3.3).
+#   - NO loss_mode:GLS in v1 -> LossSum (the v1 base default
+#     sum-of-weighted-losses) + AdamW, so per-task weights are kept.
+#   - num_registers: 1 (v1 GN2XE has no num_registers override -> the v1 default
+#     of 1 learned register token, transformer.py:558-559).
+#
+# NO machine paths are committed (design §5 placeholder policy). A typical
+# invocation FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2
+# script is not installed):
+#
+#   salt2 fit --config salt/core/configs/GN2XE.yaml \
+#     --data.train_file $DATA/pp_output_train.h5 \
+#     --data.val_file   $DATA/pp_output_val.h5 \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml
+#
+# Static validation (no data) supplies required init_args data-free:
+#   python -m salt.core.main graph validate -c salt/core/configs/GN2XE.yaml \
+#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+
+name: GN2XE
+
+data:
+  batch_size: 1000
+  num_workers: 15
+  modules:
+    reader:
+      class_path: salt.core.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {vector: true}
+          tracks: {vector: false, truncate: 100}
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        # the ONE place column order is defined (design §5.1) — v1 GN2XE.yaml
+        # variables. The edge features need eta/phi/pt (dR/kt/z) + subjetIndex
+        # (subjetIndex edge feature), so those track variables are present and
+        # EdgeFeatures resolves its indices_map by NAME at bind (design §2.2).
+        variables:
+          jets: [pt, eta, mass]
+          tracks:
+            [
+              pt,
+              eta,
+              phi,
+              subjetIndex,
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int} # precomputed flavour_label (no labeller)
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
+    lrs: {initial: 1.0e-7, max: 3.0e-4, end: 5.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW # v1 base default (no GLS/lion override in GN2XE)
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header)
+          streams: [jets, tracks]
+          global_object: jets
+      # --- THE M6 EDGE PATH (parts 1-3) -----------------------------------
+      # part 1: pairwise edge features on the RAW tracks (design §6.3) — v1
+      # data.edge_constructors (GN2XE.yaml:38-45). Built on inputs.tracks, NOT
+      # normed.tracks; writes a NEW edges.tracks key (write-once, design §2.1).
+      edge_features:
+        class_path: salt.core.nn.EdgeFeatures
+        init_args:
+          stream: tracks
+          features: [dR, z, kt, subjetIndex, isSelfLoop] # v1 GN2XE.yaml:41-45
+      # part 2: edge embedding — v1 edge_init_nets (GN2XE.yaml:67-73). The edge
+      # input_size (E=5) is INFERRED at bind (design §2.3 — no input_size YAML
+      # arithmetic); output 32, hidden [32], SiLU.
+      edge_embed:
+        class_path: salt.core.nn.EdgeEmbed
+        init_args:
+          stream: tracks
+          out_dim: &edge_embed_dim 32 # v1 GN2XE.yaml:&edge_embed_dim 32
+          dense: {hidden_layers: [32], activation: &activation SiLU}
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          out_dim: &embed_dim 192 # v1 GN2XE.yaml:&embed_dim 192
+          dense: {hidden_layers: [256], activation: *activation}
+      concat:
+        # SINGLE-stream concat -> tracks IS streams[0] trivially: the
+        # edge-stream-first validator (ED2 rule a) is satisfied. v1 had ONE
+        # init_net + ONE edge_init_net on tracks (GN2XE.yaml:60-72).
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks]}
+      # part 3: encoder edge port — v1 encoder edge_embed_dim/update_edges
+      # (GN2XE.yaml:79-80). Every EncoderLayer swaps Attention->EdgeAttention.
+      # attn_type MUST be torch-math (EdgeAttention-backend forcing, ED2 rule b:
+      # flash-varlen alongside an edge port is a named ConfigError).
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 128 # v1 GN2XE.yaml:&out_dim 128
+          num_layers: 6 # v1 GN2XE.yaml:77
+          attention: {num_heads: 4, attn_type: torch-math} # v1 GN2XE.yaml:87 num_heads:4
+          dense: {activation: *activation, gated: false} # v1 GN2XE.yaml:83-85
+          edges: edges.tracks_emb # the EdgeEmbed output the encoder consumes
+          edge_embed_dim: *edge_embed_dim # cross-checked vs edges.tracks_emb width at bind
+          update_edges: true # v1 GN2XE.yaml:80 — EdgeAttention edge-out projection per layer
+      split:
+        class_path: salt.core.nn.Split # production task path (design §3.3)
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      # head 1/3: 4-class Xbb flavour (precomputed flavour_label, no labeller).
+      # class_names = the standard GN2X Xbb scheme (v1 GN2XE.yaml output_size:4).
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [hbb, hcc, top, qcd] # 4-class Xbb (v1 GN2XE output_size:4)
+          loss: torch.nn.CrossEntropyLoss # v1 default unweighted CE
+          dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: &dropout 0.1}
+      # head 2/3: 8-class ftag track-origin, v1 weight 0.5
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight: 0.5 # v1 GN2XE.yaml:117
+          loss: torch.nn.CrossEntropyLoss
+          dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: *dropout}
+      # head 3/3: per-track vertex edges, v1 weight 1.5
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          weight: 1.5 # v1 GN2XE.yaml:153
+          dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: *dropout}
+      loss:
+        class_path: salt.core.nn.LossSum # v1 default sum-of-weighted-losses
+
+export: # export-ONLY half (design §5.1, §7); inert during fit/test
+  model_name: GN2XE # Athena name: no '_'/'-'
+  inputs:
+    - {port: inputs.jets, name: jet_features} # [1, F] global
+    # the SINGLE positional sequence input — the edge tensors are PRODUCED
+    # inside the model from this token axis, so BOTH edge T axes inherit the
+    # dynamic n_tracks count (dynamic-T contract; ED1 ONNX leg).
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+  # outputs: NONE — derived from the writers (M4.5 unified manifest): the default
+  # TaskWriter declares GN2XE_p{hbb,hcc,top,qcd} (split_scalars from the 4-class
+  # head), _TrackOrigin (argmax int8) and _VertexIndex (vertex_union_find int8).
+  # The edge path traces with both edge T axes DYNAMIC + the register zero-pad
+  # shape-derived (plan 12 sub-wave C; ED1 ONNX-trace). Inspect with
+  # `salt2 graph resolve -c <this file>`.
+
+trainer:
+  max_epochs: 50
+  precision: 32-true # edge configs FORBID flash-varlen (ED2 rule b); bf16 cluster M6 follow-up

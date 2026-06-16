@@ -867,6 +867,23 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
                 "init_arg, no mup:true module left out (§3.4)"
             )
+        # edge bind-time validators (FD §6.7 1425-1431): edge-stream-first +
+        # EdgeAttention-backend forcing. The same `validate_edge_port` SaltModule
+        # construction runs; surfaced here as a first-class CI check (these are
+        # HARD errors — they would already abort the parse above; this captures
+        # the OK line / the error message for the validate report).
+        from salt.core.saltmodule import validate_edge_port  # noqa: PLC0415 - heavy/circular
+
+        try:
+            n_edge = validate_edge_port(cfg.model_modules)
+        except ConfigError as err:
+            errors.append(f"edge port: {err}")
+            n_edge = 0
+        if n_edge:
+            print(
+                f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
+                "the attention backend is edge-compatible (no silent flash bypass; §6.7)"
+            )
     # data-free module preflights (design §2.3): duck-typed `preflight()`
     # checks file-backed materialise sources (e.g. the Normaliser norm dict).
     # WARNING-level here — `validate` must stay runnable on data-less machines

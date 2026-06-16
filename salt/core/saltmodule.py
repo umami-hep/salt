@@ -87,8 +87,16 @@ __all__ = [
     "module_mup_enabled",
     "module_supports_mup",
     "resolve_origin_weighting",
+    "validate_edge_port",
     "validate_mup_routing",
 ]
+
+# the attention backends an EdgeAttention encoder MAY declare without it being a
+# silent bypass: only the deterministic raw-torch backend. v1's EncoderLayer
+# skips backend assignment entirely when edge_embed_dim>0 (transformer.py:
+# 599-601,616-620), so any flash/varlen/efficient backend declared ALONGSIDE an
+# edge port was silently ignored in v1 — ED2 makes that a NAMED error.
+_EDGE_OK_BACKENDS = frozenset({"torch-math"})
 
 CKPT_KEY = "salt_core"
 """Checkpoint dict key for the schema + plan-hash payload (design §2.3, §2.6)."""
@@ -205,6 +213,11 @@ class SaltModule(lightning.LightningModule):
         # module dict (each name exists + carries a `mup` init_arg) and warn
         # on a mup-on module left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
+        # the edge bind-time validators (FD §6.7 1425-1431, M6 sub-wave C):
+        # edge-stream-first + EdgeAttention-backend forcing — the named-error
+        # replacements for v1's silent sort-first hack (saltmodel.py:66-73) and
+        # flash bypass (transformer.py:599-601). No-op without an edge encoder.
+        _validate_edge_port(modules)
         # resolved config only — the module dict is NOT pickled into hparams
         # (design §3.4; load_from_checkpoint takes modules= explicitly)
         self.save_hyperparameters(logger=False, ignore=["modules"])
@@ -1355,6 +1368,157 @@ def _validate_mup(
         The normalised mup config or None.
     """
     return validate_mup_routing(mup, modules)
+
+
+def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    """The encoder modules that declare an edge port (duck-typed on ``edges_key``).
+
+    A `TransformerEncoder` with ``edges:`` configured carries a non-None
+    ``edges_key`` attribute (modules.py); duck-typed so user encoder modules
+    that add an edge port participate too.
+
+    Returns
+    -------
+    list[tuple[str, Any]]
+        ``(instance name, module)`` pairs for edge-bearing encoders.
+    """
+    return [
+        (name, module)
+        for name, module in modules.items()
+        if getattr(module, "edges_key", None) is not None
+    ]
+
+
+def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The `Concat`'s first stream (the edge-stream-first reference).
+
+    Identifies the `Concat` PRECISELY by its produced ``seq.x`` key (the concat
+    signature, modules.py Concat.declare_io) rather than by an attribute name —
+    `Normaliser`/`Split` also carry a ``streams`` attr, so an attribute test would
+    be ambiguous. Returns the concat's ``(instance name, streams[0])`` — the edge
+    tensor's stream must equal this so the ``[B, T, T, D_e]`` edge matrix aligns
+    with the LEADING ``T`` rows/cols of the concatenated ``[B, S, D]`` sequence
+    the encoder receives (the v1 sort-first hack put the edge stream first for
+    exactly this reason, saltmodel.py:66-73).
+
+    Returns
+    -------
+    tuple[str, str] | None
+        ``(concat name, first stream)``, or None when no `Concat` is configured.
+    """
+    for name, module in modules.items():
+        streams = getattr(module, "streams", None)
+        if not (isinstance(streams, (list, tuple)) and streams):
+            continue
+        declare = getattr(module, "declare_io", None)
+        if not callable(declare):
+            continue
+        # the Concat is the module producing seq.x (its declare_io produces
+        # seq.x/seq.mask/seq.layout); declare_io is config-only/static (design
+        # §2.2), so calling it here is cheap and side-effect-free.
+        produces = flatten_spec(declare(Mode.FIT).produces)
+        if "seq.x" in produces:
+            return name, streams[0]
+    return None
+
+
+def validate_edge_port(modules: Mapping[str, Any]) -> int:
+    """Validate the encoder edge-port bind-time constraints (FD §6.7 1425-1431).
+
+    The two HIDDEN v1 edge mechanisms made into NAMED constraints (ED2; the
+    "land in M1 validation" rules). Runs at `SaltModule.__init__` (every
+    fit/test) and in ``salt2 graph validate`` so the same rules fire data-free
+    in CI and at run construction — the edge analogue of `validate_mup_routing`.
+    No-op when no encoder declares an edge port.
+
+    Rules:
+
+    - **edge-stream-first** (rule a): the edge tensor's stream MUST be the FIRST
+      stream of the `Concat` (``Concat.streams[0]``). v1 SILENTLY re-sorted the
+      init_nets so the edge stream landed first (saltmodel.py:66-73) — required
+      because the encoder zero-pads the ``[B, T, T, D_e]`` edge matrix to the
+      register-augmented sequence length assuming the edge stream's ``T`` rows are
+      the LEADING rows of the concatenated sequence (transformer.py:689-719). v2
+      makes the ordering an EXPLICIT config constraint instead of a runtime sort:
+      a mis-ordered concat is a named `ConfigError`.
+    - **EdgeAttention-backend forcing** (rule b): an encoder with an edge port may
+      NOT declare a non-edge attention backend (``flash-varlen`` / any backend
+      outside ``{"torch-math"}``). v1 SILENTLY ignored ``attn_type`` whenever
+      ``edge_embed_dim>0`` — it skipped the backend assignment
+      (transformer.py:599-601,616-620), so a user who set ``flash-varlen`` got
+      raw attention with no warning. v2 makes the silent bypass a named error.
+
+    Parameters
+    ----------
+    modules : Mapping[str, Any]
+        The model-side module dict (instance name -> module). For the static
+        validator this is the model subdict; for `SaltModule` it is the
+        pre-filtered ctor dict.
+
+    Returns
+    -------
+    int
+        The number of edge-bearing encoders validated (0 = no edge path).
+
+    Raises
+    ------
+    ConfigError
+        On either rule, naming the encoder, the edge stream, and the conflict.
+    """
+    encoders = _edge_encoders(modules)
+    if not encoders:
+        return 0
+    concat = _concat_first_stream(modules)
+    for name, module in encoders:
+        edge_stream = module.edge_stream  # "edges.tracks_emb" -> "tracks"
+        # -- rule (a): edge stream must be Concat.streams[0] --------------------
+        if concat is None:
+            raise ConfigError(
+                f"encoder {name!r} declares an edge port (edges={module.edges_key!r}) but no "
+                "Concat is configured — the edge tensor's stream must be the FIRST concat stream "
+                "so the [B, T, T, D_e] edge matrix aligns with the leading sequence rows "
+                "(v1 sort-first hack, saltmodel.py:66-73; FD §6.7 1425-1431)"
+            )
+        concat_name, first_stream = concat
+        if edge_stream != first_stream:
+            raise ConfigError(
+                f"encoder {name!r} edge port stream {edge_stream!r} (from edges="
+                f"{module.edges_key!r}) is NOT the first stream of Concat {concat_name!r} "
+                f"(streams[0]={first_stream!r}) — the edge tensor must align with the LEADING "
+                "rows of the concatenated sequence (the encoder zero-pads it to the "
+                "register-augmented length assuming the edge stream is first, "
+                f"transformer.py:689-719). fix: put {edge_stream!r} first in {concat_name!r}'s "
+                "streams (v1 did this silently via the init-net sort, saltmodel.py:66-73; "
+                "FD §6.7 1425-1431 rule a)"
+            )
+        # -- rule (b): no non-edge attention backend alongside an edge port -----
+        # the v2 encoder stores attn_type on its composed v1 Transformer; an
+        # EdgeAttention encoder always runs raw torch attention (the v1 silent
+        # bypass, transformer.py:599-601), so any other declared backend is a
+        # NAMED error instead of a no-op.
+        attn_type = getattr(getattr(module, "encoder", None), "attn_type", "torch-math")
+        if attn_type not in _EDGE_OK_BACKENDS:
+            raise ConfigError(
+                f"encoder {name!r} declares attention backend {attn_type!r} alongside an edge "
+                f"port (edges={module.edges_key!r}), but EdgeAttention supports ONLY raw torch "
+                f"attention ({sorted(_EDGE_OK_BACKENDS)}). v1 silently IGNORED the backend when "
+                "edge features were on (transformer.py:599-601) — v2 makes that a named error so "
+                "a flash-varlen edge config fails loudly instead of running unexpectedly-slow raw "
+                "attention. fix: set the encoder's attention.attn_type to 'torch-math' (or drop "
+                "the edge port). FD §6.7 1425-1431 rule b"
+            )
+    return len(encoders)
+
+
+def _validate_edge_port(modules: Mapping[str, Any]) -> int:
+    """`SaltModule.__init__` wrapper around `validate_edge_port` (module-private alias).
+
+    Returns
+    -------
+    int
+        The number of edge-bearing encoders validated.
+    """
+    return validate_edge_port(modules)
 
 
 def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:

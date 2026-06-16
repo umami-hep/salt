@@ -52,6 +52,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
     IO,
+    KEY_SEP,
     GraphModule,
     Mode,
     TensorSpec,
@@ -65,10 +66,13 @@ from salt.core.nn.bind import ResolvedSchema
 from salt.models import Dense as V1Dense
 from salt.models import Transformer as V1Transformer
 from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
+from salt.utils.edge_features import calculate_edge_features, check_edge_config
 from salt.utils.tensor_utils import attach_context
 
 __all__ = [
     "Concat",
+    "EdgeEmbed",
+    "EdgeFeatures",
     "GlobalAttentionPooling",
     "LossGLS",
     "LossSum",
@@ -84,6 +88,12 @@ _UNNAMED = "unnamed"
 
 _SEQ_LEN = sym_dim("S", "seq")
 _ENC_LEN = sym_dim("L", "enc")
+
+_EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
+"""The recognised edge-feature vocabulary (v1 `check_edge_config`,
+edge_features.py:30-43; design §6.7). EdgeFeatures rejects anything outside this
+set at config time; the per-feature required input variables (e.g. ``dR`` needs
+``eta``/``phi``) are validated at `bind` against the resolved schema fields."""
 
 
 def _stream_len(stream: str) -> str:
@@ -833,6 +843,293 @@ class VectorConcat(nn.Module):
         return {self.out_key: torch.cat([b.get(key) for key in self.inputs], dim=-1)}
 
 
+class EdgeFeatures(nn.Module):
+    """Config-constructed pairwise edge-feature builder (design §6.7, M6 sub-wave C).
+
+    The v2 replacement for v1's ``EdgeConstructor`` (edge_constructor.py:7) +
+    ``calculate_edge_features`` (edge_features.py:52). A NetModule: it requires
+    the **raw** ``inputs.<stream>`` ``[B, T, F]`` (design §6.3 — edges are built
+    on UN-normalised values, which is exactly why ``inputs.*`` and ``normed.*``
+    are distinct keys and no ordering hack is needed) plus ``masks.<stream>``,
+    and produces ``edges.<stream>`` ``[B, T, T, E]`` where ``E = len(features)``.
+
+    v1 wired this as in-place mutation: ``EdgeConstructor.forward`` wrote
+    ``inputs[f"_edge_features_{name}"]`` back into the input dict
+    (edge_constructor.py:41-44) and the SaltModel sorted init_nets so the edge
+    stream landed first (saltmodel.py:69-80). v2 makes it an ordinary graph
+    edge: a NEW ``edges.<stream>`` key, never mutating ``inputs.*`` (design
+    §2.1 write-once); the edge-stream-first / EdgeAttention-backend constraints
+    become bind-time validator rules on the ENCODER port (design §6.7
+    1425-1431), authored when the encoder gains its ``edges:`` arg (a later M6
+    sub-wave C stage — NOT here).
+
+    Faithfulness: the per-element math is the COMPOSED v1 functions
+    (`calculate_edge_features`, `check_edge_config`) so the dR/kt/z/subjetIndex/
+    isSelfLoop/mass values are byte-identical to v1 (M2 porting policy, plan 05;
+    full absorption is M7). The ``indices_map`` (variable name -> column index)
+    is resolved at `bind` from the resolved schema's declared ``inputs.<stream>``
+    fields (the dataset-side `Features` declaration, design §2.2 — column
+    lookups resolve by NAME, never by YAML list position), exactly v1's
+    ``EdgeConstructor`` ``indices_map`` built from ``variables[input_name]``
+    (edge_constructor.py:34-36). ``masks.<stream>`` is a declared dependency
+    (design §6.7 1418) — the v1 math does not consume it (it relies on
+    ``nan_to_num`` to zero the inf/nan from zero-padded rows, edge_features.py:146,
+    and the upstream `Features` processor already zeroes padded rows,
+    processors.py:145), so the v2 forward composes the v1 function verbatim and
+    keeps the mask as the contract dependency that ties this module to its
+    stream's pad mask.
+
+    ONNX (load-bearing, design §6.7 ONNX note / plan 12 sub-wave C): the
+    produced ``edges.<stream>`` carries the SAME ``T:<stream>`` symbol on BOTH
+    token axes, so a downstream export marks both as dynamic; the v1 math is all
+    ``unsqueeze``/``expand``/elementwise ops driven by ``batch.shape[1]`` (the
+    dynamic token count), tracing to shape-derived nodes — no baked track count.
+    The encoder-side register zero-pad is a SEPARATE later stage; this module's
+    forward is itself trace-safe (no Python-int shape bakes).
+
+    TODO(M7): absorb the v1 ``calculate_edge_features`` math into v2 (drop the
+    composed-function dependency) when the v1 ``models``/``utils`` tree retires.
+    """
+
+    def __init__(
+        self,
+        stream: str,
+        features: Sequence[str],
+        out: str | None = None,
+        input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
+    ) -> None:
+        """Capture config only (design §2.3 — no schema/data access here).
+
+        Parameters
+        ----------
+        stream : str
+            The stream whose pairwise edges are built (``inputs.<stream>``).
+        features : Sequence[str]
+            Edge feature names, in produced column order — any of
+            ``{"dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass"}`` (the v1
+            `check_edge_config` vocabulary, edge_features.py:30-43). Validated
+            against the recognised set here; required input variables are
+            checked at `bind` against the resolved fields.
+        out : str | None, optional
+            Produced edge key, by default ``edges.<stream>``.
+        input : str | None, optional
+            Raw input key override, by default ``inputs.<stream>``.
+
+        Raises
+        ------
+        ConfigError
+            If `features` is empty, has duplicates, or names an unrecognised
+            edge feature.
+        """
+        super().__init__()
+        self.name = _UNNAMED
+        if not features:
+            raise ConfigError("EdgeFeatures: features must be a non-empty sequence (design §6.7)")
+        if len(set(features)) != len(tuple(features)):
+            raise ConfigError(f"EdgeFeatures: duplicate features in {tuple(features)}")
+        unknown = [f for f in features if f not in _EDGE_FEATURES]
+        if unknown:
+            raise ConfigError(
+                f"EdgeFeatures: unrecognised edge feature(s) {unknown} — choose from "
+                f"{sorted(_EDGE_FEATURES)} (v1 check_edge_config, edge_features.py:30-43)"
+            )
+        self.stream = stream
+        self.features = tuple(features)
+        self.out_key = out if out is not None else f"edges.{stream}"
+        self.input_key = input if input is not None else f"inputs.{stream}"
+        self.indices_map: dict[str, int] | None = None
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare raw ``inputs.<stream>`` + ``masks.<stream>`` -> ``edges.<stream>``.
+
+        The input is the RAW (un-normalised) stream (design §6.3); the produced
+        edge tensor is ``[B, T, T, E]`` with the SAME ``T:<stream>`` symbol on
+        both token axes (a square per-stream pairwise matrix) and a concrete
+        last dim ``E = len(features)``. ``masks.<stream>`` is a declared
+        ``pad_mask`` dependency (design §6.7 1418).
+
+        Returns
+        -------
+        IO
+            The declared requires/produces.
+        """
+        del mode
+        tlen = _stream_len(self.stream)
+        edge_dim = len(self.features)
+        return IO(
+            requires=unflatten_spec({
+                self.input_key: TensorSpec(
+                    shape=("B", tlen, sym_dim("F", self.name)), dtype="float32"
+                ),
+                f"masks.{self.stream}": TensorSpec(
+                    shape=("B", tlen), dtype="bool", kind="pad_mask"
+                ),
+            }),
+            produces=unflatten_spec({
+                self.out_key: TensorSpec(shape=("B", tlen, tlen, edge_dim), dtype="float32"),
+            }),
+        )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Resolve the variable-name -> column-index map and validate features.
+
+        Mirrors v1 ``EdgeConstructor.__init__`` (edge_constructor.py:32-36):
+        the ``indices_map`` is built from the declared ``inputs.<stream>``
+        fields (the dataset-side `Features` variable list, design §2.2 — column
+        lookups by NAME), then `check_edge_config` validates that every feature's
+        required variables are present (e.g. ``dR`` needs ``eta``/``phi``).
+        """
+        fields = schema.fields_of(self.input_key)
+        check_edge_config(list(self.features), list(fields))
+        self.indices_map = {name: i for i, name in enumerate(fields)}
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Compute the pairwise edge features on the RAW input (design §6.7).
+
+        Composes the v1 `calculate_edge_features` verbatim (byte-faithful), so
+        the dR/kt/z/... values match v1 exactly. Returns a FRESH tensor
+        (``torch.zeros`` + ``nan_to_num`` inside the v1 function), never
+        mutating ``inputs.*`` (design §2.1 write-once).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The newly produced ``edges.<stream>`` key only (design §2.5).
+        """
+        del mode
+        assert self.indices_map is not None, "forward before bind()"
+        x = b.get(self.input_key)
+        edges = calculate_edge_features(x, self.indices_map, list(self.features))
+        return {self.out_key: edges}
+
+
+class EdgeEmbed(nn.Module):
+    """Config-constructed edge-feature embedding (design §6.7 1420-1421, M6 sub-wave C).
+
+    An edge-typed `StreamEmbed`: it maps ``edges.<stream>`` ``[B, T, T, E]`` ->
+    ``edges.<stream>_emb`` ``[B, T, T, D_e]`` with an internal v1 `Dense`. The
+    v2 replacement for v1's ``edge_init_nets`` (saltmodel.py:69-80) — but
+    WITHOUT v1's sort-first hack (the ``assert len(edge_init_nets) == 1`` and
+    the init_nets re-sort so the edge stream is first): in v2 the edge stream's
+    leading position in the concat is a bind-time VALIDATOR rule on the encoder
+    port (design §6.7 1425-1431), not a silent runtime sort.
+
+    Lifecycle (design §2.3): ``__init__`` captures config; ``bind`` builds the
+    `Dense` with ``input_size = width(edges.<stream>) = E`` (the edge-feature
+    count, resolved from the schema — design §2.3 kills ``input_size`` YAML
+    arithmetic, exactly as `StreamEmbed`); ``forward`` projects. The internal v1
+    `Dense` is an ``nn.Linear`` stack over the LAST dim (dense.py:91-94), so it
+    applies cleanly to a rank-4 ``[B, T, T, E]`` tensor (it embeds each
+    pairwise edge independently) — the v1 ``edge_init_nets[0]`` `InitNet` does
+    the same (it is a `Dense` over the ``[B, L, L, E]`` edge matrix,
+    saltmodel.py:132). No context, no muP, no ``vector:`` rank switch — edges
+    are always the rank-4 pairwise matrix.
+
+    ONNX: a plain ``nn.Linear``-stack over the last dim has no dynamic feature
+    axis; the two ``T:<stream>`` token axes flow through unchanged, so the
+    embed traces with both token axes dynamic (the dynamic-T contract is
+    enforced on the export side, plan 12 sub-wave C).
+
+    TODO(M7): pos_enc / featurewise blocks when the v1 `InitNet` is absorbed
+    (mirrors `StreamEmbed`).
+    """
+
+    def __init__(
+        self,
+        stream: str,
+        out_dim: int,
+        dense: dict[str, Any] | None = None,
+        input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
+        out: str | None = None,
+    ) -> None:
+        """Capture config only (design §2.3).
+
+        Parameters
+        ----------
+        stream : str
+            The stream whose edge tensor is embedded.
+        out_dim : int
+            Output edge-embedding width ``D_e`` (concrete, config-fixed; v1
+            ``edge_init_nets[0].dense_config.output_size``, GN2XE.yaml:70).
+        dense : dict[str, Any] | None, optional
+            Extra kwargs for the internal v1 `Dense` (``hidden_layers``,
+            ``activation``, ...); must not contain width keys, by default None.
+        input : str | None, optional
+            Edge input key override, by default ``edges.<stream>``.
+        out : str | None, optional
+            Produced embedded edge key, by default ``edges.<stream>_emb``.
+
+        Raises
+        ------
+        ConfigError
+            If `dense` configures widths (inferred at bind, design §2.3) or
+            `out_dim` is not positive.
+        """
+        super().__init__()
+        self.name = _UNNAMED
+        if out_dim < 1:
+            raise ConfigError(f"EdgeEmbed: out_dim must be >= 1, got {out_dim}")
+        _reject_width_keys("EdgeEmbed", dense, ("input_size", "output_size", "context_size"))
+        self.stream = stream
+        self.out_dim = out_dim
+        self.dense_cfg = dict(dense or {})
+        self.input_key = input if input is not None else f"edges.{stream}"
+        self.out_key = out if out is not None else f"edges.{stream}_emb"
+        self.net: nn.Module | None = None
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare ``edges.<stream>`` ``[B, T, T, E]`` -> ``edges.<stream>_emb`` ``[B, T, T, D_e]``.
+
+        Both token axes share the stream's ``T:<stream>`` symbol; the input
+        last dim is a require symbol (resolved at bind), the produced last dim
+        is the concrete ``out_dim``.
+
+        Returns
+        -------
+        IO
+            The declared requires/produces.
+        """
+        del mode
+        tlen = _stream_len(self.stream)
+        return IO(
+            requires=unflatten_spec({
+                self.input_key: TensorSpec(
+                    shape=("B", tlen, tlen, sym_dim("E", self.name)), dtype="float32"
+                ),
+            }),
+            produces=unflatten_spec({
+                self.out_key: TensorSpec(shape=("B", tlen, tlen, self.out_dim), dtype="float32"),
+            }),
+        )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Build the internal `Dense` with the inferred edge-feature width (design §2.3).
+
+        ``input_size = width(edges.<stream>) = E`` — the edge-feature count,
+        resolved from the schema (v1 inferred it from the edge tensor's last
+        dim, saltmodel.py:132). No context (edges carry no context entries).
+        """
+        self.net = V1Dense(
+            input_size=schema.width(self.input_key), output_size=self.out_dim, **self.dense_cfg
+        )
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Project the rank-4 edge tensor through the internal `Dense`.
+
+        The `Dense` embeds the last (edge-feature) dim, leaving both token axes
+        intact: ``[B, T, T, E] -> [B, T, T, D_e]`` (v1 edge_init_nets,
+        saltmodel.py:132).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The newly produced ``edges.<stream>_emb`` key only (design §2.5).
+        """
+        del mode
+        assert self.net is not None, "forward before bind()"
+        return {self.out_key: self.net(b.get(self.input_key))}
+
+
 class TransformerEncoder(nn.Module):
     """Config-constructed transformer encoder (design §9.2, composes a fresh v1 `Transformer`).
 
@@ -964,6 +1261,9 @@ class TransformerEncoder(nn.Module):
         norm_type: str = "pre",
         drop_registers: bool = False,
         mup: bool = False,
+        edges: str | None = None,
+        edge_embed_dim: int = 0,
+        update_edges: bool = False,
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -1016,13 +1316,43 @@ class TransformerEncoder(nn.Module):
             ``mup: True`` (GN2_muP.yaml:51). Requires an out projection (``out_dim``
             set) — `MuReadout` is the last muP layer (v1 transformer.py:594-597).
             The export-time fold to a plain `nn.Linear` happens in `set_export_mode`.
+        edges : str | None, optional
+            The EDGE-EMBED bundle key the encoder consumes (M6 sub-wave C; FD
+            §6.7 1422-1424). When set (e.g. ``"edges.tracks_emb"``) every
+            composed v1 ``EncoderLayer`` swaps its `Attention` for an
+            `EdgeAttention` (transformer.py:365-373): the edge tensor biases the
+            attention scores and gates the softmax output (attention.py:630-654).
+            The edge-stream-first / EdgeAttention-backend-forcing constraints are
+            BIND-TIME validators on this port (FD 1425-1431; `validate_edge_port`
+            in saltmodule.py) — the named-error replacements for v1's silent
+            sort-first hack (saltmodel.py:69-80) and flash bypass
+            (transformer.py:599-601). By default None (no edge path).
+        edge_embed_dim : int, optional
+            The edge-embed width ``D_e`` (v1 ``edge_embed_dim``, GN2XE.yaml:79).
+            REQUIRED (positive) when `edges` is set — the composed v1
+            `Transformer` builds its `EdgeAttention` projections from it at
+            ``__init__`` (transformer.py:368), so it cannot be deferred to bind;
+            cross-checked against the resolved ``edges.<stream>_emb`` width at
+            bind (so a mismatch is a named error, not a silent shape bug). Must
+            be 0 when `edges` is None. By default 0.
+        update_edges : bool, optional
+            Whether the encoder UPDATES the edge tensor each layer (v1
+            ``update_edges``, GN2XE.yaml:80; EdgeAttention edge-out projection
+            attention.py:641-644, EncoderLayer edge post-norm
+            transformer.py:416-417). Requires `edges` set. The updated edges
+            stay INTERNAL to the encoder (v2 produces only ``encoded.seq`` — the
+            edge update is a per-layer refinement, not a published output, exactly
+            as v1 keeps ``edge_x`` inside `Transformer.forward`,
+            transformer.py:729-733). By default False.
 
         Raises
         ------
         ConfigError
             If `attention` is missing ``num_heads``, `norm_type` is not one of
-            ``{"pre", "post", "hybrid"}``, or `mup` is set without an `out_dim`
-            (MuReadout has no layer to live on — v1 transformer.py:594-597).
+            ``{"pre", "post", "hybrid"}``, `mup` is set without an `out_dim`
+            (MuReadout has no layer to live on — v1 transformer.py:594-597),
+            `edges` is set without a positive `edge_embed_dim` (or vice versa),
+            or `update_edges` is set without `edges`.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -1042,12 +1372,32 @@ class TransformerEncoder(nn.Module):
                 "muP layer of the model and has no layer to live on without one "
                 "(v1 transformer.py:594-597)"
             )
+        # edge-port consistency (FD §6.7 1422-1424): edges <-> edge_embed_dim are
+        # paired — the v1 EncoderLayer picks EdgeAttention iff edge_embed_dim > 0
+        # (transformer.py:366), and update_edges needs an edge tensor to update
+        # (transformer.py:589-590). Reject the inconsistent combinations loudly
+        # at config time rather than building a half-wired encoder.
+        if (edges is None) != (edge_embed_dim <= 0):
+            raise ConfigError(
+                "TransformerEncoder: 'edges' and 'edge_embed_dim' must be set together — "
+                f"got edges={edges!r}, edge_embed_dim={edge_embed_dim}. Set both for an edge "
+                "encoder (v1 GN2XE.yaml:79 edge_embed_dim with an edge_init_net), or neither "
+                "(FD §6.7 1422-1424)"
+            )
+        if update_edges and edges is None:
+            raise ConfigError(
+                "TransformerEncoder: update_edges requires an 'edges' port — there is no edge "
+                "tensor to update without one (v1 transformer.py:589-590, GN2XE.yaml:80)"
+            )
         attn_kwargs = dict(attention)
         attn_type = attn_kwargs.pop("attn_type", "torch-math")
         self.dim = dim
         self.norm_type = norm_type
         self.drop_registers = bool(drop_registers)
         self.mup = bool(mup)
+        self.edges_key = edges
+        self.edge_embed_dim = int(edge_embed_dim)
+        self.update_edges = bool(update_edges)
         self.encoder = V1Transformer(
             num_layers=num_layers,
             embed_dim=dim,
@@ -1057,6 +1407,8 @@ class TransformerEncoder(nn.Module):
             do_final_norm=True,
             num_registers=num_registers,
             drop_registers=self.drop_registers,
+            edge_embed_dim=self.edge_embed_dim,
+            update_edges=self.update_edges,
             attn_kwargs=attn_kwargs,
             dense_kwargs=dict(dense) if dense is not None else None,
             norm_type=norm_type,
@@ -1078,8 +1430,29 @@ class TransformerEncoder(nn.Module):
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
 
+    @property
+    def edge_stream(self) -> str | None:
+        """The stream the edge port belongs to, or None when no edge path.
+
+        ``"edges.tracks_emb"`` -> ``"tracks"`` (the second dotted component is
+        the stream + the ``_emb`` suffix). Used by the bind-time
+        edge-stream-first validator (FD §6.7 1425-1431) to check the edge
+        stream is `Concat.streams[0]`.
+
+        Returns
+        -------
+        str | None
+            The edge stream name, or None.
+        """
+        if self.edges_key is None:
+            return None
+        # "edges.<stream>_emb" -> "<stream>" (the EdgeEmbed out-key convention,
+        # modules.py EdgeEmbed.out_key); strip the namespace + the _emb suffix.
+        leaf = self.edges_key.split(KEY_SEP, 1)[1] if KEY_SEP in self.edges_key else self.edges_key
+        return leaf.removesuffix("_emb")
+
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``seq.x``/``seq.mask`` -> ``encoded.seq`` (+ ``masks.registers``).
+        """Declare ``seq.x``/``seq.mask`` (+ ``edges.<stream>_emb``) -> ``encoded.seq``.
 
         ``masks.registers`` is produced ONLY when ``drop_registers`` is False:
         with the registers dropped from ``encoded.seq`` there are no register
@@ -1087,6 +1460,15 @@ class TransformerEncoder(nn.Module):
         transformer.py:745-750), and a downstream `GlobalAttentionPooling`
         treats ``masks.registers`` as OPTIONAL — so a drop-registers config
         plan-compiles exactly like the encoder-less path (modules.py:1065-1070).
+
+        When an `edges` port is configured (M6 sub-wave C; FD §6.7 1422-1424)
+        the encoder additionally REQUIRES the edge-embed tensor
+        ``edges.<stream>_emb`` ``[B, T, T, D_e]`` — a rank-4 pairwise tensor
+        whose BOTH token axes share the stream's ``T:<stream>`` symbol (the
+        square pairwise matrix `EdgeEmbed` produces, modules.py EdgeEmbed). The
+        updated edges stay INTERNAL (v1 keeps ``edge_x`` inside the forward,
+        transformer.py:729-733), so this module still produces only
+        ``encoded.seq`` (+ the optional register mask) — no edge output key.
 
         Returns
         -------
@@ -1101,13 +1483,50 @@ class TransformerEncoder(nn.Module):
             produces["masks.registers"] = TensorSpec(
                 shape=("B", self.num_registers), dtype="bool", kind="pad_mask"
             )
+        requires: dict[str, TensorSpec] = {
+            "seq.x": TensorSpec(shape=("B", _SEQ_LEN, self.dim), dtype="float32"),
+            "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
+        }
+        if self.edges_key is not None:
+            stream = self.edge_stream
+            assert stream is not None  # edges_key implies edge_stream (config invariant)
+            tlen = _stream_len(stream)
+            # both token axes share T:<stream> — the dynamic-T export prerequisite
+            # (FD §6.7 ONNX note); last dim is the concrete edge-embed width.
+            requires[self.edges_key] = TensorSpec(
+                shape=("B", tlen, tlen, self.edge_embed_dim), dtype="float32"
+            )
         return IO(
-            requires=unflatten_spec({
-                "seq.x": TensorSpec(shape=("B", _SEQ_LEN, self.dim), dtype="float32"),
-                "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
-            }),
+            requires=unflatten_spec(requires),
             produces=unflatten_spec(produces),
         )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Cross-check the edge-embed width against the configured ``edge_embed_dim``.
+
+        The composed v1 `Transformer` already built its `EdgeAttention`
+        projections from ``edge_embed_dim`` at ``__init__`` (transformer.py:368),
+        so this `bind` only VALIDATES that the resolved ``edges.<stream>_emb``
+        width matches — a mismatch (the EdgeEmbed ``out_dim`` was changed without
+        updating the encoder, or vice versa) is a named `ConfigError` here rather
+        than a silent runtime shape error inside the v1 ``linear_e``
+        (attention.py:535). No-op when no edge port is configured.
+
+        Raises
+        ------
+        ConfigError
+            When the resolved edge-embed width differs from ``edge_embed_dim``.
+        """
+        if self.edges_key is None:
+            return
+        resolved = schema.width(self.edges_key)
+        if resolved != self.edge_embed_dim:
+            raise ConfigError(
+                f"TransformerEncoder {self.name!r}: edge_embed_dim={self.edge_embed_dim} but the "
+                f"resolved {self.edges_key!r} width is {resolved} — set edge_embed_dim to the "
+                "EdgeEmbed out_dim (the encoder's EdgeAttention projections were sized from "
+                "edge_embed_dim at construction, attention.py:535; FD §6.7 1422-1424)"
+            )
 
     def set_export_mode(self) -> None:
         """Prepare the encoder for tracing: torch-math backend + MuReadout fold.
@@ -1131,7 +1550,13 @@ class TransformerEncoder(nn.Module):
            otherwise). Idempotent — a second call no-ops once the swap has
            happened (the out-proj is then already a plain `nn.Linear`).
         """
-        self.encoder.set_backend("torch-math")
+        # EdgeAttention has no pluggable backend — it is ALWAYS raw torch
+        # attention (set_backend just warns, attention.py:544-549) and is
+        # already trace-safe; only switch the backend for the non-edge encoder
+        # (the v1 EncoderLayer skips the backend assignment when edge_embed_dim>0,
+        # transformer.py:599-601,616-620 — the now-NAMED constraint ED2 enforces).
+        if self.edges_key is None:
+            self.encoder.set_backend("torch-math")
         if self.mup:
             self._fold_mu_readout()
 
@@ -1169,6 +1594,16 @@ class TransformerEncoder(nn.Module):
         (transformer.py:745-750), so only ``encoded.seq`` is produced — no
         ``masks.registers`` (the produce is gated out in `declare_io`).
 
+        When an `edges` port is configured (M6 sub-wave C; FD §6.7 1422-1424)
+        the edge-embed tensor ``edges.<stream>_emb`` ``[B, T, T, D_e]`` is passed
+        as the v1 ``edge_x`` kwarg. The register zero-pad to the
+        register-augmented sequence length stays INSIDE the composed v1
+        `Transformer` (transformer.py:689-719) — it builds the pad from the
+        DYNAMIC ``x.shape[1]``, the SHAPE-DERIVED pad the ONNX trace needs (FD
+        §6.7 ONNX note; ED1 ONNX-trace assertion). The per-layer edge update is
+        internal (transformer.py:729-733), so this module still publishes only
+        ``encoded.seq`` (+ the optional register mask) — no edge output key.
+
         Returns
         -------
         dict[str, Tensor]
@@ -1179,7 +1614,10 @@ class TransformerEncoder(nn.Module):
         # both (transformer.py:777,785) — never hand it bundle-owned dicts.
         xs: dict[str, Tensor] = {"seq": b.get("seq.x")}
         pad: dict[str, Tensor] = {"seq": b.get("seq.mask")}
-        encoded, out_pad = self.encoder(xs, pad_mask=pad)
+        kwargs: dict[str, Tensor] = {}
+        if self.edges_key is not None:
+            kwargs["edge_x"] = b.get(self.edges_key)
+        encoded, out_pad = self.encoder(xs, pad_mask=pad, **kwargs)
         if self.drop_registers:
             # registers stripped from encoded.seq; v1 also removed "REGISTERS"
             # from the pad dict, so there is no register mask to publish
