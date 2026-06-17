@@ -1,4 +1,4 @@
-"""M7 W1 gates harness — CV1 (converter acceptance) + CV2 (hard-error path).
+"""M7 W1 gates harness — CV1 (converter acceptance) + CV2 (hard-error path) + CVF.
 
 Standalone gates, each a subcommand of ``python -m salt.core.gates_m7``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -88,6 +88,26 @@ Gate criteria (each justified in its ``run_*`` docstring vs the plan/matrix):
   v1 source for a HEALTHY config (which converts cleanly), so the "must
   hard-error" assertion flips to False and the gate goes red, proving the
   hard-error check is not vacuous.
+
+- **CVF — converter-output target-producer fidelity** (M7 W1.5; the validate/
+  plan-compile MISS). Over the SAME CV1 denominator, CVF asserts every converted
+  task's declared target/label is PRODUCED by a data module: (i) every task
+  target in the converted FIT plan has a producer, and every v1-declared
+  SYNTHETIC handle (a ``multi_target`` ``custom_target`` column that exists
+  nowhere on disk) is produced by a CONCRETE (non-wildcard) data module
+  (``MultiTarget`` / ``MaskFormerTargets`` / ...), never served only by the
+  demand-driven ``Labels`` ``labels.**`` wildcard — the MISS that let the broken
+  pre-F1a ``regression_multi_target`` pass CV1 (its regression head consumed a
+  never-produced ``pt_label_handle`` yet plan-compiled clean because the wildcard
+  narrows ``labels.**`` to ANY demanded key); (ii) the converter's task-NAME +
+  stream set equals the v1 RESOLVED set; (iii) the named fixture exceptions
+  (``event_classifier``, ``regression_multi_target``) are excluded from
+  converter-vs-FIXTURE equality (fixture keeps, not fidelity failures) but NOT
+  from check (i) — ``regression_multi_target`` MUST now concretely produce its
+  ``pt_label_handle`` target (F1a). Negative control (``test_gates_m7.py`` + the
+  in-gate ``corruption`` hook): a converter output whose ``MultiTarget`` producer
+  was DELETED falls back to the wildcard (plan-compile still succeeds, the MISS)
+  -> the target's ``wildcard_only`` flag flips True and the gate goes red.
 """
 
 from __future__ import annotations
@@ -1647,6 +1667,493 @@ def run_cv2(
 
 
 # ---------------------------------------------------------------------------
+# CVF — converter-output target-producer fidelity (the plan-compile MISS)
+# ---------------------------------------------------------------------------
+
+# The two CV1 configs whose hand-written v2 fixture is an INTENTIONAL keep that
+# is NOT a 1:1 converter reproduction — they are excluded from any
+# converter-vs-FIXTURE equality in CVF (they are documented fixture exceptions,
+# NOT converter-fidelity failures). They are NAMED here explicitly (the gate
+# pins them) and asserted to be the curated fixture exceptions, never silently
+# dropped. CRUCIALLY: regression_multi_target stays on this list (its fixture
+# renames the v1 task and is therefore not byte-equal to the converter) BUT it
+# MUST still pass CVF check (i) — F1a now translates the v1 `multi_target` block
+# into a concrete MultiTarget data module that PRODUCES the `pt_label_handle`
+# custom target the regression head consumes, so the head's target is no longer
+# a phantom satisfied only by the demand-driven `Labels` wildcard.
+_CVF_FIXTURE_EXCEPTIONS: tuple[str, ...] = ("event_classifier", "regression_multi_target")
+
+# v2 data-module processor classes that are CONCRETE (non-wildcard) producers of
+# synthetic label/target handles: a `custom_target` created by MultiTarget, a
+# per-object MaskFormer target produced by MaskFormerTargets, etc. A synthetic
+# target produced by one of these (allow_wildcards == False) is GENUINELY served;
+# a synthetic target served ONLY by the `Labels` wildcard (allow_wildcards ==
+# True, which narrows `labels.**` to ANY demanded key — it never proves the
+# column exists) is the plan-compile MISS this gate exists to catch.
+_CVF_CONCRETE_LABEL_PRODUCERS: tuple[str, ...] = (
+    "MultiTarget",
+    "MaskFormerTargets",
+    "MaskDecoder",
+)
+
+
+def _v1_synthetic_targets(v1_resolved: Mapping[str, Any]) -> set[str]:
+    """The v1-declared SYNTHETIC label handles a converted task must NOT phantom.
+
+    These are label keys that do NOT exist as a dataset column and therefore
+    REQUIRE a concrete data-module producer in the converted config — the
+    demand-driven `Labels` wildcard would silently "produce" them at plan-compile
+    (narrowing ``labels.**`` to any demanded key) while no real column backs them,
+    which is exactly the MISS that let the broken (pre-F1a) regression_multi_target
+    pass CV1. Derived INDEPENDENTLY from the v1 source (not the converter output)
+    so a converter that DROPS the producer is caught:
+
+    - v1 ``data.multi_target`` rules' ``custom_target`` outputs — the
+      ``pt_label_handle`` family (v1 datasets.py:648-693 NaN-placeholder columns,
+      created on the fly, never read from disk).
+
+    Returns
+    -------
+    set[str]
+        Dotted ``labels.<stream>.<handle>`` keys that must be concretely produced.
+    """
+    out: set[str] = set()
+    data = v1_resolved.get("data") or {}
+    for rule in data.get("multi_target") or ():
+        if not isinstance(rule, Mapping):
+            continue
+        custom = rule.get("custom_target")
+        stream = rule.get("input_name")
+        if custom is not None and stream is not None:
+            out.add(f"labels.{stream}.{custom}")
+    return out
+
+
+def _v1_task_signature(v1_resolved: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """The v1 resolved task-NAME set + the stream set its tasks read.
+
+    Reads the inner ``SaltModel`` heads (the path ``convert_stack`` reads,
+    convert.py) — the converter preserves the v1 task ``name`` verbatim as the v2
+    instance name, so the two name sets must coincide for a faithful conversion.
+    A ``mask_decoder`` block counts as the ``mask_decoder`` head (the converter's
+    instance name for it).
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(sorted task names, sorted stream names)``.
+    """
+    inner = ((v1_resolved.get("model") or {}).get("model") or {}).get("init_args", {}) or {}
+    tasks = (inner.get("tasks") or {}).get("init_args", {}).get("modules", []) or []
+    names: list[str] = []
+    streams: set[str] = set()
+    for t in tasks:
+        init = t.get("init_args") or {}
+        if init.get("name") is not None:
+            names.append(str(init["name"]))
+        if init.get("input_name") is not None:
+            streams.add(str(init["input_name"]))
+    if inner.get("mask_decoder") is not None:
+        names.append("mask_decoder")
+        streams.add("objects")
+    return sorted(names), sorted(streams)
+
+
+def _conv_task_signature(cfg: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """The converted v2 task-NAME set + the stream set its task modules read.
+
+    The task instance names are the ``model.init_args.modules`` keys whose class
+    is a v2 head (``*TaskModule`` / ``MaskDecoder``); the streams are their
+    ``init_args.stream`` (the v1 ``input_name``).
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(sorted task instance names, sorted stream names)``.
+    """
+    mods = (cfg.get("model") or {}).get("init_args", {}).get("modules", {}) or {}
+    names: list[str] = []
+    streams: set[str] = set()
+    for name, mod in mods.items():
+        if not isinstance(mod, Mapping):
+            continue
+        if any(str(mod.get("class_path", "")).endswith(s) for s in _V2_TASK_CLASS_SUFFIXES):
+            names.append(name)
+            stream = (mod.get("init_args") or {}).get("stream")
+            if stream is not None:
+                streams.add(str(stream))
+    return sorted(names), sorted(streams)
+
+
+def _fit_target_producers(
+    conv_path: Path, outdir: Path, *, extra_sets: list[str] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Per task target key, the set of producing modules in the converted FIT plan.
+
+    Compiles the converted config's FIT plan (the SAME data-free machinery as
+    `_plan_signature` / `_validate_rc` — norm overrides + muP shapes), then for
+    every ``labels.*`` / ``objects.*`` / ``masks.*`` key consumed by a TASK head
+    (``*TaskModule`` / ``MaskDecoder``) records each producer module's CLASS and
+    whether that producer is a demand-driven WILDCARD producer (``allow_wildcards``
+    — the `Labels` ``labels.**`` producer, which never proves a real column backs
+    the narrowed key). A target served ONLY by a wildcard producer has NO concrete
+    backing — the plan-compile MISS.
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        ``{target_key: {"producers": [class, ...], "wildcard_only": bool,
+        "consumers": [class, ...]}}`` for every target a FIT task consumes, or a
+        single ``{"__error__": "..."}`` entry on a compile failure.
+    """
+    sets, _ = _normaliser_overrides([conv_path], outdir)
+    sets += _mup_shape_override([conv_path], sets, outdir)
+    if extra_sets:
+        sets += extra_sets
+    bare = [s for s in sets if s != "--set"]
+    try:
+        with _quiet():
+            gc = load_config([str(conv_path)], bare)
+            fit_modes = [m for m in gc.sinks if m.name == "FIT"]
+            if not fit_modes:
+                return {"__error__": "converted config declares no FIT mode"}
+            mode = fit_modes[0]
+            plan = compile_plan(
+                gc.modules,
+                mode,
+                gc.sources,
+                schema=gc.schema,
+                sinks=gc.sinks,
+                sink_origins=gc.sink_origins.get(mode),
+            )
+    except Exception as err:  # noqa: BLE001 - a FIT compile failure is the per-config datum
+        return {"__error__": f"{type(err).__name__}: {err}"}
+
+    def _is_task(node: str) -> bool:
+        mod = gc.modules.get(node)
+        return mod is not None and any(
+            type(mod).__name__.endswith(s) for s in _V2_TASK_CLASS_SUFFIXES
+        )
+
+    # the keys each task head consumes (its label/target demand)
+    target_prefixes = ("labels.", "objects.", "masks.", "targets.")
+    consumers: dict[str, set[str]] = {}
+    for e in plan.edges:
+        if e.key.startswith(target_prefixes) and e.consumer in gc.modules and _is_task(e.consumer):
+            consumers.setdefault(e.key, set()).add(type(gc.modules[e.consumer]).__name__)
+    out: dict[str, dict[str, Any]] = {}
+    for key, cons in consumers.items():
+        producers: list[str] = []
+        wildcard_flags: list[bool] = []
+        for e in plan.edges:
+            if e.key != key:
+                continue
+            if e.producer in gc.modules:
+                pmod = gc.modules[e.producer]
+                producers.append(type(pmod).__name__)
+                wildcard_flags.append(bool(getattr(pmod, "allow_wildcards", False)))
+            else:  # a SOURCES sentinel — a framework-provided concrete leaf
+                producers.append(e.producer)
+                wildcard_flags.append(False)
+        out[key] = {
+            "producers": sorted(set(producers)),
+            # a target is "wildcard_only" when it has ≥1 producer and EVERY
+            # producer is a demand-driven wildcard (the Labels labels.** narrow) —
+            # no concrete data module proves the key is real. No producer at all is
+            # impossible here (compile_plan raises on a missing producer), so this
+            # is the meaningful failure surface.
+            "wildcard_only": bool(producers) and all(wildcard_flags),
+            "consumers": sorted(cons),
+        }
+    return out
+
+
+def run_cvf(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """CVF: every converted task's target is PRODUCED by a data module (no phantoms).
+
+    Over the SAME CV1 denominator (``_CV1_CONFIGS``, the convertible configs —
+    the expected-hard-error ``tutorial`` is skipped, it has no converter output),
+    CVF reuses CV1's converter-run + v1-resolution machinery and asserts:
+
+    (i) **target producer fidelity** — for EVERY task in the converted FIT plan,
+        every label/target it consumes has a producer, AND every v1-declared
+        SYNTHETIC handle (a ``multi_target`` ``custom_target`` — a column that
+        does NOT exist on disk) is produced by a CONCRETE (non-wildcard) data
+        module (``MultiTarget`` / ``MaskFormerTargets`` / ...), NOT served only by
+        the demand-driven ``Labels`` ``labels.**`` wildcard. This is the
+        plan-compile + ``salt2 graph validate`` MISS that let the broken (pre-F1a)
+        ``regression_multi_target`` pass CV1: the wildcard narrows ``labels.**`` to
+        ANY demanded key, so a regression head consuming a never-produced
+        ``pt_label_handle`` compiled clean while no real column backed it.
+
+    (ii) **converter-v1 faithfulness** — for configs INTENDED to be converter-v1
+        faithful (all CV1 configs except the named fixture exceptions), the
+        converter's task-NAME set and stream set equal the v1 RESOLVED set (the
+        converter preserves v1 task names verbatim; a dropped/renamed task is
+        caught against the v1 source, independently of the fixture).
+
+    (iii) **named fixture exceptions** — ``event_classifier`` and
+        ``regression_multi_target`` are NAMED explicitly (``_CVF_FIXTURE_EXCEPTIONS``)
+        and excluded from converter-vs-FIXTURE equality (they are fixture keeps,
+        NOT converter-fidelity failures). BUT they are NOT excused from check (i):
+        ``regression_multi_target`` MUST produce its ``pt_label_handle`` target
+        concretely (F1a). The exception set is PINNED (== the configs flagged
+        fixture-subset whose fixture renames/curates the converter output).
+
+    Negative control (``test_gates_m7.py`` + the in-gate ``corruption`` hook,
+    test-only, never on the CLI): a converter output with a task whose synthetic
+    target has NO concrete producer (the hook DELETES the ``MultiTarget`` data
+    module from one config's converted dict) — the target then falls back to the
+    ``Labels`` wildcard (plan-compile still SUCCEEDS, the MISS), so its
+    ``wildcard_only`` flag flips True and CVF goes red, proving check (i) is not
+    vacuous.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("CVF converter-output target-producer fidelity — every task target has a real producer")
+    print("=" * 96)
+
+    checks: dict[str, bool] = {}
+    results: list[dict[str, Any]] = []
+
+    # the named fixture exceptions must be a subset of the CV1 config set (and of
+    # the pinned fixture-subset set) — a typo or a fixture silently made faithful
+    # changes the accounting.
+    cv1_names = {e["name"] for e in _CV1_CONFIGS}
+    checks["fixture_exceptions_pinned"] = (
+        set(_CVF_FIXTURE_EXCEPTIONS) <= cv1_names
+        and set(_CVF_FIXTURE_EXCEPTIONS) <= set(_CV1_FIXTURE_SUBSET)
+    )
+
+    for entry in _CV1_CONFIGS:
+        name = entry["name"]
+        # the expected-hard-error config (tutorial) has NO converter output to
+        # check targets on — it is correctly absent (CV1 gates its hard-error).
+        if entry.get("expect_convert_error"):
+            continue
+        cdir = outdir / name
+        cdir.mkdir(parents=True, exist_ok=True)
+        v1_full = [V1_CONFIG_DIR / p for p in entry.get("v1", ())]
+        fix_full = [CONFIG_DIR / p for p in entry.get("fix", ())]
+        is_today = bool(entry.get("today"))
+        is_exception = name in _CVF_FIXTURE_EXCEPTIONS
+        row: dict[str, Any] = {
+            "name": name,
+            "tier": entry["tier"],
+            "today": is_today,
+            "fixture_exception": is_exception,
+            "converted": False,
+            "v1_synthetic_targets": [],
+            "task_target_producers": {},
+            "synthetic_targets_concretely_produced": None,
+            "all_targets_have_producer": None,
+            "converter_v1_task_match": None,
+            "converter_v1_stream_match": None,
+            "v1_tasks": [],
+            "conv_tasks": [],
+        }
+        if not all(p.is_file() for p in v1_full):
+            checks[f"{name}:targets_produced"] = False
+            results.append(row)
+            continue
+
+        # -- convert (reuse CV1's class_names sourcing) -----------------------
+        class_names = (
+            dict(entry.get("class_names") or {}) if is_today else _fixture_class_names(fix_full)
+        )
+        try:
+            with _quiet():
+                cfg = convert.convert_config(v1_full, class_names=class_names or None)
+                v1_resolved = convert.resolve_stack(v1_full)
+        except ConvertError as err:
+            row["convert_error"] = f"{type(err).__name__}: {err}"
+            checks[f"{name}:targets_produced"] = False
+            results.append(row)
+            continue
+        # the test-only corruption hook mutates the converted config dict (e.g.
+        # strips the MultiTarget producer) to prove the gate has teeth.
+        if corruption is not None:
+            cfg = corruption(cfg) if name == "regression_multi_target" else cfg
+        row["converted"] = True
+        conv_path = cdir / f"{name}__converted.yaml"
+        conv_path.write_text(convert._yaml_dump(cfg))  # noqa: SLF001 - same-package dumper
+
+        # -- the GN2X_qcdsplit labeller substitution (same as CV1) ------------
+        extra_sets: list[str] = []
+        conv_lab = (
+            cfg.get("data", {}).get("modules", {}).get("labels", {}).get("init_args") or {}
+        ).get("class_names")
+        fix_lab = _fixture_labeller_classes(fix_full)
+        if entry.get("labeller_override") and conv_lab and fix_lab and conv_lab != fix_lab:
+            extra_sets = ["--set", f"data.modules.labels.init_args.class_names={fix_lab}"]
+
+        # -- (i) target producer fidelity ------------------------------------
+        synth = sorted(_v1_synthetic_targets(v1_resolved))
+        row["v1_synthetic_targets"] = synth
+        producers = _fit_target_producers(conv_path, cdir, extra_sets=extra_sets)
+        if "__error__" in producers:
+            row["fit_compile_error"] = producers["__error__"]
+            checks[f"{name}:targets_produced"] = False
+            results.append(row)
+            continue
+        row["task_target_producers"] = producers
+        # every consumed target has a producer (compile_plan guarantees this, but
+        # record it as an explicit check so a future plan that admits an orphan
+        # target — e.g. a writers-only sink with no producer — would be caught).
+        all_have_producer = all(bool(p["producers"]) for p in producers.values())
+        row["all_targets_have_producer"] = all_have_producer
+        # every v1-declared synthetic handle a task consumes is produced by a
+        # CONCRETE (non-wildcard) data module — NOT served only by the Labels
+        # wildcard. (A synthetic handle no task consumes won't appear in the FIT
+        # plan; the converter would have dropped both the producer and consumer,
+        # which the check-(ii) task match catches.)
+        synth_in_plan = [k for k in synth if k in producers]
+        synth_concrete = all(
+            not producers[k]["wildcard_only"]
+            and any(c in _CVF_CONCRETE_LABEL_PRODUCERS for c in producers[k]["producers"])
+            for k in synth_in_plan
+        )
+        # a synthetic target the v1 source declares MUST surface in the converted
+        # FIT plan (a task consumes it) — if it vanished entirely, the converter
+        # dropped the task that needed it. Require each declared synthetic key to
+        # be present AND concretely produced.
+        synth_all_present = set(synth_in_plan) == set(synth)
+        synthetic_ok = synth_concrete and synth_all_present
+        row["synthetic_targets_concretely_produced"] = synthetic_ok
+        row["synthetic_targets_in_plan"] = synth_in_plan
+        # no task target is served ONLY by the demand-driven wildcard among the
+        # synthetic set (the phantom). Real dataset columns (flavour_label,
+        # ftagTruthOriginLabel) are legitimately wildcard-served and NOT flagged.
+        checks[f"{name}:targets_produced"] = all_have_producer and synthetic_ok
+
+        # -- (ii) converter-v1 task/stream faithfulness ----------------------
+        v1_names, v1_streams = _v1_task_signature(v1_resolved)
+        conv_names, conv_streams = _conv_task_signature(cfg)
+        row["v1_tasks"] = v1_names
+        row["conv_tasks"] = conv_names
+        row["v1_streams"] = v1_streams
+        row["conv_streams"] = conv_streams
+        task_match = conv_names == v1_names
+        stream_match = conv_streams == v1_streams
+        row["converter_v1_task_match"] = task_match
+        row["converter_v1_stream_match"] = stream_match
+        # the named fixture exceptions are excluded from converter-vs-FIXTURE
+        # equality, NOT from converter-vs-V1 faithfulness (the converter is still
+        # faithful to the v1 SOURCE; only its fixture diverges). So check (ii)
+        # applies to every convertible config including the exceptions — it is
+        # the v1 SOURCE comparison, the thing the fixture exception does not break.
+        checks[f"{name}:faithful_to_v1"] = task_match and stream_match
+        results.append(row)
+
+    passed = all(checks.values())
+    n_total = len(results)
+    n_converted = sum(1 for r in results if r["converted"])
+    n_synth_configs = sum(1 for r in results if r["v1_synthetic_targets"])
+    exception_rows = [r for r in results if r["fixture_exception"]]
+
+    criterion = (
+        "the M7 W1.5 converter-output target-producer fidelity gate (the plan-compile + salt2 "
+        "graph validate MISS): over the SAME CV1 denominator, for EVERY task in the converted FIT "
+        "plan (i) every label/target it consumes has a producer AND every v1-declared SYNTHETIC "
+        "handle (a multi_target custom_target — a column absent from disk) is produced by a "
+        "CONCRETE (non-wildcard) data module (MultiTarget / MaskFormerTargets / ...), never served "
+        "only by the demand-driven Labels labels.** wildcard (which narrows to ANY demanded key, "
+        "proving no real column) — this is the MISS that let the broken pre-F1a "
+        "regression_multi_target pass CV1 (its regression head consumed a never-produced "
+        "pt_label_handle yet plan-compiled clean); (ii) for configs intended converter-v1 faithful "
+        "the converter's task-NAME + stream set equals the v1 RESOLVED set; (iii) the named "
+        "fixture exceptions "
+        f"({', '.join(_CVF_FIXTURE_EXCEPTIONS)}) are excluded from converter-vs-FIXTURE equality "
+        "(fixture keeps, not fidelity failures) — but regression_multi_target MUST still pass (i) "
+        "now that F1a translates its multi_target block into a concrete MultiTarget producer. "
+        "Negative control: a converter output with a synthetic target whose producer was deleted "
+        "FAILS (the target falls back to the wildcard -> wildcard_only -> gate red)."
+    )
+    report = _base_report(
+        "cvf_target_producer_fidelity",
+        passed,
+        criterion,
+        {
+            "total_configs": n_total,
+            "converted": n_converted,
+            "synthetic_target_configs": n_synth_configs,
+            "fixture_exception_names": list(_CVF_FIXTURE_EXCEPTIONS),
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["configs"] = results
+    report["cvf_fixture_exceptions"] = list(_CVF_FIXTURE_EXCEPTIONS)
+    report["v1_source_root"] = str(V1_CONFIG_DIR)
+    report["fixture_root"] = str(CONFIG_DIR)
+    report["scope_note"] = (
+        "CVF closes the validate/plan-compile MISS CV1 alone cannot catch: salt2 graph validate "
+        "and compile_plan accept a config in which a task consumes a label key that the "
+        "demand-driven Labels processor narrows out of its labels.** wildcard — the wildcard "
+        "produces ANY demanded key, so a phantom target (a custom_target column that exists "
+        "nowhere on disk) compiles clean and only fails at training-data-read time. CVF derives "
+        "the SYNTHETIC handle set INDEPENDENTLY from the v1 source (the multi_target custom_target "
+        "outputs) and asserts each is produced by a CONCRETE (allow_wildcards == False) data "
+        "module in the converted FIT plan — for regression_multi_target that producer is the "
+        "MultiTarget "
+        "module F1a now emits, producing labels.jets.pt_label_handle for the regression head "
+        "(MultiTarget --labels.jets.pt_label_handle--> RegressionTaskModule). Real dataset columns "
+        "(flavour_label, ftagTruthOriginLabel) are legitimately served by the Labels wildcard and "
+        "are NOT flagged — only the v1-declared synthetic handles must be concrete. Check (ii) "
+        "compares the converter against the v1 RESOLVED source (task names + streams), which the "
+        "fixture exceptions do not break (only their hand-written fixture diverges, by a rename/"
+        "curation); check (iii) names event_classifier + regression_multi_target as the pinned "
+        "fixture exceptions, excluded from fixture equality but NOT from check (i)."
+    )
+
+    # -- stdout table ----------------------------------------------------------
+    print(
+        f"{'config':<26}{'tier':<6}{'conv':>5}{'targets-ok':>12}{'v1-faithful':>13}"
+        f"{'synth':>7}  flags"
+    )
+    for r in results:
+        conv = "PASS" if r["converted"] else "FAIL"
+        targ = (
+            "PASS"
+            if checks.get(f"{r['name']}:targets_produced")
+            else ("-" if not r["converted"] else "FAIL")
+        )
+        faith = (
+            "PASS"
+            if checks.get(f"{r['name']}:faithful_to_v1")
+            else ("-" if not r["converted"] else "FAIL")
+        )
+        nsynth = len(r["v1_synthetic_targets"])
+        flags = []
+        if r["today"]:
+            flags.append("today")
+        if r["fixture_exception"]:
+            flags.append("fix-exception")
+        if nsynth:
+            flags.append("multi-target")
+        print(
+            f"{r['name']:<26}{r['tier']:<6}{conv:>5}{targ:>12}{faith:>13}"
+            f"{nsynth:>7}  {','.join(flags)}"
+        )
+    print(
+        f"\n{n_converted}/{n_total} converted; {n_synth_configs} config(s) declare synthetic "
+        f"multi_target handles (must be concretely produced); fixture exceptions: "
+        f"{[r['name'] for r in exception_rows]}"
+    )
+    _print_verdict("cvf", passed, criterion, _emit_report(report, outdir, "cvf"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1666,6 +2173,7 @@ def _build_parser() -> argparse.ArgumentParser:
     helps = {
         "cv1": "Converter acceptance over the needs-M5+M6 denominator (convert+validate+plan==fix)",
         "cv2": "Converter hard-error path on the bit-rotted/parked configs (the dropped marker)",
+        "cvf": "Converter target-producer fidelity (every task target has a real producer)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -1682,7 +2190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         0 if the gate passed, 1 otherwise.
     """
     args = _build_parser().parse_args(argv)
-    runner = {"cv1": run_cv1, "cv2": run_cv2}[args.gate]
+    runner = {"cv1": run_cv1, "cv2": run_cv2, "cvf": run_cvf}[args.gate]
     code, _ = runner(args.outdir)
     return code
 

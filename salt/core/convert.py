@@ -481,7 +481,6 @@ def _convert_task(
     cfg_name: str,
     pooled_key: str,
     context_key: str,
-    has_split: bool,
     has_encoder: bool,
     train_attr_names: Mapping[str, list[str]] | None,
 ) -> tuple[str, dict[str, Any]]:
@@ -490,8 +489,10 @@ def _convert_task(
     The v1 ``name``/``input_name`` couple becomes the v2 instance name + the
     ``stream`` + ``input``/``context`` wiring. A GLOBAL task (``input_name`` ==
     ``global_object``) reads the pooled rep as ``input``; a per-token task on a
-    track stream reads ``encoded.<stream>`` (the default) with the pooled rep
-    as ``context`` (the v1 ``context_size`` pattern).
+    track stream reads ``encoded.<stream>`` (the default), with the pooled rep
+    as ``context`` ONLY when the v1 head declared ``context_size`` (the v1 Dense
+    consumes context only then — dense.py:91-94; the encoder-less no-context-size
+    track heads receive but DROP the passed context).
 
     Returns
     -------
@@ -530,8 +531,18 @@ def _convert_task(
         if not has_encoder:
             module["input"] = f"embed.{input_name}"
             module["sequence"] = True
-        # the pooled rep as context (v1 context_size pattern)
-        if "context_size" in dense_cfg or not has_split:
+        # the pooled rep as context — ONLY when the v1 head declared context_size.
+        # v1 SaltModel.run_tasks (saltmodel.py:221-222) ALWAYS PASSES the pooled
+        # global_rep as `context` to every per-token (non-global, non-objects) task,
+        # but the v1 Dense head only CONSUMES it when context_size is truthy
+        # (dense.py:91-94: `if self.context_size: x = attach_context(x, context)`).
+        # With no context_size the context is silently dropped (and the net width
+        # input_size+context_size has no room for it), so injecting `context:
+        # pooled.global` here would be UNFAITHFUL — it would wire/consume a context
+        # the v1 head never used. The encoder-less no_global_object track heads
+        # (regression / regression_weighted / nan_regression) declare no context_size,
+        # and their hand-written v2 fixtures correctly omit context.
+        if "context_size" in dense_cfg:
             module["context"] = context_key
 
     weight = init.get("weight")
@@ -676,7 +687,9 @@ def _convert_data(
       - ``num_inputs`` -> per-group ``truncate:``;
       - ``selections`` -> the reader's ``selections:`` (ftag cut strings);
       - ``labeller_config`` -> the ``Labels`` processor labeller init_args;
-      - ``mf_config`` -> a ``MaskFormerTargets`` processor (handled separately).
+      - ``mf_config`` -> a ``MaskFormerTargets`` processor (handled separately);
+      - ``multi_target`` -> a ``MultiTarget`` processor (the conditional
+        target-replacement rules, datasets.py:695-739).
 
     Returns
     -------
@@ -686,7 +699,8 @@ def _convert_data(
     Raises
     ------
     ConvertError
-        When ``data.variables`` is empty (nothing to read).
+        When ``data.variables`` is empty (nothing to read), or a multi_target
+        rule is unconvertible (FD §10).
     """
     variables = dict(v1.get("variables") or {})
     if not variables:
@@ -739,6 +753,15 @@ def _convert_data(
         },
         "labels": {"class_path": "salt.core.data.Labels", "init_args": labels_init},
     }
+    # v1 top-level data.multi_target -> the MultiTarget processor (the conditional
+    # target-replacement rules; the produced custom_target/target is a TRAINING-gated
+    # label the regression head consumes). Concrete produce beats the Labels wildcard
+    # (planner rule (a)), so it OWNS the built label key — write-once is preserved.
+    multi_target = v1.get("multi_target")
+    if multi_target:
+        data["modules"]["multi_target"] = _multi_target_processor(
+            _as_list(multi_target), cfg_name=cfg_name
+        )
     return data
 
 
@@ -942,7 +965,6 @@ def _convert_maskformer(
             cfg_name=cfg_name,
             pooled_key="pooled.global",
             context_key="pooled.global",
-            has_split=False,
             has_encoder=True,  # the decoder requires an encoder; input overridden below
             train_attr_names=None,
         )
@@ -993,6 +1015,79 @@ def _mf_targets_processor(mf_config: Mapping[str, Any]) -> dict[str, Any]:
         "class_map": class_map,
     }
     return {"class_path": "salt.core.data.MaskFormerTargets", "init_args": init}
+
+
+# v1 multi_target rule key -> v2 MultiTarget replacement-rule key. The v1 spelling
+# (datasets.py:709-716) differs from the v2 processor's surface (processors.py:586-595):
+# v1 'input_name' is the stream and v1 'opp' is the operator; every other key (sel_label,
+# value, source, custom_target/target) is named identically.
+_MULTI_TARGET_RULE_KEYS: dict[str, str] = {
+    "input_name": "stream",
+    "opp": "op",
+    "sel_label": "sel_label",
+    "value": "value",
+    "source": "source",
+    "custom_target": "custom_target",
+    "target": "target",
+}
+
+
+def _multi_target_processor(
+    multi_target: Sequence[Mapping[str, Any]], *, cfg_name: str
+) -> dict[str, Any]:
+    """Build the v2 ``MultiTarget`` data processor from a v1 ``data.multi_target`` block.
+
+    v1's ``multi_target`` (``datasets.py:90/123``; setup ``237-248``; placeholder
+    injection ``648-693``; sequential mutation ``695-739``) is a list of conditional
+    target-replacement rules applied IN ORDER over a running per-output array
+    (``torch.where(op(sel, value), source, running)``). Each rule names a stream
+    (``input_name``), a selection label compared by an operator (``opp``) against a
+    literal ``value``, the ``source`` label written where the condition holds, and
+    exactly one of ``custom_target`` (create a NaN-base new label) or ``target``
+    (replace an existing label). The v2 ``MultiTarget`` processor
+    (``salt.core.data.MultiTarget``, processors.py:550-719) reproduces this exactly;
+    the only rename is ``input_name`` -> ``stream`` and ``opp`` -> ``op``.
+
+    Returns
+    -------
+    dict[str, Any]
+        The ``{class_path, init_args}`` MultiTarget module (module key ``multi_target``).
+
+    Raises
+    ------
+    ConvertError
+        On a rule that is not a mapping, carries an unknown key (FD §10 — never
+        silently drop a v1 directive), or sets neither/both of
+        ``custom_target``/``target``.
+    """
+    rules: list[dict[str, Any]] = []
+    for raw in multi_target:
+        if not isinstance(raw, Mapping):
+            raise ConvertError(
+                f"config {cfg_name!r}: data.multi_target entry is not a mapping (got {raw!r})"
+            )
+        unknown = [k for k in raw if k not in _MULTI_TARGET_RULE_KEYS]
+        if unknown:
+            raise ConvertError(
+                f"TODO(multi_target): config {cfg_name!r} data.multi_target rule has unknown "
+                f"key(s) {unknown} — not in the v1 rule surface "
+                f"{sorted(_MULTI_TARGET_RULE_KEYS)} (datasets.py:709-716). The converter must not "
+                "silently drop a v1 directive (FD §10); extend the translation or fix the config."
+            )
+        has_custom = raw.get("custom_target") is not None
+        has_target = raw.get("target") is not None
+        if has_custom == has_target:
+            raise ConvertError(
+                f"TODO(multi_target): config {cfg_name!r} data.multi_target rule must set exactly "
+                f"one of 'custom_target' (create a new label) or 'target' (replace an existing "
+                f"label) (v1 datasets.py:237-248); got {dict(raw)!r}."
+            )
+        rule = {_MULTI_TARGET_RULE_KEYS[k]: v for k, v in raw.items()}
+        rules.append(rule)
+    return {
+        "class_path": "salt.core.data.MultiTarget",
+        "init_args": {"replacements": rules},
+    }
 
 
 def _convert_edges(
@@ -1266,7 +1361,6 @@ def convert_stack(
             cfg_name=cfg_name,
             pooled_key=pooled_key,
             context_key=pooled_key,
-            has_split=has_split,
             has_encoder=has_encoder,
             train_attr_names=train_attr_names,
         )

@@ -8,7 +8,7 @@ hook (never on the CLI) proves the gate's assertions are not vacuous.
 from __future__ import annotations
 
 import salt.core.gates_m7 as gm7
-from salt.core.gates_m7 import run_cv1, run_cv2
+from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf
 
 # the authoritative embedded lists live as module privates on gm7 (the gate is
 # the single source of truth); reference them through the module so the test does
@@ -17,6 +17,7 @@ _CV1_CONFIGS = gm7._CV1_CONFIGS  # noqa: SLF001
 _CV1_FIXTURE_SUBSET = gm7._CV1_FIXTURE_SUBSET  # noqa: SLF001
 _CV2_CONFIGS = gm7._CV2_CONFIGS  # noqa: SLF001
 _CV2_HEALTHY_PROBE = gm7._CV2_HEALTHY_PROBE  # noqa: SLF001
+_CVF_FIXTURE_EXCEPTIONS = gm7._CVF_FIXTURE_EXCEPTIONS  # noqa: SLF001
 
 
 class TestCV1:
@@ -282,9 +283,131 @@ class TestCV2:
         assert not bad["hard_errored"]
 
 
+class TestCVF:
+    """CVF — converter-output target-producer fidelity (the validate/plan-compile MISS).
+
+    Pins: every converted task's target is PRODUCED by a data module (check (i)),
+    every v1-declared synthetic multi_target handle is produced CONCRETELY (not
+    served only by the Labels wildcard), the converter task/stream set equals the
+    v1 resolved set for faithful configs (check (ii)), the named fixture exceptions
+    are excluded from fixture equality but NOT from check (i) (check (iii)), and the
+    corruption teeth (deleting a config's MultiTarget producer -> the synthetic
+    target falls back to the wildcard -> gate red).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_cvf(tmp_path)
+        assert code == 0, {k: v for k, v in report["checks"].items() if not v}
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "cvf_report.json").is_file()
+
+    def test_runs_over_cv1_denominator_minus_expected_hard_errors(self, tmp_path):
+        _code, report = run_cvf(tmp_path)
+        # CVF iterates the SAME CV1 config set, skipping only the
+        # expected-hard-error configs (tutorial: no converter output to check)
+        expected_hard_err = {e["name"] for e in _CV1_CONFIGS if e.get("expect_convert_error")}
+        cvf_names = {c["name"] for c in report["configs"]}
+        cv1_names = {e["name"] for e in _CV1_CONFIGS}
+        assert cvf_names == cv1_names - expected_hard_err
+        assert "tutorial" not in cvf_names  # the one expected-hard-error config
+        assert report["config"]["total_configs"] == len(cv1_names) - len(expected_hard_err)
+
+    def test_multi_target_now_produces_its_target_concretely(self, tmp_path):
+        # the heart of F1a: regression_multi_target's pt_label_handle custom_target
+        # is now PRODUCED by a concrete MultiTarget data module, not phantom-served
+        # by the Labels wildcard (the validate/plan-compile MISS that let the
+        # broken config pass CV1).
+        _code, report = run_cvf(tmp_path)
+        rmt = next(c for c in report["configs"] if c["name"] == "regression_multi_target")
+        assert rmt["converted"]
+        # the v1 source declares the synthetic pt_label_handle custom_target
+        assert "labels.jets.pt_label_handle" in rmt["v1_synthetic_targets"]
+        # it is consumed by a task in the converted FIT plan...
+        prod = rmt["task_target_producers"]
+        assert "labels.jets.pt_label_handle" in prod
+        entry = prod["labels.jets.pt_label_handle"]
+        # ...and produced by a CONCRETE MultiTarget (NOT the Labels wildcard)
+        assert "MultiTarget" in entry["producers"]
+        assert not entry["wildcard_only"], "pt_label_handle is phantom-served by the wildcard"
+        assert "RegressionTaskModule" in entry["consumers"]
+        # the gate's per-config target check passes for it
+        assert rmt["synthetic_targets_concretely_produced"]
+        assert report["checks"]["regression_multi_target:targets_produced"]
+
+    def test_every_task_target_has_a_producer(self, tmp_path):
+        _code, report = run_cvf(tmp_path)
+        for c in report["configs"]:
+            if not c["converted"]:
+                continue
+            assert c["all_targets_have_producer"], c["name"]
+            assert report["checks"][f"{c['name']}:targets_produced"], (
+                f"{c['name']}: a task target is not concretely produced "
+                f"(producers={c['task_target_producers']})"
+            )
+
+    def test_converter_faithful_to_v1_task_and_stream_set(self, tmp_path):
+        # check (ii): for EVERY convertible config (incl. the fixture exceptions,
+        # which are faithful to the v1 SOURCE — only their fixture diverges) the
+        # converter task-name + stream set equals the v1 resolved set
+        _code, report = run_cvf(tmp_path)
+        for c in report["configs"]:
+            if not c["converted"]:
+                continue
+            assert c["converter_v1_task_match"], (
+                f"{c['name']}: conv tasks {c['conv_tasks']} != v1 tasks {c['v1_tasks']}"
+            )
+            assert c["converter_v1_stream_match"], (
+                f"{c['name']}: conv streams {c['conv_streams']} != v1 {c['v1_streams']}"
+            )
+            assert report["checks"][f"{c['name']}:faithful_to_v1"], c["name"]
+
+    def test_fixture_exceptions_named_and_pinned(self, tmp_path):
+        # check (iii): event_classifier + regression_multi_target are the NAMED
+        # fixture exceptions, pinned to the CV1 fixture-subset set; they are
+        # excluded from fixture equality but regression_multi_target is still NOT
+        # excused from check (i) below
+        _code, report = run_cvf(tmp_path)
+        assert report["cvf_fixture_exceptions"] == list(_CVF_FIXTURE_EXCEPTIONS)
+        assert set(_CVF_FIXTURE_EXCEPTIONS) == {"event_classifier", "regression_multi_target"}
+        assert report["checks"]["fixture_exceptions_pinned"]
+        # both exceptions are real CV1 fixture-subset configs
+        assert set(_CVF_FIXTURE_EXCEPTIONS) <= set(_CV1_FIXTURE_SUBSET)
+        for name in _CVF_FIXTURE_EXCEPTIONS:
+            row = next(c for c in report["configs"] if c["name"] == name)
+            assert row["fixture_exception"]
+            # NOT excused from check (i): each must still pass targets_produced
+            assert report["checks"][f"{name}:targets_produced"], name
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # the negative control: DELETE the MultiTarget data module from the
+        # converted regression_multi_target config. Its pt_label_handle target then
+        # falls back to the demand-driven Labels wildcard (plan-compile STILL
+        # succeeds — the MISS), so the target's wildcard_only flag flips True and
+        # CVF goes red, proving check (i) has teeth.
+        def corrupt(cfg):
+            cfg["data"]["modules"].pop("multi_target", None)
+            return cfg
+
+        code, report = run_cvf(tmp_path, corruption=corrupt)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["regression_multi_target:targets_produced"]
+        rmt = next(c for c in report["configs"] if c["name"] == "regression_multi_target")
+        # the synthetic target is now wildcard-only (phantom) -> not concretely produced
+        assert not rmt["synthetic_targets_concretely_produced"]
+        entry = rmt["task_target_producers"]["labels.jets.pt_label_handle"]
+        assert entry["wildcard_only"]
+        assert "MultiTarget" not in entry["producers"]
+
+
 def test_cli_dispatch_cv1(tmp_path):
     assert gm7.main(["cv1", "--outdir", str(tmp_path)]) == 0
 
 
 def test_cli_dispatch_cv2(tmp_path):
     assert gm7.main(["cv2", "--outdir", str(tmp_path)]) == 0
+
+
+def test_cli_dispatch_cvf(tmp_path):
+    assert gm7.main(["cvf", "--outdir", str(tmp_path)]) == 0
