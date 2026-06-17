@@ -56,6 +56,10 @@ data:
         groups:
           jets: {vector: true}
           tracks: {vector: false}
+          # constituent streams (v1 GN3V01.yaml:148-149 flows + electrons) —
+          # padded sequences like tracks, so vector:false (design §6.6)
+          flows: {vector: false}
+          electrons: {vector: false}
           # the GN3 'global' stream: an ordinary [B, F] vector (no pad mask,
           # design §6.6 1393-1396; v1 datasets.py:519-524 mask-excludes 'global')
           global: {vector: true}
@@ -89,6 +93,40 @@ data:
               numberOfPixelSplitHits,
               numberOfSCTSharedHits,
             ]
+          # flows stream — exact v1 GN3V01.yaml:186-191 (5 vars)
+          flows: [pt, energy, deta, dphi, isCharged]
+          # electrons stream — exact v1 GN3V01.yaml:192-220 (29 vars)
+          electrons:
+            [
+              pt,
+              ptfrac,
+              ptrel,
+              dr,
+              abs_eta,
+              eta,
+              phi,
+              ftag_et,
+              qOverP,
+              d0RelativeToBeamspot,
+              d0RelativeToBeamspotSignificance,
+              ftag_ptVarCone30OverPt,
+              numberOfPixelHits,
+              numberOfSCTHitsInclDead,
+              ftag_deltaPOverP,
+              eProbabilityHT,
+              deltaEta1,
+              deltaPhiRescaled2,
+              ftag_energyOverP,
+              Rhad,
+              Rhad1,
+              Eratio,
+              weta2,
+              Rphi,
+              Reta,
+              wtots1,
+              f1,
+              f3,
+            ]
     labels:
       class_path: salt.core.data.Labels
       init_args: {dtype_policy: int64-for-int}
@@ -104,7 +142,7 @@ model:
         class_path: salt.core.nn.Normaliser
         init_args:
           # norm_dict: REQUIRED override (see header)
-          streams: [jets, tracks]
+          streams: [jets, tracks, flows, electrons]
           global_object: jets
       # a SECOND normaliser for the 'global' vector stream fed past the encoder
       # (one Normaliser has a single global_object slot; jets already fills it)
@@ -121,9 +159,26 @@ model:
           context: [normed.jets]
           out_dim: 16
           dense: {hidden_layers: [16], activation: SiLU}
+      # flows StreamEmbed (v1 init_nets flows, GN3V01.yaml:25-27) — same dense
+      # config as tracks (v1 &init anchor), jets as embed context
+      flow_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: flows
+          context: [normed.jets]
+          out_dim: 16
+          dense: {hidden_layers: [16], activation: SiLU}
+      # electrons StreamEmbed (v1 init_nets electrons, GN3V01.yaml:29-31)
+      electron_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: electrons
+          context: [normed.jets]
+          out_dim: 16
+          dense: {hidden_layers: [16], activation: SiLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks]}
+        init_args: {streams: [tracks, flows, electrons]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
@@ -259,6 +314,9 @@ export: # export-ONLY half (design §5.1, §7); inert during fit/test
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    # constituent stream ports (v1 to_onnx exposes flows + electrons)
+    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows} # [L, F]
+    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons} # [L, F]
     # the GN3 alias: ONE Athena jet tensor cloned into the global port (design
     # §6.6/§7; v1 to_onnx.py:377-378). Identity gather here (global==jets cols).
     - {port: inputs.global, alias: inputs.jets}

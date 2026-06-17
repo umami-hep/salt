@@ -55,18 +55,29 @@ Gate criteria (each justified in its ``run_*`` docstring vs the plan/matrix):
   fixture (condition 4 is N/A): they are gated on conditions 1-3 only
   (convert+validate+plan-compile fit/test/onnx), with their global flavour
   ``class_names`` supplied via ``--class-names`` per cardinality (TPLTmu/PLITel
-  declare them inline). **Honesty**: where the hand-written fixture is a
-  curated SUBSET of the v1 source (fewer regression tasks / streams / context
-  edges than v1 — the fixtures were authored as feature-coverage skeletons, NOT
-  faithful 1:1 reproductions), the exact-plan match cannot hold; CV1 records a
-  per-config ``fixture_match`` AND a ``converter_faithful_to_v1`` classification,
-  flags the config, ASSERTS the converter reproduces the FULL v1 task count
-  (``conv_task_count == v1_task_count >= fixture_task_count`` — the
-  ``converter_faithful_to_v1`` claim is a CHECKED fact, not just a human note),
-  and asserts the converter still converts + validates + plan-compiles. The set
-  of fixture-subset configs is itself pinned (a fixture that SILENTLY started
-  matching, or stopped, changes the gate's accounting), so the divergence is a
-  documented, audited fact — not a hidden converter gap. NOTE: matrix §4 cond. 4's
+  declare them inline). **Post-Wave-F2 honesty**: 6 fixtures that were once
+  curated SUBSETS of the v1 source (regression, regression_gaussian,
+  regression_weighted, nan_regression, GN3V01, GN2XE) were RESTORED in Wave F2 to
+  FULL v1 fidelity — for these CV1 asserts they REPRODUCE THE FULL V1 CAPABILITY:
+  ``conv_task_count == v1_task_count == fixture_task_count`` AND the converter is
+  STRUCTURALLY EQUIVALENT to the fixture (the module-CLASS multiset matches in
+  every shared mode). The residual converter-vs-fixture differences are
+  topology-neutral cosmetics (verbose-v1 vs short head names → class-canonical
+  sink keys; the embed.tracks==seq.x edge for a single-stream Concat; the
+  fixture's hand-set PadMaskWriter mask column), so a byte-exact ``fixture_match``
+  is recorded but NOT required; a DROPPED module would break the structural
+  check. Exactly 2 INTENTIONAL KEEPS remain (``event_classifier`` — the converter
+  wires FIT/VAL metric sinks the fixture omits by design; ``regression_multi_target``
+  — the fixture renames the v1 task and is the curated F1a MultiTarget artifact):
+  their hand-written fixture is the faithful v2 artifact and NOT a 1:1 converter
+  reproduction, so the exact-plan match cannot hold; CV1 records ``fixture_match``
+  + ``converter_faithful_to_v1``, ASSERTS the converter reproduces the FULL v1
+  task count (``conv_task_count == v1_task_count >= fixture_task_count``), keeps
+  them fixture-DIVERGENT, and requires a ``keep_reason`` naming WHY. BOTH the keep
+  set and the restored set are PINNED (a fixture that SILENTLY started matching,
+  or regressed back to a subset, changes the gate's accounting), so every
+  divergence is a documented, audited fact — not a hidden converter gap. NOTE:
+  matrix §4 cond. 4's
   numerical forward-parity spot-check + the v1==v2 weight-parity test are
   explicitly DEFERRED (see the report ``deferred_forward_parity`` field): the
   v2-vs-v1 forward parity for every CV1 family is already bitwise-gated by
@@ -248,13 +259,27 @@ def _base_report(gate: str, passed: bool, criterion: str, config: dict[str, Any]
 #                 converter output can be compiled in this environment — the
 #                 converter output stays faithful to v1, the override is a data-
 #                 environment workaround, not a converter edit.
-#   fixture_subset — True when the hand-written fixture is a curated SUBSET of the
-#                 v1 source (fewer tasks/streams/context edges). For these the
-#                 exact-plan match cannot hold; the converter is MORE faithful to
-#                 v1 than the fixture. CV1 records WHY and still requires
-#                 convert+validate+plan-compile. This set is PINNED (the gate
-#                 asserts exactly these configs are subset-divergent — a fixture
-#                 silently starting/stopping to match changes the accounting).
+#   restored — True for the 6 Wave-F2-RESTORED configs (regression,
+#                 regression_gaussian, regression_weighted, nan_regression,
+#                 GN3V01, GN2XE) whose fixture was a v1 subset but is now restored
+#                 to FULL v1 fidelity. CV1 asserts they REPRODUCE THE FULL V1
+#                 CAPABILITY (conv == v1 == fixture task count AND module-class
+#                 multiset equal to the fixture in every shared mode); a byte-exact
+#                 fixture_match is recorded but NOT required (the residual diff is
+#                 topology-neutral cosmetics). This set is PINNED.
+#   fixture_subset — True for the 2 INTENTIONAL KEEPS (event_classifier,
+#                 regression_multi_target) whose hand-written fixture is the
+#                 faithful v2 artifact and NOT a 1:1 converter reproduction BY
+#                 DESIGN. The exact-plan match cannot hold; the converter is MORE
+#                 (event_classifier: metric-sink) / DIFFERENTLY (multi_target:
+#                 rename) faithful than the fixture. CV1 records WHY (a keep_reason
+#                 field), keeps them fixture-DIVERGENT, and still requires
+#                 convert+validate + the full-v1-task-count fact. This set is
+#                 PINNED (a fixture silently starting/stopping to match changes the
+#                 accounting).
+#   keep_reason — (fixture_subset keeps only) the documented reason the fixture
+#                 diverges from the converter by design (named per codex CVF
+#                 finding; asserted present by the gate).
 #   conditional_drop — True for Dipz (matrix §1: drops once hitz validates;
 #                 trigger fired post-M5). The converter still runs on it.
 #   note        — the matrix feature(s) the config exercises.
@@ -266,9 +291,11 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("regression.yaml",),
         "tier": "m5",
         "onnx": "validate",
-        "fixture_subset": True,
-        "note": "RegressionTask all variants + encoder-less pooling; fixture is a 3-task subset "
-        "of the v1 5-task source (converter reproduces all 5 v1 tasks)",
+        "restored": True,
+        "note": "RegressionTask all variants + encoder-less pooling; F2 RESTORED the fixture to the "
+        "full v1 5-task set (was a 3-task subset) — converter + fixture now both carry all 5 v1 "
+        "tasks (class-canonical module set + edges identical; sink keys differ only by the "
+        "verbose-v1 vs short-fixture head names)",
     },
     {
         "name": "regression_gaussian",
@@ -276,8 +303,11 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("regression_gaussian.yaml",),
         "tier": "m5",
         "onnx": "validate",
-        "fixture_subset": True,
-        "note": "GaussianRegressionTask + ONNX stddev; fixture is a curated subset of v1",
+        "restored": True,
+        "note": "GaussianRegressionTask + ONNX stddev; F2 confirmed full v1 fidelity (both gaussian "
+        "heads present, PadMaskWriter wired). Converter + fixture carry the same task count and "
+        "the same module-class set; the per-token head's input edge differs cosmetically "
+        "(converter embed.tracks vs fixture seq.x — identical for a single-stream Concat([tracks]))",
     },
     {
         "name": "regression_weighted",
@@ -285,8 +315,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("regression_weighted.yaml",),
         "tier": "m5",
         "onnx": "validate",
-        "fixture_subset": True,
-        "note": "RegressionTask sample_weight; fixture is a curated subset of the v1 source",
+        "restored": True,
+        "note": "RegressionTask sample_weight; F2 RESTORED the fixture to the full v1 5-task set "
+        "(was 3 + the mass denom var) — converter + fixture now class-canonical-IDENTICAL (module "
+        "set + edges + sinks match in every mode; only the head instance names differ)",
     },
     {
         "name": "regression_multi_target",
@@ -295,7 +327,14 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m5",
         "onnx": "validate",
         "fixture_subset": True,
-        "note": "MultiTarget processor + RegressionTask; fixture is a curated subset of the v1 src",
+        "keep_reason": "INTENTIONAL KEEP (1 of 2): the hand-written fixture RENAMES the v1 task and "
+        "is therefore not class-canonical-equal to the converter output (the converter preserves "
+        "the verbose v1 task name; the fixture is the curated artifact). The fixture is the faithful "
+        "v2 artifact kept for the MultiTarget/F1a producer-fidelity scenario (CVF); the converter "
+        "stays MORE-verbose-faithful to the v1 source. NOT a converter-fidelity failure.",
+        "note": "MultiTarget processor + RegressionTask; fixture renames the v1 task (intentional "
+        "keep, not subset-restorable — the fixture IS the faithful artifact). CVF asserts F1a's "
+        "concrete MultiTarget producer for pt_label_handle",
     },
     {
         "name": "nan_regression",
@@ -303,8 +342,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("nan_regression.yaml",),
         "tier": "m5",
         "onnx": "validate",
-        "fixture_subset": True,
-        "note": "RegressionTask NaN-target masking; fixture is a curated subset of the v1 source",
+        "restored": True,
+        "note": "RegressionTask NaN-target masking; F2 confirmed full v1 fidelity (all 3 v1 heads, "
+        "PadMaskWriter wired). Converter + fixture carry the same task count + module-class set; the "
+        "per-token head's input edge differs cosmetically (converter embed.tracks vs fixture seq.x)",
     },
     {
         "name": "dips",
@@ -428,10 +469,11 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("gn3v01.yaml",),
         "tier": "m5",
         "onnx": "validate",
-        "fixture_subset": True,
+        "restored": True,
         "note": "flagship GN3: VectorConcat+alias + LossGLS + norm_type:hybrid + RegressionTask; "
-        "fixture is a track-only subset of the v1 5-stream source (converter reproduces "
-        "tracks+flows+electrons)",
+        "F2 RESTORED the dropped flows + electrons constituent streams (was tracks-only) — the "
+        "converter + fixture now EXACTLY class-canonical-MATCH in every mode (module set + edges + "
+        "sinks identical; the converter reproduces tracks+flows+electrons, as does the fixture)",
     },
     {
         "name": "GN2emu",
@@ -484,6 +526,11 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m5",
         "onnx": "na",
         "fixture_subset": True,
+        "keep_reason": "INTENTIONAL KEEP (2 of 2): the converter's classification head wires the "
+        "FIT/VAL metric sinks that the hand-written fixture deliberately omits, so the FIT/VAL "
+        "plans diverge BY DESIGN (an export-omission that is correct for this fixture — the TEST/"
+        "ONNX plans still match). The fixture is the curated artifact; the divergence is an "
+        "intentional metric-sink omission, NOT a converter-fidelity failure or a missing v1 task.",
         "note": "RegressionTask TEST de-scaling from a NON-feature label; fit+test ONLY (no "
         "export: block). Fixture omits the FIT/VAL metric sinks the converter wires for the "
         "classification head (TEST/ONNX plans match)",
@@ -542,11 +589,12 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("GN2XE.yaml",),
         "tier": "m6",
         "onnx": "validate",
-        "fixture_subset": True,
+        "restored": True,
         "note": "GN2X with EDGE FEATURES end-to-end (EdgeFeatures -> EdgeEmbed -> encoder edges:; "
-        "M6-C, gates ED1/ED2). The hand-written fixture omits the jets-context edge v1 "
-        "attaches to track_embed (v1 InitNet.attach_global default True, initnet.py:46) — the "
-        "converter reproduces it, so the plans differ by one (norm.normed.jets -> track_embed)",
+        "M6-C, gates ED1/ED2). F2 RESTORED the jets-context edge v1 attaches to track_embed (v1 "
+        "InitNet.attach_global default True, initnet.py:46) — the converter + fixture now EXACTLY "
+        "class-canonical-MATCH in every mode (the norm.normed.jets -> track_embed edge is present "
+        "on both sides; edge counts FIT 37 / TEST 34 / ONNX 33 identical)",
     },
     # -- reproducible-today (✅) configs: NO hand-written v2 fixture exists (they
     # were never authored as M5/M6 fixtures — every module already shipped at
@@ -680,10 +728,38 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
     },
 )
 
-# the PINNED set of fixture-subset configs (a fixture that silently starts/stops
-# matching changes CV1's accounting — assert it stays exactly this set).
+# the PINNED set of fixture-subset configs — the INTENTIONAL KEEPS whose
+# hand-written v2 fixture is NOT a 1:1 converter reproduction by design (the
+# converter is MORE faithful to the v1 source than the fixture). After Wave F2
+# restored 6 previously-subset fixtures to full v1 fidelity, this set shrinks to
+# exactly the 2 DOCUMENTED keeps (the codex CVF finding names them explicitly):
+#
+#   - ``event_classifier`` — the converter wires the FIT/VAL classification-metric
+#     sinks the fixture deliberately omits; an EXPORT-OMISSION correct by design
+#     (TEST/ONNX plans still match). NOT a missing v1 task.
+#   - ``regression_multi_target`` — the fixture RENAMES the v1 task (so it is not
+#     class-canonical-equal to the converter), and the fixture IS the faithful v2
+#     artifact kept for the F1a MultiTarget producer-fidelity scenario (CVF).
+#
+# Each keep carries a ``keep_reason`` field naming WHY it diverges (asserted
+# present below). A fixture that silently starts/stops matching changes CV1's
+# accounting, so this set is PINNED and asserted == exactly these two.
 _CV1_FIXTURE_SUBSET: frozenset[str] = frozenset(
     e["name"] for e in _CV1_CONFIGS if e.get("fixture_subset")
+)
+
+# the PINNED set of F2-RESTORED configs: previously fixture-subset, now restored
+# to FULL v1 fidelity (the fixture reproduces the full v1 task/stream/capability
+# set). For these the converter + fixture reproduce the SAME v1 capability — the
+# gate asserts they reproduce the full v1 task count AND are STRUCTURALLY
+# EQUIVALENT to the fixture (the module-CLASS multiset matches in every shared
+# mode), no longer subset-divergent. (Class-canonical sink keys / one documented-
+# equivalent embed.tracks==seq.x edge / the fixture's PadMaskWriter mask column
+# may still differ from the converter's verbose-v1 naming — cosmetic, topology-
+# neutral — so a byte-exact ``fixture_match`` is NOT required; the structural-
+# equivalence + full-v1-task-count facts are.)
+_CV1_RESTORED: frozenset[str] = frozenset(
+    e["name"] for e in _CV1_CONFIGS if e.get("restored")
 )
 
 _NO_STRICT_RATIONALE = (
@@ -1020,6 +1096,37 @@ def _eval_manifest(sig_test: dict[str, Any]) -> list[str]:
     return list(sig_test.get("sinks", [])) if "error" not in sig_test else []
 
 
+def _structural_equivalence(
+    conv_sig: Mapping[str, Any], fix_sig: Mapping[str, Any]
+) -> dict[str, bool]:
+    """Per shared mode, whether the converter + fixture compile to the SAME module set.
+
+    The STRUCTURAL-EQUIVALENCE proxy used to gate the F2-RESTORED configs: the
+    fixture now reproduces the full v1 capability, so the converter and fixture
+    must compile to the SAME module-CLASS multiset in every shared mode (the
+    module inventory — what modules run — is identical). This is WEAKER than the
+    exact ``fixture_match`` (which also requires identical edges, sinks, eval/ONNX
+    manifests) because a RESTORED fixture may still diverge from the converter's
+    verbose-v1 output by topology-NEUTRAL cosmetics: class-canonical sink keys
+    (the converter keeps verbose v1 task names, the fixture short names), one
+    documented-equivalent embed.tracks==seq.x per-token-head edge for a
+    single-stream Concat, and the fixture's hand-set PadMaskWriter mask column.
+    None of these change WHICH modules run; the module-class set is the faithful
+    invariant. A RESTORED config that DROPPED a module (a real regression) would
+    change the class set and FAIL this check.
+
+    Returns
+    -------
+    dict[str, bool]
+        ``{mode_name: classes-equal}`` over the modes both signatures compiled.
+    """
+    out: dict[str, bool] = {}
+    for mode in sorted(set(conv_sig) & set(fix_sig)):
+        c, f = conv_sig[mode], fix_sig[mode]
+        out[mode] = "error" not in c and "error" not in f and c.get("classes") == f.get("classes")
+    return out
+
+
 def run_cv1(
     outdir: Path | str,
     *,
@@ -1107,6 +1214,8 @@ def run_cv1(
             "v1_stack": list(entry.get("v1", ())),
             "fix_stack": list(entry.get("fix", ())),
             "fixture_subset": bool(entry.get("fixture_subset")),
+            "restored": bool(entry.get("restored")),
+            "keep_reason": entry.get("keep_reason"),
             "conditional_drop": bool(entry.get("conditional_drop")),
             "expect_convert_error": expect_err,
             "converted": False,
@@ -1115,6 +1224,9 @@ def run_cv1(
             "mode_match": {},
             "eval_manifest_match": None,
             "onnx_manifest_match": None,
+            "structural_equivalence": {},
+            "structurally_equivalent": None,
+            "reproduces_full_v1_capability": None,
             "converter_faithful_to_v1": None,
             "v1_task_count": None,
             "fixture_task_count": None,
@@ -1249,14 +1361,23 @@ def run_cv1(
         fixture_match = bool(mode_match) and all(mode_match.values()) and eval_match and onnx_match
         row["fixture_match"] = fixture_match
 
-        is_subset = bool(entry.get("fixture_subset"))
-        # the task-count faithfulness fact (low-severity finding): the converter
-        # output reproduces the FULL v1 source task count, and (for a subset
-        # fixture) carries AT LEAST as many tasks as the fixture. This is what
-        # makes "converter is MORE faithful than the fixture" a machine assertion
-        # rather than a human note — a converter regression that dropped a v1 task
-        # on a subset config now FAILS even though it converts + validates +
-        # stays fixture-divergent.
+        is_subset = bool(entry.get("fixture_subset"))  # the 2 INTENTIONAL keeps
+        is_restored = bool(entry.get("restored"))  # the 6 F2-restored configs
+        # the STRUCTURAL-EQUIVALENCE proxy (module-CLASS multiset equal per shared
+        # mode) — the faithfulness invariant for the RESTORED configs that diverge
+        # from the converter only by topology-neutral cosmetics (verbose-v1 vs
+        # short fixture head names, the embed.tracks==seq.x single-stream edge, the
+        # fixture's PadMaskWriter mask column). A dropped module would fail this.
+        struct = _structural_equivalence(conv_sig, fix_sig)
+        row["structural_equivalence"] = struct
+        structurally_equivalent = bool(struct) and all(struct.values())
+        row["structurally_equivalent"] = structurally_equivalent
+
+        # the task-count faithfulness fact: the converter output reproduces the
+        # FULL v1 source task count and carries AT LEAST as many tasks as the
+        # fixture. For a RESTORED config the fixture ALSO carries the full set, so
+        # conv == v1 == fixture; for a KEEP it is conv == v1 >= fixture. A converter
+        # (or fixture) regression that dropped a v1 task FAILS this check.
         v1n, convn, fixn = row["v1_task_count"], row["conv_task_count"], row["fixture_task_count"]
         task_counts_ok = (
             v1n is not None
@@ -1266,29 +1387,65 @@ def run_cv1(
             and convn >= fixn
         )
         row["task_counts_faithful"] = task_counts_ok
-        # converter is "faithful to v1" when it either matches the fixture exactly
-        # OR diverges ONLY because the fixture is a documented curated subset AND
-        # the converter still reproduces the full v1 task count (checked, not just
-        # labelled).
-        row["converter_faithful_to_v1"] = fixture_match or (is_subset and task_counts_ok)
 
-        # the per-config GATING check:
-        #  - non-subset configs MUST convert + validate + plan-match the fixture;
-        #  - subset configs MUST convert + validate AND reproduce the full v1 task
-        #    count (>= the fixture's) — the exact-plan match is known not to hold
-        #    (recorded, not gated; the divergence reason is pinned + now CHECKED).
-        if is_subset:
+        # a config "reproduces the full v1 capability" when the converter output
+        # reproduces the full v1 task count AND it is either an exact fixture plan
+        # match OR structurally equivalent to the (now-full-fidelity) fixture. This
+        # is the post-F2 assertion for the 6 RESTORED configs: capability restored,
+        # not subset-divergent.
+        reproduces_full_v1 = task_counts_ok and (fixture_match or structurally_equivalent)
+        row["reproduces_full_v1_capability"] = reproduces_full_v1
+        # "faithful to v1" = an exact fixture match, OR a restored config that
+        # reproduces the full v1 capability, OR a documented keep whose converter
+        # still reproduces the full v1 task count (the divergence is the fixture's,
+        # by design).
+        row["converter_faithful_to_v1"] = (
+            fixture_match
+            or (is_restored and reproduces_full_v1)
+            or (is_subset and task_counts_ok)
+        )
+
+        # the per-config GATING check (three cases):
+        #  - RESTORED configs (the 6 F2 restores): MUST convert + validate AND
+        #    reproduce the FULL v1 capability (full task count + structural
+        #    equivalence to the now-full-fidelity fixture) — NO longer
+        #    subset-divergent. (Exact byte-for-byte fixture_match is recorded but
+        #    not required: verbose-v1 head names / the embed==seq edge / the mask
+        #    column are topology-neutral cosmetics.)
+        #  - KEEP configs (the 2 intentional fixture-subset keeps): MUST convert +
+        #    validate AND reproduce the full v1 task count, AND stay fixture-
+        #    DIVERGENT (the documented keep — the fixture is the curated artifact);
+        #    each carries a keep_reason naming WHY (asserted present).
+        #  - all other fixture-bearing configs: MUST convert + validate + exactly
+        #    plan-match the fixture.
+        if is_restored:
+            checks[f"{name}:accept"] = (
+                row["converted"] and all_modes_ok and reproduces_full_v1
+            )
+            checks[f"{name}:reproduces_full_v1_capability"] = reproduces_full_v1
+            checks[f"{name}:structurally_equivalent"] = structurally_equivalent
+        elif is_subset:
             checks[f"{name}:accept"] = row["converted"] and all_modes_ok and task_counts_ok
-            checks[f"{name}:fixture_subset_divergent"] = not fixture_match
+            checks[f"{name}:intentional_keep_divergent"] = not fixture_match
             checks[f"{name}:reproduces_full_v1_tasks"] = task_counts_ok
+            checks[f"{name}:keep_reason_documented"] = bool(entry.get("keep_reason"))
         else:
             checks[f"{name}:accept"] = row["converted"] and all_modes_ok and fixture_match
         results.append(row)
 
-    # the fixture-subset set is PINNED — assert it is exactly what the gate claims
+    # the fixture-subset KEEP set is PINNED — assert it is exactly the 2 documented
+    # intentional keeps (event_classifier + regression_multi_target). A fixture
+    # silently starting/stopping to match changes CV1's accounting.
     observed_subset = {r["name"] for r in results if r["fixture_subset"]}
     checks["fixture_subset_set_pinned"] = (
         observed_subset == set(_CV1_FIXTURE_SUBSET) and corruption is None
+    ) or (corruption is not None)
+    # the F2-RESTORED set is PINNED too — assert it is exactly the 6 restored
+    # configs (a restored fixture silently regressing back to a subset would
+    # change which configs the gate treats as faithful).
+    observed_restored = {r["name"] for r in results if r["restored"]}
+    checks["restored_set_pinned"] = (
+        observed_restored == set(_CV1_RESTORED) and corruption is None
     ) or (corruption is not None)
 
     passed = all(checks.values())
@@ -1297,6 +1454,8 @@ def run_cv1(
     n_matched = sum(1 for r in results if r["fixture_match"])
     n_subset = len(observed_subset)
     n_flagged = sorted(observed_subset)
+    n_restored = len(observed_restored)
+    restored_flagged = sorted(observed_restored)
     n_today = sum(1 for r in results if r["today"])
     n_fixture = n_total - n_today  # needs-M5 + needs-M6 (have a hand-written fixture)
     today_names = sorted(r["name"] for r in results if r["today"])
@@ -1322,11 +1481,20 @@ def run_cv1(
         "(matrix §5.3: bake class_names + origin_label, use_class_dict->weight_source, "
         "num_inputs->truncate, input_map->groups, callbacks list->dict) have NO fixture and are "
         f"gated on convert+validate+plan-compile only (cond. 1-3; the closed 29-vs-39 denominator "
-        f"gap). {n_subset} fixture configs ({', '.join(n_flagged)}) are FLAGGED fixture-subset "
-        "divergent — the fixture is a curated subset of the v1 source; the converter reproduces "
-        "the FULL v1 task count (CHECKED: conv_task_count == v1_task_count >= fixture_task_count), "
-        "so it is MORE faithful than the fixture; these are gated on convert+validate+plan-compile "
-        f"+ the v1-task-count fact, with the divergence pinned + audited. {n_expected_err} "
+        f"gap). {n_restored} fixture configs ({', '.join(restored_flagged)}) were RESTORED in Wave "
+        "F2 to full v1 fidelity (the fixture now reproduces the full v1 task/stream/capability "
+        "set) — they are asserted to REPRODUCE THE FULL V1 CAPABILITY (CHECKED: conv_task_count == "
+        "v1_task_count == fixture_task_count AND the converter is STRUCTURALLY EQUIVALENT to the "
+        "fixture — module-class multiset equal in every shared mode), no longer subset-divergent; "
+        "the residual converter-vs-fixture differences are topology-neutral cosmetics (verbose-v1 "
+        "vs short head names, the embed.tracks==seq.x single-stream edge, the PadMaskWriter mask "
+        f"column). {n_subset} fixture configs ({', '.join(n_flagged)}) remain INTENTIONAL KEEPS — "
+        "the hand-written fixture is the faithful v2 artifact and is NOT a 1:1 converter "
+        "reproduction by design (event_classifier: the converter wires FIT/VAL metric sinks the "
+        "fixture omits — an export-omission correct by design; regression_multi_target: the fixture "
+        "renames the v1 task and is the curated F1a MultiTarget artifact). Each keep is gated on "
+        "convert+validate + the full-v1-task-count fact + stays fixture-DIVERGENT, with a "
+        f"keep_reason naming WHY; the keep set is PINNED + audited. {n_expected_err} "
         f"config(s) ({', '.join(expected_err_names)}) are EXPECTED-hard-error (a non-standard "
         "vertex label the v2 VertexingTaskModule invariant cannot map -> the converter correctly "
         "HARD-ERRORS per FD §10; counted in the 39 denominator, gated on the EXPECTED hard-error "
@@ -1356,6 +1524,8 @@ def run_cv1(
             "fixture_plan_matched": n_matched,
             "fixture_subset_flagged": n_subset,
             "fixture_subset_configs": n_flagged,
+            "restored_flagged": n_restored,
+            "restored_configs": restored_flagged,
             "missing_config_files": missing,
             "strict": False,
             "corrupted_by_test_hook": corruption is not None,
@@ -1387,14 +1557,21 @@ def run_cv1(
         "semantic-equivalence comparison (fixture-bearing configs) is CLASS-CANONICAL (instance "
         "names normalised to module classes): the converter derives task-head instance names from "
         "v1 task names while the hand-written fixtures pick short names, so the GRAPH is compared, "
-        "not the labels. Where a fixture is a curated SUBSET of the v1 source (fewer regression "
-        "tasks / streams / context edges — the fixtures were authored as feature-coverage "
-        "skeletons, NOT 1:1 reproductions), the exact-plan match cannot hold; CV1 records "
-        "fixture_match + converter_faithful_to_v1, ASSERTS the converter reproduces the FULL v1 "
-        "task count (conv_task_count == v1_task_count >= fixture_task_count — the "
-        "converter_faithful_to_v1 claim is now a checked fact, not a human note), and gates on "
-        "convert+validate+plan-compile + that task-count fact, with the subset set PINNED so the "
-        "divergence is audited. GN2X_qcdsplit: the v1 labeller class qcdxx is absent from ftag "
+        "not the labels. Wave F2 RESTORED 6 previously-subset fixtures (regression, "
+        "regression_gaussian, regression_weighted, nan_regression, GN3V01, GN2XE) to FULL v1 "
+        "fidelity — for these CV1 asserts they REPRODUCE THE FULL V1 CAPABILITY: conv_task_count == "
+        "v1_task_count == fixture_task_count AND the converter is STRUCTURALLY EQUIVALENT to the "
+        "fixture (the module-class multiset matches in every shared mode). The residual converter-"
+        "vs-fixture differences are topology-neutral cosmetics — verbose-v1 vs short head names "
+        "(class-canonical sink keys), the embed.tracks==seq.x edge for a single-stream Concat, the "
+        "fixture's hand-set PadMaskWriter mask column — so a byte-exact fixture_match is recorded "
+        "but NOT required; a dropped module would break the structural-equivalence check. The 2 "
+        "remaining INTENTIONAL KEEPS (event_classifier: the converter wires FIT/VAL metric sinks "
+        "the fixture omits by design; regression_multi_target: the fixture renames the v1 task and "
+        "is the curated F1a MultiTarget artifact) are gated on convert+validate + the full-v1-task-"
+        "count fact + staying fixture-DIVERGENT, each carrying a keep_reason; the keep set + the "
+        "restored set are both PINNED so the accounting is audited. GN2X_qcdsplit: the v1 labeller "
+        "class qcdxx is absent from ftag "
         "v0.2.17 (matrix §2) — the converter FAITHFULLY emits qcdxx; CV1 substitutes qcdll at "
         "plan-compile (the same workaround the fixture makes) so the converter output compiles in "
         "this build (the converter output is NOT edited)."
@@ -1431,8 +1608,10 @@ def run_cv1(
         flags = []
         if r["today"]:
             flags.append("today")
+        if r["restored"]:
+            flags.append("RESTORED")
         if r["fixture_subset"]:
-            flags.append("SUBSET")
+            flags.append("KEEP")
         if r["conditional_drop"]:
             flags.append("cond-drop")
         if r.get("labeller_override_applied"):
@@ -1445,7 +1624,18 @@ def run_cv1(
             conv_col = "HERR" if r.get("hard_errored_as_expected") else "FAIL"
         else:
             conv_col = "PASS" if r["converted"] else "FAIL"
-        plan_col = "n/a" if r["today"] else ("PASS" if r["fixture_match"] else "DIFF")
+        # plan==fix: n/a for ✅ today configs (no fixture); for a RESTORED/KEEP
+        # config that is structurally equivalent (full capability) but not byte-
+        # exact, show STRUCT (the topology-neutral-cosmetic divergence); PASS for
+        # an exact match, DIFF for an unexpected (gating) divergence.
+        if r["today"]:
+            plan_col = "n/a"
+        elif r["fixture_match"]:
+            plan_col = "PASS"
+        elif r.get("structurally_equivalent") and (r["restored"] or r["fixture_subset"]):
+            plan_col = "STRUCT"
+        else:
+            plan_col = "DIFF"
         print(
             f"{r['name']:<24}{r['tier']:<6}"
             f"{conv_col:>5}"
@@ -1456,7 +1646,8 @@ def run_cv1(
         f"\n{n_accepted}/{n_total} accepted (denominator {n_total} = {n_fixture} fixture-bearing + "
         f"{n_today} ✅ today; {n_converted} converted+validated, {n_expected_err} expected-hard-"
         f"error: {expected_err_names}), {n_matched}/{n_fixture} exact-plan-match the fixture, "
-        f"{n_subset} flagged fixture-subset divergent: {n_flagged}"
+        f"{n_restored} F2-RESTORED to full v1 capability: {restored_flagged}, "
+        f"{n_subset} intentional fixture keeps (divergent by design): {n_flagged}"
     )
     if missing:
         print(f"MISSING files: {missing}")
@@ -1925,13 +2116,15 @@ def run_cvf(
     checks: dict[str, bool] = {}
     results: list[dict[str, Any]] = []
 
-    # the named fixture exceptions must be a subset of the CV1 config set (and of
-    # the pinned fixture-subset set) — a typo or a fixture silently made faithful
-    # changes the accounting.
+    # the named fixture exceptions must be in the CV1 config set AND must be
+    # EXACTLY the pinned CV1 intentional-keep (fixture_subset) set — a typo, a
+    # fixture silently made faithful, or a keep silently dropped changes the
+    # accounting. Post-Wave-F2 these two sets coincide: the 2 CV1 keeps
+    # (event_classifier, regression_multi_target) ARE the CVF fixture exceptions.
     cv1_names = {e["name"] for e in _CV1_CONFIGS}
     checks["fixture_exceptions_pinned"] = (
         set(_CVF_FIXTURE_EXCEPTIONS) <= cv1_names
-        and set(_CVF_FIXTURE_EXCEPTIONS) <= set(_CV1_FIXTURE_SUBSET)
+        and set(_CVF_FIXTURE_EXCEPTIONS) == set(_CV1_FIXTURE_SUBSET)
     )
 
     for entry in _CV1_CONFIGS:

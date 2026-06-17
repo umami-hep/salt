@@ -188,6 +188,7 @@ model:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2) — v1 InitNet attach_global default (initnet.py:46,56,77) concats normed.jets into the track embed; dropped in the fixture, restored to match v1
           out_dim: &embed_dim 192 # v1 GN2XE.yaml:&embed_dim 192
           dense: {hidden_layers: [256], activation: *activation}
       concat:

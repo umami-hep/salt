@@ -15,9 +15,24 @@ from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf
 # not import private names directly.
 _CV1_CONFIGS = gm7._CV1_CONFIGS  # noqa: SLF001
 _CV1_FIXTURE_SUBSET = gm7._CV1_FIXTURE_SUBSET  # noqa: SLF001
+_CV1_RESTORED = gm7._CV1_RESTORED  # noqa: SLF001
 _CV2_CONFIGS = gm7._CV2_CONFIGS  # noqa: SLF001
 _CV2_HEALTHY_PROBE = gm7._CV2_HEALTHY_PROBE  # noqa: SLF001
 _CVF_FIXTURE_EXCEPTIONS = gm7._CVF_FIXTURE_EXCEPTIONS  # noqa: SLF001
+
+# the 2 documented INTENTIONAL KEEPS after Wave F2 (event_classifier: export-
+# omission correct by design; regression_multi_target: the fixture is the faithful
+# F1a artifact). The other 6 once-subset fixtures were restored to full v1 fidelity.
+_EXPECTED_KEEPS = {"event_classifier", "regression_multi_target"}
+# the 6 Wave-F2-RESTORED configs (fixture restored to full v1 capability).
+_EXPECTED_RESTORED = {
+    "regression",
+    "regression_gaussian",
+    "regression_weighted",
+    "nan_regression",
+    "GN3V01",
+    "GN2XE",
+}
 
 
 class TestCV1:
@@ -25,10 +40,11 @@ class TestCV1:
 
     Pins: the embedded authoritative config list (29 fixture-bearing needs-M5/M6
     + 10 reproducible-today ✅), every config converts + validates + plan-compiles,
-    the fixture-plan semantic equivalence (exact for non-subset fixture configs;
-    flagged for the pinned fixture-subset configs; N/A for the ✅ configs), the
-    task-count faithfulness fact, and the corruption teeth (a bit-rotted v1 source
-    breaks conversion -> gate red).
+    the fixture-plan semantic equivalence (exact for unflagged fixture configs;
+    structural-equivalence + full-v1-capability for the 6 Wave-F2-RESTORED configs;
+    fixture-divergent for the 2 pinned intentional keeps; N/A for the ✅ configs),
+    the task-count faithfulness fact, and the corruption teeth (a bit-rotted v1
+    source breaks conversion -> gate red).
     """
 
     def test_pass(self, tmp_path):
@@ -131,12 +147,14 @@ class TestCV1:
         assert report["config"]["strict"] is False
         assert "no --strict" in report["no_strict_rationale"]
 
-    def test_non_subset_fixture_configs_plan_match_the_fixture(self, tmp_path):
+    def test_unflagged_fixture_configs_plan_match_the_fixture(self, tmp_path):
         _code, report = run_cv1(tmp_path)
         for c in report["configs"]:
-            # only the FIXTURE-bearing, non-subset configs plan-match; the ✅
-            # today configs have no fixture (skipped)
-            if c["today"] or c["name"] in _CV1_FIXTURE_SUBSET:
+            # only the FIXTURE-bearing configs that are NEITHER restored NOR
+            # intentional-keeps plan-match exactly; the ✅ today configs have no
+            # fixture (skipped), the 6 restored configs are structurally
+            # equivalent (not byte-exact), the 2 keeps are divergent by design
+            if c["today"] or c["restored"] or c["name"] in _CV1_FIXTURE_SUBSET:
                 continue
             assert c["fixture_match"], (
                 f"{c['name']} converted plan != hand-written fixture plan: "
@@ -147,10 +165,50 @@ class TestCV1:
             assert c["onnx_manifest_match"], c["name"]
             assert c["converter_faithful_to_v1"], c["name"]
 
-    def test_fixture_subset_reproduces_full_v1_task_count(self, tmp_path):
-        # the low-severity finding: converter_faithful_to_v1 for the subset
-        # configs is now a CHECKED fact (conv_task_count == v1 >= fixture), not a
-        # human note
+    def test_restored_set_is_pinned_to_the_six_f2_restores(self, tmp_path):
+        # Wave F2 restored exactly 6 once-subset fixtures to full v1 fidelity;
+        # the restored set is pinned (a regression back to a subset changes the
+        # accounting). The restored set and the keep set are disjoint.
+        _code, report = run_cv1(tmp_path)
+        assert set(_CV1_RESTORED) == _EXPECTED_RESTORED
+        assert report["config"]["restored_configs"] == sorted(_CV1_RESTORED)
+        assert report["checks"]["restored_set_pinned"]
+        assert set(_CV1_RESTORED).isdisjoint(set(_CV1_FIXTURE_SUBSET))
+
+    def test_restored_configs_reproduce_full_v1_capability(self, tmp_path):
+        # the 6 F2-restored configs: the converter + the (now-full-fidelity)
+        # fixture both carry the FULL v1 task set AND are structurally equivalent
+        # (module-class multiset equal in every shared mode). They are NO LONGER
+        # subset-divergent — the gate asserts full-v1-capability, not divergence.
+        _code, report = run_cv1(tmp_path)
+        for c in report["configs"]:
+            if not c["restored"]:
+                continue
+            assert c["converted"], c["name"]
+            assert c["validate"].get("fit") == 0, c["name"]
+            assert c["validate"].get("test") == 0, c["name"]
+            # full v1 capability: conv == v1 == fixture task count
+            assert c["task_counts_faithful"], (
+                f"{c['name']}: conv={c['conv_task_count']} v1={c['v1_task_count']} "
+                f"fixture={c['fixture_task_count']}"
+            )
+            assert c["conv_task_count"] == c["v1_task_count"] == c["fixture_task_count"], c["name"]
+            # structural equivalence: same module-class multiset every shared mode
+            assert c["structurally_equivalent"], (
+                f"{c['name']} converter is NOT structurally equivalent to the restored fixture "
+                f"(module-class set differs): {c['structural_equivalence']}"
+            )
+            assert c["reproduces_full_v1_capability"], c["name"]
+            assert c["converter_faithful_to_v1"], c["name"]
+            assert report["checks"][f"{c['name']}:reproduces_full_v1_capability"], c["name"]
+            assert report["checks"][f"{c['name']}:structurally_equivalent"], c["name"]
+            # the restored configs are NOT flagged as intentional keeps
+            assert c["name"] not in _CV1_FIXTURE_SUBSET
+            assert not c["fixture_subset"]
+
+    def test_intentional_keeps_reproduce_full_v1_tasks(self, tmp_path):
+        # the 2 documented keeps still reproduce the FULL v1 task count
+        # (conv == v1 >= fixture) — the divergence is the FIXTURE's, by design.
         _code, report = run_cv1(tmp_path)
         for c in report["configs"]:
             if c["name"] not in _CV1_FIXTURE_SUBSET:
@@ -164,21 +222,27 @@ class TestCV1:
             assert c["conv_task_count"] >= c["fixture_task_count"]
             assert report["checks"][f"{c['name']}:reproduces_full_v1_tasks"]
 
-    def test_fixture_subset_configs_flagged_and_diverge(self, tmp_path):
+    def test_intentional_keeps_pinned_named_and_diverge(self, tmp_path):
         _code, report = run_cv1(tmp_path)
-        # the fixture-subset set is pinned (exactly these diverge)
+        # the keep set shrank from 8 (pre-F2) to exactly the 2 documented keeps
+        assert set(_CV1_FIXTURE_SUBSET) == _EXPECTED_KEEPS
         assert report["config"]["fixture_subset_configs"] == sorted(_CV1_FIXTURE_SUBSET)
         assert report["checks"]["fixture_subset_set_pinned"]
         for c in report["configs"]:
             if c["name"] not in _CV1_FIXTURE_SUBSET:
                 continue
-            # subset configs: converter is MORE faithful than the fixture -> the
+            # keep configs: the fixture is the faithful artifact by design -> the
             # exact plan match does NOT hold, but they still convert + validate
             assert c["fixture_subset"]
+            assert not c["restored"]
             assert not c["fixture_match"], (
-                f"{c['name']} is flagged fixture-subset but now MATCHES the fixture — the "
-                "accounting changed; re-audit whether the fixture was made faithful"
+                f"{c['name']} is a flagged intentional keep but now MATCHES the fixture — the "
+                "accounting changed; re-audit whether it should be a restored config instead"
             )
+            # each keep documents WHY it diverges (the codex CVF finding)
+            assert c["keep_reason"], f"{c['name']} keep lacks a documented keep_reason"
+            assert report["checks"][f"{c['name']}:intentional_keep_divergent"]
+            assert report["checks"][f"{c['name']}:keep_reason_documented"]
             assert c["converter_faithful_to_v1"]
             assert c["converted"]
 

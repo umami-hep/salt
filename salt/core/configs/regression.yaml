@@ -39,7 +39,7 @@ data:
       class_path: salt.core.data.Features
       init_args:
         variables:
-          jets: [pt_btagJes, eta_btagJes]
+          jets: [pt_btagJes, eta_btagJes, mass]
           tracks:
             [
               d0,
@@ -120,6 +120,37 @@ model:
           targets: HadronConeExclTruthLabelPt
           target_denominators: pt_btagJes # a declared input Feature (ONNX source)
           custom_output_names: pt
+          loss: MSELoss
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      reg_multiratio:
+        # jets head, multi-output ratio norm (v1 regression.yaml:69
+        # regression_multi_output_with_ratio_norm): two targets each divided
+        # by a declared input Feature denominator (mass, pt_btagJes — both
+        # ONNX-gatherable by name), with per-target custom_output_names.
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          targets:
+            [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+          target_denominators: [mass, pt_btagJes] # declared input Features (ONNX source)
+          custom_output_names: [truthMass, truthPt]
+          loss: MSELoss
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      reg_seq_tracks:
+        # per-token sequence head on the TRACKS stream (v1 regression.yaml:87
+        # regression_multi_output_no_global_object). Encoder-less DiPS body has
+        # no encoded.seq, so the per-token input is the StreamEmbed output
+        # embed.tracks; sequence: true is set explicitly because the input is a
+        # non-default key (inference would otherwise read it as global). PER F1b:
+        # v1 has NO context_size on this head -> CONTEXT-FREE (no context key).
+        class_path: salt.core.nn.tasks.RegressionTaskModule
+        init_args:
+          stream: tracks
+          input: embed.tracks # encoder-less per-token features (no pooled.global)
+          sequence: true
+          targets: [dphi, deta]
+          custom_output_names: [dummyOutput_dPhi, dummyOutput_dEta]
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:

@@ -23,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
@@ -32,6 +33,7 @@ from salt.tests.core.regression_fixture import write_vector_concat_norm_dict
 from salt.utils.inputs import write_dummy_file
 
 CONFIGS = [
+    "regression",
     "regression_gaussian",
     "regression_weighted",
     "nan_regression",
@@ -44,6 +46,20 @@ def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("regression_configs")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
+    # regression.yaml and regression_weighted.yaml declare `mass` as a third
+    # jets input variable (target_denominators — must be a declared input
+    # Feature for ONNX de-scaling).  write_parity_norm_dict only knows the
+    # GN2 parity jets variables [pt_btagJes, eta_btagJes]; adding `mass` here
+    # keeps the shared parity fixture untouched (do NOT add mass there —
+    # it would change the parity gate's per-variable indexing and break
+    # bitwise reproducibility).  Constants follow the same scheme as
+    # write_parity_norm_dict: mean_i = 0.1*(i+1), std_i = 1.0+0.05*(i+1)
+    # indexed by position in the jets variable list; mass is at index 2.
+    with open(nd_path) as f:
+        nd = yaml.safe_load(f)
+    nd["jets"]["mass"] = {"mean": round(0.1 * 3, 6), "std": round(1.0 + 0.05 * 3, 6)}
+    with open(nd_path, "w") as f:
+        yaml.dump(nd, f, sort_keys=False)
     h5_path = base / "pp_output_train.h5"
     write_dummy_file(h5_path, nd_path)
     schema_path = base / "schema.yaml"
