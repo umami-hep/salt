@@ -94,7 +94,7 @@ class Features(Processor):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<s> (+ optional masks.<s>) -> inputs.<s>`` per stream.
 
-        The mask require is optional: ``vector`` streams have no mask
+        The mask require is optional: ``global_object`` streams have no mask
         producer and the planner drops the port (design §2.2).
 
         Returns

@@ -250,7 +250,9 @@ class TestStreamEmbed:
         io = embed.declare_io(Mode.FIT)
         assert set(flatten_spec(io.requires)) == {"normed.tracks", "normed.jets"}
         assert set(flatten_spec(io.produces)) == {"embed.tracks"}
-        assert flatten_spec(io.produces)["embed.tracks"].shape[-1] == 8
+        # rank-agnostic produce (M7 W1.5 wave R): shape=None, width via derived_widths
+        assert flatten_spec(io.produces)["embed.tracks"].shape is None
+        assert embed.derived_widths({}) == {"embed.tracks": 8}
 
     def test_context_prepended_in_v1_order(self, gn2v2):
         """Single GN2 context entry reproduces v1's [global, stream] layout."""
@@ -271,33 +273,36 @@ class TestStreamEmbed:
 
 
 class TestStreamEmbedVector:
-    """The rank-2 ``vector:`` path (M6-6 / plan 12 sub-wave D, DL1 jets-only MLP).
+    """Rank INFERRED from the bound input (M7 W1.5 wave R; collapses the M6-6 flag).
 
-    Mirrors `TestNormaliser.test_global_object_is_rank_two`: a ``vector: true``
-    stream declares/produces ``[B, F]`` -> ``[B, D]`` (no token axis) while a
-    default stream stays rank-3. The forward math is identity to v1's
-    no-context `InitNet`/`Dense` (initnet.py:72-89) on a ``[B, F]`` input.
+    `StreamEmbed` no longer carries a rank flag. It declares rank-AGNOSTIC specs
+    (``shape=None`` on its ``normed.<s>`` require AND its ``embed.<s>`` produce),
+    so the producer (Normaliser/reader, keyed on the single reader
+    ``global_object:`` flag) sets the input rank and the consumer sets the output
+    rank — a rank-2 ``[B, F]`` input yields a rank-2 ``[B, D]`` embed (DL1
+    jets-only MLP), a rank-3 ``[B, T, F]`` input yields a rank-3 ``[B, T, D]``
+    embed, all WITHOUT a model-side flag. The ``out_dim`` width is contributed via
+    `derived_widths`. The forward math is identity to v1's no-context
+    `InitNet`/`Dense` (initnet.py:72-89).
     """
 
-    def test_declare_io_is_rank_two(self):
-        embed = StreamEmbed(stream="jets", out_dim=8, vector=True)
+    def test_declare_io_is_rank_agnostic(self):
+        embed = StreamEmbed(stream="jets", out_dim=8)
         embed.name = "jet_embed"
         io = embed.declare_io(Mode.FIT)
         req = flatten_spec(io.requires)
         prod = flatten_spec(io.produces)
         assert set(req) == {"normed.jets"}
         assert set(prod) == {"embed.jets"}
-        # [B, F] -> [B, D]: rank 2 on BOTH sides, no T axis
-        assert len(req["normed.jets"].shape) == 2
-        assert len(prod["embed.jets"].shape) == 2
-        assert prod["embed.jets"].shape == ("B", 8)
+        # rank-agnostic: no flag, the rank flows from producer/consumer
+        assert req["normed.jets"].shape is None
+        assert prod["embed.jets"].shape is None
 
-    def test_default_stream_stays_rank_three(self):
-        embed = StreamEmbed(stream="tracks", out_dim=8)  # vector defaults False
-        embed.name = "track_embed"
-        io = embed.declare_io(Mode.FIT)
-        assert len(flatten_spec(io.requires)["normed.tracks"].shape) == 3
-        assert len(flatten_spec(io.produces)["embed.tracks"].shape) == 3
+    def test_derived_widths_contribute_out_dim(self):
+        """The ``embed.<s>`` width comes from `derived_widths` (shape=None produce)."""
+        embed = StreamEmbed(stream="jets", out_dim=8)
+        embed.name = "jet_embed"
+        assert embed.derived_widths({}) == {"embed.jets": 8}
 
     def test_bind_infers_vector_width(self):
         """A vector stream's Dense input width is the resolved [B, F] width."""

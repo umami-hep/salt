@@ -34,11 +34,11 @@ wholesale — ``datasets.py:367-405, 448-524``):
 
 Produces ``raw.<stream>`` (structured, post-selection — may alias the
 reusable buffer; never crosses the torch boundary), ``masks.<stream>``
-(``~valid``, True = padded, ``datasets.py:523``) for non-``vector`` streams,
-and ``meta.rows`` (TEST only). The v1 magic exclusion set
+(``~valid``, True = padded, ``datasets.py:523``) for non-``global_object``
+streams, and ``meta.rows`` (TEST only). The v1 magic exclusion set
 ``{parameters, global_object, "global"}`` becomes the explicit per-group
-``vector: true`` config (design §6.1), inferred from the schema artifact's
-``valid`` field when not given.
+``global_object: true`` config (design §6.1), inferred from the schema
+artifact's ``valid`` field when not given.
 """
 
 from __future__ import annotations
@@ -76,15 +76,16 @@ class GroupConfig:
     ``None`` — the default, so empty YAML group blocks parse through
     jsonargparse (design §5.3) — resolves to the stream name in
     `H5StructuredReader._parse_group`). `truncate` keeps the leading N
-    constituents (v1 ``num_inputs``). `vector` declares a ``[B, F]`` stream
-    carrying no pad mask (the explicit replacement for v1's magic exclusion
-    set, design §6.1); None infers it from the schema artifact (no ``valid``
-    field => vector).
+    constituents (v1 ``num_inputs``). `global_object` declares a ``[B, F]``
+    stream carrying no pad mask (the explicit replacement for v1's magic
+    exclusion set, design §6.1; aligns with `Normaliser(global_object=...)`);
+    None infers it from the schema artifact (no ``valid`` field =>
+    global_object).
     """
 
     dataset: str | None = None
     truncate: int | None = None
-    vector: bool | None = None
+    global_object: bool | None = None
 
     def __post_init__(self) -> None:
         if self.truncate is not None and self.truncate < 1:
@@ -97,16 +98,17 @@ class H5StructuredReader(Reader):
     Parameters
     ----------
     groups : Mapping[str, GroupConfig | Mapping | None]
-        Stream name -> group config (``{dataset:, truncate:, vector:}``).
+        Stream name -> group config (``{dataset:, truncate:, global_object:}``).
         A None / empty value defaults the dataset name to the stream name.
         The FIRST group defines the reader length (rows on axis 0 are aligned
         across groups by the file format).
     schema : Schema | str | Path | None, optional
         The dataset schema artifact (design §2.6) or its YAML path. Reading
-        it here is config I/O, not data I/O (§2.6). When given, ``vector`` is
-        inferred for unset groups and selection/transform fields are
-        validated statically; when None (explicit opt-out) every group must
-        set ``vector`` and field typos surface at worker bind (design §2.6).
+        it here is config I/O, not data I/O (§2.6). When given,
+        ``global_object`` is inferred for unset groups and selection/transform
+        fields are validated statically; when None (explicit opt-out) every
+        group must set ``global_object`` and field typos surface at worker
+        bind (design §2.6).
     filename : str | Path | None, optional
         Input H5 file (wildcards trigger VDS creation in `prepare`). May be
         omitted at construction and supplied via `with_source` — the
@@ -133,10 +135,10 @@ class H5StructuredReader(Reader):
     ------
     ConfigError
         On malformed group configs, unknown selection/transform streams, or
-        an unset ``vector`` flag with no schema to infer from.
+        an unset ``global_object`` flag with no schema to infer from.
     SchemaError
         When the schema artifact contradicts the config (missing groups or
-        fields, a non-vector group without ``valid``).
+        fields, a non-global_object group without ``valid``).
     """
 
     def __init__(
@@ -211,31 +213,33 @@ class H5StructuredReader(Reader):
         """
         if isinstance(cfg, GroupConfig):
             if cfg.dataset is None:
-                return GroupConfig(dataset=stream, truncate=cfg.truncate, vector=cfg.vector)
+                return GroupConfig(
+                    dataset=stream, truncate=cfg.truncate, global_object=cfg.global_object
+                )
             return cfg
         cfg = dict(cfg or {})
-        unknown = set(cfg) - {"dataset", "truncate", "vector"}
+        unknown = set(cfg) - {"dataset", "truncate", "global_object"}
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "dataset/truncate/vector (design §2.6)"
+                "dataset/truncate/global_object (design §2.6)"
             )
         return GroupConfig(
             dataset=str(cfg.get("dataset", stream)),
             truncate=cfg.get("truncate"),
-            vector=cfg.get("vector"),
+            global_object=cfg.get("global_object"),
         )
 
     def _validate_against_schema(self) -> None:
-        """Resolve per-group ``vector`` flags and statically validate config fields.
+        """Resolve per-group ``global_object`` flags and statically validate config fields.
 
         Raises
         ------
         ConfigError
-            If ``vector`` is unset for a group and no schema is available.
+            If ``global_object`` is unset for a group and no schema is available.
         SchemaError
             If the schema lacks a configured group/field, or a group is
-            declared (or inferred) non-vector without a ``valid`` field.
+            declared (or inferred) non-global_object without a ``valid`` field.
         """
         resolved: dict[str, GroupConfig] = {}
         for stream, cfg in self.groups.items():
@@ -249,22 +253,22 @@ class H5StructuredReader(Reader):
                     f"group {stream!r}: dataset {cfg.dataset!r} not in the schema artifact"
                     f"{hint} (design §2.6)"
                 )
-            vector = cfg.vector
-            if vector is None:
+            global_object = cfg.global_object
+            if global_object is None:
                 if gschema is None:
                     raise ConfigError(
-                        f"group {stream!r}: 'vector' is unset and no schema artifact is "
-                        "available to infer it — set vector: true/false explicitly or "
+                        f"group {stream!r}: 'global_object' is unset and no schema artifact is "
+                        "available to infer it — set global_object: true/false explicitly or "
                         "provide schema: (design §2.6, §6.1)"
                     )
-                vector = not gschema.has_valid
-            if gschema is not None and not vector and not gschema.has_valid:
+                global_object = not gschema.has_valid
+            if gschema is not None and not global_object and not gschema.has_valid:
                 raise SchemaError(
                     f"group {stream!r} (dataset {cfg.dataset!r}) is a sequence stream "
-                    "(vector: false) but the schema has no 'valid' field — pad masks "
+                    "(global_object: false) but the schema has no 'valid' field — pad masks "
                     "cannot be derived (design §6.1)"
                 )
-            resolved[stream] = GroupConfig(cfg.dataset, cfg.truncate, vector)
+            resolved[stream] = GroupConfig(cfg.dataset, cfg.truncate, global_object)
             if gschema is not None:
                 config_fields = self._selection_fields.get(stream, []) + self._transform_fields.get(
                     stream, []
@@ -371,9 +375,9 @@ class H5StructuredReader(Reader):
         flat: dict[str, TensorSpec] = {}
         for stream, cfg in self.groups.items():
             t_dim: int | str = cfg.truncate if cfg.truncate is not None else sym_dim("T", stream)
-            shape = ("B",) if cfg.vector else ("B", t_dim)
+            shape = ("B",) if cfg.global_object else ("B", t_dim)
             flat[f"raw.{stream}"] = TensorSpec(shape=shape, kind="data")
-            if not cfg.vector:
+            if not cfg.global_object:
                 flat[f"masks.{stream}"] = TensorSpec(shape=shape, dtype="bool", kind="pad_mask")
         flat["meta.rows"] = TensorSpec(shape=(2,), dtype="int64", kind="meta", modes=Mode.TEST)
         return IO(produces=unflatten_spec(flat))
@@ -511,7 +515,7 @@ class H5StructuredReader(Reader):
                         f"field {field!r} demanded by {who!r} not present in h5 "
                         f"group {cfg.dataset!r}{hint} (design §2.6)"
                     )
-            if not cfg.vector and "valid" not in file_fields:
+            if not cfg.global_object and "valid" not in file_fields:
                 raise SchemaError(
                     f"group {stream!r} (dataset {cfg.dataset!r}) is a sequence stream but "
                     f"the file has no 'valid' field — pad masks cannot be derived "
@@ -562,7 +566,7 @@ class H5StructuredReader(Reader):
                         else transform(batch, stream)
                     )
             out[f"raw.{stream}"] = batch
-            if not cfg.vector:
+            if not cfg.global_object:
                 out[f"masks.{stream}"] = ~batch["valid"]  # True = padded (datasets.py:523)
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)

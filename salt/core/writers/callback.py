@@ -139,7 +139,7 @@ class WriterCallback(Callback):
             The model-side module dict.
         reader : Any
             The configured reader prototype (``streams`` + ``groups`` with
-            resolved ``vector`` flags — the `H5StructuredReader` surface).
+            resolved ``global_object`` flags — the `H5StructuredReader` surface).
 
         Returns
         -------
@@ -509,7 +509,7 @@ class WriterCallback(Callback):
                 f"writers need an H5StructuredReader-style reader exposing streams/groups — "
                 f"got {type(reader).__name__} (design §8)"
             )
-        sequence = tuple(s for s in streams if not getattr(groups[s], "vector", False))
+        sequence = tuple(s for s in streams if not getattr(groups[s], "global_object", False))
         return WriterDeclareCtx(
             model_modules=model_modules, streams=streams, sequence_streams=sequence
         )

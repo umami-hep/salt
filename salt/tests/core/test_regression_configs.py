@@ -109,8 +109,9 @@ def test_dl1_config_validates_all_modes(data):
     (legacy/DL1.yaml) — the MLP-only / vector-stream coverage the user asked to
     PRESERVE (plan 12 sub-wave D non-regression invariant: "DL1's original
     MLP-only CI fixture is preserved unchanged"). DL1 is the canonical exercise
-    of the M6-6 deliverable: the rank-2 ``[B, F]`` vector-stream embed
-    (``vector: true``) -> a ``sequence: false`` head, NO encoder / NO pool.
+    of the M6-6 deliverable: the rank-2 ``[B, F]`` vector-stream embed (rank
+    inferred from the reader ``global_object: true`` boundary) -> a
+    ``sequence: false`` head, NO encoder / NO pool.
     Validates the shipped ``DL1.yaml`` through the real ``salt2 graph validate``
     in all default modes (fit/test/onnx); the parity norm dict (jets:
     pt_btagJes/eta_btagJes) is the documented required override.

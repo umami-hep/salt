@@ -381,7 +381,7 @@ def cli_run(tmp_path_factory):
     dm = GraphDataModule(
         modules={
             "reader": H5StructuredReader(
-                groups={"jets": {"vector": True}, "tracks": {"vector": False}}
+                groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}
             ),
             "features": Features(variables=VARIABLES),
             "labels": Labels(),

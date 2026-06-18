@@ -40,8 +40,8 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          hits: {vector: false}
+          jets: {global_object: true}
+          hits: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:

@@ -54,15 +54,15 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false}
           # constituent streams (v1 GN3V01.yaml:148-149 flows + electrons) —
-          # padded sequences like tracks, so vector:false (design §6.6)
-          flows: {vector: false}
-          electrons: {vector: false}
+          # padded sequences like tracks, so global_object:false (design §6.6)
+          flows: {global_object: false}
+          electrons: {global_object: false}
           # the GN3 'global' stream: an ordinary [B, F] vector (no pad mask,
           # design §6.6 1393-1396; v1 datasets.py:519-524 mask-excludes 'global')
-          global: {vector: true}
+          global: {global_object: true}
     features:
       class_path: salt.core.data.Features
       init_args:

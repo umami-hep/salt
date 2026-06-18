@@ -716,8 +716,8 @@ def _convert_data(
     groups: dict[str, Any] = {}
     for stream in streams:
         gc: dict[str, Any] = {}
-        # vector: the global object (+ a 'global' vector stream) read as [B, F]
-        gc["vector"] = stream in {global_object, "global"}
+        # global_object: the global object (+ a 'global' vector stream) read as [B, F]
+        gc["global_object"] = stream in {global_object, "global"}
         if stream in input_map and input_map[stream] != stream:
             gc["dataset"] = input_map[stream]
         if stream in num_inputs:
@@ -1215,7 +1215,9 @@ def convert_stack(
         # ensure the object (truth_hadron) group is read
         obj_name = (mf_config.get("object") or {}).get("name")
         if obj_name and obj_name not in data_block["modules"]["reader"]["init_args"]["groups"]:
-            data_block["modules"]["reader"]["init_args"]["groups"][obj_name] = {"vector": False}
+            data_block["modules"]["reader"]["init_args"]["groups"][obj_name] = {
+                "global_object": False
+            }
 
     # --- model modules -------------------------------------------------------
     modules: dict[str, Any] = {}
@@ -1240,12 +1242,13 @@ def convert_stack(
     for net in init_nets:
         stream = net["input_name"]
         # the 'global' vector stream (GN3) feeds VectorConcat, not an embed —
-        # skip it (a global-object init_net WITHOUT an encoder is the DL1 vector
-        # MLP and IS embedded, vector: true).
+        # skip it (a global-object init_net WITHOUT an encoder is the DL1 rank-2
+        # MLP and IS embedded — its rank-2-ness comes from the reader's
+        # global_object: true flag, NOT a model-side flag).
         if stream == "global":
             continue
-        is_vector_global = stream == global_object and encoder_block is None
-        if stream == global_object and not is_vector_global:
+        is_global_mlp = stream == global_object and encoder_block is None
+        if stream == global_object and not is_global_mlp:
             # the global object under an encoder is attached as CONTEXT to the
             # constituent embeds, not embedded itself (v1 attach_global) — skip.
             continue
@@ -1258,12 +1261,13 @@ def convert_stack(
         }
         embed: dict[str, Any] = {"stream": stream, "out_dim": out_dim, "dense": dense}
         attaches_global = net.get("attach_global", True) and global_object in norm_streams
-        if not is_vector_global and attaches_global:
+        if not is_global_mlp and attaches_global:
             embed["context"] = [f"normed.{global_object}"]
         if dense_cfg.get("mup"):
             embed["mup"] = True
-        if is_vector_global:
-            embed["vector"] = True  # rank-2 [B, F] -> [B, D] (DL1 jets-only MLP)
+        # NOTE: StreamEmbed carries NO rank flag — it infers rank-2 vs rank-3 from
+        # its bound input (the DL1 global-object MLP gets [B, F] because the reader
+        # group is global_object: true). No model-side vector flag is emitted.
         modules[_embed_name(stream)] = {
             "class_path": "salt.core.nn.StreamEmbed",
             "init_args": embed,

@@ -395,7 +395,7 @@ class TestGraphArtifacts:
         trainer.callbacks = [WriterCallback(modules={"tasks": TaskWriter()})]
         trainer.datamodule = SimpleNamespace(
             reader=H5StructuredReader(
-                groups={"jets": {"vector": True}, "tracks": {"vector": False}}
+                groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}
             )
         )
         GraphArtifacts().on_test_start(trainer, fitted_model)

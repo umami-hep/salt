@@ -269,12 +269,12 @@ class TestStaticValidation:
             build_v2(data, sinks=sinks)
 
     def test_no_schema_requires_vector_flags(self, data):
-        with pytest.raises(ConfigError, match="vector"):
+        with pytest.raises(ConfigError, match="global_object"):
             H5StructuredReader(groups={"jets": {}}, schema=None, filename=data["h5"])
 
     def test_no_schema_explicit_flags_work_with_warning(self, data):
         reader = H5StructuredReader(
-            groups={"jets": {"vector": True}, "tracks": {"vector": False}},
+            groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
             schema=None,
             filename=data["h5"],
         )
@@ -289,7 +289,7 @@ class TestStaticValidation:
 
     def test_bind_time_field_error_without_schema(self, data):
         reader = H5StructuredReader(
-            groups={"jets": {"vector": True}},
+            groups={"jets": {"global_object": True}},
             schema=None,
             filename=data["h5"],
         )
@@ -891,7 +891,7 @@ class TestSinkOriginAttribution:
         # reader must still attribute the demand to the task module
         modules = self.make_modules(data)
         modules["reader"] = H5StructuredReader(
-            groups={"jets": {"vector": True}, "tracks": {"vector": False}},
+            groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
             filename=data["h5"],
         )
         bad_key = "labels.jets.flavor_label"

@@ -468,7 +468,7 @@ class _DoesNothing(Writer):
 def _reader():
     from salt.core.data import H5StructuredReader
 
-    return H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    return H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
 
 
 class TestExportOnlyStory:

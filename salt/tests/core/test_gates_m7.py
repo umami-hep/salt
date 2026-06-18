@@ -8,7 +8,7 @@ hook (never on the CLI) proves the gate's assertions are not vacuous.
 from __future__ import annotations
 
 import salt.core.gates_m7 as gm7
-from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf
+from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf, run_ren1
 
 # the authoritative embedded lists live as module privates on gm7 (the gate is
 # the single source of truth); reference them through the module so the test does
@@ -19,6 +19,7 @@ _CV1_RESTORED = gm7._CV1_RESTORED  # noqa: SLF001
 _CV2_CONFIGS = gm7._CV2_CONFIGS  # noqa: SLF001
 _CV2_HEALTHY_PROBE = gm7._CV2_HEALTHY_PROBE  # noqa: SLF001
 _CVF_FIXTURE_EXCEPTIONS = gm7._CVF_FIXTURE_EXCEPTIONS  # noqa: SLF001
+_REN1_SHIPPED_CONFIGS = gm7._REN1_SHIPPED_CONFIGS  # noqa: SLF001
 
 # the 2 documented INTENTIONAL KEEPS after Wave F2 (event_classifier: export-
 # omission correct by design; regression_multi_target: the fixture is the faithful
@@ -465,6 +466,102 @@ class TestCVF:
         assert "MultiTarget" not in entry["producers"]
 
 
+class TestREN1:
+    """REN1 — vector->global_object rename + StreamEmbed flag collapse (W1.5 wave R).
+
+    Pins: (a) no residual `vector` FLAG use in salt/core (only VectorConcat / prose
+    / the 3 named historical references allowed); (b) every shipped M5/M6-CONV
+    config validates fit/test/onnx with the new global_object flag; (c) the same
+    flag-free StreamEmbed infers rank-2 [B,F] -> [B,D] AND rank-3 [B,T,F] ->
+    [B,T,D]; and the corruption teeth (an injected residual-flag hit -> gate red).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_ren1(tmp_path)
+        assert code == 0, {k: v for k, v in report["checks"].items() if not v}
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "ren1_report.json").is_file()
+
+    def test_no_residual_vector_flag(self, tmp_path):
+        # (a) the rename left NO flag-shaped `vector` use in salt/core
+        _code, report = run_ren1(tmp_path)
+        assert report["checks"]["no_residual_vector_flag"], (
+            f"residual vector FLAG hits: {report['residual_flag_hits']}"
+        )
+        assert report["residual_flag_hits"] == []
+        assert report["config"]["residual_flag_hits"] == 0
+
+    def test_every_shipped_config_validates_with_global_object(self, tmp_path):
+        # (b) every M5/M6-CONV shipped config validates fit/test/onnx data-free
+        _code, report = run_ren1(tmp_path)
+        for r in report["shipped_config_validation"]:
+            assert r["files_present"], r["name"]
+            assert r["validate"].get("fit") == 0, r["name"]
+            assert r["validate"].get("test") == 0, r["name"]
+            if "onnx" in r["validate"]:
+                assert r["validate"]["onnx"] == 0, r["name"]
+            assert r["all_modes_ok"], r["name"]
+        # data-free, NOT --strict (the M5/M6-CONV precedent)
+        assert report["config"]["strict"] is False
+        assert "NOT --strict" in report["no_strict_rationale"]
+        assert (
+            report["config"]["shipped_configs_validated"] == report["config"]["shipped_configs"]
+        )
+        # the denominator is the authoritative M5-CONV (24) + M6-CONV (5) lists
+        assert report["config"]["shipped_configs"] == len(_REN1_SHIPPED_CONFIGS)
+
+    def test_streamembed_infers_rank_for_rank2_and_rank3(self, tmp_path):
+        # (c) the SAME flag-free StreamEmbed: rank-2 [B,F] -> [B,D] (no token
+        # axis) AND rank-3 [B,T,F] -> [B,T,D] (token axis preserved)
+        _code, report = run_ren1(tmp_path)
+        rank = report["rank_inference"]
+        r2, r3 = rank["rank2"], rank["rank3"]
+        # rank-2 [B,F] bound input -> rank-2 [B,D] embed (no token axis)
+        assert r2["input_rank"] == 2
+        assert r2["embed_rank"] == 2
+        # rank-3 [B,T,F] bound input -> rank-3 [B,T,D] embed (token axis preserved)
+        assert r3["input_rank"] == 3
+        assert r3["embed_rank"] == 3
+        # the same out_dim width contributed via derived_widths in both cases
+        assert r2["derived_width"] == r3["derived_width"]
+        # the StreamEmbed carries NO `vector` rank flag (the param is DELETED)
+        assert r2["embed_has_no_vector_param"]
+        assert r3["embed_has_no_vector_param"]
+        for cname in (
+            "rank2_embed_is_rank2",
+            "rank3_embed_is_rank3",
+            "out_dim_via_derived_widths",
+            "streamembed_has_no_vector_attr",
+        ):
+            assert report["checks"][f"rank:{cname}"], cname
+
+    def test_historical_refs_and_vectorconcat_are_pinned(self, tmp_path):
+        # the allowed exemptions are recorded: the out-of-scope VectorConcat
+        # surface + the 3 named historical references that explain the collapse
+        _code, report = run_ren1(tmp_path)
+        assert "VectorConcat" in report["vectorconcat_tokens_allowed"]
+        suffixes = {h["file_suffix"] for h in report["historical_refs_allowed"]}
+        assert {"nn/modules.py", "configs/DL1.yaml", "convert.py"} == suffixes
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # the negative control: INJECT a fake residual-flag hit -> the
+        # no_residual_vector_flag check flips False and the gate goes red,
+        # proving the grep check (a) is not vacuous.
+        def corrupt(state):
+            state["residual"] = [
+                {"file": "data/reader.py", "line": "88", "text": "vector: bool | None = None",
+                 "pattern": "fake"}
+            ]
+            return state
+
+        code, report = run_ren1(tmp_path, corruption=corrupt)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["no_residual_vector_flag"]
+        assert report["config"]["residual_flag_hits"] == 1
+
+
 def test_cli_dispatch_cv1(tmp_path):
     assert gm7.main(["cv1", "--outdir", str(tmp_path)]) == 0
 
@@ -475,3 +572,7 @@ def test_cli_dispatch_cv2(tmp_path):
 
 def test_cli_dispatch_cvf(tmp_path):
     assert gm7.main(["cvf", "--outdir", str(tmp_path)]) == 0
+
+
+def test_cli_dispatch_ren1(tmp_path):
+    assert gm7.main(["ren1", "--outdir", str(tmp_path)]) == 0

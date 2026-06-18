@@ -29,10 +29,10 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false, dataset: tracks_ghost}
+          jets: {global_object: true}
+          tracks: {global_object: false, dataset: tracks_ghost}
           # the added pflow stream (v1 input_map: flow -> flows)
-          flow: {vector: false, dataset: flows}
+          flow: {global_object: false, dataset: flows}
     features:
       class_path: salt.core.data.Features
       init_args:

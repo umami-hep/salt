@@ -51,12 +51,12 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false}
-          electrons: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false}
+          electrons: {global_object: false}
           # the soft-muon `global` stream: an ordinary [B, F] vector (no pad
           # mask, design §6.6 1393-1396; v1 datasets.py mask-excludes 'global')
-          global: {vector: true}
+          global: {global_object: true}
     features:
       class_path: salt.core.data.Features
       init_args:

@@ -32,10 +32,10 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          # vector flags set explicitly so the config also runs without a
+          # global_object flags set explicitly so the config also runs without a
           # schema artifact (reader infers them when a schema is given)
-          jets: {vector: true}
-          tracks: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:

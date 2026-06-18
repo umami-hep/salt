@@ -40,8 +40,10 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
 
 - **VS1 vector-stream forward parity (v1-decidable)** — the model-side rank-2
   ``[B, F]`` vector-stream embed (M6-6 / plan 12 sub-wave D): a `StreamEmbed`
-  with ``vector: true`` projects ``normed.<s> [B, F]`` -> ``embed.<s> [B, D]``
-  (no token axis), consumed DIRECTLY by a ``sequence: false`` task head with NO
+  whose rank-2-ness is INFERRED from the bound input (the reader/Normaliser
+  ``global_object`` boundary) projects ``normed.<s> [B, F]`` -> ``embed.<s>
+  [B, D]`` (no token axis), consumed DIRECTLY by a ``sequence: false`` task head
+  with NO
   encoder and NO pooling — the v2 reproduction of v1's jets-only DL1 MLP
   (``legacy/DL1.yaml`` single init_net ``attach_global: false`` -> the
   no-encoder/no-pool `SaltModel` path ``saltmodel.py:90-92`` guard, ``:155-156``
@@ -626,7 +628,7 @@ def run_lb1(
 
 # DL1's two jet input variables (legacy/DL1.yaml:35-36 pt/eta; input_size:2).
 # The v2 source declares inputs.jets as the rank-2 [B, F] vector boundary the
-# reader's `vector:` flag produces (reader.py GroupConfig -> Features rank-2).
+# reader's `global_object:` flag produces (reader.py GroupConfig -> Features rank-2).
 _VS1_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
 # DL1's 3-class jet flavour head (legacy/DL1.yaml:28 output_size:3).
 _VS1_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")
@@ -665,11 +667,12 @@ def _vs1_norm_dict(outdir: Path) -> Path:
 def _vs1_modules(norm_dict: Path) -> dict[str, Any]:
     """Build the DL1-shaped v2 module dict: rank-2 embed -> head, no encoder/pool.
 
-    Mirrors the v1 jets-only MLP (legacy/DL1.yaml): a single ``vector: true``
-    `StreamEmbed` on the global ``jets`` stream feeds a ``sequence: false``
-    `ClassificationTaskModule` reading ``embed.jets`` DIRECTLY — no `Concat`,
-    no `TransformerEncoder`, no `Split`, no pooling (v1 saltmodel.py:90-92
-    guard / :155-156 / :170-172).
+    Mirrors the v1 jets-only MLP (legacy/DL1.yaml): a single `StreamEmbed` on the
+    global ``jets`` stream — its rank-2-ness INFERRED from the bound input (the
+    reader/Normaliser ``global_object`` boundary), no model-side flag — feeds a
+    ``sequence: false`` `ClassificationTaskModule` reading ``embed.jets`` DIRECTLY
+    — no `Concat`, no `TransformerEncoder`, no `Split`, no pooling (v1
+    saltmodel.py:90-92 guard / :155-156 / :170-172).
 
     Returns
     -------
@@ -682,7 +685,7 @@ def _vs1_modules(norm_dict: Path) -> dict[str, Any]:
             stream="jets",
             out_dim=_VS1_EMBED_DIM,
             dense={"hidden_layers": list(_VS1_HIDDEN), "activation": "Mish"},
-            vector=True,
+            # rank-2 INFERRED from the bound input (normed.jets [B, F]); no flag.
         ),
         "jets_classification": ClassificationTaskModule(
             stream="jets",
@@ -703,8 +706,8 @@ def _vs1_modules(norm_dict: Path) -> dict[str, Any]:
 def _vs1_sources():
     """The DL1 dataset boundary: a rank-2 vector ``inputs.jets`` + its label.
 
-    ``inputs.jets`` is ``[B, F]`` (the reader ``vector:`` boundary, no token
-    axis); the flavour label is ``[B]`` and TRAINING-gated.
+    ``inputs.jets`` is ``[B, F]`` (the reader ``global_object:`` boundary, no
+    token axis); the flavour label is ``[B]`` and TRAINING-gated.
 
     Returns
     -------
@@ -791,8 +794,9 @@ def run_vs1(
 ) -> tuple[int, dict[str, Any]]:
     """VS1: rank-2 ``[B, F]`` vector-stream embed -> task head, parity vs v1 DL1.
 
-    Drives the DL1-shaped v2 plan (rank-2 ``vector: true`` `StreamEmbed` ->
-    ``sequence: false`` `ClassificationTaskModule`, NO encoder/pool — `_vs1_modules`)
+    Drives the DL1-shaped v2 plan (rank-2 `StreamEmbed` with rank inferred from
+    its global-object input -> ``sequence: false`` `ClassificationTaskModule`, NO
+    encoder/pool — `_vs1_modules`)
     through the REAL compiler / two-phase bind / executor and asserts:
 
     - **bitwise forward parity** — the v2 raw FIT logits (``preds.jets.
@@ -835,13 +839,20 @@ def run_vs1(
     norm_dict = _vs1_norm_dict(outdir)
     modules = _vs1_modules(norm_dict)
 
-    # -- (a) the embed declares/produces rank-2 [B, F] -> [B, D] (no T axis) ---
+    # -- (a) the embed declares RANK-AGNOSTIC specs (M7 W1.5 wave R): no rank
+    # flag — the embed inherits its rank from the bound input. Both its
+    # normed.jets require and its embed.jets produce are shape=None; the rank-2
+    # [B, F] -> [B, D] boundary is proven end-to-end below by the compiled plan
+    # (b), the forward output shape (c) and the ONNX no-T axis (d). The out_dim
+    # width is contributed via derived_widths (shape=None carries no last dim).
     embed_io = modules["jets_embed"].declare_io(Mode.FIT)
     req = flatten_spec(embed_io.requires)
     prod = flatten_spec(embed_io.produces)
-    checks["embed_input_is_rank2"] = len(req["normed.jets"].shape) == 2
-    checks["embed_output_is_rank2"] = len(prod["embed.jets"].shape) == 2
-    checks["embed_out_dim_matches"] = prod["embed.jets"].shape[-1] == _VS1_EMBED_DIM
+    checks["embed_input_is_rank_agnostic"] = req["normed.jets"].shape is None
+    checks["embed_output_is_rank_agnostic"] = prod["embed.jets"].shape is None
+    checks["embed_out_dim_via_derived_widths"] = modules["jets_embed"].derived_widths({}) == {
+        "embed.jets": _VS1_EMBED_DIM
+    }
 
     # -- (b) compile the DL1 plan: no encoder, no pool, no seq/encoded edges --
     fit_plan = compile_plan(modules, Mode.FIT, sources=_vs1_sources(), sinks=["loss.total"])
@@ -978,8 +989,9 @@ def run_vs1(
 
     passed = all(checks.values())
     criterion = (
-        "the model-side rank-2 [B, F] vector-stream embed (M6-6 / plan 12 VS1): a vector: true "
-        "StreamEmbed projects normed.jets [B, F] -> embed.jets [B, D] (no token axis) consumed "
+        "the model-side rank-2 [B, F] vector-stream embed (M6-6 / plan 12 VS1): a StreamEmbed "
+        "with rank inferred from its global-object input projects normed.jets [B, F] -> "
+        "embed.jets [B, D] (no token axis) consumed "
         "DIRECTLY by a sequence: false ClassificationTaskModule with NO encoder and NO pooling; "
         "the v2 FIT logits are BITWISE identical to an INDEPENDENT v1 no-encoder/no-pool reference "
         "(separately built InitNet(attach_global:false) + ClassificationTask weight-loaded from "
@@ -1000,7 +1012,8 @@ def run_vs1(
             "batch": _VS1_B,
             "norm_dict": str(norm_dict),
             "onnx_path": str(onnx_path),
-            "approach": "StreamEmbed rank-2 vector path (mirrors Normaliser global_object)",
+            "approach": "StreamEmbed rank-2 path INFERRED from the bound input "
+            "(reader/Normaliser global_object boundary; no model-side flag)",
             "corrupted_by_test_hook": corruption is not None,
         },
     )
@@ -3246,7 +3259,7 @@ def _s31_reader() -> Any:
     Reader
         A `H5StructuredReader` over jets+tracks (never read by S31).
     """
-    return H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    return H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
 
 
 # ---------------------------------------------------------------------------
@@ -3568,7 +3581,7 @@ def _ig1_reader() -> Any:
         Two streams: a ``jets`` vector stream (the IG attribution target) and a
         ``tracks`` sequence stream (so PadMaskWriter has a stream to select).
     """
-    return H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    return H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
 
 
 # ---------------------------------------------------------------------------
@@ -3638,7 +3651,8 @@ _CONV_M6_CONFIGS: tuple[dict[str, Any], ...] = (
         "onnx": "validate",
         "family": "vector-stream",
         "note": (
-            "jets-only MLP: rank-2 [B, F] vector-stream embed (vector: true) -> sequence: false "
+            "jets-only MLP: rank-2 [B, F] vector-stream embed (rank inferred from the "
+            "global_object input) -> sequence: false "
             "head, NO encoder/pool (the M6-6 deliverable, gate VS1); 3-class CE; LossSum"
         ),
     },

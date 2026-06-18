@@ -133,7 +133,7 @@ class WriterDeclareCtx:
     streams : tuple[str, ...]
         The reader's stream names, in config order.
     sequence_streams : tuple[str, ...]
-        The subset of `streams` carrying a pad mask (``vector: false``
+        The subset of `streams` carrying a pad mask (``global_object: false``
         groups, design §6.1).
     """
 

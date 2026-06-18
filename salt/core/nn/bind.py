@@ -192,7 +192,7 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
         if key not in widths and key in fields:
             widths[key] = len(fields[key])
 
-    # Second pass: modules whose produced width is a FUNCTION of resolved input
+    # Second phase: modules whose produced width is a FUNCTION of resolved input
     # widths (not a single shared symbol the dim table can unify) contribute it
     # via the optional duck-typed `derived_widths(widths) -> {key: int}` hook
     # (design §6.6: VectorConcat's ``Dsum`` "unified at bind" — there is no
@@ -201,8 +201,61 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
     # module references, so no signature change is needed. Generic: any module
     # may derive widths; conflicting contributions raise (a derived width that
     # disagrees with an already-resolved one is a real bug, not a silent drop).
-    _apply_derived_widths(plans, widths)
+    #
+    # The derived widths and the symbol back-binding (below) run to a JOINT
+    # fixpoint: a derived width on key K (e.g. Concat's ``seq.x``) may carry a
+    # symbolic last dim SHARED with a not-yet-resolved key (e.g. the pool's
+    # ``pooled.global``, which shares the pool's ``D`` symbol with its ``seq.x``
+    # input). Binding K's symbol to its resolved width then resolves the sharers.
+    # This chain arises since `StreamEmbed` declares ``shape=None`` produces
+    # (rank inferred from the bound input, M7 W1.5 wave R): the embed width enters
+    # via `derived_widths` rather than a spec last dim, so the encoder-less
+    # ``embed -> Concat -> pool`` width path is resolved here rather than by the
+    # first-phase dim table.
+    while True:
+        _apply_derived_widths(plans, widths)
+        if not _back_bind_symbols(observed, widths, dims):
+            break
     return ResolvedSchema(widths=widths, fields=fields)
+
+
+def _back_bind_symbols(
+    observed: Mapping[str, list[TensorSpec]],
+    widths: dict[str, int],
+    dims: _DimBindings,
+) -> bool:
+    """Bind symbolic last dims from resolved key widths, then re-resolve sharers.
+
+    For every key with a known width whose observed specs carry a SYMBOLIC last
+    dim, bind that symbol to the width (idempotent; conflicts raise in
+    `dims.bind`). Then resolve any still-unknown key whose symbolic last dim is
+    now concrete. Returns True if any new width was resolved, so the caller can
+    re-run `derived_widths` (a newly resolved width may unlock a derivation).
+
+    Returns
+    -------
+    bool
+        Whether this pass resolved at least one new width.
+    """
+    for key, width in list(widths.items()):
+        for spec in observed.get(key, ()):
+            if spec.shape and is_symbolic_dim(spec.shape[-1]):
+                dims.bind(str(spec.shape[-1]), width, f"key {key!r} resolved width")
+    changed = False
+    for key, specs in observed.items():
+        if key in widths:
+            continue
+        for spec in specs:
+            if not spec.shape:
+                continue
+            last = spec.shape[-1]
+            if is_symbolic_dim(last):
+                size = dims.size_of(str(last))
+                if size is not None:
+                    widths[key] = size
+                    changed = True
+                    break
+    return changed
 
 
 def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None:

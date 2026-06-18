@@ -269,8 +269,8 @@ def _model_boundary_sources(cli: Any) -> Any:
     file at materialise/read), so it needs the post-data boundary the model
     consumes — exactly the keys the data modules produce and the model requires.
     Derived data-free from the `Features` variables (field counts), the reader's
-    per-stream ``vector`` flag (rank-2 vs rank-3), and the model's FIT-mode
-    label demand (`SaltModule.sink_demand`).
+    per-stream ``global_object`` flag (rank-2 vs rank-3), and the model's
+    FIT-mode label demand (`SaltModule.sink_demand`).
 
     Returns
     -------
@@ -295,9 +295,9 @@ def _model_boundary_sources(cli: Any) -> Any:
         )
     flat: dict[str, TensorSpec] = {}
     for stream, names in features.variables.items():
-        is_vector = bool(getattr(reader.groups.get(stream), "vector", False))
+        is_global = bool(getattr(reader.groups.get(stream), "global_object", False))
         n_fields = len(names)
-        if is_vector:
+        if is_global:
             flat[f"inputs.{stream}"] = TensorSpec(
                 shape=("B", n_fields), dtype="float32", fields=tuple(names)
             )
@@ -309,14 +309,14 @@ def _model_boundary_sources(cli: Any) -> Any:
             flat[f"masks.{stream}"] = TensorSpec(shape=("B", t_dim), dtype="bool", kind="pad_mask")
     # label demand (FIT) — the keys the task heads need from the dataset. The
     # key is labels.<stream>.<label>: a SEQUENCE stream's labels are per-token
-    # ([B, T:stream]); a vector/global stream's are per-jet ([B]).
+    # ([B, T:stream]); a global-object stream's are per-jet ([B]).
     for key in model.sink_demand().get(Mode.FIT, []):
         parts = key.split(".")
         if parts[0] != "labels" or key in flat:
             continue
         stream = parts[1] if len(parts) > 1 else ""
-        is_vector = bool(getattr(reader.groups.get(stream), "vector", True))
-        shape = ("B",) if is_vector else ("B", sym_dim("T", stream))
+        is_global = bool(getattr(reader.groups.get(stream), "global_object", True))
+        shape = ("B",) if is_global else ("B", sym_dim("T", stream))
         flat[key] = TensorSpec(shape=shape, dtype="int64", kind="label", modes=Mode.TRAINING)
     return unflatten_spec(flat)
 

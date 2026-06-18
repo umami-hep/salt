@@ -128,6 +128,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -135,14 +136,33 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 import yaml
 
 from salt.core import convert
 from salt.core.cli import load_config
 from salt.core.convert import ConvertError
+from salt.core.gates_m5 import _CONV_CONFIGS as _M5_CONV_CONFIGS
+from salt.core.gates_m5 import _conv_set_args as _m5_conv_set_args
+from salt.core.gates_m6 import _CONV_M6_CONFIGS as _M6_CONV_CONFIGS
+from salt.core.graph import Bundle, Executor, Mode
 from salt.core.graph.planner import compile_plan
+from salt.core.graph.spec import TensorSpec, unflatten_spec
 from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
+from salt.core.nn import (
+    Normaliser,
+    StreamEmbed,
+    bind_all,
+    materialise_all,
+    resolve_bind_schema,
+)
+from salt.tests.core.gn2_fixture import write_parity_norm_dict
+
+# The salt.core package root (the worktree's salt/core), the editable surface
+# REN1 greps for a residual ``vector`` FLAG use (reader GroupConfig field /
+# StreamEmbed param). CONFIG_DIR is salt/core/configs, so its parent is salt/core.
+CORE_DIR = CONFIG_DIR.parent
 
 # The v1 SOURCE config root (the legacy tree, READ-ONLY reference; plan 13:
 # v1 stays in-tree dormant). The converter reads YAML from here.
@@ -570,8 +590,9 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "fix": ("DL1.yaml",),
         "tier": "m6",
         "onnx": "validate",
-        "note": "jets-only MLP: rank-2 [B,F] vector-stream embed (vector:true) -> sequence:false "
-        "head, NO encoder/pool (the M6-6 deliverable, gate VS1); 3-class CE; LossSum",
+        "note": "jets-only MLP: rank-2 [B,F] vector-stream embed (rank inferred from the "
+        "global_object input) -> sequence:false head, NO encoder/pool (the M6-6 deliverable, "
+        "gate VS1); 3-class CE; LossSum",
     },
     {
         "name": "GN2_muP",
@@ -2347,17 +2368,460 @@ def run_cvf(
 
 
 # ---------------------------------------------------------------------------
+# REN1 — the vector->global_object rename + StreamEmbed flag collapse (W1.5 wave R)
+# ---------------------------------------------------------------------------
+
+# The grep-pattern that catches a RESIDUAL ``vector`` FLAG use after the W1.5
+# wave-R rename — a reader ``GroupConfig`` ``vector:`` field or a ``StreamEmbed``
+# ``vector`` __init__ param / ``self.vector`` attribute. The rename DELETED both
+# the coupled reader flag (renamed to ``global_object`` to align with
+# ``Normaliser(global_object=)``) and the model-side StreamEmbed rank flag (its
+# rank is now INFERRED from its bound input). What is ALLOWED to survive: the
+# VectorConcat module + its gates_m5 helpers (explicitly out of scope, a
+# different "vector" concept — the global-vector concat), and DESCRIPTIVE PROSE
+# ("[B,F] vector", "global vector", "pooled vector", "feature vector",
+# "vector head", "vector-stream", regression "vector norm_params") in
+# docstrings/config comments, plus the 3 intentional historical references that
+# NAME the removed flag to EXPLAIN the collapse (nn/modules.py, DL1.yaml,
+# convert.py). REN1 greps salt/core for the FLAG-SHAPED patterns only — a
+# ``vector:`` YAML key, a ``{vector:``/``"vector":`` dict literal, a ``vector=``
+# kwarg, a ``self.vector`` attribute, or a ``gc["vector"]``/``embed["vector"]``
+# subscript — each NOT on a ``global_object`` line. A non-empty hit is a
+# residual flag that should have been renamed; the gate goes red.
+# A flag-shaped ``vector`` token is one NOT preceded by a backtick (a real YAML
+# key / Python param / attribute is never backtick-wrapped; ```vector:``` /
+# `` `vector:` `` are PROSE that names the removed flag, not a live flag). The
+# negative lookbehind ``(?<![A-Za-z_.`])`` therefore rejects (1) an identifier
+# substring (``vector_mlp``, ``a.vector``) AND (2) a backtick-quoted prose
+# mention — leaving only genuine flag uses.
+_REN1_FLAG_PATTERNS: tuple[str, ...] = (
+    r'(?<!`)"vector"\s*:',  # a {"vector": ...} dict literal (Python), not prose
+    r"(?<![A-Za-z_.`])vector\s*:",  # a `vector:` YAML key (not global_object:, not prose)
+    r"(?<![A-Za-z_.`])vector\s*=",  # a `vector=` kwarg / assignment (not prose)
+    r"(?<!`)self\.vector\b",  # a `self.vector` attribute (not prose)
+    r'gc\[["\']vector["\']\]',  # a `gc["vector"]` reader-config subscript
+    r'embed\[["\']vector["\']\]',  # an `embed["vector"]` subscript
+)
+
+# the gate + test HARNESS files (not product code): they NAME the removed flag in
+# their patterns/docstrings/criterion to DESCRIBE the rename, so they are scoped
+# OUT of the product-code residual-flag grep. REN1 part (a) asserts the PRODUCT
+# code surface -- reader, modules, bind, convert, processors, configs -- is
+# flag-free, not that the gate harness avoids mentioning the flag it gates.
+_REN1_HARNESS_GLOBS: tuple[str, ...] = ("gates_m", "parity_")
+
+# the VectorConcat surface (the out-of-scope "vector" concept) — a hit on one of
+# these tokens is NOT a residual flag (the global-vector concat module + its
+# gates_m5 build helpers, ~16 hits, explicitly kept per the wave-R brief).
+_REN1_VECTORCONCAT_TOKENS: tuple[str, ...] = (
+    "VectorConcat",
+    "vector_concat",
+    "vectorconcat",
+)
+
+# the 3 INTENTIONAL historical references that NAME the removed ``vector:`` flag
+# to EXPLAIN the collapse (a flag-shaped ``vector:`` substring may appear inside
+# the explanatory prose). They are PINNED by (file-suffix, required-substring) so
+# a NEW residual flag use in one of these files is still caught — only the exact
+# documented sentence is exempted.
+_REN1_HISTORICAL_REFS: tuple[tuple[str, str], ...] = (
+    ("nn/modules.py", "supersedes"),  # "supersedes the M6-6 ``vector:`` flag"
+    ("configs/DL1.yaml", "collapsed"),  # "collapsed the old coupled reader+model `vector:` pair"
+    ("convert.py", "No model-side vector flag is emitted"),
+)
+
+
+def _ren1_grep_residual_flags() -> list[dict[str, str]]:
+    """Grep ``salt/core`` for a RESIDUAL ``vector`` FLAG use after the rename.
+
+    Walks every ``*.py`` and ``*.yaml`` under ``salt/core`` and flags any line
+    matching a flag-shaped ``vector`` pattern (``_REN1_FLAG_PATTERNS``) that is
+    NOT (a) on a ``global_object`` line (the rename target), (b) a VectorConcat
+    surface line (the out-of-scope concat module), or (c) one of the 3 pinned
+    intentional historical references that name the removed flag to explain the
+    collapse. A non-empty result means a flag the rename should have removed
+    still lives in the tree.
+
+    Returns
+    -------
+    list[dict[str, str]]
+        One ``{"file", "line", "text", "pattern"}`` record per residual hit
+        (paths relative to ``salt/core``), sorted; empty when the rename is clean.
+    """
+    hits: list[dict[str, str]] = []
+    compiled = [(p, re.compile(p)) for p in _REN1_FLAG_PATTERNS]
+    for path in sorted(CORE_DIR.rglob("*")):
+        if path.suffix not in {".py", ".yaml"} or not path.is_file():
+            continue
+        # the gate/parity HARNESS files name the removed flag to describe the
+        # rename — scope them out (REN1 gates the PRODUCT code, not its harness).
+        if any(path.name.startswith(g) for g in _REN1_HARNESS_GLOBS):
+            continue
+        rel = str(path.relative_to(CORE_DIR))
+        for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+            # skip the out-of-scope VectorConcat surface + the global_object
+            # rename target outright (a `global_object:` line is the rename, not
+            # a residual flag; `Normaliser(global_object=)` also carries `=`).
+            low = raw.lower()
+            if any(tok.lower() in low for tok in _REN1_VECTORCONCAT_TOKENS):
+                continue
+            if "global_object" in raw:
+                continue
+            # the 3 pinned historical references that NAME the removed flag
+            if any(rel.endswith(suf) and sub in raw for suf, sub in _REN1_HISTORICAL_REFS):
+                continue
+            for pat, rx in compiled:
+                if rx.search(raw):
+                    hits.append(
+                        {"file": rel, "line": str(lineno), "text": raw.strip(), "pattern": pat}
+                    )
+                    break
+    return hits
+
+
+# the shipped-config denominator for REN1 part (b): the AUTHORITATIVE M5-CONV +
+# M6-CONV config lists (the standalone-validatable shipped v2 configs, with their
+# overlay stacks / norm_global / muP / onnx handling already pinned by those
+# gates). This is the set the converter + the model emit with the NEW
+# ``global_object`` flag; REN1 re-validates every one fit/test/onnx (data-free)
+# to prove the rename did not break config loading/plan-compile. The 10 GN3
+# overlay FRAGMENTS (GN3_baseline overlays etc.) are NOT standalone-validatable
+# on their own — the M5-CONV list already carries them as STACKED entries (base +
+# overlay), so REN1 inherits the correct stacking for free.
+_REN1_SHIPPED_CONFIGS: tuple[dict[str, Any], ...] = (*_M5_CONV_CONFIGS, *_M6_CONV_CONFIGS)
+
+_REN1_NO_STRICT_RATIONALE = (
+    "REN1 part (b) validates data-free, NOT --strict — the SAME M5/M6-CONV + CV1 precedent "
+    "(_NO_STRICT_RATIONALE): a data-free validation cannot satisfy --strict, which promotes EVERY "
+    "warning to an error (cli.py), and several warnings are inherent to data-free validation "
+    "(no-schema, warning-level deadcode, multi-stream Normaliser missing-input-type preflight) — "
+    "orthogonal to whether the global_object rename loads + plan-compiles. rc == 0 (no ERROR-level "
+    "finding) IS the 'validates in fit/test/onnx with the new global_object flag' criterion. "
+    "(--strict on these data-free configs is RED BY CONSTRUCTION, confirmed empirically: DL1 "
+    "--strict fit/test/onnx all rc=1 — exactly the documented data-free-warning promotion, not a "
+    "rename regression.)"
+)
+
+# REN1 part (c) — the rank-inference synthetic check fixture (DL1-shaped jets).
+_REN1_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
+_REN1_EMBED_DIM = 16
+_REN1_B = 4  # batch size for the synthetic rank check
+_REN1_T = 5  # token positions for the rank-3 sequence case
+
+
+def _ren1_rank_inference(outdir: Path) -> dict[str, Any]:
+    """StreamEmbed infers rank from its BOUND INPUT — rank-2 AND rank-3, no flag.
+
+    The load-bearing wave-R evidence (part (c)): a SINGLE ``StreamEmbed`` (carrying
+    NO rank flag — the ``vector`` param is DELETED) is driven through the REAL
+    compiler / two-phase bind / executor twice, the ONLY difference being the
+    rank its bound input carries (set by the producer ``Normaliser`` — rank-2 for
+    a ``global_object`` stream, rank-3 for a sequence stream — exactly the single
+    reader ``global_object:`` flag that now drives the rank end-to-end):
+
+    - a ``global_object='jets'`` ``Normaliser`` -> ``normed.jets`` ``[B, F]`` ->
+      the SAME embed produces ``embed.jets`` ``[B, D]`` (rank-2, no token axis);
+    - a sequence (``global_object=None``) ``Normaliser`` -> ``normed.jets``
+      ``[B, T, F]`` -> the SAME embed produces ``embed.jets`` ``[B, T, D]``
+      (rank-3, token axis preserved).
+
+    The embed's ``out_dim`` width ``D`` is contributed identically in BOTH cases
+    via ``derived_widths`` (a ``shape=None`` produce carries no last dim); only
+    the RANK differs, and it flows from the bound input — proving the collapse is
+    behaviour-preserving (the rank-2 DL1 path and the rank-3 sequence path share
+    one flag-free module).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"checks": {...}, "rank2": {...}, "rank3": {...}}`` — per-case the
+        forward output rank/shape and the static derived width.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    nd = outdir / "ren1_norm_dict.yaml"
+    nd.write_text(
+        yaml.safe_dump({
+            "jets": {
+                "pt_btagJes": {"mean": 1.5, "std": 2.0},
+                "eta_btagJes": {"mean": -0.25, "std": 1.25},
+            }
+        })
+    )
+
+    def _build() -> StreamEmbed:
+        # a SINGLE StreamEmbed — NO rank flag (the deleted `vector` param). The
+        # ONLY thing varied between the two cases is the Normaliser's
+        # global_object flag, which sets the bound-input rank.
+        return StreamEmbed(
+            stream="jets",
+            out_dim=_REN1_EMBED_DIM,
+            dense={"hidden_layers": [8], "activation": "ReLU"},
+        )
+
+    def _run(global_object: str | None, src_shape: tuple, x: torch.Tensor) -> dict[str, Any]:
+        norm = Normaliser(norm_dict=nd, streams=["jets"], global_object=global_object)
+        embed = _build()
+        modules: dict[str, Any] = {"norm": norm, "jets_embed": embed}
+        for name, module in modules.items():
+            module.name = name
+        sources = unflatten_spec({
+            "inputs.jets": TensorSpec(
+                shape=src_shape, dtype="float32", fields=tuple(_REN1_JET_VARIABLES)
+            )
+        })
+        with _quiet():
+            plan = compile_plan(modules, Mode.FIT, sources=sources, sinks=["embed.jets"])
+            input_spec = plan.sources["inputs.jets"]
+            bind_all(modules, resolve_bind_schema([plan]))
+            materialise_all(modules)
+            b = Bundle()
+            b.set("inputs.jets", x)
+            out = Executor(plan).run(b, debug=True)
+        emb = out.get("embed.jets")
+        return {
+            "global_object": global_object,
+            "input_rank": len(input_spec.shape),
+            "embed_rank": int(emb.ndim),
+            "embed_shape": list(emb.shape),
+            "derived_width": embed.derived_widths({}).get("embed.jets"),
+            "embed_has_no_vector_param": not hasattr(embed, "vector"),
+        }
+
+    nf = len(_REN1_JET_VARIABLES)
+    rank2 = _run(
+        "jets",
+        ("B", nf),
+        torch.randn(_REN1_B, nf, generator=torch.Generator().manual_seed(1)),
+    )
+    rank3 = _run(
+        None,
+        ("B", "T:jets", nf),
+        torch.randn(_REN1_B, _REN1_T, nf, generator=torch.Generator().manual_seed(2)),
+    )
+
+    checks = {
+        # rank-2 [B, F] bound input -> rank-2 [B, D] embed (no token axis)
+        "rank2_input_is_rank2": rank2["input_rank"] == 2,
+        "rank2_embed_is_rank2": rank2["embed_rank"] == 2,
+        "rank2_embed_shape": rank2["embed_shape"] == [_REN1_B, _REN1_EMBED_DIM],
+        # rank-3 [B, T, F] bound input -> rank-3 [B, T, D] embed (token axis kept)
+        "rank3_input_is_rank3": rank3["input_rank"] == 3,
+        "rank3_embed_is_rank3": rank3["embed_rank"] == 3,
+        "rank3_embed_shape": rank3["embed_shape"] == [_REN1_B, _REN1_T, _REN1_EMBED_DIM],
+        # the SAME out_dim width via derived_widths in BOTH cases (flag-free)
+        "out_dim_via_derived_widths": (
+            rank2["derived_width"] == rank3["derived_width"] == _REN1_EMBED_DIM
+        ),
+        # the StreamEmbed carries NO `vector` rank flag (the param is DELETED)
+        "streamembed_has_no_vector_attr": rank2["embed_has_no_vector_param"]
+        and rank3["embed_has_no_vector_param"],
+    }
+    return {"checks": checks, "rank2": rank2, "rank3": rank3, "norm_dict": str(nd)}
+
+
+def run_ren1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """REN1: the vector->global_object rename + StreamEmbed flag-collapse gate.
+
+    The W1.5 wave-R behaviour-preserving rename gate. It asserts THREE things:
+
+    (a) **no residual ``vector`` FLAG** — a grep over ``salt/core`` finds NO
+        flag-shaped ``vector`` use (a reader ``GroupConfig`` ``vector:`` field or
+        a ``StreamEmbed`` ``vector`` param / ``self.vector`` attribute). Only the
+        out-of-scope ``VectorConcat`` surface, descriptive prose, and the 3
+        pinned intentional historical references that NAME the removed flag to
+        explain the collapse are allowed (``_ren1_grep_residual_flags``);
+
+    (b) **every shipped config validates with the new flag** — over the
+        AUTHORITATIVE M5-CONV + M6-CONV shipped-config denominator (the
+        standalone-validatable v2 configs, overlay stacks pinned), every config
+        validates + plan-compiles fit/test/onnx (``salt2 graph validate`` rc == 0
+        in every applicable mode; data-free, NOT ``--strict`` — the M5/M6-CONV
+        precedent, ``_REN1_NO_STRICT_RATIONALE``) with the renamed
+        ``global_object`` flag in place;
+
+    (c) **StreamEmbed infers rank for rank-2 AND rank-3 inputs** — a synthetic
+        check (``_ren1_rank_inference``) drives the SAME flag-free ``StreamEmbed``
+        through the real compile/bind/executor twice: a ``global_object`` rank-2
+        ``[B, F]`` bound input -> ``[B, D]`` embed (no token axis), a sequence
+        rank-3 ``[B, T, F]`` bound input -> ``[B, T, D]`` embed (token axis
+        preserved) — rank inferred from the bound input, ZERO model-side flag.
+
+    Negative control (``test_gates_m7.py`` + the in-gate ``corruption`` hook,
+    test-only, never on the CLI): the hook INJECTS a fake residual-flag hit into
+    the part-(a) result, so the ``no_residual_vector_flag`` check flips False and
+    the gate goes red — proving the grep check is not vacuous.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("REN1 vector->global_object rename + StreamEmbed flag-collapse (W1.5 wave R)")
+    print("=" * 96)
+
+    checks: dict[str, bool] = {}
+
+    # -- (a) no residual `vector` FLAG use in salt/core ----------------------
+    residual = _ren1_grep_residual_flags()
+    if corruption is not None:
+        residual = corruption({"residual": residual})["residual"]
+    checks["no_residual_vector_flag"] = residual == []
+
+    # -- (b) every shipped config validates fit/test/onnx with global_object --
+    outdir.mkdir(parents=True, exist_ok=True)
+    norm_dict = outdir / "ren1_conv_norm_dict.yaml"
+    class_dict = outdir / "ren1_conv_class_dict.yaml"
+    write_parity_norm_dict(norm_dict, class_dict)
+    config_rows: list[dict[str, Any]] = []
+    for entry in _REN1_SHIPPED_CONFIGS:
+        name = entry["name"]
+        cfg_paths = [CONFIG_DIR / c for c in entry["cfg"]]
+        files_ok = all(p.is_file() for p in cfg_paths)
+        row: dict[str, Any] = {
+            "name": name,
+            "cfg": list(entry["cfg"]),
+            "family": entry.get("family"),
+            "validate": {},
+            "files_present": files_ok,
+        }
+        if not files_ok:
+            checks[f"{name}:files_present"] = False
+            config_rows.append(row)
+            continue
+        sets = list(_m5_conv_set_args(entry, norm_dict))
+        # a muP config (M6-CONV GN2_muP) needs its infshapes generated data-free
+        # first (the _mup_shape_override helper, the MU2 precedent).
+        if entry.get("mup"):
+            sets += _mup_shape_override(cfg_paths, sets, outdir / name)
+        all_ok = True
+        modes = ["fit", "test"] + (["onnx"] if entry.get("onnx") == "validate" else [])
+        for mode in modes:
+            rc = _validate_rc(cfg_paths, mode, sets)
+            row["validate"][mode] = rc
+            mode_ok = rc == 0
+            checks[f"{name}:validate:{mode}"] = mode_ok
+            all_ok = all_ok and mode_ok
+        row["all_modes_ok"] = all_ok
+        config_rows.append(row)
+
+    # -- (c) StreamEmbed rank inference (rank-2 [B,F] + rank-3 [B,T,F]) -------
+    rank = _ren1_rank_inference(outdir / "rank_inference")
+    for cname, cval in rank["checks"].items():
+        checks[f"rank:{cname}"] = cval
+
+    passed = all(checks.values())
+    n_configs = len(config_rows)
+    n_cfg_ok = sum(1 for r in config_rows if r.get("all_modes_ok"))
+
+    criterion = (
+        "the M7 W1.5 wave-R vector->global_object rename + StreamEmbed flag collapse "
+        "(behaviour-preserving): (a) a grep over salt/core finds NO residual `vector` FLAG use (a "
+        "reader GroupConfig `vector:` field or a StreamEmbed `vector` param / self.vector "
+        "attribute) "
+        "— only the out-of-scope VectorConcat surface, descriptive prose, and the 3 pinned "
+        "intentional historical references that NAME the removed flag are allowed; (b) over the "
+        f"AUTHORITATIVE M5-CONV + M6-CONV shipped-config denominator ({n_configs} configs) every "
+        "config validates + plan-compiles fit/test/onnx (salt2 graph validate rc == 0, data-free "
+        "non-strict — the M5/M6-CONV precedent) with the renamed global_object flag in place; (c) "
+        "the SAME flag-free StreamEmbed INFERS its rank from its bound input — a rank-2 [B, F] "
+        "global-object input -> [B, D] embed (no token axis) AND a rank-3 [B, T, F] sequence input "
+        "-> [B, T, D] embed (token axis preserved), zero model-side flag. Negative control: an "
+        "injected residual-flag hit flips check (a) red, proving the grep is not vacuous."
+    )
+    report = _base_report(
+        "ren1_vector_rename_collapse",
+        passed,
+        criterion,
+        {
+            "core_dir": str(CORE_DIR),
+            "shipped_configs": n_configs,
+            "shipped_configs_validated": n_cfg_ok,
+            "residual_flag_hits": len(residual),
+            "strict": False,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["residual_flag_hits"] = residual
+    report["flag_patterns"] = list(_REN1_FLAG_PATTERNS)
+    report["vectorconcat_tokens_allowed"] = list(_REN1_VECTORCONCAT_TOKENS)
+    report["historical_refs_allowed"] = [
+        {"file_suffix": suf, "substring": sub} for suf, sub in _REN1_HISTORICAL_REFS
+    ]
+    report["shipped_config_validation"] = config_rows
+    report["shipped_config_names"] = [e["name"] for e in _REN1_SHIPPED_CONFIGS]
+    report["rank_inference"] = rank
+    report["no_strict_rationale"] = _REN1_NO_STRICT_RATIONALE
+    report["scope_note"] = (
+        "REN1 gates the W1.5 wave-R rename that DELETED two coupled flags: the reader's "
+        "GroupConfig.vector field (renamed global_object, aligning with "
+        "Normaliser(global_object=)) "
+        "and the model-side StreamEmbed `vector` rank flag (collapsed — the embed now INFERS its "
+        "rank from its bound input). The rename is BEHAVIOUR-PRESERVING: the rank originates at "
+        "ONE "
+        "place (the reader's per-group global_object: flag), which drives both the reader/Features "
+        "boundary rank and the matching Normaliser global_object rank-2 handling; the StreamEmbed "
+        "declares rank-AGNOSTIC specs (shape=None on both the normed.<s> require and the embed.<s> "
+        "produce) so the producer sets the input rank and the consumer sets the output rank — they "
+        "agree by construction (both derive from that one flag). Part (a) greps for the "
+        "FLAG-SHAPED "
+        "residual only (a `vector:` key, a `vector=` kwarg, self.vector, a gc/embed['vector'] "
+        "subscript) NOT on a global_object line — the VectorConcat module (a DIFFERENT 'vector' "
+        "concept, the global-vector concat) + descriptive prose + the 3 pinned historical "
+        "references that name the removed flag to explain the collapse are exempt. Part (b) reuses "
+        "the M5-CONV + M6-CONV shipped-config lists (the standalone-validatable v2 configs, "
+        "overlay "
+        "stacks/norm_global/muP already pinned) so it inherits the correct stacking for the 10 GN3 "
+        "overlay fragments. Part (c) proves the rank inference end-to-end for BOTH ranks through "
+        "the "
+        "real compile/bind/executor with one flag-free StreamEmbed."
+    )
+
+    # -- stdout table ----------------------------------------------------------
+    print("(a) residual vector FLAG hits in salt/core:")
+    if residual:
+        for h in residual:
+            print(f"    {h['file']}:{h['line']}  [{h['pattern']}]  {h['text']}")
+    else:
+        print("    NONE (rename clean)")
+    print(f"\n(b) shipped configs validated fit/test/onnx ({n_cfg_ok}/{n_configs}):")
+    print(f"{'config':<28}{'fit':>5}{'test':>6}{'onnx':>6}  family")
+    for r in config_rows:
+        v = r["validate"]
+        fit = "PASS" if v.get("fit") == 0 else ("-" if "fit" not in v else "FAIL")
+        test = "PASS" if v.get("test") == 0 else ("-" if "test" not in v else "FAIL")
+        onnx = "PASS" if v.get("onnx") == 0 else ("na" if "onnx" not in v else "FAIL")
+        print(f"{r['name']:<28}{fit:>5}{test:>6}{onnx:>6}  {r.get('family')}")
+    r2, r3 = rank["rank2"], rank["rank3"]
+    print(
+        f"\n(c) StreamEmbed rank inference: rank-2 [B,F] in (rank {r2['input_rank']}) -> embed "
+        f"{r2['embed_shape']} (rank {r2['embed_rank']}); rank-3 [B,T,F] in "
+        f"(rank {r3['input_rank']}) "
+        f"-> embed {r3['embed_shape']} (rank {r3['embed_rank']}); out_dim via derived_widths "
+        f"(no model-side flag)"
+    )
+    _print_verdict("ren1", passed, criterion, _emit_report(report, outdir, "ren1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the M7 gate subcommand parser (cv1 / cv2; later waves append more).
+    """Build the M7 gate subcommand parser (cv1 / cv2 / cvf / ren1).
 
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``cv1`` and ``cv2`` subcommands.
+        Parser with the ``cv1``, ``cv2``, ``cvf`` and ``ren1`` subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m7", description=__doc__.splitlines()[0]
@@ -2367,6 +2831,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "cv1": "Converter acceptance over the needs-M5+M6 denominator (convert+validate+plan==fix)",
         "cv2": "Converter hard-error path on the bit-rotted/parked configs (the dropped marker)",
         "cvf": "Converter target-producer fidelity (every task target has a real producer)",
+        "ren1": "vector->global_object rename + StreamEmbed flag collapse (W1.5 wave R)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -2383,7 +2848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         0 if the gate passed, 1 otherwise.
     """
     args = _build_parser().parse_args(argv)
-    runner = {"cv1": run_cv1, "cv2": run_cv2, "cvf": run_cvf}[args.gate]
+    runner = {"cv1": run_cv1, "cv2": run_cv2, "cvf": run_cvf, "ren1": run_ren1}[args.gate]
     code, _ = runner(args.outdir)
     return code
 

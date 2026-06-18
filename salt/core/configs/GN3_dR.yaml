@@ -24,4 +24,4 @@ data:
       init_args:
         groups:
           # dR-matched tracks (v1 input_map: tracks -> tracks_dr)
-          tracks: {vector: false, dataset: tracks_dr}
+          tracks: {global_object: false, dataset: tracks_dr}

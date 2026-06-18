@@ -52,11 +52,11 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false}
           # the truth-hadron object group (v1 mf_config.object.name) the
           # MaskFormerTargets processor reads to build object_class + masks
-          truth_hadrons: {vector: false}
+          truth_hadrons: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:

@@ -78,10 +78,10 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false, truncate: 100}
-          flow: {vector: false, truncate: 100}
-          truth_hadrons: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false, truncate: 100}
+          flow: {global_object: false, truncate: 100}
+          truth_hadrons: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:

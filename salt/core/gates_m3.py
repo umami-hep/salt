@@ -332,7 +332,7 @@ def _v2_checkpoint(
     buffers arrive via the state dict, no materialise on the test path) and
     the trainer saves the checkpoint ``salt2 test`` will evaluate.
 
-    No schema artifact (explicit vector flags instead, matching the
+    No schema artifact (explicit global_object flags instead, matching the
     schema-less ``salt2 test`` invocation): a real open-data file's
     ``flavour_label`` class attr (4 classes) would otherwise trip
     `check_class_names` against the 3-class fixture head — the W gates
@@ -347,7 +347,7 @@ def _v2_checkpoint(
     dm = GraphDataModule(
         modules={
             "reader": H5StructuredReader(
-                groups={"jets": {"vector": True}, "tracks": {"vector": False}}
+                groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}
             ),
             "features": Features(variables=variables),
             "labels": Labels(),

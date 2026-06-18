@@ -596,8 +596,8 @@ class TestWriterCallback:
 def _stub_reader() -> SimpleNamespace:
     """A minimal H5StructuredReader surface for `WriterCallback._declare_ctx`."""
     groups = {
-        "jets": SimpleNamespace(vector=True, dataset="jets"),
-        "tracks": SimpleNamespace(vector=False, dataset="tracks"),  # the sequence stream
+        "jets": SimpleNamespace(global_object=True, dataset="jets"),
+        "tracks": SimpleNamespace(global_object=False, dataset="tracks"),  # the sequence stream
     }
     return SimpleNamespace(streams=("jets", "tracks"), groups=groups)
 

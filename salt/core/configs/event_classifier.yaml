@@ -49,8 +49,8 @@ data:
           # the global object is `events` (v1 global_object: events); the
           # reconstructed `objects` are the constituent sequence (v1 input_map:
           # events -> event_vars, objects -> objects_vars)
-          events: {vector: true, dataset: event_vars}
-          objects: {vector: false, dataset: objects_vars}
+          events: {global_object: true, dataset: event_vars}
+          objects: {global_object: false, dataset: objects_vars}
     features:
       class_path: salt.core.data.Features
       init_args:

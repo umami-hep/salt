@@ -425,7 +425,7 @@ class TestBoundaryDemandGuards:
                 raise NotImplementedError
 
         wcb = WriterCallback(modules={"truth": TruthWriter(), "tasks": TaskWriter()})
-        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+        reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
         model = build_model(data)
         model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
             callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
@@ -636,7 +636,7 @@ class TestClassNamesCheck:
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
-        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+        reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
         assert check_class_names(modules, reader) == 0
 
     def test_default_on_at_fit_setup(self, data):
@@ -674,7 +674,7 @@ class TestExposeSilencesDeadPreds:
 
         # TaskWriter narrowed to the jets task — the tracks tasks' preds are unconsumed
         wcb = WriterCallback(modules={"tasks": TaskWriter(tasks=["jets_classification"])})
-        reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+        reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
         model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
             callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
         )

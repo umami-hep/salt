@@ -400,24 +400,31 @@ class StreamEmbed(nn.Module):
     ``context: [normed.jets]`` this reproduces v1's ``[global, stream]``
     column order exactly (checkpoint layout, design §5.1).
 
-    Stream rank — the ``vector:`` flag (M6-6 / plan 12 sub-wave D): a normal
-    constituent stream is a padded sequence ``inputs.<s> [B, T, F]`` ->
-    ``embed.<s> [B, T, D]``. A ``vector: true`` stream is a per-jet global
-    vector ``inputs.<s> [B, F]`` -> ``embed.<s> [B, D]`` with NO token axis —
-    the model-side counterpart to the reader/``Features`` rank-2 boundary the
-    ``vector:`` reader flag (reader.py GroupConfig) already produces, and the
-    DIRECT mirror of `Normaliser`'s ``global_object`` rank-2 handling
-    (modules.py `Normaliser._spec`). This is what makes DL1 a jets-only MLP:
-    a ``[B, F]`` embed consumed straight by a (``sequence: false``) task head,
-    with no encoder and no pooling — exactly v1's no-encoder/no-pool
-    `InitNet`/`SaltModel` path (saltmodel.py:90-92 guard, :155-156 embed_xs,
-    :170-172 global_rep = embed_xs). The internal v1 `Dense`/``attach_context``
-    are rank-agnostic (``nn.Linear`` over ``[..., F]``, tensor_utils.py:236-240
-    expands a lower-rank context), so the forward math is identical — only the
-    declared/produced spec rank changes. ONNX: a rank-2 embed is a plain
-    `nn.Linear`-stack with no T axis, trivially traceable (B the sole dynamic
-    axis), exactly as `Normaliser`'s ``[B, F]`` global-object path traces today
-    (no special-casing, design ONNX note plan 12 sub-wave D).
+    Stream rank — INFERRED from the bound input (M7 W1.5 wave R; supersedes the
+    M6-6 ``vector:`` flag): StreamEmbed no longer carries a rank flag of its own.
+    Its rank is whatever its BOUND INPUT carries, and the embed simply preserves
+    it: a padded-sequence input ``inputs.<s> [B, T, F]`` -> ``embed.<s> [B, T, D]``,
+    a per-jet GLOBAL input ``inputs.<s> [B, F]`` -> ``embed.<s> [B, D]`` with NO
+    token axis. The rank originates at ONE place — the reader's per-group
+    ``global_object:`` flag (reader.py GroupConfig), which drives the
+    reader/``Features`` boundary rank and the matching `Normaliser`
+    ``global_object`` rank-2 handling (modules.py `Normaliser._spec`). The embed
+    declares rank-AGNOSTIC specs (``shape=None`` on both its ``normed.<s>``
+    require and its ``embed.<s>`` produce), so the producer (Normaliser/reader)
+    sets the input rank and the consumer (Concat / a ``sequence:`` task head)
+    sets the output rank — they are consistent BY CONSTRUCTION because both come
+    from the single reader flag. The embed's ``out_dim`` width is contributed via
+    the `derived_widths` bind hook (design §6.6), since a ``shape=None`` produce
+    declares no last dim. This is what makes DL1 a jets-only MLP: a ``[B, F]``
+    embed consumed straight by a (``sequence: false``) task head, with no encoder
+    and no pooling — exactly v1's no-encoder/no-pool `InitNet`/`SaltModel` path
+    (saltmodel.py:90-92 guard, :155-156 embed_xs, :170-172 global_rep = embed_xs).
+    The internal v1 `Dense`/``attach_context`` are rank-agnostic (``nn.Linear``
+    over ``[..., F]``, tensor_utils.py:236-240 expands a lower-rank context), so
+    the forward math is identical — only the rank flowing through the spec changes.
+    ONNX: a rank-2 embed is a plain `nn.Linear`-stack with no T axis, trivially
+    traceable (B the sole dynamic axis), exactly as `Normaliser`'s ``[B, F]``
+    global-object path traces today (no special-casing).
 
     muP — the ``mup:`` flag (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/
     BREAK-routing): the model-side embed is the first stage of the muP-parametrised
@@ -458,7 +465,6 @@ class StreamEmbed(nn.Module):
         dense: dict[str, Any] | None = None,
         context: Sequence[str] = (),
         input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
-        vector: bool = False,
         mup: bool = False,
     ) -> None:
         """Capture config only (design §2.3).
@@ -477,13 +483,9 @@ class StreamEmbed(nn.Module):
             Dotted bundle keys attached as context, in v1 prepend order (see
             class docstring), by default ``()``.
         input : str | None, optional
-            Input key override, by default ``normed.<stream>``.
-        vector : bool, optional
-            Whether the stream is a per-jet global vector (``[B, F]`` ->
-            ``[B, D]``, no token axis) rather than a padded sequence
-            (``[B, T, F]`` -> ``[B, T, D]``); by default False. The model-side
-            mirror of the reader's ``vector:`` flag and `Normaliser`'s
-            ``global_object`` rank-2 handling (DL1 jets-only MLP, M6-6).
+            Input key override, by default ``normed.<stream>``. The embed's
+            rank is INFERRED from this bound input — no rank flag (M7 W1.5
+            wave R; see the class docstring).
         mup : bool, optional
             Whether to use the muP parametrisation for the embed's internal
             `Dense` (M6 sub-wave B), by default False. When True the composed v1
@@ -514,34 +516,20 @@ class StreamEmbed(nn.Module):
         self.dense_cfg = dict(dense or {})
         self.context = tuple(context)
         self.input_key = input if input is not None else f"normed.{stream}"
-        self.vector = vector
         self.mup = bool(mup)
         self.net: nn.Module | None = None
-
-    def _shape(self, width: int | str) -> tuple[int | str, ...]:
-        """Build the input/produced shape for this stream's rank (vector vs sequence).
-
-        Mirrors `Normaliser._spec`: a ``vector`` stream is ``("B", width)``,
-        a sequence stream is ``("B", "T:<stream>", width)``. The last dim is
-        `width` (a symbol for the require, the concrete `out_dim` for the
-        produce); the planner's rank check (planner.py:1083) ties the embed's
-        declared rank to the rank-2 ``Features``/``Normaliser`` producer chain
-        the reader's ``vector:`` flag drives.
-
-        Returns
-        -------
-        tuple[int | str, ...]
-            ``("B", width)`` for a vector stream, ``("B", "T:<stream>",
-            width)`` for a sequence stream.
-        """
-        return ("B", width) if self.vector else ("B", _stream_len(self.stream), width)
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + context keys -> ``embed.<stream>``.
 
-        The input/produced rank follows the ``vector:`` flag (``[B, F]`` ->
-        ``[B, D]`` for a vector stream, ``[B, T, F]`` -> ``[B, T, D]`` for a
-        sequence stream); see `_shape`.
+        Rank-AGNOSTIC (M7 W1.5 wave R): the input require and the ``embed.<s>``
+        produce both declare ``shape=None``, so the embed inherits its rank from
+        the bound input — the producer (Normaliser/reader, keyed on the single
+        reader ``global_object:`` flag) sets the input rank, and the consumer
+        (Concat / a ``sequence:`` task head) sets the output rank; both come from
+        that one flag so they agree by construction. The ``out_dim`` width of the
+        ``embed.<s>`` produce is contributed at bind via `derived_widths` (a
+        ``shape=None`` spec declares no last dim, design §6.6).
 
         Returns
         -------
@@ -550,7 +538,7 @@ class StreamEmbed(nn.Module):
         """
         del mode
         requires: dict[str, TensorSpec] = {
-            self.input_key: TensorSpec(shape=self._shape(sym_dim("F", self.name)), dtype="float32"),
+            self.input_key: TensorSpec(shape=None, dtype="float32"),
         }
         for key in self.context:
             # rank/width unconstrained here: context may be a [B, F] global
@@ -559,11 +547,25 @@ class StreamEmbed(nn.Module):
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec({
-                f"embed.{self.stream}": TensorSpec(
-                    shape=self._shape(self.out_dim), dtype="float32"
-                ),
+                f"embed.{self.stream}": TensorSpec(shape=None, dtype="float32"),
             }),
         )
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """Contribute the ``embed.<stream>`` last-dim width (design §6.6).
+
+        The produce declares ``shape=None`` (rank inferred from the bound input,
+        see `declare_io`), so the ``out_dim`` width is supplied here instead of
+        via a spec last dim. `out_dim` is a config constant, so this is
+        unconditional (no dependence on resolved input widths).
+
+        Returns
+        -------
+        dict[str, int]
+            ``{"embed.<stream>": out_dim}``.
+        """
+        del widths
+        return {f"embed.{self.stream}": self.out_dim}
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Build the internal `Dense` with the inferred input width (design §2.3).
@@ -669,6 +671,35 @@ class Concat(nn.Module):
                 ),
             }),
         )
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """Contribute the ``seq.x`` last-dim width from the per-stream embed widths.
+
+        Concat shares one ``embed_dim`` symbol between its ``embed.<stream>``
+        requires and its ``seq.x`` produce (equal embed widths are a genuine
+        concat constraint). Since `StreamEmbed` now produces ``embed.<stream>``
+        with ``shape=None`` (rank inferred from the bound input, M7 W1.5 wave R),
+        its width arrives via `StreamEmbed.derived_widths` rather than a spec last
+        dim — so there is no longer a concrete ``embed.<stream>`` shape for the
+        dim table to bind ``embed_dim`` from. When an ENCODER follows, the
+        encoder's concrete ``seq.x`` require width still binds it; the
+        ENCODERLESS-pool path (regression DiPS body) has no such anchor, so this
+        hook forwards the resolved embed width to ``seq.x`` directly (design §6.6,
+        the same mechanism as `VectorConcat`'s ``Dsum``). The per-stream embeds
+        share one width (the concat constraint), so the FIRST resolved input
+        width is the ``seq.x`` width.
+
+        Returns
+        -------
+        dict[str, int]
+            ``{"seq.x": embed_width}`` once an ``embed.<stream>`` width is
+            resolved, otherwise ``{}``.
+        """
+        for stream in self.streams:
+            width = widths.get(f"embed.{stream}")
+            if width is not None:
+                return {"seq.x": width}
+        return {}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Any]:
         """Concatenate streams along the token dim and record the layout.
@@ -1022,7 +1053,7 @@ class EdgeEmbed(nn.Module):
     applies cleanly to a rank-4 ``[B, T, T, E]`` tensor (it embeds each
     pairwise edge independently) — the v1 ``edge_init_nets[0]`` `InitNet` does
     the same (it is a `Dense` over the ``[B, L, L, E]`` edge matrix,
-    saltmodel.py:132). No context, no muP, no ``vector:`` rank switch — edges
+    saltmodel.py:132). No context, no muP, no per-stream rank inference — edges
     are always the rank-4 pairwise matrix.
 
     ONNX: a plain ``nn.Linear``-stack over the last dim has no dynamic feature

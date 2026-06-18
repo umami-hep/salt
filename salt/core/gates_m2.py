@@ -273,8 +273,8 @@ def run_g1(
     Both sides are configured with the SAME column set: variables default to
     the norm-dict per-stream lists (`_norm_dict_variables` — works for dummy
     and real files alike), labels to the GN2 training labels. The v2 reader
-    gets the schema dumped live from ``file`` (design §2.6), so vector flags
-    and field validation come from the file itself. Compared per slice:
+    gets the schema dumped live from ``file`` (design §2.6), so global_object
+    flags and field validation come from the file itself. Compared per slice:
     ``inputs.jets/tracks`` (f32), ``masks.tracks`` (bool, True = padded) and
     every ``labels.<stream>.<label>`` (int64) — the explicit v1<->v2 key map
     of ``test_data_pipeline.assert_batches_match``. Sequential slices from

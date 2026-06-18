@@ -3516,7 +3516,7 @@ def _jets_only_writer() -> tuple[Any, Any]:
         ``(writer_callback, reader)`` for the `_model_sinks(Mode.TEST)` path.
     """
     wcb = WriterCallback(modules={"tasks": TaskWriter(tasks=["jets_classification"])})
-    reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
     return wcb, reader
 
 
@@ -3620,8 +3620,8 @@ def run_d2expose(
         lambda: unknown.resolve_origin_names(_origin_schema_reader())
     )
     no_attr = _name_based_vertexing()
-    # a reader with NO schema artifact (vector set explicitly so it constructs)
-    no_attr_reader = H5StructuredReader(groups={"tracks": {"vector": False}})
+    # a reader with NO schema artifact (global_object set explicitly so it constructs)
+    no_attr_reader = H5StructuredReader(groups={"tracks": {"global_object": False}})
     checks["name_based_no_schema_bind_fails"] = _raises_config_error(
         lambda: (
             no_attr.resolve_origin_names(no_attr_reader),
@@ -3891,7 +3891,7 @@ def run_d2cfg(
     # -- (a) writer TensorSpec kind/dtype validation (the REAL validate_specs) --
     norm_dict = _norm_dict(outdir)
     model_modules = build_gn2v2_modules(norm_dict)
-    reader = H5StructuredReader(groups={"jets": {"vector": True}, "tracks": {"vector": False}})
+    reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
     producer_specs = WriterCallback.model_producer_specs(model_modules)
     produced_key = "preds.jets.jets_classification"
     # the producing leaf this gate unifies against (kind="data", dtype="float32")

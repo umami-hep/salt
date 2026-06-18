@@ -27,9 +27,9 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false, dataset: tracks_ghost} # v1 input_map
-          flows: {vector: false}
+          jets: {global_object: true}
+          tracks: {global_object: false, dataset: tracks_ghost} # v1 input_map
+          flows: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:

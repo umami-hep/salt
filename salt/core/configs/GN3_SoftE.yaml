@@ -39,8 +39,8 @@ data:
         groups:
           # GN3V00's jets/tracks/flows groups survive the key-level merge; ADD
           # the electrons stream and the `global` jet-feature concat stream.
-          electrons: {vector: false}
-          global: {vector: true}
+          electrons: {global_object: false}
+          global: {global_object: true}
     features:
       class_path: salt.core.data.Features
       init_args:

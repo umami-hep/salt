@@ -83,9 +83,11 @@ class TestVS1:
         assert report["passed"]
         assert all(report["checks"].values())
         assert (tmp_path / "vs1_report.json").is_file()
-        # rank-2 [B, F] -> [B, D] embed, no token axis
-        assert report["checks"]["embed_input_is_rank2"]
-        assert report["checks"]["embed_output_is_rank2"]
+        # rank-agnostic embed specs (M7 W1.5 wave R): the rank-2 [B, F] -> [B, D]
+        # boundary is proven end-to-end (compiled plan + forward shape + ONNX)
+        assert report["checks"]["embed_input_is_rank_agnostic"]
+        assert report["checks"]["embed_output_is_rank_agnostic"]
+        assert report["checks"]["embed_out_dim_via_derived_widths"]
         assert report["checks"]["pred_is_rank2_b_nclasses"]
         # no-encoder / no-pool plan; head reads the embed directly
         assert report["checks"]["no_encoder_in_plan"]
@@ -115,8 +117,8 @@ class TestVS1:
         assert not report["passed"]
         assert not report["checks"]["forward_bitwise_vs_v1"]
         # the structural + onnx checks are independent of the logit values
-        assert report["checks"]["embed_input_is_rank2"]
-        assert report["checks"]["embed_output_is_rank2"]
+        assert report["checks"]["embed_input_is_rank_agnostic"]
+        assert report["checks"]["embed_output_is_rank_agnostic"]
         assert report["checks"]["no_encoder_in_plan"]
         assert report["checks"]["no_pool_in_plan"]
         assert report["checks"]["no_token_dynamic_axis"]

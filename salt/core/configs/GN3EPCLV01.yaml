@@ -49,14 +49,14 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
+          jets: {global_object: true}
           # v1 input_map: tracks -> tracks_ghost (the ghost-associated tracks)
-          tracks: {vector: false, dataset: tracks_ghost}
-          flows: {vector: false}
-          electrons: {vector: false}
+          tracks: {global_object: false, dataset: tracks_ghost}
+          flows: {global_object: false}
+          electrons: {global_object: false}
           # the GN3 `global` stream: an ordinary [B, F] vector (no pad mask,
           # design §6.6 1393-1396; v1 datasets.py mask-excludes 'global')
-          global: {vector: true}
+          global: {global_object: true}
         # v1 `selections: null` (loose tracks)
         selections: null
     features:

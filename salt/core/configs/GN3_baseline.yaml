@@ -32,8 +32,8 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          jets: {vector: true}
-          tracks: {vector: false, dataset: tracks_ghost} # v1 input_map
+          jets: {global_object: true}
+          tracks: {global_object: false, dataset: tracks_ghost} # v1 input_map
         # v1 selections: {tracks: [d0 < 3.5, NSHARED < 1.1]} (ftag Cuts)
         selections:
           tracks: ["d0 < 3.5", "NSHARED < 1.1"]
