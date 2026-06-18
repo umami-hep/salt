@@ -142,7 +142,7 @@ def test_process_labels():
             batch = dataset.arrays[input_name]
             labels[input_name] = {}
             output = dataset.process_labels(labels, batch, input_name)
-            assert isinstance(*output.values(), torch.Tensor) is True
+            assert all(isinstance(v, torch.Tensor) for v in output.values())
 
 
 def test_file_vars_for_cuts():
