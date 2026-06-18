@@ -61,7 +61,7 @@ from salt.core.data.vds import create_vds, has_wildcard
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema, load_schema
-from salt.data.datasets import get_dtype
+from salt.core.data.dtypes import get_dtype
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
 

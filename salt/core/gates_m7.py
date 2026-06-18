@@ -124,10 +124,12 @@ Gate criteria (each justified in its ``run_*`` docstring vs the plan/matrix):
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import copy
 import io
 import json
+import operator
 import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -2811,17 +2813,271 @@ def run_ren1(
 
 
 # ---------------------------------------------------------------------------
+# RS1 — residual v1-import scanner (the M7 W2 worklist + the W2c end-state gate)
+# ---------------------------------------------------------------------------
+
+# the v1 legacy top-level packages a MODULARISED salt.core must NOT live-import.
+# A production salt.core file importing from any of these is a residual coupling
+# to the v1 tree (the modularisation §2 goal: salt.core is self-contained, the
+# v1 tree stays in-tree dormant as the GATE ORACLE). W2 relocates the genuinely-
+# shared helpers into salt.core/ and repoints every consumer; RS1 is the worklist
+# (the authoritative residual list) AND the W2c end-state gate (count == 0).
+_RS1_V1_PACKAGES: frozenset[str] = frozenset({
+    "models",
+    "data",
+    "utils",
+    "onnx",
+    "optim",
+    "modelwrapper",
+    "callbacks",
+    "submit",
+    "stypes",
+})
+
+# the GATE HARNESS + scaffolding files under salt/core that are NOT production
+# code (they are the M7 gate machinery + v1-adapter shims). RS1 scopes them OUT:
+#   - gates_m*.py / parity_gn2.py — the gate harnesses themselves (they import v1
+#     deliberately, as the ORACLE side of every parity/conversion gate);
+#   - from_v1.py — the v1->v2 weight/state adapter (it MUST import v1 to translate
+#     a v1 checkpoint; that is its entire purpose);
+#   - wrappers.py — the v1 ModelWrapper/Lightning bridge shim;
+#   - demo_m1.py — the M1 spike demo script.
+# RS1 asserts the PRODUCT surface (reader, processors, nn task/module heads,
+# writers, onnx reduces, saltmodule, convert, ...) is v1-import-free, not that the
+# gate machinery avoids importing the tree it gates.
+_RS1_HARNESS_BASENAMES: frozenset[str] = frozenset({
+    "parity_gn2.py",
+    "from_v1.py",
+    "wrappers.py",
+    "demo_m1.py",
+})
+_RS1_HARNESS_PREFIXES: tuple[str, ...] = ("gates_m",)
+
+
+def _rs1_is_harness(path: Path) -> bool:
+    """Return whether ``path`` is a gate-harness / scaffolding file (scoped out).
+
+    Returns
+    -------
+    bool
+        True for the gate harnesses (``gates_m*.py``, ``parity_gn2.py``), the v1
+        adapters (``from_v1.py``, ``wrappers.py``) and the demo (``demo_m1.py``)
+        — the non-production files RS1 excludes from the residual scan.
+    """
+    name = path.name
+    if name in _RS1_HARNESS_BASENAMES:
+        return True
+    return any(name.startswith(p) for p in _RS1_HARNESS_PREFIXES)
+
+
+def _rs1_module_top(module: str | None, level: int) -> str | None:
+    """Return the v1 sub-package a ``salt.<pkg>...`` import targets, else None.
+
+    Resolves an ``Import`` / ``ImportFrom`` module string to the v1 top-level
+    sub-package it references (``models`` / ``data`` / ``utils`` / ...), or None
+    when the import is NOT a live ``salt.<v1-pkg>`` import. A ``salt.core.*``
+    import is NEVER a residual (it is the modularised tree itself); a relative
+    import (``level > 0``, no ``salt.`` prefix) is intra-package and never a v1
+    residual.
+
+    Returns
+    -------
+    str | None
+        The matched v1 sub-package name (e.g. ``"utils"``) when ``module`` is a
+        live ``salt.<pkg>`` / ``salt.<pkg>.<...>`` import for a flagged package,
+        else None.
+    """
+    if not module or level:  # relative imports are intra-package, never v1
+        return None
+    parts = module.split(".")
+    # need at least salt.<pkg>; salt.core.* is the modularised tree (not v1)
+    if len(parts) < 2 or parts[0] != "salt" or parts[1] == "core":
+        return None
+    return parts[1] if parts[1] in _RS1_V1_PACKAGES else None
+
+
+def _rs1_scan_residual_imports() -> list[dict[str, Any]]:
+    """AST-walk every PRODUCTION ``salt/core`` file for a live v1-package import.
+
+    Parses each ``*.py`` under ``salt/core`` (EXCLUDING the gate harnesses +
+    v1-adapter shims, ``_rs1_is_harness``) with ``ast.parse`` and walks every
+    ``ast.Import`` / ``ast.ImportFrom`` node, reporting any LIVE import from a
+    flagged v1 sub-package (``_RS1_V1_PACKAGES``). Because the scan is AST-based,
+    a v1-package name appearing in a COMMENT or a string literal (e.g. the
+    ``convert.py`` :119 ``# ... salt.models ...`` comment and the :355 f-string
+    naming ``salt.models``) does NOT count — only a real import node does (the
+    text-grep false-positive the worklist warns about).
+
+    Both ``import salt.utils.x`` (an ``ast.Import`` alias) and
+    ``from salt.utils.x import y`` (an ``ast.ImportFrom``) are caught; lazy
+    function-body imports (``from salt.utils import file_utils`` inside a method)
+    are caught too because ``ast.walk`` descends into function bodies.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One ``{"file", "lineno", "module", "pkg"}`` record per residual live
+        import (``file`` relative to ``salt/core``), sorted by (file, lineno);
+        empty when ``salt.core`` is fully decoupled from the v1 tree (the W2c
+        end-state).
+    """
+    hits: list[dict[str, Any]] = []
+    for path in sorted(CORE_DIR.rglob("*.py")):
+        if not path.is_file() or _rs1_is_harness(path):
+            continue
+        rel = str(path.relative_to(CORE_DIR))
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    pkg = _rs1_module_top(alias.name, 0)
+                    if pkg is not None:
+                        hits.append(
+                            {
+                                "file": rel,
+                                "lineno": node.lineno,
+                                "module": alias.name,
+                                "pkg": pkg,
+                            }
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                pkg = _rs1_module_top(node.module, node.level)
+                if pkg is not None:
+                    hits.append(
+                        {
+                            "file": rel,
+                            "lineno": node.lineno,
+                            "module": node.module,
+                            "pkg": pkg,
+                        }
+                    )
+    hits.sort(key=operator.itemgetter("file", "lineno"))
+    return hits
+
+
+def run_rs1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """RS1: the residual v1-import scanner (the M7 W2 worklist + W2c end-state gate).
+
+    AST-walks every PRODUCTION file under ``salt/core`` (EXCLUDING the gate
+    harnesses ``gates_m*.py`` / ``parity_gn2.py`` and the v1-adapter shims
+    ``from_v1.py`` / ``wrappers.py`` / ``demo_m1.py``) and reports every LIVE
+    import from a flagged v1 sub-package (``salt.{models,data,utils,onnx,optim,
+    modelwrapper,callbacks,submit,stypes}``). The scan is AST-based
+    (``ast.parse`` + ``ast.walk`` over ``Import`` / ``ImportFrom`` nodes) so a v1
+    package name in a COMMENT or a string literal is NOT a hit — only a real
+    import node — defusing the text-grep false-positive on the ``convert.py``
+    :119 comment + :355 f-string that NAME ``salt.models`` in prose.
+
+    The gate PASSES when the residual count is ZERO (the W2c modularisation
+    end-state: ``salt.core`` is fully decoupled from the v1 tree). During W2a/W2b
+    it RUNS and emits the AUTHORITATIVE residual production-import list — the W2
+    worklist — with a non-zero rc until every relocation has landed.
+
+    Negative control (``test_gates_m7.py`` + the in-gate ``corruption`` hook,
+    test-only, never on the CLI): the hook INJECTS a synthetic
+    ``salt.models``-import residual into the scan result, so the
+    ``no_residual_v1_imports`` check flips False and the gate goes red — proving
+    the scanner is not vacuous.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("RS1 residual v1-import scanner (M7 W2 worklist + W2c end-state gate)")
+    print("=" * 96)
+
+    checks: dict[str, bool] = {}
+
+    residual = _rs1_scan_residual_imports()
+    if corruption is not None:
+        residual = corruption({"residual": residual})["residual"]
+    checks["no_residual_v1_imports"] = residual == []
+
+    passed = all(checks.values())
+    n_residual = len(residual)
+    by_pkg: dict[str, int] = {}
+    for h in residual:
+        by_pkg[h["pkg"]] = by_pkg.get(h["pkg"], 0) + 1
+
+    criterion = (
+        "the M7 W2c modularisation end-state: an AST walk (ast.parse + ast.walk over "
+        "Import/ImportFrom) of every PRODUCTION salt/core file (EXCLUDING the gate harnesses "
+        "gates_m*.py / parity_gn2.py and the v1-adapter shims from_v1.py / wrappers.py / "
+        "demo_m1.py) finds NO live import from a flagged v1 sub-package "
+        "(salt.{models,data,utils,onnx,optim,modelwrapper,callbacks,submit,stypes}). The scan is "
+        "AST-based so a v1 package name in a comment or string literal (the convert.py:119 comment "
+        "+ :355 f-string) does NOT count — only a real import node. The gate PASSES when the "
+        "residual count is 0 (salt.core fully decoupled from v1); during W2a/W2b it emits the "
+        "authoritative residual production-import list (the W2 worklist) and rc != 0 until every "
+        "relocation lands. Negative control: an injected synthetic salt.models residual flips the "
+        "check red, proving the scanner is not vacuous."
+    )
+    report = _base_report(
+        "rs1_residual_v1_imports",
+        passed,
+        criterion,
+        {
+            "core_dir": str(CORE_DIR),
+            "residual_import_count": n_residual,
+            "residual_by_package": dict(sorted(by_pkg.items())),
+            "flagged_packages": sorted(_RS1_V1_PACKAGES),
+            "excluded_harness_basenames": sorted(_RS1_HARNESS_BASENAMES),
+            "excluded_harness_prefixes": list(_RS1_HARNESS_PREFIXES),
+            "ast_based": True,
+            "corrupted_by_test_hook": corruption is not None,
+        },
+    )
+    report["checks"] = checks
+    report["residual_imports"] = residual
+    report["scope_note"] = (
+        "RS1 is the M7 W2 worklist + the W2c end-state gate. It walks the AST of every PRODUCTION "
+        "salt/core *.py (gate harnesses gates_m*.py/parity_gn2.py + v1 adapters from_v1.py/"
+        "wrappers.py/demo_m1.py scoped OUT — they import v1 deliberately as the ORACLE/adapter "
+        "side) and flags every live Import/ImportFrom of salt.{models,data,utils,onnx,optim,"
+        "modelwrapper,callbacks,submit,stypes}. AST-based (not a text grep) so comments + string "
+        "literals naming a v1 package do NOT register — the convert.py:119 dropped-class comment "
+        "and the :355 bit-rot f-string both NAME salt.models in prose but are not import nodes. "
+        "salt.core.* imports are never residuals (that is the modularised tree). Lazy "
+        "function-body imports are caught because ast.walk descends into function bodies. The "
+        "gate passes at "
+        "count == 0 (W2c); the non-empty list it emits now is the authoritative W2 relocation "
+        "worklist."
+    )
+
+    # -- stdout table ----------------------------------------------------------
+    print(f"flagged v1 packages: {sorted(_RS1_V1_PACKAGES)}")
+    print(f"\nresidual live v1 imports in production salt/core ({n_residual}):")
+    if residual:
+        print(f"{'file':<32}{'line':>6}  module")
+        for h in residual:
+            print(f"{h['file']:<32}{h['lineno']:>6}  {h['module']}")
+        print(f"\nresidual by package: {dict(sorted(by_pkg.items()))}")
+    else:
+        print("    NONE (salt.core fully decoupled from the v1 tree — W2c end-state)")
+    _print_verdict("rs1", passed, criterion, _emit_report(report, outdir, "rs1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the M7 gate subcommand parser (cv1 / cv2 / cvf / ren1).
+    """Build the M7 gate subcommand parser (cv1 / cv2 / cvf / ren1 / rs1).
 
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``cv1``, ``cv2``, ``cvf`` and ``ren1`` subcommands.
+        Parser with the ``cv1``, ``cv2``, ``cvf``, ``ren1`` and ``rs1``
+        subcommands.
     """
     parser = argparse.ArgumentParser(
         prog="python -m salt.core.gates_m7", description=__doc__.splitlines()[0]
@@ -2832,6 +3088,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "cv2": "Converter hard-error path on the bit-rotted/parked configs (the dropped marker)",
         "cvf": "Converter target-producer fidelity (every task target has a real producer)",
         "ren1": "vector->global_object rename + StreamEmbed flag collapse (W1.5 wave R)",
+        "rs1": "Residual v1-import scanner over production salt/core (W2 worklist + W2c gate)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -2848,7 +3105,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         0 if the gate passed, 1 otherwise.
     """
     args = _build_parser().parse_args(argv)
-    runner = {"cv1": run_cv1, "cv2": run_cv2, "cvf": run_cvf, "ren1": run_ren1}[args.gate]
+    runner = {
+        "cv1": run_cv1,
+        "cv2": run_cv2,
+        "cvf": run_cvf,
+        "ren1": run_ren1,
+        "rs1": run_rs1,
+    }[args.gate]
     code, _ = runner(args.outdir)
     return code
 

@@ -44,7 +44,7 @@ from salt.core.data.base import DatasetModule, Reader
 from salt.core.data.dataset import GraphDataset
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode
-from salt.data.samplers import RandomBatchSampler
+from salt.core.data.samplers import RandomBatchSampler
 
 __all__ = ["GraphDataModule"]
 
@@ -331,7 +331,7 @@ class GraphDataModule(lightning.LightningDataModule):
         """
         if not self._staging_active() or self.train_file is None or self.val_file is None:
             return
-        from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+        from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
 
         print("-" * 100)
         print(f"Moving train/val files to {self.move_files_temp}")
@@ -353,7 +353,7 @@ class GraphDataModule(lightning.LightningDataModule):
         """
         self._auto_sinks()
         if stage == "fit" and self._staging_active():
-            from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+            from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
 
             self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
             self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
@@ -460,7 +460,7 @@ class GraphDataModule(lightning.LightningDataModule):
             return
         from pathlib import Path as _Path  # noqa: PLC0415 - opt-in staging path only
 
-        from salt.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+        from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
 
         print("-" * 100)
         print(f"Removing staged training files:\n\t{self.train_file}\n\t{self.val_file}")

@@ -51,8 +51,8 @@ from salt.models.task import ClassificationTask as V1ClassificationTask
 from salt.models.task import GaussianRegressionTask as V1GaussianRegressionTask
 from salt.models.task import RegressionTask as V1RegressionTask
 from salt.models.task import VertexingTask as V1VertexingTask
-from salt.utils.array_utils import listify
-from salt.utils.scalers import RegressionTargetScaler
+from salt.core.utils.array_utils import listify
+from salt.core.utils.scalers import RegressionTargetScaler
 
 __all__ = ["ClassificationTaskModule", "RegressionTaskModule", "VertexingTaskModule"]
 

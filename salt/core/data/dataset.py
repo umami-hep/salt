@@ -36,7 +36,7 @@ from salt.core.graph.errors import ConfigError, MutationError, SchemaError
 from salt.core.graph.executor import canonical_produced
 from salt.core.graph.planner import Plan, Sinks, compile_plan
 from salt.core.graph.spec import KEY_SEP, Mode, TensorSpec
-from salt.utils.array_utils import maybe_copy
+from salt.core.utils.array_utils import maybe_copy
 
 __all__ = ["MODEL_VISIBLE_NAMESPACES", "GraphDataset"]
 

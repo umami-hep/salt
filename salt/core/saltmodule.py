@@ -71,7 +71,7 @@ from salt.core.nn.bind import (
     resolve_bind_schema,
 )
 from salt.core.nn.modules import LossGLS, LossSum
-from salt.optim import HybridMuonAdamW
+from salt.core.optim import HybridMuonAdamW
 
 try:
     from lion_pytorch import Lion

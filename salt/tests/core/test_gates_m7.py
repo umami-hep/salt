@@ -8,7 +8,7 @@ hook (never on the CLI) proves the gate's assertions are not vacuous.
 from __future__ import annotations
 
 import salt.core.gates_m7 as gm7
-from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf, run_ren1
+from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf, run_ren1, run_rs1
 
 # the authoritative embedded lists live as module privates on gm7 (the gate is
 # the single source of truth); reference them through the module so the test does
@@ -24,6 +24,16 @@ _REN1_SHIPPED_CONFIGS = gm7._REN1_SHIPPED_CONFIGS  # noqa: SLF001
 # the 2 documented INTENTIONAL KEEPS after Wave F2 (event_classifier: export-
 # omission correct by design; regression_multi_target: the fixture is the faithful
 # F1a artifact). The other 6 once-subset fixtures were restored to full v1 fidelity.
+# the v1 import sites the M7 W2a relocation removed (now repointed to salt.core.*)
+_W2A_RELOCATED_MODULES = {
+    "salt.utils.array_utils",
+    "salt.utils.scalers",
+    "salt.utils.union_find",
+    "salt.utils.file_utils",
+    "salt.data.samplers",
+    "salt.optim",
+    "salt.data.datasets",  # get_dtype
+}
 _EXPECTED_KEEPS = {"event_classifier", "regression_multi_target"}
 # the 6 Wave-F2-RESTORED configs (fixture restored to full v1 capability).
 _EXPECTED_RESTORED = {
@@ -560,6 +570,98 @@ class TestREN1:
         assert not report["passed"]
         assert not report["checks"]["no_residual_vector_flag"]
         assert report["config"]["residual_flag_hits"] == 1
+
+
+class TestRS1:
+    """RS1 — residual v1-import scanner (the M7 W2 worklist + W2c end-state gate).
+
+    Pins: the gate RUNS and emits the authoritative residual production-import
+    list; it is AST-based (so the convert.py:119 comment + :355 f-string that NAME
+    salt.models in prose are NOT counted); the W2a-relocated helpers (array_utils
+    / scalers / union_find / file_utils / samplers / optim / get_dtype) are GONE
+    from the residual list; and the corruption teeth (an injected synthetic
+    salt.models residual -> gate red).
+    """
+
+    def test_runs_and_emits_residual_list(self, tmp_path):
+        # the gate RUNS and writes its report; during W2a/W2b rc may be nonzero
+        # (residual W2b+W2c imports remain) — the gate is the worklist, not yet
+        # green. The report carries the authoritative residual list either way.
+        code, report = run_rs1(tmp_path)
+        assert code in {0, 1}
+        assert (tmp_path / "rs1_report.json").is_file()
+        assert "residual_imports" in report
+        assert report["config"]["residual_import_count"] == len(report["residual_imports"])
+        # green iff the residual list is empty (the W2c end-state)
+        assert report["passed"] == (report["residual_imports"] == [])
+
+    def test_ast_based_not_text_grep(self, tmp_path):
+        # the convert.py:119 comment + :355 f-string NAME salt.models in prose;
+        # an AST scan must NOT count them. So NO residual hit may be reported on a
+        # convert.py line that is a comment / string literal.
+        _code, report = run_rs1(tmp_path)
+        assert report["config"]["ast_based"] is True
+        convert_hits = [h for h in report["residual_imports"] if h["file"] == "convert.py"]
+        # convert.py only NAMES salt.models in prose (a comment + an f-string) —
+        # it has no live v1 import node, so the AST scan reports zero hits for it.
+        assert convert_hits == [], convert_hits
+
+    def test_w2a_relocations_are_gone_from_residual(self, tmp_path):
+        # every W2a-relocated helper import has been repointed to salt.core.* —
+        # none may remain in the residual list.
+        _code, report = run_rs1(tmp_path)
+        residual_modules = {h["module"] for h in report["residual_imports"]}
+        leftover = _W2A_RELOCATED_MODULES & residual_modules
+        assert leftover == set(), f"W2a relocations still residual: {sorted(leftover)}"
+
+    def test_harness_files_are_excluded(self, tmp_path):
+        # the gate harnesses + v1 adapters import v1 deliberately and are scoped
+        # OUT — no residual hit may be reported on one of them.
+        _code, report = run_rs1(tmp_path)
+        excluded = set(report["config"]["excluded_harness_basenames"])
+        prefixes = tuple(report["config"]["excluded_harness_prefixes"])
+        for h in report["residual_imports"]:
+            base = h["file"].rsplit("/", 1)[-1]
+            assert base not in excluded, h
+            assert not base.startswith(prefixes), h
+
+    def test_flagged_packages_are_the_v1_tree(self, tmp_path):
+        _code, report = run_rs1(tmp_path)
+        assert set(report["config"]["flagged_packages"]) == {
+            "models",
+            "data",
+            "utils",
+            "onnx",
+            "optim",
+            "modelwrapper",
+            "callbacks",
+            "submit",
+            "stypes",
+        }
+        # every residual hit's package is one of the flagged v1 packages
+        for h in report["residual_imports"]:
+            assert h["pkg"] in report["config"]["flagged_packages"], h
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # the negative control: INJECT a synthetic salt.models import residual ->
+        # the no_residual_v1_imports check flips False and the gate goes red,
+        # proving the scanner is not vacuous.
+        def corrupt(state):
+            state["residual"] = [
+                {
+                    "file": "nn/synthetic.py",
+                    "lineno": 1,
+                    "module": "salt.models",
+                    "pkg": "models",
+                }
+            ]
+            return state
+
+        code, report = run_rs1(tmp_path, corruption=corrupt)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["no_residual_v1_imports"]
+        assert report["config"]["residual_import_count"] == 1
 
 
 def test_cli_dispatch_cv1(tmp_path):

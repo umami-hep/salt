@@ -2951,7 +2951,7 @@ def run_lr1(
     """
     import warnings as _warnings  # noqa: PLC0415
 
-    from salt.optim import HybridMuonAdamW  # noqa: PLC0415
+    from salt.core.optim import HybridMuonAdamW  # noqa: PLC0415
     from salt.optim.hybrid_muon_adamw import MuonParamPolicy  # noqa: PLC0415
 
     outdir = Path(outdir)

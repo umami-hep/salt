@@ -49,7 +49,7 @@ from salt.core.graph.errors import ConfigError, KindError, ShapeError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec, flatten_spec
 from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
-from salt.utils.array_utils import join_structured_arrays
+from salt.core.utils.array_utils import join_structured_arrays
 
 __all__ = ["WriterCallback"]
 

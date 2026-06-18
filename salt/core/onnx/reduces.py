@@ -82,7 +82,7 @@ from salt.core.graph.spec import TensorSpec, split_key
 from salt.core.onnx.config import ExportOutput
 from salt.models.maskformer import get_maskformer_outputs as v1_get_maskformer_outputs
 from salt.models.task import mask_fill_flattened
-from salt.utils.union_find import get_node_assignment_jit
+from salt.core.utils.union_find import get_node_assignment_jit
 
 __all__ = [
     "BoundReduce",
