@@ -182,9 +182,7 @@ class SaltCLI(LightningCLI):
         config = self.config[self.subcommand] if self.subcommand else self.config
         sc_tasks = config.model.model.init_args.tasks.init_args.modules
 
-        labels: dict = {}
-        if "labels" in config.data:
-            labels = config.data.labels
+        labels: dict = config.data.get("labels") or {}
         for task in sc_tasks:
             assert "Task" in task["class_path"]
             self.collect_labels_from_task(

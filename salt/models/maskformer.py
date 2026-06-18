@@ -247,6 +247,15 @@ class MaskDecoder(nn.Module):
                     task_pred = task.net(preds["objects"]["embed"])
                     preds["objects"][task.name] = task_pred
 
+        # Inference / ONNX export path: labels are unavailable, so object tasks
+        # are not handled by the loss. Still run them to expose object-level
+        # predictions such as regression.
+        if labels is None:
+            for task in tasks:
+                if task.input_name == "objects":
+                    task_pred = task.net(preds["objects"]["embed"])
+                    preds["objects"][task.name] = task_pred
+
         return preds, labels, {}
 
 
