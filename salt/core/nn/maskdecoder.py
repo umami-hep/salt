@@ -46,14 +46,58 @@ from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.modules import _stream_len
 
 # composed v1 layers (M2 porting policy, plan 05 — absorbed at M7)
+# V1Dense + V1MaskDecoderLayer are W2c absorption targets (the v1 layer/Dense
+# family); they stay composed until that wave. ``get_masks`` is a tiny pure
+# function — inlined here (M7 W2b) BYTE-FAITHFULLY from v1 maskformer.py:206-241.
 from salt.models import Dense as V1Dense
 from salt.models.maskformer import MaskDecoderLayer as V1MaskDecoderLayer
-from salt.models.maskformer import get_masks as v1_get_masks
 
 __all__ = ["MaskDecoder"]
 
 _UNNAMED = "unnamed"
 """Placeholder instance name — the config dict key is assigned before compile (design §2.2)."""
+
+
+def get_masks(
+    x: Tensor,
+    q: Tensor,
+    mask_net: nn.Module,
+    input_pad_mask: Tensor | None = None,
+) -> Tensor:
+    """Compute mask logits over input tokens conditioned on queries.
+
+    M7 W2b inline of v1 ``salt.models.maskformer.get_masks`` (maskformer.py:206-241),
+    byte-faithful: the ``einsum('bqe,ble->bql')`` of ``mask_net(q)`` against the
+    node embeddings, with padded positions driven to the dtype minimum.
+
+    Parameters
+    ----------
+    x : Tensor
+        Input/node embeddings of shape ``[B, L, E]``.
+    q : Tensor
+        Query embeddings of shape ``[B, M, E]``.
+    mask_net : nn.Module
+        Module mapping queries to mask tokens; expected to output
+        ``mask_tokens = mask_net(q)`` with shape ``[B, M, E]``.
+    input_pad_mask : Tensor | None, optional
+        Padding mask for inputs of shape ``[B, L]``; padded positions are set
+        to the minimum representable value in the output, by default ``None``.
+
+    Returns
+    -------
+    Tensor
+        Mask logits of shape ``[B, M, L]`` computed as
+        ``einsum('bqe,ble->bql')`` between mask tokens and inputs.
+    """
+    mask_tokens = mask_net(q)
+    pred_masks = torch.einsum("bqe,ble->bql", mask_tokens, x)
+
+    if input_pad_mask is not None:
+        pred_masks[input_pad_mask.unsqueeze(1).expand_as(pred_masks)] = torch.finfo(
+            pred_masks.dtype
+        ).min
+
+    return pred_masks
 
 
 class MaskDecoder(nn.Module):
@@ -298,7 +342,7 @@ class MaskDecoder(nn.Module):
             class_probs = torch.cat([1 - class_probs, class_probs], dim=-1)
         else:
             class_probs = class_logits.softmax(-1)
-        pred_masks = v1_get_masks(x, q, self.mask_net, pad_mask)
+        pred_masks = get_masks(x, q, self.mask_net, pad_mask)
         return {"class_logits": class_logits, "class_probs": class_probs, "masks": pred_masks}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:

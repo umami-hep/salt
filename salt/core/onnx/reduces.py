@@ -80,8 +80,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import TensorSpec, split_key
 from salt.core.onnx.config import ExportOutput
-from salt.models.maskformer import get_maskformer_outputs as v1_get_maskformer_outputs
-from salt.models.task import mask_fill_flattened
+from salt.core.utils.mask_utils import indices_from_mask
 from salt.core.utils.union_find import get_node_assignment_jit
 
 __all__ = [
@@ -95,6 +94,163 @@ __all__ = [
     "registered_reduces",
     "unregister_reduce",
 ]
+
+
+# ---------------------------------------------------------------------------
+# inlined v1 MaskFormer export math (M7 W2b)
+# ---------------------------------------------------------------------------
+# ``get_maskformer_outputs`` (null suppression + pT reorder + index math) and
+# ``mask_fill_flattened`` (the per-node -> batch unflatten) are tiny pure
+# functions the two MaskFormer object reduces + the vertex union-find reduce
+# compose. Inlined here BYTE-FAITHFULLY from v1 ``salt.models.maskformer``
+# (maskformer.py:244-349) and v1 ``salt.models.task`` (task.py:1010-1035) so the
+# export graph traces identically while the core package no longer imports the v1
+# ``models`` tree. ``indices_from_mask`` is the relocated core copy
+# (``salt.core.utils.mask_utils``, also byte-faithful).
+
+
+# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
+@torch.jit.script
+def mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
+    """Unflatten a per-node array back to a batch-shaped tensor using a mask.
+
+    M7 W2b inline of v1 ``salt.models.task.mask_fill_flattened`` (task.py:1009-1035),
+    byte-faithful — the ``@torch.jit.script`` decorator is PRESERVED (the union-find
+    export reduce inlines this scripted subgraph into the ONNX trace, to_onnx.py:431;
+    the scripted form's loop semantics are load-bearing for export parity).
+
+    Parameters
+    ----------
+    flat_array : Tensor
+        Tensor of shape ``[N, F]`` with concatenated (valid) per-node values.
+    mask : Tensor
+        Boolean mask of shape ``[B, L]`` where valid (non-padded) positions are ``False``.
+
+    Returns
+    -------
+    Tensor
+        Filled tensor of shape ``[B, L, F]`` where padded positions are set to ``-inf``.
+    """
+    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
+    mask = mask.to(torch.bool)
+    start_index = end_index = 0
+
+    for i in range(mask.shape[0]):
+        if mask[i].shape[0] > 0:
+            end_index += (~mask[i]).to(torch.long).sum()
+            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
+            start_index = end_index
+
+    return filled
+
+
+def get_maskformer_outputs(
+    objects: Mapping[str, Tensor],
+    max_null: float = 0.5,
+    apply_reorder: bool = True,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Convert raw MaskFormer-style outputs to convenient per-object tensors.
+
+    M7 W2b inline of v1 ``salt.models.maskformer.get_maskformer_outputs``
+    (maskformer.py:244-349), byte-faithful. This helper:
+      1. Thresholds the "null" class probability and suppresses masks/regression
+         for objects with ``p_null > max_null``.
+      2. Converts per-position mask logits into sparse mask indices via
+         :func:`salt.core.utils.mask_utils.indices_from_mask`.
+      3. Optionally reorders objects so that the "leading" object is first
+         (highest regression[0], e.g. pT in vertexing).
+
+    Parameters
+    ----------
+    objects : Mapping[str, Tensor]
+        Dictionary with keys at least:
+        - ``"masks"``: mask logits of shape ``[B, M, L]``.
+        - ``"class_probs"``: class probabilities of shape ``[B, M, C]`` (last class is null).
+        - ``"regression"``: regression targets/predictions of shape ``[B, M, R]``.
+    max_null : float, optional
+        Maximum allowed null probability ``p_null`` for an object to be kept,
+        by default ``0.5``.
+    apply_reorder : bool, optional
+        If ``True``, reorder objects in descending order of ``regression[..., 0]``,
+        by default ``True``.
+
+    Returns
+    -------
+    leading_regression : torch.Tensor
+        Tensor of shape ``[B, R]`` for the leading object (after optional reordering).
+    obj_indices : torch.Tensor | None
+        Sparse indices of masks per object with shape ``[B, M]``; values are
+        positions in ``[0, L)`` (or ``NaN`` when undefined). May be ``None``
+        if there are no tracks (``L == 0``).
+    class_probs : torch.Tensor
+        Possibly-reordered class probabilities of shape ``[B, M, C]``.
+    regression : torch.Tensor
+        Possibly-reordered regression tensor of shape ``[B, M, R]`` with ``NaN``
+        for objects deemed null.
+
+    Notes
+    -----
+    - If there are no input tracks/tokens (``L == 0``), dummy tensors filled with
+      ``NaN`` are returned for indices and regression.
+    - Masks are thresholded at ``0.5`` after a sigmoid to produce boolean masks
+      prior to conversion to indices.
+    """
+    # Convert the (N,M) -> (M,) mask indices
+    masks = objects["masks"]
+    class_probs = objects["class_probs"]
+    regression = objects["regression"]
+    n_tracks = masks.shape[-1]
+    n_obj = masks.shape[1]
+    n_reg = regression.shape[-1]
+
+    # If we have a jet with no tracks,
+    if n_tracks == 0:
+        return (
+            torch.full((1, n_obj), torch.nan),
+            None,
+            class_probs,
+            torch.full((1, n_obj, n_reg), torch.nan),
+        )
+    # For testing purposes - this will likely blow up our fake rate
+    null_preds = class_probs[:, :, -1] > max_null
+    if not null_preds.any():
+        # If we have no predicted objects, we return dummy values
+        return (
+            torch.full((1, n_obj), torch.nan),
+            torch.arange(n_tracks).unsqueeze(0).expand(1, n_tracks),
+            class_probs,
+            torch.full((1, n_obj, n_reg), torch.nan),
+        )
+
+    masks = masks.sigmoid() > 0.5
+    expanded_null = null_preds.unsqueeze(-1).expand(-1, -1, masks.size(-1))
+    masks[expanded_null] = torch.zeros_like(masks)[expanded_null]
+    regression[null_preds] = torch.nan
+
+    if apply_reorder:
+        # Define the leading object as the one with the highest regression[0] value
+        # in vertexing case, this is the pT. We first set these values to non-nans, as
+        # argsort will otherwise not work correctly when in athena, and then set them back
+        regression[null_preds] = -torch.inf
+        order = torch.argsort(regression[:, :, 0], descending=True)
+        regression[null_preds] = torch.nan
+        order_expanded = order.unsqueeze(-1).expand(-1, -1, masks.size(-1))
+
+        # Use gather to reorder tensors along a specific dimension
+        masks = torch.gather(masks, 1, order_expanded)
+        class_probs = torch.gather(
+            class_probs, 1, order.unsqueeze(-1).expand(-1, -1, class_probs.size(-1))
+        )
+        regression = torch.gather(
+            regression, 1, order.unsqueeze(-1).expand(-1, -1, regression.size(-1))
+        )
+        # Define the leading object as that with the highest [0] (pt for vertexing)
+    leading_regression = regression[:, 0]
+
+    # Convert our masks (N,M), now in pT order, to be (M,) indices
+    obj_indices = indices_from_mask(masks)
+
+    return leading_regression, obj_indices, class_probs, regression
 
 
 @dataclass(frozen=True)
@@ -564,7 +720,7 @@ def _bind_leading_object(out_cfg: ExportOutput, ctx: ReduceCtx) -> BoundReduce:
     def fn(b: Bundle) -> tuple[Tensor, ...]:
         # the leading_object port IS the object-regression port, so the regression
         # is read from the DECLARED port (no hardcoded task name) — port-faithful
-        leading_reg, _, _, _ = v1_get_maskformer_outputs(
+        leading_reg, _, _, _ = get_maskformer_outputs(
             _maskformer_objects(b, stream, port), apply_reorder=True
         )  # leading_reg: [B, R] (maskformer.py:344)
         # v1 emits leading_reg[0][r] per target (B == 1 in the traced export);
@@ -624,7 +780,7 @@ def _bind_object_index(out_cfg: ExportOutput, ctx: ReduceCtx) -> BoundReduce:
     reg_key = f"preds.{stream}.regression"
 
     def fn(b: Bundle) -> tuple[Tensor, ...]:
-        _, indices, _, _ = v1_get_maskformer_outputs(
+        _, indices, _, _ = get_maskformer_outputs(
             _maskformer_objects(b, stream, reg_key), apply_reorder=True
         )  # indices: [B, L] dense object index per constituent (maskformer.py:347)
         return (indices.reshape(-1).char(),)  # v1 to_onnx.py:469

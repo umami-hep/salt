@@ -560,7 +560,7 @@ class MaskformerMetrics(Callback):
         dict[str, Tensor]
             ``{metric name: scalar tensor}`` (the v1 names).
         """
-        from salt.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415 - heavy
+        from salt.core.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415
 
         class_logits = bundle.get(self._matched_key("class_logits")).detach()
         object_class = bundle.get(self._matched_key("object_class")).detach()

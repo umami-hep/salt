@@ -63,11 +63,15 @@ from salt.core.graph.spec import (
 from salt.core.nn.bind import ResolvedSchema
 
 # composed v1 layers (M2 porting policy, plan 05 — absorbed at M7)
+# V1Dense / V1Transformer / V1GlobalAttentionPooling are W2c absorption targets
+# (the v1 layer/Dense/pooling family); they stay composed until that wave. The
+# small pure math helpers (``attach_context`` + ``calculate_edge_features`` /
+# ``check_edge_config``) are inlined below (M7 W2b) BYTE-FAITHFULLY from v1
+# ``salt.utils.tensor_utils`` (tensor_utils.py:168-268) and v1
+# ``salt.utils.edge_features`` (edge_features.py:10-146).
 from salt.models import Dense as V1Dense
 from salt.models import Transformer as V1Transformer
 from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
-from salt.utils.edge_features import calculate_edge_features, check_edge_config
-from salt.utils.tensor_utils import attach_context
 
 __all__ = [
     "Concat",
@@ -94,6 +98,263 @@ _EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
 edge_features.py:30-43; design §6.7). EdgeFeatures rejects anything outside this
 set at config time; the per-feature required input variables (e.g. ``dR`` needs
 ``eta``/``phi``) are validated at `bind` against the resolved schema fields."""
+
+
+# ---------------------------------------------------------------------------
+# inlined v1 math helpers (M7 W2b) — byte-faithful copies, v1 originals untouched
+# ---------------------------------------------------------------------------
+
+
+def add_dims(x: Tensor, ndim: int) -> Tensor:
+    """Add singleton dimensions to reach a target rank.
+
+    M7 W2b inline of v1 ``salt.utils.tensor_utils.add_dims`` (tensor_utils.py:168-197),
+    byte-faithful. The new singleton dimensions are inserted after the batch
+    dimension (i.e., at position 1 repeatedly) until ``x.ndim == ndim``.
+
+    Parameters
+    ----------
+    x : Tensor
+        Input tensor.
+    ndim : int
+        Target number of dimensions.
+
+    Returns
+    -------
+    Tensor
+        Tensor reshaped with added singleton dimensions.
+
+    Raises
+    ------
+    ValueError
+        If ``ndim`` is smaller than ``x.ndim``.
+    """
+    if (dim_diff := ndim - x.dim()) < 0:
+        raise ValueError(f"Target ndim ({ndim}) is smaller than input ndim ({x.dim()})")
+
+    if dim_diff > 0:
+        x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
+
+    return x
+
+
+def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
+    """Concatenate a context tensor to a single tensor with broadcasting.
+
+    M7 W2b inline of v1 ``salt.utils.tensor_utils.attach_context_single``
+    (tensor_utils.py:200-240), byte-faithful. The ``context`` tensor is expanded
+    (via :func:`add_dims` and broadcast) so its rank matches ``x``; it is then
+    concatenated with ``x`` along the last dimension.
+
+    Parameters
+    ----------
+    x : Tensor
+        Input tensor of shape ``(B, ..., F)``.
+    context : Tensor
+        Context tensor of shape ``(B, F_ctx)`` or broadcastable to
+        ``(B, ..., F_ctx)``.
+
+    Returns
+    -------
+    Tensor
+        Concatenation of ``context`` and ``x`` along the feature dimension,
+        with shape ``(B, ..., F_ctx + F)``.
+
+    Raises
+    ------
+    RuntimeError
+        If ``context`` is ``None``.
+    ValueError
+        If the provided context has more dimensions than the input.
+    """
+    if context is None:
+        raise RuntimeError("Expected context is missing from forward pass")
+
+    if (dim_diff := x.dim() - context.dim()) < 0:
+        raise ValueError(
+            f"Provided context has more dimensions ({context.dim()}) than inputs ({x.dim()})"
+        )
+
+    if dim_diff > 0:
+        context = add_dims(context, x.dim())
+        context = context.expand(*x.shape[:-1], -1)
+
+    return torch.cat([context, x], dim=-1)
+
+
+def attach_context(x: Tensor | dict[str, Tensor], context: Tensor) -> Tensor | dict[str, Tensor]:
+    """Concatenate a context tensor to inputs (tensor or dict of tensors).
+
+    M7 W2b inline of v1 ``salt.utils.tensor_utils.attach_context``
+    (tensor_utils.py:243-268), byte-faithful. A convenience wrapper over
+    :func:`attach_context_single` that applies the operation to either a single
+    tensor or every tensor in a dictionary.
+
+    Parameters
+    ----------
+    x : Tensor | dict[str, Tensor]
+        Input tensor or dictionary of tensors to which the context will be
+        concatenated along the last dimension.
+    context : Tensor
+        Context tensor of shape ``(B, F_ctx)`` (or broadcastable to each
+        input).
+
+    Returns
+    -------
+    Tensor | dict[str, Tensor]
+        If ``x`` is a tensor, returns a tensor with context concatenated.
+        If ``x`` is a dict, returns a dict with each value concatenated
+        with the context.
+    """
+    if isinstance(x, dict):
+        return {key: attach_context_single(val, context) for key, val in x.items()}
+    return attach_context_single(x, context)
+
+
+def check_edge_config(
+    edge_features: list[str],
+    available_vars: list[str],
+) -> None:
+    """Check the provided edge feature configuration for validity.
+
+    M7 W2b inline of v1 ``salt.utils.edge_features.check_edge_config``
+    (edge_features.py:10-49), byte-faithful.
+
+    Parameters
+    ----------
+    edge_features : list[str]
+        List of edge features to compute.
+    available_vars : list[str]
+        List of available variables.
+
+    Raises
+    ------
+    ValueError
+        If an edge feature is not recognized or if required indices are missing.
+    """
+    req_vars: list[str] = []
+    for variable in edge_features:
+        if variable == "dR":
+            req_vars.extend(["eta", "phi"])
+        elif variable == "z":
+            req_vars.extend(["pt"])
+        elif variable == "kt":
+            req_vars.extend(["eta", "phi", "pt"])
+        elif variable == "isSelfLoop":
+            continue
+        elif variable == "subjetIndex":
+            req_vars.extend(["subjetIndex"])
+        elif variable == "mass":
+            req_vars.extend(["pt", "eta", "phi", "energy"])
+        else:
+            raise ValueError(f"Edge feature {variable} not recognized")
+
+    missing = set(req_vars) - set(available_vars)
+    if missing:
+        raise ValueError(
+            f"Indices of {missing} required for edge features calculation were not specified."
+        )
+
+
+def calculate_edge_features(
+    batch: Tensor,
+    indices_map: dict[str, int],
+    variables: list[str],
+) -> Tensor:
+    """Calculate edge features for a given batch of graphs.
+
+    M7 W2b inline of v1 ``salt.utils.edge_features.calculate_edge_features``
+    (edge_features.py:52-146), byte-faithful — the pairwise dR/kt/z/subjetIndex/
+    isSelfLoop/mass math, ``torch.zeros`` accumulator + final ``nan_to_num``.
+
+    Parameters
+    ----------
+    batch : Tensor
+        Input batch of node features of shape ``[B, N, D]``.
+    indices_map : dict[str, int]
+        Mapping variable names to indices in the node feature tensor.
+    variables : list[str]
+        List of edge features to compute.
+
+    Returns
+    -------
+    Tensor
+        Computed edge features tensor of shape ``[B, N, N, num_edge_features]``.
+    """
+    ebatch = torch.zeros(
+        (batch.shape[0], batch.shape[1], batch.shape[1], len(variables)),
+        dtype=batch.dtype,
+        device=batch.device,
+    )
+
+    # intermediate quantities
+    if "dR" in variables or "kt" in variables:
+        dphi = batch[:, :, indices_map["phi"]].unsqueeze(1).expand(-1, batch.shape[1], -1) - batch[
+            :, :, indices_map["phi"]
+        ].unsqueeze(2).expand(-1, -1, batch.shape[1])
+        dphi -= (dphi > math.pi).type_as(dphi) * 2 * math.pi
+        deta = batch[:, :, indices_map["eta"]].unsqueeze(1).expand(-1, batch.shape[1], -1) - batch[
+            :, :, indices_map["eta"]
+        ].unsqueeze(2).expand(-1, -1, batch.shape[1])
+    if "kt" in variables or "z" in variables:
+        pt_min = torch.minimum(
+            batch[:, :, indices_map["pt"]].unsqueeze(1).expand(-1, batch.shape[1], -1),
+            batch[:, :, indices_map["pt"]].unsqueeze(2).expand(-1, -1, batch.shape[1]),
+        )
+    if "mass" in variables:
+        pt = batch[:, :, indices_map["pt"]]
+        eta = batch[:, :, indices_map["eta"]]
+        phi = batch[:, :, indices_map["phi"]]
+        energy = batch[:, :, indices_map["energy"]]
+        px = pt * torch.cos(phi)
+        py = pt * torch.sin(phi)
+        pz = pt * (torch.exp(eta) - torch.exp(-eta)) / 2
+
+    # fill edge features
+    for i, variable in enumerate(variables):
+        if variable == "dR":
+            ebatch[:, :, :, i] = torch.log(torch.sqrt(torch.square(deta) + torch.square(dphi)))
+        elif variable == "kt":
+            ebatch[:, :, :, i] = torch.log(
+                pt_min * torch.sqrt(torch.square(deta) + torch.square(dphi))
+            )
+        elif variable == "z":
+            pt_sum = batch[:, :, indices_map["pt"]].unsqueeze(1).expand(
+                -1, batch.shape[1], -1
+            ) + batch[:, :, indices_map["pt"]].unsqueeze(2).expand(-1, -1, batch.shape[1])
+            ebatch[:, :, :, i] = torch.log(pt_min / pt_sum)
+        elif variable == "isSelfLoop":
+            ebatch[:, :, :, i] = (
+                torch.eye(batch.shape[1], dtype=ebatch.dtype, device=batch.device)
+                .unsqueeze(0)
+                .expand(batch.shape[0], -1, -1)
+            )
+        elif variable == "subjetIndex":
+            sji1 = (
+                batch[:, :, indices_map["subjetIndex"]].unsqueeze(1).expand(-1, batch.shape[1], -1)
+            )
+            sji2 = (
+                batch[:, :, indices_map["subjetIndex"]].unsqueeze(2).expand(-1, -1, batch.shape[1])
+            )
+            ebatch[:, :, :, i] = torch.logical_and(torch.eq(sji1, sji2), sji1 >= 0)
+        elif variable == "mass":
+            e1 = energy.unsqueeze(1).expand(-1, batch.shape[1], -1)
+            e2 = energy.unsqueeze(2).expand(-1, -1, batch.shape[1])
+            px1 = px.unsqueeze(1).expand(-1, batch.shape[1], -1)
+            px2 = px.unsqueeze(2).expand(-1, -1, batch.shape[1])
+            py1 = py.unsqueeze(1).expand(-1, batch.shape[1], -1)
+            py2 = py.unsqueeze(2).expand(-1, -1, batch.shape[1])
+            pz1 = pz.unsqueeze(1).expand(-1, batch.shape[1], -1)
+            pz2 = pz.unsqueeze(2).expand(-1, -1, batch.shape[1])
+            e_sum = e1 + e2
+            px_sum = px1 + px2
+            py_sum = py1 + py2
+            pz_sum = pz1 + pz2
+            mass2 = e_sum**2 - px_sum**2 - py_sum**2 - pz_sum**2
+            mass2 = torch.clamp_min(mass2, 1e-8)
+            ebatch[:, :, :, i] = 0.5 * torch.log(mass2)
+
+    return torch.nan_to_num(ebatch, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _stream_len(stream: str) -> str:
@@ -894,10 +1155,11 @@ class EdgeFeatures(nn.Module):
     1425-1431), authored when the encoder gains its ``edges:`` arg (a later M6
     sub-wave C stage — NOT here).
 
-    Faithfulness: the per-element math is the COMPOSED v1 functions
-    (`calculate_edge_features`, `check_edge_config`) so the dR/kt/z/subjetIndex/
-    isSelfLoop/mass values are byte-identical to v1 (M2 porting policy, plan 05;
-    full absorption is M7). The ``indices_map`` (variable name -> column index)
+    Faithfulness: the per-element math is the v1 functions
+    (`calculate_edge_features`, `check_edge_config`) — INLINED into this module
+    BYTE-FAITHFULLY at M7 W2b (modules.py, copied from v1 edge_features.py:10-146,
+    v1 original untouched) so the dR/kt/z/subjetIndex/isSelfLoop/mass values are
+    byte-identical to v1. The ``indices_map`` (variable name -> column index)
     is resolved at `bind` from the resolved schema's declared ``inputs.<stream>``
     fields (the dataset-side `Features` declaration, design §2.2 — column
     lookups resolve by NAME, never by YAML list position), exactly v1's
@@ -918,8 +1180,10 @@ class EdgeFeatures(nn.Module):
     The encoder-side register zero-pad is a SEPARATE later stage; this module's
     forward is itself trace-safe (no Python-int shape bakes).
 
-    TODO(M7): absorb the v1 ``calculate_edge_features`` math into v2 (drop the
-    composed-function dependency) when the v1 ``models``/``utils`` tree retires.
+    M7 W2b: the v1 ``calculate_edge_features`` / ``check_edge_config`` math is now
+    INLINED into this module (byte-faithful, above), so the edge builder no longer
+    imports the v1 ``salt.utils.edge_features`` tree — the composed-function
+    dependency is dropped.
     """
 
     def __init__(

@@ -13,4 +13,7 @@ Modules:
 - ``union_find`` — ``get_node_assignment_jit`` (the ``@torch.jit.script`` ONNX
   union-find path) + its helpers.
 - ``file_utils`` — temp-file / S3 staging helpers (the opt-in staging path).
+- ``mask_utils`` — ``indices_from_mask`` (the MaskFormer writer + ``object_index``
+  reduce sparse-index helper) + ``mask_from_logits`` / ``reco_metrics`` (the
+  MaskFormer metric callback's mask reconstruction-metric chain), M7 W2b.
 """

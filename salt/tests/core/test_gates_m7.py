@@ -34,6 +34,45 @@ _W2A_RELOCATED_MODULES = {
     "salt.optim",
     "salt.data.datasets",  # get_dtype
 }
+# the v1 import SITES the M7 W2b inline-math + mask_utils relocation removed
+# (RS1 18 -> 11). These are pinned at (file, module) granularity, NOT module-level:
+# salt.models.maskformer is BOTH removed here (maskdecoder.py:51 get_masks, reduces.py
+# maskformer get_maskformer_outputs) AND retained at a DIFFERENT W2c site
+# (maskdecoder.py MaskDecoderLayer), so a module-level "gone" assertion (the W2a
+# style) would be wrong. The salt.utils.* relocations (mask_utils/tensor_utils/
+# edge_features) ARE total — no salt.utils import survives W2b anywhere in core.
+_W2B_RELOCATED_SITES = {
+    ("callbacks.py", "salt.utils.mask_utils"),  # mask_from_logits + reco_metrics
+    ("writers/maskformer.py", "salt.utils.mask_utils"),  # indices_from_mask
+    ("nn/modules.py", "salt.utils.edge_features"),  # calculate_edge_features + check
+    ("nn/modules.py", "salt.utils.tensor_utils"),  # attach_context (+ add_dims)
+    ("onnx/reduces.py", "salt.models.maskformer"),  # get_maskformer_outputs inline
+    ("onnx/reduces.py", "salt.models.task"),  # the task import reduces no longer needs
+}
+# NOT a W2b-gone SITE here: the maskdecoder.py get_masks inline removed
+# (nn/maskdecoder.py, salt.models.maskformer) at the OLD line, but a DIFFERENT
+# salt.models.maskformer import (MaskDecoderLayer) is RETAINED at that same file
+# as a W2c item — so (file, module) cannot distinguish removed from retained
+# there. Its removal is instead pinned by _W2C_RESIDUAL_WORKLIST below: maskdecoder
+# carries EXACTLY ONE salt.models.maskformer import (line 53, MaskDecoderLayer),
+# not two — proving the get_masks import is gone.
+# the W2c end-state worklist: the EXACT residual after W2b, pinned at
+# (file, lineno, module) so the 18 -> 11 monotonic drop is gate-verified and any
+# regression that re-introduces a flagged v1 import (or fails to land a W2c
+# relocation) trips this test. ALL salt.models; salt.utils fully eliminated.
+_W2C_RESIDUAL_WORKLIST = {
+    ("nn/maskdecoder.py", 52, "salt.models"),  # Dense
+    ("nn/maskdecoder.py", 53, "salt.models.maskformer"),  # MaskDecoderLayer
+    ("nn/maskformer_loss.py", 61, "salt.models.maskformer_loss"),  # MaskFormerLoss
+    ("nn/maskformer_loss.py", 62, "salt.models.matcher"),  # matcher
+    ("nn/modules.py", 72, "salt.models"),  # Dense
+    ("nn/modules.py", 73, "salt.models"),  # Transformer
+    ("nn/modules.py", 74, "salt.models.pooling"),  # pooling
+    ("nn/tasks.py", 50, "salt.models.task"),
+    ("nn/tasks.py", 51, "salt.models.task"),
+    ("nn/tasks.py", 52, "salt.models.task"),
+    ("nn/tasks.py", 53, "salt.models.task"),
+}
 _EXPECTED_KEEPS = {"event_classifier", "regression_multi_target"}
 # the 6 Wave-F2-RESTORED configs (fixture restored to full v1 capability).
 _EXPECTED_RESTORED = {
@@ -579,8 +618,12 @@ class TestRS1:
     list; it is AST-based (so the convert.py:119 comment + :355 f-string that NAME
     salt.models in prose are NOT counted); the W2a-relocated helpers (array_utils
     / scalers / union_find / file_utils / samplers / optim / get_dtype) are GONE
-    from the residual list; and the corruption teeth (an injected synthetic
-    salt.models residual -> gate red).
+    from the residual list; the W2b inline-math + mask_utils relocation sites
+    (tensor_utils / edge_features / mask_utils + the maskformer get_masks /
+    get_maskformer_outputs / task reduce imports) are GONE too — the salt.utils
+    tree is fully decoupled and the residual is the pinned W2c worklist (the
+    18 -> 11 monotonic drop is gate-verified); and the corruption teeth (an
+    injected synthetic salt.models residual -> gate red).
     """
 
     def test_runs_and_emits_residual_list(self, tmp_path):
@@ -613,6 +656,39 @@ class TestRS1:
         residual_modules = {h["module"] for h in report["residual_imports"]}
         leftover = _W2A_RELOCATED_MODULES & residual_modules
         assert leftover == set(), f"W2a relocations still residual: {sorted(leftover)}"
+
+    def test_w2b_relocations_are_gone_from_residual(self, tmp_path):
+        # the M7 W2b inline-math + mask_utils relocation wave: every W2b-removed
+        # import SITE has been inlined/repointed to salt.core.* — none survive in
+        # the residual. Asserted at (file, module) granularity because
+        # salt.models.maskformer persists at a DIFFERENT (W2c) site, so a
+        # module-level check would mis-fire. Plus the categorical W2b outcome: NO
+        # salt.utils.* import survives anywhere in production salt.core (the
+        # tensor_utils / edge_features / mask_utils relocations are total).
+        _code, report = run_rs1(tmp_path)
+        residual_sites = {(h["file"], h["module"]) for h in report["residual_imports"]}
+        leftover = _W2B_RELOCATED_SITES & residual_sites
+        assert leftover == set(), f"W2b-removed import sites still residual: {sorted(leftover)}"
+        # the salt.utils tree is fully decoupled (W2a + W2b utils relocations):
+        utils_residual = [
+            h for h in report["residual_imports"] if h["module"].startswith("salt.utils")
+        ]
+        assert utils_residual == [], f"salt.utils still imported by core: {utils_residual}"
+
+    def test_w2c_residual_worklist_is_pinned(self, tmp_path):
+        # the W2b end-state == the W2c worklist: pin the EXACT residual so the
+        # 18 -> 11 monotonic drop is gate-verified. Matched at (file, module)
+        # multiset granularity (robust to benign line shifts; a re-added flagged
+        # v1 import or an unlanded W2c relocation still trips it). EVERY residual
+        # is salt.models — the only v1 sub-tree core still touches at W2b.
+        _code, report = run_rs1(tmp_path)
+        residual_fm = sorted((h["file"], h["module"]) for h in report["residual_imports"])
+        worklist_fm = sorted((f, m) for f, _lineno, m in _W2C_RESIDUAL_WORKLIST)
+        assert residual_fm == worklist_fm, (
+            f"residual != pinned W2c worklist\n  residual: {residual_fm}\n  worklist: {worklist_fm}"
+        )
+        assert report["config"]["residual_import_count"] == len(_W2C_RESIDUAL_WORKLIST)
+        assert all(h["pkg"] == "models" for h in report["residual_imports"])
 
     def test_harness_files_are_excluded(self, tmp_path):
         # the gate harnesses + v1 adapters import v1 deliberately and are scoped

@@ -55,7 +55,7 @@ from salt.core.graph.spec import GraphModule, Mode, TensorSpec
 from salt.core.onnx.config import ExportOutput
 from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
 from salt.core.writers.names import OBJECT_INDEX
-from salt.utils.mask_utils import indices_from_mask
+from salt.core.utils.mask_utils import indices_from_mask
 
 __all__ = ["MaskFormerObjectWriter"]
 
