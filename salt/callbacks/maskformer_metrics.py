@@ -1,4 +1,3 @@
-import torch
 import torch.nn.functional as nnf
 import torchmetrics as tm
 from lightning import Callback, LightningModule, Trainer

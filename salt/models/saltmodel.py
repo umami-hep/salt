@@ -154,18 +154,7 @@ class SaltModel(nn.Module):
             preds = {"embed_xs": embed_xs}
         else:
             preds = {"embed_xs": flatten_tensor_dict(xs)}
-        # for key, values in xs.items():
-        #     print(key, values.shape, values[0], values[1])
-        # print("Look at encoder?")
-        # print(embed_xs[0])
-        # print(embed_xs[1])
-        # print("And now the inputs!")
-        # print(inputs['tracks'][0])
-        # print(inputs['tracks'][1])
-        # print("And flows?")
         # if "flows" in inputs:
-        #     print(inputs["flows"][0])
-        #     print(inputs["flows"][1])
         preds, labels, loss = (
             self.mask_decoder(preds, self.tasks, pad_masks, labels)
             if self.mask_decoder
@@ -175,7 +164,7 @@ class SaltModel(nn.Module):
         # apply featurewise transformation to global track embeddings if configured
         if hasattr(self, "featurewise_global") and self.featurewise_global:
             preds["embed_xs"] = self.featurewise_global(inputs, preds["embed_xs"])
-        
+
         # pooling
         if self.pool_net:
             global_rep = self.pool_net(preds, pad_mask=pad_masks)

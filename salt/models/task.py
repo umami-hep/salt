@@ -459,7 +459,6 @@ class RegressionTaskBase(TaskBase, ABC):
                 [targets_dict[self.input_name][target] for target in self.targets], dim=1
             )
 
-
         if targets is not None:
             if self.scaler is not None:
                 for i in range(len(self.targets)):
@@ -480,12 +479,10 @@ class RegressionTaskBase(TaskBase, ABC):
             # dimension. This allows us to keep the same code for both global and query scaling
             if len(targets.shape) == 3:
                 targets = targets.transpose(1, 2)
-        
-        # TODO move this or use something better because this sucks 
+
+        # TODO(npond): Move this or use a more robust target sanitisation step.
         if True:
-            targets = torch.nan_to_num(
-                targets, nan=0.0, posinf=0.0, neginf=0.0
-            )
+            targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
         return targets
 
 

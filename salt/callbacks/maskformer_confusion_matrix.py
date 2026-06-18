@@ -1,32 +1,33 @@
-from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
 from lightning import Callback, LightningModule, Trainer
+from sklearn.metrics import confusion_matrix
+from torch import Tensor
 
 
 class MaskformerConfusionMatrix(Callback):
+    """Callback to log normalized confusion matrix for MaskFormer class labels to Comet.
+
+    Parameters
+    ----------
+    only_val : bool
+        Whether to log confusion matrix only on validation epoch end. Default is True.
+    log_every_n_epochs : int
+        Log confusion matrix every N epochs. Default is 1.
+    normalize : bool
+        Whether to normalize the confusion matrix. Default is True.
+    """
+
     def __init__(self, only_val: bool = True, log_every_n_epochs: int = 1, normalize: bool = True):
-        """Callback to log normalized confusion matrix for MaskFormer class labels to Comet.
-
-        Parameters
-        ----------
-        only_val: bool
-            Whether to log confusion matrix only on validation epoch end. Default is True.
-        log_every_n_epochs: int
-            Log confusion matrix every N epochs. Default is 1.
-        normalize: bool
-            Whether to normalize the confusion matrix. Default is True.
-
-        """
         self.only_val = only_val
         self.log_every_n_epochs = log_every_n_epochs
         self.normalize = normalize
-        self.val_preds = []
-        self.val_targets = []
-        self.train_preds = []
-        self.train_targets = []
+        self.val_preds: list[Tensor] = []
+        self.val_targets: list[Tensor] = []
+        self.train_preds: list[Tensor] = []
+        self.train_targets: list[Tensor] = []
 
     def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
         if trainer.fast_dev_run or stage != "fit":
@@ -42,7 +43,12 @@ class MaskformerConfusionMatrix(Callback):
         self.null_index = len(self.classes) - 1
 
     def on_validation_batch_end(
-        self, trainer, module, outputs, batch, batch_idx  # noqa: ARG002
+        self,
+        trainer,
+        module,  # noqa: ARG002
+        outputs,
+        batch,  # noqa: ARG002
+        batch_idx,  # noqa: ARG002
     ):
         if trainer.fast_dev_run:
             return
@@ -59,7 +65,12 @@ class MaskformerConfusionMatrix(Callback):
         self.val_targets.append(obj_class_tgt.view(-1))
 
     def on_train_batch_end(
-        self, trainer, module, outputs, batch, batch_idx  # noqa: ARG002
+        self,
+        trainer,
+        module,  # noqa: ARG002
+        outputs,
+        batch,  # noqa: ARG002
+        batch_idx,  # noqa: ARG002
     ):
         if self.only_val or trainer.fast_dev_run:
             return
@@ -120,7 +131,7 @@ class MaskformerConfusionMatrix(Callback):
 
         plt.close(fig)
 
-    def on_validation_epoch_end(self, trainer, module):  # noqa: ARG002
+    def on_validation_epoch_end(self, trainer, module):
         if trainer.fast_dev_run or len(self.val_preds) == 0:
             return
 
@@ -136,7 +147,7 @@ class MaskformerConfusionMatrix(Callback):
         self.val_preds.clear()
         self.val_targets.clear()
 
-    def on_train_epoch_end(self, trainer, module):  # noqa: ARG002
+    def on_train_epoch_end(self, trainer, module):
         if self.only_val or trainer.fast_dev_run or len(self.train_preds) == 0:
             return
 

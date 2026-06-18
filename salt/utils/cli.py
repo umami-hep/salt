@@ -185,7 +185,6 @@ class SaltCLI(LightningCLI):
         labels: dict = {}
         if "labels" in config.data:
             labels = config.data.labels
-        # print("Labels are", labels)
         for task in sc_tasks:
             assert "Task" in task["class_path"]
             self.collect_labels_from_task(
@@ -216,8 +215,7 @@ class SaltCLI(LightningCLI):
             ]
             labels[maskformer_config.constituent.name] += [maskformer_config.constituent.id_label]
             if (
-                config.model.model.init_args
-                .get("mask_decoder")
+                config.model.model.init_args.get("mask_decoder")
                 .get("init_args", {})
                 .get("class_weights")
                 is None

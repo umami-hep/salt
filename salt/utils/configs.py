@@ -1,5 +1,9 @@
 import warnings
 from dataclasses import dataclass
+from typing import Any, TypeAlias
+
+ObjectClassValue: TypeAlias = int | float | list[int]
+ObjectClasses: TypeAlias = dict[str | None, dict[str, Any]]
 
 
 @dataclass
@@ -43,7 +47,7 @@ class MaskformerObjectConfig:
         Name of the variable in the global object to use as an ID.
     class_label : str | None
         Name of the variable in the global object to use as a class label.
-    object_classes : dict[str | None, dict[str, int]] | None
+    object_classes : ObjectClasses | None
         Mapping of class names to raw/mapped indices. Expected format::
 
             {
@@ -96,7 +100,7 @@ class MaskformerObjectConfig:
     name: str
     id_label: str
     class_label: str | None = None
-    object_classes: dict[str | None, dict[str, float | int | list[int]]] | None = None
+    object_classes: ObjectClasses | None = None
     max_lxy_mm: float | None = None
     lxy_field: str = "Lxy"
     cuts: list[ObjectCut] | None = None
@@ -107,7 +111,13 @@ class MaskformerObjectConfig:
     num_objects: int | None = None  # legacy alias for max_objects
 
     def __post_init__(self) -> None:
-        """Ensure that the object_classes dictionary is valid."""
+        """Ensure that the object_classes dictionary is valid.
+
+        Raises
+        ------
+        ValueError
+            If the null class is missing or ``pv_class`` is invalid.
+        """
         if self.object_classes:
             # When reading in 'null', jsonargparse may cast it to None, so cast back
             if None in self.object_classes:
@@ -120,9 +130,10 @@ class MaskformerObjectConfig:
             )
             assert set(self.class_map.values()) == set(range(len(self.object_classes)))
 
-            for k, v in self.object_classes.items():
-                if isinstance(v["raw"], float):
-                    v["raw"] = int(v["raw"])
+            for v in self.object_classes.values():
+                raw = v.get("raw")
+                if isinstance(raw, float):
+                    v["raw"] = int(raw)
 
         # jsonargparse may pass dicts → coerce to ObjectCut
         if self.cuts:
@@ -174,7 +185,12 @@ class MaskformerObjectConfig:
         """
         if not self.object_classes:
             raise ValueError("No object classes defined")
-        return [v.get("weight", 1.0) for v in self.object_classes.values()]
+        weights = []
+        for v in self.object_classes.values():
+            weight = v.get("weight", 1.0)
+            assert not isinstance(weight, list), "Class weight must be a scalar"
+            weights.append(float(weight))
+        return weights
 
     @property
     def num_not_null_classes(self) -> int:
@@ -206,13 +222,13 @@ class MaskformerObjectConfig:
         return self.num_not_null_classes
 
     @property
-    def class_map(self) -> dict[int, int]:
+    def class_map(self) -> dict[tuple[int, ...], int]:
         """Return mapping from raw class labels to mapped class labels.
 
         Returns
         -------
-        dict[int, int]
-            Dictionary mapping raw indices to mapped indices.
+        dict[tuple[int, ...], int]
+            Dictionary mapping raw index tuples to mapped indices.
 
         Raises
         ------
@@ -222,16 +238,19 @@ class MaskformerObjectConfig:
         if not self.object_classes:
             raise ValueError("No object classes defined")
 
-        def make_tuple(v):
-            if isinstance(v, (list, tuple)):
+        def make_tuple(v: ObjectClassValue) -> tuple[int, ...]:
+            if isinstance(v, list):
                 assert all(isinstance(i, int) for i in v), "All values must be integers"
                 return tuple(v)
             if isinstance(v, int):
                 return (v,)
-
             return (int(v),)
 
-        return {make_tuple(v["raw"]): v["mapped"] for v in self.object_classes.values()}
+        return {
+            make_tuple(v["raw"]): int(v["mapped"])
+            for v in self.object_classes.values()
+            if "raw" in v
+        }
 
     @property
     def class_names(self) -> list[str]:

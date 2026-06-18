@@ -236,9 +236,7 @@ class ModelWrapper(lightning.LightningModule):
         state_dict = checkpoint.get("state_dict")
         if not state_dict or not any("_orig_mod." in k for k in state_dict):
             return
-        checkpoint["state_dict"] = {
-            k.replace("_orig_mod.", ""): v for k, v in state_dict.items()
-        }
+        checkpoint["state_dict"] = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
     def shared_step(self, batch: tuple, evaluation: bool = False):
         """Unpack a batch, run forward, and compute loss.

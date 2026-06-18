@@ -7,27 +7,37 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 SOLVER_REGISTRY = Solvers.get_available_solvers()
+
+
 def fill_default_indices_loop(assignments: torch.Tensor) -> torch.Tensor:
-    """
-    Fill -1s with ascending unused indices; if not enough, keep filling with
-    ascending indices (duplicates allowed). Matches the vectorized version below.
+    """Fill ``-1`` entries with ascending unused indices.
+
+    Parameters
+    ----------
+    assignments : torch.Tensor
+        Assignment tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Assignment tensor with unmatched entries filled.
     """
     out = assignments.long().clone()
-    B, N = out.shape
+    batch_size, num_objects = out.shape
     device = out.device
-    default = torch.arange(N, device=device)
+    default = torch.arange(num_objects, device=device)
 
-    for b in range(B):
+    for b in range(batch_size):
         row = out[b]
         neg = row.eq(-1)
         k = int(neg.sum().item())
         if k == 0:
             continue
-        used = torch.zeros(N, dtype=torch.bool, device=device)
+        used = torch.zeros(num_objects, dtype=torch.bool, device=device)
         pos_vals = row[~neg]
         if pos_vals.numel():
             used[pos_vals.clamp_min(0)] = True
-        unused = default[~used]                       # ascending
+        unused = default[~used]  # ascending
         # pad with 0..N-1 if we still need more (allows duplicates)
         if unused.numel() < k:
             pad = default[: k - unused.numel()]
@@ -38,9 +48,7 @@ def fill_default_indices_loop(assignments: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def fill_unmatched_assignments_vectorized(
-    assignments: Tensor, num_predictions: int
-) -> Tensor:
+def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: int) -> Tensor:
     """Fill unmatched assignments (-1 values) with remaining prediction indices (vectorized).
 
     Parameters
@@ -56,7 +64,7 @@ def fill_unmatched_assignments_vectorized(
     Tensor
         Assignments with -1 values replaced by unused prediction indices.
     """
-    batch_size, num_objects = assignments.shape
+    batch_size, _num_objects = assignments.shape
     device = assignments.device
 
     # Create mask for unmatched assignments
@@ -66,8 +74,6 @@ def fill_unmatched_assignments_vectorized(
     if not unmatched_mask.any():
         return assignments
 
-    # Create a boolean mask for all possible prediction indices
-    # Shape: (batch_size, num_predictions)
     all_indices = torch.arange(num_predictions, device=device).unsqueeze(0).expand(batch_size, -1)
 
     # Mark which indices are already used
@@ -246,6 +252,8 @@ class HungarianMatcher(nn.Module):
         Weights for individual loss components, e.g.
         ``{"object_class_ce": 1.0, "mask_dice": 1.0, "mask_ce": 0.0, "mask_focal": 0.0,
         "regression": 0.0}``.
+    object_weights : list[float] | None, optional
+        Optional per-object-class weights, by default ``None``.
 
     Notes
     -----
@@ -335,7 +343,8 @@ class HungarianMatcher(nn.Module):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
             if torch.isinf(cost_mask_dice).any() or torch.isnan(cost_mask_dice).any():
                 print(
-                    "Nans in cost matrix, DICE this is probably due to the mask dice targets being inf."
+                    "Nans in cost matrix, DICE; this is probably due to the "
+                    "mask dice targets being inf."
                 )
                 print("Mask targets:", mask_tgt)
                 print("Mask predictions:", mask_pred)
@@ -344,7 +353,9 @@ class HungarianMatcher(nn.Module):
             cost_mask_ce = batch_sigmoid_ce_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_ce"] * cost_mask_ce
             if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
-                print("Nans in cost matrix, CE this is probably due to the mask ce targets being inf.")
+                print(
+                    "Nans in cost matrix, CE this is probably due to the mask ce targets being inf."
+                )
                 print("Mask targets:", mask_tgt)
                 print("Mask predictions:", mask_pred)
                 print("Mask cost:", cost_mask_ce)
@@ -352,7 +363,10 @@ class HungarianMatcher(nn.Module):
             cost_mask_focal = batch_sigmoid_focal_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_focal"] * cost_mask_focal
             if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
-                print("Nans in cost matrix, FOCAL this is probably due to the mask focal loss targets being inf.")
+                print(
+                    "Nans in cost matrix, FOCAL; this is probably due to the "
+                    "mask focal loss targets being inf."
+                )
                 print("Mask targets:", mask_tgt)
                 print("Mask predictions:", mask_pred)
 
@@ -362,10 +376,11 @@ class HungarianMatcher(nn.Module):
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
             reg_tgt = torch.nan_to_num(reg_tgt, nan=0.0, posinf=0.0, neginf=0.0)
             reg_cost = batch_mae_loss(reg_pred, reg_tgt)
-            # TODO figure out why we have nans in the targets...
+            # TODO(npond): Figure out why we have nans in the targets.
             if torch.isnan(reg_cost).any() or torch.isinf(reg_cost).any():
                 print(
-                    "Nans or infs in cost matrix, REG, this is probably due to the regression targets being nan."
+                    "Nans or infs in cost matrix, REG; this is probably due to "
+                    "the regression targets being nan."
                 )
                 print("Regression targets:", reg_cost)
             cost_matrix += self.loss_weights["regression"] * reg_cost
@@ -402,16 +417,15 @@ class HungarianMatcher(nn.Module):
             Assigned target indices per batch of shape ``[B, M]``; unassigned
             slots are filled to cover all ``num_objects`` by appending remaining indices.
         """
-        batch_size = preds["class_logits"].shape[0]
         device = preds["class_logits"].device
 
         # Get the full cost matrix, then run batched LSAP
-        full_cost, batch_N = self.get_batch_cost(preds, targets)
-        batch_N = batch_N.squeeze(-1).cpu().numpy()
+        full_cost, batch_n = self.get_batch_cost(preds, targets)
+        batch_n = batch_n.squeeze(-1).cpu().numpy()
 
         solver = SOLVER_REGISTRY[self.solver_name]
         full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
-        assignments = solver.batch_solve(full_cost, num_valid=batch_N)
+        assignments = solver.batch_solve(full_cost, num_valid=batch_n)
         assignments = torch.from_numpy(assignments).to(torch.int64).to(device)
         assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
         self.global_step += 1
@@ -430,6 +444,11 @@ class HungarianMatcher(nn.Module):
         list[int]
             Ordered list of selected target indices ``idx`` aligned with sources,
             extended by appending any remaining indices to cover all ``num_objects``.
+
+        Raises
+        ------
+        ValueError
+            If the linear sum assignment problem cannot be solved.
         """
         try:
             src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)

@@ -21,7 +21,7 @@ from torch.utils.data import Dataset
 
 from salt.stypes import Vars
 from salt.utils.array_utils import maybe_copy
-from salt.utils.configs import LabellerConfig, MaskformerConfig
+from salt.utils.configs import LabellerConfig, MaskformerConfig, MaskformerObjectConfig
 from salt.utils.inputs import as_half
 from salt.utils.mask_utils import build_target_masks
 
@@ -36,7 +36,7 @@ OPERATORS = {
 }
 
 
-def _select_objects(batch: np.ndarray, obj_config) -> np.ndarray:
+def _select_objects(batch: np.ndarray, obj_config: MaskformerObjectConfig) -> np.ndarray:
     """Apply per-jet cuts, sort, PV-pin, and truncation to the objects array.
 
     The selection has four phases applied per-jet:
@@ -148,14 +148,9 @@ def _select_objects(batch: np.ndarray, obj_config) -> np.ndarray:
 
     # Sentinel-fill pad slots so they don't collide with real IDs in
     # build_target_masks and so process_labels maps them cleanly to null.
-    if has_valid:
-        pad_mask = ~out["valid"].astype(bool)
-    else:
-        # No 'valid' field → infer pad slots from "no row was assigned" by
-        # checking the id_label sentinel we just initialised to 0 (same as
-        # zero-fill). Without a valid field there is no clean way to know,
-        # so leave id/class fields untouched.
-        pad_mask = np.zeros((n_jets, n_out), dtype=bool)
+    # No 'valid' field -> there is no clean way to infer pad slots, so leave
+    # id/class fields untouched in that case.
+    pad_mask = ~out["valid"].astype(bool) if has_valid else np.zeros((n_jets, n_out), dtype=bool)
 
     id_field = obj_config.id_label
     if id_field in out.dtype.names and pad_mask.any():

@@ -116,9 +116,16 @@ class MaskFormerLoss(nn.Module):
         Same as loss_weights but for the matching cost, by default None
     null_class_weight: float, optional
         Relative classification weight applied to the no-object category, by default 0.5
+    class_weights: list[float] | None, optional
+        Optional weights for object classes, with or without the null class.
     losses: list[str] | None, optional
         List of all the losses to be applied. See get_loss for list of available losses,
         by default None
+
+    Raises
+    ------
+    ValueError
+        If ``class_weights`` has an invalid length.
     """
 
     def __init__(
@@ -128,7 +135,7 @@ class MaskFormerLoss(nn.Module):
         loss_weights: dict,
         matcher_weights: dict | None = None,
         null_class_weight: float = 0.5,
-        class_weights : list[float] | None = None,
+        class_weights: list[float] | None = None,
         losses: list[str] | None = None,
     ):
         super().__init__()
@@ -138,14 +145,13 @@ class MaskFormerLoss(nn.Module):
         if self.num_classes == 1:
             empty_weight = torch.tensor([self.null_class_weight])
         elif class_weights is not None:
-            print(class_weights)
             if len(class_weights) == self.num_classes + 1:
                 # if class_weights is provided, it must be of size num_classes + 1
                 empty_weight = torch.tensor(class_weights)
             elif len(class_weights) == self.num_classes:
                 # if class_weights is provided, it must be of size num_classes
                 # and we add the null class weight at the end
-                empty_weight = torch.tensor([*class_weights , self.null_class_weight])
+                empty_weight = torch.tensor([*class_weights, self.null_class_weight])
             else:
                 raise ValueError(
                     f"Invalid class_weights length: {len(class_weights)}. "
@@ -154,7 +160,6 @@ class MaskFormerLoss(nn.Module):
         else:
             empty_weight = torch.ones(self.num_classes + 1)
             empty_weight[-1] = self.null_class_weight
-        print(f"Using empty weight: {empty_weight}")
         self.register_buffer("empty_weight", empty_weight)
         self.loss_weights = loss_weights
         if matcher_weights is None:
@@ -165,7 +170,7 @@ class MaskFormerLoss(nn.Module):
             num_classes=num_classes,
             num_objects=num_objects,
             loss_weights=matcher_weights,
-            object_weights=empty_weight
+            object_weights=empty_weight,
         )
 
     def loss_labels(

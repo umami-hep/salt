@@ -42,6 +42,10 @@ class MaskDecoder(nn.Module):
     aux_loss : bool, optional
         If ``True``, store intermediate predictions after each decoder layer
         for auxiliary losses, by default ``False``.
+    constituent_name : str | None, optional
+        Name of the constituent collection to use for the decoder, by default ``None``.
+    class_weights : list[float] | None, optional
+        Optional class weights forwarded to :class:`MaskFormerLoss`, by default ``None``.
     """
 
     def __init__(
@@ -54,7 +58,7 @@ class MaskDecoder(nn.Module):
         num_objects: int,
         loss_config: Mapping,
         aux_loss: bool = False,
-        constituent_name=None,
+        constituent_name: str | None = None,
         class_weights: list[float] | None = None,
     ):
         super().__init__()
@@ -73,7 +77,9 @@ class MaskDecoder(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
 
-        self.mask_loss = MaskFormerLoss(**loss_config, num_objects=num_objects, class_weights=class_weights)
+        self.mask_loss = MaskFormerLoss(
+            **loss_config, num_objects=num_objects, class_weights=class_weights
+        )
         self.constituent_name = constituent_name
 
     def get_preds(
@@ -171,12 +177,13 @@ class MaskDecoder(nn.Module):
         if isinstance(pad_mask, dict):
             if self.constituent_name is not None:
                 # Create the mask to extract only the relevent consituent embeddings
-                emb_mask = torch.zeros(preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device)
+                emb_mask = torch.zeros(
+                    preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+                )
 
                 i = 0
                 for k, v in pad_mask.items():
                     if k == self.constituent_name:
-                        
                         emb_mask[i : i + v.shape[1]] = True
                         break
                     i += v.shape[1]
@@ -184,21 +191,19 @@ class MaskDecoder(nn.Module):
             else:
                 assert len(pad_mask) == 1, "Maskformer only supports one input."
                 pad_mask = next(iter(pad_mask.values()))
-                emb_mask = torch.ones(preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device)
+                emb_mask = torch.ones(
+                    preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+                )
         else:
-            emb_mask = torch.ones(preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device)
+            emb_mask = torch.ones(
+                preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+            )
 
         x = preds["embed_xs"]
-        # print("original x shape", x.shape, "pad_mask shape", pad_mask.shape, emb_mask.shape)
         x = x[:, emb_mask, :]
-        # print("Next x shape", x.shape, "pad_mask shape", pad_mask.shape)
         # apply norm
         q = self.norm1(self.inital_q.expand(x.shape[0], -1, -1))
         x = self.norm2(x)
-        # print("Initial q shape", q.shape, "x shape", x.shape)
-        # print(q[0])
-        # print(q[1])
-        # print("Pad mask?", pad_mask[0], pad_mask[1])
         # Add a dummy track to the inputs (and to pad mask) to stop onnx complaining
         xpad = torch.zeros((x.shape[0], 1, x.shape[-1]), device=x.device, dtype=x.dtype)
         x = torch.cat([x, xpad], dim=1)
@@ -209,22 +214,14 @@ class MaskDecoder(nn.Module):
             pad_mask = torch.cat([pad_mask, padpad_mask], dim=1)
 
         intermediate_outputs: list | None = [] if self.aux_loss else None
-        # print("Weird before? ", q[0])
-        # print("X before? ", x[0])
-        i=0
+        i = 0
         for layer in self.layers:
-            # print(i, "Weird still,", q[0][0], q[1][0], x[0][0], x[1][0])
             if self.aux_loss:
                 assert intermediate_outputs is not None
                 intermediate_outputs.append({"embed": q, **self.get_preds(q, x, pad_mask)})
             q, x = layer(q, x, kv_mask=pad_mask)
-            # print("Weird",i, q[0], q[1], x[0], x[1])
-            i+=1
+            i += 1
         mf_preds = self.get_preds(q, x, pad_mask)
-        # print(q.shape, q[0])
-        # print(q.shape, q[1])
-        # print("And x?", x.shape, x[0])
-        # print("And x?", x.shape, x[1])
         # Un-pad the embedding x, get the mf_predictions, and then unpad them as well
         preds["objects"] = {"embed": q, "x": x[:, :-1, :], **mf_preds}
         preds["objects"]["masks"] = preds["objects"]["masks"][:, :, :-1]
@@ -282,7 +279,7 @@ def get_masks(
     """
     mask_tokens = mask_net(q)
     pred_masks = torch.einsum("bqe,ble->bql", mask_tokens, x)
-    
+
     if input_pad_mask is not None:
         pred_masks[input_pad_mask.unsqueeze(1).expand_as(pred_masks)] = torch.finfo(
             pred_masks.dtype
@@ -506,5 +503,5 @@ class MaskDecoderLayer(nn.Module):
         # Perform a normalization step
         q = self.norm1(q)
         kv = self.norm2(kv)
-    
+
         return q, kv

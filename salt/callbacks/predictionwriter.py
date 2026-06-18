@@ -6,7 +6,7 @@ import numpy as np
 from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
-import h5py
+
 from salt.data.datasets import _select_objects
 from salt.models.task import (
     ClassificationTask,
@@ -178,7 +178,7 @@ class PredictionWriter(Callback):
             self.ds.mf_config is not None
             and objects_dataset_name is not None
             and dataset_name == objects_dataset_name
-            and self.ds._needs_object_selection()
+            and self.ds._needs_object_selection()  # noqa: SLF001
         ):
             slice_arr = _select_objects(slice_arr, self.ds.mf_config.object)
 
@@ -322,9 +322,9 @@ class PredictionWriter(Callback):
                 objects["masks"].cpu().float().unsqueeze(-1).numpy(),
                 dtype=np.dtype([("mask_logits", self.precision)]),
             )
-            # Exapnd the pad mask from (B, N_constituents) to (B, N_objects, N_constituents) 
+            # Exapnd the pad mask from (B, N_constituents) to (B, N_objects, N_constituents)
             # and set the invalid entries to -inf
-            # expanded_pad_mask = 
+            # expanded_pad_mask =
             # to_write["object_masks"]["mask_logits"][]
 
         self._write_batch_outputs(to_write, out_pads, batch_idx)
