@@ -40,13 +40,18 @@ same key (bind.py).
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, final
 
 import torch
 import yaml
-from torch import Tensor, nn
+from torch import BoolTensor, Size, Tensor, nn
+from torch.nn import functional
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.functional import pad, softmax
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
@@ -62,19 +67,26 @@ from salt.core.graph.spec import (
 )
 from salt.core.nn.bind import ResolvedSchema
 
-# composed v1 layers (M2 porting policy, plan 05 — absorbed at M7)
-# V1Dense / V1Transformer / V1GlobalAttentionPooling are W2c absorption targets
-# (the v1 layer/Dense/pooling family); they stay composed until that wave. The
-# small pure math helpers (``attach_context`` + ``calculate_edge_features`` /
-# ``check_edge_config``) are inlined below (M7 W2b) BYTE-FAITHFULLY from v1
-# ``salt.utils.tensor_utils`` (tensor_utils.py:168-268) and v1
-# ``salt.utils.edge_features`` (edge_features.py:10-146).
-from salt.models import Dense as V1Dense
-from salt.models import Transformer as V1Transformer
-from salt.models.pooling import GlobalAttentionPooling as V1GlobalAttentionPooling
+# v2-NATIVE absorption of the v1 layer/Dense/pooling family (M7 W2c-2). The
+# v1 ``Dense`` (dense.py), the v1 ``Transformer`` stack + its transitive deps
+# (transformer.py / attention.py / layernorm.py) and the v1
+# ``GlobalAttentionPooling`` (pooling.py) are COPIED VERBATIM below as
+# self-contained v2-native classes (``Dense``, ``Transformer`` &c.,
+# ``_GlobalAttentionPoolingV1``) — the v1 originals stay UNTOUCHED in
+# salt/models/* as the bitwise gate ORACLE (parity_gn2 / gates_m6 MU1/MU2/ED1/ED2
+# weight-load a fresh v1 instance from these absorbed modules' state_dicts and
+# compare forwards bitwise, so the absorbed structure + math are byte-faithful by
+# construction). The small pure math helpers (``attach_context`` +
+# ``calculate_edge_features`` / ``check_edge_config``) were inlined at M7 W2b
+# BYTE-FAITHFULLY from v1 ``salt.utils.tensor_utils`` (tensor_utils.py:168-268)
+# and v1 ``salt.utils.edge_features`` (edge_features.py:10-146); the four
+# tensor-dict / varlen helpers the absorbed Transformer + pooling need
+# (``masked_softmax`` / ``flatten_tensor_dict`` / ``undo_padding`` /
+# ``redo_padding``) are inlined likewise from tensor_utils.py:30-165.
 
 __all__ = [
     "Concat",
+    "Dense",
     "EdgeEmbed",
     "EdgeFeatures",
     "GlobalAttentionPooling",
@@ -83,6 +95,7 @@ __all__ = [
     "Normaliser",
     "Split",
     "StreamEmbed",
+    "Transformer",
     "TransformerEncoder",
     "VectorConcat",
 ]
@@ -355,6 +368,1469 @@ def calculate_edge_features(
             ebatch[:, :, :, i] = 0.5 * torch.log(mass2)
 
     return torch.nan_to_num(ebatch, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def flatten_tensor_dict(
+    x: dict[str, Tensor],
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> Tensor:
+    """Flatten (concatenate) a dictionary of tensors into one tensor.
+
+    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.flatten_tensor_dict``
+    (tensor_utils.py:30-71), byte-faithful. All tensors are concatenated along
+    ``dim=1``; ``include``/``exclude`` are mutually exclusive subset selectors.
+
+    Returns
+    -------
+    Tensor
+        Single tensor formed by concatenating the selected tensors along ``dim=1``.
+
+    Raises
+    ------
+    ValueError
+        If both ``include`` and ``exclude`` are provided.
+    """
+    if include and exclude:
+        raise ValueError("Cannot use 'include' and 'exclude' together")
+    if include:
+        return torch.cat([x[emb] for emb in include], dim=1)
+    if exclude:
+        return torch.cat([x[emb] for emb in x if emb not in exclude], dim=1)
+    return torch.cat(list(x.values()), dim=1)
+
+
+def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
+    """Apply softmax while ignoring (masking) padded elements.
+
+    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.masked_softmax``
+    (tensor_utils.py:74-105), byte-faithful. Elements where ``mask`` is ``True``
+    are set to ``-inf`` before the softmax and zeroed after.
+
+    Returns
+    -------
+    Tensor
+        Tensor after masked softmax.
+    """
+    if mask is not None:
+        mask = add_dims(mask, x.dim())
+        x = x.masked_fill(mask, -torch.inf)
+
+    x = softmax(x, dim=dim)
+
+    if mask is not None:
+        x = x.masked_fill(mask, 0)
+
+    return x
+
+
+def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple[Tensor, Tensor, int]:
+    """Remove padded elements and return packed sequence info.
+
+    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.undo_padding``
+    (tensor_utils.py:108-141), byte-faithful — the flash-varlen packer. Convention
+    ``mask == True`` -> padded element; the mask is flipped internally.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor, int]
+        The packed (unpadded) sequence, the cumulative lengths (``int32``), and
+        the maximum valid sequence length.
+    """
+    mask = ~mask  # convert mask: True -> valid token
+    seqlens = mask.sum(dim=-1)
+    maxlen = int(seqlens.max().item())
+    culens = pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+    return seq[mask], culens, maxlen
+
+
+def redo_padding(unpadded_seq: Tensor, mask: BoolTensor) -> Tensor:
+    """Re-apply padding to an unpadded sequence.
+
+    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.redo_padding``
+    (tensor_utils.py:144-165), byte-faithful.
+
+    Returns
+    -------
+    Tensor
+        Padded tensor (zeros at padded positions, values at valid positions).
+    """
+    mask = ~mask  # convert mask: True -> valid token
+    shape = (*mask.shape, unpadded_seq.shape[-1])
+    out = torch.zeros(shape, dtype=unpadded_seq.dtype, device=unpadded_seq.device)
+    out[mask] = unpadded_seq
+    return out
+
+
+# ===========================================================================
+# v2-native absorption of the v1 Dense / Transformer / pooling family (M7 W2c-2)
+# ---------------------------------------------------------------------------
+# The classes below are COPIED VERBATIM (math + attribute layout + parameter
+# registration order) from the v1 originals so a fresh v1 instance can
+# ``load_state_dict`` a v2-native module's composed sub-net (the gates_m6
+# MU1/MU2/ED1/ED2 oracle pattern) and the forwards agree BITWISE. The v1
+# originals (salt/models/dense.py, transformer.py, attention.py, layernorm.py,
+# pooling.py) stay UNTOUCHED as the gate oracle.
+# ===========================================================================
+
+
+class Dense(nn.Module):
+    """A fully connected feed forward neural network, with optional context.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.Dense`` (dense.py:6-103),
+    COPIED VERBATIM — same layer list (``net``), same muP init
+    (``_reset_parameters``), same ``attach_context`` forward. The v1 original is
+    UNTOUCHED as the gate oracle (gates_m6 VS1/ED1 weight-load a fresh v1 Dense
+    from this absorbed Dense's ``state_dict()`` and compare bitwise).
+
+    Parameters
+    ----------
+    input_size : int
+        Input size
+    output_size : int | None, optional
+        Output size. If not specified this will be the same as the input size, by default None
+    hidden_layers : list[int] | None, optional
+        Number of nodes per layer, if not specified, the network will have
+        a single hidden layer with size `input_size * hidden_dim_scale`, by default None
+    hidden_dim_scale : int, optional
+        Scale factor for the hidden layer size, by default 2
+    activation : str, optional
+        Activation function for hidden layers. Must be a valid torch.nn activation function.
+        By default "ReLU"
+    final_activation : str | None, optional
+        Activation function for the output layer. Must be a valid torch.nn activation function.
+        By default None
+    dropout : float, optional
+        Apply dropout with the supplied probability, by default 0.0
+    bias : bool, optional
+        Whether to use bias in the linear layers, by default True
+    context_size : int, optional
+        Size of the context tensor, 0 means no context information is provided, by default 0
+    mup : bool, optional
+        Whether to use the muP parametrisation (impacts initialisation), by default None
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int | None = None,
+        hidden_layers: list[int] | None = None,
+        hidden_dim_scale: int = 2,
+        activation: str = "ReLU",
+        final_activation: str | None = None,
+        dropout: float = 0.0,
+        bias: bool = True,
+        context_size: int = 0,
+        mup: bool = False,
+    ) -> None:
+        super().__init__()
+
+        if output_size is None:
+            output_size = input_size
+        if hidden_layers is None:
+            hidden_layers = [input_size * hidden_dim_scale]
+
+        # Save the networks input and output sizes
+        self.input_size = input_size
+        self.output_size = output_size
+        self.context_size = context_size
+        self.mup = mup
+
+        # build nodelist
+        self.node_list = [input_size + context_size, *hidden_layers, output_size]
+
+        # input and hidden layers
+        layers = []
+
+        num_layers = len(self.node_list) - 1
+        for i in range(num_layers):
+            if dropout:
+                layers.append(nn.Dropout(dropout))
+
+            # linear projection
+            layers.append(nn.Linear(self.node_list[i], self.node_list[i + 1], bias=bias))
+
+            # activation for all but the final layer
+            if i != num_layers - 1:
+                layers.append(getattr(nn, activation)())
+
+            # final layer: return logits by default, or activation if specified
+            elif final_activation:
+                layers.append(getattr(nn, final_activation)())
+
+        # build the net
+        self.net = nn.Sequential(*layers)
+
+        if self.mup:
+            self._reset_parameters()
+
+    def forward(self, x: Tensor, context: Tensor | None = None) -> Tensor:
+        if self.context_size:
+            x = attach_context(x, context)
+        return self.net(x)
+
+    def _reset_parameters(self):
+        """Initialise the weights and biases for muP."""
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                std = 1.0 / layer.weight.shape[0] ** 0.5
+                nn.init.normal_(layer.weight, std=std)
+                nn.init.constant_(layer.bias, 0)
+
+
+# ---------------------------------------------------------------------------
+# layernorm.py absorption (hybrid/RMS norm)
+# ---------------------------------------------------------------------------
+
+
+class LayerNorm(nn.LayerNorm):
+    """Faster LayerNorm by setting elementwise_affine=False.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.layernorm.LayerNorm``
+    (layernorm.py:5-9), VERBATIM.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, elementwise_affine=False)
+
+
+class RMSNorm(torch.nn.Module):
+    """RMSNorm from https://arxiv.org/abs/1910.07467.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.layernorm.RMSNorm``
+    (layernorm.py:12-27), VERBATIM — follows the LLaMA implementation.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+class _Layernorms:
+    """Namespace mirroring v1 ``import salt.models.layernorm as layernorms``.
+
+    The v1 EncoderLayer / Transformer resolve the norm class by NAME
+    (``getattr(layernorms, norm)``, transformer.py:223,355,371). This namespace
+    exposes the absorbed `LayerNorm` / `RMSNorm` under the same attribute names so
+    the verbatim ``getattr(_LAYERNORMS, norm)`` lookups below are byte-faithful.
+    """
+
+    LayerNorm = LayerNorm
+    RMSNorm = RMSNorm
+
+
+_LAYERNORMS = _Layernorms()
+
+
+# ---------------------------------------------------------------------------
+# attention.py absorption (MultiheadAttention / EdgeAttention / SDPA helpers)
+# ---------------------------------------------------------------------------
+
+try:
+    from flash_attn import flash_attn_varlen_qkvpacked_func as _flash_attn_func
+except ImportError:
+    _flash_attn_func = None
+
+
+def check_flash_attn() -> str:
+    """Check if Flash Attention is available and compatible.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.check_flash_attn``
+    (attention.py:29-59), VERBATIM.
+
+    Returns
+    -------
+    str
+        Empty string if Flash Attention is available, otherwise a reason why not.
+    """
+    # 1. Check CUDA Availability
+    if not torch.cuda.is_available():
+        return "No GPU available."
+
+    # 2. Get CUDA & GPU Info
+    gpu_name = torch.cuda.get_device_name(0)
+    # Compute capability is a tuple (major, minor), e.g., (8, 0)
+    compute_capability = torch.cuda.get_device_capability(0)
+    major, minor = compute_capability
+    sm_version = float(f"{major}.{minor}")
+
+    if sm_version < 8.0:
+        return (
+            f"GPU '{gpu_name}' with SM {sm_version} is not compatible. "
+            "Flash Attention 2 requires SM 8.0 or newer (Ampere+)."
+        )
+    if _flash_attn_func is None:
+        return (
+            "Flash attention is required but not found! Please ensure the package is installed "
+            "correctly. If not, please install the flash attention package as described in "
+            "https://ftag-salt.docs.cern.ch/setup/#install-the-salt-package"
+        )
+    return ""
+
+
+ATTN_TYPES = ["torch-math", "torch-flash", "torch-meff", "flash-varlen"]
+
+
+def merge_masks(
+    kv_mask: BoolTensor | None,
+    attn_mask: BoolTensor | None,
+    q_shape: Size,
+) -> BoolTensor | None:
+    """Create a full attention mask which incorporates padding information.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.merge_masks``
+    (attention.py:65-112), VERBATIM. Padded tokens can't **send** information but
+    can **receive** it (prevents softmax NaNs).
+
+    Returns
+    -------
+    BoolTensor | None
+        Combined mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable over heads), or ``None``.
+    """
+    mask = None
+
+    # If the kv_mask exists, ensure padded tokens never send information
+    if kv_mask is not None:
+        mask = kv_mask.unsqueeze(-2).expand(-1, q_shape[-2], -1)
+        mask = ~mask  # convert the mask so that True indicates a valid token
+
+    # Combine with the explicit attention mask if present
+    if attn_mask is not None:
+        mask = attn_mask if mask is None else attn_mask & mask
+
+    # Unsqueeze for head broadcasting
+    if mask is not None:
+        mask = mask.unsqueeze(1)
+
+    return mask
+
+
+def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
+    """Repeat keys and values along a dimension.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.repeat_kv``
+    (attention.py:115-136), VERBATIM.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        Repeated ``(keys, values)`` tensors.
+    """
+    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
+    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
+    return keys, values
+
+
+def projection_packed(
+    q: Tensor,
+    kv: Tensor | None,
+    weight: Tensor,
+    bias: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Efficient input projection for MHA using a single packed linear layer.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.projection_packed``
+    (attention.py:139-176), VERBATIM — uses ``chunk`` (faster than ``unflatten``).
+
+    Returns
+    -------
+    tuple[Tensor, Tensor, Tensor]
+        Projected queries, keys, and values: ``(Q, K, V)``.
+    """
+    if kv is None:
+        return functional.linear(q, weight, bias).chunk(3, dim=-1)
+
+    dim = q.size(-1)
+    w_q, w_kv = weight.split([dim, dim * 2])
+    b_q, b_kv = bias.split([dim, dim * 2]) if bias is not None else (None, None)
+
+    q_proj = functional.linear(q, w_q, b_q)
+    k_proj, v_proj = functional.linear(kv, w_kv, b_kv).chunk(2, dim=-1)
+    return q_proj, k_proj, v_proj
+
+
+def torch_attn(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    mask: BoolTensor | None,
+    dropout: float,
+    softmax_scale: float,
+    backend: str,
+) -> Tensor:
+    """Scaled dot-product attention with a switchable torch backend.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.torch_attn``
+    (attention.py:179-220), VERBATIM.
+
+    Returns
+    -------
+    Tensor
+        Attention output of shape ``[B, H, L_q, D_h]``.
+    """
+    backends = [SDPBackend.MATH]  # Default backend
+    if backend == "torch-flash":
+        backends += [SDPBackend.FLASH_ATTENTION]
+    elif backend == "torch-meff":
+        backends += [SDPBackend.EFFICIENT_ATTENTION]
+    with sdpa_kernel(backends=backends):
+        return functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=dropout, scale=softmax_scale
+        )
+
+
+class Attention(nn.Module):
+    """Multihead attention module with optional differential attention and norms.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.Attention``
+    (attention.py:223-462), COPIED VERBATIM (same packed in-proj parameters,
+    muP init, RMSNorm q/k/v norms, backend dispatch).
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input (and output) embedding dimension.
+    num_heads : int, optional
+        Number of attention heads. The default is ``1``.
+    attn_type : str, optional
+        Backend kernel to use. One of ``{"torch-math", "torch-flash", "torch-meff",
+        "flash-varlen"}``. The default is ``"torch-meff"``.
+    dropout : float, optional
+        Dropout rate applied in attention. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms in projections. The default is ``True``.
+    do_qk_norm : bool, optional
+        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
+    do_v_norm : bool, optional
+        Whether to apply RMSNorm to V per head. The default is ``False``.
+    mup: bool, optional
+        Whether to use the muP parametrisation. The default is ``False``.
+        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
+        Ref: https://arxiv.org/abs/2203.03466
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int = 1,
+        attn_type: str = "torch-meff",
+        dropout: float = 0.0,
+        bias: bool = True,
+        do_qk_norm: bool = False,
+        do_v_norm: bool = False,
+        mup: bool = False,
+    ) -> None:
+        super().__init__()
+        assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
+        assert attn_type in ATTN_TYPES, "Invalid attention type!"
+
+        # Attributes
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.dropout = dropout
+        self.bias = bias
+        self.attn_type = attn_type
+        self.do_qk_norm = do_qk_norm
+        self.do_v_norm = do_v_norm
+        self.mup = mup
+
+        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
+
+        if self.do_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+        if self.do_v_norm:
+            self.v_norm = RMSNorm(self.head_dim)
+
+        # Better parallelism for self-attention when using parameters directly
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.reset_parameters()
+        self.set_backend(attn_type)
+
+    def set_backend(self, attn_type: str) -> str:
+        """Set and validate the attention backend.
+
+        Returns
+        -------
+        str
+            Effective backend set (may fall back to ``"torch-math"``).
+        """
+        # Check the attention backend
+        self.attn_type = attn_type
+        if self.attn_type == "flash-varlen":
+            why_not_flash = check_flash_attn()
+            if why_not_flash:
+                warnings.warn(
+                    f"Cannot use flash-varlen backend. {why_not_flash} Reverting to torch-math.",
+                    stacklevel=2,
+                )
+                self.attn_type = "torch-math"
+            else:
+                self._flash_attn = _flash_attn_func
+        return self.attn_type
+
+    def reset_parameters(self) -> None:
+        """Initialize the parameters."""
+        if self.mup:
+            # muP init: https://arxiv.org/abs/2203.03466
+            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
+            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
+            nn.init.normal_(self.out_proj.weight, std=(1.0 / self.embed_dim) ** 0.5)  # Output proj
+            if self.bias:
+                nn.init.constant_(self.in_proj_bias, 0.0)
+                nn.init.constant_(self.out_proj.bias, 0.0)
+            return
+
+        # Standard init
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        self.out_proj.reset_parameters()
+        if self.bias:
+            nn.init.constant_(self.in_proj_bias, 0.0)
+
+    def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
+        """FlashAttention backend.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[N_total, D]``.
+        """
+        # Perform the packed input projection
+        qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
+        qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
+
+        if self.do_qk_norm or self.do_v_norm:
+            dtype = qkv.dtype
+            q, k, v = qkv.unbind(1)
+            if self.do_qk_norm:
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+            if self.do_v_norm:
+                v = self.v_norm(v)
+            qkv = torch.stack([q, k, v], dim=1).to(dtype)
+
+        # Run the flash-varlen backend
+        dropout = self.dropout if self.training else 0.0
+        a_out = self._flash_attn(qkv, culens, maxlen, dropout, softmax_scale=self.scale)
+        a_out = a_out.reshape(-1, self.embed_dim)
+
+        # Mix with final linear layer
+        return self.out_proj(a_out)
+
+    def _torch_forward(
+        self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
+    ) -> Tensor:
+        """Attention using PyTorch SDPA backends.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[B, L_q, D]``.
+        """
+        b, s, d = x.shape
+
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        shape = (b, -1, self.num_heads, self.head_dim)
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        if self.do_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.do_v_norm:
+            v = self.v_norm(v)
+
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        dropout = self.dropout if self.training else 0.0
+        a_out = torch_attn(
+            q, k, v, mask, dropout=dropout, softmax_scale=self.scale, backend=self.attn_type
+        )
+
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
+        return self.out_proj(a_out)
+
+    def forward(
+        self,
+        x: Tensor,
+        kv: Tensor | None = None,
+        mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+        attn_mask: BoolTensor | None = None,
+        culens: Tensor | None = None,
+        maxlen: int | None = None,
+    ) -> Tensor:
+        """Attention forward pass, dispatching to the appropriate backend.
+
+        Returns
+        -------
+        Tensor
+            Output of shape ``[B, L_q, D]``.
+        """
+        if self.attn_type == "flash-varlen":
+            assert kv is None, "flash-varlen only supports self attention!"
+            assert attn_mask is None, "flash-varlen does not support attention masks!"
+            assert culens is not None, "flash-varlen requires culens!"
+            assert maxlen is not None, "flash-varlen requires maxlen!"
+            return self._flash_forward(x, culens, maxlen)
+
+        return self._torch_forward(x, kv, mask, kv_mask, attn_mask)
+
+
+class EdgeAttention(nn.Module):
+    """Multihead attention module with optional norms, including edge features.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.EdgeAttention``
+    (attention.py:465-658), COPIED VERBATIM — the edge-bias / edge-gate / optional
+    edge-update math (consumes the W2b-inlined edge features). The v1 original is
+    the bitwise oracle for gates_m6 ED1/ED2.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input (and output) embedding dimension.
+    edge_embed_dim : int
+        Model embedding dimension for edge features.
+    num_heads : int, optional
+        Number of attention heads. The default is ``1``.
+    dropout : float, optional
+        Dropout rate applied in attention. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms in projections. The default is ``True``.
+    do_qk_norm : bool, optional
+        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
+    do_v_norm : bool, optional
+        Whether to apply RMSNorm to V per head. The default is ``False``.
+    update_edges : bool, optional
+        Indicate whether to update edge features, by default False
+    mup: bool, optional
+        Whether to use the muP parametrisation. The default is ``False``.
+        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
+        Ref: https://arxiv.org/abs/2203.03466
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        edge_embed_dim: int,
+        num_heads: int = 1,
+        dropout: float = 0.0,
+        bias: bool = True,
+        do_qk_norm: bool = False,
+        do_v_norm: bool = False,
+        update_edges: bool = False,
+        mup: bool = False,
+    ) -> None:
+        super().__init__()
+        assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
+
+        # Attributes
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.edge_embed_dim = edge_embed_dim
+        self.edge_head_dim = edge_embed_dim // num_heads
+        self.dropout = dropout
+        self.bias = bias
+        self.do_qk_norm = do_qk_norm
+        self.do_v_norm = do_v_norm
+        self.update_edges = update_edges
+        self.mup = mup
+
+        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
+
+        if self.do_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+        if self.do_v_norm:
+            self.v_norm = RMSNorm(self.head_dim)
+
+        # Better parallelism for self-attention when using parameters directly
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        # Edge feature projections
+        self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
+        self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
+        if self.update_edges:
+            self.linear_e_out = nn.Linear(self.num_heads, self.edge_embed_dim, bias=bias)
+        else:
+            self.register_buffer("linear_e_out", None)
+
+        self.reset_parameters()
+
+    def set_backend(self, attn_type: str) -> str:
+        warnings.warn(
+            "EdgeAttention does not support different backends yet. Using raw attention.",
+            stacklevel=2,
+        )
+        return attn_type
+
+    def reset_parameters(self) -> None:
+        """Initialize the parameters."""
+        if self.mup:
+            # muP init: https://arxiv.org/abs/2203.03466
+            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
+            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
+            linear_layers = [self.out_proj]
+            nn.init.normal_(self.linear_e.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
+            nn.init.normal_(self.linear_g.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
+            linear_layers.extend([self.linear_e, self.linear_g])
+            if self.update_edges:
+                nn.init.normal_(self.linear_e_out.weight, std=(1.0 / self.num_heads) ** 0.5)
+                linear_layers.append(self.linear_e_out)
+            if self.bias:
+                nn.init.constant_(self.in_proj_bias, 0.0)
+                for layer in linear_layers:
+                    nn.init.constant_(layer.bias, 0.0)
+            return
+
+        # Standard init
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        if self.bias:
+            nn.init.constant_(self.in_proj_bias, 0.0)
+
+        # Linear layers
+        layers = [self.linear_e, self.linear_g, self.out_proj]
+        if self.update_edges:
+            layers.append(self.linear_e_out)
+        for layer in layers:
+            layer.reset_parameters()
+            if self.bias:
+                nn.init.constant_(layer.bias, 0.0)
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_x: Tensor,
+        kv: Tensor | None = None,
+        mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+        attn_mask: BoolTensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Attention using PyTorch SDPA backends.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            Output of shape ``[B, L_q, D]`` and updated edge features of shape
+            ``[B, L_q, L_kv, E]``.
+        """
+        b, s, d = x.shape
+        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
+
+        shape = (b, -1, self.num_heads, self.head_dim)
+        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+        if self.do_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if self.do_v_norm:
+            v = self.v_norm(v)
+
+        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        mask = merge_masks(s_mask, attn_mask, q.shape)
+        e = self.linear_e(edge_x)  # (B, L_q, L_kv, num_heads)
+        g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, num_heads, L_q, L_kv)
+        attn_scores = attn_scores + e.permute(0, 3, 1, 2)  # add edge embeddings
+
+        if self.dropout > 0.0 and self.training:
+            attn_scores = functional.dropout(attn_scores, p=self.dropout)
+
+        # Prepare edge output
+        edge_out = edge_x
+        if self.update_edges:
+            edge_out = self.linear_e_out(
+                attn_scores.permute(0, 2, 3, 1)  # (B, L_q, L_kv, num_heads)
+            )
+        # Compute attention weights
+        masked_scores = (
+            torch.masked_fill(attn_scores, ~mask, float("-inf"))
+            if mask is not None
+            else attn_scores
+        )
+        attn_weights = torch.softmax(masked_scores, dim=-1)  # (B, num_heads, L_q, L_kv)
+
+        attn_weights = attn_weights * g.permute(0, 3, 1, 2)  # apply gating
+
+        a_out = torch.matmul(attn_weights, v)  # (B, num_heads, L_q, head_dim)
+
+        a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
+        return self.out_proj(a_out), edge_out
+
+
+# ---------------------------------------------------------------------------
+# transformer.py absorption (GLU / LayerScale / DropPath / NormResidual /
+# EncoderLayer / Transformer — the pieces TransformerEncoder uses)
+# ---------------------------------------------------------------------------
+
+try:
+    from mup import MuReadout as _MuReadout
+
+except ImportError:
+    _MuReadout = None
+
+
+class GLU(nn.Module):
+    """Dense update with a (gated) linear unit.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.GLU``
+    (transformer.py:53-125), VERBATIM. See https://arxiv.org/abs/2002.05202.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Input/output embedding dimension.
+    hidden_dim : int | None, optional
+        Hidden dimension. If ``None``, defaults to ``2 * embed_dim``.
+    activation : str, optional
+        Name of the activation class in ``torch.nn`` (e.g., ``"SiLU"``).
+    dropout : float, optional
+        Dropout probability. The default is ``0.0``.
+    bias : bool, optional
+        Whether to include bias terms. The default is ``True``.
+    gated : bool, optional
+        If ``True``, uses a gated branch (splits hidden in two). The default is ``False``.
+    mup : bool, optional
+        Whether to use μP parameterization. The default is ``False``.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        hidden_dim: int | None = None,
+        activation: str = "SiLU",
+        dropout: float = 0.0,
+        bias: bool = True,
+        gated: bool = False,
+        mup: bool = False,
+    ):
+        super().__init__()
+        self.mup = mup
+
+        if hidden_dim is None:
+            hidden_dim = embed_dim * 2
+
+        self.gated = gated
+        self.embed_dim = embed_dim
+        self.in_proj = nn.Linear(embed_dim, hidden_dim + hidden_dim * gated, bias=bias)
+        self.out_proj = nn.Linear(hidden_dim, embed_dim, bias=bias)
+        self.drop = nn.Dropout(dropout)
+        self.activation = getattr(nn, activation)()
+
+        if self.mup:
+            for proj in [self.in_proj, self.out_proj]:
+                nn.init.normal_(proj.weight, mean=0.0, std=1.0 / (proj.weight.shape[0] ** 0.5))
+                if bias:
+                    nn.init.zeros_(proj.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Apply the GLU block.
+
+        Returns
+        -------
+        Tensor
+            Output tensor of shape ``[B, L, D]``.
+        """
+        x = self.in_proj(x)
+        if self.gated:
+            x1, x2 = x.chunk(2, dim=-1)
+            x = self.activation(x1) * x2
+        else:
+            x = self.activation(x)
+        x = self.drop(x)
+        return self.out_proj(x)
+
+
+class LayerScale(nn.Module):
+    """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.LayerScale``
+    (transformer.py:128-151), VERBATIM. Reference: https://arxiv.org/abs/2103.17239
+    """
+
+    def __init__(self, dim: int, init_value: float = 1e-3) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(init_value * torch.ones(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Scale the input by a learnable vector ``gamma``.
+
+        Returns
+        -------
+        Tensor
+            Scaled inputs as Tensor
+        """
+        return x * self.gamma
+
+
+class DropPath(nn.Module):
+    """Stochastic depth / drop-path regularization.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.DropPath``
+    (transformer.py:154-180), VERBATIM.
+    """
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Randomly drop residual paths during training.
+
+        Returns
+        -------
+        Tensor
+            Output tensor with stochastic depth applied when training.
+        """
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()  # binarize
+        return x.div(keep_prob) * random_tensor
+
+
+class NormResidual(nn.Module):
+    """Residual wrapper with normalization, LayerScale, and DropPath.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.NormResidual``
+    (transformer.py:183-283), VERBATIM. Represents PostNorm/PreNorm/NoNorm
+    patterns and forwards edge features for `EdgeAttention`.
+
+    Parameters
+    ----------
+    fn : GLU | Attention | EdgeAttention
+        The wrapped non-resizing module.
+    norm : str, optional
+        Normalization class name. The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial value for LayerScale. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate for stochastic depth. The default is ``0.0``.
+    embed_dim : int, optional
+        Input/output dimension. If ``0``, attempts to read ``fn.embed_dim``.
+    norm_type : str, optional
+        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
+    """
+
+    def __init__(
+        self,
+        fn: GLU | Attention | EdgeAttention,
+        norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
+        embed_dim: int = 0,
+        norm_type: str = "pre",
+    ) -> None:
+        super().__init__()
+        self.norm_type = norm_type
+        dim = embed_dim or fn.embed_dim
+        assert dim > 0, "Could not determine embed_dim from fn"
+        self.fn = fn
+        if self.norm_type != "none":
+            self.norm = getattr(_LAYERNORMS, norm)(dim)
+        self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
+
+        self.edges = bool(isinstance(fn, EdgeAttention))
+
+    def _forward_edges(self, x: Tensor, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]:
+        """Apply residual wrapper around ``fn`` that returns edge features.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            Output tensor with residual + the edge features from ``fn``.
+        """
+        if self.norm_type == "pre":
+            fn_out, edge_out = self.fn(self.norm(x), *args, **kwargs)
+            res_out = x + self.drop_path(self.ls(fn_out))
+            return res_out, edge_out
+        if self.norm_type == "post":
+            fn_out, edge_out = self.fn(x, *args, **kwargs)
+            res_out = self.norm(x + self.drop_path(self.ls(fn_out)))
+            return res_out, edge_out
+        fn_out, edge_out = self.fn(x, *args, **kwargs)
+        res_out = x + self.drop_path(self.ls(fn_out))
+        return res_out, edge_out
+
+    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]:
+        """Apply residual wrapper around ``fn``.
+
+        Returns
+        -------
+        Tensor | tuple[Tensor, Tensor]
+            Output tensor with residual; a tuple ``(output, edge_out)`` for `EdgeAttention`.
+        """
+        if self.edges:
+            return self._forward_edges(x, *args, **kwargs)
+        if self.norm_type == "pre":
+            return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
+        if self.norm_type == "post":
+            return self.norm(x + self.drop_path(self.ls(self.fn(x, *args, **kwargs))))
+        return x + self.drop_path(self.ls(self.fn(x, *args, **kwargs)))
+
+
+@final
+class EncoderLayer(nn.Module):
+    """Transformer encoder layer: self-attention + feed-forward.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.EncoderLayer``
+    (transformer.py:286-425), VERBATIM — the hybrid-norm placement logic, the
+    Attention/EdgeAttention selection, and the residual submodule layout.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension.
+    norm : str, optional
+        Normalization style. The default is ``"LayerNorm"``.
+    ls_init : float | None, optional
+        Initial LayerScale value. If ``None``, LayerScale is disabled.
+    drop_path : float, optional
+        Drop-path rate. The default is ``0.0``.
+    depth : int, optional
+        Layer depth index, used for differential attention weighting. The default is ``1``.
+    dense_kwargs : dict | None, optional
+        Keyword args for :class:`GLU`.
+    attn_kwargs : dict | None, optional
+        Keyword args for :class:`Attention`.
+    norm_type : str, optional
+        One of ``{"pre", "post", "hybrid"}``. The default is ``"pre"``.
+    edge_embed_dim : int, optional
+        Model embedding dimension for edge features. The default is ``0``.
+    update_edges : bool, optional
+        If ``True``, edge features are updated after attention. The default is ``False``
+    mup: bool, optional
+        Whether to use μP parameterization. The default is ``False``.
+    num_dense: int, optional
+        Number of dense layers to stack in the feed-forward block. The default is ``1``.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
+        depth: int = 1,
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
+        edge_embed_dim: int = 0,
+        update_edges: bool = False,
+        mup: bool = False,
+        num_dense: int = 1,
+    ) -> None:
+        super().__init__()
+        self.mup = mup
+        self.num_dense = num_dense
+
+        assert num_dense >= 1, "num_dense must be at least 1"
+        self.update_edges = update_edges
+
+        # Safe defaults
+        if attn_kwargs is None:
+            attn_kwargs = {}
+        if dense_kwargs is None:
+            dense_kwargs = {}
+
+        # Attributes
+        self.embed_dim = embed_dim
+        self.norm_type = norm_type
+        if norm_type == "hybrid":
+            attn_kwargs["do_qk_norm"] = True
+            attn_kwargs["do_v_norm"] = True
+            residual_norm_type = "pre" if depth == 0 else "none"
+            self.norm = (
+                nn.Identity(embed_dim) if depth == 0 else getattr(_LAYERNORMS, norm)(embed_dim)
+            )
+        else:
+            residual_norm_type = norm_type
+
+        if self.mup:
+            attn_kwargs["mup"] = True
+            dense_kwargs["mup"] = True
+
+        # Choose attention type
+        attn_class: type[Attention | EdgeAttention]
+        if edge_embed_dim > 0:
+            attn_class = EdgeAttention
+            attn_kwargs["edge_embed_dim"] = edge_embed_dim
+            attn_kwargs["update_edges"] = update_edges
+
+            self.edge_prenorm = getattr(_LAYERNORMS, norm)(edge_embed_dim)
+            if self.update_edges:
+                self.edge_postnorm = getattr(_LAYERNORMS, norm)(edge_embed_dim)
+        else:
+            attn_class = Attention
+
+        # Submodules
+        residual = partial(
+            NormResidual,
+            norm=norm,
+            ls_init=ls_init,
+            drop_path=drop_path,
+            norm_type=residual_norm_type,
+        )
+        self.attn = residual(attn_class(embed_dim, **attn_kwargs))
+        if num_dense == 1:
+            self.dense = residual(GLU(embed_dim, **dense_kwargs))
+        else:
+            self.dense = nn.Sequential(*[
+                residual(GLU(embed_dim, **dense_kwargs)) for _ in range(num_dense)
+            ])
+
+    def forward(
+        self, x: Tensor, edge_x: Tensor | None = None, **kwargs: Any
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        """Apply self-attention and feed-forward.
+
+        Returns
+        -------
+        Tensor | tuple[Tensor, Tensor]
+            The updated token embeddings (and edges when ``edge_x`` is provided).
+        """
+        if edge_x is not None:
+            x, edge_x = self.attn(x, edge_x=edge_x, **kwargs)
+            if self.update_edges:
+                edge_x = edge_x + self.edge_postnorm(edge_x)
+        else:
+            x = self.attn(x, **kwargs)
+
+        x = self.dense(self.norm(x)) if self.norm_type == "hybrid" else self.dense(x)
+
+        if edge_x is not None:
+            return x, edge_x
+        return x
+
+
+@final
+class Transformer(nn.Module):
+    """Transformer encoder stack with optional registers and output projection.
+
+    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.Transformer``
+    (transformer.py:511-789), COPIED VERBATIM — the register tokens, the muP
+    ``MuReadout`` out-proj swap (the M6 coord-check canonical slope), the
+    featurewise ``ModuleList`` hook, and the register/edge zero-pad forward. The
+    v1 original is the bitwise oracle for gates_m6 MU1/ED1 (weight-loaded from
+    this absorbed encoder's ``state_dict()``).
+
+    Parameters
+    ----------
+    num_layers : int
+        Number of encoder layers.
+    embed_dim : int
+        Embedding dimension.
+    out_dim : int | None, optional
+        Optional output projection dimension. If ``None``, equals ``embed_dim``.
+    norm : str, optional
+        Normalization style. The default is ``"LayerNorm"``.
+    attn_type : str, optional
+        Attention backend. The default is ``"torch-math"``.
+    do_final_norm : bool, optional
+        Whether to apply a final normalization layer. The default is ``True``.
+    num_registers : int, optional
+        Number of learned register tokens. The default is ``1``.
+    drop_registers : bool, optional
+        If ``True``, registers are dropped from outputs. The default is ``False``.
+    edge_embed_dim : int, optional
+        Model embedding dimension for edge features. The default is ``0``.
+    update_edges : bool, optional
+        If ``True``, edge features are updated after attention. The default is ``False``
+    mup: bool, optional
+        Whether to use μP parameterization. The default is ``False``.
+    **kwargs : Any
+        Extra keyword arguments forwarded to :class:`EncoderLayer`.
+
+    Raises
+    ------
+    ValueError
+        If ``num_registers < 1``.
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        embed_dim: int,
+        out_dim: int | None = None,
+        norm: str = "LayerNorm",
+        attn_type: str = "torch-math",
+        do_final_norm: bool = True,
+        num_registers: int = 1,
+        drop_registers: bool = False,
+        edge_embed_dim: int = 0,
+        update_edges: bool = False,
+        mup: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+
+        # Check the inputs
+        if num_registers < 1:
+            raise ValueError(
+                "Some global objects (graphs) might have no constituents (nodes), "
+                "which causes NaNs in the attention scores. "
+                "To avoid this, set num_registers to at least 1",
+            )
+
+        # Attributes
+        self.num_layers = num_layers
+        self.embed_dim = embed_dim
+        self.out_dim = out_dim or embed_dim
+        self.do_final_norm = do_final_norm
+        self.do_out_proj = out_dim is not None
+        self.attn_type = attn_type
+        self.num_registers = num_registers
+        self.drop_registers = drop_registers
+        self.edge_embed_dim = edge_embed_dim
+        self.update_edges = update_edges
+        self.mup = mup
+
+        if self.update_edges:
+            assert edge_embed_dim > 0, "Cannot update edges with edge_embed_dim=0"
+
+        if self.mup:
+            assert _MuReadout is not None, "mup is not installed!"
+            assert self.do_out_proj, (
+                "Need the out_dim layer for muP, \
+                as this is the last layer of the muP-part of the model"
+            )
+
+        # Set the attention type if no edge features are used
+        if edge_embed_dim == 0:
+            kwargs["attn_kwargs"]["attn_type"] = self.attn_type
+
+        # Submodules
+        self.layers = torch.nn.ModuleList([
+            EncoderLayer(
+                embed_dim=embed_dim,
+                norm=norm,
+                depth=depth,
+                edge_embed_dim=edge_embed_dim,
+                update_edges=update_edges,
+                **kwargs,
+            )
+            for depth in range(num_layers)
+        ])
+
+        # Only set the attention type if no edge features are used
+        if self.edge_embed_dim == 0:
+            # Check and set the attention type
+            assert self.attn_type in ATTN_TYPES, "Invalid attention type!"
+            self.set_backend(self.attn_type)
+
+        # Optional submodules
+        if self.do_out_proj:
+            self.out_proj = nn.Linear(self.embed_dim, self.out_dim)
+            if self.mup and _MuReadout is not None:
+                self.out_proj = _MuReadout(embed_dim, self.out_dim)
+                self.out_proj.bias.data.zero_()
+                self.out_proj.weight.data.zero_()
+        if self.do_final_norm:
+            self.out_norm = getattr(_LAYERNORMS, norm)(self.out_dim)
+        if self.num_registers:
+            self.registers = nn.Parameter(
+                torch.normal(torch.zeros((self.num_registers, self.embed_dim)), std=1e-4)
+            )
+            self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
+        self.featurewise = nn.ModuleList()
+
+    def set_backend(self, attn_type: str) -> None:
+        """Set the attention backend for all layers."""
+        self.attn_type = attn_type
+        for layer in self.layers:
+            self.attn_type = layer.attn.fn.set_backend(self.attn_type)
+
+    def forward(
+        self,
+        x: Tensor | dict[str, Tensor],
+        pad_mask: BoolTensor | dict[str, BoolTensor],
+        inputs: Any | None = None,
+        edge_x: Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[Tensor, BoolTensor | dict[str, BoolTensor]]:
+        """Run the encoder stack.
+
+        Returns
+        -------
+        tuple[Tensor, BoolTensor | dict[str, BoolTensor]]
+            Tuple of ``(encoded, pad_mask)`` where ``encoded`` has shape ``[B, L, D_out]``.
+        """
+        # Add the registers to the sequence and the mask
+        if self.num_registers:
+            x, pad_mask = self._add_registers(x, pad_mask)
+
+        # Combine the input sequences if they are dictionaries (don't overwrite pad_mask)
+        if isinstance(x, dict):
+            x = torch.cat(list(x.values()), dim=1)
+        mask = torch.cat(list(pad_mask.values()), dim=1) if isinstance(pad_mask, dict) else pad_mask
+
+        # Pad edges by num_registers if using edge features
+        if edge_x is not None:
+            edge_x = torch.cat(
+                [
+                    edge_x,
+                    torch.zeros(
+                        (
+                            edge_x.shape[0],
+                            x.shape[1] - edge_x.shape[1],
+                            edge_x.shape[2],
+                            edge_x.shape[3],
+                        ),
+                        device=edge_x.device,
+                    ),
+                ],
+                dim=1,
+            )
+            edge_x = torch.cat(
+                [
+                    edge_x,
+                    torch.zeros(
+                        (
+                            edge_x.shape[0],
+                            edge_x.shape[1],
+                            x.shape[1] - edge_x.shape[2],
+                            edge_x.shape[3],
+                        ),
+                        device=edge_x.device,
+                    ),
+                ],
+                dim=2,
+            )
+
+        # If using the varlen backend, pack the sequence and store the cumulative lengths
+        if self.attn_type == "flash-varlen":
+            x, kwargs["culens"], kwargs["maxlen"] = undo_padding(x, mask)
+
+        # Run through the main transformer encoder layers
+        for i, layer in enumerate(self.layers):
+            if len(self.featurewise) > 0:
+                x = self.featurewise[i](inputs, x)
+            if edge_x is not None:
+                x, edge_x = layer(x, edge_x=edge_x, mask=mask, **kwargs)
+            else:
+                x = layer(x, mask=mask, **kwargs)
+
+        # Run through the optional layers
+        if self.do_out_proj:
+            x = self.out_proj(x)
+        if self.do_final_norm:
+            x = self.out_norm(x)
+
+        # If using the varlen backend, unpack the sequence
+        if self.attn_type == "flash-varlen":
+            x = redo_padding(x, mask)
+
+        # Optionally drop the registers from the output
+        if self.drop_registers:
+            x = x[:, : -self.num_registers]
+            if isinstance(pad_mask, dict):
+                del pad_mask["REGISTERS"]
+            elif isinstance(pad_mask, Tensor):
+                pad_mask = pad_mask[:, : -self.num_registers]
+
+        return x, pad_mask
+
+    def _add_registers(
+        self, x: Tensor | dict[str, Tensor], pad_mask: BoolTensor | dict[str, BoolTensor] | None
+    ) -> tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]:
+        """Add the learnable registers to the end of the input sequence (and mask).
+
+        Returns
+        -------
+        tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]
+            Updated ``(x, pad_mask)`` including appended registers.
+        """
+        # Get the batch size and expand the registers to match
+        batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
+
+        # Add as a key or concatenate at the end
+        reg = self.registers.expand(batch_size, -1, -1)
+        if isinstance(x, dict):
+            x["REGISTERS"] = reg
+        else:
+            x = torch.cat([x, reg], dim=1)
+
+        # Also include a mask for the registers
+        if pad_mask is not None:
+            reg_mask = self.register_mask.expand(batch_size, -1)
+            if isinstance(pad_mask, dict):
+                pad_mask["REGISTERS"] = reg_mask
+            else:
+                pad_mask = torch.cat([pad_mask, reg_mask], dim=-1)
+
+        return x, pad_mask
+
+
+# ---------------------------------------------------------------------------
+# pooling.py absorption (GlobalAttentionPooling math — composed by the v2
+# GlobalAttentionPooling GraphModule below)
+# ---------------------------------------------------------------------------
+
+
+class _GlobalAttentionPoolingV1(nn.Module):
+    """Global attention pooling over concatenated node embeddings.
+
+    M7 W2c-2 v2-native absorption of v1
+    ``salt.models.pooling.GlobalAttentionPooling`` (pooling.py:12-65), COPIED
+    VERBATIM — the dict-order mask concatenation (numerics-critical, pooling.py:56)
+    and the zero-token ONNX pad. Named with the ``V1`` suffix because the
+    config-facing v2 GraphModule below is also called `GlobalAttentionPooling`;
+    this is the inner ``nn.Module`` it composes (the same composition the M2 port
+    used, now self-contained). The v1 original is the bitwise pooling oracle.
+
+    Parameters
+    ----------
+    input_size : int
+        Dimensionality of each node embedding feature vector.
+    """
+
+    def __init__(self, input_size: int):
+        super().__init__()
+        self.gate_nn = nn.Linear(input_size, 1)
+
+    def forward(
+        self,
+        x: dict[str, Tensor] | dict,
+        pad_mask: dict | None = None,
+    ) -> Tensor:
+        """Apply global attention pooling.
+
+        Returns
+        -------
+        Tensor
+            Pooled tensor of shape ``[B, D]``.
+        """
+        x_flat = flatten_tensor_dict(x, exclude=["objects"])
+
+        if pad_mask is not None:
+            pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
+
+        weights = masked_softmax(self.gate_nn(x_flat), pad_mask, dim=1)
+        # add padded track to avoid error in onnx model when there are no tracks in the jet
+        weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
+        x_pad = torch.zeros((x_flat.shape[0], 1, x_flat.shape[2]), device=x_flat.device)
+        weights = torch.cat([weights, weight_pad], dim=1)
+        x_flat = torch.cat([x_flat, x_pad], dim=1)
+
+        return (x_flat * weights).sum(dim=1)
 
 
 def _stream_len(stream: str) -> str:
@@ -838,7 +2314,7 @@ class StreamEmbed(nn.Module):
         (``_reset_parameters``, dense.py:88-89,96-102); the forward is unchanged.
         """
         input_size = schema.width(self.input_key) + sum(schema.width(key) for key in self.context)
-        self.net = V1Dense(
+        self.net = Dense(
             input_size=input_size, output_size=self.out_dim, mup=self.mup, **self.dense_cfg
         )
 
@@ -1404,7 +2880,7 @@ class EdgeEmbed(nn.Module):
         resolved from the schema (v1 inferred it from the edge tensor's last
         dim, saltmodel.py:132). No context (edges carry no context entries).
         """
-        self.net = V1Dense(
+        self.net = Dense(
             input_size=schema.width(self.input_key), output_size=self.out_dim, **self.dense_cfg
         )
 
@@ -1693,7 +3169,7 @@ class TransformerEncoder(nn.Module):
         self.edges_key = edges
         self.edge_embed_dim = int(edge_embed_dim)
         self.update_edges = bool(update_edges)
-        self.encoder = V1Transformer(
+        self.encoder = Transformer(
             num_layers=num_layers,
             embed_dim=dim,
             out_dim=out_dim,
@@ -2102,7 +3578,7 @@ class GlobalAttentionPooling(nn.Module):
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Build the composed v1 pooling with the inferred gate width (design §2.3)."""
-        self.pool_net = V1GlobalAttentionPooling(input_size=schema.width(self.input_key))
+        self.pool_net = _GlobalAttentionPoolingV1(input_size=schema.width(self.input_key))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Pool the sequence with the (optionally register-augmented) mask dict.

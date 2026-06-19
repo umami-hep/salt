@@ -54,24 +54,21 @@ _W2B_RELOCATED_SITES = {
 # salt.models.maskformer import (MaskDecoderLayer) is RETAINED at that same file
 # as a W2c item — so (file, module) cannot distinguish removed from retained
 # there. Its removal is instead pinned by _W2C_RESIDUAL_WORKLIST below: maskdecoder
-# carries EXACTLY ONE salt.models.maskformer import (line 53, MaskDecoderLayer),
-# not two — proving the get_masks import is gone.
-# the W2c end-state worklist: the EXACT residual after W2b, pinned at
-# (file, lineno, module) so the 18 -> 11 monotonic drop is gate-verified and any
-# regression that re-introduces a flagged v1 import (or fails to land a W2c
-# relocation) trips this test. ALL salt.models; salt.utils fully eliminated.
+# carries EXACTLY ONE salt.models.maskformer import (MaskDecoderLayer), not two —
+# proving the get_masks import is gone (and after W2c-2 the V1Dense import too).
+# the W2c-3 end-state worklist: the EXACT residual after W2c-1 (task family
+# absorbed -> nn/tasks.py salt.models.task imports gone) and W2c-2 (the
+# Dense/Transformer/pooling family absorbed into nn/modules.py -> modules.py:72-74
+# + maskdecoder.py V1Dense gone), pinned at (file, lineno, module) so the
+# 18 -> 11 -> 7 -> 3 monotonic drop is gate-verified and any regression that
+# re-introduces a flagged v1 import (or fails to land the final W2c-3 relocation)
+# trips this test. The 3 remaining are the W2c-3 worklist (the MaskFormer
+# decoder-layer + matched-loss/matcher family); ALL salt.models, salt.utils fully
+# eliminated.
 _W2C_RESIDUAL_WORKLIST = {
-    ("nn/maskdecoder.py", 52, "salt.models"),  # Dense
-    ("nn/maskdecoder.py", 53, "salt.models.maskformer"),  # MaskDecoderLayer
-    ("nn/maskformer_loss.py", 61, "salt.models.maskformer_loss"),  # MaskFormerLoss
-    ("nn/maskformer_loss.py", 62, "salt.models.matcher"),  # matcher
-    ("nn/modules.py", 72, "salt.models"),  # Dense
-    ("nn/modules.py", 73, "salt.models"),  # Transformer
-    ("nn/modules.py", 74, "salt.models.pooling"),  # pooling
-    ("nn/tasks.py", 50, "salt.models.task"),
-    ("nn/tasks.py", 51, "salt.models.task"),
-    ("nn/tasks.py", 52, "salt.models.task"),
-    ("nn/tasks.py", 53, "salt.models.task"),
+    ("nn/maskdecoder.py", 54, "salt.models.maskformer"),  # MaskDecoderLayer (W2c-3)
+    ("nn/maskformer_loss.py", 61, "salt.models.maskformer_loss"),  # MaskFormerLoss (W2c-3)
+    ("nn/maskformer_loss.py", 62, "salt.models.matcher"),  # matcher (W2c-3)
 }
 _EXPECTED_KEEPS = {"event_classifier", "regression_multi_target"}
 # the 6 Wave-F2-RESTORED configs (fixture restored to full v1 capability).
@@ -676,11 +673,11 @@ class TestRS1:
         assert utils_residual == [], f"salt.utils still imported by core: {utils_residual}"
 
     def test_w2c_residual_worklist_is_pinned(self, tmp_path):
-        # the W2b end-state == the W2c worklist: pin the EXACT residual so the
-        # 18 -> 11 monotonic drop is gate-verified. Matched at (file, module)
-        # multiset granularity (robust to benign line shifts; a re-added flagged
-        # v1 import or an unlanded W2c relocation still trips it). EVERY residual
-        # is salt.models — the only v1 sub-tree core still touches at W2b.
+        # the W2c-3 worklist: pin the EXACT residual after W2c-1 + W2c-2 so the
+        # 18 -> 11 -> 7 -> 3 monotonic drop is gate-verified. Matched at (file,
+        # module) multiset granularity (robust to benign line shifts; a re-added
+        # flagged v1 import or an unlanded W2c-3 relocation still trips it). EVERY
+        # residual is salt.models — the only v1 sub-tree core still touches.
         _code, report = run_rs1(tmp_path)
         residual_fm = sorted((h["file"], h["module"]) for h in report["residual_imports"])
         worklist_fm = sorted((f, m) for f, _lineno, m in _W2C_RESIDUAL_WORKLIST)

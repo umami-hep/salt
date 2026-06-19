@@ -43,13 +43,14 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.modules import _stream_len
+from salt.core.nn.modules import Dense, _stream_len
 
 # composed v1 layers (M2 porting policy, plan 05 — absorbed at M7)
-# V1Dense + V1MaskDecoderLayer are W2c absorption targets (the v1 layer/Dense
-# family); they stay composed until that wave. ``get_masks`` is a tiny pure
-# function — inlined here (M7 W2b) BYTE-FAITHFULLY from v1 maskformer.py:206-241.
-from salt.models import Dense as V1Dense
+# Dense is now the v2-NATIVE absorbed class (M7 W2c-2; salt.core.nn.modules.Dense,
+# a verbatim copy of v1 salt.models.Dense). V1MaskDecoderLayer remains a W2c-3
+# absorption target (the per-object MaskFormer decoder layer); it stays composed
+# from the v1 tree until that wave. ``get_masks`` is a tiny pure function —
+# inlined here (M7 W2b) BYTE-FAITHFULLY from v1 maskformer.py:206-241.
 from salt.models.maskformer import MaskDecoderLayer as V1MaskDecoderLayer
 
 __all__ = ["MaskDecoder"]
@@ -225,8 +226,8 @@ class MaskDecoder(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
         # v1 heads: class_net [D -> C], mask_net [D -> D] (maskformer.py:64-65)
-        self.class_net = V1Dense(input_size=embed_dim, output_size=n_classes, **class_cfg)
-        self.mask_net = V1Dense(
+        self.class_net = Dense(input_size=embed_dim, output_size=n_classes, **class_cfg)
+        self.mask_net = Dense(
             input_size=embed_dim, output_size=mask_cfg.pop("output_size", embed_dim), **mask_cfg
         )
 

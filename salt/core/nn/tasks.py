@@ -44,7 +44,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.modules import V1Dense, _reject_width_keys, _stream_len
+from salt.core.nn.modules import Dense, _reject_width_keys, _stream_len
 from salt.core.onnx.config import ExportOutput
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
@@ -167,7 +167,7 @@ def _mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
 class _AbsorbedTaskBase(nn.Module):
     """Absorbed v1 ``TaskBase`` (task.py:20-78) — v2-native, math verbatim.
 
-    Wraps a `Dense` head (the W2c-2 composition target ``V1Dense``), a loss, an
+    Wraps a `Dense` head (the W2c-2 v2-native absorbed ``salt.core.nn.modules.Dense``), a loss, an
     ``input_name`` stream tag and a scalar ``weight``. ``input_name_mask`` is the
     v1 cross-stream selection helper; the v2 modules hand SINGLE-STREAM dicts so
     it is the identity, but it is reproduced verbatim for bitwise parity.
@@ -184,7 +184,7 @@ class _AbsorbedTaskBase(nn.Module):
         super().__init__()
         self.name = name
         self.input_name = input_name
-        self.net = V1Dense(**dense_config)
+        self.net = Dense(**dense_config)
         self.loss = loss
         self.weight = weight
 
