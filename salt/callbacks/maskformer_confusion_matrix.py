@@ -3,7 +3,27 @@ import numpy as np
 import seaborn as sns
 import torch
 from lightning import Callback, LightningModule, Trainer
-from sklearn.metrics import confusion_matrix
+
+
+def confusion_matrix(y_true, y_pred, labels=None):
+    """Minimal confusion matrix implementation to avoid a scikit-learn dependency."""
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+
+    if labels is None:
+        labels = np.union1d(y_true, y_pred)
+
+    labels = np.asarray(list(labels))
+    label_to_idx = {int(label): i for i, label in enumerate(labels)}
+    matrix = np.zeros((len(labels), len(labels)), dtype=np.int64)
+
+    for truth, pred in zip(y_true, y_pred):
+        i = label_to_idx.get(int(truth))
+        j = label_to_idx.get(int(pred))
+        if i is not None and j is not None:
+            matrix[i, j] += 1
+
+    return matrix
 from torch import Tensor
 
 
