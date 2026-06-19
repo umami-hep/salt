@@ -481,7 +481,7 @@ class RegressionTaskBase(TaskBase, ABC):
                 targets = targets.transpose(1, 2)
 
         # TODO(npond): Move this or use a more robust target sanitisation step.
-        if True:
+        if targets is not None:
             targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
         return targets
 
