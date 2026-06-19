@@ -24,6 +24,7 @@ dependencies = [
   "jsonargparse[signatures,argcomplete]>=4.32.0",
   "lightning==2.6.1",
   "lion-pytorch>=0.2.2",
+  "py-lap-solver",
   "numpy>=2.2.6",
   "onnx==1.21.0",
   "onnxruntime==1.25.0",
