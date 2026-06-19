@@ -219,17 +219,26 @@ def dot_source(
         The DOT source.
     """
     modules = dict(modules or {})
-    # Graph styling (design §4.3): orthogonal right-angle edge routing, generous
-    # rank/node separation so labelled edges have room, and namespace-coloured
-    # filled module boxes (the same _NS_COLOURS palette the matplotlib renderer
-    # uses). Tuned for `dot` (the graphviz side container); the bare DOT stays
-    # valid for any graphviz consumer.
+    # Graph styling (design §4.3), tuned for `dot` (the graphviz side container);
+    # the bare DOT stays valid for any graphviz consumer:
+    #   - splines=polyline: straight-segment edges with generous rank/node
+    #     separation. (splines=ortho gives pure right angles but graphviz places
+    #     edge labels at the logical midpoint, which ortho routing then bends
+    #     away from — labels detach/overlap on dense graphs. polyline keeps the
+    #     label near its wire while still drawing clean straight runs. Flip the
+    #     one line below to "splines=ortho;" for strict right angles.)
+    #   - pad/forcelabels: keep boundary ellipses off the canvas edge and keep
+    #     every edge label drawn.
+    #   - namespace-coloured filled module boxes (the same _NS_COLOURS palette
+    #     the matplotlib renderer uses) + kind-coloured edges.
     lines = [
         f"digraph salt_core_{plan.mode.name.lower()} {{",
         "  rankdir=LR;",
-        "  splines=ortho;",
-        "  nodesep=0.45;",
-        "  ranksep=0.9;",
+        "  splines=polyline;",
+        "  nodesep=0.7;",
+        "  ranksep=1.7;",
+        "  pad=0.4;",
+        "  forcelabels=true;",
         '  bgcolor="white";',
         '  node [shape=box, style="rounded,filled", fillcolor="#eeeeee",'
         ' fontname="Helvetica", fontsize=10, margin="0.14,0.07"];',
