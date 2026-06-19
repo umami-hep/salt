@@ -219,17 +219,29 @@ def dot_source(
         The DOT source.
     """
     modules = dict(modules or {})
+    # Graph styling (design §4.3): orthogonal right-angle edge routing, generous
+    # rank/node separation so labelled edges have room, and namespace-coloured
+    # filled module boxes (the same _NS_COLOURS palette the matplotlib renderer
+    # uses). Tuned for `dot` (the graphviz side container); the bare DOT stays
+    # valid for any graphviz consumer.
     lines = [
         f"digraph salt_core_{plan.mode.name.lower()} {{",
         "  rankdir=LR;",
-        '  node [shape=box, fontname="Helvetica"];',
+        "  splines=ortho;",
+        "  nodesep=0.45;",
+        "  ranksep=0.9;",
+        '  bgcolor="white";',
+        '  node [shape=box, style="rounded,filled", fillcolor="#eeeeee",'
+        ' fontname="Helvetica", fontsize=10, margin="0.14,0.07"];',
+        '  edge [fontname="Helvetica", fontsize=9, color="#555555"];',
     ]
     if any(edge.producer == SOURCES for edge in plan.edges):
-        lines.append(f"  {_quote(SOURCES)} [shape=ellipse, style=dashed];")
+        lines.append(f'  {_quote(SOURCES)} [shape=ellipse, style="dashed,filled", fillcolor="#f5f5f5"];')
     if any(edge.consumer == SINKS for edge in plan.edges):
-        lines.append(f"  {_quote(SINKS)} [shape=ellipse, style=dashed];")
+        lines.append(f'  {_quote(SINKS)} [shape=ellipse, style="dashed,filled", fillcolor="#f5f5f5"];')
     lines.extend(
-        f"  {_quote(step.name)} [label={_label(step.name, type(step.module).__name__)}];"
+        f"  {_quote(step.name)} [label={_label(step.name, type(step.module).__name__)},"
+        f' fillcolor="{_module_colour(step)}"];'
         for step in plan.steps
     )
     for name in pruned:
