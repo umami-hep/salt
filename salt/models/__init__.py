@@ -5,7 +5,6 @@ from salt.models.edge_constructor import EdgeConstructor
 from salt.models.featurewise import FeaturewiseTransformation
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
-from salt.models.maskformer_loss import MaskFormerLoss
 from salt.models.pooling import (
     GlobalAttentionPooling,
     NodeQueryGAP,
@@ -36,7 +35,6 @@ __all__ = [
     "GlobalAttentionPooling",
     "InitNet",
     "InputNorm",
-    "MaskFormerLoss",
     "NodeQueryGAP",
     "Pooling",
     "PositionalEncoder",

@@ -3,7 +3,7 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor, nn
 
-from salt.models import MaskFormerLoss
+from salt.models.maskformer_loss import MaskFormerLoss
 from salt.models.transformer import GLU, Attention
 from salt.stypes import Tensors
 from salt.utils.mask_utils import indices_from_mask
