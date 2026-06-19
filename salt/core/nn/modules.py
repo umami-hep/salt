@@ -89,10 +89,12 @@ __all__ = [
     "Dense",
     "EdgeEmbed",
     "EdgeFeatures",
+    "FeaturewiseTransformation",
     "GlobalAttentionPooling",
     "LossGLS",
     "LossSum",
     "Normaliser",
+    "PositionalEncoder",
     "Split",
     "StreamEmbed",
     "Transformer",
@@ -628,6 +630,282 @@ class _Layernorms:
 
 
 _LAYERNORMS = _Layernorms()
+
+
+# ---------------------------------------------------------------------------
+# featurewise.py + posenc.py absorption (M7 W-FILM) — v2-native FiLM + posenc
+# ---------------------------------------------------------------------------
+
+_FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
+"""The v1 FiLM ``layer`` placements (featurewise.py:44). ``input`` applies the
+scale/bias BEFORE a `StreamEmbed`'s projection (initnet.py:85-86); ``encoder``
+applies it at the START of every encoder layer (transformer.py:727-728);
+``global`` applies it to the pooled/encoded representation before pooling
+(saltmodel.py:165-166). All three are wired as OPTIONAL config blocks (off by
+default)."""
+
+_POSENC_SYM_VARS: frozenset[str] = frozenset({"phi"})
+"""v1 `PositionalEncoder` ``SYM_VARS`` (posenc.py:4) — the variables whose
+encoding is symmetric (a sin/cos of the sin/cos), faithful to v1."""
+
+
+class FeaturewiseTransformation(nn.Module):
+    """Feature-wise (FiLM) scale/bias from per-event ``parameters`` (M7 W-FILM).
+
+    v2-native absorption of v1 ``salt.models.FeaturewiseTransformation``
+    (featurewise.py:8-81), COPIED VERBATIM (the v1 original stays UNTOUCHED as the
+    FILM1 gate oracle). The internal scale/bias nets are `salt.core.nn.Dense` (the
+    v2-native absorbed Dense, byte-identical to v1's so a weight-transfer between
+    them is exact) — NOT v1's ``salt.models.Dense``. The conditioning signal is
+    the per-event ``parameters`` tensor ``[B, n_params]`` read from the bundle
+    (``inputs.parameters``, the raw — NOT normalised — parameters, faithful to v1
+    where ``parameters`` is in ``InputNorm.NO_NORM``, inputnorm.py:45).
+
+    Forward (featurewise.py:71-81, verbatim math):
+    ``features = scale_net(p).unsqueeze(1) * features`` then
+    ``features = features + bias_net(p).unsqueeze(1)`` then optional `LayerNorm`.
+    The ``unsqueeze(1)`` broadcasts the per-event ``[B, num_features]`` scale/bias
+    over the token axis of a ``[B, T, num_features]`` feature tensor.
+
+    https://distill.pub/2018/feature-wise-transformations/.
+
+    Parameters
+    ----------
+    layer : str
+        Which pipeline stage to scale/bias — one of ``{"input", "encoder",
+        "global"}`` (featurewise.py:44; see ``_FEATUREWISE_LAYERS``).
+    num_params : int
+        Number of per-event conditioning parameters (the FiLM net input width;
+        v1 inferred it from ``len(variables["parameters"])``, featurewise.py:55).
+    num_features : int
+        Output width of the FiLM scale/bias nets — the feature width the
+        transformation is applied to (the embed/encoder width). Threaded in at
+        bind from the resolved schema (v1 read it off the Dense ``output_size``,
+        featurewise.py:57,61).
+    dense_config_scale : dict | None, optional
+        Extra `salt.core.nn.Dense` kwargs for the scaling net (``hidden_layers``,
+        ``activation``, ...); must not set width keys. When None (and
+        ``dense_config_bias`` is set) the FiLM applies a bias-only transform. By
+        default None.
+    dense_config_bias : dict | None, optional
+        Extra `salt.core.nn.Dense` kwargs for the biasing net. When None (and
+        ``dense_config_scale`` is set) the FiLM applies a scale-only transform. By
+        default None.
+    apply_norm : bool, optional
+        Apply a `torch.nn.LayerNorm` to the transformed features, by default
+        False.
+
+    Raises
+    ------
+    ConfigError
+        If `layer` is not one of ``{"input", "encoder", "global"}``, if a
+        dense config sets width keys (inferred at bind), or if neither scale
+        nor bias net is configured.
+    """
+
+    def __init__(
+        self,
+        layer: str,
+        num_params: int,
+        num_features: int,
+        dense_config_scale: dict | None = None,
+        dense_config_bias: dict | None = None,
+        apply_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.name = _UNNAMED
+        if layer not in _FEATUREWISE_LAYERS:
+            raise ConfigError(
+                f"FeaturewiseTransformation: layer must be one of {sorted(_FEATUREWISE_LAYERS)}, "
+                f"got {layer!r} (v1 featurewise.py:44)"
+            )
+        if num_params < 1:
+            raise ConfigError(
+                f"FeaturewiseTransformation: num_params must be >= 1, got {num_params}"
+            )
+        if num_features < 1:
+            raise ConfigError(
+                f"FeaturewiseTransformation: num_features must be >= 1, got {num_features}"
+            )
+        scale_cfg = dict(dense_config_scale or {})
+        bias_cfg = dict(dense_config_bias or {})
+        for cfg in (scale_cfg, bias_cfg):
+            _reject_width_keys(
+                "FeaturewiseTransformation", cfg, ("input_size", "output_size", "context_size")
+            )
+        # v1 builds a net iff the corresponding dense config is TRUTHY
+        # (featurewise.py:54 ``if dense_config_scale:`` / :58) — so a None or an
+        # empty {} config builds nothing. Mirror v1 exactly.
+        build_scale = bool(dense_config_scale)
+        build_bias = bool(dense_config_bias)
+        if not build_scale and not build_bias:
+            raise ConfigError(
+                "FeaturewiseTransformation: specify at least one (non-empty) dense_config_scale "
+                "or dense_config_bias (v1 featurewise.py:63-66)"
+            )
+        self.layer = layer
+        self.num_params = int(num_params)
+        self.num_features = int(num_features)
+        self._build_scale = build_scale
+        self._build_bias = build_bias
+        self.scale_cfg = scale_cfg
+        self.bias_cfg = bias_cfg
+        self.apply_norm = bool(apply_norm)
+        self.scale_net: nn.Module | None = None
+        self.bias_net: nn.Module | None = None
+        self.norm: nn.Module | None = None
+        self._built = False
+
+    def build(self) -> None:
+        """Construct the scale/bias `Dense` nets + optional norm (idempotent).
+
+        Mirrors v1 ``FeaturewiseTransformation.__init__`` (featurewise.py:54-69)
+        verbatim, but ``input_size``/``output_size`` come from the captured
+        ``num_params``/``num_features`` (resolved at bind) instead of from
+        ``variables``. Called once at bind; a second call no-ops so the parity
+        gate can rebuild idempotently.
+        """
+        if self._built:
+            return
+        if self._build_scale:
+            self.scale_net = Dense(
+                input_size=self.num_params, output_size=self.num_features, **self.scale_cfg
+            )
+        if self._build_bias:
+            self.bias_net = Dense(
+                input_size=self.num_params, output_size=self.num_features, **self.bias_cfg
+            )
+        if self.apply_norm:
+            self.norm = nn.LayerNorm(self.num_features)
+        self._built = True
+
+    def forward(self, params: Tensor, features: Tensor) -> Tensor:
+        """Apply the FiLM scale/bias to ``features`` (featurewise.py:71-81 verbatim).
+
+        Parameters
+        ----------
+        params : Tensor
+            The per-event conditioning parameters ``[B, n_params]`` (the bundle's
+            ``inputs.parameters`` — v1 ``inputs["parameters"]``).
+        features : Tensor
+            The features to transform ``[B, T, num_features]`` (or ``[B,
+            num_features]`` for the global layer).
+
+        Returns
+        -------
+        Tensor
+            The scaled/biased (and optionally normed) features — a FRESH tensor
+            (the multiply/add allocate new tensors), never aliasing ``features``.
+        """
+        assert self._built, "FeaturewiseTransformation.forward before build()"
+        if self.scale_net is not None:
+            features = self.scale_net(params).unsqueeze(1) * features
+        if self.bias_net is not None:
+            features = torch.add(features, self.bias_net(params).unsqueeze(1))
+        if self.norm is not None:
+            features = self.norm(features)
+        return features
+
+
+class PositionalEncoder(nn.Module):
+    """Sin/cos positional encoding over coordinate variables (M7 W-FILM).
+
+    v2-native absorption of v1 ``salt.models.posenc.PositionalEncoder``
+    (posenc.py:7-85), COPIED VERBATIM MINUS the v1 ``print()`` debug lines
+    (posenc.py:30,33,56) — the encoding math is the parity-bearing part and is
+    byte-faithful. The v1 original stays UNTOUCHED as the FILM1 gate oracle.
+
+    Evenly shares the embedding space between the encoded variables; any
+    remaining dimensions are left as zeros. The ``@torch.no_grad`` forward and the
+    sin/cos order are faithful to v1 (the encoding is a fixed, parameter-free
+    function of the coordinates).
+
+    Parameters
+    ----------
+    variables : Sequence[str]
+        Variable names to encode (the coordinate columns). Symmetric variables
+        (``phi``, ``_POSENC_SYM_VARS``) get the sin-of-sin / sin-of-cos symmetric
+        encoding (posenc.py:79-81).
+    dim : int
+        Total positional-encoding width. Split evenly: ``per_input_dim = dim //
+        (2 * len(variables))`` per variable, with ``dim % (2 * len(variables))``
+        trailing zeros (posenc.py:31-32).
+    alpha : int, optional
+        Frequency scaling factor, by default 100 (posenc.py:25).
+
+    Raises
+    ------
+    ConfigError
+        If `variables` is empty or `dim` is too small to give each variable at
+        least one frequency band (``per_input_dim < 1``).
+    """
+
+    def __init__(self, variables: Sequence[str], dim: int, alpha: int = 100) -> None:
+        super().__init__()
+        self.name = _UNNAMED
+        self.variables = tuple(variables)
+        if not self.variables:
+            raise ConfigError("PositionalEncoder: variables must be a non-empty sequence")
+        self.dim = int(dim)
+        self.alpha = int(alpha)
+        self.per_input_dim = self.dim // (2 * len(self.variables))
+        self.last_dim = self.dim % (2 * len(self.variables))
+        if self.per_input_dim < 1:
+            raise ConfigError(
+                f"PositionalEncoder: dim={self.dim} too small for {len(self.variables)} variables "
+                f"(per_input_dim = dim // (2*n_vars) = {self.per_input_dim} < 1)"
+            )
+
+    @torch.no_grad()
+    def forward(self, inputs: Tensor) -> Tensor:
+        """Encode each coordinate column; concat along the last dim (posenc.py:36-57).
+
+        Parameters
+        ----------
+        inputs : Tensor
+            Coordinate tensor ``[..., len(variables)]`` (the selected columns, in
+            ``variables`` order).
+
+        Returns
+        -------
+        Tensor
+            The positional encoding ``[..., dim]``.
+        """
+        encodings: list[Tensor] = []
+        for i, var in enumerate(self.variables):
+            symmetric = var in _POSENC_SYM_VARS
+            encodings.append(self.pos_enc(inputs[..., i], self.per_input_dim, symmetric=symmetric))
+        if self.last_dim > 0:
+            encodings.append(torch.zeros_like(encodings[0][..., : self.last_dim]))
+        return torch.cat(encodings, dim=-1)
+
+    def pos_enc(self, xs: Tensor, dim: int, symmetric: bool = False) -> Tensor:
+        """One variable's sin/cos encoding (posenc.py:59-85, verbatim).
+
+        Parameters
+        ----------
+        xs : Tensor
+            One coordinate column ``[...]``.
+        dim : int
+            Per-variable half-width (``per_input_dim``).
+        symmetric : bool, optional
+            Symmetric (phi-style) encoding, by default False.
+
+        Returns
+        -------
+        Tensor
+            The ``[..., 2*dim]`` encoding for this variable.
+        """
+        xs = xs.unsqueeze(-1)
+        kwargs = {"device": xs.device, "dtype": xs.dtype}
+        omegas = self.alpha * torch.logspace(0, 2 / (dim) - 1, dim, 10_000, **kwargs)
+        if symmetric:
+            p1 = (xs.sin() * omegas).sin()
+            p2 = (xs.cos() * omegas).sin()
+        else:
+            p1 = (xs * omegas).sin()
+            p2 = (xs * omegas).cos()
+        return torch.cat((p1, p2), dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -2185,8 +2463,25 @@ class StreamEmbed(nn.Module):
     (which named modules carry ``mup: true``, the shape-path/MuAdamW wiring) is a
     SEPARATE later stage — this is the architectural port only.
 
-    TODO(M7): pos_enc / featurewise blocks
-    (design §6.4) when `InitNet` is absorbed.
+    Optional FiLM + positional encoding (M7 W-FILM, design §6.4 — input-layer
+    half of v1 `InitNet`). Two OPTIONAL config blocks, both OFF by default (unset
+    => byte-identical to today):
+
+    - ``featurewise:`` — an INPUT-layer `FeaturewiseTransformation` (FiLM). When
+      set, the embed reads the per-event ``inputs.parameters`` ``[B, n_params]``
+      and applies ``scale * x + bias`` to the embed INPUT (before the `Dense`
+      projection), exactly as v1 `InitNet.forward` (initnet.py:85-86: featurewise
+      is applied to ``x`` BEFORE ``self.net(x)``). Faithful to v1, when featurewise
+      is active the ``parameters`` are NOT also concatenated as context
+      (initnet.py:81 ``not self.featurewise``) — the FiLM IS the conditioning path.
+    - ``pos_enc:`` — a `PositionalEncoder` added to the embed OUTPUT. When set, the
+      sin/cos encoding of the configured coordinate variables (selected by NAME
+      from the input's fields) is ADDED to the projected embedding, exactly as v1
+      `InitNet.forward` (initnet.py:92-95: ``x += pos_enc(inputs[input][...,
+      idx])`` AFTER the projection). The pos_enc reads the RAW embed input columns
+      (the same key the `Dense` consumes) at the variable indices.
+
+    Both are NO-OP when unset.
     """
 
     MUP_WIDTH_ARG = "out_dim"
@@ -2203,6 +2498,8 @@ class StreamEmbed(nn.Module):
         context: Sequence[str] = (),
         input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
         mup: bool = False,
+        featurewise: dict[str, Any] | None = None,
+        pos_enc: dict[str, Any] | None = None,
     ) -> None:
         """Capture config only (design §2.3).
 
@@ -2230,6 +2527,18 @@ class StreamEmbed(nn.Module):
             init (``~N(0, 1/fan_out)`` weights, zeroed biases, dense.py:96-102);
             the forward is unchanged (muP affects init only). The v1 surface is
             ``init_net.dense_config.mup: True`` (GN2_muP.yaml:35).
+        featurewise : dict[str, Any] | None, optional
+            OPTIONAL input-layer FiLM config (M7 W-FILM; see class docstring). The
+            kwargs for `FeaturewiseTransformation` MINUS the width args (``layer``
+            is forced to ``"input"``; ``num_params``/``num_features`` are inferred
+            at bind). May carry an explicit ``parameters`` key naming the bundle
+            key of the per-event conditioning tensor (default ``inputs.parameters``).
+            By default None (no FiLM — byte-identical to today).
+        pos_enc : dict[str, Any] | None, optional
+            OPTIONAL positional-encoding config (M7 W-FILM; see class docstring).
+            The kwargs for `PositionalEncoder` (``variables``, ``dim``, ``alpha``)
+            — ``dim`` defaults to ``out_dim`` (the embed width the encoding is added
+            to). By default None (no positional encoding — byte-identical to today).
 
         Raises
         ------
@@ -2255,6 +2564,22 @@ class StreamEmbed(nn.Module):
         self.input_key = input if input is not None else f"normed.{stream}"
         self.mup = bool(mup)
         self.net: nn.Module | None = None
+        # -- optional input-layer FiLM (M7 W-FILM) ---------------------------
+        self.featurewise_cfg = dict(featurewise) if featurewise is not None else None
+        self.params_key = "inputs.parameters"
+        self.featurewise: FeaturewiseTransformation | None = None
+        if self.featurewise_cfg is not None:
+            self.params_key = self.featurewise_cfg.pop("parameters", self.params_key)
+            if self.featurewise_cfg.get("layer", "input") != "input":
+                raise ConfigError(
+                    "StreamEmbed featurewise: layer must be 'input' (the embed is the input-layer "
+                    "FiLM site; use TransformerEncoder for encoder/global layers)"
+                )
+            self.featurewise_cfg["layer"] = "input"
+        # -- optional positional encoding (M7 W-FILM) ------------------------
+        self.pos_enc_cfg = dict(pos_enc) if pos_enc is not None else None
+        self.pos_enc: PositionalEncoder | None = None
+        self.pos_enc_indices: tuple[int, ...] = ()
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + context keys -> ``embed.<stream>``.
@@ -2281,6 +2606,10 @@ class StreamEmbed(nn.Module):
             # rank/width unconstrained here: context may be a [B, F] global
             # vector or broadcastable — widths resolve from the producer side
             requires[key] = TensorSpec(shape=None, dtype="float32")
+        if self.featurewise_cfg is not None:
+            # the per-event conditioning parameters: a rank-2 [B, n_params]
+            # global stream (M7 W-FILM). Width resolves from the producer side.
+            requires[self.params_key] = TensorSpec(shape=("B", sym_dim("P", self.name)), dtype="float32")
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec({
@@ -2312,14 +2641,51 @@ class StreamEmbed(nn.Module):
         of CLI variable injection. When ``self.mup`` the `Dense` is built with
         ``mup=True`` so its ``__init__`` applies the muP weight init
         (``_reset_parameters``, dense.py:88-89,96-102); the forward is unchanged.
+
+        The optional input-layer FiLM (M7 W-FILM) is built here too: the FiLM
+        nets are sized ``num_params = width(parameters)`` (input) /
+        ``num_features = input_size`` (output, the embed INPUT width the FiLM is
+        applied to BEFORE the projection, faithful to v1 initnet.py:85-86). The
+        optional positional encoder resolves its variable column indices from the
+        input's declared fields (initnet.py:93-94) and defaults ``dim`` to
+        ``out_dim`` (the embed OUTPUT width it is added to).
         """
         input_size = schema.width(self.input_key) + sum(schema.width(key) for key in self.context)
         self.net = Dense(
             input_size=input_size, output_size=self.out_dim, mup=self.mup, **self.dense_cfg
         )
+        if self.featurewise_cfg is not None:
+            self.featurewise = FeaturewiseTransformation(
+                num_params=schema.width(self.params_key),
+                num_features=input_size,
+                **self.featurewise_cfg,
+            )
+            self.featurewise.name = self.name
+            self.featurewise.build()
+        if self.pos_enc_cfg is not None:
+            cfg = dict(self.pos_enc_cfg)
+            cfg.setdefault("dim", self.out_dim)
+            self.pos_enc = PositionalEncoder(**cfg)
+            self.pos_enc.name = self.name
+            # resolve the coordinate column indices by NAME from the input fields
+            # (v1 initnet.py:93-94 ``[this_vars.index(v) for v in pos_enc.variables]``)
+            fields = schema.fields_of(self.input_key)
+            try:
+                self.pos_enc_indices = tuple(fields.index(v) for v in self.pos_enc.variables)
+            except ValueError as err:
+                raise ConfigError(
+                    f"StreamEmbed {self.name!r} pos_enc: variable not found in {self.input_key!r} "
+                    f"fields {list(fields)}: {err}"
+                ) from None
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Attach context (prepended, v1 order) and project.
+
+        With the optional FiLM (M7 W-FILM) the per-event ``parameters`` scale/bias
+        is applied to the embed INPUT before the projection (v1 initnet.py:85-86);
+        with the optional positional encoder the sin/cos encoding of the configured
+        coordinate columns is ADDED to the embed OUTPUT (v1 initnet.py:92-95). Both
+        are NO-OP when unset (byte-identical to the no-FiLM path).
 
         Returns
         -------
@@ -2328,10 +2694,18 @@ class StreamEmbed(nn.Module):
         """
         del mode
         x = b.get(self.input_key)
+        raw = x  # the raw input columns (pos_enc reads these at the variable idx)
         for key in self.context:
             x = attach_context(x, b.get(key))  # cat([context, x]) — tensor_utils.py:240
+        if self.featurewise is not None:
+            # FiLM on the embed INPUT, before the projection (v1 initnet.py:85-86)
+            x = self.featurewise(b.get(self.params_key), x)
         assert self.net is not None, "forward before bind()"
-        return {f"embed.{self.stream}": self.net(x)}
+        out = self.net(x)
+        if self.pos_enc is not None:
+            # ADD the positional encoding to the embed OUTPUT (v1 initnet.py:92-95)
+            out = out + self.pos_enc(raw[..., self.pos_enc_indices])
+        return {f"embed.{self.stream}": out}
 
 
 class Concat(nn.Module):
@@ -2801,8 +3175,16 @@ class EdgeEmbed(nn.Module):
     embed traces with both token axes dynamic (the dynamic-T contract is
     enforced on the export side, plan 12 sub-wave C).
 
-    TODO(M7): pos_enc / featurewise blocks when the v1 `InitNet` is absorbed
-    (mirrors `StreamEmbed`).
+    FiLM / positional encoding (M7 W-FILM): the edge embed carries NEITHER — and
+    this is FAITHFUL to v1, not a drop. v1's ``init_featurewise`` (saltmodel.py:
+    262-279) attaches `FeaturewiseTransformation` ONLY to the constituent
+    ``init_nets``, NEVER to the ``edge_init_nets``; and v1 builds the edge
+    `InitNet` with ``featurewise=None`` / ``pos_enc=None`` (saltmodel.py:75-77 —
+    the edge init nets get no featurewise/pos_enc kwargs). So an edge embed is a
+    PLAIN projection of the pairwise edge-feature matrix with no per-event
+    conditioning and no coordinate encoding (the FiLM/posenc input-layer port
+    lives on `StreamEmbed` for the constituent streams; the encoder/global FiLM
+    lives on `TransformerEncoder`). Nothing to wire here.
     """
 
     def __init__(
@@ -3005,8 +3387,26 @@ class TransformerEncoder(nn.Module):
     affects training, not the frozen forward), so the exported graph is a plain
     transformer.
 
-    TODO(M7): ``featurewise:`` / ``edges:`` ports
-    (design §6.4, §6.7) when the v1 internals are absorbed.
+    Optional FiLM (M7 W-FILM, design §6.4 — the encoder + global halves of v1
+    featurewise). The ``featurewise:`` config is a LIST of
+    `FeaturewiseTransformation` configs, each with a ``layer`` of ``"encoder"`` or
+    ``"global"`` (an ``"input"`` entry belongs on `StreamEmbed`, rejected here):
+
+    - ``layer: encoder`` — one `FeaturewiseTransformation` per encoder layer,
+      applied to ``x`` at the START of every layer (v1 transformer.py:727-728).
+      The per-layer FiLMs are populated into the absorbed `Transformer`'s
+      ``featurewise`` ``ModuleList`` (the verbatim v1 forward already applies
+      them, modules.py:2001-2003), driven by the per-event ``inputs.parameters``
+      ``[B, n_params]`` tensor threaded through the encoder forward.
+    - ``layer: global`` — a single `FeaturewiseTransformation` applied to the
+      ENCODER OUTPUT (``encoded.seq``) before it is published, faithful to v1
+      where the global FiLM scales ``preds["embed_xs"]`` (the encoder output)
+      right before pooling (saltmodel.py:165-166).
+
+    OFF by default (no ``featurewise:`` => byte-identical to today; the absorbed
+    Transformer's ``featurewise`` ModuleList stays empty and the verbatim forward
+    skips the FiLM application). The ``edges:`` port was wired in M6 sub-wave C
+    (FD §6.7) — only the featurewise port lands here.
     """
 
     _NORM_TYPES = ("pre", "post", "hybrid")
@@ -3035,6 +3435,7 @@ class TransformerEncoder(nn.Module):
         edges: str | None = None,
         edge_embed_dim: int = 0,
         update_edges: bool = False,
+        featurewise: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -3200,6 +3601,43 @@ class TransformerEncoder(nn.Module):
             set_base_shapes(self.encoder, self.encoder, rescale_params=False)
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
+        # -- optional encoder/global FiLM (M7 W-FILM) ------------------------
+        self.num_layers = int(num_layers)
+        self.params_key = "inputs.parameters"
+        self._encoder_film_cfg: dict[str, Any] | None = None
+        self._global_film_cfg: dict[str, Any] | None = None
+        self.featurewise_global: FeaturewiseTransformation | None = None
+        for fw in featurewise or ():
+            fw = dict(fw)
+            layer = fw.get("layer")
+            # one params key is shared by all FiLM entries (v1 reads the single
+            # inputs["parameters"], featurewise.py:74); take it from any entry.
+            pk = fw.pop("parameters", None)
+            if pk is not None:
+                self.params_key = pk
+            if layer == "encoder":
+                if self._encoder_film_cfg is not None:
+                    raise ConfigError(
+                        "TransformerEncoder featurewise: at most one 'encoder'-layer FiLM entry "
+                        "(v1 replicates ONE config across all encoder layers, saltmodel.py:268-269)"
+                    )
+                self._encoder_film_cfg = fw
+            elif layer == "global":
+                if self._global_film_cfg is not None:
+                    raise ConfigError(
+                        "TransformerEncoder featurewise: at most one 'global'-layer FiLM entry"
+                    )
+                self._global_film_cfg = fw
+            elif layer == "input":
+                raise ConfigError(
+                    "TransformerEncoder featurewise: layer 'input' belongs on StreamEmbed "
+                    "(featurewise:), not the encoder — only 'encoder'/'global' here"
+                )
+            else:
+                raise ConfigError(
+                    f"TransformerEncoder featurewise: each entry needs layer in "
+                    f"{{'encoder', 'global'}}, got {layer!r}"
+                )
 
     @property
     def edge_stream(self) -> str | None:
@@ -3267,6 +3705,12 @@ class TransformerEncoder(nn.Module):
             requires[self.edges_key] = TensorSpec(
                 shape=("B", tlen, tlen, self.edge_embed_dim), dtype="float32"
             )
+        if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
+            # the per-event conditioning parameters: a rank-2 [B, n_params] global
+            # stream feeding the encoder/global FiLM (M7 W-FILM)
+            requires[self.params_key] = TensorSpec(
+                shape=("B", sym_dim("P", self.name)), dtype="float32"
+            )
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec(produces),
@@ -3283,11 +3727,39 @@ class TransformerEncoder(nn.Module):
         than a silent runtime shape error inside the v1 ``linear_e``
         (attention.py:535). No-op when no edge port is configured.
 
+        Also builds the optional encoder/global FiLM (M7 W-FILM): the per-layer
+        encoder FiLMs are sized ``num_features = dim`` (the encoder embed width
+        the FiLM scales at the start of each layer, v1 transformer.py:727-728) and
+        populated into the absorbed `Transformer`'s ``featurewise`` ModuleList; the
+        global FiLM is sized ``num_features = out_dim`` (the encoder output width
+        it scales before pooling, v1 saltmodel.py:165-166). ``num_params`` is the
+        resolved ``parameters`` width on both.
+
         Raises
         ------
         ConfigError
             When the resolved edge-embed width differs from ``edge_embed_dim``.
         """
+        if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
+            num_params = schema.width(self.params_key)
+            if self._encoder_film_cfg is not None:
+                # one FiLM per encoder layer — v1 replicates the SAME config across
+                # all num_layers layers (saltmodel.py:268-269). Populate the
+                # absorbed Transformer's featurewise ModuleList (its verbatim
+                # forward applies featurewise[i](params, x) per layer).
+                for _ in range(self.num_layers):
+                    film = FeaturewiseTransformation(
+                        num_params=num_params, num_features=self.dim, **self._encoder_film_cfg
+                    )
+                    film.name = self.name
+                    film.build()
+                    self.encoder.featurewise.append(film)
+            if self._global_film_cfg is not None:
+                self.featurewise_global = FeaturewiseTransformation(
+                    num_params=num_params, num_features=self.out_dim, **self._global_film_cfg
+                )
+                self.featurewise_global.name = self.name
+                self.featurewise_global.build()
         if self.edges_key is None:
             return
         resolved = schema.width(self.edges_key)
@@ -3388,7 +3860,18 @@ class TransformerEncoder(nn.Module):
         kwargs: dict[str, Tensor] = {}
         if self.edges_key is not None:
             kwargs["edge_x"] = b.get(self.edges_key)
+        if len(self.encoder.featurewise) > 0:
+            # encoder-layer FiLM (M7 W-FILM): thread the per-event parameters into
+            # the absorbed Transformer forward; its verbatim loop applies
+            # featurewise[i](params, x) at the start of each layer (v1
+            # transformer.py:727-728). The v2 FiLM signature is forward(params, x),
+            # so `inputs` IS the [B, n_params] parameters tensor here.
+            kwargs["inputs"] = b.get(self.params_key)
         encoded, out_pad = self.encoder(xs, pad_mask=pad, **kwargs)
+        if self.featurewise_global is not None:
+            # global-layer FiLM (M7 W-FILM): scale/bias the encoder OUTPUT before
+            # it is pooled, exactly as v1 saltmodel.py:165-166
+            encoded = self.featurewise_global(b.get(self.params_key), encoded)
         if self.drop_registers:
             # registers stripped from encoded.seq; v1 also removed "REGISTERS"
             # from the pad dict, so there is no register mask to publish

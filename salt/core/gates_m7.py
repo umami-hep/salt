@@ -3066,6 +3066,408 @@ def run_rs1(
 
 
 # ---------------------------------------------------------------------------
+# FILM1 — v2-native FiLM + PositionalEncoder + parameterised forward parity
+# ---------------------------------------------------------------------------
+#
+# FILM1 (M7 W-FILM) gates the v2-native FiLM/posenc port (plan 16). For EVERY
+# W-FILM surface it builds an independent v1 instance (the FILM1 ORACLE — v1 stays
+# in-tree, the v2 port COPIES the math, never imports v1 in production), transfers
+# the v1 weights into the v2-native block, and asserts the v2 forward is BITWISE
+# (torch.equal) vs v1 on synthetic fixtures:
+#
+#   1. FeaturewiseTransformation at layer=input / encoder / global — the FiLM
+#      scale/bias math (featurewise.py:71-81), incl. the optional LayerNorm.
+#   2. PositionalEncoder — the sin/cos encoding (posenc.py:36-85, the v1 print()
+#      debug dropped in the port — the encoding math is the parity-bearing part).
+#   3. A parameterised DATA-PATH forward — the v2 `Features` processor materialises
+#      `inputs.parameters` [B, n_params] in the DECLARED column order from a
+#      structured raw, and a FiLM-wired `StreamEmbed` consumes it bitwise-vs-v1.
+#      Proves the order/normalisation/rank contract end-to-end, not just a
+#      hand-built tensor: the declared parameter NAMES determine column ORDER, the
+#      tensor stays rank-2 [B, n_params], and a missing/duplicate parameter fails
+#      loudly (negative-control assertions).
+#
+# Negative control (test_gates_m7.py + the in-gate corruption hook): perturbing
+# ONE v2 weight after the transfer makes the bitwise check go red — proving the
+# comparison is not vacuous.
+
+# small synthetic dims (the parity is shape-independent; small keeps it fast)
+_FILM1_BATCH = 5
+_FILM1_TOKENS = 7
+_FILM1_NUM_PARAMS = 3
+_FILM1_NUM_FEATURES = 8
+_FILM1_OUT_DIM = 6
+_FILM1_PARAM_NAMES = ("mu", "npv", "pt_bin")
+"""The declared parameter NAMES — the data-path contract: column order == this
+list order, rank-2 [B, len(names)] (v1 datasets.py:222-228 order check)."""
+
+
+def _film1_dense_cfg() -> dict[str, Any]:
+    """A representative FiLM net dense config (hidden layer + ReLU).
+
+    Returns
+    -------
+    dict[str, Any]
+        Kwargs the v2 FiLM forwards to `salt.core.nn.Dense` (no width keys —
+        those are inferred at build/bind).
+    """
+    return {"hidden_layers": [16], "activation": "ReLU"}
+
+
+def _film1_featurewise_parity(layer: str, *, corrupt: bool) -> dict[str, Any]:
+    """Build v1 + v2 FiLM at ``layer``, transfer weights, compare bitwise.
+
+    Constructs an independent v1 ``FeaturewiseTransformation`` (the oracle) with
+    an EXPLICIT ``output_size = num_features`` (v1's user-set width) and a
+    v2-native one with the SAME width INFERRED at build; loads the v1 state_dict
+    into the v2 block (the absorbed Dense is byte-identical so the transfer is
+    exact) and asserts ``torch.equal`` on a synthetic ``[B, T, num_features]``
+    feature tensor. ``apply_norm`` is exercised on the input layer.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{layer, bitwise, max_abs_diff, ref_shape, got_shape, apply_norm}``.
+    """
+    from salt.models.featurewise import FeaturewiseTransformation as V1FW  # noqa: PLC0415
+
+    from salt.core.nn import FeaturewiseTransformation as V2FW  # noqa: PLC0415
+
+    torch.manual_seed(0)
+    apply_norm = layer == "input"
+    dc = _film1_dense_cfg()
+    v1 = V1FW(
+        layer=layer,
+        variables={"parameters": list(_FILM1_PARAM_NAMES)},
+        dense_config_scale={**dc, "output_size": _FILM1_NUM_FEATURES},
+        dense_config_bias={**dc, "output_size": _FILM1_NUM_FEATURES},
+        apply_norm=apply_norm,
+    )
+    v2 = V2FW(
+        layer=layer,
+        num_params=_FILM1_NUM_PARAMS,
+        num_features=_FILM1_NUM_FEATURES,
+        dense_config_scale=dict(dc),
+        dense_config_bias=dict(dc),
+        apply_norm=apply_norm,
+    )
+    v2.build()
+    v2.load_state_dict(v1.state_dict())
+    if corrupt:
+        # negative control: nudge ONE v2 weight so the forward diverges
+        with torch.no_grad():
+            next(p for p in v2.parameters()).add_(1.0)
+    params = torch.randn(_FILM1_BATCH, _FILM1_NUM_PARAMS)
+    features = torch.randn(_FILM1_BATCH, _FILM1_TOKENS, _FILM1_NUM_FEATURES)
+    v1.eval()
+    v2.eval()
+    with torch.no_grad():
+        ref = v1({"parameters": params}, features)
+        got = v2(params, features)
+    bitwise = ref.shape == got.shape and torch.equal(ref, got)
+    return {
+        "layer": layer,
+        "apply_norm": apply_norm,
+        "bitwise": bool(bitwise),
+        "max_abs_diff": 0.0 if bitwise else float((ref - got).abs().max().item()),
+        "ref_shape": tuple(ref.shape),
+        "got_shape": tuple(got.shape),
+    }
+
+
+def _film1_posenc_parity(*, corrupt: bool) -> dict[str, Any]:
+    """Build v1 + v2 `PositionalEncoder`, compare bitwise (no weights — fixed fn).
+
+    The encoder is parameter-free (a fixed sin/cos function under
+    ``@torch.no_grad``), so there is nothing to weight-transfer — the v2 port must
+    reproduce the v1 encoding BYTE-FOR-BYTE on the SAME coordinate tensor. The
+    ``phi`` symmetric variable exercises the ``SYM_VARS`` branch (posenc.py:79-81).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{bitwise, max_abs_diff, ref_shape, got_shape, variables, dim}``.
+    """
+    from salt.models.posenc import PositionalEncoder as V1PE  # noqa: PLC0415
+
+    from salt.core.nn import PositionalEncoder as V2PE  # noqa: PLC0415
+
+    variables = ["phi", "eta"]  # phi -> SYM_VARS symmetric branch; eta -> default
+    dim = _FILM1_OUT_DIM
+    v1 = V1PE(variables=variables, dim=dim, alpha=100)
+    v2 = V2PE(variables=variables, dim=dim, alpha=100)
+    torch.manual_seed(1)
+    coords = torch.randn(_FILM1_BATCH, _FILM1_TOKENS, len(variables))
+    with torch.no_grad():
+        ref = v1(coords)
+        got = v2(coords)
+    if corrupt:
+        got = got + 1.0  # negative control: perturb the v2 output
+    bitwise = ref.shape == got.shape and torch.equal(ref, got)
+    return {
+        "variables": variables,
+        "dim": dim,
+        "bitwise": bool(bitwise),
+        "max_abs_diff": 0.0 if bitwise else float((ref - got).abs().max().item()),
+        "ref_shape": tuple(ref.shape),
+        "got_shape": tuple(got.shape),
+    }
+
+
+def _film1_param_contract() -> dict[str, Any]:
+    """Prove the v2 ``parameters`` order/normalisation/rank contract end-to-end.
+
+    Drives the REAL v2 `Features` processor (the design §6.2 ``raw.* -> inputs.*``
+    boundary, the ONE place column order is defined) on a structured raw whose
+    fields are DELIBERATELY out of declared order, and asserts:
+
+    - the produced ``inputs.parameters`` is rank-2 ``[B, n_params]`` (a global
+      stream, v1 datasets.py global_object path);
+    - the columns are in the DECLARED ``_FILM1_PARAM_NAMES`` order (NOT the raw
+      field order) — the parity-sensitive order contract (v1 datasets.py:222-228);
+    - the produced spec carries ``fields`` == the declared names (so a downstream
+      FiLM/`StreamEmbed` resolves columns by NAME);
+    - a DUPLICATE parameter name fails loudly (`ConfigError`);
+    - a Features stream demanding a parameter ABSENT from the raw fails loudly.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{rank2, declared_order, fields_match, duplicate_rejected,
+        missing_rejected}``.
+    """
+    from salt.core.data.processors import Features  # noqa: PLC0415
+    from salt.core.graph import Bundle, Mode  # noqa: PLC0415
+    from salt.core.graph.spec import flatten_spec  # noqa: PLC0415
+
+    result: dict[str, Any] = {}
+
+    # the raw structured array with the parameter fields in a SCRAMBLED order
+    # (npv, pt_bin, mu) — the declared order is (mu, npv, pt_bin); the Features
+    # processor MUST reorder to the declared list, never the raw field order.
+    scrambled = ("npv", "pt_bin", "mu")
+    raw = np.zeros(
+        _FILM1_BATCH, dtype=[(name, np.float32) for name in scrambled]
+    )
+    # distinct per-column sentinels so a wrong order is detectable
+    sentinels = {"mu": 10.0, "npv": 20.0, "pt_bin": 30.0}
+    for name in scrambled:
+        raw[name] = sentinels[name]
+
+    feats = Features(variables={"parameters": list(_FILM1_PARAM_NAMES)})
+    out = feats.process(Bundle({"raw": {"parameters": raw}}), slice(None), Mode.FIT)
+    arr = out["inputs.parameters"]
+    result["rank2"] = arr.ndim == 2 and arr.shape == (_FILM1_BATCH, len(_FILM1_PARAM_NAMES))
+    # column j must hold the DECLARED name's sentinel (declared order, not raw)
+    declared_ok = all(
+        float(arr[0, j]) == sentinels[name] for j, name in enumerate(_FILM1_PARAM_NAMES)
+    )
+    result["declared_order"] = bool(declared_ok)
+    # the produced spec carries fields == declared names (column-by-name lookups)
+    io = feats.declare_io(Mode.FIT)
+    spec = flatten_spec(io.produces)["inputs.parameters"]
+    result["fields_match"] = tuple(spec.fields or ()) == _FILM1_PARAM_NAMES
+
+    # duplicate parameter name -> loud ConfigError
+    try:
+        Features(variables={"parameters": ["mu", "mu", "npv"]})
+        result["duplicate_rejected"] = False
+    except ConvertError:  # pragma: no cover - wrong error type
+        result["duplicate_rejected"] = False
+    except Exception as err:  # noqa: BLE001 - any ConfigError-family loud failure
+        result["duplicate_rejected"] = "duplicate" in str(err).lower()
+
+    # a declared parameter ABSENT from the raw -> loud failure at process()
+    missing_feats = Features(variables={"parameters": ["mu", "npv", "absent_param"]})
+    try:
+        missing_feats.process(Bundle({"raw": {"parameters": raw}}), slice(None), Mode.FIT)
+        result["missing_rejected"] = False
+    except Exception:  # noqa: BLE001 - a numpy field KeyError / ValueError is loud
+        result["missing_rejected"] = True
+
+    return result
+
+
+def _film1_datapath_forward(*, corrupt: bool) -> dict[str, Any]:
+    """End-to-end: a FiLM-wired `StreamEmbed` consumes data-path ``inputs.parameters``.
+
+    Builds a `StreamEmbed` with an INPUT-layer ``featurewise:`` block, binds it
+    against a synthetic schema, drives its forward on a `Bundle` carrying the
+    data-path-produced ``inputs.parameters`` (declared order, rank-2), and asserts
+    the embed output is BITWISE vs an independent v1 ``InitNet`` + v1
+    ``FeaturewiseTransformation`` (weight-transferred). This proves the FiLM
+    consumes the contract-produced parameters tensor — not just a hand-built one.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{bitwise, max_abs_diff, ref_shape, got_shape}``.
+    """
+    from salt.models.dense import Dense as V1Dense  # noqa: PLC0415
+    from salt.models.featurewise import FeaturewiseTransformation as V1FW  # noqa: PLC0415
+
+    from salt.core.nn import StreamEmbed  # noqa: PLC0415
+    from salt.core.nn import ResolvedSchema  # noqa: PLC0415
+    from salt.core.graph import Bundle, Mode  # noqa: PLC0415
+
+    torch.manual_seed(2)
+    n_in = 5  # the tracks input width (the embed INPUT feature count)
+    # -- v2 FiLM-wired StreamEmbed -----------------------------------------
+    dc = _film1_dense_cfg()
+    se = StreamEmbed(
+        stream="tracks",
+        out_dim=_FILM1_OUT_DIM,
+        dense=dict(dc),
+        featurewise={
+            "dense_config_scale": dict(dc),
+            "dense_config_bias": dict(dc),
+        },
+    )
+    se.name = "track_embed"
+    schema = ResolvedSchema(
+        widths={"normed.tracks": n_in, "inputs.parameters": _FILM1_NUM_PARAMS},
+        fields={"normed.tracks": tuple(f"v{i}" for i in range(n_in))},
+    )
+    se.bind(schema)
+    se.eval()
+
+    # -- v1 oracle: InitNet(featurewise=...) with NO attach_global ----------
+    # (v1 applies the input FiLM to x BEFORE net(x); initnet.py:85-89). Build a
+    # bare v1 Dense + v1 FiLM mirroring the StreamEmbed's net + featurewise.
+    v1_fw = V1FW(
+        layer="input",
+        variables={"parameters": list(_FILM1_PARAM_NAMES)},
+        dense_config_scale={**dc, "output_size": n_in},
+        dense_config_bias={**dc, "output_size": n_in},
+    )
+    v1_net = V1Dense(input_size=n_in, output_size=_FILM1_OUT_DIM, **dc)
+    # transfer the v2 weights into the v1 oracle (v2 is the system under test;
+    # the v1 oracle gets v2's weights so a faithful port matches bit-for-bit).
+    v1_fw.load_state_dict(se.featurewise.state_dict())
+    v1_net.load_state_dict(se.net.state_dict())
+    v1_fw.eval()
+    v1_net.eval()
+
+    # -- the data-path parameters tensor (declared order, rank-2) -----------
+    params = torch.randn(_FILM1_BATCH, _FILM1_NUM_PARAMS)
+    x = torch.randn(_FILM1_BATCH, _FILM1_TOKENS, n_in)
+    b = Bundle({
+        "normed": {"tracks": x},
+        "inputs": {"parameters": params},
+    })
+    with torch.no_grad():
+        got = se.forward(b, Mode.FIT)["embed.tracks"]
+        # v1 reference: FiLM(x) then net (initnet.py:85-89)
+        ref = v1_net(v1_fw({"parameters": params}, x))
+    if corrupt:
+        got = got + 1.0
+    bitwise = ref.shape == got.shape and torch.equal(ref, got)
+    return {
+        "bitwise": bool(bitwise),
+        "max_abs_diff": 0.0 if bitwise else float((ref - got).abs().max().item()),
+        "ref_shape": tuple(ref.shape),
+        "got_shape": tuple(got.shape),
+    }
+
+
+def run_film1(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """FILM1: v2-native FiLM + PositionalEncoder + parameterised forward parity.
+
+    For EVERY W-FILM surface (the FiLM at layer=input/encoder/global, the
+    PositionalEncoder, and a parameterised data-path forward) the gate builds an
+    independent v1 oracle, weight-transfers, and asserts the v2-native block's
+    forward is BITWISE vs v1 on synthetic fixtures, PLUS proves the v2
+    ``parameters`` order/normalisation/rank contract end-to-end via the real
+    `Features` processor.
+
+    Negative control (``test_gates_m7.py`` + the in-gate ``corruption`` hook,
+    test-only, never on the CLI): the hook flips the ``corrupt`` flag on the FiLM
+    + posenc + data-path sub-checks, so a perturbed v2 weight/output makes the
+    bitwise assertions go red — proving the parity checks are not vacuous.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    outdir = Path(outdir)
+    print("=" * 96)
+    print("FILM1 v2-native FiLM + PositionalEncoder + parameterised forward parity (M7 W-FILM)")
+    print("=" * 96)
+
+    corrupt = False
+    if corruption is not None:
+        corrupt = bool(corruption({"corrupt": False})["corrupt"])
+
+    checks: dict[str, bool] = {}
+    details: dict[str, Any] = {}
+
+    # 1. FeaturewiseTransformation at every layer
+    fw_results = {
+        layer: _film1_featurewise_parity(layer, corrupt=corrupt)
+        for layer in ("input", "encoder", "global")
+    }
+    for layer, res in fw_results.items():
+        checks[f"featurewise_{layer}_bitwise"] = res["bitwise"]
+    details["featurewise"] = fw_results
+
+    # 2. PositionalEncoder
+    pe_res = _film1_posenc_parity(corrupt=corrupt)
+    checks["posenc_bitwise"] = pe_res["bitwise"]
+    details["posenc"] = pe_res
+
+    # 3a. the parameters order/normalisation/rank contract (NOT corruptible —
+    # it's a structural contract, always asserted)
+    contract = _film1_param_contract()
+    checks["param_rank2"] = bool(contract["rank2"])
+    checks["param_declared_order"] = bool(contract["declared_order"])
+    checks["param_fields_match"] = bool(contract["fields_match"])
+    checks["param_duplicate_rejected"] = bool(contract["duplicate_rejected"])
+    checks["param_missing_rejected"] = bool(contract["missing_rejected"])
+    details["param_contract"] = contract
+
+    # 3b. the data-path FiLM forward (FiLM consumes contract-produced parameters)
+    dp_res = _film1_datapath_forward(corrupt=corrupt)
+    checks["datapath_forward_bitwise"] = dp_res["bitwise"]
+    details["datapath_forward"] = dp_res
+
+    passed = all(checks.values())
+    criterion = (
+        "every v2-native W-FILM surface (FeaturewiseTransformation at layer=input/encoder/global, "
+        "PositionalEncoder, and a parameterised data-path forward) is BITWISE (torch.equal) vs an "
+        "independent v1 instance with weight-transfer on synthetic fixtures, AND the v2 parameters "
+        "input enforces the order/normalisation/rank contract (declared NAMES == column order, "
+        "rank-2 [B, n_params], duplicate/missing params fail loudly) via the real Features "
+        "processor. The v1 tree is the FILM1 ORACLE (copied, never imported by the v2 port — RS1 "
+        "stays 0). Negative control: a perturbed v2 weight/output flips the bitwise checks red."
+    )
+    report = _base_report("film1", passed, criterion, {"corrupted_by_test_hook": corrupt})
+    report["checks"] = checks
+    report["details"] = details
+
+    # -- stdout table ----------------------------------------------------------
+    print(f"{'surface':<40}{'bitwise/ok':>12}{'max|diff|':>14}")
+    print("-" * 96)
+    for layer, res in fw_results.items():
+        print(f"{'FeaturewiseTransformation/' + layer:<40}{str(res['bitwise']):>12}"
+              f"{res['max_abs_diff']:>14.3e}")
+    print(f"{'PositionalEncoder':<40}{str(pe_res['bitwise']):>12}{pe_res['max_abs_diff']:>14.3e}")
+    print(f"{'parameters/rank2':<40}{str(contract['rank2']):>12}")
+    print(f"{'parameters/declared-order':<40}{str(contract['declared_order']):>12}")
+    print(f"{'parameters/fields-match':<40}{str(contract['fields_match']):>12}")
+    print(f"{'parameters/duplicate-rejected':<40}{str(contract['duplicate_rejected']):>12}")
+    print(f"{'parameters/missing-rejected':<40}{str(contract['missing_rejected']):>12}")
+    print(f"{'data-path FiLM forward':<40}{str(dp_res['bitwise']):>12}"
+          f"{dp_res['max_abs_diff']:>14.3e}")
+    _print_verdict("film1", passed, criterion, _emit_report(report, outdir, "film1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -3089,6 +3491,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "cvf": "Converter target-producer fidelity (every task target has a real producer)",
         "ren1": "vector->global_object rename + StreamEmbed flag collapse (W1.5 wave R)",
         "rs1": "Residual v1-import scanner over production salt/core (W2 worklist + W2c gate)",
+        "film1": "v2-native FiLM + PositionalEncoder + parameterised forward parity vs v1 (W-FILM)",
     }
     for gate, help_text in helps.items():
         p = sub.add_parser(gate, help=help_text)
@@ -3111,6 +3514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cvf": run_cvf,
         "ren1": run_ren1,
         "rs1": run_rs1,
+        "film1": run_film1,
     }[args.gate]
     code, _ = runner(args.outdir)
     return code

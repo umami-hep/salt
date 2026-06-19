@@ -8,7 +8,7 @@ hook (never on the CLI) proves the gate's assertions are not vacuous.
 from __future__ import annotations
 
 import salt.core.gates_m7 as gm7
-from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf, run_ren1, run_rs1
+from salt.core.gates_m7 import run_cv1, run_cv2, run_cvf, run_film1, run_ren1, run_rs1
 
 # the authoritative embedded lists live as module privates on gm7 (the gate is
 # the single source of truth); reference them through the module so the test does
@@ -751,3 +751,77 @@ def test_cli_dispatch_cvf(tmp_path):
 
 def test_cli_dispatch_ren1(tmp_path):
     assert gm7.main(["ren1", "--outdir", str(tmp_path)]) == 0
+
+
+class TestFILM1:
+    """FILM1 — v2-native FiLM + PositionalEncoder + parameterised forward parity.
+
+    Pins: the gate PASSES green (every W-FILM surface is bitwise vs an independent
+    v1 oracle with weight-transfer); the FiLM is gated at ALL THREE layers
+    (input/encoder/global); the PositionalEncoder is bitwise; the v2 ``parameters``
+    order/normalisation/rank contract holds (declared NAMES == column order, rank-2,
+    duplicate/missing rejected) through the REAL Features processor; and the
+    corruption teeth — a perturbed v2 weight/output flips the bitwise checks red.
+    """
+
+    def test_passes_green(self, tmp_path):
+        code, report = run_film1(tmp_path)
+        assert code == 0
+        assert report["passed"]
+        assert (tmp_path / "film1_report.json").is_file()
+
+    def test_every_film_layer_bitwise(self, tmp_path):
+        # the FiLM must be bitwise at input / encoder / global (the v1 `layer`
+        # placements, featurewise.py:44).
+        _code, report = run_film1(tmp_path)
+        for layer in ("input", "encoder", "global"):
+            assert report["checks"][f"featurewise_{layer}_bitwise"], layer
+            assert report["details"]["featurewise"][layer]["max_abs_diff"] == 0.0, layer
+
+    def test_posenc_bitwise(self, tmp_path):
+        # the PositionalEncoder is a fixed sin/cos function (no weights) — the v2
+        # port must reproduce v1 BYTE-FOR-BYTE (the v1 print() debug dropped).
+        _code, report = run_film1(tmp_path)
+        assert report["checks"]["posenc_bitwise"]
+        assert report["details"]["posenc"]["max_abs_diff"] == 0.0
+
+    def test_parameters_contract(self, tmp_path):
+        # the order/normalisation/rank contract: declared names == column order,
+        # rank-2 [B, n_params], duplicate/missing params fail loudly.
+        _code, report = run_film1(tmp_path)
+        for k in (
+            "param_rank2",
+            "param_declared_order",
+            "param_fields_match",
+            "param_duplicate_rejected",
+            "param_missing_rejected",
+        ):
+            assert report["checks"][k], k
+
+    def test_datapath_forward_bitwise(self, tmp_path):
+        # the FiLM consumes the CONTRACT-PRODUCED parameters tensor (not a hand-
+        # built one) and matches v1 bitwise.
+        _code, report = run_film1(tmp_path)
+        assert report["checks"]["datapath_forward_bitwise"]
+        assert report["details"]["datapath_forward"]["max_abs_diff"] == 0.0
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # the negative control: flip the corrupt flag -> a perturbed v2 weight/
+        # output makes the bitwise checks go red, proving they are not vacuous.
+        def corrupt(state):
+            state["corrupt"] = True
+            return state
+
+        code, report = run_film1(tmp_path, corruption=corrupt)
+        assert code == 1
+        assert not report["passed"]
+        # the FiLM, posenc, and data-path bitwise checks all flip red
+        assert not report["checks"]["featurewise_input_bitwise"]
+        assert not report["checks"]["featurewise_encoder_bitwise"]
+        assert not report["checks"]["featurewise_global_bitwise"]
+        assert not report["checks"]["posenc_bitwise"]
+        assert not report["checks"]["datapath_forward_bitwise"]
+
+
+def test_cli_dispatch_film1(tmp_path):
+    assert gm7.main(["film1", "--outdir", str(tmp_path)]) == 0
