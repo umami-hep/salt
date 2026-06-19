@@ -1,0 +1,153 @@
+# easyjet_hh4b_ttbar.yaml — an EVENT-level signal-vs-background classifier trained
+# DIRECTLY on TWO per-sample easyjet AnalysisMiniTree ROOT ntuples via the v2
+# modular MultiSampleReader (NO UPP/umami pre-resampling). Demonstrates the v2
+# multi-sample Reader boundary: signal (HH->4b) and background (ttbar) are read
+# by their OWN EasyjetReader sub-readers, proportionally interleaved into one
+# stratified stream, with a per-event sample label injected as raw.event.process.
+# Features / Labels / Normaliser / StreamEmbed / the encoder / the pooling / the
+# task head / salt2 are all UNCHANGED — only the NEW combining layer + this config.
+#
+# Topology (event-level, NO per-jet Split):
+#   MultiSampleReader{signal EasyjetReader(603404) + background EasyjetReader(410471)}
+#     -> Features(jets: kinematics + GN2v01)
+#     -> Labels (exposes labels.event.process from the injected scalar)
+#     -> Normaliser(jets)
+#     -> StreamEmbed(jets) -> Concat -> TransformerEncoder
+#     -> GlobalAttentionPooling (event representation, NO Split)
+#     -> ClassificationTaskModule on `process` (binary signal/bg, EVENT-level)
+#
+# COMMON FEATURE SET: signal is mc23/p7128, background is mc20/p7018 (different
+# campaigns), so only the branches present in BOTH are used (verified at write
+# time): pt/eta/phi/m kinematics + GN2v01 pb/pc/pu scores. Each sub-reader has its
+# OWN branches: map (here identical names), so a name divergence is a config change.
+#
+# STAGE BINDING (per-reader stage-sourcing): each sample carries `sources:
+# {train, val, test}`; the MultiSampleReader re-sources each sub-reader per stage.
+# data.train_file / val_file / test_file are set to placeholder stage keys and are
+# IGNORED by MultiSampleReader (they only satisfy the datamodule's non-None check);
+# the real per-stage data comes from each sample's `sources`. For a single-file
+# smoke (fast_dev_run) point all three stage sources of a sample at the same file.
+#
+# NO machine paths committed (design §5 placeholder policy). uproot + awkward are
+# runtime reader extras (pip install in salt.sif). A typical invocation FROM THE
+# REPO ROOT (the experiment runner fills the ${...} sources + norm_dict):
+#
+#   salt2 fit --config salt/core/configs/easyjet_hh4b_ttbar.yaml \
+#     --data.modules.reader.init_args.samples.0.sources.train $SIGNAL_DIR \
+#     --data.modules.reader.init_args.samples.0.sources.val   $SIGNAL_DIR \
+#     --data.modules.reader.init_args.samples.1.sources.train $TTBAR_FILE \
+#     --data.modules.reader.init_args.samples.1.sources.val   $TTBAR_FILE \
+#     --model.modules.norm.init_args.norm_dict $NORM
+
+name: easyjet_hh4b_ttbar
+
+data:
+  batch_size: 1000
+  num_workers: 4
+  # placeholder stage keys — IGNORED by MultiSampleReader (it sources per sample
+  # via `sources:` below); they only satisfy the datamodule's non-None file check.
+  train_file: train
+  val_file: val
+  test_file: test
+  modules:
+    reader:
+      class_path: salt.core.data.MultiSampleReader
+      init_args:
+        label_stream: event
+        label_field: process
+        samples:
+          - name: signal
+            label: 1
+            reader:
+              class_path: salt.core.data.EasyjetReader
+              init_args:
+                tree: AnalysisMiniTree
+                groups: &ej_groups
+                  jets:
+                    jagged: true
+                    truncate: 20
+                    branches:
+                      pt: recojet_antikt4PFlow_pt_NOSYS
+                      eta: recojet_antikt4PFlow_eta
+                      phi: recojet_antikt4PFlow_phi
+                      m: recojet_antikt4PFlow_m_NOSYS
+                      GN2v01_pb: recojet_antikt4PFlow_GN2v01_pb
+                      GN2v01_pc: recojet_antikt4PFlow_GN2v01_pc
+                      GN2v01_pu: recojet_antikt4PFlow_GN2v01_pu
+                  event:
+                    jagged: false
+                    branches:
+                      eventNumber: eventNumber
+                      mcChannelNumber: mcChannelNumber
+            # sources: REQUIRED override per stage (see header) — signal files
+          - name: background
+            label: 0
+            reader:
+              class_path: salt.core.data.EasyjetReader
+              init_args:
+                tree: AnalysisMiniTree
+                groups: *ej_groups
+            # sources: REQUIRED override per stage (see header) — ttbar files
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, phi, m, GN2v01_pb, GN2v01_pc, GN2v01_pu]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header) — jets stream only
+          streams: [jets]
+      jet_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: jets
+          out_dim: &embed_dim 128
+          dense: {hidden_layers: [128], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [jets]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 128
+          num_layers: 2
+          attention: {num_heads: 4, attn_type: torch-math}
+          dense: {activation: ReLU, gated: false}
+      pool:
+        # event representation: globally attention-pool the jet tokens (NO Split)
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      events_classification:
+        # EVENT-level binary signal-vs-background head on the injected `process`
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: event
+          input: pooled.global
+          label: process
+          class_names: [background, signal] # index 0 = bg (label 0), 1 = signal
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
+      loss:
+        class_path: salt.core.nn.LossSum
+
+writers:
+  modules:
+    # the only task is on the GLOBAL `event` stream (no sequence-stream task), so
+    # there is no pad mask to write — delete the base2.yaml default (design §5.3
+    # null-deletion). InputCopyWriter + TaskWriter keep their event roles.
+    pad_mask: null
+
+trainer:
+  max_epochs: 20
+  precision: 32-true

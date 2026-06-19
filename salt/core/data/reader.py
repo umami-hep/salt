@@ -335,17 +335,21 @@ class H5StructuredReader(Reader):
         filename: str | Path,
         num: int = -1,
         vds_path: str | Path | None = None,
+        stage: str | None = None,
     ) -> H5StructuredReader:
         """Clone this reader for another source file (the datamodule pattern, design §6.1).
 
         Config-only (no file I/O): the loaded schema artifact, group configs,
         selections and transforms are shared; only the file binding changes.
+        ``stage`` is accepted for the plan-02 stage-sourcing contract and IGNORED
+        here (a single-source reader's one ``filename`` per stage IS its data).
 
         Returns
         -------
         H5StructuredReader
             A fresh, unbound reader instance (same instance ``name``).
         """
+        del stage  # single-source reader: the per-stage filename is the data
         clone = H5StructuredReader(
             groups=self.groups,
             schema=self.schema,

@@ -465,19 +465,22 @@ class EasyjetReader(Reader):
         filename: str | Path,
         num: int = -1,
         vds_path: str | Path | None = None,  # accepted for API parity; ROOT has no VDS
+        stage: str | None = None,
     ) -> EasyjetReader:
         """Clone this reader for another source (the datamodule pattern, design §6.1).
 
         Config-only (no file I/O): the group configs are shared; only the source
         binding and ``num`` change. ``vds_path`` is accepted for `Reader` API
-        parity but unused (ROOT files need no VDS).
+        parity but unused (ROOT files need no VDS). ``stage`` is accepted for the
+        plan-02 stage-sourcing contract and IGNORED here (a single-source reader's
+        one ``filename`` per stage IS its data).
 
         Returns
         -------
         EasyjetReader
             A fresh, unbound reader instance (same instance ``name``).
         """
-        del vds_path
+        del vds_path, stage
         clone = EasyjetReader(
             groups=self.groups, filename=filename, tree=self.tree, num=num
         )
