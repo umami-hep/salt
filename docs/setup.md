@@ -18,7 +18,7 @@ cd salt
 
 You can install salt within a virtual environment or a docker image.
 The recommended workflow is to create the Python environment and install Salt with `uv sync`.
-Salt requires Python 3.10 to 3.14.
+Salt requires Python 3.11 to 3.14.
 
 === "uv"
 
