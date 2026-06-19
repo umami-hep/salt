@@ -1,30 +1,51 @@
+from collections.abc import Iterable
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
 from lightning import Callback, LightningModule, Trainer
+from numpy.typing import ArrayLike
+from torch import Tensor
 
 
-def confusion_matrix(y_true, y_pred, labels=None):
-    """Minimal confusion matrix implementation to avoid a scikit-learn dependency."""
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_pred).reshape(-1)
+def confusion_matrix(
+    y_true: ArrayLike,
+    y_pred: ArrayLike,
+    labels: Iterable[int] | None = None,
+) -> np.ndarray:
+    """Compute a confusion matrix without requiring scikit-learn.
 
-    if labels is None:
-        labels = np.union1d(y_true, y_pred)
+    Parameters
+    ----------
+    y_true : ArrayLike
+        True class labels.
+    y_pred : ArrayLike
+        Predicted class labels.
+    labels : Iterable[int] | None
+        Labels to include in the confusion matrix. If ``None``, labels are inferred.
 
-    labels = np.asarray(list(labels))
-    label_to_idx = {int(label): i for i, label in enumerate(labels)}
-    matrix = np.zeros((len(labels), len(labels)), dtype=np.int64)
+    Returns
+    -------
+    np.ndarray
+        Confusion matrix with rows as true labels and columns as predicted labels.
+    """
+    true_values = np.asarray(y_true).reshape(-1)
+    pred_values = np.asarray(y_pred).reshape(-1)
 
-    for truth, pred in zip(y_true, y_pred):
+    label_values = (
+        np.union1d(true_values, pred_values) if labels is None else np.asarray(list(labels))
+    )
+    label_to_idx = {int(label): i for i, label in enumerate(label_values)}
+    matrix = np.zeros((len(label_values), len(label_values)), dtype=np.int64)
+
+    for truth, pred in zip(true_values, pred_values, strict=False):
         i = label_to_idx.get(int(truth))
         j = label_to_idx.get(int(pred))
         if i is not None and j is not None:
             matrix[i, j] += 1
 
     return matrix
-from torch import Tensor
 
 
 class MaskformerConfusionMatrix(Callback):
