@@ -5,6 +5,7 @@ same graph kernel as the model side. Public surface:
 
 - base classes: `DatasetModule`, `Reader`, `Processor`, `WorkerCtx`
 - the throughput-preserving reader: `H5StructuredReader` (+ `GroupConfig`)
+- the multi-sample combining reader: `MultiSampleReader` (+ `SampleConfig`)
 - shipped processors: `Features`, `Labels`, `MultiTarget`
 - the runtime: `GraphDataset` (per-batch plan execution + torch boundary)
   and `GraphDataModule` (Lightning wiring, ``data:`` YAML block)
@@ -16,6 +17,8 @@ from __future__ import annotations
 from salt.core.data.base import DatasetModule, Processor, Reader, WorkerCtx
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.core.data.easyjet_reader import EasyjetGroupConfig, EasyjetReader
+from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
 from salt.core.data.processors import Features, Labels, MaskFormerTargets, MultiTarget
 from salt.core.data.reader import GroupConfig, H5StructuredReader
 from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
@@ -23,6 +26,8 @@ from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",
     "DatasetModule",
+    "EasyjetGroupConfig",
+    "EasyjetReader",
     "Features",
     "GraphDataModule",
     "GraphDataset",
@@ -30,9 +35,11 @@ __all__ = [
     "H5StructuredReader",
     "Labels",
     "MaskFormerTargets",
+    "MultiSampleReader",
     "MultiTarget",
     "Processor",
     "Reader",
+    "SampleConfig",
     "WorkerCtx",
     "create_vds",
     "default_vds_path",

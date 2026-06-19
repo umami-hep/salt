@@ -188,11 +188,20 @@ class Reader(DatasetModule):
         filename: str | Path,
         num: int = -1,
         vds_path: str | Path | None = None,
+        stage: str | None = None,
     ) -> Reader:
         """Clone this reader onto another source file (config-only, no file I/O).
 
         `GraphDataModule` uses this to derive the per-stage readers from the
         single configured prototype (design §6.1).
+
+        `stage` (``"train"``/``"val"``/``"test"``) is the OPTIONAL per-reader
+        stage-sourcing hook (plan 02): single-source readers (`H5StructuredReader`,
+        `EasyjetReader`) IGNORE it — their one ``filename`` per stage IS the data,
+        so adding the kwarg is byte-for-byte backward compatible. Multi-source
+        readers (`MultiSampleReader`, a future cut-based reader) use it to select
+        each sub-source's per-stage data. The datamodule passes the stage it
+        already knows; readers that don't need it never look at it.
 
         Returns
         -------

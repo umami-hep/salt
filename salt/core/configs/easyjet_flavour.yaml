@@ -1,0 +1,105 @@
+# easyjet_flavour.yaml — a minimal jet-flavour tagger trained DIRECTLY on easyjet
+# AnalysisMiniTree ROOT ntuples via the v2 modular EasyjetReader (NO H5
+# pre-processing). Demonstrates the v2 Reader boundary: a brand-new file format
+# is a NEW Reader — Features / Labels / Normaliser / StreamEmbed / the encoder /
+# the task heads / salt2 are all UNCHANGED.
+#
+# The jets stream is a per-event JAGGED sequence (recojet_antikt4PFlow_*),
+# padded to a fixed multiplicity by the reader; the model treats it as a token
+# sequence (Normaliser -> StreamEmbed -> Concat -> TransformerEncoder -> Split)
+# and the classification head runs PER JET on HadronConeExclTruthLabelID
+# (4-class b/c/tau/light via label_map 5->0, 4->1, 15->2, 0->3). NO tracks —
+# easyjet output has none. Branch names carry the _NOSYS suffix in config, so
+# HH4b vs flavtag is a config change, not a code change.
+#
+# Data paths are REQUIRED overrides — NO machine paths are committed. uproot +
+# awkward are runtime reader extras (pip install in salt.sif). A typical
+# invocation FROM THE REPO ROOT:
+#
+#   salt2 fit --config salt/core/configs/easyjet_flavour.yaml \
+#     --data.train_file $DIR \
+#     --data.val_file   $DIR \
+#     --model.modules.norm.init_args.norm_dict $NORM
+#
+# ($DIR = a directory of .root files or a single file; $NORM = a norm_dict.yaml
+# with mean/std for the 7 jet features under a top-level `jets:` key.)
+
+name: easyjet_flavour
+
+data:
+  batch_size: 1000
+  num_workers: 4
+  modules:
+    reader:
+      class_path: salt.core.data.EasyjetReader
+      init_args:
+        tree: AnalysisMiniTree
+        groups:
+          jets:
+            jagged: true
+            truncate: 20
+            branches:
+              pt: recojet_antikt4PFlow_pt_NOSYS
+              eta: recojet_antikt4PFlow_eta
+              phi: recojet_antikt4PFlow_phi
+              m: recojet_antikt4PFlow_m_NOSYS
+              GN2v01_pb: recojet_antikt4PFlow_GN2v01_pb
+              GN2v01_pc: recojet_antikt4PFlow_GN2v01_pc
+              GN2v01_pu: recojet_antikt4PFlow_GN2v01_pu
+              HadronConeExclTruthLabelID: recojet_antikt4PFlow_HadronConeExclTruthLabelID
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, phi, m, GN2v01_pb, GN2v01_pc, GN2v01_pu]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header) — jets stream only
+          streams: [jets]
+      jet_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: jets
+          out_dim: 128
+          dense: {hidden_layers: [128], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [jets]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: 128
+          out_dim: 128
+          num_layers: 2
+          attention: {num_heads: 4, attn_type: torch-math}
+          dense: {activation: ReLU, gated: false}
+      split:
+        class_path: salt.core.nn.Split
+        init_args: {streams: [jets]}
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          label: HadronConeExclTruthLabelID
+          class_names: [bjets, cjets, taujets, ujets]
+          # easyjet HadronConeExclTruthLabelID -> 4-class index:
+          # 5=b->0, 4=c->1, 15=tau->2, 0=light->3
+          label_map: {5: 0, 4: 1, 15: 2, 0: 3}
+          dense: {hidden_layers: [128, 64], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossSum
+
+trainer:
+  max_epochs: 20
+  precision: 32-true

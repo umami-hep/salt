@@ -48,6 +48,11 @@ from salt.core.data.samplers import RandomBatchSampler
 
 __all__ = ["GraphDataModule"]
 
+# Map the per-stage Mode to the stage key passed through Reader.with_source(stage=...)
+# (the plan-02 per-reader stage-sourcing hook). Single-source readers ignore it;
+# MultiSampleReader uses it to select each sub-reader's per-stage source.
+_STAGE_OF_MODE: dict[Mode, str] = {Mode.FIT: "train", Mode.VAL: "val", Mode.TEST: "test"}
+
 
 class GraphDataModule(lightning.LightningDataModule):
     """LightningDataModule running the v2 dataset pipeline (design §6.1).
@@ -259,7 +264,9 @@ class GraphDataModule(lightning.LightningDataModule):
                 "GraphDataModule has no sinks — pass sinks= or call set_sinks() with the "
                 "model boundary's demanded keys before setup (design §3.3, §6.1)"
             )
-        reader = self._reader_proto.with_source(filename=filename, num=num, vds_path=vds_path)
+        reader = self._reader_proto.with_source(
+            filename=filename, num=num, vds_path=vds_path, stage=_STAGE_OF_MODE[mode]
+        )
         # deep-copy the processors per stage: bind-time state (e.g. the Labels
         # narrowed key set) is per-(dataset, mode) and must not leak between
         # the train/val/test plans sharing this module dict (design §2.3)
@@ -292,15 +299,15 @@ class GraphDataModule(lightning.LightningDataModule):
         if self.trainer is None or not self.trainer.is_global_zero:
             return
         if stage == "fit":
-            for filename, num, vds in (
-                (self.train_file, self.num_train, self.train_vds_path),
-                (self.val_file, self.num_val, self.val_vds_path),
+            for filename, num, vds, stage_key in (
+                (self.train_file, self.num_train, self.train_vds_path, "train"),
+                (self.val_file, self.num_val, self.val_vds_path, "val"),
             ):
                 if filename is not None:
-                    self._reader_proto.with_source(filename, num, vds).prepare()
+                    self._reader_proto.with_source(filename, num, vds, stage=stage_key).prepare()
         elif stage == "test" and self.test_file is not None:
             self._reader_proto.with_source(
-                self.test_file, self.num_test, self.test_vds_path
+                self.test_file, self.num_test, self.test_vds_path, stage="test"
             ).prepare()
 
     def _staging_active(self) -> bool:
