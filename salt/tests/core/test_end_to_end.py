@@ -190,14 +190,14 @@ class TestPlot:
         out_path = tmp_path / "graph.svg"
         assert cli_main(["graph", "plot", "-c", TOY_CFG, "--mode", "fit", "-o", str(out_path)]) == 0
         dot = (tmp_path / "graph.dot").read_text()
-        assert '"<sources>" -> "source" [label="raw.x"]' in dot
-        assert '"<sources>" -> "labels" [label="raw.x"]' in dot
-        assert '"source" -> "embed" [label="inputs.x"]' in dot
-        assert '"embed" -> "head" [label="embed.x"]' in dot
+        assert '"<sources>" -> "source" [label="raw.x (B, 8)"]' in dot
+        assert '"<sources>" -> "labels" [label="raw.x (B, 8)"]' in dot
+        assert '"source" -> "embed" [label="inputs.x (B, 8)"]' in dot
+        assert '"embed" -> "head" [label="embed.x (B, 16)"]' in dot
         # kind styling: labels orange, losses red, pad masks dotted grey
-        assert '"labels" -> "head" [label="labels.x", color=orange' in dot
+        assert '"labels" -> "head" [label="labels.x (B)", color=orange' in dot
         assert '"head" -> "<sinks>" [label="losses.total", color=red' in dot
-        assert 'label="masks.x", color=grey, fontcolor=grey, style=dotted' in dot
+        assert 'label="masks.x (B)", color=grey, fontcolor=grey, style=dotted' in dot
         # writer is TEST-gated: absent from the FIT graph entirely
         assert '"writer"' not in dot
 

@@ -50,7 +50,7 @@ class TestDotSource:
         assert "digraph salt_core_fit {" in dot
         assert '"embed"' in dot
         assert '"<sources>" -> "source"' in dot
-        assert '"embed" -> "head" [label="embed.x"' in dot
+        assert '"embed" -> "head" [label="embed.x (B, 16)"' in dot
         assert "color=orange" in dot  # label kind
 
     def test_pruned_rendered_dashed(self, plan):

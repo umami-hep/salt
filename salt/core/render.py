@@ -142,6 +142,43 @@ def _label(*lines: str) -> str:
     return '"' + "\\n".join(_esc(line) for line in lines) + '"'
 
 
+def _fmt_shape(spec: TensorSpec | None) -> str:
+    """Format a spec's shape as ``"(d0, d1, ...)"`` for edge labels.
+
+    Symbolic dims (``"B"``, ``"T:tracks"``) and concrete ints are joined as-is.
+    A scalar/None-shape spec (and a missing spec) yields ``""`` so the edge
+    keeps just its key rather than an empty ``"()"``.
+
+    Returns
+    -------
+    str
+        The parenthesised shape, or ``""`` when there is none.
+    """
+    # `not spec.shape` covers both None and the empty tuple () — a scalar
+    # (e.g. a `losses.*` leaf) has no dims worth showing, so it keeps just its
+    # key rather than a noisy "()".
+    if spec is None or not spec.shape:
+        return ""
+    return "(" + ", ".join(str(dim) for dim in spec.shape) + ")"
+
+
+def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
+    """Resolve the `TensorSpec` an edge carries (mirrors `dot_source`'s lookup).
+
+    For a source edge (``producer == SOURCES``) the spec comes from
+    `plan.sources`; otherwise from the producing step's `produces`. Uses
+    ``.get`` so a missing key degrades to ``None`` rather than raising.
+
+    Returns
+    -------
+    TensorSpec | None
+        The resolved spec, or ``None`` if unavailable.
+    """
+    if producer == SOURCES:
+        return plan.sources.get(key)
+    return plan.step(producer).produces.get(key)
+
+
 def _edge_style(key: str, spec: TensorSpec) -> list[str]:
     """Kind-based DOT edge styling (design §4.3).
 
@@ -204,7 +241,9 @@ def dot_source(
             spec = plan.sources[edge.key]
         else:
             spec = plan.step(edge.producer).produces[edge.key]
-        attrs = [f"label={_quote(edge.key)}", *_edge_style(edge.key, spec)]
+        shape = _fmt_shape(spec)
+        label_text = f"{edge.key} {shape}" if shape else edge.key
+        attrs = [f"label={_quote(label_text)}", *_edge_style(edge.key, spec)]
         lines.append(f"  {_quote(edge.producer)} -> {_quote(edge.consumer)} [{', '.join(attrs)}];")
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -378,10 +417,15 @@ def render_graph(
         per_src_idx[src] += 1
         t = (0.35, 0.58, 0.78)[i % 3]
         sign = 1 if i % 2 == 0 else -1
+        # each key paired with ITS OWN spec shape (never reuse one for the group)
+        label_lines = []
+        for key in sorted(keys):
+            shape = _fmt_shape(_edge_spec(plan, src, key))
+            label_lines.append(f"{key} {shape}" if shape else key)
         ax.text(
             x0 + t * (x1 - x0),
             y0 + t * (y1 - y0) + sign * (0.22 + 0.05 * len(keys)),
-            "\n".join(sorted(keys)),
+            "\n".join(label_lines),
             fontsize=7.6,
             ha="center",
             va="bottom" if sign > 0 else "top",
@@ -420,7 +464,13 @@ def render_graph(
                 )
             )
         ax.add_patch(Ellipse((bx, by), 1.5, 0.55, fc="#f2f2f2", ec="#888888", lw=1.0, zorder=2))
-        ax.text(bx, by, key, fontsize=7.0, ha="center", va="center", style="italic", zorder=3)
+        if tag == "in":
+            shape = _fmt_shape(plan.sources.get(key))
+        else:
+            producer = next(iter(boundary_out[key]))
+            shape = _fmt_shape(_edge_spec(plan, producer, key))
+        text = f"{key}\n{shape}" if shape else key
+        ax.text(bx, by, text, fontsize=7.0, ha="center", va="center", style="italic", zorder=3)
 
     for name, (x, y) in pos.items():
         ax.add_patch(
