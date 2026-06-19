@@ -53,6 +53,31 @@ from salt.core.schema import GroupSchema, Schema
 
 __all__ = ["EasyjetGroupConfig", "EasyjetReader"]
 
+
+def _require_root_deps() -> None:
+    """Import-time guard for the optional ROOT reader extra.
+
+    Called once at the first file-touching operation (``prepare`` /
+    ``_read_columns`` / ``_array_dtype_name`` / ``_max_count``).  If uproot or
+    awkward are absent the user gets a clear, actionable error pointing at the
+    correct install command instead of a bare ``ModuleNotFoundError`` from deep
+    inside an array method.
+
+    This function is intentionally cheap when the deps ARE present (two imports
+    that are already cached in ``sys.modules`` after the first call).
+    """
+    try:
+        import awkward  # noqa: F401
+        import uproot  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "EasyjetReader requires the 'easyjet' extra — install with:\n"
+            "  pip install 'salt[easyjet]'\n"
+            "or directly:\n"
+            "  pip install uproot awkward"
+        ) from exc
+
+
 # Default pad fills, by dtype kind (numpy kind code). Floats pad to 0.0 (zeroed
 # again downstream after masking in Features); SIGNED ints (labels) pad to the
 # -1 sentinel so a padded label is never a real class; unsigned ints pad to 0
@@ -287,6 +312,7 @@ class EasyjetReader(Reader):
         """
         if self._table is not None:
             return
+        _require_root_deps()
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy; design §6.1)
 
@@ -368,6 +394,7 @@ class EasyjetReader(Reader):
         str
             A ``np.dtype(name)``-constructible name.
         """
+        _require_root_deps()
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
         flat = ak.flatten(arr, axis=None) if is_jagged else arr
@@ -550,6 +577,7 @@ class EasyjetReader(Reader):
             ``{field: awkward/numpy array}`` of length ``stop - start``, in global
             row order. Jagged fields are awkward arrays; scalar fields are numpy.
         """
+        _require_root_deps()
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 

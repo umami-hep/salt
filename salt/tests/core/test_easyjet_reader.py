@@ -347,3 +347,111 @@ def test_no_top_level_uproot_awkward_import() -> None:
     assert "uproot" not in top_level_imports
     assert "awkward" not in top_level_imports
     del src
+
+
+# --------------------------------------------------------------------------- #
+# 5. pyproject.toml optional-dependency structure
+# --------------------------------------------------------------------------- #
+
+
+def test_uproot_awkward_are_extras_not_base_deps() -> None:
+    """uproot/awkward must NOT appear in base [project.dependencies].
+
+    They must appear in the `root` and/or `easyjet` optional-dependency groups,
+    confirming `pip install salt` stays uproot-free.
+    """
+    import importlib.util
+    import tomllib
+    from pathlib import Path
+
+    # Locate pyproject.toml relative to the installed package location
+    spec = importlib.util.find_spec("salt")
+    assert spec is not None and spec.origin is not None
+    pkg_root = Path(spec.origin).parent  # salt/
+    proj_root = pkg_root.parent  # worktree root
+    pyproject = proj_root / "pyproject.toml"
+    assert pyproject.exists(), f"pyproject.toml not found at {pyproject}"
+
+    with pyproject.open("rb") as fh:
+        data = tomllib.load(fh)
+
+    base_deps: list[str] = data["project"].get("dependencies", [])
+    base_names = {d.split("[")[0].split(">=")[0].split("==")[0].split("!=")[0].strip().lower()
+                  for d in base_deps}
+    assert "uproot" not in base_names, "uproot must not be in base [project.dependencies]"
+    assert "awkward" not in base_names, "awkward must not be in base [project.dependencies]"
+
+    optional: dict = data["project"].get("optional-dependencies", {})
+    # The `easyjet` extra must exist and pull in uproot/awkward (directly or via root)
+    assert "easyjet" in optional, "Missing [project.optional-dependencies.easyjet]"
+    easyjet_deps = optional["easyjet"]
+    # Either easyjet lists them directly, or it includes the `root` meta-extra
+    root_deps = optional.get("root", [])
+    all_easyjet = easyjet_deps + root_deps
+    all_easyjet_lower = {d.lower() for d in all_easyjet}
+    assert any("uproot" in d for d in all_easyjet_lower), (
+        "uproot not found in easyjet or root optional-dependency group"
+    )
+    assert any("awkward" in d for d in all_easyjet_lower), (
+        "awkward not found in easyjet or root optional-dependency group"
+    )
+
+
+def test_missing_root_deps_raises_helpful_error(single_file: tuple[Path, dict]) -> None:
+    """EasyjetReader with blocked uproot must raise a helpful ImportError.
+
+    The error message must mention `salt[easyjet]` so the user knows exactly
+    what to install — NOT a bare ModuleNotFoundError from deep inside uproot.
+    """
+    import importlib
+    import sys
+
+    path, _ = single_file
+
+    # Save and remove real modules from sys.modules to simulate absence
+    saved: dict[str, object] = {}
+    for key in list(sys.modules):
+        if key == "uproot" or key.startswith("uproot."):
+            saved[key] = sys.modules.pop(key)
+
+    # Install a meta_path blocker for uproot (same pattern as the existing
+    # test_no_top_level_uproot_awkward_import style used in the codebase)
+    class _BlockUproot:
+        @staticmethod
+        def find_spec(name, path, target=None):  # noqa: ANN001, ANN202
+            if name == "uproot" or name.startswith("uproot."):
+                raise ModuleNotFoundError(f"blocked: {name}")
+            return None
+
+    blocker = _BlockUproot()
+    sys.meta_path.insert(0, blocker)
+    # Also ensure the easyjet_reader module re-runs its guard by busting the
+    # cached imports inside the module (clear uproot from its namespace if loaded)
+    import salt.core.data.easyjet_reader as _mod
+
+    _orig_uproot = _mod.__dict__.pop("uproot", None)
+
+    try:
+        reader = EasyjetReader(
+            groups={"jets": EasyjetGroupConfig(branches={"pt": "recojet_antikt4PFlow_pt_NOSYS"})},
+            filename=path,
+        )
+        with pytest.raises(ImportError) as exc_info:
+            reader.prepare()
+        msg = str(exc_info.value)
+        assert "salt[easyjet]" in msg, (
+            f"Error message must mention 'salt[easyjet]', got: {msg!r}"
+        )
+        # Must NOT be a bare ModuleNotFoundError without context
+        assert "pip install" in msg, (
+            f"Error message must include install instructions, got: {msg!r}"
+        )
+    finally:
+        sys.meta_path.remove(blocker)
+        # Restore uproot so subsequent tests work
+        for key, mod in saved.items():
+            sys.modules[key] = mod  # type: ignore[assignment]
+        if _orig_uproot is not None:
+            _mod.__dict__["uproot"] = _orig_uproot
+        # Force uproot reimport into the module cache
+        importlib.import_module("uproot")

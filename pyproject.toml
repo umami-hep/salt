@@ -40,6 +40,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# ROOT-based reader extras: each reader type that needs uproot/awkward (or any
+# other non-core dep) gets its own named extra so `pip install salt[<name>]`
+# pulls exactly what that reader needs.  The `root` group is a shared base for
+# all ROOT readers; individual reader groups (e.g. `easyjet`) pull it in.
+# Pattern for future readers:
+#   physlite = ["salt[root]", "any-physlite-specific-pkg"]
+#   easyjet = ["salt[root]"]   # when easyjet needs nothing beyond root
+root = [
+  "uproot>=5",
+  "awkward>=2",
+]
+# `pip install 'salt[easyjet]'`  — installs uproot + awkward for EasyjetReader.
+easyjet = [
+  "salt[root]",
+]
 muP = [
   "aiobotocore==2.24.2",
   "boto3==1.40.18",
