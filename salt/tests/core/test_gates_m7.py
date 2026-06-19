@@ -56,20 +56,17 @@ _W2B_RELOCATED_SITES = {
 # there. Its removal is instead pinned by _W2C_RESIDUAL_WORKLIST below: maskdecoder
 # carries EXACTLY ONE salt.models.maskformer import (MaskDecoderLayer), not two —
 # proving the get_masks import is gone (and after W2c-2 the V1Dense import too).
-# the W2c-3 end-state worklist: the EXACT residual after W2c-1 (task family
-# absorbed -> nn/tasks.py salt.models.task imports gone) and W2c-2 (the
-# Dense/Transformer/pooling family absorbed into nn/modules.py -> modules.py:72-74
-# + maskdecoder.py V1Dense gone), pinned at (file, lineno, module) so the
-# 18 -> 11 -> 7 -> 3 monotonic drop is gate-verified and any regression that
-# re-introduces a flagged v1 import (or fails to land the final W2c-3 relocation)
-# trips this test. The 3 remaining are the W2c-3 worklist (the MaskFormer
-# decoder-layer + matched-loss/matcher family); ALL salt.models, salt.utils fully
-# eliminated.
-_W2C_RESIDUAL_WORKLIST = {
-    ("nn/maskdecoder.py", 54, "salt.models.maskformer"),  # MaskDecoderLayer (W2c-3)
-    ("nn/maskformer_loss.py", 61, "salt.models.maskformer_loss"),  # MaskFormerLoss (W2c-3)
-    ("nn/maskformer_loss.py", 62, "salt.models.matcher"),  # matcher (W2c-3)
-}
+# the W2c-3 END-STATE worklist: the FINAL absorption has LANDED. After W2c-1 (task
+# family absorbed -> nn/tasks.py salt.models.task imports gone), W2c-2 (the
+# Dense/Transformer/pooling family absorbed into nn/modules.py + maskdecoder.py
+# V1Dense gone), and W2c-3 (the MaskFormer decoder-layer + matched-loss/matcher
+# family absorbed VERBATIM into nn/maskdecoder.py + nn/maskformer_loss.py), the
+# residual is EMPTY — the 18 -> 11 -> 7 -> 3 -> 0 monotonic drop is now complete and
+# gate-verified. salt.core is fully decoupled from the v1 tree (RS1 count == 0, the
+# W2 self-containment success criterion). The pin stays EMPTY so any regression that
+# re-introduces a flagged v1 import trips this test (and test_w2c_residual_is_zero
+# below asserts the count is 0 explicitly).
+_W2C_RESIDUAL_WORKLIST: set[tuple[str, int, str]] = set()
 _EXPECTED_KEEPS = {"event_classifier", "regression_multi_target"}
 # the 6 Wave-F2-RESTORED configs (fixture restored to full v1 capability).
 _EXPECTED_RESTORED = {
@@ -673,11 +670,10 @@ class TestRS1:
         assert utils_residual == [], f"salt.utils still imported by core: {utils_residual}"
 
     def test_w2c_residual_worklist_is_pinned(self, tmp_path):
-        # the W2c-3 worklist: pin the EXACT residual after W2c-1 + W2c-2 so the
-        # 18 -> 11 -> 7 -> 3 monotonic drop is gate-verified. Matched at (file,
-        # module) multiset granularity (robust to benign line shifts; a re-added
-        # flagged v1 import or an unlanded W2c-3 relocation still trips it). EVERY
-        # residual is salt.models — the only v1 sub-tree core still touches.
+        # the W2c-3 END-STATE: the FINAL absorption has landed, so the pinned
+        # worklist is EMPTY and the residual must match it (count 0). Matched at
+        # (file, module) multiset granularity (robust to benign line shifts; a
+        # re-added flagged v1 import or a reverted W2c-3 absorption still trips it).
         _code, report = run_rs1(tmp_path)
         residual_fm = sorted((h["file"], h["module"]) for h in report["residual_imports"])
         worklist_fm = sorted((f, m) for f, _lineno, m in _W2C_RESIDUAL_WORKLIST)
@@ -685,7 +681,11 @@ class TestRS1:
             f"residual != pinned W2c worklist\n  residual: {residual_fm}\n  worklist: {worklist_fm}"
         )
         assert report["config"]["residual_import_count"] == len(_W2C_RESIDUAL_WORKLIST)
-        assert all(h["pkg"] == "models" for h in report["residual_imports"])
+        # the W2c-3 success criterion: ZERO residual v1 imports (salt.core fully
+        # decoupled from the v1 tree). The gate PASSES (rc 0 GREEN) at this count.
+        assert report["config"]["residual_import_count"] == 0
+        assert report["checks"]["no_residual_v1_imports"] is True
+        assert _code == 0
 
     def test_harness_files_are_excluded(self, tmp_path):
         # the gate harnesses + v1 adapters import v1 deliberately and are scoped

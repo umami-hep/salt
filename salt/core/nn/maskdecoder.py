@@ -43,17 +43,24 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.modules import Dense, _stream_len
+from salt.core.nn.modules import GLU, Attention, Dense, _stream_len
 
-# composed v1 layers (M2 porting policy, plan 05 — absorbed at M7)
-# Dense is now the v2-NATIVE absorbed class (M7 W2c-2; salt.core.nn.modules.Dense,
-# a verbatim copy of v1 salt.models.Dense). V1MaskDecoderLayer remains a W2c-3
-# absorption target (the per-object MaskFormer decoder layer); it stays composed
-# from the v1 tree until that wave. ``get_masks`` is a tiny pure function —
-# inlined here (M7 W2b) BYTE-FAITHFULLY from v1 maskformer.py:206-241.
-from salt.models.maskformer import MaskDecoderLayer as V1MaskDecoderLayer
+# Dense / Attention / GLU are the v2-NATIVE absorbed classes (M7 W2c-2;
+# salt.core.nn.modules, verbatim copies of v1 salt.models.Dense /
+# salt.models.transformer.{Attention,GLU}). The per-object MaskFormer decoder
+# LAYER is now ABSORBED here too (M7 W2c-3 — the FINAL absorption): the
+# ``MaskDecoderLayer`` class below is a VERBATIM copy of v1
+# ``salt.models.maskformer.MaskDecoderLayer`` (maskformer.py:352-454), composing
+# the absorbed Attention/GLU from salt.core.nn.modules — NOT the v1 tree — so its
+# parameter names (q_ca.*, q_sa.*, q_dense.*, kv_ca.*, kv_dense.*, mask_net.*) and
+# its forward math are byte-for-byte v1's. The composed MaskDecoder.layers stack
+# is therefore state_dict-compatible with a fresh v1 MaskDecoder (the MF1a gate
+# oracle load_state_dict-copies this composed decoder into an independent v1
+# MaskDecoder and compares bitwise). ``get_masks`` is a tiny pure function —
+# inlined here (M7 W2b) BYTE-FAITHFULLY from v1 maskformer.py:206-241; the layer
+# uses that same module-level ``get_masks``.
 
-__all__ = ["MaskDecoder"]
+__all__ = ["MaskDecoder", "MaskDecoderLayer"]
 
 _UNNAMED = "unnamed"
 """Placeholder instance name — the config dict key is assigned before compile (design §2.2)."""
@@ -231,9 +238,11 @@ class MaskDecoder(nn.Module):
             input_size=embed_dim, output_size=mask_cfg.pop("output_size", embed_dim), **mask_cfg
         )
 
-        # v1 layer stack — every layer shares the ONE mask_net (maskformer.py:67-69)
+        # v1 layer stack — every layer shares the ONE mask_net (maskformer.py:67-69).
+        # ``MaskDecoderLayer`` is the absorbed v2-native layer (below); it composes the
+        # absorbed Attention/GLU so the stack is state_dict-compatible with v1.
         self.layers = nn.ModuleList([
-            V1MaskDecoderLayer(embed_dim, mask_net=self.mask_net, **md_cfg)
+            MaskDecoderLayer(embed_dim, mask_net=self.mask_net, **md_cfg)
             for _ in range(num_layers)
         ])
 
@@ -396,3 +405,118 @@ class MaskDecoder(nn.Module):
             f"{self.out_stream}.class_probs": preds["class_probs"],
             f"{self.out_stream}.masks": masks,
         }
+
+
+class MaskDecoderLayer(nn.Module):
+    """Single decoder layer used in `MaskDecoder` (M7 W2c-3 v2-native absorption).
+
+    A VERBATIM copy of v1 ``salt.models.maskformer.MaskDecoderLayer``
+    (maskformer.py:352-454) — the FINAL M7 absorption. It composes the absorbed
+    `Attention` / `GLU` from ``salt.core.nn.modules`` (themselves verbatim copies of
+    v1 ``salt.models.transformer.{Attention,GLU}``, W2c-2) and calls the module-level
+    `get_masks` (W2b inline), so its parameter names (``q_ca.*`` / ``q_sa.*`` /
+    ``q_dense.*`` / ``kv_ca.*`` / ``kv_dense.*`` / ``mask_net.*``) and forward math are
+    byte-for-byte v1's — the composed `MaskDecoder.layers` stack stays state_dict-
+    compatible with a fresh v1 `MaskDecoder` (the MF1a parity oracle), and the
+    decoder forward stays bitwise vs v1.
+
+    Applies (1) cross-attention from queries to inputs, (2) self-attention
+    among queries, (3) a gated feed-forward (GLU) update, and optionally
+    (4) a bidirectional cross-attention update from inputs to queries.
+    Mask-guided attention can be enabled to sparsify cross-attention.
+
+    Parameters
+    ----------
+    embed_dim : int
+        Embedding dimension ``E``.
+    n_heads : int
+        Number of attention heads.
+    mask_attention : bool
+        If ``True``, build a boolean attention mask from predicted masks to
+        restrict cross-attention to confident positions.
+    bidirectional_ca : bool
+        If ``True``, also update inputs via cross-attention from queries.
+    mask_net : nn.Module
+        Module mapping queries to mask tokens used when ``mask_attention=True``.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        n_heads: int,
+        mask_attention: bool,
+        bidirectional_ca: bool,
+        mask_net: nn.Module,
+    ) -> None:
+        super().__init__()
+
+        self.mask_attention = mask_attention
+        self.bidirectional_ca = bidirectional_ca
+
+        self.q_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
+        self.q_sa = Attention(embed_dim=embed_dim, num_heads=n_heads)
+        self.q_dense = GLU(embed_dim)
+        if bidirectional_ca:
+            self.kv_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
+            self.kv_dense = GLU(embed_dim)
+        self.mask_net = mask_net
+
+    def forward(
+        self,
+        q: Tensor,
+        kv: Tensor,
+        kv_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply one decoder layer step.
+
+        Parameters
+        ----------
+        q : Tensor
+            Query embeddings of shape ``[B, M, E]``.
+        kv : Tensor
+            Input/key-value embeddings of shape ``[B, L, E]``.
+        kv_mask : Tensor | None, optional
+            Padding mask for ``kv`` of shape ``[B, L]``, by default ``None``.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Tuple ``(q, kv)`` with updated query and (optionally) updated
+            input embeddings, each maintaining their original shapes.
+        """
+        attn_mask = None
+        # Return the q, kv
+        # if we want to do mask attention
+        if self.mask_attention:
+            # New attention masking convention with transformers 2
+            # Positions with True are allowed while False are masked
+            # Compute masks and apply sigmoid
+            attn_mask = get_masks(kv, q, self.mask_net, kv_mask).sigmoid()
+
+            # Threshold and detach
+            attn_mask = (attn_mask > 0.9).detach()
+            # Check if all values along the last dimension are 0 (equivalent to `False` in boolean)
+            # If so, set them to 1 (equivalent to `True` in boolean)
+            newmask = torch.all(attn_mask == 0, dim=-1, keepdim=True).expand(attn_mask.shape)
+
+            attn_mask = attn_mask | newmask
+
+        # update queries with cross attention from nodes
+        q = q + self.q_ca(q, kv=kv, kv_mask=kv_mask, attn_mask=attn_mask)
+
+        # update queries with self attention
+        q = q + self.q_sa(q)
+
+        # dense update
+        q = q + self.q_dense(q)
+
+        # update nodes with cross attention from queries and dense layer
+        if self.bidirectional_ca:
+            if attn_mask is not None:
+                attn_mask = attn_mask.transpose(1, 2)
+                newmask = torch.all(attn_mask == 1, dim=-1, keepdim=True).expand(attn_mask.shape)
+                attn_mask = attn_mask | ~newmask.bool()
+
+            kv = kv + self.kv_ca(kv, q, attn_mask=attn_mask)
+            kv = kv + self.kv_dense(kv)
+        return q, kv
