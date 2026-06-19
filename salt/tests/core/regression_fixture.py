@@ -330,8 +330,13 @@ def build_independent_v1_head(
         "weight": composed.weight,
         "dense_config": dense_config,
     }
+    # M7 W2c-1: ``composed`` is now the v2-native absorbed head (RegressionTaskModule
+    # composes salt.core.nn.tasks._AbsorbedRegressionTask / _AbsorbedGaussianRegressionTask),
+    # so detect the gaussian case STRUCTURALLY (output_size == 2 * len(targets), the v1
+    # GaussianRegressionTask invariant, task.py:664) instead of isinstance against the v1
+    # class — the independent v1 ORACLE built here is unchanged.
     fresh: V1RegressionTask | V1GaussianRegressionTask
-    if isinstance(composed, V1GaussianRegressionTask):
+    if composed.net.output_size == 2 * len(composed.targets):
         fresh = V1GaussianRegressionTask(**common)
     else:
         fresh = V1RegressionTask(scaler=scaler, **common)

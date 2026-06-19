@@ -44,15 +44,12 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.modules import _reject_width_keys, _stream_len
+from salt.core.nn.modules import V1Dense, _reject_width_keys, _stream_len
 from salt.core.onnx.config import ExportOutput
-from salt.core.writers.names import VERTEX_INDEX, pascal_case
-from salt.models.task import ClassificationTask as V1ClassificationTask
-from salt.models.task import GaussianRegressionTask as V1GaussianRegressionTask
-from salt.models.task import RegressionTask as V1RegressionTask
-from salt.models.task import VertexingTask as V1VertexingTask
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
+from salt.core.utils.union_find import get_node_assignment_jit
+from salt.core.writers.names import VERTEX_INDEX, pascal_case
 
 __all__ = ["ClassificationTaskModule", "RegressionTaskModule", "VertexingTaskModule"]
 
@@ -78,6 +75,701 @@ _DEFAULT_VTX_LOSS: dict[str, Any] = {
 }
 _DEFAULT_REG_LOSS: dict[str, Any] = {"class_path": "torch.nn.MSELoss"}
 _DEFAULT_GAUSS_LOSS: dict[str, Any] = {"class_path": "torch.nn.GaussianNLLLoss"}
+
+
+# ===========================================================================
+# Absorbed v1 task-head family (M7 W2c-1) — v2-native, math copied VERBATIM
+# from ``salt.models.task`` (the read-only gate ORACLE). The v2 ``*TaskModule``
+# classes below compose these v2-native heads at ``bind`` (was: the v1
+# ``salt.models.task.*`` classes); ``_OriginWeightedVertexing`` subclasses the
+# v2-native ``_AbsorbedVertexingTask``. The v1 originals are NEVER edited — the
+# G3 / M5 / parity_gn2 gates still import ``salt.models.task`` to compare
+# BITWISE, so this family reproduces the v1 forward/loss/inference EXACTLY:
+# origin-weighting (v1 task.py:957-964), the ignore_index=-1 / ``-2`` label fold
+# (task.py:218-227), ``nan_loss`` (task.py:384-440), target scaling
+# (task.py:442-602) and the Gaussian/Classification/Vertexing specifics.
+# ===========================================================================
+
+
+def _add_dims(x: Tensor, ndim: int) -> Tensor:
+    """Add singleton dims after the batch dim to reach ``ndim`` (v1 tensor_utils.py:168-198).
+
+    Inlined byte-faithfully from v1 ``salt.utils.tensor_utils.add_dims`` — the
+    ``masked_softmax`` mask-broadcast helper the classification ``run_inference``
+    relies on (sequence-mode padded softmax).
+
+    Returns
+    -------
+    Tensor
+        ``x`` reshaped with the added singleton dimensions.
+
+    Raises
+    ------
+    ValueError
+        If ``ndim`` is smaller than ``x.ndim``.
+    """
+    if (dim_diff := ndim - x.dim()) < 0:
+        raise ValueError(f"Target ndim ({ndim}) is smaller than input ndim ({x.dim()})")
+    if dim_diff > 0:
+        x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
+    return x
+
+
+def _masked_softmax(x: Tensor, mask: Tensor | None, dim: int = -1) -> Tensor:
+    """Softmax ignoring padded elements (v1 tensor_utils.py:74-107, byte-faithful).
+
+    Inlined VERBATIM from v1 ``salt.utils.tensor_utils.masked_softmax`` — the
+    padded-aware softmax the absorbed ``ClassificationTask.run_inference`` uses
+    for sequence (per-token) heads (v1 task.py:263). Elements where ``mask`` is
+    ``True`` are set to ``-inf`` before the softmax and zeroed after.
+
+    Returns
+    -------
+    Tensor
+        Tensor after the masked softmax.
+    """
+    if mask is not None:
+        mask = _add_dims(mask, x.dim())
+        x = x.masked_fill(mask, -torch.inf)
+    x = torch.softmax(x, dim=dim)
+    if mask is not None:
+        x = x.masked_fill(mask, 0)
+    return x
+
+
+# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
+@torch.jit.script
+def _mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
+    """Unflatten a per-node array back to a batch-shaped tensor (v1 task.py:1009-1035).
+
+    Inlined VERBATIM from v1 ``salt.models.task.mask_fill_flattened`` — the
+    ``@torch.jit.script`` decorator is PRESERVED (the scripted loop semantics are
+    load-bearing for vertexing inference parity). Padded positions read ``-inf``.
+
+    Returns
+    -------
+    Tensor
+        Filled tensor of shape ``[B, L, F]``; padded positions set to ``-inf``.
+    """
+    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
+    mask = mask.to(torch.bool)
+    start_index = end_index = 0
+
+    for i in range(mask.shape[0]):
+        if mask[i].shape[0] > 0:
+            end_index += (~mask[i]).to(torch.long).sum()
+            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
+            start_index = end_index
+
+    return filled
+
+
+class _AbsorbedTaskBase(nn.Module):
+    """Absorbed v1 ``TaskBase`` (task.py:20-78) — v2-native, math verbatim.
+
+    Wraps a `Dense` head (the W2c-2 composition target ``V1Dense``), a loss, an
+    ``input_name`` stream tag and a scalar ``weight``. ``input_name_mask`` is the
+    v1 cross-stream selection helper; the v2 modules hand SINGLE-STREAM dicts so
+    it is the identity, but it is reproduced verbatim for bitwise parity.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        input_name: str,
+        dense_config: dict,
+        loss: nn.Module,
+        weight: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.input_name = input_name
+        self.net = V1Dense(**dense_config)
+        self.loss = loss
+        self.weight = weight
+
+    def input_name_mask(self, pad_masks: Mapping) -> Tensor:
+        """Boolean mask selecting tokens from ``self.input_name`` (v1 task.py:58-78).
+
+        Returns
+        -------
+        Tensor
+            Boolean mask of shape ``[L]`` (concatenated across streams), ``True``
+            for positions belonging to ``self.input_name``.
+        """
+        return torch.cat(
+            [
+                torch.ones(m.shape[1], device=m.device) * (1 if (t == self.input_name) else 0)
+                for t, m in pad_masks.items()
+            ],
+        ).bool()
+
+
+class _AbsorbedClassificationTask(_AbsorbedTaskBase):
+    """Absorbed v1 ``ClassificationTask`` (task.py:81-301) — v2-native, math verbatim.
+
+    ``class_names`` is REQUIRED (the v2 modules always pass it; the v1
+    ``CLASS_NAMES`` h5-attr fallback is intentionally dropped — design §3.3).
+    The forward reproduces the ignore_index=-1 default, the label-map remap, and
+    the ``-2`` pad fold (task.py:218-227); ``run_inference`` reproduces the
+    sigmoid / softmax / padded-softmax branch (task.py:240-264).
+    """
+
+    def __init__(
+        self,
+        label: str,
+        class_names: list[str],
+        label_map: Mapping | None = None,
+        sample_weight: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.label = label
+        self.class_names = class_names
+        self.label_map = label_map
+        if self.label_map is not None and self.class_names is None:
+            raise ValueError("Specify class names when using label_map.")
+        if hasattr(self.loss, "ignore_index"):
+            self.loss.ignore_index = -1
+        self.sample_weight = sample_weight
+        if self.sample_weight is not None:
+            assert self.loss.reduction == "none", (
+                "Sample weights only supported for reduction='none'"
+            )
+        if len(self.class_names) != self.net.output_size:
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of outputs ({self.net.output_size}) does not match "
+                f"number of class names ({len(self.class_names)}). Class names: {self.class_names}"
+            )
+
+    def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
+        """Apply per-sample weights to a loss tensor if configured (v1 task.py:153-170).
+
+        Returns
+        -------
+        Tensor
+            Weighted mean loss if ``sample_weight`` is set; otherwise the input.
+        """
+        if self.sample_weight is None:
+            return loss
+        return (loss * labels_dict[self.input_name][self.sample_weight]).mean()
+
+    def forward(
+        self,
+        x: Tensor,
+        labels_dict: Mapping,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute logits and classification loss (v1 task.py:172-238, verbatim).
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted logits and the loss (``None`` when no labels).
+        """
+        # get predictions and mask
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
+        # get labels and remap them if necessary
+        labels = labels_dict[self.input_name][self.label] if labels_dict else None
+        if labels is not None and self.label_map is not None:
+            mapped_labels = torch.clone(labels)
+            for k, v in self.label_map.items():
+                mapped_labels[labels == k] = v
+            labels = mapped_labels
+
+        # use the mask to remove padded values from the loss (ignore_index=-1 is set by default)
+        if pad_mask is not None and labels is not None:
+            # mask out dodgey labels
+            # TODO @npond: remove when is in the samples
+            # https://gitlab.cern.ch/atlas/athena/-/merge_requests/60199
+            pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
+
+            # update the labels based on the mask (in case not done already)
+            labels = torch.masked_fill(labels, pad_mask, -1)
+
+        loss: Tensor | None = None
+        if labels is not None:
+            if preds.ndim == 3:
+                loss = self.loss(preds.permute(0, 2, 1), labels)
+            elif isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
+                loss = self.loss(preds.squeeze(-1), labels.float())
+            else:
+                loss = self.loss(preds, labels)
+            loss = self.apply_sample_weight(loss, labels_dict)
+            loss *= self.weight
+
+        return preds, loss
+
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
+        """Convert logits to probabilities (v1 task.py:240-264, verbatim).
+
+        Returns
+        -------
+        Tensor
+            Probabilities with the same leading dimensions as ``preds``.
+        """
+        if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
+            probs = torch.sigmoid(preds)
+        elif pad_mask is None:
+            assert preds.ndim == 2
+            probs = torch.softmax(preds, dim=-1)
+        else:
+            assert preds.ndim == 3
+            probs = _masked_softmax(preds, pad_mask.unsqueeze(-1))
+        return probs
+
+
+class _AbsorbedRegressionTaskBase(_AbsorbedTaskBase):
+    """Absorbed v1 ``RegressionTaskBase`` (task.py:304-482) — v2-native, verbatim.
+
+    Owns the single-scaling guard, ``nan_loss`` (NaN-target masking +
+    per-sample weighting + ``torch.nanmean``, task.py:384-440) and ``get_targets``
+    (stack + scaler/denominator/norm_params scaling, task.py:442-482).
+    """
+
+    def __init__(
+        self,
+        targets: list[str] | str,
+        scaler: RegressionTargetScaler | None = None,
+        target_denominators: list[str] | str | None = None,
+        norm_params: dict | None = None,
+        custom_output_names: list[str] | str | None = None,
+        sample_weight: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.scaler = scaler
+        self.targets = listify(targets)
+        self.target_denominators = listify(target_denominators)
+        self.custom_output_names = listify(custom_output_names)
+        if norm_params:
+            norm_params["mean"] = listify(norm_params["mean"])
+            norm_params["std"] = listify(norm_params["std"])
+        self.norm_params = norm_params
+        self.sample_weight = sample_weight
+
+        if [scaler, target_denominators, norm_params].count(None) not in {2, 3}:
+            raise ValueError("Can only use a single scaling method")
+
+        if self.scaler:
+            for target in self.targets:
+                self.scaler.scale(target, torch.Tensor(1))
+        if self.target_denominators and len(self.targets) != len(self.target_denominators):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of targets ({len(self.targets)}) does not match "
+                f"number of target denominators ({len(self.target_denominators)})"
+            )
+        if self.norm_params and len(self.norm_params["mean"]) != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of means in norm_params ({len(self.norm_params['mean'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        if self.norm_params and len(self.norm_params["std"]) != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        if self.sample_weight is not None:
+            assert self.loss.reduction == "none", (
+                "Sample weights only supported for reduction='none'"
+            )
+
+    def nan_loss(self, preds: Tensor, targets: Tensor, targets_dict: Mapping, **kwargs) -> Tensor:
+        """Loss that ignores NaN targets (v1 task.py:384-440, verbatim).
+
+        Returns
+        -------
+        Tensor
+            Mean loss over non-NaN elements.
+
+        Raises
+        ------
+        ValueError
+            If the resulting loss becomes NaN.
+        """
+        invalid = torch.isnan(targets)
+        preds = torch.where(invalid, torch.zeros_like(preds), preds)
+        targets = torch.where(invalid, torch.zeros_like(targets), targets)
+
+        if "var" in kwargs:
+            kwargs["var"] = torch.where(invalid, torch.zeros_like(kwargs["var"]), kwargs["var"])
+
+        loss = self.loss(preds, targets, **kwargs)
+
+        if len(loss.shape) == 0:
+            if torch.isnan(loss):
+                raise ValueError(
+                    "Regression loss is NaN. This may be due to NaN targets,"
+                    " check configs/nan_regression.yaml for options to deal with this."
+                )
+            return loss
+
+        if self.sample_weight is not None:
+            weights = targets_dict[self.input_name][self.sample_weight]
+            weights = weights.unsqueeze(1)
+            # If multiple regression targets, expand the weights to match the shape
+            if loss.shape[1] > 1:
+                weights = weights.expand(-1, loss.shape[1])
+            loss = loss * weights
+
+        nanmean = torch.nanmean(loss)
+        if torch.isnan(nanmean):
+            raise ValueError("NanRegression is NaN. This means all model predictions are NaN")
+        return nanmean
+
+    def get_targets(self, targets_dict: Mapping) -> Tensor | None:
+        """Assemble and scale regression targets (v1 task.py:442-482, verbatim).
+
+        Returns
+        -------
+        Tensor | None
+            Targets of shape ``[B, R]`` (or ``[B, L, R]`` for queries), scaled
+            per configuration; ``None`` when there are no targets.
+        """
+        targets = None
+        if targets_dict:
+            targets = torch.stack(
+                [targets_dict[self.input_name][target] for target in self.targets], dim=1
+            )
+
+        if targets is not None:
+            if self.scaler is not None:
+                for i in range(len(self.targets)):
+                    targets[:, i] = self.scaler.scale(self.targets[i], targets[:, i])
+            if self.target_denominators is not None:
+                for i in range(len(self.targets)):
+                    targets[:, i] = torch.div(
+                        targets[:, i], targets_dict[self.input_name][self.target_denominators[i]]
+                    )
+            if self.norm_params is not None:
+                for i in range(len(self.norm_params["mean"])):
+                    targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
+                        self.norm_params["std"][i]
+                    )
+
+            # We stack targets dict always over the first dimension to allow consistency
+            # when scaling, but for queries we want the regression target to be in the final
+            # dimension. This allows us to keep the same code for both global and query scaling
+            if len(targets.shape) == 3:
+                targets = targets.transpose(1, 2)
+        return targets
+
+
+class _AbsorbedRegressionTask(_AbsorbedRegressionTaskBase):
+    """Absorbed v1 ``RegressionTask`` (task.py:485-642) — v2-native, verbatim.
+
+    Plain regression head: ``output_size == len(targets)``; forward fills padded
+    targets with NaN before ``nan_loss``; ``run_inference`` inverts the scaling
+    (denominator / norm_params / scaler, task.py:567-602).
+    """
+
+    def __init__(self, scaler: RegressionTargetScaler | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        if self.net.output_size != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of outputs ({self.net.output_size}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        self.scaler = scaler
+
+    def forward(
+        self,
+        x: Tensor,
+        targets_dict: Mapping,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute regression predictions and loss (v1 task.py:519-565, verbatim).
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted values and the loss (``None`` when no targets).
+        """
+        if pad_masks is not None and self.input_name != "objects":
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
+        targets = self.get_targets(targets_dict)
+
+        # fill targets with nan where invalid to remove them from loss calculation
+        if pad_mask is not None and targets is not None:
+            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
+
+        loss: Tensor | None = None
+        if targets is not None:
+            loss = self.nan_loss(preds, targets, targets_dict) * self.weight
+
+        return preds, loss
+
+    def run_inference(
+        self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
+    ) -> Tensor:
+        """Invert target scaling to the original space (v1 task.py:567-602, verbatim).
+
+        Returns
+        -------
+        Tensor
+            De-scaled predictions with NaN padding.
+        """
+        preds = preds.float()
+        if self.target_denominators is not None and labels is not None:
+            for i in range(len(self.targets)):
+                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[:, i] *= self.norm_params["std"][i]
+                preds[:, i] += self.norm_params["mean"][i]
+        elif self.scaler is not None:
+            for i in range(len(self.targets)):
+                preds[:, :, i] = self.scaler.inverse(self.targets[i], preds[:, :, i])
+
+        # apply mask if available
+        if pad_mask is not None:
+            preds = torch.masked_fill(preds, pad_mask.unsqueeze(-1), np.nan)
+
+        return preds
+
+
+class _AbsorbedGaussianRegressionTask(_AbsorbedRegressionTaskBase):
+    """Absorbed v1 ``GaussianRegressionTask`` (task.py:645-821) — v2-native, verbatim.
+
+    Mu/sigma head: ``output_size == 2 * len(targets)``; softplus variance, Gaussian
+    NLL loss, and ``run_inference`` returning de-scaled ``(means, stds)`` with
+    ``stddev = sqrt(softplus(var))`` (task.py:729-774).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        if self.net.output_size != 2 * len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of targets ({len(self.targets)}) is not twice the "
+                f"number of outputs ({self.net.output_size})"
+            )
+
+    def forward(
+        self,
+        x: Tensor,
+        targets_dict: Mapping,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute mean/variance predictions and Gaussian NLL loss (v1 task.py:677-727).
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Concatenated means/variances ``[B, 2R]`` and the loss.
+        """
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
+        targets = self.get_targets(targets_dict)
+
+        # split outputs into means and sigmas
+        means, variances = preds.tensor_split(2, -1)
+        variances = nn.functional.softplus(variances)  # ensure positiveness of variance
+
+        # fill targets with nan where padded to remove them from loss calculation
+        if pad_mask is not None and targets is not None:
+            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
+
+        loss: Tensor | None = None
+        if targets is not None:
+            loss = self.nan_loss(means, targets, targets_dict, var=variances) * self.weight
+
+        return preds, loss
+
+    def run_inference(
+        self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """Invert scaling for means + (sqrt of) variances (v1 task.py:729-774, verbatim).
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            De-scaled ``(means, stds)`` each of shape ``[B, R]``.
+
+        Raises
+        ------
+        ValueError
+            If called without the necessary scaling parameters.
+        """
+        if self.target_denominators is not None and labels is not None:
+            for i in range(len(self.targets)):
+                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
+                preds[:, i + 1] *= labels[self.input_name][self.target_denominators[i]]
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[:, i] *= self.norm_params["std"][i]
+                preds[:, i] += self.norm_params["mean"][i]
+                # return stddev as sqrt(var)
+                preds[:, i + 1] = (
+                    torch.sqrt(nn.functional.softplus(preds[:, i + 1])) * self.norm_params["std"][i]
+                )
+        else:
+            raise ValueError("Inference for Gaussian regression requires scaling parameters.")
+        means, stds = preds.tensor_split(2, -1)
+
+        # apply mask if available
+        if pad_mask is not None:
+            means = torch.masked_fill(means, pad_mask.unsqueeze(-1), np.nan)
+            stds = torch.masked_fill(stds, pad_mask.unsqueeze(-1), np.nan)
+
+        return means, stds
+
+
+class _AbsorbedVertexingTask(_AbsorbedTaskBase):
+    """Absorbed v1 ``VertexingTask`` (task.py:824-1005) — v2-native, verbatim.
+
+    Edge-classification vertexing: builds the compressed track-track matrix,
+    runs the dense head per edge, weights the per-edge BCE by origin labels
+    (``get_weights``, task.py:949-967), and ``run_inference`` returns per-node
+    union-find assignments (task.py:969-986). ``_OriginWeightedVertexing``
+    subclasses this v2-native base and overrides ``get_weights``.
+    """
+
+    def __init__(self, label: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.label = label
+
+    def forward(
+        self,
+        x: Tensor,
+        labels_dict: Mapping,
+        pad_masks: Tensor | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute pair classification for vertexing and its loss (v1 task.py:839-902).
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted edge logits ``[E, 1]`` and the scalar loss.
+        """
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            mask = pad_masks[self.input_name]
+            x = x[:, input_name_mask]
+        else:
+            mask = None
+        b, n, d = x.shape
+        ex_size = (b, n, n, d)
+        t_mask = torch.ones(b, n, device=x.device) if mask is None else ~mask
+        t_mask = torch.cat(
+            [t_mask, torch.zeros(b, 1, device=x.device)], dim=1
+        )  # pad t_mask for onnx compatibility
+        adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
+        adjmat = (
+            adjmat.bool() & ~torch.eye(n + 1, n + 1, device=adjmat.device).repeat(b, 1, 1).bool()
+        )
+
+        # Deal with context
+        context_matrix = None
+        if context is not None:
+            context_d = context.shape[-1]
+            context = context.unsqueeze(1).expand(b, n, context_d)
+            context_matrix = torch.zeros(
+                (adjmat.sum(), 2 * context_d), device=x.device, dtype=x.dtype
+            )
+            context_matrix = context.unsqueeze(-2).expand((b, n, n, context_d))[adjmat[:, :-1, :-1]]
+
+        # Create the track-track matrix as a compressed tensor
+        tt_matrix = torch.zeros((adjmat.sum(), d * 2), device=x.device, dtype=x.dtype)
+        tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat[:, :-1, :-1]]
+        tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
+        pred = self.net(tt_matrix, context_matrix)
+        loss: Tensor | None = None
+        if labels_dict:
+            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat[:, :-1, :-1])
+
+        return pred, loss
+
+    def calculate_loss(self, pred: Tensor, labels_dict: Mapping, adjmat: Tensor) -> Tensor:
+        """Compute the vertexing loss against pairwise matching labels (v1 task.py:904-947).
+
+        Returns
+        -------
+        Tensor
+            Weighted average loss scaled by ``self.weight``.
+        """
+        labels = labels_dict[self.input_name][self.label]
+
+        match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
+
+        # Remove matching pairs if either of them come from the negative class
+        unique_matrix = labels < 0
+        unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
+        match_matrix *= ~unique_matrix
+
+        # Compress the matrix using the adjacenty matrix (no self connections)
+        match_matrix = match_matrix[adjmat].float()
+
+        # Compare the match_matrix to the vertx predictions using the BCE loss
+        loss = self.loss(pred.squeeze(-1), match_matrix)
+
+        # If reduction is none and have weight labels, weight the loss
+        origin_label = self.label.replace("VertexIndex", "OriginLabel")
+        weights = self.get_weights(labels_dict[self.input_name][origin_label], adjmat)
+        weighted_loss = loss * weights
+
+        # Calculate the number of non-masked elements
+        num_non_masked_elements = match_matrix.sum()
+
+        # Take average over the non-masked elements
+        loss = weighted_loss.sum() / num_non_masked_elements
+
+        return loss * self.weight
+
+    def get_weights(self, labels: Tensor, adjmat: Tensor) -> Tensor:
+        """Per-edge weights from origin labels (v1 task.py:949-967, hardcoded 3,4,5/1).
+
+        ``_OriginWeightedVertexing`` overrides this with config-driven heavy/fake
+        ids; with the v1 defaults the two are bit-identical.
+
+        Returns
+        -------
+        Tensor
+            Per-edge weights ``[E]`` after adjacency compression.
+        """
+        weights = torch.clip(sum(labels == i for i in (3, 4, 5)), 0, 1) - (labels == 1).int()
+        weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
+        weights = weights[adjmat]
+        return 1 + weights
+
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
+        """Per-node assignments from edge predictions (v1 task.py:969-986, verbatim).
+
+        Returns
+        -------
+        Tensor
+            Flattened per-node assignments with paddings filled to ``-inf``.
+        """
+        preds = get_node_assignment_jit(preds, pad_mask)
+        return _mask_fill_flattened(preds, pad_mask)
 
 
 class _TaskModuleBase(nn.Module):
@@ -463,7 +1155,7 @@ class ClassificationTaskModule(_TaskModuleBase):
             **({"context_size": schema.width(self.context)} if self.context else {}),
             **self.dense_cfg,
         }
-        self.task = V1ClassificationTask(
+        self.task = _AbsorbedClassificationTask(
             name=self.name,
             input_name=self.stream,
             label=self.label,
@@ -1492,9 +2184,9 @@ class RegressionTaskModule(_TaskModuleBase):
         # the plain head additionally takes the functional `scaler` (the
         # gaussian head has no scaler branch — guarded at __init__)
         self.task = (
-            V1GaussianRegressionTask(**common)
+            _AbsorbedGaussianRegressionTask(**common)
             if self.gaussian
-            else V1RegressionTask(scaler=scaler, **common)
+            else _AbsorbedRegressionTask(scaler=scaler, **common)
         )
         if self.target_denominators is not None:
             self._input_fields = schema.fields_of(self.input_feature_key)
@@ -1657,12 +2349,14 @@ class RegressionTaskModule(_TaskModuleBase):
         ]
 
 
-class _OriginWeightedVertexing(V1VertexingTask):
-    """v1 `VertexingTask` with config-driven heavy/fake origin ids (design §3.3).
+class _OriginWeightedVertexing(_AbsorbedVertexingTask):
+    """Absorbed v2-native `VertexingTask` with config-driven heavy/fake origin ids (design §3.3).
 
-    With the default ids (3,4,5 / 1) `get_weights` is bit-identical to v1's
-    hardcoded version (task.py:957-964): both build the heavy indicator via
-    clipped sums and AND them pairwise over the adjacency.
+    Subclasses the M7 W2c-1 ABSORBED `_AbsorbedVertexingTask` base (was: the v1
+    `salt.models.task.VertexingTask`); the subclass relationship now holds
+    v2-natively. With the default ids (3,4,5 / 1) `get_weights` is bit-identical
+    to v1's hardcoded version (task.py:957-964): both build the heavy indicator
+    via clipped sums and AND them pairwise over the adjacency.
     """
 
     def __init__(self, heavy_ids: Sequence[int], fake_ids: Sequence[int], **kwargs: Any) -> None:
