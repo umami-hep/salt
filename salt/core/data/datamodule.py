@@ -15,19 +15,21 @@ Differences from v1, by design: the val dataset compiles the VAL plan
 randomisation into validation — design §6.2 fixes this), and read-time
 transforms are FIT-only (design §6.1).
 
-``move_files_temp`` / S3 staging (M6 sub-wave E, gate S31; FD §6.1 1292, §10
-1779 "ported as-is in M6"): an OPT-IN, default-off file-staging surface ported
-from v1 ``datamodules.py`` (ctor ``move_files_temp`` :91, prepare/setup/teardown
-:191-204,274-280) on top of the shared ``salt.utils.file_utils`` S3 helpers
-(``download_from_S3`` :375, ``move_files_temp`` :91, ``get_temp_path`` :27). When
-``move_files_temp`` is set the fit train/val files are copied to that root
-(typically a RAM disk like ``/dev/shm``) in ``prepare_data``, the stage files
-are repointed at the temp copies in ``setup('fit')``, and the copies are removed
-in ``teardown('fit')``. With ``move_files_temp=None`` (the default) every hook is
-a no-op and the read path is byte-identical to before this port. The v1
-``config_s3`` auto-download glue (file_utils ``import_data_S3`` / ``setup_S3_CLI``)
-stays a CLI-side concern reachable via the ``download_S3`` console entry — it is
-NOT wired into the datamodule (the v2 reader takes already-local paths).
+``move_files_temp`` staging (M6 sub-wave E, gate S31; FD §6.1 1292, §10 1779;
+**reader-owned as of M8 wave 3**): an OPT-IN, default-off file-staging surface.
+M8 collapsed the v1 fat 3-hook subsystem (``prepare_data`` copy + ``setup``
+file-repoint + ``teardown`` remove, ``datamodules.py:191-204,274-280``) into a
+thin trigger: the datamodule no longer copies files itself — it arms a
+``_stage_root`` in ``setup('fit')`` and each per-stage `Reader` restages its OWN
+files there (`Reader.restage` -> `salt.core.data.vds.stage_file`, reusing the
+FileLock + ``.done``-marker copy machinery). This auto-handles multi-file and
+multi-sample readers (the v1 path staged only ``train_file``/``val_file`` and
+silently dropped the rest). ``teardown('fit')`` removes the ``_stage_root`` tree.
+With ``move_files_temp=None`` (the default) ``_stage`` is identity and the read
+path is byte-identical. The v1 ``config_s3`` auto-download glue (file_utils
+``import_data_S3`` / ``setup_S3_CLI``) stays a CLI-side concern reachable via the
+``download_S3`` console entry — it is NOT wired into the datamodule (the v2 reader
+takes already-local paths).
 """
 
 from __future__ import annotations
@@ -82,12 +84,12 @@ class GraphDataModule(lightning.LightningDataModule):
         callback (v1 ``SaltDataModule.test_suff``, ``datamodules.py:113``;
         design §8), by default None.
     move_files_temp : str | None, optional
-        OPT-IN staging root (e.g. ``/dev/shm/<user>/tmp``) for the fit
-        train/val files (M6 sub-wave E, gate S31; v1 ``datamodules.py:91``).
-        When set, ``prepare_data`` copies the train/val files there, ``setup``
-        repoints the fit files at the copies, and ``teardown('fit')`` removes
-        them. ``None`` (default) leaves the read path untouched. Ignored under
-        ``fast_dev_run`` (v1 ``datamodules.py:191,201``).
+        OPT-IN staging root (e.g. ``/dev/shm/<user>/tmp``) for the fit reader's
+        files (M6 sub-wave E, gate S31; v1 ``datamodules.py:91``). When set,
+        ``setup('fit')`` arms the root and each per-stage `Reader` restages its own
+        file(s) there (`Reader.restage`; M8 wave 3 — multi-file / multi-sample safe),
+        and ``teardown('fit')`` removes the root. ``None`` (default) leaves the read
+        path byte-identical. Ignored under ``fast_dev_run`` (v1 ``datamodules.py:191,201``).
     train_vds_path, val_vds_path, test_vds_path : str | Path | None, optional
         Explicit VDS output paths for wildcard files.
     sinks : Mapping[Mode, Iterable[str]] | None, optional
@@ -164,8 +166,12 @@ class GraphDataModule(lightning.LightningDataModule):
         self.num_test = num_test
         self.test_suff = test_suff
         # opt-in staging root (M6 sub-wave E, gate S31; v1 datamodules.py:91).
-        # None -> every staging hook is a no-op (default-off read path).
+        # None -> staging is a no-op (default-off, byte-identical read path).
+        # `move_files_temp` is the backward-compat config name; `_stage_root` is the
+        # internal name the thin setup('fit')/teardown('fit') trigger reads (M8 wave 3:
+        # the fat prepare_data/setup-repoint subsystem collapsed to reader.restage()).
         self.move_files_temp = move_files_temp
+        self._stage_root: Path | None = None
         self.train_vds_path = train_vds_path
         self.val_vds_path = val_vds_path
         self.test_vds_path = test_vds_path
@@ -198,7 +204,7 @@ class GraphDataModule(lightning.LightningDataModule):
 
     @property
     def reader(self) -> Reader:
-        """The configured reader prototype (read-only).
+        """The configured reader prototype.
 
         Returns
         -------
@@ -206,6 +212,18 @@ class GraphDataModule(lightning.LightningDataModule):
             The single reader module the per-stage clones derive from.
         """
         return self._reader_proto
+
+    @reader.setter
+    def reader(self, reader: Reader) -> None:
+        """Replace the reader prototype (the M8 wave-3 ``reader.restage`` trigger).
+
+        ``setup('fit')`` reassigns ``self.reader = self.reader.restage(root)`` when
+        opt-in staging is active, so the per-stage clones derive from the staged
+        reader. Keeps the instance ``name`` and the ``modules`` view consistent.
+        """
+        reader.name = self._reader_name
+        self._reader_proto = reader
+        self._modules[self._reader_name] = reader
 
     def set_sinks(self, sinks: Mapping[Mode, Iterable[str]]) -> None:
         """Set the per-mode model-boundary demand (the stage-B wiring hook).
@@ -267,6 +285,7 @@ class GraphDataModule(lightning.LightningDataModule):
         reader = self._reader_proto.with_source(
             filename=filename, num=num, vds_path=vds_path, stage=_STAGE_OF_MODE[mode]
         )
+        reader = self._stage(reader)
         # deep-copy the processors per stage: bind-time state (e.g. the Labels
         # narrowed key set) is per-(dataset, mode) and must not leak between
         # the train/val/test plans sharing this module dict (design §2.3)
@@ -304,54 +323,62 @@ class GraphDataModule(lightning.LightningDataModule):
                 (self.val_file, self.num_val, self.val_vds_path, "val"),
             ):
                 if filename is not None:
-                    self._reader_proto.with_source(filename, num, vds, stage=stage_key).prepare()
+                    reader = self._reader_proto.with_source(filename, num, vds, stage=stage_key)
+                    self._stage(reader).prepare()
         elif stage == "test" and self.test_file is not None:
-            self._reader_proto.with_source(
+            reader = self._reader_proto.with_source(
                 self.test_file, self.num_test, self.test_vds_path, stage="test"
-            ).prepare()
+            )
+            self._stage(reader).prepare()
 
-    def _staging_active(self) -> bool:
-        """Whether the opt-in temp-file staging is on for this run (S31, v1 port).
+    def _resolve_stage_root(self, stage: str) -> Path | None:
+        """The opt-in staging root for this stage, or None (the thin M8 trigger).
 
-        True only when a ``move_files_temp`` root is configured AND the run is
-        not a ``fast_dev_run`` (the v1 guard, ``datamodules.py:191,201,275``).
-        With ``move_files_temp=None`` (the default) this is always False, so the
-        staging hooks short-circuit and the read path is unchanged.
+        Staging is on only for ``fit``, only when a ``move_files_temp`` root is
+        configured, and (v1 guard, ``datamodules.py:191,201,275``) only when the run
+        is not a ``fast_dev_run``. With ``move_files_temp=None`` (the default) this is
+        always None, so `_stage` is a no-op and the read path is byte-identical.
 
         Returns
         -------
-        bool
-            True if files should be staged to/cleaned from the temp root.
+        Path | None
+            The stage-root directory, or None when staging is inactive.
         """
-        if not self.move_files_temp:
-            return False
-        return not (self.trainer is not None and self.trainer.fast_dev_run)
+        if stage != "fit" or not self.move_files_temp:
+            return None
+        if self.trainer is not None and self.trainer.fast_dev_run:
+            return None
+        return Path(self.move_files_temp)
 
-    def prepare_data(self) -> None:
-        """Copy the fit train/val files to the temp root when staging is on (S31).
+    def _stage(self, reader: Reader) -> Reader:
+        """Restage a per-stage reader onto ``_stage_root`` when staging is active (M8).
 
-        Port of v1 ``datamodules.py:190-195``: a no-op unless ``move_files_temp``
-        is set (and not ``fast_dev_run``). Lightning calls ``prepare_data`` once
-        per node before ``setup``, so the copy happens before any worker opens a
-        handle. The original files are left in place (``file_utils.copy_file``
-        skips an already-present destination).
+        The thin trigger replacing the v1 fat ``prepare_data`` copy + ``setup``
+        repoint block: with ``_stage_root`` set, the reader copies its OWN sourced
+        file(s) under the root (rank-0 + FileLock coordinated inside
+        `Reader.restage` -> `vds.stage_file`) and returns a clone reading the copies —
+        single-file H5, multi-file easyjet, and multi-sample readers all stage their
+        full source set (the v1 path staged only ``train_file``/``val_file``). With
+        ``_stage_root`` None this returns the reader unchanged.
+
+        Returns
+        -------
+        Reader
+            The staged clone, or ``reader`` unchanged when staging is inactive.
         """
-        if not self._staging_active() or self.train_file is None or self.val_file is None:
-            return
-        from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
-
-        print("-" * 100)
-        print(f"Moving train/val files to {self.move_files_temp}")
-        print("-" * 100)
-        fu.move_files_temp(self.move_files_temp, self.train_file, self.val_file)
+        if self._stage_root is None:
+            return reader
+        return reader.restage(self._stage_root)
 
     def setup(self, stage: str) -> None:
         """Build the per-stage datasets (``datamodules.py:197-245`` contract).
 
         Train compiles the FIT plan, val the VAL plan (fixing v1's
         ``stage='fit'`` leak into validation), test the TEST plan. When opt-in
-        temp staging is active the fit train/val files are repointed at the temp
-        copies (v1 ``datamodules.py:201-204``) BEFORE the datasets are built.
+        temp staging is active (``move_files_temp`` set, not ``fast_dev_run``) the
+        ``_stage_root`` is armed BEFORE VDS precreation / dataset building, so every
+        per-stage reader restages its own files onto the root (M8 wave 3: the fat
+        ``prepare_data``/``setup``-repoint subsystem collapsed to `Reader.restage`).
 
         Raises
         ------
@@ -359,11 +386,7 @@ class GraphDataModule(lightning.LightningDataModule):
             If the stage's file or the sinks are unset.
         """
         self._auto_sinks()
-        if stage == "fit" and self._staging_active():
-            from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
-
-            self.train_file = fu.get_temp_path(self.move_files_temp, self.train_file)
-            self.val_file = fu.get_temp_path(self.move_files_temp, self.val_file)
+        self._stage_root = self._resolve_stage_root(stage)
         if stage in {"fit", "test"} and self.trainer is not None:
             self._precreate_vds_rank0(stage)
             self._dist_barrier()
@@ -448,28 +471,29 @@ class GraphDataModule(lightning.LightningDataModule):
         return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
 
     def teardown(self, stage: str | None = None) -> None:
-        """Remove the staged temp files after fit when staging is on (S31, v1 port).
+        """Remove the staging root after fit when staging is on (M8 wave-3 thin trigger).
 
-        Port of v1 ``datamodules.py:271-281``: a no-op unless ``move_files_temp``
-        is set (and not ``fast_dev_run``); only the global-zero rank cleans up,
-        and only after the ``fit`` stage. ``file_utils.remove_files_temp`` deletes
-        the two copies and best-effort-removes their (now-empty) parent dir. With
-        ``move_files_temp=None`` this never touches the filesystem.
+        The cleanup half of the collapsed staging subsystem (v1
+        ``datamodules.py:271-281``): a no-op unless ``move_files_temp`` is set (and not
+        ``fast_dev_run``); only the global-zero rank cleans up, and only after ``fit``.
+        Removes the ENTIRE ``_stage_root`` tree (every staged copy + its FileLock /
+        ``.done`` markers — single-file, multi-file, and multi-sample staging all land
+        under the one root), so it generalises the v1 two-file ``remove_files_temp``.
+        With ``move_files_temp=None`` this never touches the filesystem.
 
         Parameters
         ----------
         stage : str | None, optional
             The Lightning stage being torn down, by default None.
         """
-        if stage != "fit" or not self._staging_active():
+        root = self._resolve_stage_root("fit") if stage == "fit" else None
+        if root is None:
             return
         if self.trainer is not None and not self.trainer.is_global_zero:
             return
-        from pathlib import Path as _Path  # noqa: PLC0415 - opt-in staging path only
-
-        from salt.core.utils import file_utils as fu  # noqa: PLC0415 - opt-in staging path only
+        import shutil  # noqa: PLC0415 - opt-in staging path only
 
         print("-" * 100)
-        print(f"Removing staged training files:\n\t{self.train_file}\n\t{self.val_file}")
-        fu.remove_files_temp(_Path(self.train_file), _Path(self.val_file))
+        print(f"Removing staged files under {root}")
+        shutil.rmtree(root, ignore_errors=True)
         print("-" * 100)

@@ -3140,7 +3140,9 @@ def run_s31(
     print("=" * 96)
     checks: dict[str, bool] = {}
 
-    # dummy LOCAL fixture files (no real H5 read needed — staging is pure I/O)
+    # dummy LOCAL fixture files (staging is pure file I/O — restage() copies bytes via
+    # the FileLock-coordinated vds.stage_file and with_source()s the staged path; no
+    # real H5 read happens, so dummy bytes are enough to exercise the M8 restage path).
     src_dir = outdir / "s31_src"
     src_dir.mkdir(parents=True, exist_ok=True)
     train_src = src_dir / "train.h5"
@@ -3148,50 +3150,63 @@ def run_s31(
     train_src.write_bytes(b"dummy-train")
     val_src.write_bytes(b"dummy-val")
     temp_root = outdir / "s31_temp"
-    modules = {"reader": _s31_reader()}
 
-    # -- (a) default-off: move_files_temp=None -> inactive, paths untouched ---
+    # -- (a) default-off: move_files_temp=None -> inactive, reader unchanged --
+    # The M8 thin trigger: _resolve_stage_root('fit') is None and _stage() is identity,
+    # so a per-stage reader restages to ITSELF (the read path is byte-identical).
     dm_off = GraphDataModule(
-        modules={"reader": _s31_reader()}, train_file=str(train_src), val_file=str(val_src)
+        modules={"reader": _s31_reader(train_src)}, train_file=str(train_src), val_file=str(val_src)
     )
-    checks["default_off_staging_inactive"] = dm_off._staging_active() is False  # noqa: SLF001
-    dm_off.prepare_data()  # no-op
-    dm_off.teardown("fit")  # no-op
-    checks["default_off_paths_untouched"] = str(dm_off.train_file) == str(train_src) and str(
-        dm_off.val_file
-    ) == str(val_src)
+    checks["default_off_staging_inactive"] = dm_off._resolve_stage_root("fit") is None  # noqa: SLF001
+    off_reader = dm_off.reader.with_source(filename=str(train_src), stage="train")
+    dm_off._stage_root = dm_off._resolve_stage_root("fit")  # noqa: SLF001
+    staged_off = dm_off._stage(off_reader)  # noqa: SLF001 - identity when inactive
+    dm_off.teardown("fit")  # no-op (nothing staged)
+    checks["default_off_paths_untouched"] = (
+        staged_off is off_reader
+        and staged_off.sources() == [Path(train_src)]
+        and not (temp_root).exists()
+    )
 
-    # -- (b) accept the staged-file args + active predicate ------------------
+    # -- (b) accept the staged-file args + active root -----------------------
     mft = str(temp_root)
     if corruption is not None:
         mft = corruption(mft)
     dm = GraphDataModule(
-        modules=modules,
+        modules={"reader": _s31_reader(train_src)},
         train_file=str(train_src),
         val_file=str(val_src),
         move_files_temp=mft,
     )
     checks["accepts_move_files_temp_arg"] = dm.move_files_temp == mft
-    checks["staging_active_when_set_no_trainer"] = dm._staging_active() is bool(mft)  # noqa: SLF001
+    checks["staging_active_when_set_no_trainer"] = (
+        dm._resolve_stage_root("fit") is not None  # noqa: SLF001
+    ) is bool(mft)
 
-    # -- (c) prepare_data copies to the temp root (originals survive) --------
-    dm.prepare_data()
+    # arm the stage root exactly as setup('fit') does (the thin M8 trigger)
+    dm._stage_root = dm._resolve_stage_root("fit")  # noqa: SLF001
     expect_train = fu.get_temp_path(mft, train_src) if mft else train_src
     expect_val = fu.get_temp_path(mft, val_src) if mft else val_src
+
+    # -- (c) restaging the per-stage readers copies to the temp root ----------
+    # (M8: the reader owns the copy — _stage() -> Reader.restage() -> vds.stage_file;
+    # this replaces the v1 prepare_data() copy, preserving its intent.)
+    train_reader = dm.reader.with_source(filename=str(train_src), stage="train")
+    val_reader = dm.reader.with_source(filename=str(val_src), stage="val")
+    staged_train = dm._stage(train_reader)  # noqa: SLF001
+    staged_val = dm._stage(val_reader)  # noqa: SLF001
     checks["prepare_data_copies_to_temp"] = (
         bool(mft) and expect_train.is_file() and expect_val.is_file()
     )
     checks["originals_survive_copy"] = train_src.is_file() and val_src.is_file()
 
-    # -- (d) setup repoints fit files at the temp copies ---------------------
-    # exercise the same repoint setup('fit') performs (without a reader read)
-    if dm._staging_active():  # noqa: SLF001
-        dm.train_file = fu.get_temp_path(mft, dm.train_file)
-        dm.val_file = fu.get_temp_path(mft, dm.val_file)
+    # -- (d) the staged readers now read the temp copies ---------------------
+    # (M8: restage() returns a clone whose sources() point inside the temp root —
+    # the reader-owned analogue of the v1 setup() file-repoint.)
     checks["setup_repoints_to_temp"] = (
         bool(mft)
-        and str(dm.train_file) == str(expect_train)
-        and str(dm.val_file) == str(expect_val)
+        and staged_train.sources() == [expect_train]
+        and staged_val.sources() == [expect_val]
     )
 
     # -- (e) teardown removes the staged copies; originals survive -----------
@@ -3243,18 +3258,28 @@ def run_s31(
     return (0 if passed else 1), report
 
 
-def _s31_reader() -> Any:
+def _s31_reader(filename: Path | str | None = None) -> Any:
     """A minimal valid `Reader` so `GraphDataModule`'s one-Reader ctor check passes (S31).
 
-    S31 exercises the staging I/O hooks only — no read happens — so the reader
-    just needs to satisfy the ctor's "exactly one Reader" guard.
+    S31 exercises the M8 reader-owned staging hooks only — no H5 read happens (the
+    restage copies bytes + ``with_source``s the path, neither of which opens the file)
+    — so the reader just needs to satisfy the ctor's "exactly one Reader" guard and
+    declare a single source via ``filename`` for `Reader.sources` / `Reader.restage`.
+
+    Parameters
+    ----------
+    filename : Path | str | None, optional
+        The source file the reader declares (for `sources`/`restage`), by default None.
 
     Returns
     -------
     Reader
-        A `H5StructuredReader` over jets+tracks (never read by S31).
+        A `H5StructuredReader` over jets+tracks (never actually read by S31).
     """
-    return H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
+    return H5StructuredReader(
+        groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
+        filename=filename,
+    )
 
 
 # ---------------------------------------------------------------------------

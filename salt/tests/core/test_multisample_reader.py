@@ -628,3 +628,73 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
             out["raw.jets"]["pt"][j], truth[lab]["raw.jets"]["pt"][li]
         )
         assert out["raw.event"]["eventNumber"][j] == truth[lab]["raw.event"]["eventNumber"][li]
+
+
+# --------------------------------------------------------------------------- #
+# 7. M8 reader-owned staging — sources() = union over sub-readers; restage()
+#    delegates to each sub-reader recursively (the multi-SAMPLE multi-FILE case).
+# --------------------------------------------------------------------------- #
+
+
+def test_multisample_sources_is_union_over_subreaders(
+    two_easyjet_files: tuple[Path, Path],
+) -> None:
+    """sources() is the de-duplicated union of every sub-reader's sources (plan 02)."""
+    sig_path, bkg_path = two_easyjet_files
+    sig = EasyjetReader(groups=_ej_groups(), filename=sig_path)
+    bkg = EasyjetReader(groups=_ej_groups(), filename=bkg_path)
+    reader = MultiSampleReader(
+        samples=[
+            SampleConfig(name="signal", label=1, reader=sig),
+            SampleConfig(name="background", label=0, reader=bkg),
+        ]
+    )
+    assert reader.sources() == [sig_path, bkg_path]
+
+
+def test_multisample_restage_delegates_recursively_and_roundtrips(
+    two_easyjet_files: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """restage() restages EACH sub-reader into root; combined read is byte-identical.
+
+    The multi-sample multi-file capability: each sub-reader (here a single-file easyjet
+    reader, but the override recurses for nested MultiSampleReaders / multi-file
+    easyjet too) stages its own file under the shared root, and the combined
+    proportionally-stratified read of the restaged reader equals the original read
+    exactly (jets pt + injected label + event scalars). The v1 single-train_file
+    staging could not express this at all.
+    """
+    sig_path, bkg_path = two_easyjet_files
+    sig = EasyjetReader(groups=_ej_groups(truncate=8), filename=sig_path)
+    bkg = EasyjetReader(groups=_ej_groups(truncate=8), filename=bkg_path)
+    orig = MultiSampleReader(
+        samples=[
+            SampleConfig(name="signal", label=1, reader=sig),
+            SampleConfig(name="background", label=0, reader=bkg),
+        ]
+    )
+    orig.prepare()
+    n = len(orig)
+    orig_out = orig.read(slice(0, n), Mode.FIT)
+
+    root = tmp_path / "ms_stage"
+    staged = orig.restage(root)
+    # each sub-reader was restaged under the shared root (recursive delegation),
+    # each into its OWN per-reader subdir so they don't glob each other's files
+    assert all(root in p.parents for p in staged.sources())
+    assert {p.name for p in staged.sources()} == {"sig.root", "bkg.root"}
+    assert {p.name for p in root.rglob("*.root")} == {"sig.root", "bkg.root"}
+    # originals survive
+    assert sig_path.is_file() and bkg_path.is_file()
+
+    staged.prepare()
+    assert len(staged) == n
+    staged_out = staged.read(slice(0, n), Mode.FIT)
+    # the interleave is seeded identically (same config), so the composition matches
+    np.testing.assert_array_equal(
+        staged_out["raw.event"]["process"], orig_out["raw.event"]["process"]
+    )
+    np.testing.assert_array_equal(staged_out["raw.jets"]["pt"], orig_out["raw.jets"]["pt"])
+    np.testing.assert_array_equal(
+        staged_out["raw.event"]["eventNumber"], orig_out["raw.event"]["eventNumber"]
+    )
