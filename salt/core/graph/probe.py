@@ -344,7 +344,13 @@ def _synthesise_group(
     """
     del stream
     is_global = bool(cfg.global_object)
-    shape: tuple[int, ...] = (batch,) if is_global else (batch, tokens)
+    # Size the synthetic sequence dim to the stream's configured ``truncate``
+    # when it exceeds the default — the reader truncates each stream to
+    # ``cfg.truncate`` and raises "truncate exceeds the file's constituent
+    # dimension" if the file has fewer (e.g. GN3X tracks set truncate=100 > 40).
+    trunc = getattr(cfg, "truncate", None)
+    n_tokens = max(tokens, trunc) if (not is_global and trunc) else tokens
+    shape: tuple[int, ...] = (batch,) if is_global else (batch, n_tokens)
     names = list(dict.fromkeys(fields))
     if "valid" in names:
         names.remove("valid")
