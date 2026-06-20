@@ -7,15 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from salt.core.cli import load_config
 from salt.core.cli import main as cli_main
 from salt.core.graph.planner import compile_plan
-from salt.core.graph.probe import SYNTHETIC, probe_shapes
-from salt.core.graph.spec import Mode, TensorSpec, unflatten_spec
-from salt.core.render import dot_source, plan_table
+from salt.core.graph.spec import PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
+from salt.core.nn.bind import resolve_bind_schema
+from salt.core.render import _shape_str, dot_source, plan_table  # noqa: PLC2701
 from salt.tests.core.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 
-# the in-repo test-scale GN2v2 config (16-dim, no machine paths) — synthetic
-# probing needs no data file, only a placeholder norm_dict the probe replaces
+# the in-repo test-scale GN2v2 config (16-dim, no machine paths) — the static
+# width resolution needs no data file, only a placeholder norm_dict
 _DUMMY_CFG = str(Path(__file__).parent.parent.parent / "core" / "configs" / "gn2v2-dummy.yaml")
 _NORM_PLACEHOLDER = ["model.modules.norm.init_args.norm_dict=unused.yaml"]
 
@@ -76,9 +77,13 @@ class TestDotSource:
         assert "#c0392b" in dot  # loss kind
         assert "#1f6fb2" in dot  # preds kind
 
-    def test_probed_shapes_override_declared(self, plan):
-        dot = dot_source(plan, probed_shapes={"embed.x": (16, 16)})
-        assert "(16, 16)" in dot  # probed concrete shape wins over (B, 16)
+    def test_concrete_feature_dim_unchanged_by_width(self, plan):
+        # the toy plan's embed.x already declares a CONCRETE last dim (B, 16);
+        # a resolved width for it is a no-op (the width agrees with the int) and,
+        # crucially, never rewrites the already-concrete dim into something else
+        dot = dot_source(plan, widths={"embed.x": 99})
+        assert "(B, 16)" in dot
+        assert "99" not in dot
 
     def test_pruned_rendered_dashed(self, plan):
         dot = dot_source(plan, modules={}, pruned=["aux"])
@@ -125,63 +130,121 @@ class TestPlotCli:
         assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
         assert pdf.read_bytes()[:5] == b"%PDF-"
 
-    @pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
-    def test_probe_shapes_flow_into_render(self, tmp_path):
-        # --probe must reach the dot_source; the synthetic-batch concrete track
-        # shape (B, 40, ...) lands in the .dot sidecar the dot render consumes
-        out = tmp_path / "probed.png"
+
+class TestShapeStrWidthSubstitution:
+    """`_shape_str` substitutes the SYMBOLIC FEATURE dim, keeps data dims (design §4.3)."""
+
+    def test_symbolic_feature_dim_becomes_concrete(self):
+        # E:enc is a feature family — the resolved width replaces it as the LAST
+        # dim; the leading B and the sequence dim T:tracks stay symbolic
+        spec = TensorSpec(shape=("B", "T:tracks", "E:enc"))
+        assert _shape_str("encoded.tracks", spec, {"encoded.tracks": 16}) == "(B, T:tracks, 16)"
+
+    def test_last_dim_data_family_stays_symbolic(self):
+        # when the LAST dim is itself a data family (T/L/S), a width must NOT
+        # turn it concrete — that would freeze a genuinely data-dependent dim
+        spec = TensorSpec(shape=("B", "T:tracks"))
+        assert _shape_str("labels.tracks.origin", spec, {"labels.tracks.origin": 100}) == (
+            "(B, T:tracks)"
+        )
+
+    def test_batch_only_stays_symbolic(self):
+        # a width on a batch-only key must NOT turn B into a concrete int (the
+        # renderer joins a single dim with no trailing comma, like _fmt_shape)
+        spec = TensorSpec(shape=("B",))
+        assert _shape_str("labels.jets.flavour", spec, {"labels.jets.flavour": 3}) == "(B)"
+
+    def test_no_width_keeps_declared_symbolic(self):
+        spec = TensorSpec(shape=("B", "F:norm"))
+        assert _shape_str("normed.jets", spec, None) == "(B, F:norm)"
+        assert _shape_str("normed.jets", spec, {}) == "(B, F:norm)"
+
+    def test_concrete_last_dim_left_alone(self):
+        # an already-concrete feature dim is not a symbolic feature dim, so it is
+        # untouched (the resolved width agrees with the declared int anyway)
+        spec = TensorSpec(shape=("B", 9))
+        assert _shape_str("preds.jets.cls", spec, {"preds.jets.cls": 9}) == "(B, 9)"
+
+    def test_scalar_and_none_have_no_shape(self):
+        assert not _shape_str("losses.total", TensorSpec(shape=()), {"losses.total": 1})
+        assert not _shape_str("embed.x", TensorSpec(shape=None), {"embed.x": 16})
+
+
+def _static_widths(cfg):
+    """Resolve widths data-free across every compilable primary mode (no batch run).
+
+    Returns
+    -------
+    dict[str, int]
+        The resolved per-key feature widths.
+    """
+    plans = []
+    for plan_mode in PRIMARY_MODES:
+        if plan_mode in cfg.mode_errors:
+            continue
+        try:
+            plans.append(
+                compile_plan(
+                    cfg.modules, plan_mode, cfg.sources, schema=cfg.schema,
+                    sinks=cfg.sinks, sink_origins=cfg.sink_origins.get(plan_mode),
+                )
+            )
+        except Exception:  # noqa: BLE001, S112 - non-requested modes may not compile
+            continue
+    return dict(resolve_bind_schema(plans).widths)
+
+
+class TestStaticWidthRender:
+    """The DOT carries CONCRETE feature dims from the STATIC resolution — NO data."""
+
+    @pytest.fixture(scope="class")
+    def dot(self):
+        # the real test-scale GN2v2 config, resolved with NO data file and NO
+        # batch run — only the static bind schema (the widths that build the
+        # nn.Linear layers) feeds the renderer.
+        cfg = load_config([_DUMMY_CFG], _NORM_PLACEHOLDER)
+        plan = compile_plan(
+            cfg.modules, Mode.FIT, cfg.sources, schema=cfg.schema,
+            sinks=cfg.sinks, sink_origins=cfg.sink_origins.get(Mode.FIT),
+        )
+        widths = _static_widths(cfg)
+        return dot_source(plan, cfg.modules, widths=widths)
+
+    def test_feature_dims_are_concrete(self, dot):
+        # the normaliser / encoder / pool / concat feature widths render as the
+        # resolved ints, NOT the symbolic F:/E:/D: dims
+        assert "(B, T:tracks, 19)" in dot   # normed.tracks: 19 input features
+        assert "(B, T:tracks, 16)" in dot   # encoded.tracks: 16 embed width
+        assert "(B, 16)" in dot             # pooled.global: 16
+        # no symbolic FEATURE dim leaked into the rendered shapes
+        for leaked in ("F:norm", "E:concat", "D:pool", "D:split"):
+            assert leaked not in dot
+
+    def test_batch_and_sequence_dims_stay_symbolic(self, dot):
+        # B and the sequence/token dims are genuinely data-dependent — symbolic
+        assert "(B, T:tracks," in dot
+        assert "L:enc" in dot
+        assert "S:seq" in dot
+
+    def test_render_is_data_free(self):
+        # the whole `salt2 graph plot` path produces a DOT sidecar with NO data
+        # file and NO --probe flag, and never emits the probe's labeller line
+        cfg = load_config([_DUMMY_CFG], _NORM_PLACEHOLDER)
+        widths = _static_widths(cfg)
+        assert widths["encoded.tracks"] == 16
+        assert widths["normed.tracks"] == 19
+
+
+class TestPlotCliStaticWidths:
+    """`salt2 graph plot` (no --probe) writes a DOT with concrete feature dims."""
+
+    def test_dot_sidecar_has_concrete_feature_dims(self, tmp_path):
+        out = tmp_path / "static.dot"
         rc = cli_main(
-            ["graph", "plot", "-c", _DUMMY_CFG, "--mode", "fit", "--probe",
+            ["graph", "plot", "-c", _DUMMY_CFG, "--mode", "fit",
              "-o", str(out), "--set", _NORM_PLACEHOLDER[0]]
         )
         assert rc == 0
-        assert out.with_suffix(".dot").read_text().count("40") > 0
-        assert out.stat().st_size > 0
-
-
-class TestProbeShapes:
-    """The one-batch SHAPE PROBE, synthetic path (no data file, design §4.3)."""
-
-    @pytest.fixture(scope="class")
-    def probed(self):
-        # SYNTHETIC: no data file — the probe synthesises a batch from the
-        # reader schema of the in-repo test-scale GN2v2 config.
-        return probe_shapes(_DUMMY_CFG, _NORM_PLACEHOLDER, SYNTHETIC, Mode.FIT)
-
-    def test_inputs_have_concrete_shapes(self, probed):
-        # batch axis renders as the symbolic "B"; tracks carry the 19 configured
-        # features over 40 synthetic tokens
-        assert probed["inputs.jets"] == ("B", 2)
-        assert probed["inputs.tracks"] == ("B", 40, 19)
-
-    def test_embed_has_concrete_shape(self, probed):
-        # the model-side embedding crossed the torch boundary with a real shape
-        assert probed["embed.tracks"][:2] == ("B", 40)
-        assert len(probed["embed.tracks"]) == 3  # [B, T, embed_dim]
-
-    def test_labels_populated_with_concrete_shapes(self, probed):
-        # the narrowed task labels loaded off the synthetic batch
-        assert probed["labels.jets.flavour_label"] == ("B",)
-        assert probed["labels.tracks.ftagTruthOriginLabel"] == ("B", 40)
-
-    def test_preds_have_concrete_shapes(self, probed):
-        # forward ran end-to-end through the heads
-        assert probed["preds.jets.jets_classification"][0] == "B"
-        assert probed["preds.tracks.track_origin"][:2] == ("B", 40)
-
-    def test_none_is_synthetic(self):
-        # data_file=None is the same SYNTHETIC path as the sentinel
-        shapes = probe_shapes(_DUMMY_CFG, _NORM_PLACEHOLDER, None, Mode.FIT)
-        assert shapes["inputs.tracks"] == ("B", 40, 19)
-
-    def test_batch_axis_is_symbolic_B(self, probed):
-        # only axis 0 (the batch) is rewritten to "B"; inner dims stay concrete
-        # ints (so an embed width that coincidentally == batch is NOT masked)
-        assert probed["inputs.tracks"][0] == "B"
-        assert all(isinstance(d, int) for d in probed["inputs.tracks"][1:])
-
-    def test_probed_shapes_feed_dot_source(self, plan, probed):
-        # the probe output drops straight into the renderer as concrete shapes,
-        # overriding the symbolic declared shape on every matching port row
-        dot = dot_source(plan, probed_shapes={"embed.x": tuple(probed["inputs.tracks"][:2])})
-        assert "(B, 40)" in dot
+        text = out.read_text()
+        assert "(B, T:tracks, 19)" in text   # concrete feature dim, B/T symbolic
+        assert "F:norm" not in text          # the symbolic feature dim is gone

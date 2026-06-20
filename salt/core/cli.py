@@ -90,7 +90,6 @@ import yaml
 
 from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
-from salt.core.graph.probe import SYNTHETIC, probe_shapes
 from salt.core.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
@@ -102,6 +101,7 @@ from salt.core.graph.spec import (
     split_key,
     unflatten_spec,
 )
+from salt.core.nn.bind import resolve_bind_schema
 from salt.core.onnx.config import attach_manifest, manifest_table, resolve_export_config
 from salt.core.render import dot_source, plan_table
 from salt.core.schema import dump_schema, load_schema, save_schema
@@ -1109,8 +1109,8 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     _print_onnx_static_caveat(cfg, mode)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
-    probed = _maybe_probe_shapes(args, mode)
-    dot_text = dot_source(plan, cfg.modules, pruned, probed_shapes=probed)
+    widths = _resolve_widths(cfg)
+    dot_text = dot_source(plan, cfg.modules, pruned, widths=widths)
     out_path = Path(args.output)
     if out_path.parent != Path():
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1123,29 +1123,49 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     return 0
 
 
-def _maybe_probe_shapes(
-    args: argparse.Namespace, mode: Mode
-) -> dict[str, tuple[int, ...]] | None:
-    """Run the one-batch shape probe when ``--probe`` was passed (design §4.3).
+def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
+    """Resolve concrete feature widths STATICALLY for the plot (design §2.3, §4.3).
 
-    ``--probe`` alone (``args.probe is SYNTHETIC``) synthesises a batch from the
-    reader schema; ``--probe FILE.h5`` seeds from a real data file. Without
-    ``--probe`` (``args.probe is None``) returns None and the renderer keeps the
-    declared/symbolic shapes.
+    Compiles every inspectable primary-mode plan and feeds them to
+    `resolve_bind_schema` — the same static resolution that builds the
+    width-dependent nn.Linear layers, with NO data file and NO batch run. The
+    resulting per-key last-dim widths let `dot_source` show the concrete
+    FEATURE/embedding dim on each port-card row (``encoded.tracks (B, T:tracks,
+    16)``) while the data-dependent batch/sequence dims stay symbolic.
+
+    All compilable modes are unified (widths are config-fixed, so resolving
+    across modes is sound and gives the requested mode every cross-mode width):
+    a mode that legitimately fails to compile (`GraphConfig.mode_errors`, or a
+    planner error on a non-requested mode) is skipped rather than aborting the
+    plot — the requested mode is guaranteed present (the caller already compiled
+    it).
 
     Returns
     -------
-    dict[str, tuple[int, ...]] | None
-        Concrete shapes by dotted key, or None when probing is off.
+    dict[str, int]
+        ``{dotted_key: concrete_last_dim}`` for every statically resolvable key.
     """
-    probe = getattr(args, "probe", None)
-    if probe is None:
-        return None
-    data_file = None if probe is SYNTHETIC else probe
-    probed = probe_shapes(args.config, args.set, data_file, mode)
-    source = "synthetic batch" if data_file is None else f"real batch from {data_file}"
-    print(f"probed {len(probed)} concrete tensor shapes from a {source}")
-    return probed
+    plans: list[Plan] = []
+    for plan_mode in PRIMARY_MODES:
+        if plan_mode in cfg.mode_errors:
+            continue
+        try:
+            plans.append(
+                compile_plan(
+                    cfg.modules,
+                    plan_mode,
+                    cfg.sources,
+                    schema=cfg.schema,
+                    sinks=cfg.sinks,
+                    sink_origins=cfg.sink_origins.get(plan_mode),
+                )
+            )
+        except GraphError:
+            # a non-requested mode that does not compile is irrelevant to the
+            # requested mode's widths — skip it (the requested mode is already
+            # compiled by the caller, so it is always represented).
+            continue
+    return dict(resolve_bind_schema(plans).widths)
 
 
 def _render_with_dot(dot_path: Path, out_path: Path) -> None:
@@ -1598,17 +1618,6 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_config_arg(plot)
     _add_mode_arg(plot, default="fit")
     plot.add_argument("-o", "--output", required=True, help="output image path (.svg/.png/.dot)")
-    plot.add_argument(
-        "--probe",
-        nargs="?",
-        const=SYNTHETIC,
-        default=None,
-        metavar="DATA.h5",
-        help="run ONE batch through the plan and annotate every port with its CONCRETE "
-        "tensor shape (design §4.3): '--probe FILE.h5' seeds from a real data file; "
-        "'--probe' alone synthesises a batch from the reader schema (no data needed). "
-        "Without --probe the declared/symbolic shapes are shown",
-    )
     plot.set_defaults(func=_cmd_plot)
 
     why = gsub.add_parser("why", help="explain one key's producer/consumers (design §3.1)")

@@ -21,7 +21,7 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.core.schema import load_schema
 
 # the in-repo test-scale GN2v2 trainer config (16-dim, no machine paths) — the
-# synthetic --probe path needs a real trainer config but no data file
+# static width-resolution plot path needs a real trainer config but no data file
 _DUMMY_CFG = str(Path(__file__).parent.parent.parent / "core" / "configs" / "gn2v2-dummy.yaml")
 
 # ---------------------------------------------------------------------------
@@ -378,31 +378,30 @@ class TestPlot:
         assert (tmp_path / "graph.dot").exists()
         assert not out_path.exists()
 
-    def test_synthetic_probe_writes_concrete_shapes(self, tmp_path, capsys):
-        # --probe alone (no data file) synthesises a batch from the reader schema
-        # and annotates the DOT with concrete numeric shapes (design §4.3). Uses
-        # the in-repo test-scale GN2v2 config; the synthetic norm_dict is injected
-        # by the probe (the placeholder --set only satisfies the config parse).
+    def test_static_widths_write_concrete_feature_dims(self, tmp_path):
+        # the plot path resolves the bind schema STATICALLY (no data file, no
+        # batch run, no --probe) and annotates each port-card row with its
+        # concrete FEATURE width while the data-dependent batch/sequence dims
+        # stay symbolic (design §2.3, §4.3). The placeholder --set only satisfies
+        # the config parse — no norm_dict values are ever read.
         out_path = tmp_path / "graph.dot"
         rc = main([
             "graph", "plot",
             "-c", _DUMMY_CFG,
             "--mode", "fit",
-            "--probe",
             "--set", "model.modules.norm.init_args.norm_dict=unused.yaml",
             "-o", str(out_path),
         ])
         assert rc == 0
-        out = capsys.readouterr().out
-        assert "probed" in out and "synthetic batch" in out
         dot = out_path.read_text()
-        # inputs/embed/labels now carry concrete inner dims; the batch axis is
-        # the symbolic "B" (only axis 0 is rewritten — the trailing embed dim 16
-        # stays a concrete number, proving the coincidence is not masked)
-        assert "(B, 40, 19)" in dot  # inputs.tracks: B batch, 40 tokens, 19 features
-        assert "inputs.tracks" in dot
-        assert "labels.jets.flavour_label" in dot
-        assert "(B, 40, 16)" in dot  # embed.tracks: B batch, 40 tokens, 16-dim embed
+        # concrete feature dims from the static resolution (the widths that build
+        # the nn.Linear layers); B and the sequence dim T:tracks stay symbolic
+        assert "normed.tracks" in dot
+        assert "(B, T:tracks, 19)" in dot   # 19 input features, T:tracks symbolic
+        assert "(B, T:tracks, 16)" in dot   # encoded.tracks: 16 embed width
+        # NO symbolic feature dim leaked, and NO probe ran (no labeller line)
+        assert "F:norm" not in dot
+        assert "not labelled" not in dot
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from salt.core.graph.planner import SINKS, SOURCES, Plan
-from salt.core.graph.spec import KEY_SEP, TensorSpec, flatten_spec
+from salt.core.graph.spec import (
+    KEY_SEP,
+    TensorSpec,
+    flatten_spec,
+    is_symbolic_dim,
+    split_symbolic_dim,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -34,6 +40,16 @@ if TYPE_CHECKING:
 __all__ = ["dot_source", "plan_table"]
 
 _WILDCARD_PARTS = frozenset({"*", "**"})
+
+# Symbolic dim families that are genuinely DATA-dependent (design §2.2 / §4.3):
+# ``B`` (batch), ``T`` (per-stream token/sequence length), ``L`` (encoder layer
+# sequence length), ``S`` (the merged seq sequence length). These vary batch to
+# batch and have no statically resolvable size, so they stay SYMBOLIC in the
+# rendered shapes. Every OTHER symbolic family (``E``/``F``/``D``/``P``/``R``/
+# ``M``/``Dsum``/...) is a FEATURE/embedding width: config-fixed and resolved by
+# `salt.core.nn.bind.resolve_bind_schema` (the very widths that build the
+# nn.Linear layers), so the renderer substitutes the concrete int.
+_DATA_DIM_FAMILIES = frozenset({"B", "T", "L", "S"})
 
 
 def _has_wildcard(key: str) -> bool:
@@ -205,25 +221,54 @@ def _html_esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _shape_str(key: str, spec: TensorSpec | None, probed_shapes: Mapping[str, tuple] | None) -> str:
-    """Shape string for a card row, preferring a probed concrete shape.
+def _is_feature_dim(dim: int | str) -> bool:
+    """Whether a shape entry is a SYMBOLIC FEATURE dim (resolvable to a width).
 
-    When `probed_shapes` carries a (live-traced) shape for `key`, it is
-    formatted like ``"(16, 40, 19)"``; otherwise the declared/symbolic shape
-    from `spec` (`_fmt_shape`) is used. A scalar probed shape (``()``) stays
-    bare, matching `_fmt_shape`'s scalar handling.
+    A feature dim is a symbolic dim whose family is NOT data-dependent (design
+    §4.3): batch ``B`` and the sequence/token families ``T``/``L``/``S`` stay
+    symbolic; every other symbolic family (``E``/``F``/``D``/...) is a config-fixed
+    feature width that `resolve_bind_schema` resolves. Concrete ints are not
+    feature dims (already resolved).
+
+    Returns
+    -------
+    bool
+        True if `dim` is a symbolic feature dim.
+    """
+    if not is_symbolic_dim(dim):
+        return False
+    family, _ = split_symbolic_dim(str(dim))
+    return family not in _DATA_DIM_FAMILIES
+
+
+def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | None) -> str:
+    """Shape string for a card row, resolving the symbolic FEATURE dim STATICALLY.
+
+    Starts from the declared/symbolic shape (`spec`) and — when `widths` carries
+    a statically resolved last-dim size for `key` (from
+    `salt.core.nn.bind.resolve_bind_schema`, NO data, NO batch run) — substitutes
+    the concrete int for the shape's LAST dim, but only when that last dim is a
+    symbolic FEATURE dim (`_is_feature_dim`). The batch axis ``B`` and the
+    sequence/token dims (``T:``/``L:``/``S:``) are genuinely data-dependent and
+    stay symbolic; a feature dim that already declares a concrete int is left
+    unchanged (the resolved width agrees with it). So ``encoded.tracks`` renders
+    ``(B, T:tracks, 16)`` — the leading dims symbolic, the resolved width concrete.
 
     Returns
     -------
     str
         The parenthesised shape, or ``""`` when there is none.
     """
-    if probed_shapes is not None and key in probed_shapes:
-        dims = tuple(probed_shapes[key])
-        if not dims:
-            return ""
-        return "(" + ", ".join(str(dim) for dim in dims) + ")"
-    return _fmt_shape(spec)
+    if spec is None or not spec.shape:
+        return ""
+    dims: list[int | str] = list(spec.shape)
+    if (
+        widths is not None
+        and key in widths
+        and _is_feature_dim(dims[-1])
+    ):
+        dims[-1] = widths[key]
+    return "(" + ", ".join(str(dim) for dim in dims) + ")"
 
 
 def _card_row(key: str, shape: str, colour: str, *, bold: bool) -> str:
@@ -298,7 +343,7 @@ def dot_source(
     plan: Plan,
     modules: Mapping[str, GraphModule] | None = None,
     pruned: Iterable[str] = (),
-    probed_shapes: Mapping[str, tuple] | None = None,
+    widths: Mapping[str, int] | None = None,
 ) -> str:
     r"""Render a compiled plan as Graphviz DOT text — port-card layout (design §4.3).
 
@@ -320,10 +365,13 @@ def dot_source(
         Module instances, used only to label `pruned` cards with their class.
     pruned : Iterable[str], optional
         Names of demand-pruned modules to draw grey/dashed, by default ().
-    probed_shapes : Mapping[str, tuple] | None, optional
-        Live-traced concrete shapes by dotted key; when a key is present its
-        tuple is shown (e.g. ``"(16, 40, 19)"``) in preference to the
-        declared/symbolic shape, by default None.
+    widths : Mapping[str, int] | None, optional
+        Statically resolved per-key feature widths (dotted key -> concrete
+        last-dim int), from `salt.core.nn.bind.resolve_bind_schema` — NO data,
+        NO batch run. When a key's declared shape ends in a symbolic FEATURE dim
+        (not ``B``/``T``/``L``/``S``), that dim is shown as the concrete width
+        (e.g. ``encoded.tracks (B, T:tracks, 16)``); the data-dependent
+        leading/sequence dims stay symbolic. By default None.
 
     Returns
     -------
@@ -360,7 +408,7 @@ def dot_source(
 
     def _rows(items: Iterable[tuple[str, TensorSpec | None]]) -> list[tuple[str, str, str]]:
         return [
-            (key, _shape_str(key, spec, probed_shapes), _row_colour(key, spec))
+            (key, _shape_str(key, spec, widths), _row_colour(key, spec))
             for key, spec in items
         ]
 
