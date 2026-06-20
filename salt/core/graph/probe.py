@@ -133,6 +133,26 @@ def probe_shapes(
 # ---------------------------------------------------------------------------
 
 
+def _symbolic_batch(shape: tuple[int, ...], batch: int) -> tuple[int | str, ...]:
+    """Render the leading (batch) axis as the symbolic ``"B"`` when it equals the
+    probe's batch size.
+
+    Keeps probed shapes consistent with the declared symbolic rows (``(B, 40,
+    28)`` not ``(16, 40, 28)``) instead of leaking the arbitrary probe batch.
+    ONLY axis 0 is rewritten, so inner dims that coincidentally equal the batch
+    (e.g. an embed width of 16) and flattened leading dims (e.g. vertexing's
+    ``batch x valid-tracks`` != batch) are left as concrete numbers.
+
+    Returns
+    -------
+    tuple[int | str, ...]
+        The shape with axis 0 replaced by ``"B"`` when it equals `batch`.
+    """
+    if shape and shape[0] == batch:
+        return ("B", *shape[1:])
+    return shape
+
+
 def _run_one_batch(
     paths: Sequence[Path],
     overrides: Sequence[str],
@@ -203,13 +223,13 @@ def _run_one_batch(
         warnings.simplefilter("ignore")
         out = Executor(plan).run(seed_bundle)
 
-    shapes: dict[str, tuple[int, ...]] = {}
+    shapes: dict[str, tuple[int | str, ...]] = {}
     for key in out.keys():  # noqa: SIM118 - Bundle.keys() is a method, not a dict
         value = out.get(key)
         if isinstance(value, torch.Tensor):
-            shapes[key] = tuple(value.shape)
+            shapes[key] = _symbolic_batch(tuple(value.shape), b)
         elif hasattr(value, "shape"):  # ndarray boundary leaves, defensive
-            shapes[key] = tuple(int(d) for d in value.shape)
+            shapes[key] = _symbolic_batch(tuple(int(d) for d in value.shape), b)
     return shapes
 
 

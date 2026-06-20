@@ -399,12 +399,13 @@ class TestPlot:
         out = capsys.readouterr().out
         assert "probed" in out and "synthetic batch" in out
         dot = out_path.read_text()
-        # inputs/embed/labels now carry CONCRETE numeric shapes (B==16)
-        assert "(16, 40, 19)" in dot  # inputs.tracks: 19 features, 40 tokens
+        # inputs/embed/labels now carry concrete inner dims; the batch axis is
+        # the symbolic "B" (only axis 0 is rewritten — the trailing embed dim 16
+        # stays a concrete number, proving the coincidence is not masked)
+        assert "(B, 40, 19)" in dot  # inputs.tracks: B batch, 40 tokens, 19 features
         assert "inputs.tracks" in dot
         assert "labels.jets.flavour_label" in dot
-        # at least one embed.* row shows a concrete [B, T, dim] triple
-        assert "(16, 40, 16)" in dot  # embed.tracks at the 16-dim test scale
+        assert "(B, 40, 16)" in dot  # embed.tracks: B batch, 40 tokens, 16-dim embed
 
 
 # ---------------------------------------------------------------------------

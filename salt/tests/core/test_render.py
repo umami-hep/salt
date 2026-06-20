@@ -112,32 +112,39 @@ class TestProbeShapes:
         return probe_shapes(_DUMMY_CFG, _NORM_PLACEHOLDER, SYNTHETIC, Mode.FIT)
 
     def test_inputs_have_concrete_shapes(self, probed):
-        # B == 16; tracks carry the 19 configured features over 40 synthetic tokens
-        assert probed["inputs.jets"] == (16, 2)
-        assert probed["inputs.tracks"] == (16, 40, 19)
+        # batch axis renders as the symbolic "B"; tracks carry the 19 configured
+        # features over 40 synthetic tokens
+        assert probed["inputs.jets"] == ("B", 2)
+        assert probed["inputs.tracks"] == ("B", 40, 19)
 
     def test_embed_has_concrete_shape(self, probed):
         # the model-side embedding crossed the torch boundary with a real shape
-        assert probed["embed.tracks"][:2] == (16, 40)
+        assert probed["embed.tracks"][:2] == ("B", 40)
         assert len(probed["embed.tracks"]) == 3  # [B, T, embed_dim]
 
     def test_labels_populated_with_concrete_shapes(self, probed):
         # the narrowed task labels loaded off the synthetic batch
-        assert probed["labels.jets.flavour_label"] == (16,)
-        assert probed["labels.tracks.ftagTruthOriginLabel"] == (16, 40)
+        assert probed["labels.jets.flavour_label"] == ("B",)
+        assert probed["labels.tracks.ftagTruthOriginLabel"] == ("B", 40)
 
     def test_preds_have_concrete_shapes(self, probed):
         # forward ran end-to-end through the heads
-        assert probed["preds.jets.jets_classification"][0] == 16
-        assert probed["preds.tracks.track_origin"][:2] == (16, 40)
+        assert probed["preds.jets.jets_classification"][0] == "B"
+        assert probed["preds.tracks.track_origin"][:2] == ("B", 40)
 
     def test_none_is_synthetic(self):
         # data_file=None is the same SYNTHETIC path as the sentinel
         shapes = probe_shapes(_DUMMY_CFG, _NORM_PLACEHOLDER, None, Mode.FIT)
-        assert shapes["inputs.tracks"] == (16, 40, 19)
+        assert shapes["inputs.tracks"] == ("B", 40, 19)
+
+    def test_batch_axis_is_symbolic_B(self, probed):
+        # only axis 0 (the batch) is rewritten to "B"; inner dims stay concrete
+        # ints (so an embed width that coincidentally == batch is NOT masked)
+        assert probed["inputs.tracks"][0] == "B"
+        assert all(isinstance(d, int) for d in probed["inputs.tracks"][1:])
 
     def test_probed_shapes_feed_dot_source(self, plan, probed):
         # the probe output drops straight into the renderer as concrete shapes,
         # overriding the symbolic declared shape on every matching port row
         dot = dot_source(plan, probed_shapes={"embed.x": tuple(probed["inputs.tracks"][:2])})
-        assert "(16, 40)" in dot
+        assert "(B, 40)" in dot
