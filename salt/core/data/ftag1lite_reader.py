@@ -53,6 +53,7 @@ import numpy as np
 
 from salt.core.data.base import Reader, WorkerCtx
 from salt.core.data.cuts import CutSpec
+from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema
@@ -79,10 +80,9 @@ def _require_root_deps() -> None:
         ) from exc
 
 
-# Padding sentinel for SIGNED-int (label) fields: never a real class, folded to
-# ignore_index=-1 downstream. Floats pad to 0.0; unsigned/counts pad to 0; bool
-# pads to False. The 'valid' field is set explicitly, never via these fills.
-_INT_PAD_SENTINEL = -1
+# Pad fills (float 0.0, signed-int label -1 sentinel, unsigned 0, bool False) are
+# applied by the shared `Reader.assemble_jagged` / `salt.core.data.stream.pad_fill`
+# helper (plan 24, Wave 2) — no reader-local sentinel constant needed.
 
 
 @dataclass(frozen=True)
@@ -700,12 +700,8 @@ class FTAG1LiteReader(Reader):
             local jet-offset of ``jlo`` within the ``[e0, e1)`` flattened block.
         """
         cum = np.concatenate([[0], np.cumsum(entry.njets)])  # (n_events+1,)
-        # first event whose cumulative END > jlo
-        e0 = int(np.searchsorted(cum, jlo, side="right") - 1)
-        # last event whose cumulative START < jhi
-        e1 = int(np.searchsorted(cum, jhi, side="left"))
-        jet_offset_in_block = jlo - int(cum[e0])
-        return e0, e1, jet_offset_in_block
+        # kept-jet range -> covering local event range (shared OffsetIndex helper, W2)
+        return OffsetIndex.covering_range(cum, jlo, jhi)
 
     # -- the per-batch read (design §6.1) -------------------------------------
 
@@ -820,48 +816,38 @@ class FTAG1LiteReader(Reader):
             cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
 
+    def _stream_config(self, stream: str) -> StreamConfig:
+        """The `StreamConfig` for a constituent stream (resolved ``pad_max``, no cuts/sort).
+
+        FTAG1LITE cuts are JET-level (evaluated at index-build over the jet scalars,
+        not per-constituent), so the per-stream config carries only the resolved
+        served ``pad_max`` — `Reader.assemble_jagged` runs the parity-preserving
+        contiguous path (plan 24, Wave 2).
+
+        Returns
+        -------
+        StreamConfig
+            The per-stream cut/sort/pad spec.
+        """
+        return StreamConfig(pad_max=self._mult[stream], jagged=True)
+
     def _assemble_jagged(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Pad constituent columns to ``pad_max`` and assemble a structured ``(B, T)`` array.
+        """Pad constituent columns to ``pad_max`` via the shared `Reader.assemble_jagged`.
 
-        The ``valid`` length is computed FIRST from the per-jet track counts, THEN
-        each field is truncated/padded with ``ak.pad_none`` + ``ak.fill_none`` per
-        dtype and converted to dense numpy ``(B, T)``. The structured array carries
-        the fields in config order plus a ``valid`` bool field.
+        Delegates to the `Reader`-base cut → sort → truncate → pad assembly (plan 24,
+        Wave 2). With no per-constituent cuts/sort this is byte-for-byte the previous
+        contiguous path: ``valid`` first, leading truncate, per-dtype fill,
+        schema-cast, structured ``(B, T)`` + ``valid`` field.
 
         Returns
         -------
         tuple[np.ndarray, np.ndarray]
             ``(structured (B, T) array, valid (B, T) bool)``.
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
-
-        t_dim = self._mult[stream]
-        first = cols[fields[0]]
-        counts = np.asarray(ak.num(first, axis=1)) if b > 0 else np.zeros(0, dtype=np.int64)
-        valid = np.arange(t_dim)[None, :] < np.minimum(counts, t_dim)[:, None]  # (B, T) bool
-
         gschema = self.schema.groups[stream] if self.schema is not None else None
-        dtype_fields: list[tuple[str, np.dtype]] = []
-        blocks: dict[str, np.ndarray] = {}
-        for f in fields:
-            arr = cols[f][:, :t_dim]  # truncate to served pad_max (leading)
-            padded = ak.pad_none(arr, t_dim, axis=1, clip=True)
-            dt = np.dtype(gschema.fields[f]) if gschema is not None else None
-            fill = self._pad_fill(dt, arr)
-            dense = ak.to_numpy(ak.fill_none(padded, fill, axis=1))
-            block = np.asarray(dense)
-            if dt is not None:
-                block = block.astype(dt, copy=False)
-            blocks[f] = block
-            dtype_fields.append((f, block.dtype))
-        dtype_fields.append(("valid", np.dtype("bool")))
-        raw = np.empty((b, t_dim), dtype=np.dtype(dtype_fields))
-        for f in fields:
-            raw[f] = blocks[f]
-        raw["valid"] = valid
-        return raw, valid
+        return self.assemble_jagged(cols, fields, self._stream_config(stream), b, gschema)
 
     def _assemble_scalar(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
@@ -886,28 +872,6 @@ class FTAG1LiteReader(Reader):
         for f in fields:
             raw[f] = blocks[f]
         return raw
-
-    @staticmethod
-    def _pad_fill(dt: np.dtype | None, arr: Any) -> Any:
-        """The pad fill value for a field, by dtype kind (plan 19 sentinel rule).
-
-        float → 0.0 (zeroed again after masking downstream); SIGNED int (labels)
-        → -1 sentinel (never a real class; folded to ``ignore_index=-1``);
-        unsigned int / counts → 0; bool → False.
-
-        Returns
-        -------
-        Any
-            The scalar fill value.
-        """
-        kind = dt.kind if dt is not None else np.asarray(arr.layout.content).dtype.kind
-        if kind == "f":
-            return 0.0
-        if kind == "i":
-            return _INT_PAD_SENTINEL
-        if kind == "b":
-            return False
-        return 0  # unsigned ints / counts: 0
 
     # -- pickling (fork is free; spawn re-binds in the worker) ----------------
 

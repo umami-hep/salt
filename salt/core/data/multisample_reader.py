@@ -109,6 +109,7 @@ from typing import Any
 import numpy as np
 
 from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.stream import pad_fill
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.planner import PlanStep
 from salt.core.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
@@ -878,11 +879,14 @@ class MultiSampleReader(Reader):
         t = max(int(block.shape[1]) for _lo, _hi, _sid, block in blocks)
         dtype_fields = [(nm, ref.dtype[nm]) for nm in names]
         combined = np.zeros((b, t), dtype=np.dtype(dtype_fields))
-        # int (label) fields pad to -1 sentinel; bool/valid pad to False; float→0.0
+        # pad-extend shorter blocks with the shared dtype-aware sentinels (plan 24, W2):
+        # float→0.0, signed-int label→-1, unsigned→0, bool/valid→False. (np.zeros
+        # already supplies 0.0/0/False; only signed-int needs the -1 sentinel, so the
+        # combined block is byte-identical to the previous inline rule.)
         for nm in names:
-            kind = np.dtype(ref.dtype[nm]).kind
-            if kind == "i":
-                combined[nm][:] = -1
+            fill = pad_fill(np.dtype(ref.dtype[nm]))
+            if fill:  # non-zero/non-False fill (the signed-int -1 sentinel)
+                combined[nm][:] = fill
         for out_lo, out_hi, _sid, block in blocks:
             tb = block.shape[1]
             for nm in names:

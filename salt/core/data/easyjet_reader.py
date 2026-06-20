@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 
 from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema
@@ -78,12 +79,9 @@ def _require_root_deps() -> None:
         ) from exc
 
 
-# Default pad fills, by dtype kind (numpy kind code). Floats pad to 0.0 (zeroed
-# again downstream after masking in Features); SIGNED ints (labels) pad to the
-# -1 sentinel so a padded label is never a real class; unsigned ints pad to 0
-# (they are not labels — counts/masks/ids — and -1 is unrepresentable). bool
-# pads to False. The 'valid' field is set explicitly, never via these fills.
-_INT_PAD_SENTINEL = -1
+# Pad fills (float 0.0, signed-int label -1 sentinel, unsigned 0, bool False) are
+# applied by the shared `Reader.assemble_jagged` / `salt.core.data.stream.pad_fill`
+# helper (plan 24, Wave 2) — no reader-local sentinel constant needed.
 
 
 @dataclass(frozen=True)
@@ -177,6 +175,7 @@ class EasyjetReader(Reader):
         self.schema: Schema | None = None
         # transient per-process state (never pickled, see __getstate__)
         self._table: list[_FileEntry] | None = None
+        self._offsets: OffsetIndex | None = None  # cumulative per-file row offsets (W2)
         self._num_rows: int | None = None
         self._mult: dict[str, int] = {}  # stream -> served multiplicity T
         self._read_fields: dict[str, dict[str, str]] = {}
@@ -444,6 +443,7 @@ class EasyjetReader(Reader):
         assert schema_groups is not None
         self.schema = Schema(groups=schema_groups)
         self._table = table
+        self._offsets = OffsetIndex([e.n for e in table])  # cumulative file offsets (W2)
         self._num_rows = num_available if self.num < 0 else self.num
 
     @staticmethod
@@ -652,19 +652,18 @@ class EasyjetReader(Reader):
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 
         assert self._table is not None
+        assert self._offsets is not None
         cfg = self.groups[stream]
         branch_of = cfg.branches
         per_field_chunks: dict[str, list[Any]] = {f: [] for f in fields}
-        for entry in self._table:
-            lo = max(start, entry.start)
-            hi = min(stop, entry.start + entry.n)
-            if lo >= hi:
-                continue
+        # decompose the global slice into per-file (entry_start, entry_stop) runs (W2)
+        for fidx, local_lo, local_hi in self._offsets.runs(slice(start, stop)):
+            entry = self._table[fidx]
             with uproot.open(f"{entry.path}:{self.tree}") as t:
                 for f in fields:
                     arr = t[branch_of[f]].array(
-                        entry_start=lo - entry.start,
-                        entry_stop=hi - entry.start,
+                        entry_start=local_lo,
+                        entry_stop=local_hi,
                         library="ak",
                     )
                     per_field_chunks[f].append(arr)
@@ -674,49 +673,38 @@ class EasyjetReader(Reader):
             cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
 
+    def _stream_config(self, stream: str) -> StreamConfig:
+        """The `StreamConfig` for a jagged stream (resolved ``pad_max``, no cuts/sort).
+
+        easyjet has no per-constituent cut/sort surface (its cuts are jet-level, a
+        future capability), so the config carries only the resolved served
+        multiplicity — `Reader.assemble_jagged` therefore runs the parity-preserving
+        contiguous path (plan 24, Wave 2).
+
+        Returns
+        -------
+        StreamConfig
+            The per-stream cut/sort/pad spec.
+        """
+        return StreamConfig(pad_max=self._mult[stream], jagged=True)
+
     def _assemble_jagged(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Pad jagged columns to ``T`` and assemble a structured ``(B, T)`` array.
+        """Pad jagged columns to ``T`` via the shared `Reader.assemble_jagged` helper.
 
-        The ``valid`` length is computed FIRST from the per-event counts, THEN each
-        field is truncated/padded with ``ak.pad_none`` + ``ak.fill_none`` per dtype
-        and converted to a dense numpy ``(B, T)`` block. The structured array
-        carries the fields in config order plus a ``valid`` bool field.
+        Delegates to the `Reader`-base cut → sort → truncate → pad assembly (plan 24,
+        Wave 2). With no cuts/sort (easyjet's default) this is byte-for-byte the
+        previous contiguous path: ``valid`` first, leading truncate, per-dtype fill,
+        schema-cast, structured ``(B, T)`` + ``valid`` field.
 
         Returns
         -------
         tuple[np.ndarray, np.ndarray]
             ``(structured (B, T) array, valid (B, T) bool)``.
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
-
-        t_dim = self._mult[stream]
-        # valid length FIRST: true per-event count, then truncate to T
-        first = cols[fields[0]]
-        counts = np.asarray(ak.num(first, axis=1))
-        valid = np.arange(t_dim)[None, :] < np.minimum(counts, t_dim)[:, None]  # (B, T) bool
-
         gschema = self.schema.groups[stream] if self.schema is not None else None
-        dtype_fields: list[tuple[str, np.dtype]] = []
-        blocks: dict[str, np.ndarray] = {}
-        for f in fields:
-            arr = cols[f][:, :t_dim]  # truncate to served multiplicity (leading)
-            padded = ak.pad_none(arr, t_dim, axis=1, clip=True)
-            dt = np.dtype(gschema.fields[f]) if gschema is not None else None
-            fill = self._pad_fill(dt, arr)
-            dense = ak.to_numpy(ak.fill_none(padded, fill, axis=1))
-            block = np.asarray(dense)
-            if dt is not None:
-                block = block.astype(dt, copy=False)
-            blocks[f] = block
-            dtype_fields.append((f, block.dtype))
-        dtype_fields.append(("valid", np.dtype("bool")))
-        raw = np.empty((b, t_dim), dtype=np.dtype(dtype_fields))
-        for f in fields:
-            raw[f] = blocks[f]
-        raw["valid"] = valid
-        return raw, valid
+        return self.assemble_jagged(cols, fields, self._stream_config(stream), b, gschema)
 
     def _assemble_scalar(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
@@ -742,28 +730,6 @@ class EasyjetReader(Reader):
             raw[f] = blocks[f]
         return raw
 
-    @staticmethod
-    def _pad_fill(dt: np.dtype | None, arr: Any) -> Any:
-        """The pad fill value for a field, by dtype kind (design risk note §11).
-
-        float -> 0.0 (zeroed again after masking downstream); SIGNED int (labels)
-        -> -1 sentinel (never a real class; folded to ``ignore_index=-1``);
-        unsigned int -> 0; bool -> False.
-
-        Returns
-        -------
-        Any
-            The scalar fill value.
-        """
-        kind = dt.kind if dt is not None else np.asarray(arr.layout.content).dtype.kind
-        if kind == "f":
-            return 0.0
-        if kind == "i":
-            return _INT_PAD_SENTINEL
-        if kind == "b":
-            return False
-        return 0  # unsigned ints / other: 0
-
     # -- pickling (fork is free; spawn re-binds in the worker) ----------------
 
     def __getstate__(self) -> dict[str, Any]:
@@ -777,7 +743,14 @@ class EasyjetReader(Reader):
         """
         state = self.__dict__.copy()
         state.update(
-            {"_table": None, "_num_rows": None, "_mult": {}, "_read_fields": {}, "schema": None}
+            {
+                "_table": None,
+                "_offsets": None,
+                "_num_rows": None,
+                "_mult": {},
+                "_read_fields": {},
+                "schema": None,
+            }
         )
         return state
 
