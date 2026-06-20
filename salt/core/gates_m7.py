@@ -859,7 +859,11 @@ def _fixture_class_names(fix_full: Sequence[Path]) -> dict[str, list[str]]:
 
 
 def _fixture_labeller_classes(fix_full: Sequence[Path]) -> list[str] | None:
-    """The fixture's ``Labels`` processor labeller class_names (if any).
+    """The fixture's ``FtagLabeller`` processor class_names (if any).
+
+    M8 sub-wave 1 extracted the on-the-fly labeller into the standalone
+    ``ftag_labeller`` ``data.modules`` entry (it was an opt-in flag on ``labels``),
+    so the labeller classes live there now.
 
     Returns
     -------
@@ -868,7 +872,7 @@ def _fixture_labeller_classes(fix_full: Sequence[Path]) -> list[str] | None:
         on-the-fly labeller.
     """
     mods = _merge_yaml(fix_full).get("data", {}).get("modules", {})
-    return ((mods.get("labels") or {}).get("init_args") or {}).get("class_names")
+    return ((mods.get("ftag_labeller") or {}).get("init_args") or {}).get("class_names")
 
 
 # v2 task-bearing module classes (the converter + fixtures emit these as the
@@ -1319,11 +1323,11 @@ def run_cv1(
         # ftag build (the converter output is NOT edited).
         extra_sets: list[str] = []
         conv_lab = (
-            cfg.get("data", {}).get("modules", {}).get("labels", {}).get("init_args") or {}
+            cfg.get("data", {}).get("modules", {}).get("ftag_labeller", {}).get("init_args") or {}
         ).get("class_names")
         fix_lab = _fixture_labeller_classes(fix_full)
         if entry.get("labeller_override") and conv_lab and fix_lab and conv_lab != fix_lab:
-            extra_sets = ["--set", f"data.modules.labels.init_args.class_names={fix_lab}"]
+            extra_sets = ["--set", f"data.modules.ftag_labeller.init_args.class_names={fix_lab}"]
             row["labeller_override_applied"] = {"v1_faithful": conv_lab, "compiled_with": fix_lab}
 
         # -- (2) validate + plan-compile (fit/test/onnx; data-free, no --strict)
@@ -2206,11 +2210,11 @@ def run_cvf(
         # -- the GN2X_qcdsplit labeller substitution (same as CV1) ------------
         extra_sets: list[str] = []
         conv_lab = (
-            cfg.get("data", {}).get("modules", {}).get("labels", {}).get("init_args") or {}
+            cfg.get("data", {}).get("modules", {}).get("ftag_labeller", {}).get("init_args") or {}
         ).get("class_names")
         fix_lab = _fixture_labeller_classes(fix_full)
         if entry.get("labeller_override") and conv_lab and fix_lab and conv_lab != fix_lab:
-            extra_sets = ["--set", f"data.modules.labels.init_args.class_names={fix_lab}"]
+            extra_sets = ["--set", f"data.modules.ftag_labeller.init_args.class_names={fix_lab}"]
 
         # -- (i) target producer fidelity ------------------------------------
         synth = sorted(_v1_synthetic_targets(v1_resolved))

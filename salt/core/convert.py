@@ -734,12 +734,6 @@ def _convert_data(
     features_vars = {s: list(variables[s]) for s in streams}
 
     labels_init: dict[str, Any] = {"dtype_policy": "int64-for-int"}
-    labeller = v1.get("labeller_config")
-    if labeller and labeller.get("use_labeller"):
-        labels_init["use_labeller"] = True
-        labels_init["require_labels"] = bool(labeller.get("require_labels", True))
-        if labeller.get("class_names"):
-            labels_init["class_names"] = list(labeller["class_names"])
 
     data: dict[str, Any] = {}
     for key in ("batch_size", "num_workers"):
@@ -753,6 +747,16 @@ def _convert_data(
         },
         "labels": {"class_path": "salt.core.data.Labels", "init_args": labels_init},
     }
+    # v1 labeller_config (use_labeller) -> the FtagLabeller processor, emitted as a
+    # SEPARATE data.modules entry (M8 sub-wave 1; mirrors the multi_target emit). The
+    # on-the-fly ftag relabelling is no longer a flag on Labels: FtagLabeller produces
+    # the CONCRETE labels.<stream>.<label>, which beats the Labels labels.** wildcard
+    # (planner rule (a)) so it OWNS that key — write-once preserved.
+    labeller = v1.get("labeller_config")
+    if labeller and labeller.get("use_labeller"):
+        data["modules"]["ftag_labeller"] = _ftag_labeller_processor(
+            labeller, global_object=global_object, cfg_name=cfg_name
+        )
     # v1 top-level data.multi_target -> the MultiTarget processor (the conditional
     # target-replacement rules; the produced custom_target/target is a TRAINING-gated
     # label the regression head consumes). Concrete produce beats the Labels wildcard
@@ -1015,6 +1019,54 @@ def _mf_targets_processor(mf_config: Mapping[str, Any]) -> dict[str, Any]:
         "class_map": class_map,
     }
     return {"class_path": "salt.core.data.MaskFormerTargets", "init_args": init}
+
+
+def _ftag_labeller_processor(
+    labeller: Mapping[str, Any], *, global_object: str, cfg_name: str
+) -> dict[str, Any]:
+    """Build the v2 ``FtagLabeller`` data processor from a v1 ``labeller_config`` block.
+
+    v1's ``LabellerConfig{use_labeller, class_names, require_labels}``
+    (``configs.py:154-197``) is triggered IMPLICITLY at read time on the gate
+    ``input_name == global_object and label == 'flavour_label'``
+    (``datasets.py:609-626``): the ftag ``Labeller(class_names, require_labels)``
+    relabels the global-object stream on the fly via ``Labeller.get_labels`` and the
+    derived int label is cast to int64. The v2 ``FtagLabeller`` processor
+    (``salt.core.data.FtagLabeller``, processors.py) reproduces this exactly as a
+    standalone, explicitly-wired module: ``stream`` is v1's ``global_object``,
+    ``label`` is v1's implicit ``"flavour_label"``, and ``class_names`` /
+    ``require_labels`` carry through unchanged. Its CONCRETE
+    ``labels.<stream>.<label>`` produce beats the `Labels` ``labels.**`` wildcard
+    (planner rule (a)), so it OWNS the relabelled key — write-once preserved.
+
+    Returns
+    -------
+    dict[str, Any]
+        The ``{class_path, init_args}`` FtagLabeller module (module key
+        ``ftag_labeller``).
+
+    Raises
+    ------
+    ConvertError
+        When ``use_labeller`` is set but ``class_names`` is empty (the v1
+        empty-class guard, ``configs.py:189`` — never emit an unlabellable module).
+    """
+    class_names = labeller.get("class_names")
+    if not class_names:
+        raise ConvertError(
+            f"config {cfg_name!r}: labeller_config sets use_labeller but class_names is empty — "
+            "specify the target relabelling classes (v1 LabellerConfig empty-class guard, "
+            "configs.py:189)"
+        )
+    return {
+        "class_path": "salt.core.data.FtagLabeller",
+        "init_args": {
+            "stream": global_object,
+            "label": "flavour_label",
+            "class_names": list(class_names),
+            "require_labels": bool(labeller.get("require_labels", True)),
+        },
+    }
 
 
 # v1 multi_target rule key -> v2 MultiTarget replacement-rule key. The v1 spelling

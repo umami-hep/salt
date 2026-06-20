@@ -116,12 +116,19 @@ data:
       class_path: salt.core.data.Labels
       init_args:
         dtype_policy: int64-for-int
-        # --- THE M6 FEATURE: on-the-fly 7-class QCD-split labeller -----------
+    ftag_labeller:
+      class_path: salt.core.data.FtagLabeller
+      init_args:
+        # --- THE M8 FEATURE: standalone on-the-fly 7-class QCD-split labeller --
         # v1 GN2X_qcdsplit.yaml:100-103 labeller_config (require_labels:False ->
-        # drop unlabelled). See the ftag-CATALOGUE SUBSTITUTION note above:
-        # qcdll stands in for the catalogue-absent qcdxx. The 7 classes MUST
-        # match jets_classification.class_names index-for-index (LB1).
-        use_labeller: True
+        # drop unlabelled), now a SEPARATE pluggable processor (M8 sub-wave 1)
+        # rather than a flag on Labels. See the ftag-CATALOGUE SUBSTITUTION note
+        # above: qcdll stands in for the catalogue-absent qcdxx. Its concrete
+        # labels.jets.flavour_label produce beats the Labels labels.** wildcard
+        # so it OWNS that key. The 7 classes MUST match
+        # jets_classification.class_names index-for-index (LB1).
+        stream: jets
+        label: flavour_label
         require_labels: False
         class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
 

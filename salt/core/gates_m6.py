@@ -175,8 +175,7 @@ import torch
 from ftag import Labeller as V1Labeller
 
 from salt.core.data import H5StructuredReader  # the S31 fixture reader (gates_m5 import surface)
-from salt.core.data.base import WorkerCtx
-from salt.core.data.processors import Labels
+from salt.core.data.processors import FtagLabeller
 from salt.core.graph import Bundle, Executor, Mode, compile_plan
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.planner import PlanStep
@@ -389,32 +388,30 @@ def _bound_labels(
     require_labels: bool,
     stream: str = "jets",
     label: str = "flavour_label",
-) -> Labels:
-    """Build a `Labels` processor with the labeller on, bound to a one-key plan.
+) -> FtagLabeller:
+    """Build the standalone `FtagLabeller` processor for the on-the-fly labeller.
+
+    M8 sub-wave 1 re-points this LB1 oracle from the (now slimmed) `Labels`
+    monolith to the extracted `FtagLabeller` processor. `FtagLabeller` is
+    class-agnostic: it derives ``labels.<stream>.<label>`` directly from its config
+    via ``process``/``read_fields`` (no wildcard narrowing / ``bind`` step), so the
+    LB1 derive-body parity is unchanged (the get_labels + int64 cast is lifted
+    byte-for-byte).
 
     Returns
     -------
-    Labels
-        A bound `Labels` whose narrowed produce is exactly
-        ``labels.<stream>.<label>`` — ready to ``process``/``read_fields``.
+    FtagLabeller
+        A `FtagLabeller` whose produce is exactly ``labels.<stream>.<label>`` —
+        ready to ``process``/``read_fields``.
     """
-    labels = Labels(
-        streams=[stream],
-        use_labeller=True,
+    labeller = FtagLabeller(
+        stream=stream,
+        label=label,
         class_names=list(classes),
         require_labels=require_labels,
-        labeller_stream=stream,
-        labeller_label=label,
     )
-    labels.name = "labels"
-    step = PlanStep(
-        name="labels",
-        module=labels,
-        requires=MappingProxyType({}),
-        produces=MappingProxyType({f"labels.{stream}.{label}": TensorSpec(kind="label")}),
-    )
-    labels.bind(WorkerCtx(mode=Mode.FIT, read_fields={}, seed=0, step=step))
-    return labels
+    labeller.name = "labels"
+    return labeller
 
 
 def _v1_process_labels(
@@ -568,10 +565,8 @@ def run_lb1(
     checks["read_fields_excludes_derived_label"] = "flavour_label" not in declared
 
     # -- (d) named-error guards ------------------------------------------------
-    # empty-class guard: use_labeller=True without class_names -> ConfigError
-    checks["empty_class_guard_raises_configerror"] = _raises(
-        ConfigError, lambda: Labels(use_labeller=True)
-    )
+    # empty-class guard: FtagLabeller without class_names -> ConfigError
+    checks["empty_class_guard_raises_configerror"] = _raises(ConfigError, FtagLabeller)
     # missing-field guard: a labeller cut variable absent -> ValueError
     raw_missing = np.array([(11,), (10,)], dtype=[("R10TruthLabel_R22v1", "i4")])
     checks["missing_field_guard_raises_valueerror"] = _raises(

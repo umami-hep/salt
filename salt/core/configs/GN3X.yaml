@@ -111,12 +111,19 @@ data:
       class_path: salt.core.data.Labels
       init_args:
         dtype_policy: int64-for-int
-        # --- THE M6 FEATURE: on-the-fly 9-class flavour labeller -------------
+    ftag_labeller:
+      class_path: salt.core.data.FtagLabeller
+      init_args:
+        # --- THE M8 FEATURE: standalone on-the-fly 9-class flavour labeller ---
         # v1 GN3X.yaml:106-109 labeller_config (use_labeller / class_names /
-        # require_labels). labeller_stream/labeller_label default to
-        # jets/flavour_label (v1's implicit global_object gate). The 9 classes
-        # MUST match jets_classification.class_names index-for-index (LB1).
-        use_labeller: True
+        # require_labels), now a SEPARATE pluggable processor (M8 sub-wave 1)
+        # rather than a flag on Labels. stream/label default to
+        # jets/flavour_label (v1's implicit global_object gate). Its concrete
+        # labels.jets.flavour_label produce beats the Labels labels.** wildcard
+        # so it OWNS that key. The 9 classes MUST match
+        # jets_classification.class_names index-for-index (LB1).
+        stream: jets
+        label: flavour_label
         require_labels: True
         class_names: [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
 
