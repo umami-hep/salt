@@ -34,11 +34,12 @@ from pathlib import Path
 
 import numpy as np
 
+from salt.core.data.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_pad
 from salt.core.graph.planner import PlanStep
 from salt.core.graph.spec import IO, KEY_SEP, Mode
 from salt.core.schema import GroupSchema, Schema
 
-__all__ = ["DatasetModule", "Processor", "Reader", "WorkerCtx"]
+__all__ = ["DatasetModule", "OffsetIndex", "Processor", "Reader", "StreamConfig", "WorkerCtx"]
 
 RAW_NAMESPACE = "raw"
 """Bundle namespace for post-selection structured arrays (design §2.1)."""
@@ -298,6 +299,49 @@ class Reader(DatasetModule):
             )
         staged = stage_file(srcs[0], root / srcs[0].name)
         return self.with_source(filename=staged)
+
+    def assemble_jagged(
+        self,
+        cols: dict[str, object],
+        fields: list[str],
+        stream_cfg: StreamConfig,
+        b: int,
+        gschema: GroupSchema | None = None,
+        labels: dict[str, object] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Cut → sort → truncate → pad jagged columns into a structured ``(B, T)`` array.
+
+        The shared `Reader`-base assembly (plan 24, Wave 2): delegates to
+        `salt.core.data.stream._cut_sort_truncate_pad`. Every jagged-stream reader
+        (easyjet, ftag1lite, the jagged-combine path of multisample, a future
+        jagged-H5 reader) calls THIS instead of re-implementing pad/sentinel logic.
+
+        **PARITY.** With ``stream_cfg`` carrying no cuts and no sort (the default)
+        this reproduces the readers' previous contiguous truncate+pad+valid path
+        byte-for-byte; the drop-then-pad / sort machinery engages only when cuts/sort
+        are configured.
+
+        Parameters
+        ----------
+        cols : dict[str, object]
+            ``{field: jagged awkward array}`` of length ``b``.
+        fields : list[str]
+            Served field names in config order (the structured field order).
+        stream_cfg : StreamConfig
+            The cut/sort/pad spec (``pad_max`` resolved).
+        b : int
+            The number of rows.
+        gschema : GroupSchema | None, optional
+            The stream's schema group for per-field dtype casting.
+        labels : dict[str, object] | None, optional
+            Aligned columns permuted/cut in lockstep but not emitted as fields.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            ``(structured (B, T) array, valid (B, T) bool)``.
+        """
+        return _cut_sort_truncate_pad(cols, fields, stream_cfg, b, gschema, labels)
 
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable reader buffer.

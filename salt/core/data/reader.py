@@ -57,6 +57,7 @@ from ftag import Cuts
 from ftag.track_selector import TrackSelector
 
 from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.stream import StreamConfig
 from salt.core.data.vds import create_vds, has_wildcard
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
@@ -347,6 +348,32 @@ class H5StructuredReader(Reader):
             for field in self.schema.groups[cfg.dataset].fields
         )
 
+    def _stream_config(self, stream: str) -> StreamConfig | None:
+        """The `StreamConfig` for a sequence stream (``truncate`` → ``pad_max``), else None.
+
+        The shared base vocabulary (plan 24, Wave 2): the H5 reader reads dense,
+        already-padded structured arrays, so its only `StreamConfig` knob is the
+        ``truncate`` leading-keep (``pad_max``). Streams with no ``truncate`` return
+        ``None``; a configured ``truncate`` applies to the leading axis whether or
+        not the stream is ``global_object`` (mirrors the pre-Wave-2 leading slice).
+        The H5 read path has NO per-constituent cuts/sort surface, so this config
+        never carries cuts/sort — the drop-then-pad / sort machinery is never engaged
+        on the H5 path (it serves dense contiguous slabs), preserving byte-identity
+        (plan 24 §6/§7).
+
+        Returns
+        -------
+        StreamConfig | None
+            The per-stream pad config, or None for scalar / untruncated streams.
+        """
+        cfg = self.groups[stream]
+        if cfg.truncate is None:
+            return None
+        # truncate applies on the leading axis whether or not the stream is a
+        # global_object — mirrors the pre-Wave-2 `batch[:, :cfg.truncate]` exactly
+        # (byte-identical; the global+truncate combo is configurable, reader.py:91-93).
+        return StreamConfig(pad_max=cfg.truncate, jagged=not cfg.global_object)
+
     def with_source(
         self,
         filename: str | Path,
@@ -575,8 +602,11 @@ class H5StructuredReader(Reader):
             batch = buf
             if (selector := self._selectors.get(stream)) is not None:
                 batch = selector(batch)
-            if cfg.truncate is not None:
-                batch = batch[:, : cfg.truncate]
+            # truncate via the shared StreamConfig leading-keep (pad_max == truncate);
+            # None for scalar/untruncated streams → no-op (byte-identical, plan 24 W2)
+            stream_cfg = self._stream_config(stream)
+            if stream_cfg is not None:
+                batch = batch[:, : stream_cfg.pad_max]
             if mode == Mode.FIT:
                 for transform, wants_rng in zip(
                     self.transforms, self._transform_wants_rng, strict=True

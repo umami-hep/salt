@@ -29,6 +29,7 @@ from salt.core.data.processors import (
     MultiTarget,
 )
 from salt.core.data.reader import GroupConfig, H5StructuredReader
+from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
 
 __all__ = [
@@ -50,9 +51,11 @@ __all__ = [
     "MaskFormerTargets",
     "MultiSampleReader",
     "MultiTarget",
+    "OffsetIndex",
     "Processor",
     "Reader",
     "SampleConfig",
+    "StreamConfig",
     "WorkerCtx",
     "create_vds",
     "default_vds_path",
