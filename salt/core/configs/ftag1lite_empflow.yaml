@@ -1,0 +1,167 @@
+# ftag1lite_empflow.yaml — a small-R EMPFlow flavour tagger trained DIRECTLY on
+# xAOD DAOD_FTAG1LITE POOL files via the v2 modular FTAG1LiteReader (NO H5
+# pre-processing, NO umami/UPP resampling). Demonstrates the v2 Reader boundary
+# on a THIRD file type: a brand-new format is a NEW Reader — Features / Labels /
+# Normaliser / StreamEmbed / the encoder / the task heads / salt2 are all
+# UNCHANGED (this is the SAME model as gn2v2-opendata.yaml).
+#
+# The sample unit is the small-R jet (AntiKt4EMPFlowJets). The reader flattens
+# the file's [event][jet] std::vector scalars to one row per jet, and pads the
+# [event][jet][track] ft1l_trk_* double-jagged constituents to pad_max=40 per jet
+# (bf16 branches AUTO-decode to float32). The model: Normaliser -> track
+# StreamEmbed (context normed.jets) -> Concat -> TransformerEncoder -> Split ->
+# GlobalAttentionPooling -> jets_classification (4-class b/c/tau/light) +
+# track_origin + track_vertexing — the standard GN2/GN3 track-tagger heads, NO
+# model change.
+#
+# Index-build cuts (optional): attach a CutSpec to the reader to select eligible
+# jets at prepare() time (e.g. pt >= 20 GeV). Per-split cuts ride
+# with_source(stage=...). See salt.core.data.cuts.CutSpec.
+#
+# Data paths + norm_dict are REQUIRED overrides — NO machine paths are committed
+# (design §5 placeholder policy). uproot + awkward are runtime reader extras
+# (pip install 'salt[root]'). A typical invocation FROM THE REPO ROOT:
+#
+#   salt2 fit --config salt/core/configs/ftag1lite_empflow.yaml \
+#     --data.train_file $FILE_OR_DIR \
+#     --data.val_file   $FILE_OR_DIR \
+#     --model.modules.norm.init_args.norm_dict $NORM
+#
+# ($FILE_OR_DIR = a .pool.root file, a directory of them, or a glob;
+#  $NORM = a norm_dict.yaml with mean/std under top-level `jets:` and `tracks:`.)
+
+name: ftag1lite_empflow
+
+data:
+  batch_size: 1000
+  num_workers: 4
+  modules:
+    reader:
+      class_path: salt.core.data.FTAG1LiteReader
+      init_args:
+        jet_collection: AntiKt4EMPFlowJets
+        tree: CollectionTree
+        groups:
+          jets:
+            jagged: false
+            branches:
+              pt: pt
+              eta: eta_calibrated
+              phi: phi_calibrated
+              mass: mass_calibrated
+              flavour_label: HadronConeExclTruthLabelID
+          tracks:
+            jagged: true
+            pad_max: 40
+            branches:
+              d0: ft1l_trk_d0_bf16
+              z0SinTheta: ft1l_trk_z0SinTheta_bf16
+              d0Uncertainty: ft1l_trk_d0Uncertainty_bf16
+              z0SinThetaUncertainty: ft1l_trk_z0SinThetaUncertainty_bf16
+              lifetimeSignedD0Significance: ft1l_trk_lifetimeSignedD0Significance_bf16
+              lifetimeSignedZ0SinThetaSignificance: ft1l_trk_lifetimeSignedZ0SinThetaSignificance_bf16
+              pt: ft1l_trk_pt_bf16
+              deta: ft1l_trk_deta_bf16
+              dphi: ft1l_trk_dphi_bf16
+              numberOfPixelHits: ft1l_trk_numberOfPixelHits
+              numberOfSCTHits: ft1l_trk_numberOfSCTHits
+              # the track-truth labels keep their v1 field names so the task
+              # heads' label-derivation contracts hold (VertexingTaskModule
+              # derives the origin key via label.replace('VertexIndex',
+              # 'OriginLabel') — task.py:937)
+              ftagTruthOriginLabel: ft1l_trk_ftagTruthOriginLabel
+              ftagTruthVertexIndex: ft1l_trk_ftagTruthVertexIndex
+    features:
+      class_path: salt.core.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, phi, mass]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              d0Uncertainty,
+              z0SinThetaUncertainty,
+              lifetimeSignedD0Significance,
+              lifetimeSignedZ0SinThetaSignificance,
+              pt,
+              deta,
+              dphi,
+              numberOfPixelHits,
+              numberOfSCTHits,
+            ]
+    labels:
+      class_path: salt.core.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.core.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.core.nn.Normaliser
+        init_args:
+          # norm_dict: REQUIRED override (see header) — jets + tracks streams
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.core.nn.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          out_dim: 256
+          dense: {hidden_layers: [256], activation: ReLU}
+      concat:
+        class_path: salt.core.nn.Concat
+        init_args: {streams: [tracks]}
+      encoder:
+        class_path: salt.core.nn.TransformerEncoder
+        init_args:
+          dim: 256
+          out_dim: 128
+          num_layers: 4
+          attention: {num_heads: 8, attn_type: torch-math}
+          dense: {activation: ReLU, gated: false}
+      split:
+        class_path: salt.core.nn.Split
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.core.nn.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      jets_classification:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [bjets, cjets, taujets, ujets]
+          # FTAG1LITE HadronConeExclTruthLabelID -> 4-class index:
+          # 5=b->0, 4=c->1, 15=tau->2, 0=light->3
+          label_map: {5: 0, 4: 1, 15: 2, 0: 3}
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      track_origin:
+        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight: 0.5
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      track_vertexing:
+        class_path: salt.core.nn.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          context: pooled.global
+          weight: 1.5
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
+      loss:
+        class_path: salt.core.nn.LossSum
+
+trainer:
+  max_epochs: 40
+  precision: 32-true

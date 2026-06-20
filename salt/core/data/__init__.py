@@ -15,9 +15,11 @@ same graph kernel as the model side. Public surface:
 from __future__ import annotations
 
 from salt.core.data.base import DatasetModule, Processor, Reader, WorkerCtx
+from salt.core.data.cuts import Cut, CutSpec
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
 from salt.core.data.easyjet_reader import EasyjetGroupConfig, EasyjetReader
+from salt.core.data.ftag1lite_reader import FTAG1LiteGroupConfig, FTAG1LiteReader
 from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
 from salt.core.data.processors import (
     Features,
@@ -31,9 +33,13 @@ from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
 
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",
+    "Cut",
+    "CutSpec",
     "DatasetModule",
     "EasyjetGroupConfig",
     "EasyjetReader",
+    "FTAG1LiteGroupConfig",
+    "FTAG1LiteReader",
     "Features",
     "FtagLabeller",
     "GraphDataModule",
