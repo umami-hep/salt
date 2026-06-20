@@ -20,6 +20,7 @@ from salt.core.data.datamodule import GraphDataModule
 from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
 from salt.core.data.easyjet_reader import EasyjetGroupConfig, EasyjetReader
 from salt.core.data.ftag1lite_reader import FTAG1LiteGroupConfig, FTAG1LiteReader
+from salt.core.data.input_samples import InputSamples
 from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
 from salt.core.data.processors import (
     Features,
@@ -47,6 +48,7 @@ __all__ = [
     "GraphDataset",
     "GroupConfig",
     "H5StructuredReader",
+    "InputSamples",
     "Labels",
     "MaskFormerTargets",
     "MultiSampleReader",

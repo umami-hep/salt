@@ -42,11 +42,14 @@ import lightning
 import torch
 from torch.utils.data import DataLoader
 
-from salt.core.data.base import DatasetModule, Reader
+from salt.core.data.base import DatasetModule, Reader, SetupBundle
 from salt.core.data.dataset import GraphDataset
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode
+from salt.core.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.core.data.samplers import RandomBatchSampler
+from salt.core.graph.errors import ConfigError
+from salt.core.graph.planner import compile_setup_plan
+from salt.core.graph.setup_executor import run_setup_plan
+from salt.core.graph.spec import PRIMARY_MODES, Mode
 
 __all__ = ["GraphDataModule"]
 
@@ -54,6 +57,39 @@ __all__ = ["GraphDataModule"]
 # (the plan-02 per-reader stage-sourcing hook). Single-source readers ignore it;
 # MultiSampleReader uses it to select each sub-reader's per-stage source.
 _STAGE_OF_MODE: dict[Mode, str] = {Mode.FIT: "train", Mode.VAL: "val", Mode.TEST: "test"}
+
+# The setup stages a setup-only module is probed over (plan-24 §3.3).
+_SETUP_STAGES: tuple[str, ...] = ("train", "val", "test")
+
+
+def _is_setup_only(module: DatasetModule) -> bool:
+    """Whether `module` participates ONLY in the setup graph (plan-24 §4.4).
+
+    A setup-only module declares a non-empty `declare_setup_io` for SOME stage
+    AND an empty `declare_io` for EVERY per-batch mode. Such a module (e.g.
+    `InputSamples`/`VDS`/`ShmStage`) MUST be partitioned out before the
+    per-batch dataset deepcopy, or `compile_plan`'s `_check_all_modes_dead`
+    (planner.py — a module inactive in every mode raises `AllModesDeadError`)
+    and `GraphDataset`'s single-Reader guard would both miscount it (plan-25
+    §3.6). A dual-face reader has a non-empty `declare_io`, so it stays in the
+    per-batch set and appears in BOTH graphs.
+
+    Returns
+    -------
+    bool
+        True when the module is setup-only.
+    """
+    has_setup = any(
+        not module.declare_setup_io(stage).is_empty()  # type: ignore[arg-type]
+        for stage in _SETUP_STAGES
+    )
+    if not has_setup:
+        return False
+    has_batch = any(
+        module.declare_io(mode).requires or module.declare_io(mode).produces
+        for mode in PRIMARY_MODES
+    )
+    return not has_batch
 
 
 class GraphDataModule(lightning.LightningDataModule):
@@ -148,6 +184,11 @@ class GraphDataModule(lightning.LightningDataModule):
         modules = {name: module for name, module in modules.items() if module is not None}
         for name, module in modules.items():
             module.name = name
+        # Single-Reader guard FIRST (over all modules): a Reader always has a
+        # non-empty per-batch face, so it is never setup-only and the count is
+        # the same before/after the partition. Doing it up front gives us
+        # `_reader_name` so InputSamples can be wired (plan-25 §3.8) BEFORE the
+        # partition probes `declare_setup_io` (which needs the reader name).
         readers = [(name, m) for name, m in modules.items() if isinstance(m, Reader)]
         if len(readers) != 1:
             raise ConfigError(
@@ -155,15 +196,34 @@ class GraphDataModule(lightning.LightningDataModule):
                 f"({[name for name, _ in readers]}) (design §6.1)"
             )
         self._reader_name, self._reader_proto = readers[0]
-        self._modules = modules
         self.train_file = train_file
         self.val_file = val_file
         self.test_file = test_file
-        self.batch_size = batch_size
-        self.num_workers = num_workers
         self.num_train = num_train
         self.num_val = num_val
         self.num_test = num_test
+        # plan-25 W3.A: the data-sourcing setup graph. If a config declares an
+        # `InputSamples` setup module it OWNS the per-stage source patterns; the
+        # deprecated train_file/val_file/test_file kwargs synthesise an IMPLICIT
+        # InputSamples for one migration window (plan-25 O-ALIAS-WINDOW / §3.3)
+        # so old configs + exp-12's `--data.train_file` keep working unchanged.
+        # MUST run before the partition: wires InputSamples._reader so its
+        # `declare_setup_io` (probed by `_is_setup_only`) can build keys.
+        self._wire_input_samples(modules)
+        # plan-24 §4.4 / plan-25 §3.6 namespace split: partition setup-only
+        # modules OUT before the per-batch dataset deepcopy. setup-only modules
+        # (InputSamples/VDS/ShmStage) never reach GraphDataset, so neither
+        # `_check_all_modes_dead` nor GraphDataset's single-Reader guard
+        # miscounts them. The setup pass iterates `_setup_modules` + the
+        # dual-face reader (which stays in `_batch_modules`).
+        self._setup_modules = {name: m for name, m in modules.items() if _is_setup_only(m)}
+        self._batch_modules = {
+            name: m for name, m in modules.items() if name not in self._setup_modules
+        }
+        self._modules = modules
+        self._setup_ctx: SetupBundle | None = None
+        self.batch_size = batch_size
+        self.num_workers = num_workers
         self.test_suff = test_suff
         # opt-in staging root (M6 sub-wave E, gate S31; v1 datamodules.py:91).
         # None -> staging is a no-op (default-off, byte-identical read path).
@@ -189,18 +249,106 @@ class GraphDataModule(lightning.LightningDataModule):
         self.val_dset: GraphDataset | None = None
         self.test_dset: GraphDataset | None = None
 
+    def _wire_input_samples(self, modules: dict[str, DatasetModule]) -> None:
+        """Assemble the data-sourcing setup graph (plan-25 §3.8 / W3.A).
+
+        Two responsibilities:
+
+        1. **Alias migration window** (plan-25 O-ALIAS-WINDOW): if no
+           `InputSamples` is configured but the deprecated
+           ``train_file``/``val_file``/``test_file`` kwargs are set, synthesise
+           an IMPLICIT `InputSamples` from them (with the matching per-stage
+           ``num``) and add it to the setup-only namespace. This keeps old
+           configs and exp-12's ``--data.train_file`` working unchanged.
+        2. **Reader-name wiring** (plan-25 §3.8): the ``source.<reader>.*`` keys
+           are embedded at *declaration* time, so each `InputSamples` instance is
+           poked with the single reader's name AFTER the single-Reader guard.
+
+        Parameters
+        ----------
+        modules : dict[str, DatasetModule]
+            The full assembled module dict (mutated in place when an implicit
+            `InputSamples` is synthesised).
+
+        Raises
+        ------
+        ConfigError
+            If more than one `InputSamples` is configured (the single Reader can
+            have exactly one source owner, plan-25 §3.1).
+        """
+        existing = [(name, m) for name, m in modules.items() if isinstance(m, InputSamples)]
+        if len(existing) > 1:
+            raise ConfigError(
+                f"GraphDataModule allows at most one InputSamples, got {len(existing)} "
+                f"({[name for name, _ in existing]}); one InputSamples owns the single "
+                "Reader's source chain (plan-25 §3.1)"
+            )
+        if not existing:
+            files = {
+                stage: f
+                for stage, f in (
+                    ("train", self.train_file),
+                    ("val", self.val_file),
+                    ("test", self.test_file),
+                )
+                if f is not None
+            }
+            if files:
+                num = {"train": self.num_train, "val": self.num_val, "test": self.num_test}
+                implicit = InputSamples(files=files, num={s: num[s] for s in files})
+                implicit.name = "input_samples"
+                # add to the module dict; the partition right after picks it up
+                # into `_setup_modules` via `_is_setup_only` (it is setup-only).
+                modules["input_samples"] = implicit
+                existing = [("input_samples", implicit)]
+        # plan-25 §3.8 reader-name wiring: embed the single Reader's name so the
+        # produced source.<reader>.<stage>.pattern keys match the handoff.
+        for _, samples in existing:
+            samples._reader = self._reader_name  # noqa: SLF001 — assembly poke (plan-25 §3.8)
+        self._input_samples: InputSamples | None = existing[0][1] if existing else None
+
     @property
     def modules(self) -> dict[str, DatasetModule]:
-        """The configured dataset modules by instance name (read-only view).
+        """All assembled dataset modules by instance name — the UNION (plan-25 §3.6).
+
+        Includes BOTH the per-batch modules and the setup-only modules
+        (InputSamples/VDS/ShmStage). ``salt2 graph`` renders the setup graph and
+        the per-batch graph as two distinct topologies, so the per-batch compile
+        must use `batch_modules`, NOT this union (a setup-only module in the
+        per-batch compile trips `AllModesDeadError`, plan-25 §3.6).
 
         Returns
         -------
         dict[str, DatasetModule]
-            A fresh dict of the assembled (None-filtered) modules — used by
-            the static graph tooling (``salt2 graph``) to build the
-            full-pipeline graph from a §5.1 config.
+            A fresh dict of the assembled (None-filtered) modules.
         """
         return dict(self._modules)
+
+    @property
+    def batch_modules(self) -> dict[str, DatasetModule]:
+        """The PER-BATCH modules (reader + processors), excluding setup-only ones.
+
+        The namespace handed to `GraphDataset` / the per-batch `compile_plan`
+        (plan-25 §3.6): setup-only modules are partitioned out so the per-batch
+        compile and its single-Reader guard see exactly the tensor pipeline.
+
+        Returns
+        -------
+        dict[str, DatasetModule]
+            A fresh dict of the per-batch modules.
+        """
+        return dict(self._batch_modules)
+
+    @property
+    def setup_modules(self) -> dict[str, DatasetModule]:
+        """The SETUP-only modules (InputSamples/VDS/ShmStage) — the setup graph.
+
+        Returns
+        -------
+        dict[str, DatasetModule]
+            A fresh dict of the setup-only modules.
+        """
+        return dict(self._setup_modules)
 
     @property
     def reader(self) -> Reader:
@@ -224,6 +372,7 @@ class GraphDataModule(lightning.LightningDataModule):
         reader.name = self._reader_name
         self._reader_proto = reader
         self._modules[self._reader_name] = reader
+        self._batch_modules[self._reader_name] = reader
 
     def set_sinks(self, sinks: Mapping[Mode, Iterable[str]]) -> None:
         """Set the per-mode model-boundary demand (the stage-B wiring hook).
@@ -253,6 +402,74 @@ class GraphDataModule(lightning.LightningDataModule):
             origins = getattr(model, "sink_origins", None)
             if callable(origins):
                 self._sink_origins = {mode: dict(who) for mode, who in origins().items()}
+
+    # -- the data-sourcing setup pass (plan-24 §4.3 / plan-25 W3.A) ------------
+
+    def _run_setup_pass(self, stages: Iterable[str]) -> None:
+        """Compile + run the setup-graph plan once per `stages` into one ctx.
+
+        The setup analogue of building the per-batch plans (plan-24 §4.3): for
+        each stage it compiles the setup plan over ``_setup_modules`` and walks
+        it (`run_setup_plan`) into ONE shared write-once ctx, so e.g.
+        ``setup("fit")`` accumulates both ``"train"`` and ``"val"`` into disjoint
+        stage-qualified keys (plan-24 §3.5). ``_make_dataset`` then reads the
+        resolved deepest PATH off this ctx. A no-op when no setup modules are
+        configured (the ctx stays empty and the kwargs path is used).
+
+        DDP-safe by construction (plan-24 §4.6): every rank runs the identical
+        pass; W3.A modules touch no filesystem, so there is no copy to serialise.
+
+        Parameters
+        ----------
+        stages : Iterable[str]
+            The setup stages to resolve (``"train"``/``"val"``/``"test"``).
+        """
+        if self._setup_ctx is None:
+            self._setup_ctx = SetupBundle()
+        if not self._setup_modules:
+            return
+        stage_tuple = tuple(stages)
+        # The whole-dict `num` SCALAR is written ONCE per ctx (plan-25 §3.7): tell
+        # the InputSamples which pass stage carries it, and whether a prior pass
+        # already wrote it into this shared ctx (so a `test` pass after `fit`
+        # doesn't re-emit the {train,val,test} cap dict).
+        if self._input_samples is not None:
+            num_key = f"artifacts.{self._reader_name}.num"
+            self._input_samples.set_num_stage(
+                stage_tuple, already_emitted=num_key in self._setup_ctx
+            )
+        for stage in stage_tuple:
+            plan = compile_setup_plan(self._setup_modules, stage)  # type: ignore[arg-type]
+            run_setup_plan(plan, stage, self._setup_ctx)  # type: ignore[arg-type]
+
+    def _resolve_source(self, mode: Mode) -> tuple[str | Path | None, int]:
+        """Resolve the stage's source PATH + row cap from the setup ctx (plan-25 §4.0).
+
+        The datamodule handoff glue: when an `InputSamples` resolved this stage,
+        return its deepest present PATH (W3.A: ``pattern``) and the per-stage
+        ``num`` off the whole-dict SCALAR leaf. With no setup ctx populated (no
+        `InputSamples` and no aliases) it falls back to the legacy
+        ``train_file``/``num_train`` kwargs — the migration window's last resort.
+
+        Returns
+        -------
+        tuple[str | Path | None, int]
+            ``(filename, num)`` for `mode`'s stage.
+        """
+        stage = _STAGE_OF_MODE[mode]
+        if self._input_samples is not None and self._setup_ctx is not None:
+            key = f"source.{self._reader_name}.{stage}.pattern"
+            if key in self._setup_ctx:
+                filename = deepest_source_path(self._setup_ctx, self._reader_name, stage)
+                num = source_num(self._setup_ctx, self._reader_name, stage)
+                return filename, num
+        # legacy fallback (no InputSamples, no aliases): the raw kwargs.
+        legacy = {
+            Mode.FIT: (self.train_file, self.num_train),
+            Mode.VAL: (self.val_file, self.num_val),
+            Mode.TEST: (self.test_file, self.num_test),
+        }
+        return legacy[mode]
 
     # -- stage plumbing --------------------------------------------------------
 
@@ -288,10 +505,13 @@ class GraphDataModule(lightning.LightningDataModule):
         reader = self._stage(reader)
         # deep-copy the processors per stage: bind-time state (e.g. the Labels
         # narrowed key set) is per-(dataset, mode) and must not leak between
-        # the train/val/test plans sharing this module dict (design §2.3)
+        # the train/val/test plans sharing this module dict (design §2.3).
+        # Only `_batch_modules` are copied — setup-only modules (plan-24 §4.4)
+        # are NEVER handed to GraphDataset, so the per-batch compile and the
+        # single-Reader guard see exactly the per-batch namespace.
         modules = {
             name: (reader if name == self._reader_name else deepcopy(module))
-            for name, module in self._modules.items()
+            for name, module in self._batch_modules.items()
         }
         return GraphDataset(
             modules,
@@ -374,11 +594,15 @@ class GraphDataModule(lightning.LightningDataModule):
         """Build the per-stage datasets (``datamodules.py:197-245`` contract).
 
         Train compiles the FIT plan, val the VAL plan (fixing v1's
-        ``stage='fit'`` leak into validation), test the TEST plan. When opt-in
-        temp staging is active (``move_files_temp`` set, not ``fast_dev_run``) the
-        ``_stage_root`` is armed BEFORE VDS precreation / dataset building, so every
-        per-stage reader restages its own files onto the root (M8 wave 3: the fat
-        ``prepare_data``/``setup``-repoint subsystem collapsed to `Reader.restage`).
+        ``stage='fit'`` leak into validation), test the TEST plan. The
+        data-sourcing setup graph runs FIRST (plan-25 W3.A): the setup pass
+        resolves each stage's source PATH onto one write-once ctx, then
+        ``_make_dataset`` binds the reader from the ctx-resolved deepest key via
+        the existing handoff (``with_source(filename=ctx_path, num=..., stage=)``).
+        When opt-in temp staging is active (``move_files_temp`` set, not
+        ``fast_dev_run``) the ``_stage_root`` is armed BEFORE VDS precreation /
+        dataset building, so every per-stage reader restages its own files onto
+        the root (M8 wave 3).
 
         Raises
         ------
@@ -387,26 +611,46 @@ class GraphDataModule(lightning.LightningDataModule):
         """
         self._auto_sinks()
         self._stage_root = self._resolve_stage_root(stage)
+        # plan-25 W3.A: run the data-sourcing setup pass once per stage into one
+        # ctx (setup("fit") resolves both train+val). _resolve_source then reads
+        # the deepest PATH off this ctx; pure path arithmetic, no FS I/O.
+        self._run_setup_pass(_STAGE_OF_MODE[m] for m in self._modes_for_stage(stage))
         if stage in {"fit", "test"} and self.trainer is not None:
             self._precreate_vds_rank0(stage)
             self._dist_barrier()
         if stage == "fit":
+            train_file, num_train = self._resolve_source(Mode.FIT)
+            val_file, num_val = self._resolve_source(Mode.VAL)
             self.train_dset = self._make_dataset(
-                Mode.FIT, self.train_file, self.num_train, self.train_vds_path
+                Mode.FIT, train_file, num_train, self.train_vds_path
             )
-            self.val_dset = self._make_dataset(
-                Mode.VAL, self.val_file, self.num_val, self.val_vds_path
-            )
+            self.val_dset = self._make_dataset(Mode.VAL, val_file, num_val, self.val_vds_path)
             if self.trainer is None or self.trainer.is_global_zero:
                 print(f"Created training dataset with {len(self.train_dset):,} entries")
                 print(f"Created validation dataset with {len(self.val_dset):,} entries")
         if stage == "test":
-            if self.test_file is None:
+            test_file, num_test = self._resolve_source(Mode.TEST)
+            if test_file is None:
                 raise ConfigError("No test file specified, see --data.test_file")
             self.test_dset = self._make_dataset(
-                Mode.TEST, self.test_file, self.num_test, self.test_vds_path
+                Mode.TEST, test_file, num_test, self.test_vds_path
             )
             print(f"Created test dataset with {len(self.test_dset):,} entries")
+
+    @staticmethod
+    def _modes_for_stage(stage: str) -> tuple[Mode, ...]:
+        """The per-batch modes a Lightning stage builds (``setup("fit")`` → FIT+VAL).
+
+        Returns
+        -------
+        tuple[Mode, ...]
+            The modes whose source PATH the setup pass must resolve for `stage`.
+        """
+        if stage == "fit":
+            return (Mode.FIT, Mode.VAL)
+        if stage == "test":
+            return (Mode.TEST,)
+        return ()
 
     # -- dataloaders (datamodules.py:247-269 kept wholesale) -------------------
 

@@ -35,11 +35,28 @@ from pathlib import Path
 import numpy as np
 
 from salt.core.data.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_pad
+from salt.core.graph.bundle import Bundle
 from salt.core.graph.planner import PlanStep
+from salt.core.graph.setup_spec import SetupIO, SetupStage
 from salt.core.graph.spec import IO, KEY_SEP, Mode
 from salt.core.schema import GroupSchema, Schema
 
-__all__ = ["DatasetModule", "OffsetIndex", "Processor", "Reader", "StreamConfig", "WorkerCtx"]
+__all__ = [
+    "DatasetModule",
+    "OffsetIndex",
+    "Processor",
+    "Reader",
+    "SetupBundle",
+    "StreamConfig",
+    "WorkerCtx",
+]
+
+# The SETUP-time carrier (plan-24 §3.5): the run `Bundle`'s write-once,
+# dotted-key machinery is leaf-type-agnostic, so it is reused AS-IS as the
+# setup bundle — its leaves are PATH strings / SCALAR artifacts instead of
+# tensors. `SetupBundle` is an alias (not a subclass) to keep the carrier a
+# single, shared implementation.
+SetupBundle = Bundle
 
 RAW_NAMESPACE = "raw"
 """Bundle namespace for post-selection structured arrays (design §2.1)."""
@@ -93,6 +110,58 @@ class DatasetModule(ABC):
         Design §2.3: this is the only place dataset modules may touch data
         files. Called once per (worker process, plan) by `GraphDataset`.
         """
+
+    # -- SETUP-time face (plan-24 §4.1: once per stage, NOT per batch) --------
+    # All three default to no-ops, so decision 3's "one module type, two
+    # phases" is cheap: a pure-source module (InputSamples/VDS/ShmStage)
+    # overrides only declare_setup_io/setup and inherits an empty declare_io; a
+    # pure processor inherits these no-ops; a dual-face reader overrides both.
+
+    def declare_setup_io(self, stage: SetupStage) -> SetupIO:
+        """Return the module's SETUP-time interface for `stage`; default empty.
+
+        The setup-time analogue of `declare_io`. A function of the module's own
+        config only — no data files, no tensors (plan-24 §4.2). A non-empty
+        return for some stage is what marks a module as setup-participating; the
+        per-batch `declare_io` face is unaffected.
+
+        Returns
+        -------
+        SetupIO
+            The declared setup requires/produces (`SourceSpec` leaves).
+        """
+        del stage
+        return SetupIO()
+
+    def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
+        """Run this module's setup-time side-effect for `stage`; default identity.
+
+        Plan-24 §4.1: the sole sanctioned setup-time ctx-mutation point (the
+        setup analogue of per-batch `read`). Runs once per stage inside
+        ``datamodule.setup(stage)``, reads its declared setup-`requires` off
+        `ctx`, may touch the filesystem (glob, build a VDS, copy to
+        ``/dev/shm``), and merges back ONLY its declared setup-`produces`
+        (write-once). Same code path on every DDP rank (plan-24 §4.6).
+
+        The base default returns `ctx` unchanged — a no-op for per-batch-only
+        modules (processors) whose `declare_setup_io` is empty.
+
+        Returns
+        -------
+        SetupBundle
+            The same `ctx`, with this module's produces merged in.
+        """
+        del stage
+        return ctx
+
+    def teardown(self, ctx: SetupBundle, stage: SetupStage) -> None:  # noqa: B027
+        """Reverse a setup-time side-effect for `stage`; default no-op.
+
+        Plan-24 §4.1: the symmetric cleanup hook (e.g. `ShmStage` rmtree-ing
+        its ``/dev/shm`` root). Called from ``datamodule.teardown(stage)``,
+        guarded so it fires only for the stage(s) the module actually set up.
+        """
+        del ctx, stage
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
         """Per-stream raw fields this module demands from the reader (design §6.1).

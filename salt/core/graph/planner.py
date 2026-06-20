@@ -33,7 +33,7 @@ import hashlib
 import heapq
 import json
 from collections import deque
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from itertools import pairwise
@@ -48,6 +48,11 @@ from salt.core.graph.errors import (
     GraphError,
     KindError,
     ShapeError,
+)
+from salt.core.graph.setup_spec import (
+    SetupStage,
+    SourceSpec,
+    flatten_source_spec,
 )
 from salt.core.graph.spec import (
     KEY_SEP,
@@ -71,6 +76,7 @@ __all__ = [
     "PlanStep",
     "Sinks",
     "compile_plan",
+    "compile_setup_plan",
     "deadcode",
 ]
 
@@ -240,6 +246,68 @@ def compile_plan(
         sinks = list(sinks)
     res = _resolve(modules, mode, sources, schema, _sinks_for(sinks, mode, mode), sink_origins)
     _check_all_modes_dead(modules, mode, sources, sinks, res)
+    return _assemble_plan(res)
+
+
+def compile_setup_plan(
+    modules: dict[str, GraphModule],
+    stage: SetupStage,
+) -> Plan:
+    """Compile the SETUP-time source plan for one stage (plan-24 §4.3).
+
+    The setup-graph twin of `compile_plan`. It reuses the SAME deterministic
+    Kahn topo-sort (config-declaration-order tie-break), the
+    connectivity / duplicate-producer / kind / cycle checks, and `plan_hash` —
+    factored into `_compile_core` and shared with the tensor planner. It
+    DIFFERS in exactly two ways (plan-24 §4.3):
+
+    - the IO getter is ``module.declare_setup_io(stage)`` (returning a
+      `SetupIO` of `SourceSpec` leaves), not ``module.declare_io(mode)``;
+    - shape-unification (`_unify_edge`) is SKIPPED — `SourceSpec` omits
+      ``shape``/``dtype``, so only kind-matching applies. Running ``_unify_edge``
+      would `AttributeError` on the first setup edge.
+
+    The setup graph has no demand pruning, no sinks, and no all-modes-dead
+    check (a setup-only module producing a key consumed downstream is alive by
+    construction; pure path producers are the graph's roots). `stage` is a
+    Lightning-style setup stage (``"train"``/``"val"``/``"test"``), NOT a `Mode`.
+    The returned `Plan`'s ``mode`` field is set to `Mode.ALL` purely so the
+    frozen dataclass is well-formed; the setup executor walks ``steps`` in topo
+    order and never reads ``mode``.
+
+    Returns
+    -------
+    Plan
+        The frozen, hashed setup plan, steps in topo order.
+
+    Raises
+    ------
+    ConfigError
+        Instance-name mismatches or reserved-name collisions.
+    ConnectivityError
+        A required setup key has no producer, or a key has two producers.
+    KindError
+        A consumer's setup-port kind differs from its producer leaf's kind.
+    CycleError
+        A dependency cycle among setup modules.
+    """
+    res = _resolve(modules, Mode.ALL, {}, None, None, None, _setup_face(stage))
+    return _assemble_plan(res)
+
+
+def _assemble_plan(res: _Resolution) -> Plan:
+    """Topo-sort a resolved graph and freeze it into a hashed `Plan` (shared core).
+
+    The tail shared by `compile_plan` and `compile_setup_plan` (plan-24 §4.3):
+    deterministic Kahn order, immutable `PlanStep`/`Edge` views, and the
+    structural `plan_hash`. Leaf-type-agnostic — `TensorSpec` and `SourceSpec`
+    both serialise via `_spec_payload`.
+
+    Returns
+    -------
+    Plan
+        The frozen, hashed plan.
+    """
     order = _topo_order(res)
     steps = tuple(
         PlanStep(
@@ -251,9 +319,9 @@ def compile_plan(
         for name in order
     )
     edges = tuple(sorted(res.edges))
-    sources_out: Mapping[str, TensorSpec] = MappingProxyType(dict(res.sources))
+    sources_out: Mapping[str, Any] = MappingProxyType(dict(res.sources))
     return Plan(
-        mode=mode,
+        mode=res.mode,
         steps=steps,
         edges=edges,
         sources=sources_out,
@@ -357,6 +425,56 @@ def deadcode(
 
 
 # ---------------------------------------------------------------------------
+# IO-face adapter (plan-24 §4.3: tensor vs setup graph share _compile_core)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _IOFace:
+    """The per-graph IO contract `_resolve` reads through (plan-24 §4.3).
+
+    Lets the tensor planner and the setup planner reuse the SAME node
+    collection / edge building / topo / hash machinery while differing in only
+    the IO getter and whether shape-unification runs:
+
+    - tensor face: ``getter(module) = module.declare_io(mode)`` (an `IO` of
+      `TensorSpec` leaves); ``flatten = flatten_spec``; ``unify = True``.
+    - setup face: ``getter(module) = module.declare_setup_io(stage)`` (a
+      `SetupIO` of `SourceSpec` leaves); ``flatten = flatten_source_spec``;
+      ``unify = False`` — `SourceSpec` has no shape/dtype, so `_unify_edge`
+      must NOT run (it would `AttributeError`).
+
+    Both leaf types expose ``.kind`` / ``.optional`` / ``.active_in(...)``, so
+    kind-matching, optional handling, and active-gating are leaf-agnostic.
+    """
+
+    getter: Callable[[GraphModule], Any]
+    flatten: Callable[[Any], dict[str, Any]]
+    unify: bool
+    gate: Callable[[Any, Mode], bool]  # (spec, mode) -> active; mode ignored by setup face
+
+
+def _tensor_face(mode: Mode) -> _IOFace:
+    """The tensor IO face bound to `mode` (the per-batch graph, plan-24 §4.3)."""
+    return _IOFace(
+        getter=lambda module: module.declare_io(mode),
+        flatten=flatten_spec,
+        unify=True,
+        gate=lambda spec, m: spec.active_in(m),
+    )
+
+
+def _setup_face(stage: SetupStage) -> _IOFace:
+    """The setup IO face bound to `stage` (the setup graph, plan-24 §4.3)."""
+    return _IOFace(
+        getter=lambda module: module.declare_setup_io(stage),
+        flatten=flatten_source_spec,
+        unify=False,
+        gate=lambda spec, _m: spec.active_in(stage),
+    )
+
+
+# ---------------------------------------------------------------------------
 # resolution (shared by compile_plan / deadcode / the all-modes-dead probe)
 # ---------------------------------------------------------------------------
 
@@ -410,22 +528,29 @@ def _resolve(
     schema: Collection[str] | None,
     sink_keys: list[str] | None,
     sink_origins: Mapping[str, str] | None = None,
+    face: _IOFace | None = None,
 ) -> _Resolution:
     """Resolve one mode's graph: narrow wildcards, build edges, check, prune.
+
+    `face` selects the IO contract (plan-24 §4.3): the default tensor face
+    reads ``declare_io(mode)`` and unifies shapes; the setup face reads
+    ``declare_setup_io(stage)`` and skips unification.
 
     Returns
     -------
     _Resolution
         The resolved graph state for `mode`.
     """
+    if face is None:
+        face = _tensor_face(mode)
     src = _active_sources(sources, mode)
-    nodes, inactive = _collect_nodes(modules, mode)
+    nodes, inactive = _collect_nodes(modules, mode, face)
     producer_of = _concrete_producers(src, nodes, mode)
     sink_list = _checked_sink_keys(sink_keys)
     demand = _collect_demand(nodes, sink_list or [])
     _narrow_wildcards(nodes, producer_of, demand, schema, mode, sink_origins)
     edges = _build_edges(
-        nodes, producer_of, src, sink_list or [], mode, modules, sources, sink_origins
+        nodes, producer_of, src, sink_list or [], mode, modules, sources, sink_origins, face
     )
     _check_wildcard_self_feed(nodes, edges, mode)
     if sink_list is None:
@@ -479,7 +604,7 @@ def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
 
 
 def _collect_nodes(
-    modules: dict[str, GraphModule], mode: Mode
+    modules: dict[str, GraphModule], mode: Mode, face: _IOFace
 ) -> tuple[dict[str, _Node], list[str]]:
     """Build per-module nodes with mode-active flattened ports.
 
@@ -515,25 +640,25 @@ def _collect_nodes(
                 f"module mapped at key {name!r} declares name={module.name!r} — instance names "
                 "must match their config keys (design §2.2)"
             )
-        io = module.declare_io(mode)
+        io = face.getter(module)
         # M1 seam for §2.2 "only framework-shipped producers may declare patterns":
         # the attribute is framework-internal, not user API. TODO(M2): bind the
         # capability to shipped code (module-path check or a framework registry)
         # so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
-        requires: dict[str, TensorSpec] = {}
-        produces: dict[str, TensorSpec] = {}
-        patterns: dict[str, TensorSpec] = {}
-        for key, spec in flatten_spec(io.requires).items():
+        requires: dict[str, Any] = {}
+        produces: dict[str, Any] = {}
+        patterns: dict[str, Any] = {}
+        for key, spec in face.flatten(io.requires).items():
             if _is_pattern(key):
                 raise ConfigError(
                     f"module {name!r} declares wildcard require {key!r} — only framework "
                     "producers may declare patterns, and only in produces (design §2.2)"
                 )
-            if spec.active_in(mode):
+            if face.gate(spec, mode):
                 requires[key] = spec
-        for key, spec in flatten_spec(io.produces).items():
-            if not spec.active_in(mode):
+        for key, spec in face.flatten(io.produces).items():
+            if not face.gate(spec, mode):
                 continue
             if _is_pattern(key):
                 if not allow_wildcards:
@@ -701,8 +826,14 @@ def _build_edges(
     modules: dict[str, GraphModule],
     sources: NestedSpec,
     sink_origins: Mapping[str, str] | None = None,
+    face: _IOFace | None = None,
 ) -> list[Edge]:
     """Bind every require/sink to its producer; check kinds and unify shapes.
+
+    Kind-matching runs for every face (both `TensorSpec` and `SourceSpec`
+    expose ``.kind``). Shape unification (`_unify_edge`) runs ONLY for the
+    tensor face (``face.unify``): `SourceSpec` has no ``shape``/``dtype`` and a
+    setup leaf has no symbolic dims to reconcile (plan-24 §4.3).
 
     Missing producers raise `ConnectivityError` (via `_raise_missing_producer`)
     and unification conflicts raise `ShapeError` (via `_unify_edge`).
@@ -718,6 +849,7 @@ def _build_edges(
     KindError
         Consumer port kind differs from producer leaf kind (design §2.2).
     """
+    unify = face.unify if face is not None else True
     dims = _DimTable(mode)
     edges: list[Edge] = []
     for name, node in nodes.items():
@@ -736,7 +868,8 @@ def _build_edges(
                     f"kind={spec.kind!r} but producer {producer!r} provides "
                     f"kind={pspec.kind!r} (design §2.2)"
                 )
-            _unify_edge(key, producer, name, pspec, spec, dims, mode)
+            if unify:
+                _unify_edge(key, producer, name, pspec, spec, dims, mode)
     for key in sink_keys:
         producer = producer_of.get(key)
         if producer is None:
@@ -1331,14 +1464,29 @@ def _match_parts(pattern: tuple[str, ...], parts: tuple[str, ...]) -> bool:
     return False
 
 
-def _spec_payload(spec: TensorSpec) -> dict[str, Any]:
-    """Canonical JSON-able form of a TensorSpec for hashing.
+def _spec_payload(spec: TensorSpec | SourceSpec) -> dict[str, Any]:
+    """Canonical JSON-able form of a leaf spec for hashing (tensor OR setup).
+
+    Both leaf types serialise through the same helper (plan-24 §4.3): a
+    `SourceSpec` has no ``shape``/``dtype``/``fields`` and gates on string
+    `stages` rather than `Mode`, so those keys are emitted as None / the stage
+    list. The setup hash is structural and stable, giving the setup graph a
+    reproducible identity for ``salt2 graph`` exactly like the tensor graph.
 
     Returns
     -------
     dict[str, Any]
         Plain-type payload, stable across runs and machines.
     """
+    if isinstance(spec, SourceSpec):
+        return {
+            "shape": None,
+            "dtype": None,
+            "kind": spec.kind,
+            "stages": list(spec.stages),
+            "optional": spec.optional,
+            "fields": None,
+        }
     return {
         "shape": list(spec.shape) if spec.shape is not None else None,
         "dtype": spec.dtype,

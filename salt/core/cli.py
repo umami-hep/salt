@@ -345,7 +345,12 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
-    data_modules = dm.modules
+    # PER-BATCH namespace only (plan-25 §3.6): setup-only modules
+    # (InputSamples/VDS/ShmStage) are partitioned out of the tensor compile, so
+    # the combined full-pipeline graph here uses `batch_modules`, NOT the union
+    # `dm.modules` (a setup-only module in `compile_plan` trips AllModesDeadError).
+    # The setup graph is a distinct topology rendered separately.
+    data_modules = dm.batch_modules
     reader = dm.reader
     for module in data_modules.values():
         if isinstance(module, Labels):

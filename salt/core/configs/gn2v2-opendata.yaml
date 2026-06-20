@@ -4,21 +4,28 @@
 # track significances are named lifetimeSigned* in this sample).
 #
 # Data paths are REQUIRED overrides — NO machine paths are committed (design
-# §5 placeholder policy). A typical invocation FROM THE REPO ROOT (use
-# `python -m salt.core.main` when the salt2 script is not installed):
+# §5 placeholder policy / plan-25 §5.1 R9). The `input_samples` block below is
+# the plan-25 W3.A config-native data-sourcing form: a per-stage `files` map
+# (train/val/test) on the data-sourcing setup module, with `${DATA_*}`
+# placeholders so the placeholder-only preflight passes. A typical invocation
+# FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2 script is
+# not installed) overrides the placeholders:
 #
 #   salt2 fit --config salt/core/configs/gn2v2-opendata.yaml \
-#     --data.train_file $DATA/pp_output_train.h5 \
-#     --data.val_file   $DATA/pp_output_val.h5 \
-#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml \
-#     --model.modules.jets_classification.init_args.weight_source='{"from_class_dict": "'$DATA'/class_dict.yaml"}' \
-#     --model.modules.track_origin.init_args.weight_source='{"from_class_dict": "'$DATA'/class_dict.yaml"}'
+#     --data.modules.input_samples.init_args.files.train $DATA/pp_output_train.h5 \
+#     --data.modules.input_samples.init_args.files.val   $DATA/pp_output_val.h5 \
+#     --norm_dict  $DATA/norm_dict.yaml \
+#     --class_dict $DATA/class_dict.yaml
+#
+# The deprecated --data.train_file/--data.val_file/--data.test_file kwargs still
+# work for one migration window (plan-25 O-ALIAS-WINDOW): if set with no
+# `input_samples` block, the datamodule synthesises an implicit InputSamples.
 #
 # Optional (recommended): --data.modules.reader.init_args.schema $DATA/schema.yaml
-# (from `salt2 schema dump`, design §2.6). The weight_source overrides
-# reproduce v1 use_class_dict (GN2.yaml:50,64 — design §5.1); leave them null
-# for unweighted CE losses. attn_type stays torch-math here: flash-varlen is
-# the M6 cluster follow-up (plan 05 hardware note).
+# (from `salt2 schema dump`, design §2.6). `--norm_dict`/`--class_dict` are the
+# Wave-1 one-flag fan-out (reproduce v1 use_class_dict, GN2.yaml:50,64); leave
+# them unset for unweighted CE losses. attn_type stays torch-math here:
+# flash-varlen is the M6 cluster follow-up (plan 05 hardware note).
 
 name: GN2v2_opendata
 
@@ -26,6 +33,18 @@ data:
   batch_size: 1000
   num_workers: 8
   modules:
+    # plan-25 W3.A data-sourcing: per-stage source files on the setup-only
+    # InputSamples module (shape A — the parity-preserving default). Paths are
+    # ${DATA_*} placeholders (placeholder-only preflight); override per stage.
+    # `num` is the per-stage row cap (-1 = all, v1 semantics).
+    input_samples:
+      class_path: salt.core.data.InputSamples
+      init_args:
+        files:
+          train: ${DATA_TRAIN_PATH}
+          val: ${DATA_VAL_PATH}
+          test: ${DATA_TEST_PATH}
+        num: {train: -1, val: -1, test: -1}
     reader:
       class_path: salt.core.data.H5StructuredReader
       init_args:
