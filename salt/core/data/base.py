@@ -218,6 +218,87 @@ class Reader(DatasetModule):
             "as a GraphDataModule reader prototype (design §6.1)"
         )
 
+    def sources(self) -> list[Path]:
+        """The concrete on-disk file(s) this reader will read (the staging surface).
+
+        Each reader is the file-authority: it declares which files it reads so
+        the framework can relocate them (M8 reader-owned staging — the datamodule
+        no longer special-cases ``train_file``/``val_file``, which silently missed
+        multi-file / multi-sample readers). The base default introspects a
+        ``filename`` or ``files`` attribute, returning its `Path`(s); readers whose
+        sources are not a single such attribute (`MultiSampleReader`) override.
+
+        Wildcard / glob filenames are returned VERBATIM (a literal pattern, not its
+        expansion) — staging a wildcard reader is the caller's responsibility (the
+        shipped staging path stages already-resolved single files). A reader with no
+        bound source returns an empty list.
+
+        Returns
+        -------
+        list[Path]
+            The file(s) backing this reader, in read order.
+        """
+        files = getattr(self, "files", None)
+        if files is not None:
+            return [Path(f) for f in files]
+        filename = getattr(self, "filename", None)
+        return [Path(filename)] if filename is not None else []
+
+    def restage(self, root: str | Path) -> Reader:
+        """Return a CLONE of this reader whose `sources` point at copies under `root`.
+
+        The reader-owned twin of `with_source` (the per-stage cloning hook above):
+        rather than re-source onto a DIFFERENT file, `restage` copies THIS reader's
+        own source file(s) into ``root`` (typically a RAM disk like ``/dev/shm``) and
+        returns a clone that reads the copies. This is the M8 replacement for the
+        datamodule's fat ``move_files_temp`` ``prepare_data``/``setup`` block: the
+        datamodule's only job becomes ``reader = reader.restage(root)`` before VDS
+        precreation, so VDS + datasets build against the staged copies, and multi-file
+        / multi-sample readers stage ALL their files (the old code staged only
+        ``train_file``/``val_file``).
+
+        Base default: copy each `sources` file to ``root`` via the FileLock-coordinated
+        `salt.core.data.vds.stage_file` (reuses the existing copy + ``.done`` marker
+        machinery so a DDP / worker stampede copies each file exactly once, no trainer
+        handle needed), then clone with the new path via `with_source`. A reader with a
+        single source uses this directly; multi-source readers (`MultiSampleReader`)
+        override to restage each sub-reader recursively. A reader with NO source clones
+        unchanged (nothing to stage).
+
+        Parameters
+        ----------
+        root : str | Path
+            The staging root directory (created if missing). Each source file is
+            copied to ``root / <source name>``.
+
+        Returns
+        -------
+        Reader
+            A fresh, unbound reader reading the staged copies (same instance
+            ``name``). Identity-stable when there is nothing to stage.
+
+        Raises
+        ------
+        NotImplementedError
+            If the reader has >1 source but does not override `restage` (the base
+            default only knows how to re-point a single-source reader via
+            `with_source`).
+        """
+        from salt.core.data.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+
+        root = Path(root)
+        srcs = self.sources()
+        if not srcs:
+            return self
+        if len(srcs) > 1:
+            raise NotImplementedError(
+                f"{type(self).__name__} has {len(srcs)} sources; the base restage() can only "
+                "re-point a single-source reader via with_source(). Override restage() to stage "
+                "each source (see MultiSampleReader)."
+            )
+        staged = stage_file(srcs[0], root / srcs[0].name)
+        return self.with_source(filename=staged)
+
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable reader buffer.
 

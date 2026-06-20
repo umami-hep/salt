@@ -19,7 +19,9 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 from ftag.vds import create_virtual_file
 
-__all__ = ["create_vds", "default_vds_path", "has_wildcard"]
+from salt.core.utils import file_utils as fu
+
+__all__ = ["create_vds", "default_vds_path", "has_wildcard", "stage_file"]
 
 _LOCK_TIMEOUT_S = 1800
 
@@ -171,6 +173,68 @@ def create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
         marker_tmp.write_text(f"ok pid={os.getpid()} time={time.time()}\n")
         marker_tmp.replace(done_path)
         return out_fname
+    finally:
+        with suppress(Exception):
+            lock.release()
+
+
+def stage_file(src: Path, dst: Path) -> Path:
+    """Copy `src` to `dst` once, multi-process-safe (the M8 file-staging primitive).
+
+    The on-disk twin of `create_vds`'s coordination, reusing the SAME FileLock +
+    ``.done`` marker pattern so a DDP rank / dataloader-worker stampede copies the
+    file exactly ONCE (the rest skip via the marker) — this is the lock-based
+    "rank-0 coordination" the datamodule's ``move_files_temp`` path relied on
+    (``datamodules.py`` rank-0 prepare_data; design §6.1), but it no longer needs a
+    trainer handle: the FileLock serialises every contender and the ``.done`` marker
+    short-circuits the followers. The actual byte copy delegates to
+    `salt.core.utils.file_utils.copy_file` (already a no-op when ``dst`` exists), so
+    the copy semantics are unchanged from the v1 staging port.
+
+    Parameters
+    ----------
+    src : Path
+        Source file to stage.
+    dst : Path
+        Destination path (its parent is created if missing).
+
+    Returns
+    -------
+    Path
+        ``dst`` (the staged copy).
+
+    Raises
+    ------
+    RuntimeError
+        If acquiring the lock times out.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    if src.resolve() == dst.resolve():
+        return dst
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    done_path = dst.with_suffix(dst.suffix + ".done")
+    # Fast path: already staged (marker present and the copy is in place).
+    if done_path.exists() and dst.is_file():
+        return dst
+
+    lock_path = dst.with_suffix(dst.suffix + ".lock")
+    lock = FileLock(str(lock_path))
+    try:
+        lock.acquire(timeout=_LOCK_TIMEOUT_S)
+    except Timeout as exc:
+        raise RuntimeError(f"Timeout waiting for staging lock: {lock_path}") from exc
+
+    try:
+        # Re-check under the lock — a contender may have just finished.
+        if done_path.exists() and dst.is_file():
+            return dst
+        fu.copy_file(src, dst)  # no-op if dst already present (file_utils.copy_file)
+        marker_tmp = done_path.with_name(done_path.name + f".tmp.{os.getpid()}")
+        marker_tmp.write_text(f"ok pid={os.getpid()} time={time.time()}\n")
+        marker_tmp.replace(done_path)
+        return dst
     finally:
         with suppress(Exception):
             lock.release()

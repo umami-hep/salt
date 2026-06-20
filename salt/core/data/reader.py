@@ -296,6 +296,23 @@ class H5StructuredReader(Reader):
         """
         return tuple(self.groups)
 
+    def sources(self) -> list[Path]:
+        """The single H5 source file (the M8 staging surface, design §6.1).
+
+        One configured ``filename`` per stage IS the H5 reader's data (the
+        single-source contract `with_source` and `restage` both rely on). A wildcard
+        ``filename`` is returned VERBATIM — the literal pattern, not the matched
+        members — so the base `Reader.restage` (which copies one file) is only used on
+        the resolved single-file staging path the datamodule drives; the empty list is
+        returned when no source is bound yet.
+
+        Returns
+        -------
+        list[Path]
+            ``[self.filename]`` (literal), or ``[]`` when unbound.
+        """
+        return [self.filename] if self.filename is not None else []
+
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema artifact's group for one served stream (design §2.6).
 

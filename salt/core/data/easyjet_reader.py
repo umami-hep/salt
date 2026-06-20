@@ -229,6 +229,73 @@ class EasyjetReader(Reader):
         """
         return tuple(self.groups)
 
+    def sources(self) -> list[Path]:
+        """The resolved ROOT file list (the M8 staging surface, design §6.1).
+
+        Unlike the H5 reader, an easyjet source can be a DIRECTORY or a GLOB matching
+        MANY ``.root`` files (`_resolve_files`), so `sources` returns the full resolved
+        member list — exactly what the M8 multi-file staging needs (the old datamodule
+        ``move_files_temp`` path staged only single ``train_file``/``val_file`` paths and
+        would have silently skipped the rest). Returns ``[]`` when no source is bound or
+        the glob is empty (no error here — staging an unbound reader is a no-op).
+
+        Returns
+        -------
+        list[Path]
+            The sorted resolved ROOT files, or ``[]`` when unbound / unmatched.
+        """
+        if self.filename is None:
+            return []
+        try:
+            return self._resolve_files()
+        except ConfigError:
+            return []
+
+    def restage(self, root: str | Path) -> EasyjetReader:
+        """Stage ALL resolved ROOT files into `root` and re-source onto the staged set.
+
+        The multi-file override of `Reader.restage`: every member returned by `sources`
+        is copied via the FileLock-coordinated `stage_file` (one copy each, stampede-safe,
+        no trainer handle needed — see `Reader.restage`), then a clone is re-sourced onto
+        the staged set. So a single-file, a directory, and a glob source all stage and
+        re-read uniformly; a reader with no resolvable source clones unchanged.
+
+        Members are staged into a per-reader SUBDIRECTORY ``root/<digest>/`` keyed by a
+        stable digest of this reader's absolute source paths — so when several easyjet
+        sub-readers of a `MultiSampleReader` share ONE staging root, each re-globs only
+        its OWN members (re-sourcing onto a shared ``root`` would make every sub-reader
+        glob every other sub-reader's files — a silent row-count bug). A single staged
+        file re-sources onto that file directly; multiple onto their subdirectory.
+
+        Parameters
+        ----------
+        root : str | Path
+            The staging root directory (created if missing).
+
+        Returns
+        -------
+        EasyjetReader
+            A fresh, unbound reader reading the staged copies under ``root``.
+        """
+        import hashlib  # noqa: PLC0415 - opt-in staging path only
+
+        from salt.core.data.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+
+        root = Path(root)
+        srcs = self.sources()
+        if not srcs:
+            return self
+        # per-reader subdir keyed by the absolute source set: isolates this reader's
+        # staged members from any sibling sub-reader sharing the same root.
+        digest = hashlib.sha1(  # noqa: S324 - non-crypto path key, collision-safe enough
+            "\n".join(sorted(str(s.resolve()) for s in srcs)).encode()
+        ).hexdigest()[:16]
+        dest_dir = root / digest
+        staged = [stage_file(src, dest_dir / src.name) for src in srcs]
+        # one file -> re-source onto the file; many -> onto the subdir (globs *.root)
+        new_src = staged[0] if len(staged) == 1 else dest_dir
+        return self.with_source(filename=new_src)
+
     # -- GraphModule declaration (config-only, design §2.2/§2.3) -------------
 
     def declare_io(self, mode: Mode) -> IO:

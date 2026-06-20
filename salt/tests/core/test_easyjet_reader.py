@@ -455,3 +455,140 @@ def test_missing_root_deps_raises_helpful_error(single_file: tuple[Path, dict]) 
             _mod.__dict__["uproot"] = _orig_uproot
         # Force uproot reimport into the module cache
         importlib.import_module("uproot")
+
+
+# --------------------------------------------------------------------------- #
+# 5. M8 reader-owned staging — restage() round-trips a MULTI-FILE reader
+#    (the new capability the v1 train_file/val_file-only staging lacked) +
+#    the GraphDataModule thin trigger restages the per-stage reader so VDS
+#    precreation sees the staged paths.
+# --------------------------------------------------------------------------- #
+
+
+def _read_all(reader: EasyjetReader, mode: Mode = Mode.FIT) -> dict:
+    """Read every served row of a (bound or standalone) reader as one batch."""
+    n = len(reader)
+    return reader.read(slice(0, n), mode)
+
+
+def test_sources_lists_every_member_of_a_multifile_reader(
+    two_files: tuple[Path, list[dict]],
+) -> None:
+    """sources() returns the FULL resolved member list — not just one file.
+
+    This is the multi-file declaration the old datamodule (single train_file) could
+    not express; restage() builds on it to stage EVERY member.
+    """
+    d, _ = two_files
+    reader = EasyjetReader(groups=_groups(), filename=d)
+    srcs = reader.sources()
+    assert [p.name for p in srcs] == ["file_000001.root", "file_000002.root"]
+    assert all(p.parent == d for p in srcs)
+    # an unbound reader has nothing to stage (no error)
+    assert EasyjetReader(groups=_groups()).sources() == []
+
+
+def test_restage_roundtrips_a_multifile_reader(
+    two_files: tuple[Path, list[dict]], tmp_path: Path
+) -> None:
+    """restage() copies ALL members to root and reads byte-identical data.
+
+    The core M8 wave-3 capability: a MULTI-file reader (2-file easyjet directory)
+    restages every member under a fresh root, the clone's sources() point there, the
+    ORIGINALS survive, and a full read of the staged clone equals the original read
+    elementwise (jets + valid mask + scalar event fields). The old train_file/val_file
+    staging would have copied at most one file and silently dropped the rest.
+    """
+    d, [a, b] = two_files
+    t = 8
+    orig = EasyjetReader(groups=_groups(truncate=t), filename=d)
+    orig_out = _read_all(orig)
+
+    root = tmp_path / "stage_root"
+    staged = orig.restage(root)
+
+    # the clone reads copies UNDER the staging root (a per-reader subdir under root)
+    staged_srcs = staged.sources()
+    assert {p.name for p in staged_srcs} == {"file_000001.root", "file_000002.root"}
+    assert all(root in p.parents for p in staged_srcs)
+    # both members were physically copied; originals survive
+    assert {p.name for p in root.rglob("*.root")} == {"file_000001.root", "file_000002.root"}
+    assert (d / "file_000001.root").is_file() and (d / "file_000002.root").is_file()
+
+    # byte-identical READ through the staged reader (the data didn't change, only
+    # WHERE the bytes live) — full epoch, jets + valid + event scalars
+    assert len(staged) == a["n_events"] + b["n_events"] == len(orig)
+    staged_out = _read_all(staged)
+    np.testing.assert_array_equal(staged_out["raw.jets"]["pt"], orig_out["raw.jets"]["pt"])
+    np.testing.assert_array_equal(staged_out["raw.jets"]["valid"], orig_out["raw.jets"]["valid"])
+    np.testing.assert_array_equal(staged_out["masks.jets"], orig_out["masks.jets"])
+    np.testing.assert_array_equal(
+        staged_out["raw.event"]["eventNumber"], orig_out["raw.event"]["eventNumber"]
+    )
+
+
+def test_restage_is_filelock_coordinated_and_idempotent(
+    two_files: tuple[Path, list[dict]], tmp_path: Path
+) -> None:
+    """A second restage to the same root reuses the copies (the .done markers).
+
+    Proves the reuse of the vds.py FileLock + .done-marker machinery: restaging twice
+    leaves one copy per member (no duplication, no error) — the stampede-safe path a
+    DDP run relies on.
+    """
+    d, _ = two_files
+    reader = EasyjetReader(groups=_groups(), filename=d)
+    root = tmp_path / "stage_root"
+    reader.restage(root)
+    reader.restage(root)  # second pass: copies present -> fast path
+    roots = sorted(p.name for p in root.rglob("*.root"))
+    assert roots == ["file_000001.root", "file_000002.root"]
+    # the FileLock + completion markers (vds.stage_file machinery) are present
+    assert sorted(p.name for p in root.rglob("*.done")) == [
+        "file_000001.root.done",
+        "file_000002.root.done",
+    ]
+
+
+def test_datamodule_trigger_restages_per_stage_reader_for_vds_precreation(
+    two_files: tuple[Path, list[dict]], tmp_path: Path
+) -> None:
+    """The GraphDataModule thin trigger restages so VDS precreation sees staged paths.
+
+    Drives the collapsed datamodule path: with move_files_temp set, _resolve_stage_root
+    arms _stage_root, and _stage(reader) restages the per-stage reader. _precreate_vds_
+    rank0 calls .prepare() on exactly this restaged reader, so it resolves files UNDER
+    the staging root — the reader-owned analogue of the v1 prepare_data/setup repoint.
+    With move_files_temp=None the per-stage reader is returned UNCHANGED (byte-identical
+    read path).
+    """
+    from salt.core.data.datamodule import GraphDataModule
+
+    d, _ = two_files
+    proto = EasyjetReader(groups=_groups(), filename=d)
+    root = tmp_path / "stage_root"
+
+    dm = GraphDataModule(
+        modules={"reader": proto},
+        train_file=str(d),
+        val_file=str(d),
+        move_files_temp=str(root),
+    )
+    # default-off twin: with no stage root, _stage() is identity (read path unchanged)
+    dm._stage_root = None
+    same = dm._stage(proto.with_source(filename=str(d), stage="train"))
+    assert all(p.parent == d for p in same.sources())
+
+    # armed: setup('fit') sets _stage_root; the per-stage reader restages to root
+    dm._stage_root = dm._resolve_stage_root("fit")
+    assert dm._stage_root == root
+    per_stage = dm.reader.with_source(filename=str(d), stage="train")
+    staged = dm._stage(per_stage)
+    assert all(root in p.parents for p in staged.sources())
+    # this is the reader _precreate_vds_rank0 prepares — it now resolves under root
+    staged.prepare()
+    assert all(root in e.path.parents for e in staged._table)
+
+    # teardown removes the whole staged tree
+    dm.teardown("fit")
+    assert not root.exists()

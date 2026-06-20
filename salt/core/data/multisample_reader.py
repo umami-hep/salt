@@ -626,6 +626,71 @@ class MultiSampleReader(Reader):
         clone.name = self.name
         return clone
 
+    def sources(self) -> list[Path]:
+        """The UNION of every sub-reader's sources (the M8 staging surface, plan 02).
+
+        A multi-sample reader has no file of its own — its data is the N sub-readers'
+        files — so `sources` is the de-duplicated union over the sub-readers (each may
+        itself be multi-file: an `EasyjetReader` over a directory). This is exactly why
+        the old datamodule ``move_files_temp`` path could not stage a multi-sample run:
+        it knew only a single ``train_file``. Order: sub-reader order, then each
+        sub-reader's own source order; duplicates (a file shared between samples) appear
+        once.
+
+        Returns
+        -------
+        list[Path]
+            The de-duplicated union of sub-reader source files.
+        """
+        seen: dict[str, Path] = {}
+        for s in self.samples:
+            for src in s.reader.sources():
+                seen.setdefault(str(src), src)
+        return list(seen.values())
+
+    def restage(self, root: str | Path) -> MultiSampleReader:
+        """Restage by delegating to EACH sub-reader recursively (plan 02).
+
+        The multi-sample override of `Reader.restage`: there is no single file to copy,
+        so each sample's sub-reader is restaged into ``root`` independently (the
+        sub-reader owns its own staging — single-file H5 via the base default, multi-file
+        easyjet via its override, even a nested `MultiSampleReader`), and a fresh
+        `MultiSampleReader` is built over the restaged sub-readers. The injected label /
+        interleave config is preserved; ``sources`` (per-stage) entries carry through
+        unchanged on the `SampleConfig` (they only matter for a later ``with_source``,
+        which restage does not perform). A sample whose sub-reader has nothing to stage
+        keeps its sub-reader (identity).
+
+        Parameters
+        ----------
+        root : str | Path
+            The staging root directory (created per sub-reader as needed).
+
+        Returns
+        -------
+        MultiSampleReader
+            A fresh, unbound multi-sample reader over the staged sub-readers (same
+            instance ``name``).
+        """
+        root = Path(root)
+        new_samples = [
+            SampleConfig(
+                name=s.name,
+                label=s.label,
+                reader=s.reader.restage(root),
+                sources=s.sources,
+            )
+            for s in self.samples
+        ]
+        clone = MultiSampleReader(
+            samples=new_samples,
+            label_stream=self.label_stream,
+            label_field=self.label_field,
+            seed=self.seed,
+        )
+        clone.name = self.name
+        return clone
+
     # -- per-worker binding (design §2.3) -------------------------------------
 
     def bind(self, ctx: WorkerCtx) -> None:
