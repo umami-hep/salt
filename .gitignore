@@ -40,3 +40,9 @@ user/
 .coverage*
 .cometml-runs
 
+# GraphArtifacts run-dir byproducts (salt2 fit/test/graph; design §4.4) — never source
+graph_*.dot
+graph_*.svg
+plan_*.txt
+resolved_io.yaml
+
