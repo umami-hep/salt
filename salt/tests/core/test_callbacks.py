@@ -8,11 +8,14 @@ shim — compared here logger-free via the stashed lists/matrix.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+_HAS_DOT = shutil.which("dot") is not None
 
 from salt.callbacks.confusion_matrix import ConfusionMatrixCallback as V1ConfusionMatrix
 from salt.core.callbacks import Checkpoint, ConfusionMatrix, GraphArtifacts, ProgressBar
@@ -363,13 +366,15 @@ class TestGraphArtifacts:
         assert "# model plan" in plan_fit
         assert "plan [mode=VAL]" in (tmp_path / "plan_val.txt").read_text()
         assert "digraph salt_core_fit" in (tmp_path / "graph_fit.dot").read_text()
-        assert (tmp_path / "graph_fit.svg").stat().st_size > 0
+        if _HAS_DOT:  # the image is rendered by the dot binary (DOT sidecar always)
+            assert (tmp_path / "graph_fit.svg").stat().st_size > 0
 
     def test_test_artifacts_written(self, fitted_model, tmp_path):
         GraphArtifacts().on_test_start(stub_trainer(tmp_path), fitted_model)
         assert "plan [mode=TEST]" in (tmp_path / "plan_test.txt").read_text()
         assert (tmp_path / "graph_test.dot").exists()
-        assert (tmp_path / "graph_test.svg").stat().st_size > 0
+        if _HAS_DOT:
+            assert (tmp_path / "graph_test.svg").stat().st_size > 0
 
     def test_test_artifacts_default_next_to_checkpoint(self, fitted_model, tmp_path):
         # M3-review HIGH fix: with a known ckpt_path, the test-path default
@@ -421,6 +426,7 @@ class TestGraphArtifacts:
         assert jets_in["kind"] == "data"
         assert jets_in["fields"]
 
+    @pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
     def test_image_format_and_output_dir_options(self, fitted_model, tmp_path):
         out = tmp_path / "sub"
         GraphArtifacts(output_dir=str(out), image_format="png").on_test_start(

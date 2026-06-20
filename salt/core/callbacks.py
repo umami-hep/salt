@@ -46,6 +46,8 @@ Shipped callbacks:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -58,7 +60,7 @@ from lightning.pytorch.loggers.comet import CometLogger
 
 from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.graph.spec import Mode, TensorSpec
-from salt.core.render import dot_source, plan_table, render_graph
+from salt.core.render import dot_source, plan_table
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -673,12 +675,12 @@ class GraphArtifacts(Callback):
       the resolved specs (shape/dtype/kind, declared fields).
     - ``graph_<stage>.dot`` + ``graph_<stage>.<image_format>`` (and
       ``graph_<stage>_dataset.*`` when a `GraphDataModule` is attached):
-      the matplotlib layered DAG (`salt.core.render.render_graph` — the
-      container has no graphviz binary), DOT alongside for manual
-      re-rendering.
+      the §4.3 Graphviz DOT (`salt.core.render.dot_source`) rasterised via
+      the ``dot`` binary baked into the salt container, DOT kept alongside
+      for manual re-rendering.
 
     Never fails a run: a LightningModule without compiled plans, or a
-    missing matplotlib, degrade to a warning / DOT-only output.
+    missing/failing ``dot`` binary, degrade to a warning / DOT-only output.
 
     Parameters
     ----------
@@ -740,7 +742,7 @@ class GraphArtifacts(Callback):
         plan = plans[Mode[stage.upper()]]
         modules = getattr(pl_module, "_graph_modules", None) or {}
         pruned = sorted(set(modules) - set(plan.module_names))
-        self._render(plan, modules, pruned, out_dir / f"graph_{stage}", f"model graph — {stage}")
+        self._render(plan, modules, pruned, out_dir / f"graph_{stage}")
         dataset = self._stage_dataset(trainer, stage)
         if dataset is not None:
             self._render(
@@ -748,7 +750,6 @@ class GraphArtifacts(Callback):
                 dataset.modules,
                 sorted(set(dataset.modules) - set(dataset.plan.module_names)),
                 out_dir / f"graph_{stage}_dataset",
-                f"dataset graph — {stage}",
             )
         print(f"wrote graph/plan artifacts to {out_dir} (design §4.4)")
 
@@ -858,18 +859,32 @@ class GraphArtifacts(Callback):
         modules: Mapping[str, Any],
         pruned: list[str],
         base: Path,
-        title: str,
     ) -> None:
-        """Write DOT + image for one plan; image degrades to a hint on ImportError."""
+        """Write DOT + image for one plan via the `dot` binary; degrade to DOT-only.
+
+        Writes the §4.3 DOT sidecar always, then shells out to Graphviz ``dot``
+        (baked into the salt container) to rasterise it. This is best-effort —
+        a missing/failing ``dot`` degrades to a DOT-only hint and NEVER crashes
+        a training run.
+        """
         dot_path = base.with_suffix(".dot")
         dot_path.write_text(dot_source(plan, modules, pruned))
         img_path = base.with_suffix(f".{self.image_format}")
-        try:
-            render_graph(plan, img_path, title=f"{title} [mode={plan.mode.name}]", pruned=pruned)
-        except ImportError:
+        hint = f"render manually with: dot -T{self.image_format} {dot_path} -o {img_path}"
+        dot_bin = shutil.which("dot")
+        if dot_bin is None:
+            print(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
+            return
+        result = subprocess.run(
+            [dot_bin, f"-T{self.image_format}", str(dot_path), "-o", str(img_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
             print(
-                f"matplotlib not importable — wrote {dot_path} only; render manually with: "
-                f"dot -T{self.image_format} {dot_path} -o {img_path}"
+                f"`dot` failed to render {img_path} (exit {result.returncode}): "
+                f"{result.stderr.strip() or '(no stderr)'} — wrote {dot_path} only; {hint}"
             )
 
     @staticmethod

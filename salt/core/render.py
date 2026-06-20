@@ -1,6 +1,6 @@
-"""Plan rendering: §4.4 plan tables, Graphviz DOT, and the matplotlib DAG plot.
+"""Plan rendering: §4.4 plan tables and the Graphviz DOT source.
 
-One shared home for the three renderings of a compiled `Plan`, consumed by
+One shared home for the two text renderings of a compiled `Plan`, consumed by
 both the static graph tooling (``salt2 graph plan/plot``, `salt.core.cli`)
 and the run-dir artifact callback (`salt.core.callbacks.GraphArtifacts`,
 design §4.4):
@@ -10,23 +10,16 @@ design §4.4):
   stdout so ``plan_<mode>.txt`` artifacts and the CLI agree.
 - `dot_source` — Graphviz DOT text (design §4.3 styling): the port-card
   layout, one HTML-like signature card per module (header + consumed/produced
-  rows) and one deduped node->node arrow per producer/consumer pair. Emitted
-  alongside every image render; the ``dot`` binary is NOT assumed to exist.
-- `render_graph` — the PRIMARY image renderer: a layered topological DAG
-  drawn with matplotlib (always available in the salt container, unlike
-  graphviz). Layout ported from the architecture-investigation
-  ``plot_graph.py``: x = longest-path layer, namespace-coloured module
-  boxes, staggered edge-key labels, dataset-boundary/sink ellipses.
+  rows) and one deduped node->node arrow per producer/consumer pair. This is
+  the authoritative graph image source: ``salt2 graph plot`` shells out to the
+  ``dot`` binary (baked into the salt container) to rasterise it to PNG/PDF.
 
-matplotlib is imported lazily inside `render_graph` (and never via pyplot —
-`matplotlib.figure.Figure` keeps the rendering backend-free), so importing
-this module stays cheap for the table/DOT paths.
+This module is pure-Python text generation — no matplotlib, no heavy imports —
+so importing it stays cheap for the table/DOT paths.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from salt.core.graph.planner import SINKS, SOURCES, Plan
@@ -38,7 +31,7 @@ if TYPE_CHECKING:
     from salt.core.graph.planner import PlanStep
     from salt.core.graph.spec import GraphModule
 
-__all__ = ["dot_source", "plan_table", "render_graph"]
+__all__ = ["dot_source", "plan_table"]
 
 _WILDCARD_PARTS = frozenset({"*", "**"})
 
@@ -171,8 +164,8 @@ def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
 
 
 # Kind/key -> row font colour for the signature-card rows (design §4.3): the
-# orange/red/blue accents the matplotlib renderer reserves for edges become row
-# font colours here, since the port-card layout has no per-key wires to colour.
+# port-card layout has no per-key wires to colour, so the orange/red/blue kind
+# accents are applied to the consumed/produced row text instead.
 _KIND_COLOURS = {"label": "#b5651d", "loss": "#c0392b", "preds": "#1f6fb2"}
 _ROW_DEFAULT_COLOUR = "#333333"
 _SHAPE_COLOUR = "#888888"
@@ -184,8 +177,7 @@ def _row_colour(key: str, spec: TensorSpec | None) -> str:
 
     Labels orange, losses red, ``preds.*`` blue; everything else the neutral
     default. Derived from the spec's `kind` (falling back to the key's leading
-    namespace for ``preds.*``), mirroring the edge palette the matplotlib
-    renderer uses.
+    namespace for ``preds.*``).
 
     Returns
     -------
@@ -358,8 +350,8 @@ def dot_source(
     ]
 
     # consumed keys per module: each require edge into the module, with the
-    # spec carried by the producing edge (mirrors the matplotlib renderer's
-    # _edge_spec lookup). dict-insertion dedupes while preserving edge order.
+    # spec carried by the producing edge (via the _edge_spec lookup).
+    # dict-insertion dedupes while preserving edge order.
     consumed: dict[str, dict[str, TensorSpec | None]] = {}
     for edge in plan.edges:
         consumed.setdefault(edge.consumer, {}).setdefault(
@@ -406,11 +398,11 @@ def dot_source(
 
 
 # ---------------------------------------------------------------------------
-# matplotlib layered DAG (the PRIMARY image renderer — graphviz-free)
+# §4.3 module box palette (shared by the DOT card fills)
 # ---------------------------------------------------------------------------
 
 # module box fill by (first matching) produced namespace — the §4.3 styling
-# translated to the layered plot (investigation plot_graph.py palette)
+# (investigation plot_graph.py palette)
 _NS_COLOURS = {
     "raw": "#b5d99c",
     "masks": "#b5d99c",
@@ -441,236 +433,3 @@ def _module_colour(step: PlanStep) -> str:
         if namespace in _NS_COLOURS:
             return _NS_COLOURS[namespace]
     return _FALLBACK_COLOUR
-
-
-def _layered_layout(plan: Plan) -> dict[str, tuple[float, float]]:
-    """Layered topological layout: x = longest-path layer, y = spread in layer.
-
-    Returns
-    -------
-    dict[str, tuple[float, float]]
-        Module name -> (x, y) position.
-    """
-    names = [step.name for step in plan.steps]
-    preds: dict[str, set[str]] = defaultdict(set)
-    for edge in plan.edges:
-        if edge.producer in names and edge.consumer in names:
-            preds[edge.consumer].add(edge.producer)
-    layer: dict[str, int] = {}
-    for name in names:  # steps are already topo-ordered
-        layer[name] = 1 + max((layer[p] for p in preds[name] if p in layer), default=0)
-    by_layer: dict[int, list[str]] = defaultdict(list)
-    for name in names:
-        by_layer[layer[name]].append(name)
-    pos: dict[str, tuple[float, float]] = {}
-    for x, members in by_layer.items():
-        for i, name in enumerate(sorted(members)):
-            pos[name] = (float(x) * 1.8, -(i - (len(members) - 1) / 2.0) * 2.0)
-    return pos
-
-
-def render_graph(
-    plan: Plan,
-    out_path: str | Path,
-    title: str | None = None,
-    pruned: Iterable[str] = (),
-    dpi: int = 200,
-    probed_shapes: Mapping[str, tuple] | None = None,
-) -> Path:
-    """Render a compiled plan as a layered DAG image via matplotlib (design §4.3/§4.4).
-
-    The primary renderer for ``salt2 graph plot`` and the run-dir
-    ``graph_<mode>`` artifacts: matplotlib ships in the salt container,
-    graphviz does not. Output format follows the file suffix (``.svg`` /
-    ``.png`` / ``.pdf``). Demand-pruned module names are listed in a grey
-    footnote rather than drawn (they have no plan edges to lay out).
-
-    Parameters
-    ----------
-    plan : Plan
-        The compiled plan to draw.
-    out_path : str | Path
-        Output image path (suffix selects the format).
-    title : str | None, optional
-        Figure title; defaults to mode + step count + plan-hash prefix.
-    pruned : Iterable[str], optional
-        Names of demand-pruned modules (footnote only), by default ().
-    dpi : int, optional
-        Raster DPI (PNG), by default 200.
-    probed_shapes : Mapping[str, tuple] | None, optional
-        Live-traced concrete shapes by dotted key (the ``--probe`` result);
-        when a key is present its tuple is shown in preference to the
-        declared/symbolic shape, by default None.
-
-    Returns
-    -------
-    Path
-        The written image path.
-
-    Raises
-    ------
-    ImportError
-        When matplotlib is not installed (callers may fall back to DOT).
-    """
-    # lazy + pyplot-free: Figure needs no backend/global state (module docstring)
-    try:
-        from matplotlib.figure import Figure  # noqa: PLC0415 - lazy heavy import
-        from matplotlib.patches import Ellipse, FancyArrowPatch, FancyBboxPatch  # noqa: PLC0415
-    except ImportError as err:
-        raise ImportError(f"render_graph needs matplotlib: {err}") from err
-
-    out_path = Path(out_path)
-    pos = _layered_layout(plan)
-    steps = {step.name: step for step in plan.steps}
-    names = set(pos)
-
-    # boundary pseudo-nodes: framework sources feeding in, sink demands out
-    boundary_in: dict[str, set[str]] = defaultdict(set)
-    boundary_out: dict[str, set[str]] = defaultdict(set)
-    internal: list[tuple[str, str, str]] = []
-    for edge in plan.edges:
-        p_in, c_in = edge.producer in names, edge.consumer in names
-        if p_in and c_in:
-            internal.append((edge.producer, edge.consumer, edge.key))
-        elif c_in:
-            boundary_in[edge.key].add(edge.consumer)
-        elif p_in:
-            boundary_out[edge.key].add(edge.producer)
-
-    xs = [x for x, _ in pos.values()] or [0.0]
-    ys = [y for _, y in pos.values()] or [0.0]
-    min_x, max_x = min(xs), max(xs)
-    yrange = max(ys) - min(ys)
-    fig_w = min(30.0, max(10.0, 1.15 * (max_x - min_x) + 7.0))
-    fig_h = max(6.5, 0.95 * yrange + 3.0)
-    fig = Figure(figsize=(fig_w, fig_h))
-    ax = fig.add_subplot()
-
-    # place boundary ellipses left (sources) / right (sinks)
-    bpos: dict[tuple[str, str], tuple[float, float]] = {}
-    for i, key in enumerate(sorted(boundary_in)):
-        bpos["in", key] = (min_x - 2.0, -(i - (len(boundary_in) - 1) / 2.0) * 1.3)
-    for i, key in enumerate(sorted(boundary_out)):
-        bpos["out", key] = (max_x + 2.0, -(i - (len(boundary_out) - 1) / 2.0) * 1.3)
-
-    # group multi-key edges between one module pair; stagger labels along the
-    # edge (cycled fraction t, alternating perpendicular offset) so labels
-    # from one source never stack
-    grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
-    for src, dst, key in internal:
-        grouped[src, dst].append(key)
-    per_src_idx: dict[str, int] = defaultdict(int)
-    for (src, dst), keys in sorted(grouped.items()):
-        (x0, y0), (x1, y1) = pos[src], pos[dst]
-        ax.add_patch(
-            FancyArrowPatch(
-                (x0 + 0.46, y0),
-                (x1 - 0.46, y1),
-                arrowstyle="-|>",
-                mutation_scale=14,
-                lw=1.1,
-                color="#555555",
-                connectionstyle="arc3,rad=0.08",
-                zorder=1,
-            )
-        )
-        i = per_src_idx[src]
-        per_src_idx[src] += 1
-        t = (0.35, 0.58, 0.78)[i % 3]
-        sign = 1 if i % 2 == 0 else -1
-        # each key paired with ITS OWN spec shape (never reuse one for the group);
-        # a probed concrete shape (the --probe result) wins over the symbolic one
-        label_lines = []
-        for key in sorted(keys):
-            shape = _shape_str(key, _edge_spec(plan, src, key), probed_shapes)
-            label_lines.append(f"{key} {shape}" if shape else key)
-        ax.text(
-            x0 + t * (x1 - x0),
-            y0 + t * (y1 - y0) + sign * (0.22 + 0.05 * len(keys)),
-            "\n".join(label_lines),
-            fontsize=7.6,
-            ha="center",
-            va="bottom" if sign > 0 else "top",
-            color="#333333",
-            zorder=3,
-            bbox={
-                "boxstyle": "round,pad=0.15",
-                "fc": "white",
-                "ec": "#bbbbbb",
-                "lw": 0.5,
-                "alpha": 0.9,
-            },
-        )
-
-    for (tag, key), (bx, by) in bpos.items():
-        for module in sorted(boundary_in[key] if tag == "in" else boundary_out[key]):
-            mx, my = pos[module]
-            start, end = (
-                ((bx + 0.75, by), (mx - 0.46, my))
-                if tag == "in"
-                else (
-                    (mx + 0.46, my),
-                    (bx - 0.75, by),
-                )
-            )
-            ax.add_patch(
-                FancyArrowPatch(
-                    start,
-                    end,
-                    arrowstyle="-|>",
-                    mutation_scale=11,
-                    lw=0.9,
-                    color="#999999",
-                    connectionstyle="arc3,rad=0.06",
-                    zorder=1,
-                )
-            )
-        ax.add_patch(Ellipse((bx, by), 1.5, 0.55, fc="#f2f2f2", ec="#888888", lw=1.0, zorder=2))
-        if tag == "in":
-            shape = _shape_str(key, plan.sources.get(key), probed_shapes)
-        else:
-            producer = next(iter(boundary_out[key]))
-            shape = _shape_str(key, _edge_spec(plan, producer, key), probed_shapes)
-        text = f"{key}\n{shape}" if shape else key
-        ax.text(bx, by, text, fontsize=7.0, ha="center", va="center", style="italic", zorder=3)
-
-    for name, (x, y) in pos.items():
-        ax.add_patch(
-            FancyBboxPatch(
-                (x - 0.46, y - 0.28),
-                0.92,
-                0.56,
-                boxstyle="round,pad=0.06,rounding_size=0.10",
-                fc=_module_colour(steps[name]),
-                ec="#222222",
-                lw=1.2,
-                zorder=2,
-            )
-        )
-        ax.text(x, y, name, fontsize=9.0, ha="center", va="center", weight="bold", zorder=3)
-
-    all_x = [x for x, _ in (*pos.values(), *bpos.values())]
-    all_y = [y for _, y in (*pos.values(), *bpos.values())]
-    ax.set_xlim(min(all_x) - 1.4, max(all_x) + 1.4)
-    ax.set_ylim(min(all_y) - 1.2, max(all_y) + 1.2)
-    if title is None:
-        title = (
-            f"salt2 graph [mode={plan.mode.name}] — {len(plan.steps)} steps, "
-            f"hash {plan.plan_hash[:10]}"
-        )
-    ax.set_title(title, fontsize=12)
-    if pruned_list := sorted(pruned):
-        ax.text(
-            0.01,
-            0.01,
-            f"demand-pruned in {plan.mode.name}: {', '.join(pruned_list)}",
-            transform=ax.transAxes,
-            fontsize=7.5,
-            color="#888888",
-            style="italic",
-        )
-    ax.axis("off")
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi)
-    return out_path

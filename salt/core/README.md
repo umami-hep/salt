@@ -376,9 +376,11 @@ into the config as a refreshable comment block (the §4.4 labels precedent
 extended to the Athena surface): a reader of the YAML always sees what
 eval writes and what Athena gets, without running anything.
 
-`salt2 graph plot` renders with **matplotlib** (layered topological DAG,
-namespace-coloured modules — the salt container has no graphviz binary) and
-always writes the Graphviz `.dot` alongside for manual re-rendering.
+`salt2 graph plot` writes the §4.3 Graphviz `.dot` (port-card signature
+layout, namespace-coloured modules) and rasterises it to a PNG + sibling PDF
+by shelling out to the **`dot`** binary baked into the salt container. There
+is no matplotlib path; a missing `dot` is a clear actionable error (the `.dot`
+is still written for manual re-rendering).
 
 ### Run-dir artifacts (design §4.4)
 

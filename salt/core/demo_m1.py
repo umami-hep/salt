@@ -8,8 +8,8 @@ validate every primary mode (design §4.1), write the fit/test plan tables
 tensors via the executor (§3.2) under debug read tracking.
 
 Artifacts written into ``--outdir``: ``plan_fit.txt``, ``plan_test.txt``,
-``deadcode.txt``, ``graph.dot`` (always) and ``graph.svg`` when the optional
-``graphviz`` package can render.
+``deadcode.txt``, ``graph.dot`` (always) plus the rendered ``graph.svg`` +
+``graph.pdf``, produced via the ``dot`` binary baked into the salt container.
 
 Usage (the experiment ``do_run`` payload)::
 
@@ -149,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     path.write_text(text)
     print(f"[demo] wrote {path}")
 
-    # 4. graph plot (design §4.3): DOT always, SVG when graphviz can render
+    # 4. graph plot (design §4.3): DOT always + SVG/PDF rendered via the dot binary
     plot_args = ["graph", "plot", "-c", config, "--mode", "fit", "-o", str(outdir / "graph.svg")]
     if (code := cli_main(plot_args)) != 0:
         return code

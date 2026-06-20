@@ -6,6 +6,7 @@ by ``class_path: salt.tests.core.test_cli.<Class>`` — the M1 loader imports
 them via importlib.
 """
 
+import shutil
 import textwrap
 from functools import reduce
 from operator import or_
@@ -326,12 +327,13 @@ class TestPlan:
 
 class TestPlot:
     def test_dot_always_emitted(self, cfg, tmp_path, capsys):
-        out_path = tmp_path / "graph.svg"
+        # a .dot target short-circuits before any image render: the DOT source
+        # is the output, so this holds with or without the dot binary
+        out_path = tmp_path / "graph.dot"
         rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
         assert rc == 0
-        dot_path = tmp_path / "graph.dot"
-        assert dot_path.exists()
-        dot = dot_path.read_text()
+        assert out_path.exists()
+        dot = out_path.read_text()
         # port-card nodes carry the keys; edges are deduped node -> node
         assert '"embed" [label=<' in dot
         assert "embed.x" in dot
@@ -339,8 +341,6 @@ class TestPlot:
         assert '"<sources>" -> "embed";' in dot
         assert "#b5651d" in dot  # labels.x styled as label kind (orange)
         assert "#c0392b" in dot  # losses.total styled as loss kind (red)
-        captured = capsys.readouterr().out
-        assert out_path.exists() or "graphviz" in captured
 
     def test_pruned_module_rendered_dashed(self, cfg, tmp_path, capsys):
         out_path = tmp_path / "graph.dot"
@@ -351,34 +351,31 @@ class TestPlot:
         assert "style=dashed" in dot
         assert '"aux"' in dot
 
-    def test_matplotlib_is_the_primary_renderer(self, cfg, tmp_path, capsys, monkeypatch):
-        # graphviz absence is irrelevant: matplotlib renders the image
-        import salt.core.cli as cli_mod
-
-        monkeypatch.setattr(cli_mod, "graphviz", None)
-        out_path = tmp_path / "graph.svg"
+    @pytest.mark.skipif(shutil.which("dot") is None, reason="graphviz `dot` not on PATH")
+    def test_dot_binary_renders_png_and_pdf(self, cfg, tmp_path, capsys):
+        # the dot binary is the sole renderer: a PNG -o emits PNG + a sibling
+        # PDF + the .dot sidecar, all via `dot`
+        out_path = tmp_path / "graph.png"
         rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "matplotlib" in out
-        assert out_path.exists()
+        assert "graphviz/dot" in out
+        assert out_path.stat().st_size > 0
+        assert out_path.with_suffix(".pdf").stat().st_size > 0
+        assert out_path.with_suffix(".dot").exists()
+        assert out_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_missing_dot_raises_actionable_error(self, cfg, tmp_path, capsys, monkeypatch):
+        # `dot` absent -> a clear actionable error (no silent matplotlib fallback);
+        # the DOT sidecar is still written for manual rendering
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        out_path = tmp_path / "graph.png"
+        rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
+        assert rc == 1
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "dot" in out and "salt container" in out
         assert (tmp_path / "graph.dot").exists()
-
-    def test_says_so_when_no_renderer_available(self, cfg, tmp_path, capsys, monkeypatch):
-        # matplotlib AND graphviz unavailable -> DOT stays, with a render hint
-        import salt.core.cli as cli_mod
-
-        def _no_mpl(*args, **kwargs):
-            raise ImportError("matplotlib disabled for the test")
-
-        monkeypatch.setattr(cli_mod, "render_graph", _no_mpl)
-        monkeypatch.setattr(cli_mod, "graphviz", None)
-        out_path = tmp_path / "graph.svg"
-        rc = main(["graph", "plot", "-c", cfg(GOOD_CFG), "--mode", "fit", "-o", str(out_path)])
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "not importable" in out
-        assert "graph.dot" in out
         assert not out_path.exists()
 
     def test_synthetic_probe_writes_concrete_shapes(self, tmp_path, capsys):

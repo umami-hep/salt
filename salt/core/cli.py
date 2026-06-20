@@ -73,6 +73,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import shutil
+import subprocess
 import sys
 import warnings
 import warnings as stdlib_warnings  # stable handle; `warnings` is shadowed by a local list
@@ -101,13 +103,8 @@ from salt.core.graph.spec import (
     unflatten_spec,
 )
 from salt.core.onnx.config import attach_manifest, manifest_table, resolve_export_config
-from salt.core.render import dot_source, plan_table, render_graph
+from salt.core.render import dot_source, plan_table
 from salt.core.schema import dump_schema, load_schema, save_schema
-
-try:
-    import graphviz
-except ImportError:  # pragma: no cover - graphviz is strictly optional
-    graphviz = None
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
 
@@ -1084,16 +1081,19 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
 def _cmd_plot(args: argparse.Namespace) -> int:
     """``salt2 graph plot``: render the mode graph (design §4.3).
 
-    Always emits Graphviz DOT next to the requested output. The image itself
-    is rendered with the matplotlib layered-DAG renderer (`render_graph` —
-    matplotlib ships in the salt container, the graphviz binary does not);
-    if matplotlib is unavailable, the optional ``graphviz`` package is tried,
-    else the ``.dot`` is left with a manual-render hint.
+    Emits the §4.3 Graphviz DOT (port-card layout, one signature card per
+    module) next to the requested output, then shells out to the ``dot``
+    binary — baked into the salt container — to rasterise it: a PNG at the
+    requested output path and a sibling PDF. This is the authoritative graph
+    image; there is no matplotlib path. When ``dot`` is absent, raises a clear
+    actionable error rather than silently degrading.
 
     Returns
     -------
     int
-        0 on success, 1 on graph errors.
+        0 on success, 1 on graph errors. A missing/failing ``dot`` binary
+        surfaces as a `GraphError` (raised by `_render_with_dot`), caught at
+        the CLI top level and reported as exit 1.
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
@@ -1119,12 +1119,7 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     print(f"wrote DOT to {dot_path}")
     if out_path.suffix == ".dot":
         return 0
-    fmt = out_path.suffix.lstrip(".") or "svg"
-    try:
-        render_graph(plan, out_path, pruned=pruned, probed_shapes=probed)
-    except ImportError:
-        return _plot_graphviz_fallback(dot_text, dot_path, out_path, fmt)
-    print(f"wrote {fmt.upper()} to {out_path} (matplotlib)")
+    _render_with_dot(dot_path, out_path)
     return 0
 
 
@@ -1153,26 +1148,45 @@ def _maybe_probe_shapes(
     return probed
 
 
-def _plot_graphviz_fallback(dot_text: str, dot_path: Path, out_path: Path, fmt: str) -> int:
-    """Render via the optional ``graphviz`` package when matplotlib is missing.
+def _render_with_dot(dot_path: Path, out_path: Path) -> None:
+    """Rasterise the DOT sidecar to PNG (``out_path``) and a sibling PDF via ``dot``.
 
-    Returns
-    -------
-    int
-        Always 0 (the DOT artifact already exists; rendering is best-effort).
+    Shells out to the Graphviz ``dot`` binary (baked into the salt container):
+    ``dot -Tpng -Gdpi=150 <dot> -o <out>.png`` and ``dot -Tpdf <dot> -o
+    <out>.pdf``. The PNG goes to the requested ``out_path``; the PDF takes the
+    same stem with a ``.pdf`` suffix.
+
+    Raises
+    ------
+    GraphError
+        When ``dot`` is not on PATH (actionable: rebuild/use the salt
+        container, which bakes in Graphviz), or when a ``dot`` invocation
+        fails (non-zero exit) — the stderr is surfaced in the message.
     """
-    hint = f"render manually with: dot -T{fmt} {dot_path} -o {out_path}"
-    if graphviz is None:
-        print(f"matplotlib/graphviz are not importable — wrote DOT only; {hint}")
-        return 0
-    try:
-        payload = graphviz.Source(dot_text).pipe(format=fmt)
-    except (OSError, graphviz.ExecutableNotFound, graphviz.CalledProcessError) as err:
-        print(f"graphviz rendering failed ({err}) — wrote DOT only; {hint}")
-        return 0
-    out_path.write_bytes(payload)
-    print(f"wrote {fmt.upper()} to {out_path} (graphviz)")
-    return 0
+    dot_bin = shutil.which("dot")
+    if dot_bin is None:
+        raise GraphError(
+            "the Graphviz `dot` binary was not found on PATH — cannot render the "
+            f"graph image. The DOT source was written to {dot_path}; render it "
+            "inside the salt container (which bakes in Graphviz), e.g.\n"
+            "  apptainer exec .../salt.sif dot -Tpng "
+            f"{dot_path} -o {out_path}\n"
+            "or rebuild the salt container from repos/salt/container/salt.def."
+        )
+    png_path = out_path
+    pdf_path = out_path.with_suffix(".pdf")
+    renders = (
+        ([dot_bin, "-Tpng", "-Gdpi=150", str(dot_path), "-o", str(png_path)], png_path),
+        ([dot_bin, "-Tpdf", str(dot_path), "-o", str(pdf_path)], pdf_path),
+    )
+    for cmd, target in renders:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise GraphError(
+                f"`dot` failed to render {target} (exit {result.returncode}): "
+                f"{result.stderr.strip() or '(no stderr)'}"
+            )
+        print(f"wrote {target.suffix.lstrip('.').upper()} to {target} (graphviz/dot)")
 
 
 # ---------------------------------------------------------------------------

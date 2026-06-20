@@ -1,15 +1,17 @@
-"""Tests for `salt.core.render`: plan table, DOT source, matplotlib DAG renderer."""
+"""Tests for `salt.core.render`: plan table, DOT source, and the CLI dot render."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 
+from salt.core.cli import main as cli_main
 from salt.core.graph.planner import compile_plan
 from salt.core.graph.probe import SYNTHETIC, probe_shapes
 from salt.core.graph.spec import Mode, TensorSpec, unflatten_spec
-from salt.core.render import dot_source, plan_table, render_graph
+from salt.core.render import dot_source, plan_table
 from salt.tests.core.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 
 # the in-repo test-scale GN2v2 config (16-dim, no machine paths) — synthetic
@@ -85,21 +87,56 @@ class TestDotSource:
         assert "color=grey" in dot
 
 
-class TestRenderGraph:
-    @pytest.mark.parametrize("suffix", ["svg", "png"])
-    def test_writes_image(self, plan, tmp_path, suffix):
-        out = render_graph(plan, tmp_path / f"graph.{suffix}")
-        assert out.stat().st_size > 0
+_HAS_DOT = shutil.which("dot") is not None
 
-    def test_title_and_pruned_footnote(self, plan, tmp_path):
-        out = render_graph(plan, tmp_path / "graph.svg", title="my title", pruned=["aux"])
-        text = out.read_text()
-        assert "my title" in text
-        assert "demand-pruned in FIT: aux" in text
 
-    def test_creates_parent_dirs(self, plan, tmp_path):
-        out = render_graph(plan, tmp_path / "a" / "b" / "graph.svg")
+class TestPlotCli:
+    """`salt2 graph plot` renders the §4.3 DOT to PNG+PDF via the dot binary."""
+
+    def test_dot_sidecar_written_even_without_image(self, tmp_path):
+        # a .dot target short-circuits before any dot invocation: the DOT
+        # sidecar is the requested output and no image is produced
+        out = tmp_path / "graph.dot"
+        rc = cli_main(
+            ["graph", "plot", "-c", _DUMMY_CFG, "--mode", "fit",
+             "-o", str(out), "--set", _NORM_PLACEHOLDER[0]]
+        )
+        assert rc == 0
         assert out.exists()
+        assert "digraph" in out.read_text()
+
+    @pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
+    def test_png_pdf_and_dot_emitted(self, tmp_path):
+        # the full image path: PNG at the requested -o, a sibling PDF, and the
+        # .dot sidecar — all via the in-container dot binary
+        out = tmp_path / "graph.png"
+        rc = cli_main(
+            ["graph", "plot", "-c", _DUMMY_CFG, "--mode", "fit",
+             "-o", str(out), "--set", _NORM_PLACEHOLDER[0]]
+        )
+        assert rc == 0
+        png = out
+        pdf = out.with_suffix(".pdf")
+        dot = out.with_suffix(".dot")
+        assert png.stat().st_size > 0
+        assert pdf.stat().st_size > 0
+        assert dot.exists()
+        # PNG magic bytes / PDF header confirm dot actually rasterised
+        assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        assert pdf.read_bytes()[:5] == b"%PDF-"
+
+    @pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
+    def test_probe_shapes_flow_into_render(self, tmp_path):
+        # --probe must reach the dot_source; the synthetic-batch concrete track
+        # shape (B, 40, ...) lands in the .dot sidecar the dot render consumes
+        out = tmp_path / "probed.png"
+        rc = cli_main(
+            ["graph", "plot", "-c", _DUMMY_CFG, "--mode", "fit", "--probe",
+             "-o", str(out), "--set", _NORM_PLACEHOLDER[0]]
+        )
+        assert rc == 0
+        assert out.with_suffix(".dot").read_text().count("40") > 0
+        assert out.stat().st_size > 0
 
 
 class TestProbeShapes:
