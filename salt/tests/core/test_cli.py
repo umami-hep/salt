@@ -9,6 +9,7 @@ them via importlib.
 import textwrap
 from functools import reduce
 from operator import or_
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -17,6 +18,10 @@ import pytest
 from salt.core.cli import main
 from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.core.schema import load_schema
+
+# the in-repo test-scale GN2v2 trainer config (16-dim, no machine paths) — the
+# synthetic --probe path needs a real trainer config but no data file
+_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "core" / "configs" / "gn2v2-dummy.yaml")
 
 # ---------------------------------------------------------------------------
 # toy modules (no physics — M1 scope); instance names assigned by the CLI
@@ -327,10 +332,13 @@ class TestPlot:
         dot_path = tmp_path / "graph.dot"
         assert dot_path.exists()
         dot = dot_path.read_text()
-        assert '"embed" -> "pred" [label="embed.x"' in dot
-        assert '"<sources>" -> "embed"' in dot
-        assert "color=orange" in dot  # labels.x styled as label kind
-        assert "color=red" in dot  # losses.total styled as loss kind
+        # port-card nodes carry the keys; edges are deduped node -> node
+        assert '"embed" [label=<' in dot
+        assert "embed.x" in dot
+        assert '"embed" -> "pred";' in dot
+        assert '"<sources>" -> "embed";' in dot
+        assert "#b5651d" in dot  # labels.x styled as label kind (orange)
+        assert "#c0392b" in dot  # losses.total styled as loss kind (red)
         captured = capsys.readouterr().out
         assert out_path.exists() or "graphviz" in captured
 
@@ -372,6 +380,31 @@ class TestPlot:
         assert "not importable" in out
         assert "graph.dot" in out
         assert not out_path.exists()
+
+    def test_synthetic_probe_writes_concrete_shapes(self, tmp_path, capsys):
+        # --probe alone (no data file) synthesises a batch from the reader schema
+        # and annotates the DOT with concrete numeric shapes (design §4.3). Uses
+        # the in-repo test-scale GN2v2 config; the synthetic norm_dict is injected
+        # by the probe (the placeholder --set only satisfies the config parse).
+        out_path = tmp_path / "graph.dot"
+        rc = main([
+            "graph", "plot",
+            "-c", _DUMMY_CFG,
+            "--mode", "fit",
+            "--probe",
+            "--set", "model.modules.norm.init_args.norm_dict=unused.yaml",
+            "-o", str(out_path),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "probed" in out and "synthetic batch" in out
+        dot = out_path.read_text()
+        # inputs/embed/labels now carry CONCRETE numeric shapes (B==16)
+        assert "(16, 40, 19)" in dot  # inputs.tracks: 19 features, 40 tokens
+        assert "inputs.tracks" in dot
+        assert "labels.jets.flavour_label" in dot
+        # at least one embed.* row shows a concrete [B, T, dim] triple
+        assert "(16, 40, 16)" in dot  # embed.tracks at the 16-dim test scale
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,7 @@ import yaml
 
 from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
+from salt.core.graph.probe import SYNTHETIC, probe_shapes
 from salt.core.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
@@ -1108,7 +1109,8 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     _print_onnx_static_caveat(cfg, mode)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
-    dot_text = dot_source(plan, cfg.modules, pruned)
+    probed = _maybe_probe_shapes(args, mode)
+    dot_text = dot_source(plan, cfg.modules, pruned, probed_shapes=probed)
     out_path = Path(args.output)
     if out_path.parent != Path():
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1119,11 +1121,36 @@ def _cmd_plot(args: argparse.Namespace) -> int:
         return 0
     fmt = out_path.suffix.lstrip(".") or "svg"
     try:
-        render_graph(plan, out_path, pruned=pruned)
+        render_graph(plan, out_path, pruned=pruned, probed_shapes=probed)
     except ImportError:
         return _plot_graphviz_fallback(dot_text, dot_path, out_path, fmt)
     print(f"wrote {fmt.upper()} to {out_path} (matplotlib)")
     return 0
+
+
+def _maybe_probe_shapes(
+    args: argparse.Namespace, mode: Mode
+) -> dict[str, tuple[int, ...]] | None:
+    """Run the one-batch shape probe when ``--probe`` was passed (design §4.3).
+
+    ``--probe`` alone (``args.probe is SYNTHETIC``) synthesises a batch from the
+    reader schema; ``--probe FILE.h5`` seeds from a real data file. Without
+    ``--probe`` (``args.probe is None``) returns None and the renderer keeps the
+    declared/symbolic shapes.
+
+    Returns
+    -------
+    dict[str, tuple[int, ...]] | None
+        Concrete shapes by dotted key, or None when probing is off.
+    """
+    probe = getattr(args, "probe", None)
+    if probe is None:
+        return None
+    data_file = None if probe is SYNTHETIC else probe
+    probed = probe_shapes(args.config, args.set, data_file, mode)
+    source = "synthetic batch" if data_file is None else f"real batch from {data_file}"
+    print(f"probed {len(probed)} concrete tensor shapes from a {source}")
+    return probed
 
 
 def _plot_graphviz_fallback(dot_text: str, dot_path: Path, out_path: Path, fmt: str) -> int:
@@ -1557,6 +1584,17 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_config_arg(plot)
     _add_mode_arg(plot, default="fit")
     plot.add_argument("-o", "--output", required=True, help="output image path (.svg/.png/.dot)")
+    plot.add_argument(
+        "--probe",
+        nargs="?",
+        const=SYNTHETIC,
+        default=None,
+        metavar="DATA.h5",
+        help="run ONE batch through the plan and annotate every port with its CONCRETE "
+        "tensor shape (design §4.3): '--probe FILE.h5' seeds from a real data file; "
+        "'--probe' alone synthesises a batch from the reader schema (no data needed). "
+        "Without --probe the declared/symbolic shapes are shown",
+    )
     plot.set_defaults(func=_cmd_plot)
 
     why = gsub.add_parser("why", help="explain one key's producer/consumers (design §3.1)")

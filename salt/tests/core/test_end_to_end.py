@@ -190,14 +190,30 @@ class TestPlot:
         out_path = tmp_path / "graph.svg"
         assert cli_main(["graph", "plot", "-c", TOY_CFG, "--mode", "fit", "-o", str(out_path)]) == 0
         dot = (tmp_path / "graph.dot").read_text()
-        assert '"<sources>" -> "source" [label="raw.x (B, 8)"]' in dot
-        assert '"<sources>" -> "labels" [label="raw.x (B, 8)"]' in dot
-        assert '"source" -> "embed" [label="inputs.x (B, 8)"]' in dot
-        assert '"embed" -> "head" [label="embed.x (B, 16)"]' in dot
-        # kind styling: labels orange, losses red, pad masks dotted grey
-        assert '"labels" -> "head" [label="labels.x (B)", color=orange' in dot
-        assert '"head" -> "<sinks>" [label="losses.total", color=red' in dot
-        assert 'label="masks.x (B)", color=grey, fontcolor=grey, style=dotted' in dot
+        assert "digraph salt_core_fit {" in dot
+        # port-card nodes: each consumed/produced key is a card row with its shape
+        assert '"source" [label=<' in dot
+        assert '"head" [label=<' in dot
+        assert "raw.x" in dot
+        assert "(B, 8)" in dot
+        assert "inputs.x" in dot
+        assert "embed.x" in dot
+        assert "(B, 16)" in dot
+        assert "masks.x" in dot
+        assert "(B)" in dot
+        assert "labels.x" in dot
+        assert "losses.total" in dot
+        # deduped node -> node edges (no per-key edge labels)
+        assert '"<sources>" -> "source";' in dot
+        assert '"<sources>" -> "labels";' in dot
+        assert '"source" -> "embed";' in dot
+        assert '"embed" -> "head";' in dot
+        assert '"labels" -> "head";' in dot
+        assert '"head" -> "<sinks>";' in dot
+        # kind-coloured rows: labels orange, losses red, preds blue
+        assert "#b5651d" in dot  # label kind
+        assert "#c0392b" in dot  # loss kind
+        assert "#1f6fb2" in dot  # preds kind
         # writer is TEST-gated: absent from the FIT graph entirely
         assert '"writer"' not in dot
 

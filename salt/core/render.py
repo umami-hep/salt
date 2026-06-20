@@ -8,8 +8,10 @@ design §4.4):
 - `plan_table` — the ordered §4.4 step table (binding constraints + narrowed
   wildcard results), byte-identical to the historical ``salt2 graph plan``
   stdout so ``plan_<mode>.txt`` artifacts and the CLI agree.
-- `dot_source` — Graphviz DOT text (design §4.3 styling). Emitted alongside
-  every image render; the ``dot`` binary is NOT assumed to exist.
+- `dot_source` — Graphviz DOT text (design §4.3 styling): the port-card
+  layout, one HTML-like signature card per module (header + consumed/produced
+  rows) and one deduped node->node arrow per producer/consumer pair. Emitted
+  alongside every image render; the ``dot`` binary is NOT assumed to exist.
 - `render_graph` — the PRIMARY image renderer: a layered topological DAG
   drawn with matplotlib (always available in the salt container, unlike
   graphviz). Layout ported from the architecture-investigation
@@ -131,17 +133,6 @@ def _quote(text: str) -> str:
     return f'"{_esc(text)}"'
 
 
-def _label(*lines: str) -> str:
-    r"""Build a quoted multi-line DOT label.
-
-    Returns
-    -------
-    str
-        The quoted label with ``\n`` separators.
-    """
-    return '"' + "\\n".join(_esc(line) for line in lines) + '"'
-
-
 def _fmt_shape(spec: TensorSpec | None) -> str:
     """Format a spec's shape as ``"(d0, d1, ...)"`` for edge labels.
 
@@ -179,39 +170,168 @@ def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
     return plan.step(producer).produces.get(key)
 
 
-def _edge_style(key: str, spec: TensorSpec) -> list[str]:
-    """Kind-based DOT edge styling (design §4.3).
+# Kind/key -> row font colour for the signature-card rows (design §4.3): the
+# orange/red/blue accents the matplotlib renderer reserves for edges become row
+# font colours here, since the port-card layout has no per-key wires to colour.
+_KIND_COLOURS = {"label": "#b5651d", "loss": "#c0392b", "preds": "#1f6fb2"}
+_ROW_DEFAULT_COLOUR = "#333333"
+_SHAPE_COLOUR = "#888888"
+_PRUNED_FILL = "#dddddd"
 
-    Labels orange, losses red, pad-masks dotted grey, ``preds.*`` blue.
+
+def _row_colour(key: str, spec: TensorSpec | None) -> str:
+    """Kind-based row font colour for a signature-card row (design §4.3).
+
+    Labels orange, losses red, ``preds.*`` blue; everything else the neutral
+    default. Derived from the spec's `kind` (falling back to the key's leading
+    namespace for ``preds.*``), mirroring the edge palette the matplotlib
+    renderer uses.
 
     Returns
     -------
-    list[str]
-        Extra DOT edge attributes.
+    str
+        A hex colour.
     """
-    if spec.kind == "label":
-        return ["color=orange", "fontcolor=orange"]
-    if spec.kind == "loss":
-        return ["color=red", "fontcolor=red"]
-    if spec.kind == "pad_mask":
-        return ["color=grey", "fontcolor=grey", "style=dotted"]
-    if spec.kind == "meta":
-        return ["color=grey", "fontcolor=grey"]
+    if spec is not None and spec.kind in _KIND_COLOURS:
+        return _KIND_COLOURS[spec.kind]
     if key.partition(KEY_SEP)[0] == "preds":
-        return ["color=blue", "fontcolor=blue"]
-    return []
+        return _KIND_COLOURS["preds"]
+    return _ROW_DEFAULT_COLOUR
+
+
+def _html_esc(text: str) -> str:
+    """Escape a string for inclusion in a Graphviz HTML-like label.
+
+    Only ``&``/``<``/``>`` are special inside an HTML-like label; quotes stay
+    literal (the label is delimited by ``<...>``, not ``"..."``).
+
+    Returns
+    -------
+    str
+        The escaped text.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _shape_str(key: str, spec: TensorSpec | None, probed_shapes: Mapping[str, tuple] | None) -> str:
+    """Shape string for a card row, preferring a probed concrete shape.
+
+    When `probed_shapes` carries a (live-traced) shape for `key`, it is
+    formatted like ``"(16, 40, 19)"``; otherwise the declared/symbolic shape
+    from `spec` (`_fmt_shape`) is used. A scalar probed shape (``()``) stays
+    bare, matching `_fmt_shape`'s scalar handling.
+
+    Returns
+    -------
+    str
+        The parenthesised shape, or ``""`` when there is none.
+    """
+    if probed_shapes is not None and key in probed_shapes:
+        dims = tuple(probed_shapes[key])
+        if not dims:
+            return ""
+        return "(" + ", ".join(str(dim) for dim in dims) + ")"
+    return _fmt_shape(spec)
+
+
+def _card_row(key: str, shape: str, colour: str, *, bold: bool) -> str:
+    """One ``<TR>`` row of a signature card: kind-coloured key plus grey shape.
+
+    Returns
+    -------
+    str
+        The HTML-like table row.
+    """
+    name = f"<B>{_html_esc(key)}</B>" if bold else _html_esc(key)
+    tail = f'  <FONT COLOR="{_SHAPE_COLOUR}">{_html_esc(shape)}</FONT>' if shape else ""
+    return f'    <TR><TD ALIGN="LEFT"><FONT COLOR="{colour}">{name}{tail}</FONT></TD></TR>'
+
+
+def _card_section(tag: str) -> str:
+    """A faint italic ``in``/``out`` section divider row.
+
+    Returns
+    -------
+    str
+        The HTML-like table row.
+    """
+    return (
+        '    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa">'
+        f"<I>{_html_esc(tag)}</I></FONT></TD></TR>"
+    )
+
+
+def _card_node(
+    name: str,
+    title: str,
+    cls: str,
+    fill: str,
+    ins: list[tuple[str, str, str]],
+    outs: list[tuple[str, str, str]],
+) -> str:
+    """Assemble one HTML-like signature-card node line.
+
+    `ins`/`outs` are ``(key, shape, colour)`` triples for the consumed and
+    produced rows; the header carries `title` + optional `cls` over a `fill`
+    background.
+
+    Returns
+    -------
+    str
+        The full ``"name" [label=<<TABLE...>>];`` DOT node line.
+    """
+    sub = (
+        f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>'
+        if cls
+        else ""
+    )
+    rows = [
+        f'    <TR><TD BGCOLOR="{fill}" ALIGN="CENTER"><B>{_html_esc(title)}</B>{sub}</TD></TR>'
+    ]
+    if ins:
+        rows.append(_card_section("in"))
+        rows.extend(_card_row(k, s, c, bold=False) for k, s, c in ins)
+    if outs:
+        rows.append(_card_section("out"))
+        rows.extend(_card_row(k, s, c, bold=True) for k, s, c in outs)
+    table = (
+        '<\n    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">\n'
+        + "\n".join(rows)
+        + "\n    </TABLE>>"
+    )
+    return f"  {_quote(name)} [label={table}];"
 
 
 def dot_source(
     plan: Plan,
     modules: Mapping[str, GraphModule] | None = None,
     pruned: Iterable[str] = (),
+    probed_shapes: Mapping[str, tuple] | None = None,
 ) -> str:
-    r"""Render a compiled plan as Graphviz DOT text (design §4.3).
+    r"""Render a compiled plan as Graphviz DOT text — port-card layout (design §4.3).
 
-    Nodes are module instances (``name\nClassName``); edges are bundle keys
-    with kind-based styling; demand-pruned modules (looked up in `modules`)
-    render grey-dashed.
+    Each module renders as an HTML-like signature card: a colour-filled header
+    (``name`` + ``ClassName``), an ``in`` section listing the keys the module
+    CONSUMES, and an ``out`` section listing the keys it PRODUCES. Each row is a
+    ``key`` plus its tensor shape, the key kind-coloured (labels orange, losses
+    red, ``preds.*`` blue). The ``<sources>`` pseudo-node carries only an ``out``
+    section (the framework boundary leaves); ``<sinks>`` only an ``in`` section.
+    Edges collapse to ONE deduped ``producer -> consumer`` arrow per pair — the
+    per-key detail lives in the cards, not on floating edge labels. Demand-pruned
+    modules (looked up in `modules`) render as a grey dashed card.
+
+    Parameters
+    ----------
+    plan : Plan
+        The compiled plan to draw.
+    modules : Mapping[str, GraphModule] | None, optional
+        Module instances, used only to label `pruned` cards with their class.
+    pruned : Iterable[str], optional
+        Names of demand-pruned modules to draw grey/dashed, by default ().
+    probed_shapes : Mapping[str, tuple] | None, optional
+        Live-traced concrete shapes by dotted key; when a key is present its
+        tuple is shown (e.g. ``"(16, 40, 19)"``) in preference to the
+        declared/symbolic shape, by default None.
 
     Returns
     -------
@@ -219,53 +339,68 @@ def dot_source(
         The DOT source.
     """
     modules = dict(modules or {})
-    # Graph styling (design §4.3), tuned for `dot` (the graphviz side container);
-    # the bare DOT stays valid for any graphviz consumer:
-    #   - splines=polyline: straight-segment edges with generous rank/node
-    #     separation. (splines=ortho gives pure right angles but graphviz places
-    #     edge labels at the logical midpoint, which ortho routing then bends
-    #     away from — labels detach/overlap on dense graphs. polyline keeps the
-    #     label near its wire while still drawing clean straight runs. Flip the
-    #     one line below to "splines=ortho;" for strict right angles.)
-    #   - pad/forcelabels: keep boundary ellipses off the canvas edge and keep
-    #     every edge label drawn.
-    #   - namespace-coloured filled module boxes (the same _NS_COLOURS palette
-    #     the matplotlib renderer uses) + kind-coloured edges.
+    # Graph styling (design §4.3): the validated port-card layout. plaintext
+    # nodes carry HTML-like TABLE labels (the cards), so the shape/style/fill
+    # live in the table, not the node attrs. splines=ortho draws clean right
+    # angles between cards; the per-key detail is inside the cards (no floating
+    # edge labels to detach), so ortho is safe here. Generous rank separation
+    # keeps the LR rows of cards legible.
     lines = [
         f"digraph salt_core_{plan.mode.name.lower()} {{",
         "  rankdir=LR;",
-        "  splines=polyline;",
-        "  nodesep=0.7;",
-        "  ranksep=1.7;",
+        "  splines=ortho;",
+        "  nodesep=0.6;",
+        "  ranksep=1.5;",
         "  pad=0.4;",
-        "  forcelabels=true;",
         '  bgcolor="white";',
-        '  node [shape=box, style="rounded,filled", fillcolor="#eeeeee",'
-        ' fontname="Helvetica", fontsize=10, margin="0.14,0.07"];',
-        '  edge [fontname="Helvetica", fontsize=9, color="#555555"];',
+        '  node [shape=plaintext, fontname="Helvetica"];',
+        '  edge [color="#777777", arrowsize=0.8, penwidth=1.3];',
     ]
+
+    # consumed keys per module: each require edge into the module, with the
+    # spec carried by the producing edge (mirrors the matplotlib renderer's
+    # _edge_spec lookup). dict-insertion dedupes while preserving edge order.
+    consumed: dict[str, dict[str, TensorSpec | None]] = {}
+    for edge in plan.edges:
+        consumed.setdefault(edge.consumer, {}).setdefault(
+            edge.key, _edge_spec(plan, edge.producer, edge.key)
+        )
+
+    def _rows(items: Iterable[tuple[str, TensorSpec | None]]) -> list[tuple[str, str, str]]:
+        return [
+            (key, _shape_str(key, spec, probed_shapes), _row_colour(key, spec))
+            for key, spec in items
+        ]
+
     if any(edge.producer == SOURCES for edge in plan.edges):
-        lines.append(f'  {_quote(SOURCES)} [shape=ellipse, style="dashed,filled", fillcolor="#f5f5f5"];')
+        lines.append(
+            _card_node(
+                SOURCES, SOURCES, "", "#f5f5f5", [], _rows(sorted(plan.sources.items()))
+            )
+        )
+    for step in plan.steps:
+        ins = _rows(consumed.get(step.name, {}).items())
+        outs = _rows(step.produces.items())
+        cls = type(step.module).__name__
+        lines.append(_card_node(step.name, step.name, cls, _module_colour(step), ins, outs))
     if any(edge.consumer == SINKS for edge in plan.edges):
-        lines.append(f'  {_quote(SINKS)} [shape=ellipse, style="dashed,filled", fillcolor="#f5f5f5"];')
-    lines.extend(
-        f"  {_quote(step.name)} [label={_label(step.name, type(step.module).__name__)},"
-        f' fillcolor="{_module_colour(step)}"];'
-        for step in plan.steps
-    )
+        lines.append(
+            _card_node(SINKS, SINKS, "", "#f5f5f5", _rows(consumed.get(SINKS, {}).items()), [])
+        )
     for name in pruned:
         cls = type(modules[name]).__name__ if name in modules else "?"
-        label = _label(name, cls, "(pruned)")
-        lines.append(f"  {_quote(name)} [label={label}, style=dashed, color=grey, fontcolor=grey];")
+        ins = _rows(consumed.get(name, {}).items())
+        line = _card_node(name, f"{name} (pruned)", cls, _PRUNED_FILL, ins, [])
+        # grey dashed border distinguishes a demand-pruned card from a live one
+        lines.append(line.replace("];", ", style=dashed, color=grey];"))
+
+    seen: set[tuple[str, str]] = set()
     for edge in plan.edges:
-        if edge.producer == SOURCES:
-            spec = plan.sources[edge.key]
-        else:
-            spec = plan.step(edge.producer).produces[edge.key]
-        shape = _fmt_shape(spec)
-        label_text = f"{edge.key} {shape}" if shape else edge.key
-        attrs = [f"label={_quote(label_text)}", *_edge_style(edge.key, spec)]
-        lines.append(f"  {_quote(edge.producer)} -> {_quote(edge.consumer)} [{', '.join(attrs)}];")
+        pair = (edge.producer, edge.consumer)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        lines.append(f"  {_quote(edge.producer)} -> {_quote(edge.consumer)};")
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -340,6 +475,7 @@ def render_graph(
     title: str | None = None,
     pruned: Iterable[str] = (),
     dpi: int = 200,
+    probed_shapes: Mapping[str, tuple] | None = None,
 ) -> Path:
     """Render a compiled plan as a layered DAG image via matplotlib (design §4.3/§4.4).
 
@@ -361,6 +497,10 @@ def render_graph(
         Names of demand-pruned modules (footnote only), by default ().
     dpi : int, optional
         Raster DPI (PNG), by default 200.
+    probed_shapes : Mapping[str, tuple] | None, optional
+        Live-traced concrete shapes by dotted key (the ``--probe`` result);
+        when a key is present its tuple is shown in preference to the
+        declared/symbolic shape, by default None.
 
     Returns
     -------
@@ -438,10 +578,11 @@ def render_graph(
         per_src_idx[src] += 1
         t = (0.35, 0.58, 0.78)[i % 3]
         sign = 1 if i % 2 == 0 else -1
-        # each key paired with ITS OWN spec shape (never reuse one for the group)
+        # each key paired with ITS OWN spec shape (never reuse one for the group);
+        # a probed concrete shape (the --probe result) wins over the symbolic one
         label_lines = []
         for key in sorted(keys):
-            shape = _fmt_shape(_edge_spec(plan, src, key))
+            shape = _shape_str(key, _edge_spec(plan, src, key), probed_shapes)
             label_lines.append(f"{key} {shape}" if shape else key)
         ax.text(
             x0 + t * (x1 - x0),
@@ -486,10 +627,10 @@ def render_graph(
             )
         ax.add_patch(Ellipse((bx, by), 1.5, 0.55, fc="#f2f2f2", ec="#888888", lw=1.0, zorder=2))
         if tag == "in":
-            shape = _fmt_shape(plan.sources.get(key))
+            shape = _shape_str(key, plan.sources.get(key), probed_shapes)
         else:
             producer = next(iter(boundary_out[key]))
-            shape = _fmt_shape(_edge_spec(plan, producer, key))
+            shape = _shape_str(key, _edge_spec(plan, producer, key), probed_shapes)
         text = f"{key}\n{shape}" if shape else key
         ax.text(bx, by, text, fontsize=7.0, ha="center", va="center", style="italic", zorder=3)
 
