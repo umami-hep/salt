@@ -942,6 +942,10 @@ def overrides(data) -> list[str]:
         f"--data.modules.reader.init_args.schema={data['schema']}",
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         "--trainer.accelerator=cpu",
+        # base2 ships a default-ON CometLogger (plan-24 Wave 0); turn it off on the
+        # fit fixture so the end-to-end run emits no offline Comet archive (and
+        # lr_monitor drops). On the salt2 test path this is already forced off.
+        "--trainer.logger=false",
         # null-delete the base2 ProgressBar (D2 default-on) — can't combine the
         # stock enable_progress_bar=false with a configured ProgressBar callback
         "--callbacks.progress=null",

@@ -375,6 +375,9 @@ class TestFitSmoke:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
+            # base2 ships a default-ON CometLogger (plan-24 Wave 0); turn it off so
+            # the smoke run emits no offline Comet archive (and lr_monitor drops)
+            "--trainer.logger=false",
             "--trainer.max_epochs=1",
             "--trainer.limit_train_batches=2",
             "--trainer.limit_val_batches=2",
@@ -431,6 +434,7 @@ class TestFitRetryLoop:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
+            "--trainer.logger=false",  # opt out of the default CometLogger (plan-24 W0)
             "--trainer.max_epochs=1",
             "--trainer.limit_train_batches=2",
             "--trainer.limit_val_batches=2",

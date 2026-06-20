@@ -34,10 +34,12 @@ module (v1 ``main.py:5``), ``--name`` is linked to the configured logger's
 replicates the v1 fit-stage Comet setup (``cli.py:281-294``): ``dict_kwargs:
 {name}``, ``online: false`` when no ``COMET_API_KEY`` / under ``fast_dev_run``,
 the ``COMET_OFFLINE_DIRECTORY`` env + its mkdir, and ``logger=False`` on test
-(``cli.py:317``). ``base2.yaml`` still ships ``logger: false`` (local runs need
-no tracking), and `LearningRateMonitor` is a dict-keyed ``callbacks: lr_monitor``
-entry that only does anything once a logger is attached (FD §13 E3). Run-dir
-timestamping rides with a later wave.
+(``cli.py:317``). ``base2.yaml`` ships a default-ON ``CometLogger`` block since
+the plan-24 Wave 0 flip (v1 parity); local / CI / smoke / gate runs opt OUT with
+``--trainer.logger false``. `LearningRateMonitor` is a dict-keyed ``callbacks:
+lr_monitor`` entry that only attaches once a logger is present (kept by default
+now, dropped on a logger-less run; FD §13 E3). Run-dir timestamping rides with a
+later wave.
 """
 
 from __future__ import annotations
@@ -143,10 +145,11 @@ def _needs_logger(callback: Any) -> bool:
     """Whether a callback hard-requires an attached experiment logger to run.
 
     The stock `LearningRateMonitor` raises a ``MisconfigurationException`` on a
-    logger-less trainer (``lr_monitor.py``). ``base2.yaml`` ships ``logger:
-    false`` by default and the ``callbacks.lr_monitor`` LearningRateMonitor
-    entry, so the assembly drops such callbacks on a logger-less run (M6 sub-wave
-    E) — keeping the default local fit/test path runnable.
+    logger-less trainer (``lr_monitor.py``). ``base2.yaml`` ships a default-ON
+    ``CometLogger`` (plan-24 Wave 0) plus the ``callbacks.lr_monitor``
+    LearningRateMonitor entry, so the monitor is KEPT by default; the assembly
+    drops such callbacks on a ``--trainer.logger false`` run (M6 sub-wave E) —
+    keeping the opt-out local / CI / smoke fit/test path runnable.
 
     Parameters
     ----------
@@ -187,6 +190,35 @@ def _comet_accepts_dict_kwargs() -> bool:
     except (ValueError, TypeError):  # pragma: no cover - builtin/uninspectable
         return False
     return "dict_kwargs" in params
+
+
+def _comet_accepts_experiment_name() -> bool:
+    """Whether this Lightning `CometLogger` declares ``experiment_name`` explicitly.
+
+    The v1 wiring set ``init_args.experiment_name`` (``cli.py:101,287``); newer
+    Lightning `CometLogger` drops it from the signature (the run label is
+    forwarded through ``**kwargs`` to the Comet experiment instead). jsonargparse
+    instantiates the logger by its DECLARED signature, so an ``experiment_name``
+    ``init_arg`` on the newer logger is rejected at ``instantiate_classes`` with
+    "Option 'experiment_name' is not accepted" — crashing the (now default-ON)
+    fit. Introspect the constructor so the wiring sets it as an ``init_arg`` only
+    when it is an EXPLICIT parameter, and otherwise routes the name through the
+    ``COMET_EXPERIMENT_NAME`` env var (the version-robust path). A bare
+    ``**kwargs`` does NOT count (jsonargparse validates against named params).
+
+    Returns
+    -------
+    bool
+        True only when ``experiment_name`` is an EXPLICIT named parameter of
+        `CometLogger.__init__`.
+    """
+    import inspect  # noqa: PLC0415 - one-shot introspection, wiring-only
+
+    try:
+        params = inspect.signature(CometLogger.__init__).parameters
+    except (ValueError, TypeError):  # pragma: no cover - builtin/uninspectable
+        return False
+    return "experiment_name" in params
 
 
 def _best_checkpoint(config_path: Path) -> str:
@@ -396,9 +428,10 @@ class Salt2CLI(LightningCLI):
         The ``base2.yaml`` default ``callbacks.lr_monitor`` LearningRateMonitor
         is dropped when no experiment logger is attached (M6 sub-wave E): the
         stock LearningRateMonitor hard-raises a ``MisconfigurationException`` on
-        a logger-less trainer, and ``base2.yaml`` ships ``logger: false``, so the
-        callback only survives once the user opts into a logger — it would
-        otherwise break every default local fit/test run. Mirrors the v1 intent
+        a logger-less trainer. Since the plan-24 Wave 0 flip ``base2.yaml`` ships
+        a default-ON CometLogger, so the callback is kept by default and only
+        drops on a ``--trainer.logger false`` opt-out run (CI/smoke/gate fixtures)
+        — otherwise it would break those logger-less runs. Mirrors the v1 intent
         (LR monitoring is meaningful only with a logger; base.yaml:37 pairs it
         with the CometLogger).
 
@@ -517,7 +550,8 @@ class Salt2CLI(LightningCLI):
             The ``fit`` subcommand config namespace.
         """
         logger = cfg.trainer.logger
-        # base2 ships `logger: false`; a bare False/None means no tracking
+        # base2 now ships a default-ON CometLogger (plan-24 Wave 0); a bare
+        # False/None (the --trainer.logger false opt-out) means no tracking
         if not logger:
             return
         run_name = cfg.get("name") or "salt"
@@ -528,10 +562,18 @@ class Salt2CLI(LightningCLI):
         is_comet = class_path.endswith(CometLogger.__name__) or "comet" in class_path.lower()
         if init_args is None or not is_comet:
             return
-        # the run name drives experiment_name + (on older CometLogger versions)
-        # the dict_kwargs label (v1 set experiment_name via link_arguments +
-        # dict_kwargs={name} in before_instantiate_classes, cli.py:101,287)
-        init_args.experiment_name = run_name
+        # the run name drives experiment_name (v1 link_arguments, cli.py:101,287).
+        # Newer Lightning CometLogger drops `experiment_name` from its signature
+        # (the label flows through **kwargs to the Comet experiment), and
+        # jsonargparse instantiates by the DECLARED signature — so setting it as an
+        # init_arg on the newer logger is rejected at instantiate_classes and
+        # crashes the (now default-ON) fit. Set it as an init_arg only when the
+        # constructor declares it; otherwise route the name through the
+        # COMET_EXPERIMENT_NAME env var (version-robust, parallels dict_kwargs).
+        if _comet_accepts_experiment_name():
+            init_args.experiment_name = run_name
+        else:
+            os.environ.setdefault("COMET_EXPERIMENT_NAME", run_name)
         # dict_kwargs was the v1 column-prefix mechanism; newer Lightning
         # CometLogger drops it (the name now flows through experiment_name), so
         # only inject it when the constructor still accepts it — version-robust

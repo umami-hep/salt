@@ -17,6 +17,7 @@ import salt.core.gates_m6 as gm6
 from salt.core.gates_m6 import (
     main,
     run_cm1,
+    run_cm2,
     run_conv,
     run_ed1,
     run_ed2,
@@ -526,6 +527,58 @@ class TestCM1:
         assert report["checks"]["lr_monitor_in_base2_callbacks_dict"]
 
 
+class TestCM2:
+    """CM2 — CometLogger default-FLIP + gate hygiene (plan-24 Wave 0; NON-gating).
+
+    Pins the flipped base2 default (the documented CometLogger block, no longer
+    logger: false), the online-auto-false + offline-dir wiring ON that default,
+    the no-offline-archive contract under a REAL salt2 fit --trainer.logger false,
+    the lr_monitor kept-with-logger / dropped-without assembly rule, and the
+    corruption teeth (reverting the default to False fails the flip check).
+    """
+
+    def test_pass(self, tmp_path):
+        code, report = run_cm2(tmp_path)
+        assert code == 0, report["checks"]
+        assert report["passed"]
+        assert all(report["checks"].values())
+        assert (tmp_path / "cm2_report.json").is_file()
+        # (a) the flipped default IS the documented CometLogger block
+        assert report["checks"]["default_logger_is_cometlogger_block"]
+        assert report["checks"]["default_logger_not_false"]
+        assert report["checks"]["default_logger_project_is_salt"]
+        # (b) online auto-false + offline dir on that default without an api key
+        assert report["checks"]["online_auto_false_on_default_without_api_key"]
+        assert report["checks"]["offline_directory_set_and_created_on_default"]
+        # (c) a REAL salt2 fit --trainer.logger false runs + writes NO *.zip archive
+        assert report["checks"]["logger_off_fit_runs"]
+        assert report["checks"]["no_offline_archive_when_logger_off"]
+        assert report["checks"]["offline_dir_not_set_when_logger_off"]
+        # (d) lr_monitor present-with-logger / dropped-without
+        assert report["checks"]["lr_monitor_needs_logger_flagged"]
+        assert report["checks"]["lr_monitor_kept_with_logger"]
+        assert report["checks"]["lr_monitor_dropped_without_logger"]
+        # NON-gating UX (no model-reproduction assertion)
+        assert report["config"]["non_gating"] is True
+
+    def test_corruption_fails_the_gate(self, tmp_path):
+        # revert the base2 default back to `logger: false` -> the flip checks must
+        # FAIL, while the value-independent lr_monitor assembly rule stays green
+        def revert_to_false(base2: dict) -> dict:
+            base2.setdefault("trainer", {})["logger"] = False
+            return base2
+
+        code, report = run_cm2(tmp_path, corruption=revert_to_false)
+        assert code == 1
+        assert not report["passed"]
+        assert not report["checks"]["default_logger_is_cometlogger_block"]
+        assert not report["checks"]["default_logger_not_false"]
+        # the logger-off-run hygiene + the assembly rule are independent invariants
+        assert report["checks"]["no_offline_archive_when_logger_off"]
+        assert report["checks"]["lr_monitor_kept_with_logger"]
+        assert report["checks"]["lr_monitor_dropped_without_logger"]
+
+
 class TestLR1:
     """LR1 — lion/HybridMuonAdamW explicit routing (plan 12 sub-wave E; NON-gating).
 
@@ -665,7 +718,9 @@ class TestIG1:
 
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
-        gates = ("lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "cm1", "lr1", "s31", "ig1", "conv")
+        gates = (
+            "lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "cm1", "cm2", "lr1", "s31", "ig1", "conv",
+        )
         for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
             assert code == 0

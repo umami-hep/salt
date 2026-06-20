@@ -11,18 +11,19 @@ seed_everything: 42
 trainer:
   accelerator: auto
   devices: 1
-  # Local runs need no experiment tracking, so the default is logger: false.
-  # The M6 CometLogger wiring (sub-wave E, gate CM1; FD §6.5) lives in
-  # salt/core/main.py Salt2CLI.before_instantiate_classes: opt in with e.g.
-  #   trainer:
-  #     logger:
-  #       class_path: lightning.pytorch.loggers.comet.CometLogger
-  #       init_args: {project: salt}
-  # and --name then drives experiment_name + dict_kwargs:{name}; online is
-  # auto-set false without COMET_API_KEY / under fast_dev_run; the offline dir
-  # is the trainer log dir (v1 cli.py:281-294). The comet-before-lightning
-  # import order is held at the top of salt/core/main.py (v1 main.py:5).
-  logger: false
+  # Default-ON CometLogger (v1 parity; plan-24 Wave 0). The M6 CometLogger wiring
+  # (sub-wave E, gate CM1/CM2; FD §6.5) lives in salt/core/main.py
+  # Salt2CLI.before_instantiate_classes: --name drives experiment_name +
+  # dict_kwargs:{name}; online is auto-set false without COMET_API_KEY / under
+  # fast_dev_run; the offline dir is the trainer log dir (v1 cli.py:281-294). The
+  # comet-before-lightning import order is held at the top of salt/core/main.py
+  # (v1 main.py:5). To turn tracking OFF (local runs, CI/smoke/gate fixtures),
+  # set `--trainer.logger false`; a logger-less trainer also drops the stock
+  # lr_monitor (see callbacks.lr_monitor below). salt2 test always forces
+  # logger=False (no tracking on eval; cli.py:317).
+  logger:
+    class_path: lightning.pytorch.loggers.comet.CometLogger
+    init_args: {project: salt}
   log_every_n_steps: 50
   # The raw trainer.callbacks list is reserved for STOCK Lightning callbacks
   # only; salt callbacks belong in the top-level callbacks: dict below, whose
@@ -39,8 +40,10 @@ trainer:
 # a salt-owned name. lr_monitor wires the stock LearningRateMonitor (M6
 # sub-wave E, FD §13 E3): the stock LearningRateMonitor HARD-RAISES on a
 # logger-less trainer, so Salt2CLI.instantiate_trainer DROPS this entry when no
-# logger is attached (the default logger:false run) and KEEPS it the moment a
-# Comet logger is opted in — it then logs the OneCycleLR schedule each step
+# logger is attached and KEEPS it whenever a logger is present. Since the flip
+# (plan-24 Wave 0) the default trainer.logger is a CometLogger, so lr_monitor is
+# KEPT by default — it then logs the OneCycleLR schedule each step. On a
+# `--trainer.logger false` run (CI/smoke/gate fixtures) it is dropped again
 # (delete entirely with `lr_monitor: null`).
 callbacks:
   checkpoint:

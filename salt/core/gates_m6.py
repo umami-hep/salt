@@ -2755,7 +2755,10 @@ def run_cm1(
 
     from jsonargparse import Namespace  # noqa: PLC0415
 
-    from salt.core.main import _comet_accepts_dict_kwargs  # noqa: PLC0415
+    from salt.core.main import (  # noqa: PLC0415
+        _comet_accepts_dict_kwargs,
+        _comet_accepts_experiment_name,
+    )
 
     run_name = "GN2_cm1_fixture"
 
@@ -2792,6 +2795,10 @@ def run_cm1(
     # namespace so no trainer.fit, no data read, no live Comet experiment.
     saved_key = os.environ.pop("COMET_API_KEY", None)
     saved_offline = os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+    # the version-robust wiring routes the run name through COMET_EXPERIMENT_NAME
+    # when the CometLogger constructor doesn't declare experiment_name — clear it
+    # so the env-fallback branch is observed deterministically
+    saved_exp_name = os.environ.pop("COMET_EXPERIMENT_NAME", None)
     try:
         cfg = _fit_namespace()
         if corruption is not None:
@@ -2800,19 +2807,28 @@ def run_cm1(
         logger_block = cfg.trainer.logger
         init_args = getattr(logger_block, "init_args", None) if logger_block else None
         checks["logger_block_configured"] = bool(logger_block)
-        checks["logger_experiment_name_is_run_name"] = (
+        # the run name lands on the experiment_name init_arg on the OLD CometLogger
+        # API, or on the COMET_EXPERIMENT_NAME env var on the NEWER API (where the
+        # constructor doesn't declare experiment_name; jsonargparse would reject
+        # it). Accept EITHER form (version-robust) — and the wiring no-ops when the
+        # logger is blanked (negative control), so this still flips then.
+        name_on_init_arg = (
             init_args is not None and getattr(init_args, "experiment_name", None) == run_name
         )
+        name_on_env = os.environ.get("COMET_EXPERIMENT_NAME") == run_name
+        wiring_fired = init_args is not None  # the negative control blanks the block
+        checks["logger_experiment_name_is_run_name"] = wiring_fired and (
+            name_on_init_arg if _comet_accepts_experiment_name() else name_on_env
+        )
         # dict_kwargs is the v1 column-prefix label; newer Lightning CometLogger
-        # drops it (the name flows through experiment_name) — the wiring injects
-        # it ONLY when the constructor still accepts it (version-robust), so
-        # accept either form: dict_kwargs={name} on old API, or name carried by
-        # experiment_name when the kwarg is gone
+        # drops it (the name flows through experiment_name / COMET_EXPERIMENT_NAME)
+        # — the wiring injects it ONLY when the constructor still accepts it
+        # (version-robust), so accept either form
         dk = getattr(init_args, "dict_kwargs", None) or {} if init_args else {}
         checks["logger_run_name_label_set"] = (
             dk.get("name") == run_name
             if _comet_accepts_dict_kwargs()
-            else getattr(init_args, "experiment_name", None) == run_name
+            else checks["logger_experiment_name_is_run_name"]
         )
         checks["online_auto_set_false_without_api_key"] = bool(init_args) and (
             getattr(init_args, "online", True) is False
@@ -2836,6 +2852,10 @@ def run_cm1(
             os.environ["COMET_OFFLINE_DIRECTORY"] = saved_offline
         else:
             os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+        if saved_exp_name is not None:
+            os.environ["COMET_EXPERIMENT_NAME"] = saved_exp_name
+        else:
+            os.environ.pop("COMET_EXPERIMENT_NAME", None)
 
     # -- (c) test path forces logger=False (v1 cli.py:317, kept) --------------
     # the M3 eval ergonomics force the logger off on the test stage
@@ -2893,6 +2913,235 @@ def run_cm1(
     )
     _print_checks(checks)
     _print_verdict("cm1", passed, criterion, _emit_report(report, outdir, "cm1"))
+    return (0 if passed else 1), report
+
+
+# ---------------------------------------------------------------------------
+# CM2 — CometLogger default-flip + gate hygiene (plan-24 Wave 0; design §5.4/§6)
+# ---------------------------------------------------------------------------
+
+
+def run_cm2(
+    outdir: Path | str,
+    *,
+    corruption: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """CM2: CometLogger default-flip + gate hygiene (plan-24 Wave 0; NON-gating).
+
+    The Wave-0 sibling of CM1. Where CM1 pins the *wiring* (how a configured
+    CometLogger is threaded), CM2 pins the *default-flip* and its hygiene
+    consequences (plan-24 §5.4, §6 "Wave 0", risk-register R1/R2):
+
+    - **(a) the flipped default is present** — ``base2.yaml`` now ships a
+      ``trainer.logger`` block whose ``class_path`` is the
+      ``lightning.pytorch.loggers.comet.CometLogger`` (NOT the old ``logger:
+      false``), with ``init_args.project == "salt"`` — the exact opt-in form the
+      base2 header documented. The corruption hook reverts it to ``False`` to
+      prove the check has teeth.
+    - **(b) online auto-false + offline dir without COMET_API_KEY** — driving the
+      REAL ``Salt2CLI._wire_experiment_logger`` on a fit namespace built FROM the
+      flipped base2 default (not a hand-built block), the wiring forces
+      ``online: false`` and sets+creates ``COMET_OFFLINE_DIRECTORY`` at the
+      trainer log dir (v1 ``cli.py:289-294``) — so a key-less default run never
+      blocks on the Comet API.
+    - **(c) no offline archive when logger:false** — a REAL ``salt2 fit
+      --fast_dev_run`` with ``--trainer.logger false`` (the gate/CI/smoke opt-out)
+      writes NO ``*.zip`` Comet offline archive under the trainer log dir, and
+      ``COMET_OFFLINE_DIRECTORY`` is not (re)pointed by the wiring — the hygiene
+      contract that keeps the flip from spewing archives in CI (R1).
+    - **(d) lr_monitor present-with-logger / dropped-without** — the
+      ``Salt2CLI.instantiate_trainer`` assembly (``has_logger or not
+      _needs_logger(cb)``) KEEPS the base2 ``LearningRateMonitor`` once a logger
+      is attached (now the default) and DROPS it on a logger-less
+      (``--trainer.logger false``) run, so the stock monitor never hard-raises on
+      the opt-out path (R2; FD §13 E3).
+
+    NON-gating (training-UX, no model-reproduction assertion), exactly like CM1.
+
+    Returns
+    -------
+    tuple[int, dict[str, Any]]
+        ``(exit_code, report)``.
+    """
+    import os  # noqa: PLC0415 - test-env manipulation, gate-only
+
+    import yaml as _yaml  # noqa: PLC0415
+    from jsonargparse import Namespace  # noqa: PLC0415
+    from lightning.pytorch.callbacks import LearningRateMonitor  # noqa: PLC0415
+
+    from salt.core.main import Salt2CLI, _needs_logger  # noqa: PLC0415
+    from salt.utils.inputs import write_dummy_file  # noqa: PLC0415
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    print("=" * 96)
+    print("CM2 CometLogger default-flip + gate hygiene (plan-24 Wave 0, NON-gating)")
+    print("=" * 96)
+    checks: dict[str, bool] = {}
+
+    run_name = "GN2_cm2_fixture"
+    comet_path = "lightning.pytorch.loggers.comet.CometLogger"
+
+    # -- (a) the flipped base2 default is the documented CometLogger block ------
+    base2 = _yaml.safe_load((CONFIG_DIR / "base2.yaml").read_text())
+    if corruption is not None:
+        base2 = corruption(base2)
+    logger_default = (base2.get("trainer") or {}).get("logger")
+    is_block = isinstance(logger_default, dict)
+    checks["default_logger_is_cometlogger_block"] = is_block and str(
+        logger_default.get("class_path", "")
+    ).endswith("CometLogger")
+    # NB: explicit identity checks (NOT `in {False, None}`) — logger_default is a
+    # dict on the flip and dicts are unhashable, so set/tuple membership raises
+    checks["default_logger_not_false"] = logger_default is not False and logger_default is not None
+    checks["default_logger_project_is_salt"] = is_block and (
+        (logger_default.get("init_args") or {}).get("project") == "salt"
+    )
+
+    # -- (b) online auto-false + offline dir, driving the REAL wiring on the ----
+    #        flipped default block (no COMET_API_KEY -> the offline branch fires)
+    saved_key = os.environ.pop("COMET_API_KEY", None)
+    saved_offline = os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+    try:
+        log_dir = outdir / "cm2_default_logs"
+        # build the fit namespace FROM the flipped base2 default (round-tripping
+        # the YAML block through Namespace, exactly as jsonargparse hands it to
+        # before_instantiate_classes), so we test the SHIPPED default, not a
+        # hand-built block.
+        init_args_dict = dict((logger_default or {}).get("init_args") or {})
+        cfg = Namespace(
+            name=run_name,
+            trainer=Namespace(
+                default_root_dir=str(log_dir),
+                fast_dev_run=False,
+                logger=Namespace(
+                    class_path=str((logger_default or {}).get("class_path", comet_path)),
+                    init_args=Namespace(**init_args_dict),
+                ),
+            ),
+        )
+        Salt2CLI._wire_experiment_logger(cfg)  # noqa: SLF001 - the wiring under test
+        wired = getattr(cfg.trainer.logger, "init_args", None) if cfg.trainer.logger else None
+        checks["online_auto_false_on_default_without_api_key"] = bool(wired) and (
+            getattr(wired, "online", True) is False
+        )
+        offline_dir = os.environ.get("COMET_OFFLINE_DIRECTORY")
+        checks["offline_directory_set_and_created_on_default"] = (
+            bool(offline_dir) and Path(offline_dir).is_dir()
+        )
+    finally:
+        # restore env so (c)'s logger:false run sees a clean slate
+        os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+        if saved_key is not None:
+            os.environ["COMET_API_KEY"] = saved_key
+        if saved_offline is not None:
+            os.environ["COMET_OFFLINE_DIRECTORY"] = saved_offline
+
+    # -- (c) a REAL `salt2 fit --fast_dev_run --trainer.logger false` writes NO --
+    #        offline Comet archive (*.zip) under the trainer log dir (R1) --------
+    nd_path = outdir / "cm2_norm_dict.yaml"
+    cd_path = outdir / "cm2_class_dict.yaml"
+    write_parity_norm_dict(nd_path, cd_path)
+    h5_path = outdir / "cm2_dummy.h5"
+    write_dummy_file(h5_path, nd_path)
+    fit_dir = outdir / "cm2_fit_logger_off"
+    fit_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_key2 = os.environ.pop("COMET_API_KEY", None)
+    saved_offline2 = os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+    try:
+        rc = salt2_main([
+            "fit",
+            "--config",
+            str(CONFIG_DIR / "gn2v2-dummy.yaml"),
+            f"--data.train_file={h5_path}",
+            f"--data.val_file={h5_path}",
+            f"--model.modules.norm.init_args.norm_dict={nd_path}",
+            f"--trainer.default_root_dir={fit_dir}",
+            "--trainer.accelerator=cpu",
+            # the opt-out under test — the flip MUST stay archive-silent here
+            "--trainer.logger=false",
+            "--trainer.fast_dev_run=2",
+            "--data.num_workers=0",
+            "--callbacks.progress=null",
+        ])
+        checks["logger_off_fit_runs"] = rc == 0
+        # no Comet offline archive (*.zip) anywhere under the run dir
+        archives = list(fit_dir.rglob("*.zip"))
+        checks["no_offline_archive_when_logger_off"] = len(archives) == 0
+        # and the wiring did NOT (re)point COMET_OFFLINE_DIRECTORY for the off run
+        checks["offline_dir_not_set_when_logger_off"] = (
+            os.environ.get("COMET_OFFLINE_DIRECTORY") is None
+        )
+    finally:
+        if saved_key2 is not None:
+            os.environ["COMET_API_KEY"] = saved_key2
+        os.environ.pop("COMET_OFFLINE_DIRECTORY", None)
+        if saved_offline2 is not None:
+            os.environ["COMET_OFFLINE_DIRECTORY"] = saved_offline2
+
+    # -- (d) lr_monitor KEPT with a logger, DROPPED without (the assembly rule) -
+    # the exact Salt2CLI.instantiate_trainer filter: `has_logger or not
+    # _needs_logger(cb)`. base2 ships callbacks.lr_monitor as a LearningRateMonitor
+    # (a logger-hard-required callback), so it must survive iff a logger is present.
+    lr_cb = LearningRateMonitor()
+    checks["lr_monitor_needs_logger_flagged"] = _needs_logger(lr_cb) is True
+
+    def _assemble(callbacks: list[Any], *, has_logger: bool) -> list[Any]:
+        """Mirror the instantiate_trainer dict-value filter for a given logger state.
+
+        Returns
+        -------
+        list[Any]
+            The callbacks that survive the ``has_logger or not _needs_logger(cb)``
+            assembly filter.
+        """
+        return [cb for cb in callbacks if cb is not None and (has_logger or not _needs_logger(cb))]
+
+    kept = _assemble([lr_cb], has_logger=True)
+    dropped = _assemble([lr_cb], has_logger=False)
+    checks["lr_monitor_kept_with_logger"] = lr_cb in kept
+    checks["lr_monitor_dropped_without_logger"] = lr_cb not in dropped
+
+    passed = all(checks.values())
+    criterion = (
+        "the plan-24 Wave 0 CometLogger default-FLIP + gate hygiene (NON-gating, training-UX, "
+        "design §5.4/§6, risk R1/R2): base2.yaml ships the documented default-ON CometLogger block "
+        "(class_path CometLogger, init_args.project: salt) instead of logger: false; "
+        "Salt2CLI._wire_experiment_logger forces online:false + sets/creates "
+        "COMET_OFFLINE_DIRECTORY without a COMET_API_KEY on that default; a REAL salt2 fit "
+        "--fast_dev_run --trainer.logger false writes NO *.zip offline archive (the opt-out "
+        "CI/smoke/gate contract) and does not repoint COMET_OFFLINE_DIRECTORY; and the "
+        "instantiate_trainer assembly KEEPS the base2 LearningRateMonitor with a logger attached "
+        "(now the default) and DROPS it on a logger-less run. No model-reproduction assertion."
+    )
+    report = _base_report(
+        "cm2_comet_default_flip_hygiene",
+        passed,
+        criterion,
+        {
+            "run_name": run_name,
+            "logger_class": comet_path,
+            "default_logger": logger_default,
+            "non_gating": True,
+            "corrupted_by_test_hook": corruption is not None,
+            "approach": (
+                "read the flipped base2 default; drive _wire_experiment_logger on it "
+                "(online/offline branch); a REAL salt2 fit --fast_dev_run with --trainer.logger "
+                "false asserting no *.zip archive; and the instantiate_trainer "
+                "has_logger/_needs_logger assembly filter keeping/dropping the LearningRateMonitor"
+            ),
+        },
+    )
+    report["checks"] = checks
+    report["v1_reference"] = (
+        "v1 base.yaml shipped a CometLogger by default (utils/cli.py:281-294 wired it); the v2 "
+        "flip (plan-24 Wave 0) restores that default-ON behaviour on base2.yaml, with the v2 "
+        "opt-out (--trainer.logger false) + lr_monitor-drop keeping CI/smoke/gate runs "
+        "archive-silent and the logger-less LearningRateMonitor hard-raise avoided."
+    )
+    _print_checks(checks)
+    _print_verdict("cm2", passed, criterion, _emit_report(report, outdir, "cm2"))
     return (0 if passed else 1), report
 
 
@@ -4057,6 +4306,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "ed1": "Edge path parity vs v1 (EdgeFeatures/EdgeEmbed/encoder) + dynamic-edge-T onnx (C)",
         "ed2": "Edge bind validators: edge-stream-first + EdgeAttention-backend forcing (C)",
         "cm1": "Comet logger + LearningRateMonitor wiring (design-conformance, NON-gating; E)",
+        "cm2": "CometLogger default-FLIP + gate hygiene (no offline archive; plan-24 Wave 0)",
         "lr1": "lion/HybridMuonAdamW explicit include/exclude routing + zero-match warn (E)",
         "s31": "move_files_temp / S3 staging smoke (design-conformance, NON-gating; E)",
         "ig1": "IntegratedGradientWriter: IG attribution columns, eval-only, WriterCallback (E)",
@@ -4085,6 +4335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ed1": run_ed1,
         "ed2": run_ed2,
         "cm1": run_cm1,
+        "cm2": run_cm2,
         "lr1": run_lr1,
         "s31": run_s31,
         "ig1": run_ig1,

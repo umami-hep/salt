@@ -613,6 +613,9 @@ def test_roundtrip_smoke_fit_finite_loss(tmp_path: Path) -> None:
         f"--model.modules.norm.init_args.norm_dict={nd_path}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
+        # base2 default-ON CometLogger (plan-24 Wave 0) → off for the smoke fit so
+        # no offline Comet archive is written under the run dir (and lr_monitor drops)
+        "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
         "--data.num_workers=0",
         "--data.batch_size=50",

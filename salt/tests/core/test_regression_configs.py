@@ -94,6 +94,9 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
+        # base2 default-ON CometLogger (plan-24 Wave 0) → off for the fast_dev_run
+        # fit so no offline Comet archive is written (and lr_monitor drops)
+        "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
         # null-delete the base2 ProgressBar (D2 default-on); the stock
         # enable_progress_bar=false cannot coexist with a configured bar
@@ -150,6 +153,9 @@ def test_dl1_config_fast_dev_run_fit(data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
+        # base2 default-ON CometLogger (plan-24 Wave 0) → off for the fast_dev_run
+        # fit so no offline Comet archive is written (and lr_monitor drops)
+        "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
         # DL1 ships the v1-faithful batch_size: 2000, larger than the dummy
         # file's 1000 jets -> zero train batches. Shrink it for the CI fixture
