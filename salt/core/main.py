@@ -127,18 +127,62 @@ class DeepMergeParser(LightningArgumentParser):
         return super().merge_config(cfg_from, cfg_to)
 
     def parse_args(self, args: Sequence[str] | None = None, *pargs: Any, **kwargs: Any) -> Any:
-        """Parse args with ``--<modules-dict>.X=null`` normalised (design §5.3).
+        """Parse args with ``--…modules.X=null`` normalised + the Wave-1 artifact fan-out.
+
+        Two pre-validation steps ride on the standard parse:
+
+        1. ``--…modules.X=null`` is rewritten to the JSON-block form (design
+           §5.3, module docstring).
+        2. ``--norm_dict`` / ``--class_dict`` are fanned out onto the model-side
+           consumers (`_fan_out_artifacts`, plan-24 Wave 1) — the only point that
+           runs AFTER the config-file deep-merge but BEFORE validation and any
+           ``--print_config`` dump, so the resolved ``norm_dict`` / per-task
+           ``weight_source`` are validated and frozen into the saved run-dir
+           config exactly as the verbose per-module override block produces them.
+
+        The fan-out cannot be a `link_arguments` compute: its targets are dict
+        elements of the single ``model.init_args.modules`` action (not registered
+        actions), and a whole-dict self-link destroys that action's deep-merge of
+        ``base2.yaml``. So the fan-out is applied here, between a
+        validation-skipped parse and an explicit `validate`, with
+        ``--print_config`` intercepted (a `NonParsingAction` whose dump otherwise
+        fires before this) so the dumped config reflects the resolved values.
 
         Returns
         -------
         Any
-            The parsed namespace (`jsonargparse` semantics unchanged).
+            The parsed namespace (`jsonargparse` semantics unchanged outside the
+            artifact fan-out).
         """
         if args is None:
             args = sys.argv[1:]
+        print_config_flags: str | None = None
         if isinstance(args, Sequence) and not isinstance(args, str):
-            args = [_normalise_module_null(arg) if isinstance(arg, str) else arg for arg in args]
-        return super().parse_args(args, *pargs, **kwargs)
+            normalised: list[Any] = []
+            for arg in args:
+                if isinstance(arg, str) and (
+                    arg == "--print_config" or arg.startswith("--print_config=")
+                ):
+                    # capture + strip so the deferred print_config dump does not
+                    # fire inside super().parse_args before the fan-out lands
+                    print_config_flags = arg.split("=", 1)[1] if "=" in arg else ""
+                    continue
+                normalised.append(_normalise_module_null(arg) if isinstance(arg, str) else arg)
+            args = normalised
+        # parse without validation so the fan-out lands before validation; if the
+        # caller already asked to skip validation (jsonargparse's internal
+        # subcommand re-parse passes _skip_validation), honour that and do NOT
+        # re-validate here — avoids the "multiple values for _skip_validation"
+        # clash and respects the caller's lenient intent
+        caller_skips = bool(kwargs.pop("_skip_validation", False))
+        cfg = super().parse_args(args, *pargs, _skip_validation=True, **kwargs)
+        _fan_out_artifacts(cfg)
+        if not caller_skips:
+            self.validate(cfg)
+        if print_config_flags is not None:
+            sys.stdout.write(self.dump(cfg, **_dump_kwargs(print_config_flags)))
+            self.exit(0)
+        return cfg
 
 
 def _needs_logger(callback: Any) -> bool:
@@ -285,6 +329,189 @@ def _normalise_module_null(arg: str) -> str:
     return f'--{match["parent"]}={{"{match["key"]}": null}}'
 
 
+_NORM_DICT_ARG = "norm_dict"
+"""Top-level convenience flag name (``--norm_dict``) — Wave 1 fan-out source."""
+
+_CLASS_DICT_ARG = "class_dict"
+"""Top-level convenience flag name (``--class_dict``) — Wave 1 fan-out source."""
+
+_NORM_DICT_CLASS = "Normaliser"
+"""Class-name suffix of the only ``norm_dict`` consumer (nn/modules.py ~2144)."""
+
+_CLASS_DICT_CLASS = "ClassificationTaskModule"
+"""Class-name suffix of the only ``class_dict``/``weight_source`` consumer (nn/tasks.py ~1027)."""
+
+# the print_config flag → ArgumentParser.dump kwarg map (mirrors the
+# jsonargparse _ActionPrintConfig flag vocabulary: comma-separated keywords
+# under `--print_config[=flag,flag]`; "skip_null" is "skip_none" on dump)
+_PRINT_CONFIG_FLAGS = {"skip_default": "skip_default", "skip_null": "skip_none"}
+
+
+def _dump_kwargs(flags: str) -> dict[str, bool]:
+    """Translate a ``--print_config=<flags>`` value to `ArgumentParser.dump` kwargs.
+
+    Mirrors `jsonargparse`'s ``_ActionPrintConfig`` flag handling so the
+    fan-out's manual dump (intercepted in `DeepMergeParser.parse_args`) honours
+    the same ``skip_default`` / ``skip_null`` keywords as the native action.
+
+    Parameters
+    ----------
+    flags : str
+        The raw flags string (``""`` for a bare ``--print_config``).
+
+    Returns
+    -------
+    dict[str, bool]
+        Keyword arguments for `dump` (empty for the bare form).
+
+    Raises
+    ------
+    ConfigError
+        On an unrecognised flag (parallels the native action's error).
+    """
+    kwargs: dict[str, bool] = {}
+    for flag in (f for f in flags.split(",") if f):
+        if flag not in _PRINT_CONFIG_FLAGS:
+            raise ConfigError(
+                f"--print_config: invalid flag {flag!r} "
+                f"(supported: {', '.join(sorted(_PRINT_CONFIG_FLAGS))})"
+            )
+        kwargs[_PRINT_CONFIG_FLAGS[flag]] = True
+    return kwargs
+
+
+def _entry_get(entry: Any, key: str) -> Any:
+    """Read ``key`` off a config-tree leaf that is a `Namespace` *or* a plain dict.
+
+    Module dict values arrive as `Namespace` from CLI/parse but as plain dicts
+    from a deep-merged config file (`test_salt2_cli.py` shows both surfaces), so
+    the fan-out must read either shape.
+
+    Returns
+    -------
+    Any
+        The value at `key`, or None when absent.
+    """
+    if isinstance(entry, dict):
+        return entry.get(key)
+    return getattr(entry, key, None)
+
+
+def _entry_set(entry: Any, key: str, value: Any) -> None:
+    """Write ``key`` onto a config-tree leaf that is a `Namespace` *or* a plain dict."""
+    if isinstance(entry, dict):
+        entry[key] = value
+    else:
+        setattr(entry, key, value)
+
+
+def _fan_out_artifacts(cfg: Any) -> Any:
+    """Fan ``--norm_dict`` / ``--class_dict`` out onto the model-side consumers (Wave 1).
+
+    Restores v1's one-flag ergonomics (plan-24 §6 Wave 1 + R1.6, §5.4): the two
+    top-level convenience args reproduce today's verbose per-module override
+    block from two flags. They are *purely* model/CLI-side — no data module, no
+    setup graph (R1.1/R1.2): ``norm_dict`` is read only by the `Normaliser`
+    (`nn/modules.py` ~2144) and ``class_dict`` only by each
+    `ClassificationTaskModule` for its CE-weight buffer (`nn/tasks.py` ~1027).
+
+    For every module under ``model.init_args.modules`` (the subclass-mode block):
+
+    - a `Normaliser` gets ``init_args.norm_dict := <--norm_dict>`` (its sole
+      consumer);
+    - a `ClassificationTaskModule` whose ``init_args.weight_source`` is
+      unset/null gets ``weight_source := {"from_class_dict": <--class_dict>}``,
+      validated through the same `_checked_weight_source` validator the task's
+      ``__init__`` uses, so ``bind()``/``materialise()`` behave identically.
+      A task that already sets ``weight_source`` (e.g. the saved run-dir config
+      on resume, or an explicit per-task override) is LEFT ALONE — this is what
+      keeps resume unaffected and makes the resolved namespace byte-equal to the
+      verbose form (plan-24 §5.4 retirement-target spelling; gate R3).
+
+    The mutation lands on `cfg` in place (and is returned), BEFORE validation +
+    any ``--print_config`` dump (`DeepMergeParser.parse_args`), so the resolved
+    values are frozen into the saved run-dir config exactly like the verbose
+    form. A no-op when neither flag is set (the args are absent on the run-free
+    graph-tooling parser, where ``cfg.get`` returns None).
+
+    Parameters
+    ----------
+    cfg : Any
+        The parsed namespace. For ``salt2 fit``/``test`` the model block lives
+        under ``cfg.<subcommand>.model``; on the run-free surface it is
+        ``cfg.model``. Both are handled.
+
+    The resolved ``weight_source`` is built through the same
+    `_checked_weight_source` validator the task's ``__init__`` uses (it cannot
+    fail for the literal ``{from_class_dict}`` the fan-out constructs, but the
+    validator stays the single source of truth for the canonical spelling).
+
+    Returns
+    -------
+    Any
+        `cfg`, mutated in place.
+    """
+    from salt.core.nn.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
+
+    for scope, model in _iter_model_blocks(cfg):
+        norm_dict = scope.get(_NORM_DICT_ARG)
+        class_dict = scope.get(_CLASS_DICT_ARG)
+        if not norm_dict and not class_dict:
+            continue
+        init_args = getattr(model, "init_args", None)
+        modules = getattr(init_args, "modules", None) if init_args is not None else None
+        if not isinstance(modules, dict):
+            continue
+        for entry in modules.values():
+            if entry is None:  # null = deleted at assembly (design §5.3)
+                continue
+            class_path = _entry_get(entry, "class_path") or ""
+            module_args = _entry_get(entry, "init_args")
+            if module_args is None:
+                continue
+            if norm_dict and class_path.endswith(_NORM_DICT_CLASS):
+                _entry_set(module_args, "norm_dict", str(norm_dict))
+            if (
+                class_dict
+                and class_path.endswith(_CLASS_DICT_CLASS)
+                and _entry_get(module_args, "weight_source") is None
+            ):
+                _entry_set(
+                    module_args,
+                    "weight_source",
+                    _checked_weight_source({"from_class_dict": str(class_dict)}),
+                )
+    return cfg
+
+
+def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
+    """Pair each ``model`` namespace with the scope its ``--norm_dict``/``--class_dict`` live in.
+
+    The two convenience flags are scoped exactly like the ``--name`` arg the
+    existing CLI glue links into the model: top-level on the run-free surface
+    (``cfg.norm_dict`` ↔ ``cfg.model``), and subcommand-scoped on a trainer run
+    (``cfg.fit.norm_dict`` ↔ ``cfg.fit.model``). Pairing the flag scope with its
+    model block keeps the fan-out reading the flags from the right level.
+
+    Returns
+    -------
+    list[tuple[Any, Any]]
+        ``(scope, model)`` pairs: ``(cfg, cfg.model)`` on the run-free surface,
+        ``(cfg.<sub>, cfg.<sub>.model)`` per present trainer subcommand, or
+        ``[]`` when no model block is present.
+    """
+    blocks: list[tuple[Any, Any]] = []
+    direct = cfg.get("model")
+    if direct is not None:
+        blocks.append((cfg, direct))
+    for sub in Salt2CLI.subcommands():
+        sub_cfg = cfg.get(sub)
+        sub_model = sub_cfg.get("model") if sub_cfg is not None else None
+        if sub_model is not None:
+            blocks.append((sub_cfg, sub_model))
+    return blocks
+
+
 class Salt2CLI(LightningCLI):
     """The salt v2 `LightningCLI` (design §5, §5.3).
 
@@ -401,6 +628,25 @@ class Salt2CLI(LightningCLI):
             "manifest post-processing. The OUTPUT manifest derives from writers.modules "
             "(M4.5 unified manifest) — declaring export.outputs is a hard error at export "
             "time. Inert during fit/test; round-trips through saved run configs.",
+        )
+        parser.add_argument(
+            f"--{_NORM_DICT_ARG}",
+            type=str | None,
+            default=None,
+            help="convenience flag (plan-24 Wave 1): fanned out to the Normaliser module's "
+            "norm_dict init_arg (its only consumer), reproducing "
+            "--model.modules.<norm>.init_args.norm_dict from one flag. Purely model-side — "
+            "no data module reads it (design §5.4, R1.1/R1.6).",
+        )
+        parser.add_argument(
+            f"--{_CLASS_DICT_ARG}",
+            type=str | None,
+            default=None,
+            help="convenience flag (plan-24 Wave 1): fanned out to weight_source="
+            "{from_class_dict: <path>} on EACH ClassificationTaskModule whose weight_source "
+            "is unset/null, reproducing the verbose per-task weight_source block from one "
+            "flag. Tasks that set weight_source explicitly are left alone; the loss CE-weight "
+            "buffer is bitwise-invariant to how the path arrived (design §5.4, R1.3/R1.6).",
         )
         if not self._run_mode:
             # run-free parses must round-trip a SAVED run config.yaml, which
