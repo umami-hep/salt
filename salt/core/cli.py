@@ -363,6 +363,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
+    writer_sink_cb = _static_writer_sink_callback(cli)
     fitval_callbacks = _static_fitval_callbacks(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
@@ -371,13 +372,24 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     mode_warnings: dict[Mode, str] = {}
     sink_origins: dict[Mode, dict[str, str]] = {}
     for mode in PRIMARY_MODES:
-        if mode is Mode.TEST and writer_cb is not None:
+        if mode is Mode.TEST and (writer_cb is not None or writer_sink_cb is not None):
             try:
-                keys = list(model._model_sinks(mode, writers=writer_cb, reader=reader))  # noqa: SLF001 - same-package adapter
-                demand = writer_cb.writer_demand(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
-                # writer-demanded dataset-namespace keys (labels/masks/meta)
-                # are TEST sinks too — their producers stay alive (design §8)
-                keys.extend(key for key in demand if key not in keys)
+                if writer_cb is not None:
+                    keys = list(model._model_sinks(mode, writers=writer_cb, reader=reader))  # noqa: SLF001 - same-package adapter
+                    demand = writer_cb.writer_demand(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
+                    # writer-demanded dataset-namespace keys (labels/masks/meta)
+                    # are TEST sinks too — their producers stay alive (design §8)
+                    keys.extend(key for key in demand if key not in keys)
+                else:
+                    keys = list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
+                if writer_sink_cb is not None:
+                    # P1.5 cutover: a callbacks-level H5OutputWriter persistence
+                    # sink (writers: nulled). Fold its writer_demand exactly as
+                    # SaltModule._boundary_demand does at salt2 test, so the
+                    # in-graph conversion producers (outputs.*) stay alive in the
+                    # render instead of pruning dead.
+                    sink_demand = writer_sink_cb.writer_demand(model._graph_modules, reader)
+                    keys.extend(key for key in sink_demand if key not in keys)
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
@@ -543,6 +555,30 @@ def _static_writer_callback(cli: Any) -> Any | None:
     if not writer_modules:
         return None
     return WriterCallback(modules=writer_modules)
+
+
+def _static_writer_sink_callback(cli: Any) -> Any | None:
+    """The configured callbacks-level TEST persistence sink, if any (P1.5 cutover).
+
+    The `_static_writer_callback` sibling for the design §2-layer-2 sink wired at
+    the ``callbacks:`` level instead of the ``writers:`` block — an
+    `H5OutputWriter` (or any callback exposing the duck-typed ``writer_demand``
+    surface). At runtime `SaltModule._attached_writer`/`_writer_demand` fold its
+    demand into the TEST sinks (saltmodule.py §8); this static half lets
+    ``salt2 graph`` resolve the SAME TEST sinks so the in-graph conversion
+    producers (``outputs.*``) stay alive in the render instead of pruning dead.
+
+    Returns
+    -------
+    Any | None
+        The callbacks-level writer sink in trainer order (first match), or None.
+    """
+    trainer = getattr(cli, "trainer", None)
+    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+    return next(
+        (cb for cb in callbacks or [] if callable(getattr(cb, "writer_demand", None))),
+        None,
+    )
 
 
 def _static_fitval_callbacks(cli: Any) -> list[Any]:
