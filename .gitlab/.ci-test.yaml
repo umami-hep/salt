@@ -37,6 +37,22 @@ unit-tests:
     - JUNIT_FILE=reports/unit-union_find.xml run_test salt/tests/test_union_find.py
     - JUNIT_FILE=reports/unit-utils.xml run_test salt/tests/test_utils.py
 
+# --------------------- MODULAR (v2) CORE TESTS ---------------------
+# The salt/core v2 modular refactor. salt/tests/unit mirrors salt/core 1:1
+# (data/, graph/, nn/, onnx/, writers/) — fast on CPU. The conftest GPU-guard
+# keeps the heavy salt/tests/integration gates OUT of this job (they need
+# --run-integration). The parity control (parity_gn2, ~9 fast bitwise checks)
+# guards the modular model code against drift.
+modular-unit-tests:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
+
+modular-parity-control:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/modular-parity-gn2.xml run_test salt/tests/integration/test_parity_gn2.py --run-integration
+
 # --------------------------- PIPELINE TESTS ---------------------------
 test-dev:
   extends: .test-template
