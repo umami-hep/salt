@@ -1,0 +1,69 @@
+# lepton_tagger_muon (TPLTmu) -- global lepton object `muons` (the reader's
+# global_object) + its constituent stream `muon_tracks`. The electron-flavoured
+# lepton_tagger.yaml emits `electrons`/`electron_tracks`, the WRONG group names
+# for TPLTmu (refutation point), so this sibling recipe emits the muon names
+# with TPLTmu.yaml's real declared variable lists.
+#
+# NOT in the test suite (test_pipeline.py does not run TPLTmu); provided so the
+# muons/muon_tracks topology has a faithful variable-superset recipe.
+seed: 42
+n_samples: 1000
+flags: {}
+modules:
+  - class_path: salt.core.testing.datagen.modules.GlobalObject
+    init_args:
+      name: muons
+      fields:
+        - { name: pt,    type: distribution, dtype: f4, dist: lognormal }
+        - { name: eta,   type: distribution, dtype: f4, dist: normal }
+        - { name: phi,   type: distribution, dtype: f4 }
+        - { name: ptvarcone30TTVARel, type: distribution, dtype: f4 }
+        - { name: topoetcone30Rel,    type: distribution, dtype: f4 }
+        - { name: caloClusterERel,    type: distribution, dtype: f4 }
+        - { name: ptfrac_lepton,      type: distribution, dtype: f4 }
+        - { name: ptrel_lepton,       type: distribution, dtype: f4 }
+        - { name: dRtrackjet_lepton,  type: distribution, dtype: f4 }
+        - { name: nTracksTrackjet,    type: distribution, dtype: f4 }
+        - name: flavour_label
+          type: label
+          dtype: i4
+          classes: [0, 1, 2, 3]
+          sample_classes: [0, 1, 2]
+          class_names: [bjets, cjets, ujets]
+  - class_path: salt.core.testing.datagen.modules.Constituents
+    init_args:
+      name: muon_tracks
+      max_items: 20
+      min_valid: 1
+      fields:
+        - { name: ptfrac,      type: distribution, dtype: f4 }
+        - { name: dr_trackjet, type: distribution, dtype: f4 }
+        - { name: btagIp_d0,                       type: distribution, dtype: f4, dist: normal }
+        - { name: btagIp_z0SinTheta,               type: distribution, dtype: f4, dist: normal }
+        - { name: btagIp_d0Uncertainty,            type: distribution, dtype: f4 }
+        - { name: btagIp_d0_significance,          type: distribution, dtype: f4 }
+        - { name: btagIp_z0SinTheta_significance,  type: distribution, dtype: f4 }
+        - { name: numberOfPixelHits,        type: distribution, dtype: f4 }
+        - { name: numberOfInnermostPixelLayerHits,       type: distribution, dtype: f4 }
+        - { name: numberOfNextToInnermostPixelLayerHits, type: distribution, dtype: f4 }
+        - { name: numberOfInnermostPixelLayerSharedHits, type: distribution, dtype: f4 }
+        - { name: numberOfInnermostPixelLayerSplitHits,  type: distribution, dtype: f4 }
+        - { name: numberOfPixelSharedHits,  type: distribution, dtype: f4 }
+        - { name: numberOfPixelSplitHits,   type: distribution, dtype: f4 }
+        - { name: numberOfSCTHits,          type: distribution, dtype: f4 }
+        - { name: numberOfSCTSharedHits,    type: distribution, dtype: f4 }
+        - name: ftagTruthOriginLabel
+          type: label
+          dtype: i4
+          classes: [0, 1, 2, 3, 4, 5, 6, 7]
+          sample_classes: [0, 1, 2, 3]
+        - name: ftagTruthVertexIndex
+          type: label
+          dtype: i4
+          classes: [0]
+  - class_path: salt.core.testing.datagen.modules.H5Writer
+    init_args: { path: "${OUTPUT_DIR}/lepton_tagger_muon.h5" }
+  - class_path: salt.core.testing.datagen.modules.NormWriter
+    init_args: { path: "${OUTPUT_DIR}/norm_dict.yaml" }
+  - class_path: salt.core.testing.datagen.modules.ClassDictWriter
+    init_args: { path: "${OUTPUT_DIR}/class_dict.yaml" }
