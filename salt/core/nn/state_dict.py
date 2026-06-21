@@ -7,11 +7,22 @@ and existing checkpoints have a migration path.
 
 Key correspondences (all v1 paths from modelwrapper.py / saltmodel.py):
 
+The mapping of the v1 norm buffers depends on which v2 normaliser the
+config selects (both are supported):
+
+* default fixed-norm `Normaliser` — ``norm.<stream>_means`` /
+  ``norm.<stream>_stds`` map straight to ``<norm>.means_<stream>`` /
+  ``<norm>.stds_<stream>`` and the ``materialised`` flag is set True
+  (transferred values are real, design §2.3);
+* opt-in `MaskedInputNormaliser` — ``means`` becomes
+  ``running_mean_<stream>`` and ``stds`` becomes ``running_var_<stream>``
+  (= std**2), with the bookkeeping buffers synthesised so the migrated
+  model starts already warmed up.
+
 ==============================  ==========================================
 v1 key prefix                   v2 key prefix
 ==============================  ==========================================
-``norm.<stream>_means``         ``<norm>.running_mean_<stream>``
-``norm.<stream>_stds``          ``<norm>.running_var_<stream>`` (= std**2)
+``norm.<stream>_means/_stds``   see the per-normaliser mapping above
 ``model.init_nets.<i>.net.*``   ``<embed[stream_i]>.net.*``
 ``model.encoder.*``             ``<encoder>.encoder.*``
 ``model.pool_net.*``            ``<pool>.pool_net.*``
@@ -28,10 +39,10 @@ to override.
 
 The mapping is total by construction: any unconsumed v1 key is an error
 (silent weight drops are exactly the failure class the gates exist to
-catch). The synthesised v2-only keys are the self-normalising Normaliser's
-bookkeeping buffers (``num_batches_tracked_<stream>`` set to 1,
-``num_objects_seen_<stream>`` to 0) — the transferred v1 means/stds become
-the running mean/var, so the migrated model starts already warmed up.
+catch). The synthesised v2-only keys are the chosen normaliser's
+bookkeeping buffers (``materialised`` for the fixed-norm `Normaliser`;
+``num_batches_tracked_<stream>`` / ``num_objects_seen_<stream>`` for the
+self-normalising `MaskedInputNormaliser`).
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ from salt.core.graph.spec import GraphModule
 from salt.core.nn.modules import (
     Concat,
     GlobalAttentionPooling,
+    MaskedInputNormaliser,
     Normaliser,
     StreamEmbed,
     TransformerEncoder,
@@ -79,9 +91,9 @@ def map_v1_state_dict(
         ``ModelWrapper.state_dict()`` of the v1 model.
     modules : Mapping[str, GraphModule]
         The v2 module dict (instance name -> module), containing exactly one
-        `Normaliser`, `Concat`, `TransformerEncoder`,
-        `GlobalAttentionPooling`, one `StreamEmbed` per concat stream, and
-        the task modules.
+        normaliser (`Normaliser` or `MaskedInputNormaliser`), `Concat`,
+        `TransformerEncoder`, `GlobalAttentionPooling`, one `StreamEmbed`
+        per concat stream, and the task modules.
     task_order : Sequence[str] | None, optional
         v2 instance names in v1 ``model.tasks`` index order, by default the
         task modules' module-dict order (see module docstring).
@@ -98,7 +110,8 @@ def map_v1_state_dict(
         index/stream in the v1 state_dict has no v2 counterpart, or any v1
         key cannot be mapped (nothing is dropped silently).
     """
-    norm = _single(modules, Normaliser)
+    norm = _single(modules, (Normaliser, MaskedInputNormaliser))
+    self_normalising = isinstance(norm[1], MaskedInputNormaliser)
     concat = _single(modules, Concat)
     encoder_name = _single(modules, TransformerEncoder)[0]
     pool_name = _single(modules, GlobalAttentionPooling)[0]
@@ -145,14 +158,18 @@ def map_v1_state_dict(
                     f"counterpart — Normaliser streams are {norm[1].streams}"
                 )
             norm_streams.add(stream)
-            # The self-normalising v2 Normaliser stores running_mean/running_var
-            # (not means/stds). v1's `(x - mean) / std` maps to v2's
-            # `(x - running_mean) / sqrt(running_var + eps)` with
+            if not self_normalising:
+                # Default fixed-norm `Normaliser`: v1 means/stds map straight to
+                # the v2 means_<stream>/stds_<stream> buffers (bitwise v1 parity).
+                out[f"{norm[0]}.{kind}_{stream}"] = value
+            # The self-normalising `MaskedInputNormaliser` stores
+            # running_mean/running_var (not means/stds). v1's `(x - mean) / std`
+            # maps to v2's `(x - running_mean) / sqrt(running_var + eps)` with
             # running_mean = v1.means and running_var = v1.stds**2. This is the
-            # migration path: a v1 checkpoint loads as a Normaliser already
-            # "warmed up" to the v1 statistics (the tiny eps under the sqrt is
-            # the deliberate, documented departure from v1 bitwise parity).
-            if kind == "means":
+            # migration path: a v1 checkpoint loads already "warmed up" to the v1
+            # statistics (the tiny eps under the sqrt is the deliberate,
+            # documented departure from v1 bitwise parity).
+            elif kind == "means":
                 out[f"{norm[0]}.running_mean_{stream}"] = value
             else:  # stds -> variance
                 out[f"{norm[0]}.running_var_{stream}"] = value * value
@@ -187,20 +204,29 @@ def map_v1_state_dict(
             f"map_v1_state_dict: {len(unmapped)} v1 keys have no v2 mapping (nothing is "
             f"dropped silently): {sorted(unmapped)}"
         )
-    # Synthesise the v2 Normaliser bookkeeping buffers that v1 has no
-    # counterpart for: the transferred stats count as "seen" so the running
-    # buffers are treated as warmed up (num_batches_tracked set to 1; the exact
-    # object count is unknown, so num_objects_seen is left at 0 — only the
-    # cumulative momentum=None path would consume it, and a migrated model
-    # continues under its configured fixed momentum).
-    for stream in norm_streams:
-        out[f"{norm[0]}.num_batches_tracked_{stream}"] = torch.tensor(1, dtype=torch.long)
-        out[f"{norm[0]}.num_objects_seen_{stream}"] = torch.tensor(0, dtype=torch.long)
+    # Synthesise the chosen normaliser's v2-only bookkeeping buffers that v1 has
+    # no counterpart for.
+    if not self_normalising:
+        # Default fixed-norm `Normaliser`: transferred values are real, so flag
+        # materialised True (checkpoint-load semantics, design §2.3).
+        out[f"{norm[0]}.materialised"] = torch.tensor(True)
+    else:
+        # Self-normalising `MaskedInputNormaliser`: the transferred stats count
+        # as "seen" so the running buffers are treated as warmed up
+        # (num_batches_tracked set to 1; the exact object count is unknown, so
+        # num_objects_seen is left at 0 — only the cumulative momentum=None path
+        # would consume it, and a migrated model continues under its configured
+        # fixed momentum).
+        for stream in norm_streams:
+            out[f"{norm[0]}.num_batches_tracked_{stream}"] = torch.tensor(1, dtype=torch.long)
+            out[f"{norm[0]}.num_objects_seen_{stream}"] = torch.tensor(0, dtype=torch.long)
     return out
 
 
-def _single(modules: Mapping[str, GraphModule], cls: type) -> tuple[str, object]:
-    """Find the single instance of `cls` in the module dict.
+def _single(
+    modules: Mapping[str, GraphModule], cls: type | tuple[type, ...]
+) -> tuple[str, object]:
+    """Find the single instance of `cls` (one class or a tuple) in the module dict.
 
     Returns
     -------
@@ -214,8 +240,13 @@ def _single(modules: Mapping[str, GraphModule], cls: type) -> tuple[str, object]
     """
     found = [(name, module) for name, module in modules.items() if isinstance(module, cls)]
     if len(found) != 1:
+        label = (
+            cls.__name__
+            if isinstance(cls, type)
+            else " | ".join(c.__name__ for c in cls)
+        )
         raise ValueError(
-            f"map_v1_state_dict: expected exactly one {cls.__name__} in the module dict, "
+            f"map_v1_state_dict: expected exactly one {label} in the module dict, "
             f"found {[name for name, _ in found]}"
         )
     return found[0]

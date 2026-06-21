@@ -1826,9 +1826,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _self_validate(cfg: Mapping[str, Any], output: Path) -> int:
     """Run ``salt2 graph validate`` on the converter's output (FD §9.3 self-check).
 
-    The self-normalising `Normaliser` learns its statistics online and needs
-    no ``norm_dict`` file — so the validate pass runs directly on the emitted
-    config with no norm-dict injection. The check still catches every genuine
+    Supplies each fixed-norm `Normaliser` a real minimal norm_dict (covering
+    the config's streams) written next to the output, so the data-free
+    preflight passes — the M5/M6-CONV convention (gates_m6.py:135-139: a real
+    parity norm dict, NO ``--strict`` because multi-stream configs emit benign
+    "missing input type" preflight warnings without data). The opt-in
+    `MaskedInputNormaliser` learns its statistics online and has no norm-dict
+    preflight, so it is left untouched. The check still catches every genuine
     graph/connectivity error.
 
     Returns
@@ -1837,10 +1841,25 @@ def _self_validate(cfg: Mapping[str, Any], output: Path) -> int:
         0 when the converted config plan-compiles cleanly in every mode, 1
         otherwise.
     """
-    del cfg
     from salt.core import cli as graph_cli  # noqa: PLC0415 - heavy graph import, CLI-time only
 
-    rc = graph_cli.main(["graph", "validate", "-c", str(output)])
+    # Only the fixed-norm-dict `Normaliser` has a norm-dict preflight; match the
+    # exact class tail (".Normaliser") so `MaskedInputNormaliser` is excluded.
+    streams: list[str] = []
+    for mod in cfg["model"]["init_args"]["modules"].values():
+        if mod.get("class_path", "").endswith(".Normaliser"):
+            streams.extend(mod.get("init_args", {}).get("streams", []))
+    norm_path = output.parent / f"{output.stem}__validation_norm_dict.yaml"
+    norm_path.write_text(yaml.safe_dump({s: {} for s in dict.fromkeys(streams)}))
+
+    set_overrides: list[str] = []
+    for mod_name, mod in cfg["model"]["init_args"]["modules"].items():
+        if mod.get("class_path", "").endswith(".Normaliser"):
+            set_overrides += [
+                "--set",
+                f"model.modules.{mod_name}.init_args.norm_dict={norm_path}",
+            ]
+    rc = graph_cli.main(["graph", "validate", "-c", str(output), *set_overrides])
     if rc != 0:
         print(
             f"convert-config: output FAILED `salt2 graph validate` (rc={rc}) — the conversion is "
@@ -1849,7 +1868,7 @@ def _self_validate(cfg: Mapping[str, Any], output: Path) -> int:
         )
         return 1
     print(
-        "convert-config: output passed `salt2 graph validate` (a full --strict pass needs a "
-        "schema artifact for the data sample; the Normaliser learns its stats online)"
+        "convert-config: output passed `salt2 graph validate` (a full --strict pass needs the "
+        "real norm_dict + a schema artifact for the data sample)"
     )
     return 0

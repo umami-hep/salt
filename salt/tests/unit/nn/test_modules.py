@@ -33,6 +33,7 @@ from salt.core.nn import (
     LossGLS,
     LossSum,
     MaskDecoder,
+    MaskedInputNormaliser,
     Normaliser,
     PositionalEncoder,
     ResolvedSchema,
@@ -170,23 +171,90 @@ class TestResolvedSchema:
 
 
 class TestNormaliser:
-    """Self-normalising Normaliser: online masked running stats (plan 01).
+    """Default fixed-norm-dict Normaliser: loads means/stds, preserves v1 parity."""
 
-    The Normaliser no longer reads a ``norm_dict.yaml`` — it learns its
-    statistics online over valid (non-padded) objects during training and
-    freezes them for eval/inference/ONNX. These tests cover the locked
-    requirements: padded garbage NEVER moves the stats; the running buffers
-    track the analytic EMA trajectory (fixed momentum) and converge to the
-    true masked dataset mean/std (``momentum=None`` cumulative); eval/val do
-    NOT update; the global (mask-free) stream path; and the empty-batch
+    def test_init_does_no_file_io(self, tmp_path):
+        """__init__ records the path only — the file need not exist (design §2.3)."""
+        norm = Normaliser(norm_dict=tmp_path / "absent.yaml", streams=["tracks"])
+        io = norm.declare_io(Mode.FIT)
+        assert set(flatten_spec(io.requires)) == {"inputs.tracks"}
+        assert set(flatten_spec(io.produces)) == {"normed.tracks"}
+
+    def test_global_object_is_rank_two(self):
+        norm = Normaliser(norm_dict="x.yaml", streams=["jets", "tracks"], global_object="jets")
+        norm.name = "norm"
+        flat = flatten_spec(norm.declare_io(Mode.FIT).requires)
+        assert len(flat["inputs.jets"].shape) == 2
+        assert len(flat["inputs.tracks"].shape) == 3
+
+    def test_config_errors(self):
+        with pytest.raises(ConfigError, match="non-empty"):
+            Normaliser(norm_dict="x.yaml", streams=[])
+        with pytest.raises(ConfigError, match="duplicate"):
+            Normaliser(norm_dict="x.yaml", streams=["a", "a"])
+        with pytest.raises(ConfigError, match="global_object"):
+            Normaliser(norm_dict="x.yaml", streams=["a"], global_object="b")
+
+    def test_materialise_fills_buffers_to_v1_values(self, norm_paths, gn2v2):
+        """Buffer values equal v1 InputNorm's from the same norm dict."""
+        modules, _, _ = gn2v2
+        wrapper = build_test_gn2(norm_paths[0].parent)
+        norm = modules["norm"]
+        assert torch.equal(norm.means_tracks, wrapper.norm.tracks_means)
+        assert torch.equal(norm.stds_tracks, wrapper.norm.tracks_stds)
+        assert torch.equal(norm.means_jets, wrapper.norm.jets_means)
+        assert bool(norm.materialised)
+
+    def test_forward_before_materialise_raises(self, norm_paths):
+        modules = build_gn2v2_modules(norm_paths[0])
+        plan = compile_gn2v2(modules, Mode.FIT)
+        bind_all(modules, resolve_bind_schema(plan))
+        with pytest.raises(RuntimeError, match="materialise"):
+            modules["norm"](fit_bundle(), Mode.FIT)
+
+    def test_forward_produces_new_keys_and_never_mutates(self, gn2v2):
+        modules, _, _ = gn2v2
+        b = fit_bundle()
+        before = b.get("inputs.tracks").clone()
+        out = modules["norm"](b, Mode.FIT)
+        assert set(out) == {"normed.jets", "normed.tracks"}
+        assert torch.equal(b.get("inputs.tracks"), before)
+        expected = (before - modules["norm"].means_tracks) / modules["norm"].stds_tracks
+        assert torch.equal(out["normed.tracks"], expected)
+
+    def test_materialise_missing_variable_raises(self, tmp_path, norm_paths):
+        import yaml
+
+        with open(norm_paths[0]) as fh:
+            nd = yaml.safe_load(fh)
+        del nd["tracks"]["d0"]
+        bad = tmp_path / "bad_norm.yaml"
+        with open(bad, "w") as fh:
+            yaml.dump(nd, fh)
+        modules = build_gn2v2_modules(bad)
+        bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
+        with pytest.raises(ValueError, match="d0"):
+            modules["norm"].materialise()
+
+
+class TestMaskedInputNormaliser:
+    """Self-normalising MaskedInputNormaliser: online masked running stats (plan 01).
+
+    The opt-in `MaskedInputNormaliser` does not read a ``norm_dict.yaml`` — it
+    learns its statistics online over valid (non-padded) objects during
+    training and freezes them for eval/inference/ONNX. These tests cover the
+    locked requirements: padded garbage NEVER moves the stats; the running
+    buffers track the analytic EMA trajectory (fixed momentum) and converge to
+    the true masked dataset mean/std (``momentum=None`` cumulative); eval/val
+    do NOT update; the global (mask-free) stream path; and the empty-batch
     no-op. parity_gn2 bitwise equality is deliberately broken (stats learned,
     not from the dict) and is NOT a pass criterion here.
     """
 
     @staticmethod
     def _bound_norm(streams, global_object=None, **kw):
-        """Build + bind a standalone Normaliser over the GN2 fixture widths."""
-        norm = Normaliser(streams=list(streams), global_object=global_object, **kw)
+        """Build + bind a standalone MaskedInputNormaliser over the GN2 fixture widths."""
+        norm = MaskedInputNormaliser(streams=list(streams), global_object=global_object, **kw)
         norm.name = "norm"
         modules = build_gn2v2_modules("ignored.yaml")
         schema = resolve_bind_schema(compile_gn2v2(modules, Mode.FIT))
@@ -195,7 +263,7 @@ class TestNormaliser:
 
     def test_init_does_no_file_io(self, tmp_path):
         """__init__ records config only; norm_dict is ignored (no file read)."""
-        norm = Normaliser(streams=["tracks"], norm_dict=tmp_path / "absent.yaml")
+        norm = MaskedInputNormaliser(streams=["tracks"], norm_dict=tmp_path / "absent.yaml")
         norm.name = "norm"
         io = norm.declare_io(Mode.FIT)
         # FIT (training) declares the pad mask require alongside the input
@@ -204,7 +272,7 @@ class TestNormaliser:
 
     def test_mask_require_is_training_only(self):
         """masks.<stream> is required in FIT/VAL but NOT TEST/ONNX (no mask at inference)."""
-        norm = Normaliser(streams=["jets", "tracks"], global_object="jets")
+        norm = MaskedInputNormaliser(streams=["jets", "tracks"], global_object="jets")
         norm.name = "norm"
         flat = flatten_spec(norm.declare_io(Mode.FIT).requires)
         assert flat["masks.tracks"].modes == Mode.TRAINING
@@ -216,7 +284,7 @@ class TestNormaliser:
         assert "masks.jets" not in flat
 
     def test_global_object_is_rank_two(self):
-        norm = Normaliser(streams=["jets", "tracks"], global_object="jets")
+        norm = MaskedInputNormaliser(streams=["jets", "tracks"], global_object="jets")
         norm.name = "norm"
         flat = flatten_spec(norm.declare_io(Mode.FIT).requires)
         assert len(flat["inputs.jets"].shape) == 2
@@ -224,15 +292,15 @@ class TestNormaliser:
 
     def test_config_errors(self):
         with pytest.raises(ConfigError, match="non-empty"):
-            Normaliser(streams=[])
+            MaskedInputNormaliser(streams=[])
         with pytest.raises(ConfigError, match="duplicate"):
-            Normaliser(streams=["a", "a"])
+            MaskedInputNormaliser(streams=["a", "a"])
         with pytest.raises(ConfigError, match="global_object"):
-            Normaliser(streams=["a"], global_object="b")
+            MaskedInputNormaliser(streams=["a"], global_object="b")
         with pytest.raises(ConfigError, match="momentum"):
-            Normaliser(streams=["a"], momentum=1.5)
+            MaskedInputNormaliser(streams=["a"], momentum=1.5)
         with pytest.raises(ConfigError, match="eps"):
-            Normaliser(streams=["a"], eps=0.0)
+            MaskedInputNormaliser(streams=["a"], eps=0.0)
 
     def test_buffers_init_to_identity(self):
         """A fresh (bound, untrained) Normaliser is identity: mean 0 / var 1, 0 batches."""
@@ -2527,12 +2595,11 @@ class TestNoIOGuard:
 
     The rule itself ("declare_io/bind touch no files") was only ever verified
     manually; this pins it in CI over the shipped GN2v2 module set (stage-E
-    design-compliance fix). With the self-normalising Normaliser there is NO
-    norm-dict file hook at all — the whole module pipeline (declare_io / bind /
-    materialise_all) is file-free, so the trap stays armed across all of it.
+    design-compliance fix). materialise() stays the ONLY file-touching hook —
+    proven by releasing the trap and pointing it at a nonexistent norm dict.
     """
 
-    def test_declare_bind_and_materialise_are_file_free(self, monkeypatch):
+    def test_declare_and_bind_are_file_free(self, monkeypatch):
         # construction is config capture only — safe to build under the trap
         def _forbid(*args, **kwargs):
             raise AssertionError(f"file I/O during declare_io/bind (design §2.3): open({args!r})")
@@ -2546,7 +2613,9 @@ class TestNoIOGuard:
                 module.declare_io(mode)
         plans = [compile_gn2v2(modules, mode) for mode in (Mode.FIT, Mode.TEST)]
         bind_all(modules, resolve_bind_schema(plans))
-        # the Normaliser self-populates from training data — materialise_all is
-        # a no-op for it (only the class-weight task may materialise, and that
-        # config carries weights inline), so it touches no files either.
-        materialise_all(modules)
+
+        # release the trap: materialise IS the sanctioned file hook and must
+        # be the first thing that touches the (nonexistent) norm dict
+        monkeypatch.undo()
+        with pytest.raises(FileNotFoundError):
+            materialise_all(modules)

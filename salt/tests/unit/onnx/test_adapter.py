@@ -808,7 +808,7 @@ def _flash_export_cfg() -> ExportConfig:
 
 
 class TestExportModeProtocol:
-    def _compiled(self, tmp_path):
+    def _compiled(self, tmp_path, *, materialise: bool):
         modules = build_flash_gn2_modules(tmp_path)
         resolved = attach_manifest(
             resolve_export_config(_flash_export_cfg(), "flash_run"),
@@ -816,13 +816,13 @@ class TestExportModeProtocol:
         )
         plan = compile_onnx_plan(modules, resolved, VARIABLES)
         bind_all(modules, resolve_bind_schema([plan]))
-        # self-normalising Normaliser: no materialise hook — the running buffers
-        # are at identity init (a valid frozen export state).
+        if materialise:
+            modules["norm"].materialise()
         fields = {"inputs.jets": tuple(JET_VARIABLES), "inputs.tracks": tuple(TRACK_VARIABLES)}
         return modules, resolved, plan, fields
 
     def test_flash_encoder_forced_to_torch_math_at_construction(self, tmp_path):
-        modules, resolved, plan, fields = self._compiled(tmp_path)
+        modules, resolved, plan, fields = self._compiled(tmp_path, materialise=True)
         encoder = modules["encoder"]
         # the trained config really is flash BEFORE the adapter exists
         assert encoder.encoder.attn_type == "torch-flash"
@@ -834,11 +834,11 @@ class TestExportModeProtocol:
         assert encoder.encoder.attn_type == "torch-math"
         assert all(layer.attn.fn.attn_type == "torch-math" for layer in encoder.encoder.layers)
 
-    def test_fresh_normaliser_exports_without_rejection(self, tmp_path):
-        # The self-normalising Normaliser has no "unmaterialised" state: identity
-        # running buffers (mean 0 / var 1) are a valid frozen export starting
-        # point, so the adapter must build cleanly with no materialise step (the
-        # old materialised=False rejection is gone).
-        modules, resolved, plan, fields = self._compiled(tmp_path)
-        adapter = OnnxAdapter(plan, resolved, fields)
-        assert adapter is not None
+    def test_unmaterialised_normaliser_rejected_before_tracing(self, tmp_path):
+        # Normaliser.forward skips its eager guard under tracing
+        # (TracerWarning hygiene) — the adapter must therefore refuse to
+        # build on unmaterialised buffers, or the trace would silently bake
+        # un-materialised values (M4-review fix)
+        modules, resolved, plan, fields = self._compiled(tmp_path, materialise=False)
+        with pytest.raises(ConfigError, match="materialised=False"):
+            OnnxAdapter(plan, resolved, fields)

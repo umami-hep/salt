@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 from lightning import Callback, Trainer
 from torch import nn
 
@@ -230,18 +231,14 @@ class TestFit:
         assert model.schema.width("inputs.tracks") == len(TRACK_VARIABLES)
         assert model.schema.fields_of("inputs.tracks") == tuple(TRACK_VARIABLES)
 
-    def test_fresh_fit_learns_running_stats_online(self, fitted):
-        """The self-normalising Normaliser accumulated running stats over the fit.
-
-        No norm dict is read — the buffers start at identity and the training
-        steps move them off it (num_batches_tracked > 0).
-        """
+    def test_fresh_fit_materialised_norm_from_file(self, fitted):
+        """materialise() ran before the first step and read the parity constants."""
         norm = fitted["model"].net["norm"]
-        assert int(norm.num_batches_tracked_jets) > 0
-        assert int(norm.num_batches_tracked_tracks) > 0
-        # the running stats have moved off the identity init (mean 0 / var 1)
-        assert not torch.equal(norm.running_mean_jets, torch.zeros_like(norm.running_mean_jets))
-        assert not torch.equal(norm.running_var_jets, torch.ones_like(norm.running_var_jets))
+        assert bool(norm.materialised)
+        expect_means = torch.tensor([0.1 * (i + 1) for i in range(len(JET_VARIABLES))])
+        expect_stds = torch.tensor([1.0 + 0.05 * (i + 1) for i in range(len(JET_VARIABLES))])
+        assert torch.allclose(norm.means_jets, expect_means)
+        assert torch.allclose(norm.stds_jets, expect_stds)
 
     def test_sinks_auto_adopted_by_datamodule(self, fitted):
         """GraphDataModule.setup adopted the model's sink_demand (no set_sinks call)."""
@@ -303,11 +300,7 @@ class TestCheckpoint:
         assert set(saved_sd) == set(loaded_sd)
         for key, value in saved_sd.items():
             assert torch.equal(value, loaded_sd[key]), key
-        # the Normaliser running buffers round-tripped bit-identically
-        assert torch.equal(
-            loaded.net["norm"].running_mean_tracks,
-            fitted["model"].net["norm"].running_mean_tracks,
-        )
+        assert bool(loaded.net["norm"].materialised)
 
     def test_fit_hash_mismatch_is_fatal(self, fitted):
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
@@ -335,13 +328,12 @@ class TestCheckpoint:
             model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
-    def test_resume_restores_running_stats_no_file(self, data, fitted):
-        """Resume continues training with the Normaliser buffers from the ckpt.
+    def test_resume_skips_materialise(self, data, fitted):
+        """Resume continues training WITHOUT materialise overwriting loaded buffers.
 
-        The self-normalising Normaliser reads no file at all — resume restores
-        the running stats from the checkpoint state_dict and training continues
-        updating them. (The norm_dict arg is ignored; a nonexistent path is
-        irrelevant.)
+        The resumed model's Normaliser points at a NONEXISTENT norm dict: if
+        materialise ran on resume it would raise FileNotFoundError; instead
+        the buffers must arrive from the checkpoint (design §2.3).
         """
         model = build_model(data, norm_dict=data["dir"] / "does_not_exist.yaml")
         dm = build_datamodule(data)
@@ -349,11 +341,12 @@ class TestCheckpoint:
         trainer.fit(model, dm, ckpt_path=fitted["ckpt"])
         assert trainer.global_step == 4  # 2 saved + 2 resumed steps
         assert model.loaded_from_checkpoint
-        # the resumed run kept accumulating from the restored buffers
+        assert not model.materialised
+        # buffers came from the checkpoint, not from any file
         saved_norm = fitted["model"].net["norm"]
-        assert int(model.net["norm"].num_batches_tracked_tracks) >= int(
-            saved_norm.num_batches_tracked_tracks
-        )
+        assert torch.equal(model.net["norm"].means_tracks, saved_norm.means_tracks)
+        assert torch.equal(model.net["norm"].stds_tracks, saved_norm.stds_tracks)
+        assert bool(model.net["norm"].materialised)
 
     def test_resume_with_changed_graph_fails_fast(self, data, fitted):
         """A config change between save and resume trips the FIT hash gate."""
@@ -379,20 +372,21 @@ class TestCheckpoint:
 
 
 class TestNormGarbageGuard:
-    def test_fresh_fit_ignores_norm_dict_and_learns_online(self, data, tmp_path):
-        """The self-normalising Normaliser ignores any norm_dict and learns online.
-
-        A bogus / nonexistent norm_dict path must NOT affect the learned stats
-        (no file is read) — the running buffers are populated purely from the
-        training batches.
-        """
-        model = build_model(data, norm_dict=tmp_path / "bogus_does_not_exist.yaml")
+    def test_fresh_fit_reads_current_norm_file(self, data, tmp_path):
+        """Control for the resume test: a FRESH fit DOES materialise from file."""
+        with open(data["nd"]) as fh:
+            norm = yaml.safe_load(fh)
+        for variables in norm.values():
+            for entry in variables.values():
+                entry["mean"] = float(entry["mean"]) + 1.0
+        shifted_path = tmp_path / "norm_shifted.yaml"
+        with open(shifted_path, "w") as fh:
+            yaml.dump(norm, fh, sort_keys=False)
+        model = build_model(data, norm_dict=shifted_path)
         dm = build_datamodule(data)
         make_trainer(limit_train_batches=1, limit_val_batches=1).fit(model, dm)
-        norm = model.net["norm"]
-        # one training batch -> exactly one EMA step off identity
-        assert int(norm.num_batches_tracked_jets) >= 1
-        assert not torch.equal(norm.running_mean_jets, torch.zeros_like(norm.running_mean_jets))
+        expect_means = torch.tensor([0.1 * (i + 1) + 1.0 for i in range(len(JET_VARIABLES))])
+        assert torch.allclose(model.net["norm"].means_jets, expect_means)
 
 
 class TestBoundaryDemandGuards:

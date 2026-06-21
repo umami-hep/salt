@@ -2123,7 +2123,297 @@ def _stream_len(stream: str) -> str:
 
 
 class Normaliser(nn.Module):
+    """Config-constructed input normalisation (design §6.3, replaces v1 `InputNorm`).
+
+    This is the DEFAULT input normaliser: it loads a precomputed
+    ``norm_dict.yaml`` (fixed per-stream, per-variable ``{mean, std}``) and
+    preserves v1 forward parity. For an opt-in self-normalising variant that
+    learns its statistics online (no norm dict), select
+    ``class_path: salt.core.nn.MaskedInputNormaliser`` instead.
+
+    Lifecycle (design §2.3): ``__init__`` records the ``norm_dict`` *path*
+    and the stream list — no file I/O. ``bind(schema)`` allocates per-stream
+    buffers (``means_<stream>`` / ``stds_<stream>``, the design §6.3 names)
+    sized from the resolved ``inputs.<stream>`` widths, and captures the
+    declared variable names. ``materialise()`` is the ONLY file-touching
+    hook: it loads the norm dict and fills the buffers — skipped on
+    checkpoint load, where values arrive via the state_dict (the
+    ``materialised`` flag buffer travels with them).
+
+    Unlike v1's ``InputNorm.forward`` (which rebinds its input dict's keys
+    in place, inputnorm.py:103-106), this module produces NEW
+    ``normed.<stream>`` keys and never mutates ``inputs.*`` (design §2.1).
+    Because ``normed.*`` and ``inputs.*`` are distinct keys, consumers of
+    raw inputs (edge features) need no ordering hack (design §6.3).
+    """
+
+    def __init__(
+        self,
+        norm_dict: str | Path,
+        streams: Sequence[str],
+        global_object: str | None = None,
+    ) -> None:
+        """Capture config only (design §2.3 — no file I/O here).
+
+        Parameters
+        ----------
+        norm_dict : str | Path
+            Path to the normalisation dictionary YAML; read at
+            `materialise`, never here.
+        streams : Sequence[str]
+            Streams to normalise (explicit M2 surface — see the module
+            docstring for the demand-driven TODO).
+        global_object : str | None, optional
+            The stream that is a per-object vector (``[B, F]``) rather than
+            a padded sequence (``[B, T, F]``), by default None.
+
+        Raises
+        ------
+        ConfigError
+            If `streams` is empty, contains duplicates, or `global_object`
+            is not one of them.
+        """
+        super().__init__()
+        self.name = _UNNAMED
+        if not streams:
+            raise ConfigError("Normaliser: streams must be a non-empty sequence")
+        if len(set(streams)) != len(tuple(streams)):
+            raise ConfigError(f"Normaliser: duplicate streams in {tuple(streams)}")
+        if global_object is not None and global_object not in streams:
+            raise ConfigError(
+                f"Normaliser: global_object {global_object!r} is not in streams {tuple(streams)}"
+            )
+        self.norm_dict_path = Path(norm_dict)
+        self.streams = tuple(streams)
+        self.global_object = global_object
+        self._fields: dict[str, tuple[str, ...]] = {}
+        self._bound = False
+
+    def _spec(self, stream: str) -> TensorSpec:
+        """Build the shared spec for ``inputs.<stream>`` / ``normed.<stream>``.
+
+        The last dim is the instance-scoped symbol ``F:<name>.<stream>`` on
+        BOTH sides, so the concrete width declared by the dataset boundary
+        propagates to ``normed.<stream>`` through unification (bind.py).
+
+        Returns
+        -------
+        TensorSpec
+            ``("B", F)`` for the global object, ``("B", "T:<stream>", F)``
+            for sequence streams.
+        """
+        width = sym_dim("F", f"{self.name}.{stream}")
+        shape: tuple[int | str, ...] = (
+            ("B", width) if stream == self.global_object else ("B", _stream_len(stream), width)
+        )
+        return TensorSpec(shape=shape, dtype="float32")
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare ``inputs.<stream>`` -> ``normed.<stream>`` for every stream.
+
+        Returns
+        -------
+        IO
+            The declared requires/produces.
+        """
+        del mode
+        return IO(
+            requires=unflatten_spec({f"inputs.{s}": self._spec(s) for s in self.streams}),
+            produces=unflatten_spec({f"normed.{s}": self._spec(s) for s in self.streams}),
+        )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Allocate normalisation buffers from the resolved schema (config-only).
+
+        Buffers are named ``means_<stream>`` / ``stds_<stream>`` (design
+        §6.3 checkpoint layout) and initialised to identity (0/1); the
+        boolean ``materialised`` buffer guards against silently training on
+        un-normalised values. Field names are captured here for
+        `materialise`'s per-variable lookup; a `BindError` propagates from
+        the schema if a stream's width or fields are not statically
+        resolved.
+
+        Raises
+        ------
+        RuntimeError
+            If called twice (rebinding would discard loaded values).
+        """
+        if self._bound:
+            raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
+        for stream in self.streams:
+            key = f"inputs.{stream}"
+            width = schema.width(key)
+            self._fields[stream] = schema.fields_of(key)
+            self.register_buffer(f"means_{stream}", torch.zeros(width))
+            self.register_buffer(f"stds_{stream}", torch.ones(width))
+        self.register_buffer("materialised", torch.tensor(False))
+        self._bound = True
+
+    def preflight(self) -> None:
+        """Fail-fast, data-free norm-dict validation (M3 leftover, design §2.3).
+
+        Without this check a wrong ``norm_dict`` path/content only surfaces
+        at `materialise` — after dataset setup and plan compilation. The
+        preflight reads ONLY the norm-dict YAML (config I/O in the design
+        §2.6 sense — no H5/bind I/O): the file must exist, parse, and carry
+        every configured stream; when the module is already bound (the
+        `SaltModule.setup` call site) the per-variable mean/std entries are
+        checked too, mirroring `materialise`'s validation. Called by
+        `SaltModule.setup` on fresh fits (hard error) and by ``salt2 graph
+        validate`` (warning — data-less machines stay supported).
+
+        Raises
+        ------
+        ConfigError
+            On a missing/unparsable norm dict, a missing stream, or (when
+            bound) missing/non-finite/zero-std variable entries.
+        """
+        path = self.norm_dict_path
+        prefix = f"Normaliser {self.name!r} preflight"
+        fix = (
+            f"  fix: point model.modules.{self.name}.init_args.norm_dict at the "
+            "preprocessing norm_dict.yaml for this sample"
+        )
+        if not path.is_file():
+            raise ConfigError(f"{prefix}: norm dict not found: {path}\n{fix}")
+        try:
+            with open(path) as fh:
+                norm_dict = yaml.safe_load(fh)
+        except yaml.YAMLError as err:
+            raise ConfigError(
+                f"{prefix}: norm dict {path} is not valid YAML: {err}\n{fix}"
+            ) from err
+        if not isinstance(norm_dict, dict):
+            raise ConfigError(f"{prefix}: norm dict {path} must be a mapping\n{fix}")
+        for stream in self.streams:
+            if stream not in norm_dict:
+                raise ConfigError(
+                    f"{prefix}: missing input type {stream!r} in {path}. "
+                    f"Choose from {sorted(norm_dict)}."
+                )
+            if not self._fields:
+                continue  # unbound (the data-free `salt2 graph validate` path)
+            variables = self._fields[stream]
+            if missing := set(variables) - set(norm_dict[stream]):
+                raise ConfigError(
+                    f"{prefix}: missing variables {sorted(missing)} for {stream!r} in {path}. "
+                    f"Choose from {sorted(norm_dict[stream])}.\n"
+                    f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove "
+                    f"them from the features variable list "
+                    f"(config: data.modules.features.init_args.variables.{stream})"
+                )
+            for variable in variables:
+                entry = norm_dict[stream][variable]
+                try:
+                    mean, std = float(entry["mean"]), float(entry["std"])
+                except (KeyError, TypeError, ValueError):
+                    raise ConfigError(
+                        f"{prefix}: entry for {stream}.{variable} in {path} must be a "
+                        f"{{mean, std}} mapping, got {entry!r}"
+                    ) from None
+                if not (torch.isfinite(torch.tensor(mean)) and torch.isfinite(torch.tensor(std))):
+                    raise ConfigError(
+                        f"{prefix}: non-finite normalisation parameters for "
+                        f"{stream}.{variable} in {path}."
+                    )
+                if std == 0:
+                    raise ConfigError(
+                        f"{prefix}: zero standard deviation for {stream}.{variable} in {path}."
+                    )
+
+    def materialise(self) -> None:
+        """Fill the buffers from the norm dict (the ONLY file I/O, design §2.3).
+
+        Mirrors v1 `InputNorm`'s validation (inputnorm.py:56-88): missing
+        streams/variables, non-finite values, and zero stds are errors.
+
+        Raises
+        ------
+        RuntimeError
+            If called before `bind`.
+        ValueError
+            If the norm dict is missing this module's streams or variables,
+            or contains non-finite means/stds or zero stds.
+        """
+        if not self._bound:
+            raise RuntimeError(f"Normaliser {self.name!r}: materialise() before bind()")
+        with open(self.norm_dict_path) as fh:
+            norm_dict = yaml.safe_load(fh)
+        for stream in self.streams:
+            if stream not in norm_dict:
+                raise ValueError(
+                    f"Missing input type {stream!r} in {self.norm_dict_path}. "
+                    f"Choose from {sorted(norm_dict)}."
+                )
+            variables = self._fields[stream]
+            if missing := set(variables) - set(norm_dict[stream]):
+                raise ValueError(
+                    f"Missing variables {sorted(missing)} for {stream!r} in "
+                    f"{self.norm_dict_path}. Choose from {sorted(norm_dict[stream])}.\n"
+                    f"  fix: add mean/std entries for {sorted(missing)} to "
+                    f"{self.norm_dict_path}, or remove them from the features variable "
+                    f"list (config: data.modules.features.init_args.variables.{stream})"
+                )
+            means = torch.as_tensor(
+                [float(norm_dict[stream][v]["mean"]) for v in variables], dtype=torch.float32
+            )
+            stds = torch.as_tensor(
+                [float(norm_dict[stream][v]["std"]) for v in variables], dtype=torch.float32
+            )
+            if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
+                raise ValueError(
+                    f"Non-finite normalisation parameters for {stream!r} in {self.norm_dict_path}."
+                )
+            if (stds == 0).any():
+                raise ValueError(
+                    f"Zero standard deviation for {stream!r} in {self.norm_dict_path}."
+                )
+            with torch.no_grad():
+                getattr(self, f"means_{stream}").copy_(means)
+                getattr(self, f"stds_{stream}").copy_(stds)
+        self.materialised.fill_(True)
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Produce ``normed.<stream> = (inputs.<stream> - means) / stds``.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The newly produced keys only (design §2.5); inputs are never
+            mutated.
+
+        Raises
+        ------
+        RuntimeError
+            If the buffers were never materialised (fresh fit without
+            `materialise`) — identity values would silently train
+            un-normalised.
+        """
+        del mode
+        # skip under tracing: the tensor->bool read would emit a spurious
+        # TracerWarning on every export. Tracing is still guarded —
+        # OnnxAdapter rejects unmaterialised modules at construction, before
+        # any trace (the eager path keeps this check).
+        if not torch.jit.is_tracing() and not bool(self.materialised):
+            raise RuntimeError(
+                f"Normaliser {self.name!r}: forward before materialise() — on a fresh fit "
+                "call materialise(); on checkpoint load the state_dict provides the values "
+                "(design §2.3)"
+            )
+        return {
+            f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"means_{s}"))
+            / getattr(self, f"stds_{s}")
+            for s in self.streams
+        }
+
+
+class MaskedInputNormaliser(nn.Module):
     """Self-normalising input layer with online masked running statistics.
+
+    OPT-IN alternative to the default fixed-norm-dict `Normaliser` (select
+    via ``class_path: salt.core.nn.MaskedInputNormaliser``). The default
+    `Normaliser` loads a precomputed ``norm_dict.yaml`` and preserves v1
+    parity; THIS module instead learns its own statistics online.
 
     A ``BatchNorm``-style replacement for the v1 ``InputNorm``: instead of
     reading a pre-computed ``norm_dict.yaml`` (per-stream, per-variable
@@ -2226,17 +2516,20 @@ class Normaliser(nn.Module):
         super().__init__()
         self.name = _UNNAMED
         if not streams:
-            raise ConfigError("Normaliser: streams must be a non-empty sequence")
+            raise ConfigError("MaskedInputNormaliser: streams must be a non-empty sequence")
         if len(set(streams)) != len(tuple(streams)):
-            raise ConfigError(f"Normaliser: duplicate streams in {tuple(streams)}")
+            raise ConfigError(f"MaskedInputNormaliser: duplicate streams in {tuple(streams)}")
         if global_object is not None and global_object not in streams:
             raise ConfigError(
-                f"Normaliser: global_object {global_object!r} is not in streams {tuple(streams)}"
+                f"MaskedInputNormaliser: global_object {global_object!r} is not in "
+                f"streams {tuple(streams)}"
             )
         if momentum is not None and not 0.0 <= momentum <= 1.0:
-            raise ConfigError(f"Normaliser: momentum must be None or in [0, 1], got {momentum}")
+            raise ConfigError(
+                f"MaskedInputNormaliser: momentum must be None or in [0, 1], got {momentum}"
+            )
         if eps <= 0.0:
-            raise ConfigError(f"Normaliser: eps must be positive, got {eps}")
+            raise ConfigError(f"MaskedInputNormaliser: eps must be positive, got {eps}")
         # norm_dict is intentionally ignored (stats are learned online); kept in
         # the signature only so existing configs / CLI overrides still parse.
         del norm_dict
@@ -2320,7 +2613,9 @@ class Normaliser(nn.Module):
             If called twice (rebinding would discard learned values).
         """
         if self._bound:
-            raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
+            raise RuntimeError(
+                f"MaskedInputNormaliser {self.name!r}: bind() called twice (design §2.3)"
+            )
         for stream in self.streams:
             width = schema.width(f"inputs.{stream}")
             self.register_buffer(f"running_mean_{stream}", torch.zeros(width))
