@@ -1761,22 +1761,37 @@ def run_l3(
     jets = torch.randn(1, len(JET_VARIABLES), generator=torch.Generator().manual_seed(3))
     tracks = torch.randn(5, len(TRACK_VARIABLES), generator=torch.Generator().manual_seed(4))
     # IDENTITY: global declares the jets columns -> None gather (a clone). The
-    # adapter's ONNX output must equal the all-valid eager TEST forward on the
+    # adapter's ONNX output must equal the all-valid eager ONNX forward on the
     # same jets/tracks (the v1 export contract: a single full-length jet, an
-    # all-valid pad mask, to_onnx.py:386-390).
+    # all-valid pad mask, to_onnx.py:386-390). The adapter WRAPS ``onnx_plan``
+    # (it runs ``Executor(onnx_plan)`` on the bundle it assembles), so the eager
+    # reference here is the SAME ``onnx_plan`` fed the SAME bundle the adapter
+    # builds (jets [1, F], tracks [1, L, F], an all-valid pad mask, global =
+    # jets.clone()) — proving the adapter's input-reorder + alias-gather +
+    # output-stack are transparent over the plan. NOTE (P1.5): we reference the
+    # ONNX plan, NOT the TEST plan: post-flip the TEST classification forward
+    # publishes RAW logits (design §2) while the ONNX forward still publishes the
+    # converted, EVAL-READY probs (the deferred-to-P4 ONNX carve-out). The v1
+    # export contract is "adapter ONNX output == eval-ready probs", and the
+    # eval-ready value IS the eager ONNX forward (softmax of the TEST raw logits);
+    # comparing the adapter against the eager ONNX forward keeps that contract
+    # faithful AND keeps the gate's teeth (the adapter wraps the plan, so the
+    # input-reorder / alias-gather / output-stack are still under test — and
+    # ``identity_alias_is_clone`` above is untouched).
     id_adapter = OnnxAdapter(onnx_plan, onnx_export, onnx_fields)
     # inspect the resolved alias gather (the export internal): None == identity
     # clone (test_onnx_adapter.py precedent for the same conformance check)
     checks["identity_alias_is_clone"] = id_adapter._alias_gathers == [None]  # noqa: SLF001 - alias-gather conformance probe
     with torch.no_grad():
         onnx_out = id_adapter(jets.clone(), tracks.clone())
-    # the eager TEST forward on the same single jet (batched) — all tracks valid
+    # the eager ONNX forward on the same single jet (batched) — all tracks valid;
+    # this is byte-for-byte the bundle the adapter assembles internally (§7)
     eager_b = Bundle()
     eager_b.set("inputs.jets", jets.clone())
     eager_b.set("inputs.tracks", tracks.unsqueeze(0).clone())
     eager_b.set("masks.tracks", torch.zeros(1, tracks.shape[0], dtype=torch.bool))
     eager_b.set("inputs.global", jets.clone())  # identity alias clones jets
-    eager_out = Executor(test_plan).run(eager_b)
+    eager_out = Executor(onnx_plan).run(eager_b)
     eager_probs = eager_out.get("preds.jets.jets_classification")
     onnx_probs = torch.stack([o.reshape(-1)[0] for o in onnx_out])
     diffs["onnx_identity_vs_eager"] = _max_abs(onnx_probs, eager_probs.reshape(-1))

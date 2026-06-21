@@ -402,6 +402,65 @@ def _entry_set(entry: Any, key: str, value: Any) -> None:
         setattr(entry, key, value)
 
 
+def _is_persistence_sink(class_path: str) -> bool:
+    """Whether a callback ``class_path`` names a TEST persistence sink (design §2 layer 2).
+
+    The P1.5 cutover (`gn2v2-dummy-cutover.yaml`) nulls the M4.5 ``writers.modules``
+    and instead wires the persistence sink at the ``callbacks:`` level — an
+    `H5OutputWriter` (or a subclass / any callback exposing the duck-typed
+    ``writer_demand`` surface `SaltModule` folds into the TEST plan sinks,
+    saltmodule.py ``_attached_writer``/``_boundary_demand``). Such a config is NOT
+    writer-less: its TEST predictions ARE persisted. This resolves the class at
+    the pre-instantiate point (jsonargparse only has the ``class_path`` string
+    here) so the writer-less refusal accepts the callbacks-level sink.
+
+    Returns
+    -------
+    bool
+        ``True`` when `class_path` resolves to `H5OutputWriter`, a subclass of
+        it, or any class exposing the ``writer_demand`` surface; ``False`` for an
+        unimportable path (treated as not-a-sink — the genuinely sink-less error
+        still fires) or a plain callback.
+    """
+    import importlib  # noqa: PLC0415 - local, only on the test path
+
+    from salt.core.outputs import H5OutputWriter  # noqa: PLC0415 - avoid import cycle at top
+
+    module_path, _, attr = class_path.rpartition(".")
+    if not module_path:
+        return False
+    try:
+        cls = getattr(importlib.import_module(module_path), attr, None)
+    except Exception:  # noqa: BLE001 - an unresolvable class_path is simply not a sink
+        return False
+    if not isinstance(cls, type):
+        return False
+    return issubclass(cls, H5OutputWriter) or callable(getattr(cls, "writer_demand", None))
+
+
+def _has_callback_persistence_sink(callbacks: Any) -> bool:
+    """Whether the ``callbacks:`` config carries a TEST persistence sink (design §2).
+
+    Inspects the dict-keyed ``callbacks:`` config (each value a `Namespace`/dict
+    with a ``class_path``) at the pre-instantiate point and returns ``True`` when
+    any non-``None`` entry is an `H5OutputWriter`-style persistence sink
+    (`_is_persistence_sink`). Used by the ``salt2 test`` writer-less check so a
+    config that nulls ``writers.modules`` but wires a callbacks-level sink (the
+    P1.5 cutover) is accepted.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one callback entry is a persistence sink.
+    """
+    items = (callbacks or {}).items() if hasattr(callbacks, "items") else ()
+    for entry in (val for _, val in items if val is not None):
+        class_path = _entry_get(entry, "class_path") or ""
+        if class_path and _is_persistence_sink(class_path):
+            return True
+    return False
+
+
 def _fan_out_artifacts(cfg: Any) -> Any:
     """Fan ``--class_dict`` out onto the model-side consumers (Wave 1).
 
@@ -712,13 +771,16 @@ class Salt2CLI(LightningCLI):
         ``--ckpt_path`` triggers the v1 best-checkpoint glob (which requires
         exactly ONE user ``--config``, the saved run config next to ``ckpts/``
         or ``checkpoints/``); multi-device eval is rejected/forced to one
-        device; a writer-less eval is refused up front (TEST predictions would
-        be computed and never persisted — design §4.2, §8).
+        device; a sink-less eval is refused up front (TEST predictions would be
+        computed and never persisted — design §4.2, §8). A persistence sink is
+        EITHER an M4.5 ``writers.modules`` writer OR a callbacks-level
+        `H5OutputWriter` sink (the P1.5 cutover, design §2 layer 2).
 
         Raises
         ------
         ConfigError
-            On a writer-less test config, an ambiguous config list without
+            On a sink-less test config (no ``writers.modules`` writer and no
+            callbacks-level persistence sink), an ambiguous config list without
             ``--ckpt_path``, or an explicit multi-device list.
         """
         subcommand = getattr(self.config, "subcommand", None)
@@ -731,11 +793,18 @@ class Salt2CLI(LightningCLI):
         self.save_config_callback = None  # v1: no config.yaml dump on test (cli.py:312-316)
         cfg.trainer.logger = False
         writer_modules = cfg.get("writers.modules") or {}
-        if not any(writer is not None for writer in writer_modules.values()):
+        has_m45_writer = any(writer is not None for writer in writer_modules.values())
+        # the P1.5 cutover (design §2 layer 2) nulls writers.modules and persists
+        # via a callbacks-level H5OutputWriter sink instead — that is NOT a
+        # writer-less eval, so accept it too (the LIVE cutover path, gn2v2-dummy-
+        # cutover.yaml; SaltModule duck-types the sink's writer_demand surface)
+        has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
+        if not has_m45_writer and not has_callback_sink:
             raise ConfigError(
-                "salt2 test needs at least one writer under writers.modules — predictions "
-                "would be computed and never persisted (design §4.2, §8; base2.yaml ships "
-                "inputs_copy/tasks/pad_mask defaults)"
+                "salt2 test needs a persistence sink — at least one writer under "
+                "writers.modules OR a callbacks-level H5OutputWriter sink; predictions "
+                "would otherwise be computed and never persisted (design §4.2, §8; "
+                "base2.yaml ships inputs_copy/tasks/pad_mask defaults)"
             )
         if not cfg.get("ckpt_path"):
             configs = cfg.get("config") or []

@@ -23,8 +23,9 @@ import torch
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import TensorSpec
+from salt.core.graph.spec import Mode, TensorSpec
 from salt.core.main import CONFIG_DIR
+from salt.core.nn import bind_all, materialise_all, resolve_bind_schema
 from salt.core.schema import dump_schema, save_schema
 from salt.core.writers import (
     WriteCtx,
@@ -32,7 +33,7 @@ from salt.core.writers import (
     WriterDeclareCtx,
 )
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
-from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
+from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules, compile_gn2v2
 from salt.utils.inputs import write_dummy_file
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
@@ -132,6 +133,19 @@ def modules(data):
     return build_gn2v2_modules(data["nd"])
 
 
+@pytest.fixture(scope="module")
+def bound_modules(data):
+    # bound + materialised module dict: needed wherever get_h5 runs the eval
+    # conversion (since the P1.5 flip ClassificationTaskModule.get_h5 calls
+    # self.task.run_inference, which exists only after bind). The TEST plan is
+    # compiled, the schema resolved and the heads built so the softmax op-chain
+    # runs on the synthetic raw-logit bundle exactly as on the live oracle path.
+    modules = build_gn2v2_modules(data["nd"])
+    bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.TEST)))
+    materialise_all(modules)
+    return modules
+
+
 def declare_ctx(modules) -> WriterDeclareCtx:
     return WriterDeclareCtx(
         model_modules=modules, streams=("jets", "tracks"), sequence_streams=("tracks",)
@@ -154,14 +168,26 @@ def write_ctx(data, modules, out: Path | None = None, run_name: str = "salt") ->
 
 
 def make_preds_bundle(b: int = 5, length: int = L_FILE, seed: int = 3) -> Bundle:
+    # Since the P1.5 flip the classification task forward publishes RAW logits in
+    # TEST and the eval softmax moved INTO get_h5 (it run_inference-s the raw
+    # leaf before packing), so this synthetic TEST bundle feeds RAW logits (NOT
+    # pre-softmaxed) for the classification heads — feeding softmaxed values here
+    # would double-convert. The masked-softmax track_origin get_h5 reads
+    # masks.tracks, so the bundle carries it (True = padded; the last two
+    # positions are padded). Vertexing is NOT flipped (its forward still converts
+    # in TEST), so its preds.* stays the per-node assignment the v1 op-chain
+    # get_h5 expects (-inf padded rows).
     gen = torch.Generator().manual_seed(seed)
-    jets = torch.softmax(torch.randn(b, 3, generator=gen), -1)
-    origin = torch.softmax(torch.randn(b, length, 8, generator=gen), -1)
+    jets = torch.randn(b, 3, generator=gen)
+    origin = torch.randn(b, length, 8, generator=gen)
     vertex = torch.randint(-1, 4, (b, length, 1), generator=gen).float()
     vertex[:, -2:] = float("-inf")  # padded rows (v1 mask_fill_flattened encoding)
+    mask = torch.zeros(b, length, dtype=torch.bool)
+    mask[:, -2:] = True  # padded track positions (True = padded)
     return Bundle({
         "preds": {
             "jets": {"jets_classification": jets},
             "tracks": {"track_origin": origin, "track_vertexing": vertex},
-        }
+        },
+        "masks": {"tracks": mask},
     })

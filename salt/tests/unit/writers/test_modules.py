@@ -29,6 +29,7 @@ from salt.tests._fixtures.writers_common import (  # noqa: F401  (data/modules a
     L_FILE,
     ORIGIN_PROB_COLS,
     PRED_KEYS,
+    bound_modules,
     data,
     declare_ctx,
     make_preds_bundle,
@@ -73,22 +74,25 @@ class TestTaskWriter:
         cols = TaskWriter().columns(write_ctx(data, prefixed))
         assert "salt_VertexIndex" in cols["tracks"].names
 
-    def test_write_values_bitwise(self, data, modules):
+    def test_write_values_bitwise(self, data, bound_modules):
         tw = TaskWriter()
-        tw.setup(write_ctx(data, modules))
+        tw.setup(write_ctx(data, bound_modules))
         bundle = make_preds_bundle()
         out = tw.write(bundle, slice(0, 5))
-        jets = bundle.get(PRED_KEYS[0]).numpy()
+        # the P1.5-flipped jets_classification.get_h5 softmaxes the RAW logits
+        # before packing, so the column == softmax(raw logits) (the SAME value
+        # the pre-flip forward used to publish — get_h5 just owns it now)
+        jets = torch.softmax(bundle.get(PRED_KEYS[0]), -1).numpy()
         for i, col in enumerate(JET_PROB_COLS):
             assert out["jets"][col].tobytes() == jets[:, i].astype("f4").tobytes()
-        # vertexing: the exact v1 op chain .int() -> u2s i8 (task.py:1003)
+        # vertexing (NOT flipped): the exact v1 op chain .int() -> u2s i8 (task.py:1003)
         vertex = bundle.get(PRED_KEYS[2]).int().numpy()[..., 0].astype("i8")
         assert out["tracks"]["VertexIndex"].tobytes() == vertex.tobytes()
         assert (out["tracks"]["VertexIndex"][:, -2:] == np.int64(-2147483648)).all()
 
-    def test_write_pads_to_file_length(self, data, modules):
+    def test_write_pads_to_file_length(self, data, bound_modules):
         tw = TaskWriter()
-        tw.setup(write_ctx(data, modules))
+        tw.setup(write_ctx(data, bound_modules))
         out = tw.write(make_preds_bundle(length=30), slice(0, 5))
         assert out["tracks"].shape == (5, L_FILE)  # maybe_pad re-expansion
         assert (out["tracks"][ORIGIN_PROB_COLS[0]][:, 30:] == 0.0).all()
@@ -119,12 +123,13 @@ class TestTaskRendersItsOwnOutput:
         descr = modules["jets_classification"].output_names("salt")
         assert descr == [("salt_pb", "f4"), ("salt_pc", "f4"), ("salt_pu", "f4")]
 
-    def test_global_classification_get_h5_is_v1_opchain(self, modules):
-        # probs -> f4 u2s verbatim (task.py:266-283), dtype = output_names
+    def test_global_classification_get_h5_is_v1_opchain(self, bound_modules):
+        # the P1.5-flipped get_h5 run_inference-s the RAW logits (softmax) then
+        # packs probs -> f4 u2s verbatim (task.py:266-283), dtype = output_names
         bundle = make_preds_bundle()
-        arr = modules["jets_classification"].get_h5(bundle, "salt")
+        arr = bound_modules["jets_classification"].get_h5(bundle, "salt")
         assert list(arr.dtype.names) == ["salt_pb", "salt_pc", "salt_pu"]
-        jets = bundle.get(PRED_KEYS[0]).float().numpy()
+        jets = torch.softmax(bundle.get(PRED_KEYS[0]), -1).float().numpy()
         for i, col in enumerate(["salt_pb", "salt_pc", "salt_pu"]):
             assert arr[col].tobytes() == jets[:, i].astype("f4").tobytes()
 

@@ -2261,8 +2261,15 @@ class TestGn2V2Execution:
         assert logits.shape == (B, 3)
         assert not torch.allclose(logits.sum(-1), torch.ones(B))  # not softmaxed
 
-    def test_test_plan_converts_predictions(self, gn2v2):
-        """TEST preds are converted physical values (design §3.3)."""
+    def test_test_plan_classification_preds_are_raw_logits(self, gn2v2):
+        """TEST classification preds are RAW logits since the P1.5 flip (design §2).
+
+        The classification eval conversion (softmax) moved OUT of ``forward`` and
+        INTO the producers / ``get_h5``, so the executed TEST ``preds.*`` for the
+        classification heads are now RAW logits (NOT softmaxed). Regression /
+        vertexing are NOT flipped (P2): vertexing TEST output stays the per-node
+        assignment (the forward still converts).
+        """
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.TEST)
         assert "loss" not in plan.module_names  # LossSum inactive outside TRAINING
@@ -2273,13 +2280,18 @@ class TestGn2V2Execution:
         b.set("masks.tracks", masks["tracks"])
         with torch.no_grad():
             b = Executor(plan).run(b, debug=True)
-        probs = b.get("preds.jets.jets_classification")
-        assert torch.allclose(probs.sum(-1), torch.ones(B), atol=1e-6)
-        track_probs = b.get("preds.tracks.track_origin")
+        # classification heads now publish RAW logits in TEST (the flip): the
+        # rows do NOT sum to 1 (not softmaxed)
+        logits = b.get("preds.jets.jets_classification")
+        assert logits.shape == (B, 3)
+        assert not torch.allclose(logits.sum(-1), torch.ones(B), atol=1e-3)
+        track_logits = b.get("preds.tracks.track_origin")
         valid = ~masks["tracks"]
-        assert torch.allclose(track_probs[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-6)
-        # vertexing TEST output: per-node assignments unflattened to the
-        # batch shape, padded positions -inf (task.py:985-986,1003-1035)
+        assert not torch.allclose(
+            track_logits[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-3
+        )
+        # vertexing (NOT flipped) TEST output: per-node assignments unflattened to
+        # the batch shape, padded positions -inf (task.py:985-986,1003-1035)
         assert b.get("preds.tracks.track_vertexing").shape == (B, T, 1)
 
     def test_onnx_plan_keeps_raw_vertexing_scores(self, gn2v2):
