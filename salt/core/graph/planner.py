@@ -291,8 +291,46 @@ def compile_setup_plan(
     CycleError
         A dependency cycle among setup modules.
     """
+    _check_incompatibilities(modules)
     res = _resolve(modules, Mode.ALL, {}, None, None, None, _setup_face(stage))
     return _assemble_plan(res)
+
+
+def _check_incompatibilities(modules: Mapping[str, GraphModule]) -> None:
+    """Enforce declared module mutual-exclusion over the setup-module dict (plan-25 Rev-2).
+
+    A generic, reusable check: for each module ``m`` in `modules`, for each
+    class-name ``N`` it lists in ``m.incompatible_with``, if any OTHER module in
+    the dict has ``type(other).__name__ == N``, raise `ConfigError` naming both.
+    The setup-plan compiler is the only thing that sees the whole module dict, so
+    it is the right place to enforce a rule a single module declares about its
+    siblings (e.g. `VDS.incompatible_with = ("ShmStage",)` — staging a VDS copies
+    h5py pointers, not data). The named class need not exist (``ShmStage`` lands
+    in W3.S): the check matches on class NAME, dormant until both are present.
+
+    Parameters
+    ----------
+    modules : Mapping[str, GraphModule]
+        The setup-module dict (instance name -> module).
+
+    Raises
+    ------
+    ConfigError
+        If two configured modules are declared mutually incompatible.
+    """
+    for name, module in modules.items():
+        forbidden = getattr(module, "incompatible_with", ())
+        for other_name, other in modules.items():
+            if other_name == name:
+                continue
+            if type(other).__name__ in forbidden:
+                raise ConfigError(
+                    f"module {name!r} ({type(module).__name__}) is incompatible with "
+                    f"{other_name!r} ({type(other).__name__}): "
+                    f"{type(module).__name__}.incompatible_with = {tuple(forbidden)!r} "
+                    "(plan-25 Rev-2 — e.g. staging a VDS copies h5py pointers, not data); "
+                    "drop one of them from data.modules"
+                )
 
 
 def _assemble_plan(res: _Resolution) -> Plan:

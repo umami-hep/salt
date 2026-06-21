@@ -142,6 +142,14 @@ class H5StructuredReader(Reader):
         fields, a non-global_object group without ``valid``).
     """
 
+    vds_capable: bool = True
+    """H5 reader builds a virtual dataset for wildcard sources (plan-25 O-VDS-CAP).
+
+    Overrides the `Reader` base default (`False`): the `VDS` setup module builds
+    a real VDS (via `create_vds`) for a wildcard source of an `H5StructuredReader`,
+    rather than passing the glob through as an identity edge.
+    """
+
     def __init__(
         self,
         groups: Mapping[str, GroupConfig | Mapping[str, Any] | None],

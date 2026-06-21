@@ -32,9 +32,11 @@ from salt.core.data.processors import (
 from salt.core.data.reader import GroupConfig, H5StructuredReader
 from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
+from salt.core.data.vds_module import VDS
 
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",
+    "VDS",
     "Cut",
     "CutSpec",
     "DatasetModule",

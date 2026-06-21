@@ -5,10 +5,15 @@ module dict shared across the three stages, per-stage readers cloned from the
 single configured reader prototype via `H5StructuredReader.with_source`,
 ``DataLoader(batch_size=None, collate_fn=None, sampler=RandomBatchSampler)``
 (``datamodules.py:247-260``), ``drop_last`` only for fit, weak shuffling of
-batch order only, rank-0 VDS pre-creation + dist barrier
-(``datamodules.py:129-188``). Per-worker handle wiring needs no
+batch order only. Per-worker handle wiring needs no
 ``worker_init_fn``: binding is pid-guarded and lazy inside
 `GraphDataset.__getitem__`, exactly like v1's ``_setup`` path.
+
+Wildcard→VDS resolution (v1's rank-0 VDS pre-creation + DDP barrier,
+``datamodules.py:129-188``) is now a declared setup-graph module (`VDS`,
+plan-25 W3.B): auto-injected alongside `InputSamples`, it produces
+``source.<reader>.<stage>.vds_path`` and `create_vds`'s FileLock + ``.done``
+marker make every-rank execution safe with no rank-0 gating or barrier.
 
 Differences from v1, by design: the val dataset compiles the VAL plan
 (v1 passed ``stage='fit'`` to the val dataset, leaking parameter
@@ -39,13 +44,13 @@ from copy import deepcopy
 from pathlib import Path
 
 import lightning
-import torch
 from torch.utils.data import DataLoader
 
 from salt.core.data.base import DatasetModule, Reader, SetupBundle
 from salt.core.data.dataset import GraphDataset
 from salt.core.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.core.data.samplers import RandomBatchSampler
+from salt.core.data.vds_module import VDS
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.planner import compile_setup_plan
 from salt.core.graph.setup_executor import run_setup_plan
@@ -210,6 +215,17 @@ class GraphDataModule(lightning.LightningDataModule):
         # MUST run before the partition: wires InputSamples._reader so its
         # `declare_setup_io` (probed by `_is_setup_only`) can build keys.
         self._wire_input_samples(modules)
+        # plan-25 W3.B: the wildcard→VDS resolution setup module. Auto-injected
+        # whenever an InputSamples is present (explicit or alias-synthesised) and
+        # no explicit VDS is configured; wires `_reader` + `_vds_capable` on the
+        # VDS (auto-injected OR explicit). MUST also run before the partition so
+        # the (setup-only) VDS lands in `_setup_modules`. The *_vds_path kwargs
+        # feed the auto-injected VDS's per-stage `out`, so they are assigned here
+        # (before `_wire_vds`), not with the rest of the plumbing below.
+        self.train_vds_path = train_vds_path
+        self.val_vds_path = val_vds_path
+        self.test_vds_path = test_vds_path
+        self._wire_vds(modules)
         # plan-24 §4.4 / plan-25 §3.6 namespace split: partition setup-only
         # modules OUT before the per-batch dataset deepcopy. setup-only modules
         # (InputSamples/VDS/ShmStage) never reach GraphDataset, so neither
@@ -232,9 +248,7 @@ class GraphDataModule(lightning.LightningDataModule):
         # the fat prepare_data/setup-repoint subsystem collapsed to reader.restage()).
         self.move_files_temp = move_files_temp
         self._stage_root: Path | None = None
-        self.train_vds_path = train_vds_path
-        self.val_vds_path = val_vds_path
-        self.test_vds_path = test_vds_path
+        # (train/val/test)_vds_path are assigned earlier, before `_wire_vds`.
         self._sinks = dict(sinks) if sinks is not None else None
         # per-mode demand provenance (M3-review fix: a merged map mis-attributed
         # writer-demanded TEST keys to their inactive FIT demander)
@@ -306,6 +320,71 @@ class GraphDataModule(lightning.LightningDataModule):
         for _, samples in existing:
             samples._reader = self._reader_name  # noqa: SLF001 — assembly poke (plan-25 §3.8)
         self._input_samples: InputSamples | None = existing[0][1] if existing else None
+
+    def _wire_vds(self, modules: dict[str, DatasetModule]) -> None:
+        """Assemble the wildcard→VDS setup module (plan-25 §5.1 / W3.B).
+
+        Two responsibilities, mirroring `_wire_input_samples`:
+
+        1. **Auto-injection** (plan-25 §3.3 shape B + §5.1 "VDS, PATH, always"):
+           shape-B YAML shows only ``input_samples`` with glob values and NO
+           explicit ``vds:`` block — so a `VDS` must be present transparently.
+           Whenever an `InputSamples` is present (explicit or alias-synthesised)
+           and no explicit `VDS` is configured, synthesise one (with per-stage
+           ``out`` paths from the deprecated ``train_vds_path``/``val_vds_path``/
+           ``test_vds_path`` kwargs) and add it to the setup-only namespace.
+        2. **Reader wiring** (plan-25 §3.8): poke the single Reader's name and
+           its `vds_capable` flag onto the `VDS` (auto-injected OR explicit), so
+           its ``declare_setup_io``/``setup`` keys match the handoff and the
+           build-vs-identity choice is gated on the reader's capability.
+
+        An auto-injected `VDS` is only synthesised when an `InputSamples` exists:
+        with no source owner there is no ``pattern`` for the `VDS` to consume.
+        An explicit `VDS` in ``data.modules`` overrides the auto-injection and
+        carries its own O-VDS-OUT paths.
+
+        Parameters
+        ----------
+        modules : dict[str, DatasetModule]
+            The full assembled module dict (mutated in place when an implicit
+            `VDS` is synthesised).
+
+        Raises
+        ------
+        ConfigError
+            If more than one `VDS` is configured (one VDS owns the single
+            Reader's wildcard resolution, plan-25 §5.1).
+        """
+        existing = [(name, m) for name, m in modules.items() if isinstance(m, VDS)]
+        if len(existing) > 1:
+            raise ConfigError(
+                f"GraphDataModule allows at most one VDS, got {len(existing)} "
+                f"({[name for name, _ in existing]}); one VDS owns the single Reader's "
+                "wildcard resolution (plan-25 §5.1)"
+            )
+        if not existing and self._input_samples is not None:
+            out = {
+                stage: p
+                for stage, p in (
+                    ("train", self.train_vds_path),
+                    ("val", self.val_vds_path),
+                    ("test", self.test_vds_path),
+                )
+                if p is not None
+            }
+            implicit = VDS(out=out or None)
+            implicit.name = "vds"
+            # add to the module dict; the partition right after picks it up into
+            # `_setup_modules` via `_is_setup_only` (a VDS is setup-only).
+            modules["vds"] = implicit
+            existing = [("vds", implicit)]
+        # plan-25 §3.8 reader wiring: embed the single Reader's name (for the
+        # source.<reader>.* keys) and its vds_capable flag (gates build-vs-identity,
+        # O-VDS-CAP) on the VDS (auto-injected OR explicit).
+        for _, vds in existing:
+            vds._reader = self._reader_name  # noqa: SLF001 — assembly poke (plan-25 §3.8)
+            vds._vds_capable = self._reader_proto.vds_capable  # noqa: SLF001 — assembly poke
+        self._vds: VDS | None = existing[0][1] if existing else None
 
     @property
     def modules(self) -> dict[str, DatasetModule]:
@@ -522,35 +601,6 @@ class GraphDataModule(lightning.LightningDataModule):
             sink_origins=(self._sink_origins or {}).get(mode),
         )
 
-    @staticmethod
-    def _dist_barrier() -> None:
-        """Synchronise all distributed ranks (no-op outside DDP, ``datamodules.py:129-137``)."""
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
-
-    def _precreate_vds_rank0(self, stage: str) -> None:
-        """Resolve VDS files on global rank 0 to avoid the startup stampede.
-
-        Port of ``datamodules.py:139-188``: correctness is enforced by the
-        FileLock inside `salt.core.data.vds.create_vds`; this is a
-        performance/robustness optimisation. Other ranks wait on the barrier.
-        """
-        if self.trainer is None or not self.trainer.is_global_zero:
-            return
-        if stage == "fit":
-            for filename, num, vds, stage_key in (
-                (self.train_file, self.num_train, self.train_vds_path, "train"),
-                (self.val_file, self.num_val, self.val_vds_path, "val"),
-            ):
-                if filename is not None:
-                    reader = self._reader_proto.with_source(filename, num, vds, stage=stage_key)
-                    self._stage(reader).prepare()
-        elif stage == "test" and self.test_file is not None:
-            reader = self._reader_proto.with_source(
-                self.test_file, self.num_test, self.test_vds_path, stage="test"
-            )
-            self._stage(reader).prepare()
-
     def _resolve_stage_root(self, stage: str) -> Path | None:
         """The opt-in staging root for this stage, or None (the thin M8 trigger).
 
@@ -599,10 +649,13 @@ class GraphDataModule(lightning.LightningDataModule):
         resolves each stage's source PATH onto one write-once ctx, then
         ``_make_dataset`` binds the reader from the ctx-resolved deepest key via
         the existing handoff (``with_source(filename=ctx_path, num=..., stage=)``).
-        When opt-in temp staging is active (``move_files_temp`` set, not
-        ``fast_dev_run``) the ``_stage_root`` is armed BEFORE VDS precreation /
-        dataset building, so every per-stage reader restages its own files onto
-        the root (M8 wave 3).
+        Wildcard→VDS resolution is now part of that setup pass (the `VDS` module,
+        plan-25 W3.B) — the rank-0 VDS precreation + DDP barrier are gone, since
+        `create_vds`'s FileLock + ``.done`` marker make every-rank execution safe
+        (plan-25 §5.1 / R-DDP). When opt-in temp staging is active
+        (``move_files_temp`` set, not ``fast_dev_run``) the ``_stage_root`` is
+        armed BEFORE dataset building, so every per-stage reader restages its own
+        files onto the root (M8 wave 3).
 
         Raises
         ------
@@ -615,9 +668,6 @@ class GraphDataModule(lightning.LightningDataModule):
         # ctx (setup("fit") resolves both train+val). _resolve_source then reads
         # the deepest PATH off this ctx; pure path arithmetic, no FS I/O.
         self._run_setup_pass(_STAGE_OF_MODE[m] for m in self._modes_for_stage(stage))
-        if stage in {"fit", "test"} and self.trainer is not None:
-            self._precreate_vds_rank0(stage)
-            self._dist_barrier()
         if stage == "fit":
             train_file, num_train = self._resolve_source(Mode.FIT)
             val_file, num_val = self._resolve_source(Mode.VAL)

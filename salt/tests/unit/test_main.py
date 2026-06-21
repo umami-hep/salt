@@ -234,10 +234,12 @@ class TestNullDeletion:
         # labels can be dropped in TEST-style configs (design §5.3 symmetry);
         # parse-level check only — a labels-less FIT would fail at compile.
         # The deprecated --data.train_file alias synthesises an implicit
-        # InputSamples (plan-25 W3.A / O-ALIAS-WINDOW), so it joins _modules.
+        # InputSamples (plan-25 W3.A / O-ALIAS-WINDOW), so it joins _modules;
+        # a VDS is then auto-injected alongside it (plan-25 W3.B), so it too
+        # joins _modules.
         cli = make_cli(data, extra=["--data.modules.labels=null"])
         dm_modules = cli.datamodule._modules  # noqa: SLF001 - assembly result
-        assert set(dm_modules) == {"reader", "features", "input_samples"}
+        assert set(dm_modules) == {"reader", "features", "input_samples", "vds"}
 
 
 # ---------------------------------------------------------------------------

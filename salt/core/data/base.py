@@ -96,6 +96,19 @@ class DatasetModule(ABC):
     consumed at construction time is config I/O (design §2.6).
     """
 
+    incompatible_with: tuple[str, ...] = ()
+    """Class names of setup modules this module must NOT coexist with (plan-25 Rev-2).
+
+    A reusable DECLARATIVE mutual-exclusion pattern: a module names the *class
+    names* (strings, not types — the named class may not exist yet) it is
+    structurally incompatible with, and the setup-plan compiler — the only thing
+    that sees the full module dict — enforces it (`_check_incompatibilities`).
+    Default `()` (no exclusions). E.g. `VDS` sets ``("ShmStage",)``: staging a
+    VDS would copy h5py pointers, not data (design incompatibility), so the rule
+    LIVES ON `VDS`; the mechanism is added now even though `ShmStage` lands in
+    W3.S.
+    """
+
     def __init__(self) -> None:
         """Initialise the instance name placeholder (assigned from the config key)."""
         self.name: str = _UNNAMED
@@ -204,6 +217,17 @@ class Reader(DatasetModule):
 
     schema: Schema | None = None
     """The dataset schema artifact, when configured (design §2.6)."""
+
+    vds_capable: bool = False
+    """Whether this reader builds an h5py virtual dataset for wildcard sources.
+
+    Plan-25 §5.1 / O-VDS-CAP: the `VDS` setup module gates build-vs-identity on
+    THIS flag (NOT an `isinstance` check). Default `False` on the `Reader` base
+    — a non-`vds_capable` reader (ROOT: `EasyjetReader`/`FTAG1LiteReader`) keeps
+    its own native glob, and the `VDS` module is an IDENTITY edge for it
+    (``vds_path == pattern``, NEVER calling `create_vds` on a ROOT glob, which
+    would crash). `H5StructuredReader` overrides it to `True`.
+    """
 
     @property
     @abstractmethod
