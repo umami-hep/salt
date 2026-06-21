@@ -1,0 +1,90 @@
+# Shared jet (global) feature list -- a VARIABLE-SUPERSET of every test-suite
+# config mapped to recipes whose jets group is the global_object.
+#
+# Authoritative source: salt/utils/inputs.py write_dummy_file `jet_vars`
+# (the 39 float f4 fields) + the 3 int labels (flavour_label,
+# HadronConeExclTruthLabelID, HadronGhostInitialTruthLabelPdgId). Every real
+# detector/regression/label name a mapped config declares is present here, so
+# SaltDataset.check_file / process_labels never KeyError.
+#
+# Why every field is here:
+#  - pt_btagJes / eta_btagJes : declared by EVERY classification/regression config
+#  - softMuon_*               : GN2emu's `global` block (resolved to the jets group)
+#  - HadronConeExclTruthLabel* / R10TruthLabel_* / ptFromTruthDressedWZJet :
+#                               regression targets read via batch[...]
+#  - mass / sample_weight     : regression denominators / per-task weight
+#  - HadronConeExclTruthLabelID : dips jets label + regression_multi_target sel_label
+#  - HadronGhostInitialTruthLabelPdgId : GN3V01 jets_charge label
+#  - flavour_label flag fan-out: default 3 (+taus for GN2.yaml), make_xbb->4, is_gn3->6
+
+# --- float f4 distribution features (inputs.py:458-498 jet_vars) ---
+- { name: pt,          type: distribution, dtype: f4, dist: lognormal }
+- { name: eta,         type: distribution, dtype: f4, dist: normal }
+- { name: mass,        type: distribution, dtype: f4, dist: lognormal }
+- { name: pt_btagJes,  type: distribution, dtype: f4, dist: lognormal }
+- { name: eta_btagJes, type: distribution, dtype: f4, dist: normal }
+- { name: ptFromTruthDressedWZJet,    type: distribution, dtype: f4, dist: lognormal }
+- { name: HadronConeExclTruthLabelPt, type: distribution, dtype: f4, dist: lognormal }
+# NaN where the jet is light (flavour_label == 0); drives nan_regression.yaml.
+- name: HadronConeExclTruthLabelLxy
+  type: distribution
+  dtype: f4
+  nan_where: "flavour_label == 0"
+- { name: n_tracks,             type: distribution, dtype: f4 }
+- { name: n_truth_promptLepton, type: distribution, dtype: f4 }
+- { name: sample_weight,        type: distribution, dtype: f4, dist: uniform }
+- { name: softMuon_pt,    type: distribution, dtype: f4, dist: lognormal }
+- { name: softMuon_dR,    type: distribution, dtype: f4 }
+- { name: softMuon_eta,   type: distribution, dtype: f4, dist: normal }
+- { name: softMuon_phi,   type: distribution, dtype: f4 }
+- { name: softMuon_qOverPratio,                       type: distribution, dtype: f4 }
+- { name: softMuon_momentumBalanceSignificance,       type: distribution, dtype: f4 }
+- { name: softMuon_scatteringNeighbourSignificance,   type: distribution, dtype: f4 }
+- { name: softMuon_pTrel,                  type: distribution, dtype: f4 }
+- { name: softMuon_ip3dD0,                 type: distribution, dtype: f4 }
+- { name: softMuon_ip3dZ0,                 type: distribution, dtype: f4 }
+- { name: softMuon_ip3dD0Significance,     type: distribution, dtype: f4 }
+- { name: softMuon_ip3dZ0Significance,     type: distribution, dtype: f4 }
+- { name: softMuon_ip3dD0Uncertainty,      type: distribution, dtype: f4 }
+- { name: softMuon_ip3dZ0Uncertainty,      type: distribution, dtype: f4 }
+- { name: R10TruthLabel_R22v1,             type: distribution, dtype: f4 }
+- { name: R10TruthLabel_R22v1_TruthJetMass, type: distribution, dtype: f4, dist: lognormal }
+- { name: R10TruthLabel_R22v1_TruthJetPt,   type: distribution, dtype: f4, dist: lognormal }
+- { name: GN2Xv00_phbb, type: distribution, dtype: f4 }
+- { name: GN2Xv00_phcc, type: distribution, dtype: f4 }
+- { name: GN2Xv00_ptop, type: distribution, dtype: f4 }
+- { name: GN2Xv00_pqcd, type: distribution, dtype: f4 }
+- { name: GN2XWithMassv00_phbb, type: distribution, dtype: f4 }
+- { name: GN2XWithMassv00_phcc, type: distribution, dtype: f4 }
+- { name: GN2XWithMassv00_ptop, type: distribution, dtype: f4 }
+- { name: GN2XWithMassv00_pqcd, type: distribution, dtype: f4 }
+- { name: Xbb2020v3_Higgs, type: distribution, dtype: f4 }
+- { name: Xbb2020v3_Top,   type: distribution, dtype: f4 }
+- { name: Xbb2020v3_QCD,   type: distribution, dtype: f4 }
+
+# --- int i4 labels (inputs.py:552-574) ---
+# flavour_label flag fan-out (classes_by_flag mirrors write_dummy_file's
+# make_xbb / is_gn3 / default ladder; class_names_append_if appends 'taus' for
+# GN2.yaml via inc_taus).
+- name: flavour_label
+  type: label
+  dtype: i4
+  classes: [0, 1, 2, 3, 4, 5]
+  sample_classes: [0, 1, 2]
+  class_names: [bjets, cjets, ujets]
+  class_names_append_if:
+    inc_taus: [taus]
+  classes_by_flag:
+    make_xbb: [0, 1, 2, 3]
+    is_gn3:   [0, 1, 2, 3, 4, 5]
+  class_names_by_flag:
+    make_xbb: [hbb, hcc, top, qcd]
+    is_gn3:   [ghostsplitbjets, ghostsplitcjets, ghostsplitsjets, ghostsplitudjets, ghostsplitgjets, ghostsplittaujets]
+- name: HadronConeExclTruthLabelID
+  type: label
+  dtype: i4
+  classes: [0, 4, 5]
+- name: HadronGhostInitialTruthLabelPdgId
+  type: label
+  dtype: i4
+  classes: [0, 15, -511, 521, 10511, 441]

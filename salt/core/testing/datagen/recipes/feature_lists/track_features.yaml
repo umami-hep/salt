@@ -1,0 +1,64 @@
+# Shared track (constituent) feature list -- a VARIABLE-SUPERSET of every
+# test-suite config's `tracks` block (also reused for the tracks_dr / tracks_ghost
+# alias groups the GN3 input_map remaps onto).
+#
+# Authoritative source: salt/utils/inputs.py write_dummy_file `TRACK_VARS`
+# (32 float f4) + the 4 int labels (ftagTruthOriginLabel, ftagTruthTypeLabel,
+# ftagTruthVertexIndex, ftagTruthParentBarcode).
+#
+# Covers: GN2/MaskFormer/regression* (IP3D_signed_*), GN3V00/V01
+# (lifetimeSigned* + leptonID + muon_*), dips (numberOf*Holes), GN2XE
+# (pt/eta/phi/subjetIndex). The MaskFormer link field ftagTruthParentBarcode is
+# injected by TruthHadronInserter (NOT listed here, so the generic Tracks module
+# does not emit it spuriously).
+
+# --- float f4 distribution features (inputs.py:56-90 TRACK_VARS) ---
+- { name: d0,         type: distribution, dtype: f4, dist: normal }
+- { name: z0SinTheta, type: distribution, dtype: f4, dist: normal }
+- { name: dphi,       type: distribution, dtype: f4 }
+- { name: deta,       type: distribution, dtype: f4 }
+- { name: qOverP,     type: distribution, dtype: f4 }
+- { name: IP3D_signed_d0_significance, type: distribution, dtype: f4 }
+- { name: IP3D_signed_z0_significance, type: distribution, dtype: f4 }
+- { name: lifetimeSignedD0Significance,            type: distribution, dtype: f4 }
+- { name: lifetimeSignedZ0SinThetaSignificance,    type: distribution, dtype: f4 }
+- { name: phiUncertainty,    type: distribution, dtype: f4 }
+- { name: thetaUncertainty,  type: distribution, dtype: f4 }
+- { name: qOverPUncertainty, type: distribution, dtype: f4 }
+- { name: numberOfPixelHits, type: distribution, dtype: f4 }
+- { name: numberOfSCTHits,   type: distribution, dtype: f4 }
+- { name: numberOfInnermostPixelLayerHits,        type: distribution, dtype: f4 }
+- { name: numberOfNextToInnermostPixelLayerHits,  type: distribution, dtype: f4 }
+- { name: numberOfInnermostPixelLayerSharedHits,  type: distribution, dtype: f4 }
+- { name: numberOfInnermostPixelLayerSplitHits,   type: distribution, dtype: f4 }
+- { name: numberOfPixelSharedHits, type: distribution, dtype: f4 }
+- { name: numberOfPixelSplitHits,  type: distribution, dtype: f4 }
+- { name: numberOfSCTSharedHits,   type: distribution, dtype: f4 }
+- { name: numberOfPixelHoles, type: distribution, dtype: f4 }
+- { name: numberOfSCTHoles,   type: distribution, dtype: f4 }
+- { name: pt,          type: distribution, dtype: f4, dist: lognormal }
+- { name: eta,         type: distribution, dtype: f4, dist: normal }
+- { name: phi,         type: distribution, dtype: f4 }
+- { name: subjetIndex, type: distribution, dtype: f4 }
+- { name: leptonID,    type: distribution, dtype: f4 }
+# soft-muon-specific track vars (GN3V00 / GN3V01)
+- { name: muon_quality,                       type: distribution, dtype: f4 }
+- { name: muon_qOverPratio,                   type: distribution, dtype: f4 }
+- { name: muon_momentumBalanceSignificance,   type: distribution, dtype: f4 }
+- { name: muon_scatteringNeighbourSignificance, type: distribution, dtype: f4 }
+
+# --- int i4 labels (inputs.py:599-606) ---
+- name: ftagTruthOriginLabel
+  type: label
+  dtype: i4
+  classes: [0, 1, 2, 3, 4, 5, 6, 7]
+  sample_classes: [0, 1, 2, 3]
+- name: ftagTruthTypeLabel
+  type: label
+  dtype: i4
+  classes: [-2, -3, 5, -5, 6, -6]
+  invalid_fill: 0
+- name: ftagTruthVertexIndex
+  type: label
+  dtype: i4
+  classes: [0]
