@@ -16,8 +16,9 @@ from .engine import generate_data
 from .io import compute_class_dict, compute_norm_dict, write_h5
 from .schema import load_schema
 
-# the example schema reproducing the current dummy file
-SCHEMA_PATH = Path(__file__).resolve().parents[5] / "example_schema.yaml"
+# the bundled schema reproducing salt v1 write_dummy_file (committed beside the
+# pipeline recipes; robust __file__-relative path, overridable via env)
+SCHEMA_PATH = Path(__file__).resolve().parent / "recipes" / "salt-v1-schema.yaml"
 
 
 def _resolve_schema_path(schema_path: str | Path | None) -> Path:

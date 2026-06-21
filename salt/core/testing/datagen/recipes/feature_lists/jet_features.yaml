@@ -69,7 +69,14 @@
 - name: flavour_label
   type: label
   dtype: i4
-  classes: [0, 1, 2, 3, 4, 5]
+  # Default class set is length 4 (b/c/u + taus) to match GN2.yaml's
+  # jets_classification head output_size: 4 + use_class_dict: True (the only
+  # default-flavour config that reads the flavour_label class_dict; its weight
+  # list length must equal output_size or CrossEntropyLoss raises a weight-size
+  # RuntimeError). write_dummy_file draws only [0,1,2] by default (taus declared
+  # but undrawn -> zero count -> 0.0 weight), exactly like the legacy length-4
+  # default class_dict. make_xbb / is_gn3 override the set via classes_by_flag.
+  classes: [0, 1, 2, 3]
   sample_classes: [0, 1, 2]
   class_names: [bjets, cjets, ujets]
   class_names_append_if:
