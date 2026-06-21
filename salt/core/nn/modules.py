@@ -2123,49 +2123,105 @@ def _stream_len(stream: str) -> str:
 
 
 class Normaliser(nn.Module):
-    """Config-constructed input normalisation (design §6.3, replaces v1 `InputNorm`).
+    """Self-normalising input layer with online masked running statistics.
 
-    Lifecycle (design §2.3): ``__init__`` records the ``norm_dict`` *path*
-    and the stream list — no file I/O. ``bind(schema)`` allocates per-stream
-    buffers (``means_<stream>`` / ``stds_<stream>``, the design §6.3 names)
-    sized from the resolved ``inputs.<stream>`` widths, and captures the
-    declared variable names. ``materialise()`` is the ONLY file-touching
-    hook: it loads the norm dict and fills the buffers — skipped on
-    checkpoint load, where values arrive via the state_dict (the
-    ``materialised`` flag buffer travels with them).
+    A ``BatchNorm``-style replacement for the v1 ``InputNorm``: instead of
+    reading a pre-computed ``norm_dict.yaml`` (per-stream, per-variable
+    ``{mean, std}``), this module **learns its own normalisation statistics
+    online during training**, accumulating running mean/var over the
+    *valid, non-padded* objects of every training batch. There is therefore
+    no norm-dict dependency, no preprocessing pass, and no file I/O.
+
+    Apply-with-running-stats (NOT batch stats)
+    -----------------------------------------
+    Unlike true ``nn.BatchNorm``, which normalises with *batch* statistics
+    in train mode, this layer ALWAYS applies the **running** buffers:
+    ``normed = (x - running_mean) / sqrt(running_var + eps)``. For input
+    normalisation that keeps the rescaling stable within and across batches
+    (batch-stat normalisation would make the input mapping batch-composition
+    dependent and noisy). The running buffers are updated *separately* from
+    the masked batch statistics during training only — closer to a "norm
+    dict that adapts" than to classic BatchNorm. Init is identity (mean 0,
+    var 1), so a fresh model is a near-passthrough that warms up.
+
+    Masked online update (train only)
+    ---------------------------------
+    On a *training* forward (``self.training`` True, à la BatchNorm), for
+    each stream the per-feature batch ``sum``, ``sumsq`` and ``count`` are
+    computed over VALID objects only — sequence streams gather ``x[~mask]``
+    (``masks.<stream>`` with ``True == padded``); the ``global_object`` has
+    no mask (all rows valid). Under DDP these three quantities are
+    all-reduced across ranks (never the per-rank mean/var, which cannot be
+    averaged correctly when counts/means differ across ranks) before the
+    global batch mean/var are derived. The EMA update is then
+    ``running = (1 - momentum) * running + momentum * batch`` with
+    ``num_batches_tracked += 1``. Empty (all-padded) streams skip the update.
+
+    Eval / inference / ONNX (frozen)
+    --------------------------------
+    In eval mode (``self.training`` False) and under tracing the update
+    branch and the mask read are both skipped: ``forward`` reduces to
+    ``(x - running_mean) / sqrt(running_var + eps)``. The ``masks.<stream>``
+    requirement is therefore declared **training-only** (``Mode.TRAINING``),
+    so TEST/ONNX graphs do not demand a mask input and the export op is a
+    pure affine transform with constant buffers.
+
+    Lifecycle
+    ---------
+    ``__init__`` records config only (no I/O). ``bind(schema)`` allocates
+    per-stream buffers ``running_mean_<stream>`` (zeros) /
+    ``running_var_<stream>`` (ones) / ``num_batches_tracked_<stream>``
+    (long 0) sized from the resolved ``inputs.<stream>`` widths. There is no
+    ``materialise``/``preflight`` file hook — the buffers self-populate
+    during training and ride in the checkpoint state_dict; on checkpoint
+    load the stored buffers are restored verbatim and no warmup is needed.
+    The legacy ``norm_dict`` constructor arg is kept for config
+    compatibility but is **ignored** (no file is ever read).
 
     Unlike v1's ``InputNorm.forward`` (which rebinds its input dict's keys
     in place, inputnorm.py:103-106), this module produces NEW
     ``normed.<stream>`` keys and never mutates ``inputs.*`` (design §2.1).
-    Because ``normed.*`` and ``inputs.*`` are distinct keys, consumers of
-    raw inputs (edge features) need no ordering hack (design §6.3).
     """
 
     def __init__(
         self,
-        norm_dict: str | Path,
         streams: Sequence[str],
         global_object: str | None = None,
+        norm_dict: str | Path | None = None,
+        momentum: float | None = 0.1,
+        eps: float = 1e-5,
     ) -> None:
         """Capture config only (design §2.3 — no file I/O here).
 
         Parameters
         ----------
-        norm_dict : str | Path
-            Path to the normalisation dictionary YAML; read at
-            `materialise`, never here.
         streams : Sequence[str]
-            Streams to normalise (explicit M2 surface — see the module
-            docstring for the demand-driven TODO).
+            Streams to normalise (explicit M2 surface).
         global_object : str | None, optional
             The stream that is a per-object vector (``[B, F]``) rather than
-            a padded sequence (``[B, T, F]``), by default None.
+            a padded sequence (``[B, T, F]``), by default None. The global
+            object has no pad mask — every row is valid.
+        norm_dict : str | Path | None, optional
+            DEPRECATED / IGNORED. Kept only for config compatibility — the
+            statistics are now learned online, never read from a file. No
+            I/O is performed regardless of this value, by default None.
+        momentum : float | None, optional
+            EMA momentum for the running-stat update (BatchNorm default
+            ``0.1``): ``running = (1 - momentum) * running + momentum *
+            batch``. A fixed momentum tracks an exponentially-weighted
+            trajectory and does NOT converge to the exact finite-dataset
+            aggregate. Pass ``None`` for cumulative moving average
+            (``momentum = 1 / num_batches_tracked``, like BatchNorm) which
+            DOES converge to the true masked dataset mean/var, by default
+            0.1.
+        eps : float, optional
+            Added under the sqrt for numerical stability, by default 1e-5.
 
         Raises
         ------
         ConfigError
-            If `streams` is empty, contains duplicates, or `global_object`
-            is not one of them.
+            If `streams` is empty, contains duplicates, `global_object` is
+            not one of them, or `momentum`/`eps` are out of range.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -2177,10 +2233,17 @@ class Normaliser(nn.Module):
             raise ConfigError(
                 f"Normaliser: global_object {global_object!r} is not in streams {tuple(streams)}"
             )
-        self.norm_dict_path = Path(norm_dict)
+        if momentum is not None and not 0.0 <= momentum <= 1.0:
+            raise ConfigError(f"Normaliser: momentum must be None or in [0, 1], got {momentum}")
+        if eps <= 0.0:
+            raise ConfigError(f"Normaliser: eps must be positive, got {eps}")
+        # norm_dict is intentionally ignored (stats are learned online); kept in
+        # the signature only so existing configs / CLI overrides still parse.
+        del norm_dict
         self.streams = tuple(streams)
         self.global_object = global_object
-        self._fields: dict[str, tuple[str, ...]] = {}
+        self.momentum = None if momentum is None else float(momentum)
+        self.eps = float(eps)
         self._bound = False
 
     def _spec(self, stream: str) -> TensorSpec:
@@ -2203,7 +2266,20 @@ class Normaliser(nn.Module):
         return TensorSpec(shape=shape, dtype="float32")
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``inputs.<stream>`` -> ``normed.<stream>`` for every stream.
+        """Declare ``inputs.<stream>`` (+ training ``masks.<stream>``) -> ``normed.<stream>``.
+
+        Every stream requires ``inputs.<stream>`` and produces
+        ``normed.<stream>`` in all modes. Sequence streams ALSO require
+        ``masks.<stream>`` (the pad mask, ``True == padded``) but ONLY in
+        training modes (``Mode.TRAINING == FIT | VAL``) and as an OPTIONAL
+        port: the mask is read only when updating the running statistics
+        (under ``self.training``), and a stream without a pad-mask producer
+        (e.g. a rank-2/rank-3 stream that is all-valid) simply has every
+        object treated as valid. Gating the require to ``Mode.TRAINING``
+        (rather than ``FIT`` alone) keeps the FIT and VAL plans structurally
+        identical (``SaltModule._assert_fit_val_identical``) while leaving
+        TEST/ONNX free of any mask dependency — so the exported graph is a
+        pure affine transform. The ``global_object`` declares no mask at all.
 
         Returns
         -------
@@ -2211,194 +2287,168 @@ class Normaliser(nn.Module):
             The declared requires/produces.
         """
         del mode
+        requires: dict[str, TensorSpec] = {f"inputs.{s}": self._spec(s) for s in self.streams}
+        for stream in self.streams:
+            if stream == self.global_object:
+                continue
+            requires[f"masks.{stream}"] = TensorSpec(
+                shape=("B", _stream_len(stream)),
+                dtype="bool",
+                kind="pad_mask",
+                modes=Mode.TRAINING,
+                optional=True,
+            )
         return IO(
-            requires=unflatten_spec({f"inputs.{s}": self._spec(s) for s in self.streams}),
+            requires=unflatten_spec(requires),
             produces=unflatten_spec({f"normed.{s}": self._spec(s) for s in self.streams}),
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Allocate normalisation buffers from the resolved schema (config-only).
+        """Allocate the running-statistic buffers from the resolved schema.
 
-        Buffers are named ``means_<stream>`` / ``stds_<stream>`` (design
-        §6.3 checkpoint layout) and initialised to identity (0/1); the
-        boolean ``materialised`` buffer guards against silently training on
-        un-normalised values. Field names are captured here for
-        `materialise`'s per-variable lookup; a `BindError` propagates from
-        the schema if a stream's width or fields are not statically
-        resolved.
+        Per stream, registers ``running_mean_<stream>`` (zeros),
+        ``running_var_<stream>`` (ones) and ``num_batches_tracked_<stream>``
+        (long 0), sized from the resolved ``inputs.<stream>`` width. Init is
+        identity normalisation (mean 0 / var 1) so a fresh model is a
+        near-passthrough that warms up as the running stats accumulate. A
+        `BindError` propagates from the schema if a stream's width is not
+        statically resolved.
 
         Raises
         ------
         RuntimeError
-            If called twice (rebinding would discard loaded values).
+            If called twice (rebinding would discard learned values).
         """
         if self._bound:
             raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
         for stream in self.streams:
-            key = f"inputs.{stream}"
-            width = schema.width(key)
-            self._fields[stream] = schema.fields_of(key)
-            self.register_buffer(f"means_{stream}", torch.zeros(width))
-            self.register_buffer(f"stds_{stream}", torch.ones(width))
-        self.register_buffer("materialised", torch.tensor(False))
+            width = schema.width(f"inputs.{stream}")
+            self.register_buffer(f"running_mean_{stream}", torch.zeros(width))
+            self.register_buffer(f"running_var_{stream}", torch.ones(width))
+            self.register_buffer(
+                f"num_batches_tracked_{stream}", torch.zeros((), dtype=torch.long)
+            )
+            # total VALID-object count seen (cumulative-averaging path only)
+            self.register_buffer(f"num_objects_seen_{stream}", torch.zeros((), dtype=torch.long))
         self._bound = True
 
-    def preflight(self) -> None:
-        """Fail-fast, data-free norm-dict validation (M3 leftover, design §2.3).
+    @staticmethod
+    def _masked_moments(x: Tensor, valid: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
+        """Compute per-feature ``(sum, sumsq, count)`` over valid objects.
 
-        Without this check a wrong ``norm_dict`` path/content only surfaces
-        at `materialise` — after dataset setup and plan compilation. The
-        preflight reads ONLY the norm-dict YAML (config I/O in the design
-        §2.6 sense — no H5/bind I/O): the file must exist, parse, and carry
-        every configured stream; when the module is already bound (the
-        `SaltModule.setup` call site) the per-variable mean/std entries are
-        checked too, mirroring `materialise`'s validation. Called by
-        `SaltModule.setup` on fresh fits (hard error) and by ``salt2 graph
-        validate`` (warning — data-less machines stay supported).
+        `x` is ``[B, T, F]`` (sequence) or ``[B, F]`` (global); for a
+        sequence stream `valid` is the boolean keep-mask ``[B, T]`` (the
+        complement of the pad mask, ``True == valid``); for the global
+        object `valid` is None (all rows kept). Reduction collapses every
+        non-feature axis so the three returned tensors are ``[F]``; `count`
+        is a scalar tensor (number of valid objects, summed over the batch).
 
-        Raises
-        ------
-        ConfigError
-            On a missing/unparsable norm dict, a missing stream, or (when
-            bound) missing/non-finite/zero-std variable entries.
+        Returns
+        -------
+        tuple[Tensor, Tensor, Tensor]
+            ``(sum_[F], sumsq_[F], count_scalar)``.
         """
-        path = self.norm_dict_path
-        prefix = f"Normaliser {self.name!r} preflight"
-        fix = (
-            f"  fix: point model.modules.{self.name}.init_args.norm_dict at the "
-            "preprocessing norm_dict.yaml for this sample"
-        )
-        if not path.is_file():
-            raise ConfigError(f"{prefix}: norm dict not found: {path}\n{fix}")
-        try:
-            with open(path) as fh:
-                norm_dict = yaml.safe_load(fh)
-        except yaml.YAMLError as err:
-            raise ConfigError(
-                f"{prefix}: norm dict {path} is not valid YAML: {err}\n{fix}"
-            ) from err
-        if not isinstance(norm_dict, dict):
-            raise ConfigError(f"{prefix}: norm dict {path} must be a mapping\n{fix}")
-        for stream in self.streams:
-            if stream not in norm_dict:
-                raise ConfigError(
-                    f"{prefix}: missing input type {stream!r} in {path}. "
-                    f"Choose from {sorted(norm_dict)}."
-                )
-            if not self._fields:
-                continue  # unbound (the data-free `salt2 graph validate` path)
-            variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[stream]):
-                raise ConfigError(
-                    f"{prefix}: missing variables {sorted(missing)} for {stream!r} in {path}. "
-                    f"Choose from {sorted(norm_dict[stream])}.\n"
-                    f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove "
-                    f"them from the features variable list "
-                    f"(config: data.modules.features.init_args.variables.{stream})"
-                )
-            for variable in variables:
-                entry = norm_dict[stream][variable]
-                try:
-                    mean, std = float(entry["mean"]), float(entry["std"])
-                except (KeyError, TypeError, ValueError):
-                    raise ConfigError(
-                        f"{prefix}: entry for {stream}.{variable} in {path} must be a "
-                        f"{{mean, std}} mapping, got {entry!r}"
-                    ) from None
-                if not (torch.isfinite(torch.tensor(mean)) and torch.isfinite(torch.tensor(std))):
-                    raise ConfigError(
-                        f"{prefix}: non-finite normalisation parameters for "
-                        f"{stream}.{variable} in {path}."
-                    )
-                if std == 0:
-                    raise ConfigError(
-                        f"{prefix}: zero standard deviation for {stream}.{variable} in {path}."
-                    )
+        # valid is None for the global object (all rows valid); otherwise gather
+        # the valid (non-padded) rows of the sequence stream.
+        flat = x.reshape(-1, x.shape[-1]) if valid is None else x[valid]
+        count = torch.tensor(flat.shape[0], dtype=x.dtype, device=x.device)
+        return flat.sum(0), (flat * flat).sum(0), count
 
-    def materialise(self) -> None:
-        """Fill the buffers from the norm dict (the ONLY file I/O, design §2.3).
+    @torch.no_grad()
+    def _update_running_stats(self, stream: str, x: Tensor, valid: Tensor | None) -> None:
+        """EMA-update the running stats for one stream from masked batch moments.
 
-        Mirrors v1 `InputNorm`'s validation (inputnorm.py:56-88): missing
-        streams/variables, non-finite values, and zero stds are errors.
-
-        Raises
-        ------
-        RuntimeError
-            If called before `bind`.
-        ValueError
-            If the norm dict is missing this module's streams or variables,
-            or contains non-finite means/stds or zero stds.
+        Computes per-feature ``(sum, sumsq, count)`` over valid objects,
+        all-reduces those three quantities across DDP ranks (so the running
+        buffers reflect the GLOBAL batch, not a single rank's shard — never
+        averaging per-rank mean/var, which is wrong when counts/means
+        differ), derives the global batch mean/var, and applies the EMA
+        ``running = (1 - momentum) * running + momentum * batch``. An
+        all-padded stream (global count 0) is skipped. ``num_batches_tracked``
+        increments only when an update actually happens.
         """
-        if not self._bound:
-            raise RuntimeError(f"Normaliser {self.name!r}: materialise() before bind()")
-        with open(self.norm_dict_path) as fh:
-            norm_dict = yaml.safe_load(fh)
-        for stream in self.streams:
-            if stream not in norm_dict:
-                raise ValueError(
-                    f"Missing input type {stream!r} in {self.norm_dict_path}. "
-                    f"Choose from {sorted(norm_dict)}."
-                )
-            variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[stream]):
-                raise ValueError(
-                    f"Missing variables {sorted(missing)} for {stream!r} in "
-                    f"{self.norm_dict_path}. Choose from {sorted(norm_dict[stream])}.\n"
-                    f"  fix: add mean/std entries for {sorted(missing)} to "
-                    f"{self.norm_dict_path}, or remove them from the features variable "
-                    f"list (config: data.modules.features.init_args.variables.{stream})"
-                )
-            means = torch.as_tensor(
-                [float(norm_dict[stream][v]["mean"]) for v in variables], dtype=torch.float32
-            )
-            stds = torch.as_tensor(
-                [float(norm_dict[stream][v]["std"]) for v in variables], dtype=torch.float32
-            )
-            if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
-                raise ValueError(
-                    f"Non-finite normalisation parameters for {stream!r} in {self.norm_dict_path}."
-                )
-            if (stds == 0).any():
-                raise ValueError(
-                    f"Zero standard deviation for {stream!r} in {self.norm_dict_path}."
-                )
-            with torch.no_grad():
-                getattr(self, f"means_{stream}").copy_(means)
-                getattr(self, f"stds_{stream}").copy_(stds)
-        self.materialised.fill_(True)
+        s_sum, s_sumsq, count = self._masked_moments(x, valid)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            packed = torch.cat([s_sum, s_sumsq, count.reshape(1)])
+            torch.distributed.all_reduce(packed, op=torch.distributed.ReduceOp.SUM)
+            f = s_sum.shape[0]
+            s_sum, s_sumsq, count = packed[:f], packed[f : 2 * f], packed[2 * f]
+        if count.item() == 0:
+            return  # all-padded batch (global) — nothing valid to learn from
+        batch_mean = s_sum / count
+        # population (biased) variance over valid objects: E[x^2] - E[x]^2,
+        # clamped to >= 0 against tiny float negatives.
+        batch_var = (s_sumsq / count - batch_mean * batch_mean).clamp_min(0.0)
+        getattr(self, f"num_batches_tracked_{stream}").add_(1)
+        running_mean = getattr(self, f"running_mean_{stream}")
+        running_var = getattr(self, f"running_var_{stream}")
+        if self.momentum is None:
+            # Cumulative (BatchNorm momentum=None): OBJECT-count-weighted pooling
+            # via the parallel/chunked moment combination (Chan et al.), so the
+            # buffers equal the EXACT pooled masked dataset mean/var regardless
+            # of per-batch valid counts (converges to the true aggregate).
+            seen = getattr(self, f"num_objects_seen_{stream}")
+            n_old = seen.to(batch_mean.dtype)
+            n_new = n_old + count
+            delta = batch_mean - running_mean
+            # combined mean
+            new_mean = running_mean + delta * (count / n_new)
+            # combined population variance (M2 accumulation form)
+            m_old = running_var * n_old
+            m_new = batch_var * count
+            new_var = (m_old + m_new + delta * delta * (n_old * count / n_new)) / n_new
+            running_mean.copy_(new_mean)
+            running_var.copy_(new_var)
+            seen.add_(count.long())
+        else:
+            mom = self.momentum
+            running_mean.mul_(1 - mom).add_(batch_mean, alpha=mom)
+            running_var.mul_(1 - mom).add_(batch_var, alpha=mom)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Produce ``normed.<stream> = (inputs.<stream> - means) / stds``.
+        """Apply running-stat normalisation; update the stats in train mode.
+
+        Always applies the frozen running buffers,
+        ``normed.<stream> = (inputs.<stream> - running_mean)
+        / sqrt(running_var + eps)``, producing NEW keys and never mutating
+        ``inputs.*`` (design §2.1/§2.5). The running statistics are updated
+        from the masked batch moments (valid objects only) iff ALL of:
+        ``self.training`` is True (BatchNorm-style gate — Lightning calls
+        ``.train()`` for fit, ``.eval()`` for val/test), the plan ``mode`` is
+        a training mode (``Mode.TRAINING``), and the graph is not being
+        traced. Conjoining the mode keeps the update (and the mask read) in
+        lockstep with the training-only ``masks.<stream>`` requirement, so a
+        TEST/ONNX plan never reads a mask even on a module left in the
+        default ``training=True`` state. In eval/inference/ONNX the op
+        reduces to a pure affine transform with constant buffers.
 
         Returns
         -------
         dict[str, Tensor]
-            The newly produced keys only (design §2.5); inputs are never
-            mutated.
-
-        Raises
-        ------
-        RuntimeError
-            If the buffers were never materialised (fresh fit without
-            `materialise`) — identity values would silently train
-            un-normalised.
+            The newly produced ``normed.<stream>`` keys only.
         """
-        del mode
-        # skip under tracing: the tensor->bool read would emit a spurious
-        # TracerWarning on every export. Tracing is still guarded —
-        # OnnxAdapter rejects unmaterialised modules at construction, before
-        # any trace (the eager path keeps this check).
-        if not torch.jit.is_tracing() and not bool(self.materialised):
-            raise RuntimeError(
-                f"Normaliser {self.name!r}: forward before materialise() — on a fresh fit "
-                "call materialise(); on checkpoint load the state_dict provides the values "
-                "(design §2.3)"
+        updating = self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing()
+        if updating:
+            for stream in self.streams:
+                x = b.get(f"inputs.{stream}")
+                # global object has no pad mask; a sequence stream with a pad
+                # mask gathers valid rows via ~pad_mask (mask True == padded);
+                # a mask-less stream (optional port with no producer) treats
+                # every object as valid (valid=None).
+                mask_key = f"masks.{stream}"
+                if stream == self.global_object or mask_key not in b:
+                    valid = None
+                else:
+                    valid = ~b.get(mask_key)
+                self._update_running_stats(stream, x, valid)
+        out: dict[str, Tensor] = {}
+        for stream in self.streams:
+            mean = getattr(self, f"running_mean_{stream}")
+            var = getattr(self, f"running_var_{stream}")
+            out[f"normed.{stream}"] = (b.get(f"inputs.{stream}") - mean) / torch.sqrt(
+                var + self.eps
             )
-        return {
-            f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"means_{s}"))
-            / getattr(self, f"stds_{s}")
-            for s in self.streams
-        }
+        return out
 
 
 class StreamEmbed(nn.Module):

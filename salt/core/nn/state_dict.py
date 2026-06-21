@@ -10,7 +10,8 @@ Key correspondences (all v1 paths from modelwrapper.py / saltmodel.py):
 ==============================  ==========================================
 v1 key prefix                   v2 key prefix
 ==============================  ==========================================
-``norm.<stream>_means/_stds``   ``<norm>.means_<stream>`` / ``stds_<stream>``
+``norm.<stream>_means``         ``<norm>.running_mean_<stream>``
+``norm.<stream>_stds``          ``<norm>.running_var_<stream>`` (= std**2)
 ``model.init_nets.<i>.net.*``   ``<embed[stream_i]>.net.*``
 ``model.encoder.*``             ``<encoder>.encoder.*``
 ``model.pool_net.*``            ``<pool>.pool_net.*``
@@ -27,9 +28,10 @@ to override.
 
 The mapping is total by construction: any unconsumed v1 key is an error
 (silent weight drops are exactly the failure class the gates exist to
-catch). The one synthesised v2-only key is the Normaliser's
-``materialised`` flag — transferred v1 buffers are real values, so it is
-set True (checkpoint-load semantics, design §2.3).
+catch). The synthesised v2-only keys are the self-normalising Normaliser's
+bookkeeping buffers (``num_batches_tracked_<stream>`` set to 1,
+``num_objects_seen_<stream>`` to 0) — the transferred v1 means/stds become
+the running mean/var, so the migrated model starts already warmed up.
 """
 
 from __future__ import annotations
@@ -133,6 +135,7 @@ def map_v1_state_dict(
 
     out: dict[str, Tensor] = {}
     unmapped: list[str] = []
+    norm_streams: set[str] = set()
     for key, value in v1_sd.items():
         if (match := _NORM_RE.match(key)) is not None:
             stream, kind = match.groups()
@@ -141,7 +144,18 @@ def map_v1_state_dict(
                     f"map_v1_state_dict: v1 norm buffer for stream {stream!r} has no v2 "
                     f"counterpart — Normaliser streams are {norm[1].streams}"
                 )
-            out[f"{norm[0]}.{kind}_{stream}"] = value
+            norm_streams.add(stream)
+            # The self-normalising v2 Normaliser stores running_mean/running_var
+            # (not means/stds). v1's `(x - mean) / std` maps to v2's
+            # `(x - running_mean) / sqrt(running_var + eps)` with
+            # running_mean = v1.means and running_var = v1.stds**2. This is the
+            # migration path: a v1 checkpoint loads as a Normaliser already
+            # "warmed up" to the v1 statistics (the tiny eps under the sqrt is
+            # the deliberate, documented departure from v1 bitwise parity).
+            if kind == "means":
+                out[f"{norm[0]}.running_mean_{stream}"] = value
+            else:  # stds -> variance
+                out[f"{norm[0]}.running_var_{stream}"] = value * value
         elif (match := _INIT_NET_RE.match(key)) is not None:
             index, rest = int(match.group(1)), match.group(2)
             if index >= len(embed_names):
@@ -173,8 +187,15 @@ def map_v1_state_dict(
             f"map_v1_state_dict: {len(unmapped)} v1 keys have no v2 mapping (nothing is "
             f"dropped silently): {sorted(unmapped)}"
         )
-    # transferred values are real — checkpoint-load semantics (design §2.3)
-    out[f"{norm[0]}.materialised"] = torch.tensor(True)
+    # Synthesise the v2 Normaliser bookkeeping buffers that v1 has no
+    # counterpart for: the transferred stats count as "seen" so the running
+    # buffers are treated as warmed up (num_batches_tracked set to 1; the exact
+    # object count is unknown, so num_objects_seen is left at 0 — only the
+    # cumulative momentum=None path would consume it, and a migrated model
+    # continues under its configured fixed momentum).
+    for stream in norm_streams:
+        out[f"{norm[0]}.num_batches_tracked_{stream}"] = torch.tensor(1, dtype=torch.long)
+        out[f"{norm[0]}.num_objects_seen_{stream}"] = torch.tensor(0, dtype=torch.long)
     return out
 
 

@@ -298,7 +298,9 @@ def two_stream(tmp_path_factory):
     resolved = attach_manifest(resolve_export_config(export_cfg, "two_stream"), manifest)
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
-    modules["norm"].materialise()
+    # self-normalising Normaliser: buffers self-populate during training and are
+    # at their identity init here (no norm-dict materialise). Identity is a valid
+    # frozen state — this fixture compares eager-v2 vs ONNX-traced-v2, not v1.
     result = export_graph(
         modules, export_cfg, variables, tmp / "two.onnx", outputs=manifest, run_name="two_stream"
     )
