@@ -1,51 +1,9 @@
-from typing import Any
-
-import scipy
 import torch
 from py_lap_solver.solvers import Solvers
 from torch import Tensor, nn
 from torch.nn import functional
 
 SOLVER_REGISTRY = Solvers.get_available_solvers()
-
-
-def fill_default_indices_loop(assignments: torch.Tensor) -> torch.Tensor:
-    """Fill ``-1`` entries with ascending unused indices.
-
-    Parameters
-    ----------
-    assignments : torch.Tensor
-        Assignment tensor.
-
-    Returns
-    -------
-    torch.Tensor
-        Assignment tensor with unmatched entries filled.
-    """
-    out = assignments.long().clone()
-    batch_size, num_objects = out.shape
-    device = out.device
-    default = torch.arange(num_objects, device=device)
-
-    for b in range(batch_size):
-        row = out[b]
-        neg = row.eq(-1)
-        k = int(neg.sum().item())
-        if k == 0:
-            continue
-        used = torch.zeros(num_objects, dtype=torch.bool, device=device)
-        pos_vals = row[~neg]
-        if pos_vals.numel():
-            used[pos_vals.clamp_min(0)] = True
-        unused = default[~used]  # ascending
-        # pad with 0..N-1 if we still need more (allows duplicates)
-        if unused.numel() < k:
-            pad = default[: k - unused.numel()]
-            fill = torch.cat([unused, pad], dim=0)
-        else:
-            fill = unused[:k]
-        row[neg] = fill
-    return out
 
 
 def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: int) -> Tensor:
@@ -252,8 +210,13 @@ class HungarianMatcher(nn.Module):
         Weights for individual loss components, e.g.
         ``{"object_class_ce": 1.0, "mask_dice": 1.0, "mask_ce": 0.0, "mask_focal": 0.0,
         "regression": 0.0}``.
-    object_weights : list[float] | None, optional
-        Optional per-object-class weights, by default ``None``.
+    solver_name : str, optional
+        Name of the LAP solver to use, by default ``"BatchedScipyOMP"``.
+
+    Raises
+    ------
+    ValueError
+        If ``solver_name`` is not available in ``SOLVER_REGISTRY``.
 
     Notes
     -----
@@ -265,23 +228,20 @@ class HungarianMatcher(nn.Module):
         num_classes: int,
         num_objects: int,
         loss_weights: dict[str, float],
-        object_weights: list[float] | None = None,
+        solver_name: str = "BatchedScipyOMP",
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_objects = num_objects
         self.loss_weights = loss_weights
-        if object_weights is not None:
-            assert len(object_weights) == num_classes + 1, (
-                "Object weights must match number of classes"
-            )
-            self.object_weights = torch.tensor(object_weights, dtype=torch.float32)
-        else:
-            self.object_weights = torch.ones(num_classes + 1, dtype=torch.float32)
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
 
         self.global_step = 0
-        self.solver_name = "BatchedScipyOMP"
+        if solver_name not in SOLVER_REGISTRY:
+            available_solvers = ", ".join(sorted(SOLVER_REGISTRY))
+            msg = f"Unknown LAP solver '{solver_name}'. Available solvers: {available_solvers}"
+            raise ValueError(msg)
+        self.solver_name = solver_name
 
     def get_batch_cost(
         self,
@@ -430,30 +390,3 @@ class HungarianMatcher(nn.Module):
         assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
         self.global_step += 1
         return (torch.arange(len(assignments)).unsqueeze(1).to(assignments.device), assignments)
-
-    def lap(self, cost: Any) -> list[int]:
-        """Solve the linear sum assignment problem for a single cost matrix.
-
-        Parameters
-        ----------
-        cost : Any
-            Cost matrix of shape ``[N, M]``.
-
-        Returns
-        -------
-        list[int]
-            Ordered list of selected target indices ``idx`` aligned with sources,
-            extended by appending any remaining indices to cover all ``num_objects``.
-
-        Raises
-        ------
-        ValueError
-            If the linear sum assignment problem cannot be solved.
-        """
-        try:
-            src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
-        except ValueError:
-            print(cost)
-            raise
-        idx = src_idx[tgt_idx]
-        return list(idx) + sorted(self.default_idx - set(idx))

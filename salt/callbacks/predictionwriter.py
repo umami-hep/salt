@@ -322,10 +322,6 @@ class PredictionWriter(Callback):
                 objects["masks"].cpu().float().unsqueeze(-1).numpy(),
                 dtype=np.dtype([("mask_logits", self.precision)]),
             )
-            # Exapnd the pad mask from (B, N_constituents) to (B, N_objects, N_constituents)
-            # and set the invalid entries to -inf
-            # expanded_pad_mask =
-            # to_write["object_masks"]["mask_logits"][]
 
         self._write_batch_outputs(to_write, out_pads, batch_idx)
 

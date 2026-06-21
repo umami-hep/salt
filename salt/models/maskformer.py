@@ -214,13 +214,11 @@ class MaskDecoder(nn.Module):
             pad_mask = torch.cat([pad_mask, padpad_mask], dim=1)
 
         intermediate_outputs: list | None = [] if self.aux_loss else None
-        i = 0
         for layer in self.layers:
             if self.aux_loss:
                 assert intermediate_outputs is not None
                 intermediate_outputs.append({"embed": q, **self.get_preds(q, x, pad_mask)})
             q, x = layer(q, x, kv_mask=pad_mask)
-            i += 1
         mf_preds = self.get_preds(q, x, pad_mask)
         # Un-pad the embedding x, get the mf_predictions, and then unpad them as well
         preds["objects"] = {"embed": q, "x": x[:, :-1, :], **mf_preds}

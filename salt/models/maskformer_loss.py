@@ -170,7 +170,6 @@ class MaskFormerLoss(nn.Module):
             num_classes=num_classes,
             num_objects=num_objects,
             loss_weights=matcher_weights,
-            object_weights=empty_weight,
         )
 
     def loss_labels(
