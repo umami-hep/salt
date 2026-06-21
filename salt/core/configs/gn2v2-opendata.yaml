@@ -14,17 +14,23 @@
 #   salt2 fit --config salt/core/configs/gn2v2-opendata.yaml \
 #     --data.modules.input_samples.init_args.files.train $DATA/pp_output_train.h5 \
 #     --data.modules.input_samples.init_args.files.val   $DATA/pp_output_val.h5 \
-#     --norm_dict  $DATA/norm_dict.yaml \
+#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml \
 #     --class_dict $DATA/class_dict.yaml
 #
 # The deprecated --data.train_file/--data.val_file/--data.test_file kwargs still
 # work for one migration window (plan-25 O-ALIAS-WINDOW): if set with no
 # `input_samples` block, the datamodule synthesises an implicit InputSamples.
 #
+# `norm_dict` is the `Normaliser` module's OWN config (its sole consumer): it is
+# set directly on `model.modules.norm.init_args.norm_dict` below, as a
+# `${DATA_NORM_DICT_PATH}` placeholder (override per run / let the placeholder
+# resolver fill it). It is NOT a top-level fan-out flag — only `--class_dict`
+# remains a one-flag fan-out (genuinely multi-task → every ClassificationTaskModule,
+# reproducing v1 use_class_dict, GN2.yaml:50,64); leave `--class_dict` unset for
+# unweighted CE losses.
+#
 # Optional (recommended): --data.modules.reader.init_args.schema $DATA/schema.yaml
-# (from `salt2 schema dump`, design §2.6). `--norm_dict`/`--class_dict` are the
-# Wave-1 one-flag fan-out (reproduce v1 use_class_dict, GN2.yaml:50,64); leave
-# them unset for unweighted CE losses. attn_type stays torch-math here:
+# (from `salt2 schema dump`, design §2.6). attn_type stays torch-math here:
 # flash-varlen is the M6 cluster follow-up (plan 05 hardware note).
 
 name: GN2v2_opendata
@@ -93,7 +99,9 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # the Normaliser's own config (its sole consumer); ${DATA_*} placeholder
+          # so the placeholder-only preflight passes — override per run (see header)
+          norm_dict: ${DATA_NORM_DICT_PATH}
           streams: [jets, tracks]
           global_object: jets
       track_embed:

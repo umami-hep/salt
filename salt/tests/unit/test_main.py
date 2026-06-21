@@ -16,10 +16,12 @@ trainer run); the fit smoke uses ``main([...])`` with ``run=True``.
 This file merges two former test modules that both exercise ``salt.core.main``:
 
 1. the ``salt2`` CLI config surface (formerly ``test_salt2_cli.py``);
-2. the Wave-1 ``--norm_dict`` / ``--class_dict`` fan-out (formerly
-   ``test_wave1_fanout.py``) — see the "Wave-1 norm_dict/class_dict fan-out"
-   section below; its helpers/fixtures are ``wave1_*``-prefixed to avoid
-   colliding with the CLI-surface ones above.
+2. the Wave-1 ``--class_dict`` fan-out (formerly ``test_wave1_fanout.py``) —
+   see the "Wave-1 class_dict fan-out" section below; its helpers/fixtures are
+   ``wave1_*``-prefixed to avoid colliding with the CLI-surface ones above.
+   ``norm_dict`` is NOT fanned out: it is the `Normaliser` module's own config,
+   set on ``model.modules.norm.init_args.norm_dict`` directly — covered by the
+   ``TestNormDictOnModule`` section.
 """
 
 from __future__ import annotations
@@ -867,11 +869,14 @@ class TestGraphFitConfigAdapter:
 
 
 # ===========================================================================
-# Wave-1 norm_dict/class_dict fan-out (formerly test_wave1_fanout.py)
+# Wave-1 class_dict fan-out (formerly test_wave1_fanout.py)
 #
-# These exercise the --norm_dict / --class_dict convenience flags on
-# salt.core.main (Salt2CLI._fan_out_artifacts). Helpers/fixtures are
-# wave1_*-prefixed to avoid colliding with the CLI-surface ones above.
+# These exercise the --class_dict convenience flag on salt.core.main
+# (Salt2CLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
+# colliding with the CLI-surface ones above. norm_dict is NOT a fan-out flag —
+# it is the Normaliser module's own config (set on
+# model.modules.norm.init_args.norm_dict); the TestNormDictOnModule section at
+# the end pins that.
 # ===========================================================================
 
 
@@ -904,10 +909,12 @@ def wave1_data(tmp_path_factory) -> dict[str, Path]:
 
 
 def wave1_base_overrides(wave1_data) -> list[str]:
-    """The gn2v2-dummy.yaml required path overrides MINUS the norm_dict block.
+    """The gn2v2-dummy.yaml required path overrides MINUS the per-task weight_source.
 
-    The norm_dict + per-task weight_source are deliberately omitted so the two
-    flags (or the verbose block) are the ONLY source of those values.
+    ``norm_dict`` IS supplied here (the module form — it is the Normaliser's own
+    REQUIRED config, no longer a fan-out flag). The per-task ``weight_source`` is
+    deliberately omitted so the ``--class_dict`` flag (or the verbose block) is
+    the ONLY source of those values.
 
     Returns
     -------
@@ -920,17 +927,20 @@ def wave1_base_overrides(wave1_data) -> list[str]:
         f"--data.train_file={wave1_data['h5']}",
         f"--data.val_file={wave1_data['h5']}",
         f"--data.modules.reader.init_args.schema={wave1_data['schema']}",
+        # norm_dict is the Normaliser module's own config (its sole consumer):
+        # always set it the module way, NOT via a top-level fan-out flag
+        f"--model.modules.{NORM_MODULE}.init_args.norm_dict={wave1_data['nd']}",
         "--trainer.logger=false",  # opt out of the default-ON CometLogger (plan-24 W0)
     ]
 
 
 def wave1_verbose_block(wave1_data) -> list[str]:
-    """Today's verbose per-module override block (the form being retired).
+    """Today's verbose per-task weight_source override block (the form being retired).
 
     Returns
     -------
     list[str]
-        The three ``--model.modules.*`` overrides.
+        The two per-task ``--model.modules.*.init_args.weight_source`` overrides.
     """
     cd = wave1_data["cd"]
 
@@ -938,21 +948,20 @@ def wave1_verbose_block(wave1_data) -> list[str]:
         return f'--model.modules.{task}.init_args.weight_source={{"from_class_dict": "{cd}"}}'
 
     return [
-        f"--model.modules.{NORM_MODULE}.init_args.norm_dict={wave1_data['nd']}",
         ws_override("jets_classification"),
         ws_override("track_origin"),
     ]
 
 
-def wave1_two_flag_block(wave1_data) -> list[str]:
-    """The Wave-1 two-flag form.
+def wave1_class_dict_flag(wave1_data) -> list[str]:
+    """The Wave-1 one-flag form (``--class_dict``).
 
     Returns
     -------
     list[str]
-        The ``--norm_dict`` / ``--class_dict`` flags.
+        The ``--class_dict`` flag.
     """
-    return [f"--norm_dict={wave1_data['nd']}", f"--class_dict={wave1_data['cd']}"]
+    return [f"--class_dict={wave1_data['cd']}"]
 
 
 def wave1_make_cli(wave1_data, extra: list[str]) -> Salt2CLI:
@@ -975,51 +984,51 @@ def wave1_print_config(wave1_data, extra: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Gate (a) — --print_config byte-equality (two-flag == verbose three-line)
+# Gate (a) — --print_config byte-equality (--class_dict == verbose two-line)
 # ---------------------------------------------------------------------------
 
 
 class TestPrintConfigByteEquality:
     def test_model_block_byte_equal(self, wave1_data):
         verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        two_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_two_flag_block(wave1_data)))
+        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
         # the whole assembled model block is byte-identical between the two forms
-        assert two_flag["model"] == verbose["model"]
+        # (norm_dict comes from the shared base overrides in both — module config)
+        assert one_flag["model"] == verbose["model"]
 
-    def test_norm_dict_field_equal(self, wave1_data):
+    def test_norm_dict_field_from_module_config(self, wave1_data):
+        # norm_dict is NOT a fan-out flag: it rides on the module config supplied
+        # by wave1_base_overrides, identically for both the --class_dict and the
+        # verbose weight_source form
         verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        two_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_two_flag_block(wave1_data)))
+        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
 
         def norm_path(cfg):
             return cfg["model"]["init_args"]["modules"][NORM_MODULE]["init_args"]["norm_dict"]
 
-        assert norm_path(two_flag) == norm_path(verbose) == str(wave1_data["nd"])
+        assert norm_path(one_flag) == norm_path(verbose) == str(wave1_data["nd"])
 
     def test_weight_source_fields_equal(self, wave1_data):
         verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        two_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_two_flag_block(wave1_data)))
+        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
 
         def ws(cfg, task):
             return cfg["model"]["init_args"]["modules"][task]["init_args"]["weight_source"]
 
         for task in CLS_TASKS:
-            assert ws(two_flag, task) == ws(verbose, task)
-            assert ws(two_flag, task) == {"from_class_dict": str(wave1_data["cd"])}
+            assert ws(one_flag, task) == ws(verbose, task)
+            assert ws(one_flag, task) == {"from_class_dict": str(wave1_data["cd"])}
 
 
 # ---------------------------------------------------------------------------
-# Gate (c) — the fan-out lands on the right modules / leaves explicit ones alone
+# Gate (c) — the class_dict fan-out lands on the right tasks / leaves explicit
+# ones alone (norm_dict, the module config, is covered in TestNormDictOnModule)
 # ---------------------------------------------------------------------------
 
 
 class TestFanOutInstantiated:
-    def test_norm_dict_lands_on_normaliser(self, wave1_data):
-        cli = wave1_make_cli(wave1_data, wave1_two_flag_block(wave1_data))
-        assert isinstance(cli.model, SaltModule)
-        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
-
     def test_class_dict_lands_on_every_unset_task(self, wave1_data):
-        cli = wave1_make_cli(wave1_data, wave1_two_flag_block(wave1_data))
+        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
         for task in CLS_TASKS:
             mod = cli.model.net[task]
             assert isinstance(mod, ClassificationTaskModule)
@@ -1031,7 +1040,7 @@ class TestFanOutInstantiated:
         # ClassificationTaskModule suffix-match in _fan_out_artifacts). Pins the
         # negative case so a future broadening of the match (e.g. to "TaskModule")
         # would be caught here.
-        cli = wave1_make_cli(wave1_data, wave1_two_flag_block(wave1_data))
+        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
         vtx = cli.model.net["track_vertexing"]
         assert not isinstance(vtx, ClassificationTaskModule)
         assert getattr(vtx, "weight_source", None) is None
@@ -1045,34 +1054,58 @@ class TestFanOutInstantiated:
             "--model.modules.jets_classification.init_args.weight_source="
             f'{{"from_class_dict": "{cd_explicit}"}}'
         )
-        cli = wave1_make_cli(wave1_data, [*wave1_two_flag_block(wave1_data), explicit_ws])
+        cli = wave1_make_cli(wave1_data, [*wave1_class_dict_flag(wave1_data), explicit_ws])
         jets = cli.model.net["jets_classification"]
         track = cli.model.net["track_origin"]
         assert jets.weight_source == {"from_class_dict": str(cd_explicit)}  # untouched
         assert track.weight_source == {"from_class_dict": str(wave1_data["cd"])}  # fanned out
 
-    def test_no_flags_is_a_noop(self, wave1_data):
-        # with neither flag, an unset task stays unset (no accidental fan-out);
-        # norm_dict supplied the verbose way still works (control that the
-        # fan-out is purely additive on the new flags)
-        cli = wave1_make_cli(
-            wave1_data,
-            [f"--model.modules.{NORM_MODULE}.init_args.norm_dict={wave1_data['nd']}"],
-        )
+    def test_no_class_dict_is_a_noop(self, wave1_data):
+        # with no --class_dict, an unset task stays unset (no accidental fan-out);
+        # norm_dict supplied the module way still works (control that the fan-out
+        # is purely additive on the --class_dict flag)
+        cli = wave1_make_cli(wave1_data, [])
         for task in CLS_TASKS:
             assert cli.model.net[task].weight_source is None
-
-    def test_norm_dict_only_does_not_touch_tasks(self, wave1_data):
-        # --norm_dict alone fans out to the normaliser but leaves tasks unset
-        cli = wave1_make_cli(wave1_data, [f"--norm_dict={wave1_data['nd']}"])
+        # norm_dict (module config from the base overrides) still landed
         assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
-        for task in CLS_TASKS:
-            assert cli.model.net[task].weight_source is None
 
     def test_class_dict_only_requires_norm_dict_elsewhere(self, wave1_data):
-        # --class_dict alone fans out to the tasks; norm_dict must still be
-        # supplied (it is REQUIRED on the Normaliser) — here via the flag too,
-        # proving the two flags are independent knobs
-        cli = wave1_make_cli(wave1_data, [f"--norm_dict={wave1_data['nd']}", f"--class_dict={wave1_data['cd']}"])
+        # --class_dict fans out to the tasks; norm_dict must still be supplied
+        # (it is REQUIRED on the Normaliser) — here via the module config in the
+        # base overrides, proving the two knobs are independent
+        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
         for task in CLS_TASKS:
             assert cli.model.net[task].weight_source == {"from_class_dict": str(wave1_data["cd"])}
+
+
+# ---------------------------------------------------------------------------
+# norm_dict is the Normaliser module's OWN config (its sole consumer): set on
+# model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag. These
+# replace the retired --norm_dict fan-out tests.
+# ---------------------------------------------------------------------------
+
+
+class TestNormDictOnModule:
+    def test_norm_dict_from_module_config_lands_on_normaliser(self, wave1_data):
+        # the module-config form (model.modules.norm.init_args.norm_dict, supplied
+        # by wave1_base_overrides) materialises on the instantiated Normaliser
+        cli = wave1_make_cli(wave1_data, [])
+        assert isinstance(cli.model, SaltModule)
+        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
+
+    def test_norm_dict_does_not_touch_tasks(self, wave1_data):
+        # setting norm_dict on the module leaves the classification tasks'
+        # weight_source untouched (norm_dict is module-local, not multi-task)
+        cli = wave1_make_cli(wave1_data, [])
+        for task in CLS_TASKS:
+            assert cli.model.net[task].weight_source is None
+
+    def test_norm_dict_unknown_flag_is_rejected(self, wave1_data):
+        # the retired --norm_dict flag is now an unknown arg: the parser must
+        # reject it (proves the top-level fan-out flag is gone, not silently
+        # ignored). The norm_dict in base_overrides is dropped here so the only
+        # norm_dict surface under test is the (now-invalid) flag.
+        bad_args = [a for a in wave1_base_overrides(wave1_data) if "norm_dict" not in a]
+        with pytest.raises(SystemExit):
+            Salt2CLI(args=[*bad_args, f"--norm_dict={wave1_data['nd']}"], run=False)

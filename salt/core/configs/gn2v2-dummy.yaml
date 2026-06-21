@@ -14,6 +14,11 @@
 #     --data.val_file   /path/to/pp_output_train.h5 \
 #     --model.modules.norm.init_args.norm_dict /path/to/norm_dict.yaml
 #
+# `norm_dict` is the `Normaliser` module's OWN config (its sole consumer), set on
+# `model.modules.norm.init_args.norm_dict` — NOT a top-level fan-out flag. The
+# test harness supplies it as a tmp path via that exact override (no machine path
+# committed here), so the `norm` block below leaves it as a REQUIRED override.
+#
 # Outputs land in the trainer log dir (cwd unless --trainer.default_root_dir
 # is given): config.yaml + checkpoints/ — the end-of-fit message prints the
 # exact paths. Run-dir layout is M6.

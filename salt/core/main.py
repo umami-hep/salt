@@ -127,18 +127,21 @@ class DeepMergeParser(LightningArgumentParser):
         return super().merge_config(cfg_from, cfg_to)
 
     def parse_args(self, args: Sequence[str] | None = None, *pargs: Any, **kwargs: Any) -> Any:
-        """Parse args with ``--…modules.X=null`` normalised + the Wave-1 artifact fan-out.
+        """Parse args with ``--…modules.X=null`` normalised + the Wave-1 class_dict fan-out.
 
         Two pre-validation steps ride on the standard parse:
 
         1. ``--…modules.X=null`` is rewritten to the JSON-block form (design
            §5.3, module docstring).
-        2. ``--norm_dict`` / ``--class_dict`` are fanned out onto the model-side
-           consumers (`_fan_out_artifacts`, plan-24 Wave 1) — the only point that
-           runs AFTER the config-file deep-merge but BEFORE validation and any
-           ``--print_config`` dump, so the resolved ``norm_dict`` / per-task
-           ``weight_source`` are validated and frozen into the saved run-dir
-           config exactly as the verbose per-module override block produces them.
+        2. ``--class_dict`` is fanned out onto the model-side consumers
+           (`_fan_out_artifacts`, plan-24 Wave 1) — the only point that runs
+           AFTER the config-file deep-merge but BEFORE validation and any
+           ``--print_config`` dump, so the resolved per-task ``weight_source`` is
+           validated and frozen into the saved run-dir config exactly as the
+           verbose per-task override block produces it. (``norm_dict`` is NOT
+           fanned out: it is the `Normaliser` module's own config — set it on
+           ``model.modules.<norm>.init_args.norm_dict`` directly, in the config
+           or on the CLI.)
 
         The fan-out cannot be a `link_arguments` compute: its targets are dict
         elements of the single ``model.init_args.modules`` action (not registered
@@ -329,14 +332,8 @@ def _normalise_module_null(arg: str) -> str:
     return f'--{match["parent"]}={{"{match["key"]}": null}}'
 
 
-_NORM_DICT_ARG = "norm_dict"
-"""Top-level convenience flag name (``--norm_dict``) — Wave 1 fan-out source."""
-
 _CLASS_DICT_ARG = "class_dict"
 """Top-level convenience flag name (``--class_dict``) — Wave 1 fan-out source."""
-
-_NORM_DICT_CLASS = "Normaliser"
-"""Class-name suffix of the only ``norm_dict`` consumer (nn/modules.py ~2144)."""
 
 _CLASS_DICT_CLASS = "ClassificationTaskModule"
 """Class-name suffix of the only ``class_dict``/``weight_source`` consumer (nn/tasks.py ~1027)."""
@@ -406,19 +403,19 @@ def _entry_set(entry: Any, key: str, value: Any) -> None:
 
 
 def _fan_out_artifacts(cfg: Any) -> Any:
-    """Fan ``--norm_dict`` / ``--class_dict`` out onto the model-side consumers (Wave 1).
+    """Fan ``--class_dict`` out onto the model-side consumers (Wave 1).
 
-    Restores v1's one-flag ergonomics (plan-24 §6 Wave 1 + R1.6, §5.4): the two
-    top-level convenience args reproduce today's verbose per-module override
-    block from two flags. They are *purely* model/CLI-side — no data module, no
-    setup graph (R1.1/R1.2): ``norm_dict`` is read only by the `Normaliser`
-    (`nn/modules.py` ~2144) and ``class_dict`` only by each
-    `ClassificationTaskModule` for its CE-weight buffer (`nn/tasks.py` ~1027).
+    Restores v1's one-flag ergonomics (plan-24 §6 Wave 1 + R1.6, §5.4): the
+    top-level convenience arg reproduces today's verbose per-task override block
+    from one flag. It is *purely* model/CLI-side — no data module, no setup graph
+    (R1.1/R1.2): ``class_dict`` is read only by each `ClassificationTaskModule`
+    for its CE-weight buffer (`nn/tasks.py` ~1027). (``norm_dict`` is genuinely
+    multi-task-free — its sole consumer is the `Normaliser` module — so it is the
+    `Normaliser`'s own config, NOT a top-level fan-out flag: set it directly at
+    ``model.modules.<norm>.init_args.norm_dict``.)
 
     For every module under ``model.init_args.modules`` (the subclass-mode block):
 
-    - a `Normaliser` gets ``init_args.norm_dict := <--norm_dict>`` (its sole
-      consumer);
     - a `ClassificationTaskModule` whose ``init_args.weight_source`` is
       unset/null gets ``weight_source := {"from_class_dict": <--class_dict>}``,
       validated through the same `_checked_weight_source` validator the task's
@@ -431,7 +428,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     The mutation lands on `cfg` in place (and is returned), BEFORE validation +
     any ``--print_config`` dump (`DeepMergeParser.parse_args`), so the resolved
     values are frozen into the saved run-dir config exactly like the verbose
-    form. A no-op when neither flag is set (the args are absent on the run-free
+    form. A no-op when the flag is not set (the arg is absent on the run-free
     graph-tooling parser, where ``cfg.get`` returns None).
 
     Parameters
@@ -454,9 +451,8 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     from salt.core.nn.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
 
     for scope, model in _iter_model_blocks(cfg):
-        norm_dict = scope.get(_NORM_DICT_ARG)
         class_dict = scope.get(_CLASS_DICT_ARG)
-        if not norm_dict and not class_dict:
+        if not class_dict:
             continue
         init_args = getattr(model, "init_args", None)
         modules = getattr(init_args, "modules", None) if init_args is not None else None
@@ -469,11 +465,8 @@ def _fan_out_artifacts(cfg: Any) -> Any:
             module_args = _entry_get(entry, "init_args")
             if module_args is None:
                 continue
-            if norm_dict and class_path.endswith(_NORM_DICT_CLASS):
-                _entry_set(module_args, "norm_dict", str(norm_dict))
             if (
-                class_dict
-                and class_path.endswith(_CLASS_DICT_CLASS)
+                class_path.endswith(_CLASS_DICT_CLASS)
                 and _entry_get(module_args, "weight_source") is None
             ):
                 _entry_set(
@@ -485,13 +478,13 @@ def _fan_out_artifacts(cfg: Any) -> Any:
 
 
 def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
-    """Pair each ``model`` namespace with the scope its ``--norm_dict``/``--class_dict`` live in.
+    """Pair each ``model`` namespace with the scope its ``--class_dict`` lives in.
 
-    The two convenience flags are scoped exactly like the ``--name`` arg the
-    existing CLI glue links into the model: top-level on the run-free surface
-    (``cfg.norm_dict`` ↔ ``cfg.model``), and subcommand-scoped on a trainer run
-    (``cfg.fit.norm_dict`` ↔ ``cfg.fit.model``). Pairing the flag scope with its
-    model block keeps the fan-out reading the flags from the right level.
+    The convenience flag is scoped exactly like the ``--name`` arg the existing
+    CLI glue links into the model: top-level on the run-free surface
+    (``cfg.class_dict`` ↔ ``cfg.model``), and subcommand-scoped on a trainer run
+    (``cfg.fit.class_dict`` ↔ ``cfg.fit.model``). Pairing the flag scope with its
+    model block keeps the fan-out reading the flag from the right level.
 
     Returns
     -------
@@ -628,15 +621,6 @@ class Salt2CLI(LightningCLI):
             "manifest post-processing. The OUTPUT manifest derives from writers.modules "
             "(M4.5 unified manifest) — declaring export.outputs is a hard error at export "
             "time. Inert during fit/test; round-trips through saved run configs.",
-        )
-        parser.add_argument(
-            f"--{_NORM_DICT_ARG}",
-            type=str | None,
-            default=None,
-            help="convenience flag (plan-24 Wave 1): fanned out to the Normaliser module's "
-            "norm_dict init_arg (its only consumer), reproducing "
-            "--model.modules.<norm>.init_args.norm_dict from one flag. Purely model-side — "
-            "no data module reads it (design §5.4, R1.1/R1.6).",
         )
         parser.add_argument(
             f"--{_CLASS_DICT_ARG}",
