@@ -16,13 +16,47 @@ clean split mirroring the model's dataflow:
 
 P0 ships the generic ``TaskOutput`` producer (identity copy) and the minimal
 ``CollectOutputs`` no-op sink — the smallest slice proving
-producer -> ``outputs.*`` -> sink with demand-gating. Conversion producers
-(P1: softmax/de-scale) and the ``H5OutputWriter`` sink build on this contract.
+producer -> ``outputs.*`` -> sink with demand-gating. P1 adds the
+classification + regression conversion producers (`ClassProbs`,
+`SeqClassProbs`, `SeqClassIndex`, `Regression`, and the `ConversionOp`
+strategies behind the generic ``TaskOutput(op=...)``) and the ``H5OutputWriter``
+sink — the real H5 serialiser that reproduces the v1
+``inputs_copy -> tasks -> pad_mask`` eval H5 with semantic array parity, owning
+the serialisation concerns (`u2s` packing, per-token pad re-expansion, input
+copies, pad-mask columns) the producers must not know about (`OutputColumn` is
+its declarative per-leaf column schema).
 """
 
 from __future__ import annotations
 
-from salt.core.outputs.producers import TaskOutput
-from salt.core.outputs.sinks import CollectOutputs
+from salt.core.outputs.producers import (
+    ClassProbs,
+    ClassProbsOp,
+    ConversionOp,
+    IdentityOp,
+    Regression,
+    RegressionDescaleOp,
+    SeqClassIndex,
+    SeqClassIndexOp,
+    SeqClassProbs,
+    SeqClassProbsOp,
+    TaskOutput,
+)
+from salt.core.outputs.sinks import CollectOutputs, H5OutputWriter, OutputColumn
 
-__all__ = ["CollectOutputs", "TaskOutput"]
+__all__ = [
+    "ClassProbs",
+    "ClassProbsOp",
+    "CollectOutputs",
+    "ConversionOp",
+    "H5OutputWriter",
+    "IdentityOp",
+    "OutputColumn",
+    "Regression",
+    "RegressionDescaleOp",
+    "SeqClassIndex",
+    "SeqClassIndexOp",
+    "SeqClassProbs",
+    "SeqClassProbsOp",
+    "TaskOutput",
+]
