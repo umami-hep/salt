@@ -149,18 +149,19 @@ def test_class_probs_global_softmax_matches_task_run_inference():
 def test_class_probs_global_matches_task_get_h5_values():
     """``ClassProbs`` op values == the f4 columns ``task.get_h5`` would emit.
 
-    The M4.5 ``get_h5`` packs the already-softmaxed ``preds.*`` into f4 columns;
-    here the producer applies the softmax itself, so the un-structured float
-    values must equal what ``get_h5`` writes (run-name prefix is sink-side).
+    Since the P1.5 flip the task publishes RAW logits in TEST and ``get_h5``
+    run_inference-s them itself (softmax) before packing the f4 columns; the
+    producer applies the same softmax, so the producer's un-structured floats
+    must equal the floats ``get_h5`` writes from the SAME raw logits (run-name
+    prefix is sink-side). Both convert ONCE (no double-convert).
     """
     torch.manual_seed(1)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
     )
     logits = torch.randn(5, 3)
-    # what M4.5 publishes in TEST then packs: run_inference -> get_h5
-    converted = module.task.run_inference(logits.clone())
-    b_oracle = Bundle({"preds": {_STREAM_J: {module.name: converted}}})
+    # the flipped TEST forward publishes RAW logits; get_h5 softmaxes + packs
+    b_oracle = Bundle({"preds": {_STREAM_J: {module.name: logits.clone()}}})
     structured = module.get_h5(b_oracle, run_name="GN2")
     oracle_cols = np.stack([structured[n] for n in structured.dtype.names], axis=-1)
 
@@ -374,9 +375,14 @@ def test_seq_class_probs_matches_task_run_inference_and_get_h5():
     torch.testing.assert_close(got, oracle, rtol=0, atol=_FLOAT_TOL)
 
     # == the float values the task's get_h5 packs (what the M4.5 writer serialises).
-    # get_h5 reads the ALREADY-converted preds.* leaf, so feed it the producer probs.
+    # Since the P1.5 flip get_h5 reads the RAW logits leaf (+ masks.<stream>) and
+    # run_inference-s them itself, so feed it the SAME raw logits + mask; the
+    # packed floats then equal the producer probs (both convert ONCE).
     structured = module.get_h5(
-        Bundle({"preds": {_STREAM_T: {module.name: got.clone()}}}), "RUN"
+        Bundle(
+            {"preds": {_STREAM_T: {module.name: logits.clone()}}, "masks": {_STREAM_T: mask}}
+        ),
+        "RUN",
     )
     packed = np.stack([structured[f"RUN_p{c}"] for c in class_names], axis=-1)
     np.testing.assert_allclose(packed, got.numpy(), rtol=0, atol=_FLOAT_TOL)

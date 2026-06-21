@@ -14,15 +14,24 @@ therefore handed single-stream dicts, under which its internal slicing is
 the identity; outputs are mathematically equal to v1's full-sequence path
 but NOT guaranteed bitwise (the M2 gates use 1e-6/curve criteria, plan 05).
 
-Mode semantics (design §3.3): ``preds.<stream>.<task>`` is published in ALL
-modes — raw logits / raw edge scores in FIT|VAL (cheap, consumed by metrics
-callbacks), converted physical values in TEST/ONNX for the classification
-family (softmax / padded-aware softmax via the v1 ``run_inference``).
-Vertexing is the documented per-family exception: TEST publishes per-node
-vertex assignments (union-find, v1 writer semantics, task.py:985-986,1003);
-ONNX publishes RAW edge scores so the export-side ``vertex_union_find``
-reduce owns the in-graph union-find (v1 placement, to_onnx.py:426-431).
-Labels are required and ``losses.<task>`` produced in FIT|VAL only.
+Mode semantics (design §3.3, P1.5 flip): ``preds.<stream>.<task>`` is
+published in ALL modes — raw logits / raw edge scores / scaled targets.
+For the CLASSIFICATION family the eval conversion (softmax / padded-aware
+softmax) has been REMOVED from ``forward`` in TEST (the P1.5 flip, design §2
+"no per-task forward branching"): classification ``forward`` now publishes
+RAW logits in FIT|VAL|TEST, and the conversion is owned by the
+``ClassProbs``/``SeqClassProbs`` producers (live path) and by the task's
+``get_h5`` (the transitional M4.5 oracle path) — both read the raw leaf and
+``run_inference`` it once. ONNX is the carve-out (deferred to P4): the
+classification ``forward`` still publishes converted probs in ONNX so the
+export trace + tests are unchanged. Regression / vertexing / maskformer are
+NOT yet flipped (P2/P3): their TEST ``forward`` keeps converting (de-scale /
+union-find) and their ``get_h5`` reads the already-converted leaf. Vertexing
+remains the documented per-family exception: TEST publishes per-node vertex
+assignments (union-find, v1 writer semantics, task.py:985-986,1003); ONNX
+publishes RAW edge scores so the export-side ``vertex_union_find`` reduce
+owns the in-graph union-find (v1 placement, to_onnx.py:426-431). Labels are
+required and ``losses.<task>`` produced in FIT|VAL only.
 """
 
 from __future__ import annotations
@@ -1201,12 +1210,23 @@ class ClassificationTaskModule(_TaskModuleBase):
             self.task.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed v1 head; raw logits + loss in FIT|VAL, probs in TEST/ONNX.
+        """Run the composed v1 head; RAW logits in FIT|VAL|TEST, probs in ONNX.
 
         The v1 head is handed SINGLE-STREAM label/mask dicts: its internal
         ``input_name_mask`` slicing is the identity on per-stream inputs,
         and the loss masking (pad fold to ``ignore_index=-1``, the ``-2``
         label fold, task.py:218-227) runs verbatim.
+
+        Mode semantics (P1.5 flip — design §2 "no per-task forward
+        branching"): the task now publishes RAW logits in EVERY non-ONNX mode
+        (FIT/VAL unchanged; TEST is the flip — it no longer softmaxes here).
+        The eval conversion (softmax / masked softmax) is OWNED by the
+        classification conversion producers (`ClassProbs`/`SeqClassProbs`) on
+        the live path and by `get_h5` on the transitional M4.5 oracle path
+        (both read this raw leaf and `run_inference` it once — design §4a).
+        ONNX is the documented carve-out (deferred to P4): export still
+        publishes the converted probs in `forward` so the ONNX export + its
+        tests are untouched until the producers are traced.
 
         Returns
         -------
@@ -1218,14 +1238,20 @@ class ClassificationTaskModule(_TaskModuleBase):
         ctx = b.get(self.context) if self.context is not None else None
         # objects-stream (query-bank) heads have no pad mask (v1 task.py:547)
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+        if mode & Mode.ONNX:
+            # ONNX carve-out (deferred to P4): keep publishing converted probs
+            # so the export trace + tests are unaffected (design §2 mode table).
+            preds, _ = self.task(x, None, None, context=ctx)
+            return {self.pred_key: self.task.run_inference(preds, mask)}
         if mode & Mode.TRAINING:
             labels_dict = {self.stream: {self.label: b.get(self.label_key)}}
             pad_masks = {self.stream: mask} if self.has_pad_mask else None
             preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
-        # TEST|ONNX: identical, already-converted physical values (design §3.3)
+        # TEST (P1.5 flip): publish RAW logits — conversion moves to the
+        # producers (live path) / get_h5 (M4.5 oracle path), design §2.
         preds, _ = self.task(x, None, None, context=ctx)
-        return {self.pred_key: self.task.run_inference(preds, mask)}
+        return {self.pred_key: preds}
 
     # -- output rendering (v1 ClassificationTask.output_names/get_h5/get_onnx) --
 
@@ -1255,18 +1281,29 @@ class ClassificationTaskModule(_TaskModuleBase):
         return [(f"{run_name}_{px}", "f4") for px in self.class_suffixes]
 
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """The already-softmaxed probabilities as ``f4`` columns (v1 task.py:266-283).
+        """Softmax the RAW TEST logits then pack as ``f4`` columns (v1 task.py:266-283).
 
-        The TEST forward publishes converted probabilities (design §3.3), so
-        this is the writer-side ``probs -> f4 u2s`` conversion verbatim
-        (padded positions read 0.0).
+        Since the P1.5 flip the TEST ``forward`` publishes RAW logits (design
+        §2), so this M4.5-oracle path now does the eval conversion ITSELF: it
+        ``run_inference``-s the raw ``preds.*`` leaf (softmax / masked softmax,
+        the SAME math the forward used to run) before the ``probs -> f4 u2s``
+        packing (padded positions read 0.0). The conversion happens exactly
+        ONCE per leaf on this path — the producer path converts independently
+        (no double-conversion, design §4 risk "double-conversion"). The mask is
+        read from ``masks.<stream>`` for the masked softmax (present in the TEST
+        bundle: the per-token head declares it as a require and the writer
+        machinery / PadMaskWriter demands it). The OUTPUT of this method is
+        byte-identical to pre-flip (softmax-then-pack == flip-then-softmax-then-
+        pack).
 
         Returns
         -------
         np.ndarray
             ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
         """
-        preds = b.get(self.pred_key)
+        assert self.task is not None, "get_h5 before bind()"
+        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+        preds = self.task.run_inference(b.get(self.pred_key), mask)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.float().cpu().numpy(), dtype)
 

@@ -23,25 +23,25 @@ GN2v2 fixture also carries a ``track_vertexing`` head whose eval column
 EXCLUDED from the comparison and recorded in ``DEFERRED_COLUMNS`` (logged, not
 silently dropped — design §4b).
 
-TRANSITIONAL-STATE NOTE (the ``preds.*`` already-converted truth — verified in
-source, ``salt/core/nn/tasks.py:1228,1632``): the FULL redesign (design §2,
-"removes the TEST/ONNX mode-branches inside ``task.forward``") moves the eval
-conversion (softmax / de-scale / union-find) OUT of the task and INTO the
-producer, so the task would publish RAW logits and the producer would convert
-once. That task change is a LATER step of the redesign and is **not yet in the
-tree**: the M4.5 ``ClassificationTaskModule.forward`` still runs
-``run_inference`` in TEST, so ``preds.<stream>.<task>`` in the executed TEST
-bundle is ALREADY the eval-ready (softmaxed) value. A conversion producer
-(`ClassProbs` / `SeqClassProbs`) reading that leaf would DOUBLE-convert. So this
-end-to-end gate wires the IDENTITY ``TaskOutput`` producer (the P0 passthrough
-clone) onto each task's published ``preds.*`` — the producer -> ``outputs.*`` ->
-``H5OutputWriter`` SINK chain serialises EXACTLY the values the M4.5 ``get_h5``
-serialises, so byte/array parity is the honest contract here. The conversion
-ops' MATH (softmax / masked-softmax / de-scale) is the SEPARATE concern proven
-bitwise against the task ``run_inference`` oracle in
-``test_outputs_producers.py`` (recon PR2). Once the task-forward conversion is
-removed (a later redesign step) this gate swaps the identity producer for the
-conversion producer with no change to the SINK or the parity assertion.
+P1.5 FLIP DONE FOR CLASSIFICATION (the conversion producers are now LOAD-BEARING
+end-to-end — verified in source, ``salt/core/nn/tasks.py``
+``ClassificationTaskModule.forward``/``get_h5``): the P1.5 step (design §2,
+"removes the TEST/ONNX mode-branches inside ``task.forward``") has been applied
+to the CLASSIFICATION family. The classification ``forward`` now publishes RAW
+logits in TEST (the softmax was removed), so ``preds.<stream>.<task>`` in the
+executed TEST bundle is the RAW logits. This gate therefore wires the REAL
+conversion producers — `ClassProbs` (``jets_classification`` -> global softmax)
+and `SeqClassProbs` (``track_origin`` -> masked softmax) — which convert ONCE on
+the new path. The M4.5 oracle path stays LIVE and ALSO converts once, because
+the conversion relocated INTO ``ClassificationTaskModule.get_h5`` (which the M4.5
+``TaskWriter`` calls): ``get_h5`` now ``run_inference``-s the raw leaf before
+packing, so the oracle eval H5 is byte-identical to pre-flip. Conversion happens
+in EXACTLY ONE place per path (producer for the new path, ``get_h5`` for the M4.5
+path; never both on the same leaf) — no double-conversion. The conversion ops'
+MATH is independently proven bitwise against the task ``run_inference`` oracle in
+``test_outputs_producers.py`` (recon PR2). Regression/vertexing are NOT yet
+flipped (P2): the GN2v2 ``track_vertexing`` head's eval column (``VertexIndex``)
+stays a DEFERRED family and is excluded from the comparison (``DEFERRED_COLUMNS``).
 
 If parity cannot be reached the assertion reports the exact column with expected
 vs got — never weaken the tolerance to pass.
@@ -54,6 +54,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+import yaml
 from lightning import Trainer
 
 from salt.core import SaltModule
@@ -61,7 +62,7 @@ from salt.core.data import Features, H5StructuredReader, Labels
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.graph.spec import Mode
 from salt.core.main import CONFIG_DIR, main
-from salt.core.outputs import H5OutputWriter, OutputColumn, TaskOutput
+from salt.core.outputs import ClassProbs, H5OutputWriter, OutputColumn, SeqClassProbs
 from salt.core.schema import dump_schema, save_schema
 from salt.tests.core.gn2_fixture import (
     JET_VARIABLES,
@@ -72,6 +73,7 @@ from salt.tests.core.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
 from salt.utils.inputs import write_dummy_file
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+CUTOVER_CFG = CONFIG_DIR / "gn2v2-dummy-cutover.yaml"  # the P1.5 live cutover
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
 N_TEST = 300  # data.num_test for both sinks
 L_FILE = 40  # write_dummy_file sequence length
@@ -185,31 +187,34 @@ def oracle_h5(data, ckpt, tmp_path_factory) -> Path:
 
 
 def _model_with_producers(data) -> SaltModule:
-    """Build the GN2v2 model and ADD the P1 output producers.
+    """Build the GN2v2 model and ADD the REAL P1 classification conversion producers.
+
+    Since the P1.5 flip the classification task ``forward`` publishes RAW logits
+    in TEST (design §2), so the producers must do the eval conversion: `ClassProbs`
+    (``jets_classification`` -> global softmax) and `SeqClassProbs`
+    (``track_origin`` -> masked softmax), the SAME math the M4.5 oracle now runs
+    in ``get_h5``. Each converts ONCE — the new path's single conversion site (the
+    M4.5 oracle's is ``get_h5``; never both on the same leaf, no double-convert).
 
     The producers are TEST-only by demand (design §4 risk 4): pruned from FIT/VAL
-    so the trained checkpoint — which never saw them — loads unchanged. They are
-    the IDENTITY ``TaskOutput`` (P0 passthrough clone) reading each task's
-    published ``preds.*``; see the module docstring's TRANSITIONAL-STATE NOTE for
-    why an identity (not conversion) producer is correct here — the M4.5 task
-    still converts in ``forward``, so ``preds.*`` is already the eval-ready value,
-    and the producer's job is to hand it to the SINK without re-converting. The
-    conversion ops' math is proven separately in ``test_outputs_producers.py``.
+    so the trained checkpoint — which never saw them — loads unchanged.
 
     track_vertexing is left WITHOUT a producer (deferred P2), and opted OUT of
     the TEST eval path (expose:[fit,val]) so its ``preds.*`` port is FIT/VAL-only
     and the dead-preds gate does not require a sink for it (design §4.2/§4 risk
-    5). The training checkpoint is unaffected — FIT/VAL keep the head.
+    5). The training checkpoint is unaffected — FIT/VAL keep the head. This is the
+    same wiring the ``gn2v2-dummy-cutover.yaml`` config encodes for the live CLI
+    path.
 
     Returns
     -------
     SaltModule
-        The GN2v2 model with identity output producers added.
+        The GN2v2 model with the real classification conversion producers added.
     """
     modules = build_gn2v2_modules(data["nd"])
     modules["track_vertexing"].expose_modes = Mode.FIT | Mode.VAL
-    modules["jet_probs"] = TaskOutput(task="jets_classification", stream="jets")
-    modules["track_origin_probs"] = TaskOutput(task="track_origin", stream="tracks")
+    modules["jet_probs"] = ClassProbs(task="jets_classification", stream="jets")
+    modules["track_origin_probs"] = SeqClassProbs(task="track_origin", stream="tracks")
     model = SaltModule(modules, lrs={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01})
     model.name = RUN_NAME
     return model
@@ -372,8 +377,19 @@ class TestH5OutputWriterParity:
                 )
         assert not diffs, "SEMANTIC H5 PARITY FAILED:\n" + "\n".join(diffs)
 
-    def test_probs_are_softmaxed(self, p1_h5):
-        """The P1 prob columns are probabilities (sum ~1), not raw logits."""
+    def test_probs_are_softmaxed_not_double_converted(self, p1_h5):
+        """The P1 prob columns are probabilities (sum ~1) — converted EXACTLY ONCE.
+
+        The double-conversion guard (design §4 "double-conversion"): if the new
+        path converted twice (e.g. the task forward still softmaxed AND the
+        producer softmaxed) the columns would be softmax(softmax(logits)) — still
+        in [0, 1] and summing to 1 per row, but a DIFFERENT distribution. The
+        semantic-H5-parity test already pins the exact values vs the M4.5 oracle
+        (which converts once in get_h5), so a double-convert would FAIL parity.
+        This test additionally pins the basic "is a distribution" invariant
+        (sum ~1, not raw logits) on both the global and the masked-softmax
+        sequence head.
+        """
         with h5py.File(p1_h5) as f:
             jets = f["jets"][:]
             tracks = f["tracks"][:]
@@ -386,3 +402,170 @@ class TestH5OutputWriterParity:
         origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
         assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
         assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+
+class TestCutoverConfig:
+    """The ``gn2v2-dummy-cutover.yaml`` config is the live wiring source of truth.
+
+    It encodes EXACTLY the wiring the programmatic gate (`_model_with_producers`
+    + `_h5_output_writer`) drives: the classification conversion producers
+    (`ClassProbs`/`SeqClassProbs`) in ``model.modules``, ``track_vertexing``
+    opted out of TEST (``expose: [fit, val]``), the M4.5 ``writers:`` nulled, and
+    the `H5OutputWriter` as a ``callbacks:`` sink.
+
+    Three levels of proof: (1) the config FITS end-to-end through the real CLI
+    (``main(['fit', ...])`` instantiates the model + the producers + the sink;
+    the producers are demand-pruned from FIT and the training path is unchanged),
+    (2) the config CONTENT is asserted by parsing the YAML (the exact module
+    classes / null-merge / callback class names), and (3) the config TESTS
+    end-to-end through ``salt2 test`` and the resulting eval H5 matches the M4.5
+    oracle (`TestCutoverCliE2E`). The ``test`` subcommand's writer-less refusal
+    now recognises the callbacks-level `H5OutputWriter` sink (main.py
+    ``_has_callback_persistence_sink``), so the LIVE cutover eval path is proven
+    through the real CLI — closing the prior "live cutover proven only
+    programmatically" gap (the programmatic `p1_h5` gate's wiring mirrors this
+    config exactly, and the CLI path now corroborates it).
+    """
+
+    def test_cutover_config_fits_end_to_end(self, data, tmp_path_factory):
+        """The cutover config instantiates + fits (producers pruned from FIT)."""
+        fit_dir = tmp_path_factory.mktemp("cutover_fit")
+        rc = main([
+            "fit",
+            "--config",
+            str(DUMMY_CFG),
+            "--config",
+            str(CUTOVER_CFG),
+            f"--data.train_file={data['h5']}",
+            f"--data.val_file={data['h5']}",
+            *_overrides(data),
+            f"--trainer.default_root_dir={fit_dir}",
+            "--trainer.max_epochs=1",
+            "--trainer.limit_train_batches=2",
+            "--trainer.limit_val_batches=2",
+            "--trainer.num_sanity_val_steps=0",
+        ])
+        assert rc == 0
+
+    def test_cutover_config_content(self):
+        """The cutover YAML wires the producers, nulls M4.5 writers, adds the sink."""
+        cfg = yaml.safe_load(CUTOVER_CFG.read_text())
+        mods = cfg["model"]["modules"]
+        # the classification conversion producers (real ops, NOT identity)
+        assert mods["jet_probs"]["class_path"] == "salt.core.outputs.ClassProbs"
+        assert mods["jet_probs"]["init_args"]["task"] == "jets_classification"
+        assert mods["track_origin_probs"]["class_path"] == "salt.core.outputs.SeqClassProbs"
+        assert mods["track_origin_probs"]["init_args"]["task"] == "track_origin"
+        # track_vertexing opted out of TEST (deferred P2)
+        assert mods["track_vertexing"]["init_args"]["expose"] == ["fit", "val"]
+        # M4.5 writers nulled (null-merge deletes the WriterCallback)
+        assert cfg["writers"]["modules"] == {
+            "inputs_copy": None,
+            "tasks": None,
+            "pad_mask": None,
+        }
+        # H5OutputWriter is the live TEST sink (a callbacks: entry)
+        h5 = cfg["callbacks"]["h5_output"]
+        assert h5["class_path"] == "salt.core.outputs.H5OutputWriter"
+        out_keys = {o["key"] for o in h5["init_args"]["outputs"]}
+        assert out_keys == {
+            "outputs.jets.jets_classification",
+            "outputs.tracks.track_origin",
+        }
+        assert h5["init_args"]["write_pad_mask"] == ["tracks"]
+
+
+# ---------------------------------------------------------------------------
+# path (c): the LIVE cutover through the real ``salt2 test`` CLI (closes the
+# "live cutover proven only programmatically" gap — the cutover config drives
+# the producers -> H5OutputWriter chain end-to-end, the same way a user runs it)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from ``salt2 test`` on the gn2v2-dummy + cutover configs (the CLI path).
+
+    Runs the LIVE cutover exactly as a user would — ``salt2 test --config
+    gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml --ckpt_path <trained>`` —
+    so the callbacks-level `H5OutputWriter` persistence sink is recognised by the
+    test-stage writer-less check (main.py ``_has_callback_persistence_sink``), the
+    classification conversion producers run on the flipped (RAW-logits) TEST
+    forward, and the eval H5 is written by the real CLI. The output path is
+    overridden onto a tmp file so the assertion can read it back.
+
+    Returns
+    -------
+    Path
+        The cutover CLI eval H5 file.
+    """
+    out = tmp_path_factory.mktemp("cutover_cli") / "cutover_cli.h5"
+    rc = main([
+        "test",
+        "--config",
+        str(DUMMY_CFG),
+        "--config",
+        str(CUTOVER_CFG),
+        f"--data.test_file={data['h5']}",
+        f"--ckpt_path={ckpt}",
+        f"--data.num_test={N_TEST}",
+        f"--trainer.default_root_dir={data['dir']}",
+        f"--callbacks.h5_output.init_args.output={out}",
+        *_overrides(data),
+    ])
+    assert rc == 0, "salt2 test on the cutover config must run end-to-end (FIX 2)"
+    assert out.exists(), f"the cutover CLI wrote no eval H5 at {out}"
+    return out
+
+
+class TestCutoverCliE2E:
+    """The cutover config drives the new path through ``salt2 test`` end-to-end.
+
+    This is G1 driven via the REAL CLI (not only ``Trainer.test``): the
+    callbacks-level `H5OutputWriter` sink is now accepted by the test-stage check
+    (FIX 2), so ``salt2 test`` on ``gn2v2-dummy.yaml`` + ``gn2v2-dummy-cutover.yaml``
+    runs producers -> sink end-to-end and the eval H5 must match the M4.5 oracle
+    at SEMANTIC parity (ints exact, floats <=1e-6), deferred (P2 vertexing)
+    columns excluded — the same contract as the programmatic `p1_h5` gate.
+    """
+
+    def test_cli_writes_eval_h5(self, cutover_cli_h5):
+        """``salt2 test`` on the cutover config writes a non-empty eval H5."""
+        with h5py.File(cutover_cli_h5) as f:
+            assert set(f.keys()) >= {"jets", "tracks"}
+            assert f["jets"].shape[0] == N_TEST
+
+    def test_cli_groups_match_oracle(self, oracle_h5, cutover_cli_h5):
+        """The CLI cutover eval H5 writes the same groups as the M4.5 oracle."""
+        with h5py.File(oracle_h5) as a, h5py.File(cutover_cli_h5) as b:
+            assert set(a.keys()) == set(b.keys())
+
+    def test_cli_semantic_h5_parity(self, oracle_h5, cutover_cli_h5):
+        """Per-column array equality vs the M4.5 oracle (deferred P2 columns excluded).
+
+        Proves the LIVE cutover (driven by the real ``salt2 test`` CLI) reproduces
+        the M4.5 ``WriterCallback`` eval H5 — closing the gap where the cutover was
+        previously proven only via the programmatic ``Trainer.test`` (`p1_h5`).
+        """
+        diffs: list[str] = []
+        with h5py.File(oracle_h5) as a, h5py.File(cutover_cli_h5) as b:
+            for group in a:
+                oracle = a[group][:]
+                cli = b[group][:]
+                want_cols = _drop_deferred(list(oracle.dtype.names), group)
+                got_cols = list(cli.dtype.names)
+                if want_cols != got_cols:
+                    diffs.append(
+                        f"{group}: column set/order mismatch\n  oracle (minus deferred): "
+                        f"{want_cols}\n  cli                    : {got_cols}"
+                    )
+                    continue
+                if oracle.shape != cli.shape:
+                    diffs.append(f"{group}: shape {oracle.shape} (oracle) != {cli.shape} (cli)")
+                    continue
+                diffs.extend(
+                    msg
+                    for col in want_cols
+                    if (msg := _compare_column(group, col, oracle[col], cli[col])) is not None
+                )
+        assert not diffs, "CUTOVER CLI SEMANTIC H5 PARITY FAILED:\n" + "\n".join(diffs)
