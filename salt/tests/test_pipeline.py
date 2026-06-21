@@ -46,7 +46,10 @@ def run_train(
     args += ["--data.batch_size=20"]
     args += ["--data.num_workers=0"]
     args += ["--trainer.max_epochs=1"]
-    args += ["--trainer.accelerator=cpu"]
+    # auto: use the GPU when one is present (e.g. a GPU CI runner) and fall back
+    # to CPU everywhere else (local / CPU runners) — so the same tests exercise
+    # the GPU path on GPU runners without changing CPU behaviour.
+    args += ["--trainer.accelerator=auto"]
     args += ["--trainer.devices=1"]
     args += [f"--trainer.default_root_dir={tmp_path}"]
     args += ["--trainer.logger.init_args.online=False"]
@@ -82,6 +85,7 @@ def run_eval(tmp_path, train_config_path, nd_path, do_xbb=False, is_gn3=False):
     args += [f"--data.test_file={test_h5_path}"]
     args += ["--data.num_test=1000"]
     args += ["--data.batch_size=100"]
+    args += ["--trainer.accelerator=auto"]  # match run_train: GPU when available, else CPU
     main(args)
 
     # check output h5 files are produced
