@@ -158,6 +158,11 @@ exclude = '^salt/tests/.*\.py$'
 log_cli = true
 log_cli_level = "CRITICAL"
 filterwarnings = ["ignore::DeprecationWarning"]
+# salt/tests/unit mirrors salt/core 1:1 (genuine unit tests); salt/tests/integration
+# holds the gate harnesses + any test that builds/runs a full model or reads real
+# data; salt/tests/*.py are the legacy v1 top-level tests. Shared fixtures live in
+# salt/tests/_fixtures (imported as salt.tests._fixtures.*, not collected).
+testpaths = ["salt/tests"]
 
 [tool.coverage.report]
 omit = ["**/mup_utils/*"]
