@@ -1,8 +1,20 @@
 """Output sinks — terminal consumers of the ``outputs.*`` dict (design §2 layer 2).
 
-A sink is a Lightning callback that consumes the producers' ``outputs.*``
-leaves and does something terminal with them. Sinks are independent and
-composable: each takes, as config, the list of output names it wants.
+A sink consumes the producers' ``outputs.*`` leaves and does something terminal
+with them. There are two shapes here:
+
+- `H5OutputSink` (plan 29 W1) is a terminal graph NODE (`SinkModule`): it
+  ``declare_io``-requires ``outputs.*``/``meta.rows``/``masks.*`` in TEST and
+  produces nothing, so the planner keeps it in the TEST plan (rendering its own
+  card and anchoring demand) and prunes it from FIT/VAL/ONNX. Its Lightning
+  lifecycle rides the generated `_SinkCallback` bridge (the "node IS the
+  callback" adapter, design §5.2) rather than being a hand-coded callback.
+- `CollectOutputs` is the original duck-typed `lightning.Callback` P0 sink: it
+  anchors demand only through ``writer_demand`` (the legacy flat-``<sinks>``
+  path), is NOT a graph node, and is preserved for that path.
+
+Sinks are independent and composable: each takes, as config, the list of output
+names it wants.
 
 The load-bearing mechanism is **demand**: a sink declares the ``outputs.*``
 keys it needs via `writer_demand`, the duck-typed surface `SaltModule`
@@ -32,10 +44,18 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import KEY_SEP
+from salt.core.graph.spec import (
+    IO,
+    KEY_SEP,
+    Mode,
+    TensorSpec,
+    flatten_spec,
+    sym_dim,
+    unflatten_spec,
+)
 from salt.core.utils.array_utils import join_structured_arrays
 
-__all__ = ["CollectOutputs", "H5OutputWriter", "OutputColumn"]
+__all__ = ["CollectOutputs", "H5OutputSink", "H5OutputWriter", "OutputColumn"]
 
 _OUTPUTS_NAMESPACE = "outputs"
 """The bundle namespace this sink demands from (design §2.1)."""
@@ -260,11 +280,134 @@ class OutputColumn:
         return np.dtype([(col, self.dtype) for col in self.column_names(run_name)])
 
 
-class H5OutputWriter(Callback):
-    """The P1 H5 sink: serialise ``outputs.*`` leaves to the eval H5 (design §2 layer 2).
+class _SinkCallback(Callback):
+    """The generated thin Lightning bridge for a terminal sink NODE (design §5.2, D3).
 
-    A TEST-only Lightning callback that accumulates the named ``outputs.*``
-    producer leaves per batch and writes them through ONE ftag `H5Writer`
+    "The node IS the callback": a sink node owns its Lightning hooks through this
+    shared base, eliminating the parallel duck-typed callback. The single node
+    declaration (`declare_io`) drives BOTH the planner demand (the H5 sink's
+    ``writer_demand`` is GENERATED from ``declare_io(Mode.TEST).requires``) and
+    the lifecycle (the hooks below forward to the node's named methods).
+
+    The discovery seam is unchanged: `SaltModule._attached_writer`
+    (saltmodule.py) still scans for ``callable(getattr(cb, "writer_demand",
+    None))`` and finds this adapter; the node also registers in the TEST plan as
+    a real `PlanStep` (so it renders its own card), and the executor partitions
+    it OUT of the per-batch forward loop via `is_sink()` (Q5).
+
+    A subclass provides the node surface: ``name``, ``declare_io(mode)`` (TEST
+    requires, empty produces), ``open_schema(trainer)`` / ``consume(bundle)`` /
+    ``flush()`` / ``close_if_open()``, and ``_pad_mask_streams()`` for the
+    GENERATED ``writer_demand``.
+    """
+
+    name: str
+
+    def is_sink(self) -> bool:
+        """Mark this module a terminal sink (excluded from the executor forward loop, Q5).
+
+        Returns
+        -------
+        bool
+            Always True — a sink produces no tensor and is never invoked as
+            ``module(bundle, mode)`` by the executor.
+        """
+        return True
+
+    def declare_io(self, mode: Mode) -> IO:  # pragma: no cover - overridden by subclasses
+        """Declare the sink's requires/produces for `mode` (subclass override).
+
+        Returns
+        -------
+        IO
+            The terminal node's IO: mode-gated requires, empty produces.
+        """
+        del mode
+        return IO(requires={}, produces={})
+
+    def open_schema(self, trainer: Trainer) -> None:  # pragma: no cover - overridden
+        """Open the sink's output schema before the first batch (was ``on_test_start``)."""
+
+    def consume(self, bundle: Bundle) -> None:  # pragma: no cover - overridden
+        """Consume one executed bundle (was ``on_test_batch_end``)."""
+
+    def flush(self) -> None:  # pragma: no cover - overridden
+        """Finalise the sink (was ``on_test_end``)."""
+
+    def close_if_open(self) -> None:  # pragma: no cover - overridden
+        """Idempotently close any open handle (failure-cleanup, design §5.3)."""
+
+    def writer_demand(
+        self, model_modules: Mapping[str, Any], reader: Any
+    ) -> dict[str, str]:  # pragma: no cover - overridden
+        """The TEST demand this sink anchors, GENERATED from `declare_io` (subclass override).
+
+        Returns
+        -------
+        dict[str, str]
+            ``{demanded key: demander description}``.
+        """
+        del model_modules, reader
+        return {}
+
+    # -- lightning hooks: forward to the node's named methods (the bridge) -------
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Single-device assertion at test setup (multi-device test writing out of scope).
+
+        Raises
+        ------
+        ConfigError
+            When testing on more than one device.
+        """
+        del pl_module
+        if stage == "test" and trainer.world_size != 1:
+            raise ConfigError(
+                f"{type(self).__name__} requires a single device, got "
+                f"world_size={trainer.world_size} — multi-device test writing is out of scope "
+                "(design §5.3, v1 contract)"
+            )
+
+    def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Open the sink schema before the first batch."""
+        del pl_module
+        self.open_schema(trainer)
+
+    def on_test_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: Bundle,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        """Consume one batch's executed bundle (Lightning threads the ``test_step`` return)."""
+        del trainer, pl_module, batch, batch_idx, dataloader_idx
+        self.consume(outputs)
+
+    def on_test_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Finalise the sink at test end."""
+        del trainer, pl_module
+        self.flush()
+
+    def teardown(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Idempotent cleanup: close any leaked handle on an interrupted test (design §5.3)."""
+        del trainer, pl_module, stage
+        self.close_if_open()
+
+
+class H5OutputSink(_SinkCallback):
+    """The P1 H5 sink: a terminal graph NODE serialising ``outputs.*`` to the eval H5 (design §4.1).
+
+    Promoted from ``H5OutputWriter`` (Q4): a `GraphModule` terminal node whose
+    ``declare_io`` requires the demanded ``outputs.*`` leaves (+ ``meta.rows`` +
+    each pad-mask stream) in TEST and produces nothing — so the planner keeps it
+    in TEST (rendering its own card) while FIT/VAL/ONNX prune it. Its Lightning
+    lifecycle (the relocated serialisation) rides the `_SinkCallback` bridge.
+
+    It accumulates the named ``outputs.*`` producer leaves per batch and writes
+    them through ONE ftag `H5Writer`
     (FIXED mode, ``num_jets`` known up front — a valid empty file for an empty
     test set), matching the M4.5 `WriterCallback` H5 contract (recon PR1.1).
     Replaces `TaskWriter` + `InputCopyWriter` + `PadMaskWriter` +
@@ -330,6 +473,9 @@ class H5OutputWriter(Callback):
         column-name collision / unknown stream / missing source variable.
     """
 
+    name = "h5_output"
+    """The graph-node instance name (overridable by the config dict key)."""
+
     def __init__(
         self,
         outputs: Sequence[OutputColumn | Mapping[str, Any]],
@@ -344,14 +490,14 @@ class H5OutputWriter(Callback):
         ]
         if not cols:
             raise ConfigError(
-                "H5OutputWriter needs a non-empty outputs list — name the outputs.* leaves "
-                "(OutputColumn) to serialise (design §2 layer 2)"
+                "H5OutputSink needs a non-empty outputs list — name the outputs.* leaves "
+                "(OutputColumn) to serialise (design §4.1)"
             )
         seen: set[str] = set()
         for col in cols:
             if col.key in seen:
                 raise ConfigError(
-                    f"H5OutputWriter: duplicate output key {col.key!r} — one OutputColumn per "
+                    f"H5OutputSink: duplicate output key {col.key!r} — one OutputColumn per "
                     "outputs.* leaf (design §2.2)"
                 )
             seen.add(col.key)
@@ -360,7 +506,7 @@ class H5OutputWriter(Callback):
         self.write_pad_mask = write_pad_mask
         self.output = output
         self.half_precision = half_precision
-        # per-test-run state (reset at on_test_start)
+        # per-test-run state (reset at open_schema)
         self._h5: H5Writer | None = None
         self._rows_written = 0
         self._expected = 0
@@ -394,51 +540,81 @@ class H5OutputWriter(Callback):
         """
         return tuple(col.key for col in self._columns)
 
+    # -- graph node surface (design §4.1) ---------------------------------------
+
+    def declare_io(self, mode: Mode) -> IO:
+        """The terminal node's IO: TEST requires ``outputs.*``/``meta.rows``/``masks.*``; empty out.
+
+        In TEST the sink requires the demanded ``outputs.*`` leaves (``kind=data``),
+        the ``meta.rows`` row anchor (``kind=meta``), and each pad-mask stream's
+        ``masks.<stream>`` (``kind=pad_mask``); it produces nothing — a terminal
+        node the planner keeps via `_is_terminal_consumer`/`_demand_closure`
+        (rendering its own card). In FIT/VAL/ONNX it declares empty requires AND
+        empty produces, so the demand-closure prunes it — and the FIT/VAL
+        ``plan_hash`` is byte-unchanged (the trained checkpoint loads unperturbed,
+        design §8 back-compat proof). The ``preds.*`` back-discovery the old
+        ``writer_demand`` did DISAPPEARS: the conversion PRODUCERS declare their
+        own ``preds.*`` requires, so the dead-preds gate is satisfied
+        transitively via the producer node (design §4.1).
+
+        Returns
+        -------
+        IO
+            The declared interface for `mode`.
+        """
+        if not (mode & Mode.TEST):
+            return IO(requires={}, produces={})
+        # dtype is None on the require: ``OutputColumn.dtype`` is the H5 NUMPY
+        # descriptor (``"f4"``/``"i8"``) — a serialisation concern — not the
+        # producer's torch dtype (``"float32"``). Constraining it would conflict
+        # with the producer's declared dtype; the sink consumes whatever leaf the
+        # producer emits and casts at write time (design §4.1, kind unifies).
+        req: dict[str, TensorSpec] = {
+            col.key: TensorSpec(shape=None, dtype=None, kind="data") for col in self._columns
+        }
+        req["meta.rows"] = TensorSpec(shape=None, dtype="int64", kind="meta")
+        for stream in self._pad_mask_streams():
+            req[f"masks.{stream}"] = TensorSpec(
+                shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
+            )
+        return IO(requires=unflatten_spec(req), produces={})
+
     # -- static demand (consumed by SaltModule, design §8) ----------------------
 
     def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The TEST demand this sink anchors (duck-typed `SaltModule` surface, design §8).
+        """The TEST demand this sink anchors — GENERATED from `declare_io` (design §4.1, §5.2).
 
-        Returns the consumed ``outputs.*`` leaves, the source ``preds.*`` leaf of
-        each producer feeding them (so the TEST dead-preds gate sees those
-        predictions as consumed — under this design preds.* are consumed by the
-        producer, not the sink), the ``meta.rows`` row anchor, and each pad-mask
-        stream's ``masks.<stream>``. The producer-source ``preds.*`` keys are
-        discovered by matching each demanded output key against the model
-        modules' ``output_key``/``pred_key`` attributes (the `TaskOutput`
-        surface) — a producer whose leaf this sink demands contributes its
-        ``pred_key``.
+        Returns the sink's TEST-mode ``declare_io`` requires (the consumed
+        ``outputs.*`` leaves, the ``meta.rows`` row anchor, and each pad-mask
+        stream's ``masks.<stream>``), each mapped to a §4.1-grade demander
+        description. `SaltModule._attached_writer` (saltmodule.py) discovers this
+        via ``callable(getattr(cb, "writer_demand", None))`` and folds the keys
+        into the TEST plan sinks — keeping that seam intact while the keys are now
+        DERIVED from the single node declaration rather than hand-coded.
+
+        The old ``preds.*`` back-discovery is GONE (design §4.1): the conversion
+        producers declare their own ``preds.*`` requires, so the dead-preds gate
+        is satisfied transitively. This sink demands ONLY
+        ``outputs.*``/``meta.rows``/``masks.*``.
 
         Parameters
         ----------
         model_modules : Mapping[str, Any]
-            The model-side module dict (producers carry ``output_key`` +
-            ``pred_key``).
+            The model-side module dict (unused — demand is generated from the
+            sink's own declaration).
         reader : Any
-            The configured reader prototype (unused here — this sink demands
-            fixed model-produced keys).
+            The configured reader prototype (unused — this sink demands fixed
+            model-produced keys).
 
         Returns
         -------
         dict[str, str]
-            ``{dotted key: "sink 'H5OutputWriter' demanding <key>"}`` in a
-            stable order (outputs, then producer-source preds, then meta/masks).
+            ``{dotted key: "sink 'H5OutputSink' demanding <key>"}`` in
+            declaration order (outputs, then meta.rows, then masks).
         """
-        del reader
-        who = "sink 'H5OutputWriter' demanding"
-        out: dict[str, str] = {col.key: f"{who} {col.key}" for col in self._columns}
-        # pull each demanded output's source preds.* into demand so the TEST
-        # dead-preds gate (saltmodule.py:613-627) treats it as consumed
-        demanded = set(out)
-        for module in (model_modules or {}).values():
-            output_key = getattr(module, "output_key", None)
-            pred_key = getattr(module, "pred_key", None)
-            if isinstance(output_key, str) and output_key in demanded and isinstance(pred_key, str):
-                out.setdefault(pred_key, f"{who} producer source {pred_key}")
-        out.setdefault("meta.rows", f"{who} meta.rows")
-        for stream in self._pad_mask_streams():
-            out.setdefault(f"masks.{stream}", f"{who} masks.{stream}")
-        return out
+        del model_modules, reader
+        who = "sink 'H5OutputSink' demanding"
+        return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
     def _pad_mask_streams(self) -> tuple[str, ...]:
         """The sequence streams a pad-mask column is requested for.
@@ -458,30 +634,16 @@ class H5OutputWriter(Callback):
             return tuple(seen)
         return tuple(dict.fromkeys(self.write_pad_mask))
 
-    # -- lightning hooks ---------------------------------------------------------
+    # -- node lifecycle (relocated VERBATIM from on_test_* — design §5.1) --------
 
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Single-device assertion (multi-device test writing is out of scope, as v1).
-
-        Raises
-        ------
-        ConfigError
-            When testing on more than one device.
-        """
-        del pl_module
-        if stage == "test" and trainer.world_size != 1:
-            raise ConfigError(
-                f"H5OutputWriter requires a single device, got world_size={trainer.world_size} "
-                "— multi-device test writing is out of scope (design §8, v1 contract)"
-            )
-
-    def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Create the eval H5 with the full schema BEFORE the first batch.
+    def open_schema(self, trainer: Trainer) -> None:
+        """Create the eval H5 with the full schema BEFORE the first batch (was ``on_test_start``).
 
         Resolves the output path + total rows from the trainer/datamodule, opens
         the source handle for input copies, merges the output / input-copy /
         pad-mask columns into per-group dtypes/shapes, and creates the FIXED-mode
-        `H5Writer` (recon PR1.1).
+        `H5Writer` (recon PR1.1). Driven by the `_SinkCallback` bridge's
+        ``on_test_start`` hook.
 
         Raises
         ------
@@ -490,12 +652,13 @@ class H5OutputWriter(Callback):
             template key, a non-sequence pad-mask stream, a column collision, or
             a missing input-copy source variable.
         """
+        pl_module = trainer.lightning_module
         dm = getattr(trainer, "datamodule", None)
         dset = getattr(dm, "test_dset", None)
         if dset is None:
             raise ConfigError(
-                "H5OutputWriter needs a GraphDataModule with a built test dataset — "
-                f"got {type(dm).__name__} (design §8)"
+                "H5OutputSink needs a GraphDataModule with a built test dataset — "
+                f"got {type(dm).__name__} (design §5.1)"
             )
         reader = dset.reader
         self._run_name = getattr(pl_module, "name", "salt")
@@ -503,8 +666,8 @@ class H5OutputWriter(Callback):
         groups = getattr(reader, "groups", None)
         if not streams or groups is None:
             raise ConfigError(
-                "H5OutputWriter needs an H5StructuredReader-style reader exposing "
-                f"streams/groups — got {type(reader).__name__} (design §8)"
+                "H5OutputSink needs an H5StructuredReader-style reader exposing "
+                f"streams/groups — got {type(reader).__name__} (design §5.1)"
             )
         sequence_streams = tuple(
             s for s in streams if not getattr(groups[s], "global_object", False)
@@ -521,7 +684,7 @@ class H5OutputWriter(Callback):
         for stream in self._mask_streams:
             if stream not in sequence_streams:
                 raise ConfigError(
-                    f"H5OutputWriter: pad-mask stream {stream!r} is not a sequence stream — "
+                    f"H5OutputSink: pad-mask stream {stream!r} is not a sequence stream — "
                     f"pad masks exist for {list(sequence_streams)} only (design §6.1)"
                 )
         total = self._expected_rows(trainer, len(dset), dm.batch_size)
@@ -540,37 +703,30 @@ class H5OutputWriter(Callback):
         self._rows_written = 0
         self._expected = total
 
-    def on_test_batch_end(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        outputs: Bundle,
-        batch: Any,
-        batch_idx: int,
-        dataloader_idx: int = 0,
-    ) -> None:
-        """Serialise one batch of ``outputs.*`` leaves (+ input copies + masks).
+    def consume(self, bundle: Bundle) -> None:
+        """Serialise one batch of ``outputs.*`` (+ input copies + masks); was ``on_test_batch_end``.
 
         Reads ``meta.rows`` to validate row alignment against the running
         counter (sharded/uneven-batch loaders fail loudly, the M4.5 contract),
         packs each demanded leaf into its declared columns, re-reads the
         input-copy columns by absolute rows, builds the pad-mask columns, merges
-        same-group fragments, and streams one `H5Writer.write`.
+        same-group fragments, and streams one `H5Writer.write`. Driven by the
+        `_SinkCallback` bridge's ``on_test_batch_end`` hook (Lightning threads
+        the ``test_step`` return — the executed `Bundle` — as the ``outputs`` arg).
 
         Raises
         ------
         ConfigError
             On a row-alignment break or a fragment with the wrong row count.
         """
-        del trainer, pl_module, batch, batch_idx, dataloader_idx
-        assert self._h5 is not None, "on_test_batch_end before on_test_start"
-        rows_t = outputs.get("meta.rows")
+        assert self._h5 is not None, "consume before open_schema"
+        rows_t = bundle.get("meta.rows")
         start, stop = int(rows_t[0]), int(rows_t[1])
         if start != self._rows_written:
             raise ConfigError(
-                f"H5OutputWriter row alignment broke: batch rows [{start}, {stop}) but "
+                f"H5OutputSink row alignment broke: batch rows [{start}, {stop}) but "
                 f"{self._rows_written} rows written so far — sharded or uneven-batch test "
-                "loaders are not supported (design §8 row-alignment contract)"
+                "loaders are not supported (design §5 row-alignment contract)"
             )
         rows = slice(start, stop)
         n = stop - start
@@ -579,16 +735,16 @@ class H5OutputWriter(Callback):
         for stream, arr in self._copy_fragments(rows).items():
             fragments.setdefault(stream, []).append(arr)
         # output columns next
-        for arr_stream, arr in self._output_fragments(outputs).items():
+        for arr_stream, arr in self._output_fragments(bundle).items():
             fragments.setdefault(arr_stream, []).append(arr)
         # pad masks last
-        for stream, arr in self._mask_fragments(outputs).items():
+        for stream, arr in self._mask_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
         for stream, arrs in fragments.items():
             for arr in arrs:
                 if len(arr) != n:
                     raise ConfigError(
-                        f"H5OutputWriter: fragment for group {stream!r} has {len(arr)} rows, "
+                        f"H5OutputSink: fragment for group {stream!r} has {len(arr)} rows, "
                         f"expected {n} (rows [{start}, {stop}))"
                     )
         data = {
@@ -598,9 +754,11 @@ class H5OutputWriter(Callback):
         self._h5.write(data)
         self._rows_written = stop
 
-    def on_test_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Close the source handle and the sink (warn on a truncated loop)."""
-        del trainer, pl_module
+    def flush(self) -> None:
+        """Close the source handle and the sink, warning on a truncated loop (was ``on_test_end``).
+
+        Driven by the `_SinkCallback` bridge's ``on_test_end`` hook.
+        """
         self._close_copies()
         if self._h5 is None:
             return
@@ -616,6 +774,22 @@ class H5OutputWriter(Callback):
         print("-" * 100)
         print(f"Wrote eval file {self.output_path}")
         print("-" * 100)
+
+    def close_if_open(self) -> None:
+        """Idempotently close any open handle on an interrupted test (design §5.3).
+
+        Wired to the `_SinkCallback` bridge's ``teardown`` hook: if ``consume``
+        raised mid-test, Lightning's ``on_test_end`` may not run, leaking the
+        FIXED-mode handle and leaving a half-written file open. This closes the
+        raw `H5Writer.file` handle (and the cached source handle) WITHOUT the
+        full-count assertion — matching `flush`'s truncated branch — and is a
+        no-op once `flush`/`close_if_open` already ran (``self._h5 is None``).
+        """
+        self._close_copies()
+        if self._h5 is None:
+            return
+        self._h5.file.close()
+        self._h5 = None
 
     # -- per-batch fragment builders --------------------------------------------
 
@@ -700,7 +874,7 @@ class H5OutputWriter(Callback):
             return
         if unknown := sorted(set(self.copy_inputs) - set(streams)):
             raise ConfigError(
-                f"H5OutputWriter: copy_inputs streams {unknown} are not reader streams — "
+                f"H5OutputSink: copy_inputs streams {unknown} are not reader streams — "
                 f"streams are {list(streams)}"
             )
         self._copy_handle = h5py.File(source_path, "r", swmr=True, libver="latest")
@@ -712,7 +886,7 @@ class H5OutputWriter(Callback):
             fields = self.copy_inputs[stream] or file_fields
             if missing := sorted(set(fields) - set(file_fields)):
                 raise ConfigError(
-                    f"H5OutputWriter: copy_inputs variables {missing} missing for stream "
+                    f"H5OutputSink: copy_inputs variables {missing} missing for stream "
                     f"{stream!r} in {source_path.name!r} (v1 extra_vars contract)"
                 )
             self._copy_reads[stream] = (ds, list(fields))
@@ -755,7 +929,7 @@ class H5OutputWriter(Callback):
         def _add(stream: str, dtype: np.dtype, who: str) -> None:
             if stream not in streams:
                 raise ConfigError(
-                    f"H5OutputWriter: {who} targets unknown group {stream!r} — reader streams "
+                    f"H5OutputSink: {who} targets unknown group {stream!r} — reader streams "
                     f"are {list(streams)}"
                 )
             for descr in dtype.descr:
@@ -779,7 +953,7 @@ class H5OutputWriter(Callback):
         for stream in self._mask_streams:
             _add(stream, np.dtype([("mask", "?")]), f"pad mask[{stream!r}]")
         if not descrs:
-            raise ConfigError("H5OutputWriter declares no output columns at all (design §8)")
+            raise ConfigError("H5OutputSink declares no output columns at all (design §8)")
         self._group_of = {stream: group_datasets.get(stream, stream) for stream in descrs}
         dtypes = {self._group_of[stream]: np.dtype(descr) for stream, descr in descrs.items()}
         shapes = {
@@ -824,7 +998,7 @@ class H5OutputWriter(Callback):
         ckpt_path = trainer.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "H5OutputWriter needs trainer.ckpt_path — run salt2 test with --ckpt_path "
+                "H5OutputSink needs trainer.ckpt_path — run salt2 test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint, v1 contract)"
             )
         stem = Path(getattr(reader, "filename", None) or reader.source_path).stem
@@ -841,5 +1015,14 @@ class H5OutputWriter(Callback):
             return Path(self.output.format(**keys))
         except KeyError as err:
             raise ConfigError(
-                f"unknown H5OutputWriter output template key {err} — available: {sorted(keys)}"
+                f"unknown H5OutputSink output template key {err} — available: {sorted(keys)}"
             ) from None
+
+
+# DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed
+# H5OutputWriter -> H5OutputSink (plan 29 W1). Downstream configs that wire
+# `salt.core.outputs.H5OutputWriter` (incl. gn2v2-dummy-cutover.yaml) keep
+# working — the alias resolves to the promoted node. Remove after the migration
+# window (mirrors plan-25's one-window alias policy).
+H5OutputWriter = H5OutputSink
+"""Deprecated alias for `H5OutputSink` (Q4 one-window migration; plan 29 W1)."""

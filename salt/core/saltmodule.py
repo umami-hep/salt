@@ -448,6 +448,106 @@ class SaltModule(lightning.LightningModule):
             return None, None
         return callback, reader
 
+    def _attached_sink_node(self) -> GraphModule | None:
+        """The attached TEST sink NODE (plan 29 W1), if one is wired as a callback.
+
+        A sink node is a `GraphModule` (``name`` + ``declare_io``) that also marks
+        itself a terminal sink via ``is_sink() -> True`` (the `SinkModule` marker,
+        e.g. `H5OutputSink`). When wired at ``callbacks:`` (the cutover config),
+        `_attached_writer` already finds it by its ``writer_demand`` surface; this
+        sibling additionally checks it is a renderable node so `compile_mode` can
+        FOLD it into the planning module dict (it then renders its OWN card and
+        anchors demand via its declared requires, not the flat ``<sinks>``
+        sentinel). The duck-typed ``writer_demand`` discovery keeps working in
+        parallel.
+
+        Returns
+        -------
+        GraphModule | None
+            The sink node, or None when no sink-node callback is attached.
+        """
+        callback, _reader = self._attached_writer()
+        if callback is None:
+            return None
+        is_sink = getattr(callback, "is_sink", None)
+        has_io = callable(getattr(callback, "declare_io", None))
+        if has_io and callable(is_sink) and bool(is_sink()):
+            return callback
+        return None
+
+    @staticmethod
+    def _fold_sink_node(
+        modules: dict[str, GraphModule], sink_node: GraphModule
+    ) -> dict[str, GraphModule]:
+        """Add a sink NODE to a planning module dict under its instance name (plan 29 W1).
+
+        The planner requires ``module.name == config_key``; the sink's ``name``
+        (the config dict key when wired at ``callbacks:``, else its class default)
+        is used as the key. A name collision with a model module is a config error
+        (instance names are unique across the pipeline graph).
+
+        Returns
+        -------
+        dict[str, GraphModule]
+            A fresh dict including the sink node.
+
+        Raises
+        ------
+        ConfigError
+            If the sink node's name collides with an existing model module.
+        """
+        name = sink_node.name
+        if name in modules:
+            raise ConfigError(
+                f"sink node name {name!r} collides with a model module — instance names must be "
+                "unique across the pipeline graph (design §2.2); rename the callback key"
+            )
+        folded = dict(modules)
+        folded[name] = sink_node
+        return folded
+
+    def _assert_no_dead_preds(self, plan: Plan) -> None:
+        """Restore the TEST dead-preds hard error on the folded-sink path (plan 29 W1).
+
+        With a sink NODE folded (`compile_mode`), the flat `_model_sinks` writer
+        dead-preds gate (`saltmodule.py` TEST branch) is bypassed — the sink
+        demands ``outputs.*``, not ``preds.*``. Under the locked design the
+        conversion PRODUCERS consume each persisted prediction's ``preds.*``, so
+        a genuinely-dead ``preds.*`` (one the model computes every TEST batch but
+        NO producer feeds into a demanded ``outputs.*`` leaf) would otherwise
+        ship silently — a regression vs the M4.5 `WriterCallback` hard error and
+        the eval-safety bug the gate exists to catch (a computed prediction that
+        is never persisted).
+
+        This re-establishes that net on the runtime path at `salt2 test` parity
+        with M4.5: every ``preds.*`` the model produces (active in TEST) must be
+        CONSUMED by some edge in the compiled plan (i.e. by a surviving
+        conversion producer that reaches the sink). A produced ``preds.*`` absent
+        from the plan's consumed keys is dead -> the existing
+        `_dead_preds_message` hard error (the `salt2 graph validate --strict`
+        finding, raised here so the eval flow keeps parity with M4.5).
+
+        Parameters
+        ----------
+        plan : Plan
+            The compiled TEST plan (with the sink folded in).
+
+        Raises
+        ------
+        ConfigError
+            When a produced ``preds.*`` key is consumed by no plan edge.
+        """
+        produced: dict[str, str] = {}
+        for name, module in self._graph_modules.items():
+            for key, spec in flatten_spec(module.declare_io(Mode.TEST).produces).items():
+                if key.split(KEY_SEP, 1)[0] == "preds" and spec.active_in(Mode.TEST):
+                    produced.setdefault(key, name)
+        # every key any plan edge carries is consumed by a surviving node — a
+        # produced preds.* not here reaches the sink through NO producer (dead).
+        consumed = {edge.key for edge in plan.edges}
+        if dead := [key for key in produced if key not in consumed]:
+            raise ConfigError(_dead_preds_message(dead, produced, writers=None))
+
     def _writer_demand(self) -> dict[str, str] | None:
         """Merged writer-declared TEST demand from an attached `WriterCallback`.
 
@@ -665,12 +765,41 @@ class SaltModule(lightning.LightningModule):
             module config drifted mid-run), or the checkpoint's FIT hash
             mismatches.
         """
+        # plan 29 W1: fold the discovered TEST sink NODE into the planning module
+        # dict so it renders its OWN card and anchors demand via its declared
+        # requires (outputs.*/meta.rows/masks.*) instead of the flat <sinks>
+        # sentinel. In FIT/VAL/ONNX the sink's declare_io is empty -> the planner
+        # collects it as inactive (no PlanStep/edge) -> plan_hash byte-UNCHANGED
+        # (the trained checkpoint loads unperturbed, design §8 back-compat proof).
+        # When a sink node is folded, the flat model sinks for TEST are empty: the
+        # node's terminal-consumer demand keeps the producers (and transitively
+        # their preds.*) alive (design §4.1).
+        modules = dict(self._graph_modules)
+        sink_node = self._attached_sink_node()
+        folded_sink = sink_node is not None and mode is Mode.TEST
+        if folded_sink:
+            # the sink node anchors ALL its demand via its declared requires
+            # (folded below) — flat model sinks are empty. The OLD flat
+            # `_model_sinks` writer dead-preds gate does not run on this path
+            # (the sink demands outputs.*, not preds.*); the equivalent runtime
+            # safety net is restored AFTER compile via `_assert_no_dead_preds`
+            # below — a `preds.*` the model computes but no producer feeds into a
+            # demanded output is still a hard error at `salt2 test` (design §4.1,
+            # parity with the M4.5 WriterCallback dead-preds error).
+            modules = self._fold_sink_node(modules, sink_node)
+            sinks: Any = []
+        else:
+            sinks = self._model_sinks(mode)
+            if sink_node is not None:
+                modules = self._fold_sink_node(modules, sink_node)
         plan = compile_plan(
-            self._graph_modules,
+            modules,
             mode,
             sources=unflatten_spec(dict(boundary)),
-            sinks=self._model_sinks(mode),
+            sinks=sinks,
         )
+        if folded_sink:
+            self._assert_no_dead_preds(plan)
         previous = self.plans.get(mode)
         if previous is not None and previous.plan_hash != plan.plan_hash:
             raise ConfigError(

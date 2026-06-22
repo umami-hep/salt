@@ -42,13 +42,14 @@ from salt.core.outputs.producers import (
     SeqClassProbsOp,
     TaskOutput,
 )
-from salt.core.outputs.sinks import CollectOutputs, H5OutputWriter, OutputColumn
+from salt.core.outputs.sinks import CollectOutputs, H5OutputSink, H5OutputWriter, OutputColumn
 
 __all__ = [
     "ClassProbs",
     "ClassProbsOp",
     "CollectOutputs",
     "ConversionOp",
+    "H5OutputSink",
     "H5OutputWriter",
     "IdentityOp",
     "OutputColumn",

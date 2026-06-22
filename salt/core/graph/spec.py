@@ -26,6 +26,7 @@ __all__ = [
     "Kind",
     "Mode",
     "NestedSpec",
+    "SinkModule",
     "TensorSpec",
     "check_key_component",
     "flatten_spec",
@@ -390,4 +391,36 @@ class GraphModule(Protocol):
 
     def declare_io(self, mode: Mode) -> IO:
         """Return the declared requires/produces for the given mode."""
+        ...
+
+
+@runtime_checkable
+class SinkModule(Protocol):
+    """A terminal sink node: in `plan.steps` for render/demand, not a forward (design §4, Q5).
+
+    A sink is a `GraphModule` (it carries `name` + `declare_io`) whose
+    ``declare_io`` produces nothing — it is a terminal CONSUMER of ``outputs.*``
+    that finalises a side effect (an H5 file, the ONNX output tuple), not a per-
+    batch tensor producer. The planner keeps it in the plan (so it renders its
+    own card and anchors demand via `_demand_closure`/`_is_terminal_consumer`),
+    but `Executor` must EXCLUDE it from the per-batch ``module(view, mode)``
+    forward + write-once merge loop (executor.py): a sink produces no tensor and
+    is not invoked as a callable. This is the INVERSE of the setup-only
+    partition (`salt.core.data.datamodule._is_setup_only`), which removes setup
+    modules from the per-batch plan ENTIRELY — a sink stays IN the plan.
+
+    The marker is the ``is_sink()`` method returning ``True`` (duck-typed,
+    runtime-checkable): `Executor.__init__` partitions plan steps into forward
+    steps vs sink steps by it. The lifecycle (``consume``/``flush``) is driven
+    by the generated Lightning bridge, not by the executor.
+    """
+
+    name: str
+
+    def is_sink(self) -> bool:
+        """Whether this module is a terminal sink (excluded from the executor forward loop)."""
+        ...
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Return the declared requires/produces for the given mode (empty produces)."""
         ...

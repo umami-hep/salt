@@ -49,9 +49,26 @@ from salt.core.graph.errors import (
     UndeclaredAccessError,
 )
 from salt.core.graph.planner import Plan, PlanStep
-from salt.core.graph.spec import KEY_SEP, GraphModule, Mode, flatten_spec, split_key
+from salt.core.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec, split_key
 
 __all__ = ["Executor", "canonical_produced"]
+
+
+def _is_sink(module: GraphModule) -> bool:
+    """Whether a plan-step module is a terminal SINK (excluded from the forward loop, Q5).
+
+    Duck-typed on the `SinkModule` Protocol marker ``is_sink() -> True`` (design
+    §4, the inverse of `datamodule._is_setup_only`). A sink stays IN ``plan.steps``
+    (so it renders its own card and anchors demand) but is never invoked as a
+    tensor forward — it produces no tensor and need not be callable.
+
+    Returns
+    -------
+    bool
+        True when `module` declares itself a sink node.
+    """
+    is_sink = getattr(module, "is_sink", None)
+    return isinstance(module, SinkModule) and callable(is_sink) and bool(is_sink())
 
 
 class Executor:
@@ -80,6 +97,10 @@ class Executor:
         self.plan = plan
         self._modules: dict[str, GraphModule] = {}
         self._allowed: dict[str, frozenset[str]] = {}
+        # sink steps stay IN plan.steps (render + demand) but are partitioned OUT
+        # of the per-batch forward loop — the inverse of the setup-only partition
+        # (Q5, design §4): a sink produces no tensor and is never called.
+        self._forward_steps: list[PlanStep] = []
         for step in plan.steps:
             module = step.module if modules is None else modules.get(step.name)
             if module is None:
@@ -97,13 +118,18 @@ class Executor:
                     f"module supplied for step {step.name!r} declares name={module.name!r} — "
                     "instance names must match their plan-step names (design §2.2)"
                 )
+            self._modules[step.name] = module
+            self._allowed[step.name] = _declared_reads(module, step, plan.mode)
+            if _is_sink(module):
+                # a terminal sink: no tensor forward, no callable requirement —
+                # its consume/flush lifecycle is driven by the Lightning bridge
+                continue
             if not callable(module):
                 raise ConfigError(
                     f"module {step.name!r} ({type(module).__name__}) is not callable — the "
                     "executor invokes modules as module(bundle, mode) (design §3.2)"
                 )
-            self._modules[step.name] = module
-            self._allowed[step.name] = _declared_reads(module, step, plan.mode)
+            self._forward_steps.append(step)
 
     def run(self, bundle: Bundle, debug: bool = False) -> Bundle:
         """Execute the plan's steps in order over `bundle` and return it (design §3.2).
@@ -146,7 +172,7 @@ class Executor:
                 f"input bundle is missing source leaves required by the {self.plan.mode.name} "
                 f"plan: {missing} — the caller provides every non-optional source (design §3.2)"
             )
-        for step in self.plan.steps:
+        for step in self._forward_steps:
             module = cast("Callable[[Any, Mode], Any]", self._modules[step.name])
             view: Bundle | _ReadTrackedBundle = (
                 _ReadTrackedBundle(bundle, step.name, self.plan.mode, self._allowed[step.name])

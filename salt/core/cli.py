@@ -364,6 +364,19 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
     writer_sink_cb = _static_writer_sink_callback(cli)
+    # plan 29 W1: when the callbacks-level persistence sink is a renderable NODE
+    # (H5OutputSink — is_sink()/declare_io), FOLD it into the planning module dict
+    # so it renders its OWN card and anchors demand via its declared requires
+    # (outputs.*/meta.rows/masks.*), NOT the flat <sinks> sentinel. In FIT/VAL/ONNX
+    # its declare_io is empty so the planner collects it as inactive (no card).
+    sink_node = _as_sink_node(writer_sink_cb)
+    if sink_node is not None:
+        if sink_node.name in modules:
+            raise ConfigError(
+                f"sink node name {sink_node.name!r} collides with a pipeline module — instance "
+                "names must be unique across the graph (design §2.2); rename the callback key"
+            )
+        modules[sink_node.name] = sink_node
     fitval_callbacks = _static_fitval_callbacks(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
@@ -380,15 +393,27 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                     # writer-demanded dataset-namespace keys (labels/masks/meta)
                     # are TEST sinks too — their producers stay alive (design §8)
                     keys.extend(key for key in demand if key not in keys)
+                elif sink_node is not None:
+                    # a renderable sink NODE (plan 29 W1) anchors ALL its demand via
+                    # its declared requires (folded into `modules` above) — no flat
+                    # sinks needed; its terminal-consumer demand keeps the producers
+                    # (and transitively their preds.*) alive (design §4.1).
+                    keys = []
                 else:
                     keys = list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
-                if writer_sink_cb is not None:
-                    # P1.5 cutover: a callbacks-level H5OutputWriter persistence
-                    # sink (writers: nulled). Fold its writer_demand exactly as
+                if writer_sink_cb is not None and sink_node is None:
+                    # P1.5 cutover with a NON-node persistence sink (duck-typed
+                    # writer_demand only, e.g. CollectOutputs): fold its
+                    # writer_demand into the flat sinks exactly as
                     # SaltModule._boundary_demand does at salt2 test, so the
                     # in-graph conversion producers (outputs.*) stay alive in the
-                    # render instead of pruning dead.
-                    sink_demand = writer_sink_cb.writer_demand(model._graph_modules, reader)
+                    # render instead of pruning dead. A renderable sink NODE
+                    # (sink_node is not None, plan 29 W1) is instead folded into
+                    # `modules` above and anchors its own demand — no flat sink.
+                    sink_demand = writer_sink_cb.writer_demand(
+                        model._graph_modules,  # noqa: SLF001 - same-package adapter
+                        reader,
+                    )
                     keys.extend(key for key in sink_demand if key not in keys)
             except ConfigError as err:
                 mode_errors[mode] = str(err)
@@ -465,8 +490,11 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                     "`salt2 export` will trace"
                 )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
-        if mode is Mode.TEST and "meta.rows" not in keys:
-            keys.append("meta.rows")  # writer row alignment (design §8)
+        # writer row alignment (design §8): a flat meta.rows sink — UNLESS a sink
+        # NODE was folded (plan 29 W1), which demands meta.rows itself via a named
+        # edge (a flat sink would re-introduce the <sinks> sentinel card).
+        if mode is Mode.TEST and sink_node is None and "meta.rows" not in keys:
+            keys.append("meta.rows")
         sinks[mode] = tuple(keys)
     return GraphConfig(
         modules=modules,
@@ -579,6 +607,30 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
         (cb for cb in callbacks or [] if callable(getattr(cb, "writer_demand", None))),
         None,
     )
+
+
+def _as_sink_node(callback: Any) -> Any | None:
+    """The callback as a renderable sink NODE, if it is one (plan 29 W1).
+
+    A sink node is a `GraphModule` (``name`` + ``declare_io``) that marks itself
+    a terminal sink via ``is_sink() -> True`` (the `SinkModule` marker — e.g.
+    `H5OutputSink`). Folding it into the planning module dict makes it render its
+    OWN card and anchor demand via its declared requires. A non-node persistence
+    sink (duck-typed ``writer_demand`` only, e.g. `CollectOutputs`) returns None
+    and keeps the legacy flat-``<sinks>`` folding.
+
+    Returns
+    -------
+    Any | None
+        The sink node, or None when `callback` is not a renderable sink node.
+    """
+    if callback is None:
+        return None
+    is_sink = getattr(callback, "is_sink", None)
+    has_io = callable(getattr(callback, "declare_io", None))
+    if has_io and callable(is_sink) and bool(is_sink()):
+        return callback
+    return None
 
 
 def _static_fitval_callbacks(cli: Any) -> list[Any]:
