@@ -63,8 +63,16 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, sym_dim, unflatten_spec
+
+# plan-29 W3 (the hard reduces): the two scripted union-find helpers + the
+# byte-faithful MaskFormer export math are ALREADY inlined VERBATIM in
+# salt.core.onnx.reduces (the legacy reduce path). The W3 conversion nodes
+# (`VertexUnionFind`/`MaskFormerObject`) REUSE those exact copies — a single
+# source of truth, so the folded node and the legacy reduce can NEVER drift.
+from salt.core.onnx.reduces import get_maskformer_outputs, mask_fill_flattened
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
+from salt.core.utils.union_find import get_node_assignment_jit
 
 __all__ = [
     "ClassProbs",
@@ -72,6 +80,9 @@ __all__ = [
     "Combination",
     "ConversionOp",
     "IdentityOp",
+    "MFLeadVertexDecorator",
+    "MaskFormerObject",
+    "MaskFormerObjects",
     "Regression",
     "RegressionDescaleOp",
     "SeqClassIndex",
@@ -79,6 +90,7 @@ __all__ = [
     "SeqClassProbs",
     "SeqClassProbsOp",
     "TaskOutput",
+    "VertexUnionFind",
 ]
 
 _UNNAMED = "unnamed"
@@ -1086,3 +1098,706 @@ class Combination(nn.Module):
         source = b.get(self.source)
         out = sum(scale * source[..., index] for index, scale in self.terms)
         return {self.output_key: out}
+
+
+class VertexUnionFind(nn.Module):
+    """In-graph union-find conversion node (plan-29 W3, folds ``reduces._bind_vertex_union_find``).
+
+    Folds the v1/M4.5 ``vertex_union_find`` export reduce (``reduces.py:592-624``,
+    ``to_onnx.py:426-432``) into a normal conversion plan node (design §6.2 mapping
+    table, the SHARPEST W3 fold — R1). It reads the RAW ``preds.<stream>.<task>``
+    ``[E, 1]`` edge scores the vertexing task publishes in ONNX mode (design §3.3
+    per-family exception) plus the stream's ``masks.<stream>`` pad mask, runs the
+    ``@torch.jit.script`` union-find INSIDE ``forward(b, Mode.ONNX)``:
+
+        ``get_node_assignment_jit`` (``salt.core.utils.union_find``, ``@torch.jit.script``)
+        -> ``mask_fill_flattened`` (``reduces.py``, ``@torch.jit.script``)
+        -> ``.reshape(-1).char()``
+
+    producing the int8 ``[L]`` per-token leaf v1's exact chain emits. The two
+    scripted helpers + the ``.reshape(-1).char()`` are reproduced VERBATIM by
+    reusing ``reduces.py``'s already-inlined byte-faithful copies (one source of
+    truth, no drift). The CRITICAL trace-placement risk (R1): the
+    ``@torch.jit.script`` subgraph must inline IDENTICALLY when called one frame
+    deeper through ``Executor.run``'s step loop vs the legacy post-executor
+    ``reduce.fn`` — ``torch.onnx.export(dynamo=False)`` traces the executed op
+    sequence, not the Python call structure, so the same scripted subgraph inlines
+    at its call site regardless of caller frame. (W3 byte-diffs the folded
+    VertexIndex ONNX vs the legacy reduce on the same weights to PROVE it.)
+
+    It is a normal `GraphModule` conversion node: ``declare_io`` requires the raw
+    ``preds.<stream>.<task>`` edge-score leaf (``kind=data``, the SAME port the
+    reduce reads) + the stream's ``masks.<stream>`` (``kind=pad_mask``), and
+    produces the new int8 ``outputs.<stream>.<name>`` leaf the `OnnxExportSink`
+    names. Because it declares the SAME ``preds.*`` port the reduce reads today, the
+    demand-closure pulls the IDENTICAL vertexing task node into the ONNX plan (R8 —
+    no rerouting through ``outputs.*``). The ``reshape(-1)`` collapse has no
+    recoverable last dim in a bind, so ``derived_widths`` re-emits width 1 (R6) —
+    a per-token int8 column.
+
+    This node is ONNX-only by construction: the union-find chain is shaped for the
+    traced ``[1, L, ...]`` export batch (the all-valid pad mask + the fake-pad-track
+    workaround inside ``get_node_assignment``); it is never wired into a TEST H5
+    config (the eval vertex columns come from a separate per-token path). The
+    ``forward`` runs the scripted chain unconditionally — the trace is the only
+    consumer.
+
+    Parameters
+    ----------
+    task : str
+        The source vertexing task's instance name — the node reads the RAW
+        ``preds.<stream>.<task>`` ``[E, 1]`` edge scores.
+    stream : str
+        The constituent stream the head publishes under (``preds.<stream>.<task>``
+        and ``masks.<stream>``). Also the stream the output is written under
+        (``outputs.<stream>.<name>``).
+    name : str, optional
+        The output leaf name (``outputs.<stream>.<name>``); defaults to `task`.
+    """
+
+    def __init__(
+        self,
+        task: str,
+        stream: str,
+        name: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = _UNNAMED
+        self.task = task
+        self.stream = stream
+        self.output_name = name if name is not None else task
+        self.pred_key = f"preds.{stream}.{task}"
+        self.mask_key = f"masks.{stream}"
+        self.output_key = f"outputs.{stream}.{self.output_name}"
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare the RAW ``preds.*`` edge scores + ``masks.*`` -> the int8 ``outputs.*`` leaf.
+
+        Both ports are active in every mode (``modes=ALL``): the node is gated by
+        DEMAND, not a hard mode flag (FIT/VAL/TEST prune it via the demand-closure
+        — only the ONNX export sink demands its leaf). The ``preds.*`` require is
+        the SAME raw port the legacy ``vertex_union_find`` reduce reads today
+        (``kind=data``), so the demand-closure keeps the identical vertexing task
+        node alive in the ONNX plan (R8); the ``masks.<stream>`` require
+        (``kind=pad_mask``) is the all-valid pad mask the union-find consumes. Both
+        shapes are ``None`` (rank-agnostic — the edge scores are ``[E, 1]``, the
+        output collapses to ``[L]``); the output width is re-emitted via
+        `derived_widths` (R6).
+
+        Returns
+        -------
+        IO
+            The declared requires/produces for this conversion node.
+        """
+        del mode
+        requires = {
+            self.pred_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.mask_key: TensorSpec(
+                shape=("B", sym_dim("T", self.stream)), dtype="bool", kind="pad_mask"
+            ),
+        }
+        produces = {self.output_key: TensorSpec(shape=None, dtype="int8", kind="data")}
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """The union-find ``reshape(-1)`` collapses to a single per-token index column (R6).
+
+        The output is one int8 index per token, so the last-dim width is always 1 —
+        re-emitted via the bind fixpoint hook (design §6.6) like `SeqClassIndexOp`'s
+        collapse, so a sink can size the column from a bind alone (R6: the
+        ``reshape(-1)`` has no recoverable last dim).
+
+        Returns
+        -------
+        dict[str, int]
+            ``{outputs.<stream>.<name>: 1}``.
+        """
+        del widths
+        return {self.output_key: 1}
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Run the ``@torch.jit.script`` union-find chain VERBATIM (v1 ``to_onnx.py:426-432``).
+
+        ``get_node_assignment_jit`` (the scripted union-find on the raw edge scores
+        + the all-valid pad mask, with the fake-pad-track workaround inside) ->
+        ``mask_fill_flattened`` (the scripted per-node -> batch unflatten) ->
+        ``.reshape(-1).char()`` — the IDENTICAL chain `reduces._bind_vertex_union_find`
+        runs, now inside the executor's step loop instead of the post-executor
+        reduce loop (R1). A fresh tensor results, so the output never aliases a
+        bundle leaf (write-once §2.1).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The new int8 ``outputs.<stream>.<name>`` per-token leaf only.
+        """
+        del mode
+        edge_scores = b.get(self.pred_key)  # RAW [E, 1] scores (design §3.3)
+        pad_mask = b.get(self.mask_key)  # the all-valid pad mask (to_onnx.py:428)
+        vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
+        vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
+        return {self.output_key: vertex_list.reshape(-1).char()}
+
+
+class MaskFormerObjects(nn.Module):
+    """MaskFormer object RECONSTRUCTION node (plan-29 W3, USER DESIGN 2026-06-22 — "the writer").
+
+    The reconstruction half of the TWO-NODE MaskFormer split (the user design
+    SUPERSEDES the doc's single ``MaskFormerObject`` §6.2 description): it runs
+    `get_maskformer_outputs` ONCE inside ``forward(b, Mode.ONNX)`` — the
+    null-suppression + pT reorder + index math — and EXPOSES its products so a
+    downstream `MFLeadVertexDecorator` can READ the reordered per-vertex outputs
+    without re-doing any heavy lifting (the user: the decorator is "basically just
+    reading the vertex outputs that the writer outputs"). One node produces:
+
+    - **object_index** (``outputs.<constituent_stream>.<index_name>``, int8
+      PER-TOKEN): the per-constituent owning-object index,
+      ``indices.reshape(-1).char()`` (folds ``reduces._bind_object_index`` BITWISE
+      vs the legacy reduce, the §6.2 object_index row).
+    - **leading_object** (``outputs.<stream>.<leading_name>``, float32 GLOBAL): the
+      leading object's R de-scaled regression scalars (folds
+      ``reduces._bind_leading_object``, the §6.2 leading_object row) — kept so the
+      single-node fold gate stays valid and so back-compat ``leading_object``
+      configs have a folded path; the legacy ``leading_object`` reduce stays
+      UNTOUCHED (additive).
+    - **vertices_class_probs** (``outputs.<stream>.<vertices_class_probs_name>``,
+      float32 ``[B, M, C]``) and **vertices_regression**
+      (``outputs.<stream>.<vertices_regression_name>``, float32 ``[B, M, R]``): the
+      reordered (null-suppressed + pT-ordered) per-vertex class probabilities +
+      regression tensors `get_maskformer_outputs` returns (its 3rd / 4th returns),
+      exposed as intermediate ``outputs.*`` leaves for the `MFLeadVertexDecorator`
+      (a node->node edge — the decorator's demand keeps THIS node alive).
+
+    `get_maskformer_outputs` is reproduced VERBATIM by reusing ``reduces.py``'s
+    already-inlined byte-faithful copy (one source of truth — the v1
+    ``salt.models.maskformer.get_maskformer_outputs``, byte-faithful per the
+    reduces.py docstring).
+
+    Cross-node reads + clone discipline (R4): the node DECLARES all three reads it
+    needs — ``objects.class_probs`` / ``objects.masks`` / ``preds.<stream>.<reg_task>``
+    — as ``declare_io`` requires, so the demand-closure keeps the MaskDecoder + the
+    object-regression task alive in the ONNX plan (and the debug-mode
+    ``_ReadTrackedBundle`` never raises ``UndeclaredAccessError``). The three tensors
+    are CLONED before `get_maskformer_outputs` (which mutates ``masks``/``regression``
+    in place for null-suppression + pT reorder), so the write-once bundle is never
+    mutated (else ``MutationError`` under debug, design §2.1).
+
+    Derived widths (R6): ``object_index``'s ``reshape(-1)`` collapse has no
+    recoverable last dim, so ``derived_widths`` re-emits width 1 for the index leaf;
+    the leading-regression leaf keeps the source regression width (R targets); the
+    per-vertex leaves are ``[B, M, C]`` / ``[B, M, R]`` whose last dim is C / R.
+
+    ONNX-only by construction (like `VertexUnionFind`): the null-suppression +
+    pT-reorder chain is shaped for the traced export batch; it is never wired into a
+    TEST H5 config (the eval object columns come from the `MaskFormerObjectWriter`'s
+    own TEST path).
+
+    Parameters
+    ----------
+    regression_task : str
+        The object-regression task's instance name — the node reads the DE-SCALED
+        ``preds.<stream>.<regression_task>`` ``[B, M, R]`` predictions (v1's single
+        object-regression key). The legacy reduces hardcode ``"regression"``; this
+        node threads the name so a non-default task is supported.
+
+        PARITY NOTE (R4): the folded ``object_index`` / ``leading_object`` leaves are
+        bitwise-equal to the LEGACY ``_bind_object_index`` / ``_bind_leading_object``
+        reduces ONLY when ``regression_task == "regression"`` — the legacy default the
+        ``MaskFormerObjectWriter`` ASSERTS for ONNX export (``writers/maskformer.py:443``,
+        because the legacy ``object_index`` reduce is declared on the masks port and so
+        always reads the FIXED ``preds.<stream>.regression`` key). Threading a
+        non-default ``regression_task`` reorders by a DIFFERENT regression tensor than
+        the legacy reduce, so it is an UNTESTED superset of legacy behaviour with no
+        parity oracle. It is internally consistent (the single ``get_maskformer_outputs``
+        call reads the threaded key for both folds, so there is no stale-key trace
+        error), but it has no folded==legacy guarantee. Keep ``regression_task`` at its
+        ``"regression"`` default for any config that must match the legacy ONNX path.
+    stream : str, optional
+        The object stream the decoder publishes under (``objects.class_probs`` /
+        ``objects.masks`` / ``preds.<stream>.<regression_task>``), by default
+        ``"objects"``. Also the object output stream (leading + vertices leaves).
+    leading_name : str, optional
+        The leading-object regression leaf name (``outputs.<stream>.<leading_name>``),
+        by default ``"leading_object"``.
+    index_name : str, optional
+        The per-constituent object-index leaf name (``outputs.<stream>.<index_name>``),
+        by default ``"object_index"``.
+    n_reg : int
+        The object-regression target count R (the leading-regression output width).
+        The leading leaf is sliced to ``leading_reg[:, :n_reg]`` so it reproduces the
+        legacy ``leading_object`` reduce's ``leading_reg[0, i] for i in range(R)``
+        (``reduces.py:728``) EXACTLY — including v1's no-objects/empty-track dummy
+        path, where ``get_maskformer_outputs`` returns a ``[1, n_obj]`` leading
+        tensor (``reduces.py:209``) and v1 takes only the first R columns. Must
+        match the configured leading-object ``names`` count.
+    constituent_stream : str, optional
+        The constituent stream the per-token index leaf is written under and whose
+        dynamic axis the index carries, by default ``"tracks"`` (v1's fixed
+        ``aux_sequence_object``). The index leaf is
+        ``outputs.<constituent_stream>.<index_name>``.
+    vertices_class_probs_name : str, optional
+        The exposed reordered per-vertex class-probs leaf name
+        (``outputs.<stream>.<name>``), by default ``"vertices_class_probs"``.
+    vertices_regression_name : str, optional
+        The exposed reordered per-vertex regression leaf name
+        (``outputs.<stream>.<name>``), by default ``"vertices_regression"``.
+    """
+
+    def __init__(
+        self,
+        n_reg: int,
+        regression_task: str = "regression",
+        stream: str = "objects",
+        leading_name: str = "leading_object",
+        index_name: str = "object_index",
+        constituent_stream: str = "tracks",
+        vertices_class_probs_name: str = "vertices_class_probs",
+        vertices_regression_name: str = "vertices_regression",
+    ) -> None:
+        super().__init__()
+        if not isinstance(n_reg, int) or isinstance(n_reg, bool) or n_reg < 1:
+            raise ConfigError(
+                f"MaskFormerObjects: n_reg must be a positive int (the leading-object regression "
+                f"target count R, matching the export leading names), got {n_reg!r}"
+            )
+        self.name = _UNNAMED
+        self.stream = stream
+        self.constituent_stream = constituent_stream
+        self.regression_task = regression_task
+        self.leading_name = leading_name
+        self.index_name = index_name
+        self.n_reg = n_reg
+        self.class_probs_key = f"{stream}.class_probs"
+        self.masks_key = f"{stream}.masks"
+        self.reg_key = f"preds.{stream}.{regression_task}"
+        # the GLOBAL leading-regression leaf is written under the OBJECT stream; the
+        # PER-TOKEN index leaf under the CONSTITUENT stream (its dynamic axis source)
+        self.leading_key = f"outputs.{stream}.{leading_name}"
+        self.index_key = f"outputs.{constituent_stream}.{index_name}"
+        # the exposed reordered per-vertex outputs (object stream) the decorator reads
+        self.vertices_class_probs_key = f"outputs.{stream}.{vertices_class_probs_name}"
+        self.vertices_regression_key = f"outputs.{stream}.{vertices_regression_name}"
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare ALL three maskformer reads -> the leading-regression + object-index leaves (R4).
+
+        Both products are active in every mode (``modes=ALL``): the node is gated
+        by DEMAND, not a hard mode flag. It DECLARES all three cross-node reads —
+        ``objects.class_probs`` / ``objects.masks`` (the decoder products) and
+        ``preds.<stream>.<reg_task>`` (the de-scaled object-regression
+        predictions), all ``kind=data`` — so the demand-closure keeps the
+        MaskDecoder + the regression task alive in the ONNX plan and the
+        debug-mode read-tracker never raises (R4). It produces BOTH the float32
+        GLOBAL leading-regression leaf (object stream) and the int8 PER-TOKEN
+        object-index leaf (constituent stream). All shapes are ``None``
+        (rank-agnostic); the index width is re-emitted via `derived_widths` (R6),
+        the leading width follows the regression port (or `n_reg`).
+
+        Returns
+        -------
+        IO
+            The declared requires/produces for this conversion node.
+        """
+        del mode
+        requires = {
+            self.class_probs_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+        }
+        produces = {
+            self.leading_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.index_key: TensorSpec(shape=None, dtype="int8", kind="data"),
+            # the exposed reordered per-vertex outputs the MFLeadVertexDecorator reads
+            # (a node->node edge — the decorator's demand keeps this node alive)
+            self.vertices_class_probs_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.vertices_regression_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+        }
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """Width-resolve the leaves: index collapses to 1 (R6), leading follows the reg port.
+
+        The per-constituent index leaf's ``reshape(-1)`` has no recoverable last dim,
+        so it is always width 1 (R6, like `SeqClassIndexOp`'s collapse). The
+        leading-regression leaf is the first `n_reg` regression targets (R), so its
+        width is the configured `n_reg` — both resolve from a bind alone (R6: the
+        ``reshape(-1)`` / dummy-path shapes have no recoverable last dim). The exposed
+        per-vertex leaves keep ``[B, M, C]`` / ``[B, M, R]`` last dims — the vertex
+        regression width is `n_reg`; the class-probs width has no recoverable last dim
+        in a bind (the decoder's class count is not threaded), so it is left
+        unresolved (the decorator consumes it by trace, not by a sized H5 column).
+
+        Returns
+        -------
+        dict[str, int]
+            ``{index leaf: 1, leading leaf: n_reg, vertices_regression leaf: n_reg}``.
+        """
+        del widths
+        return {
+            self.index_key: 1,
+            self.leading_key: self.n_reg,
+            self.vertices_regression_key: self.n_reg,
+        }
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Run ``get_maskformer_outputs`` ONCE -> object_index + leading + the per-vertex leaves.
+
+        ONE `get_maskformer_outputs` call (null-suppression + pT reorder) over the
+        CLONED object trio (R4 — never mutate the write-once bundle) yields the
+        leading regression ``[B, R]``, the per-constituent index ``[B, L]`` AND the
+        reordered per-vertex ``class_probs [B, M, C]`` / ``regression [B, M, R]`` (its
+        3rd / 4th returns). The leading scalars (``leading_reg[0]``, v1
+        ``to_onnx.py:467-468``) slice into the global ``[B, R]`` leaf, the indices
+        ``reshape(-1).char()`` (v1 ``to_onnx.py:469``) into the int8 ``[L]`` leaf —
+        the SAME tensors the two legacy reduces emit — and the reordered per-vertex
+        tensors pass through as the intermediate leaves the `MFLeadVertexDecorator`
+        reads (the user design: the decorator just reads what "the writer" exposes).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The float32 GLOBAL leading-regression leaf, the int8 PER-TOKEN
+            object-index leaf, and the two reordered per-vertex leaves.
+        """
+        del mode
+        objects = {
+            "class_probs": b.get(self.class_probs_key).clone(),
+            "masks": b.get(self.masks_key).clone(),
+            "regression": b.get(self.reg_key).clone(),
+        }
+        leading_reg, indices, vertices_class_probs, vertices_regression = get_maskformer_outputs(
+            objects, apply_reorder=True
+        )
+        # `get_maskformer_outputs` returns indices=None at L == 0 (n_tracks == 0,
+        # reduces.py:210). This NEVER happens on the export path — torch.onnx.export
+        # always traces at a fixed L > 0 and onnxruntime then runs L == 0 through the
+        # traced graph (the gate confirms it passes), so `indices` is a real tensor at
+        # trace time and this guard folds to a constant-False branch that emits NO ops
+        # (the same trace-safe pattern as the `n_obj == 0` guard in the decorator —
+        # it cannot perturb the byte-identical L > 0 trace the GO2 fold gate pins). The
+        # guard is defensive insurance only, removing the latent AttributeError a future
+        # eager TEST-mode wiring of this node would hit (R1/R4 low-severity foot-gun);
+        # legacy `_bind_object_index` (reduces.py:786) has the same unguarded crash.
+        if indices is None:
+            empty_index = torch.zeros(0, dtype=torch.int8)
+        else:
+            empty_index = indices.reshape(-1).char()  # v1 to_onnx.py:469
+        # leading_reg is [B, R] in the normal path (maskformer.py:344) but [1, n_obj]
+        # in v1's no-objects/empty-track dummy path (reduces.py:209,212,219,222); the
+        # legacy reduce takes only the first R columns (leading_reg[0, i] for i in
+        # range(R), reduces.py:728), so slice to [:, :n_reg] to reproduce both paths
+        # EXACTLY. Emit the GLOBAL [B, R] leaf so the OnnxExportSink's split_scalars
+        # names it into R per-target scalars (split(value, 1, -1).squeeze(), the SAME
+        # naming split a ClassProbs softmax leaf rides — no per-target stack node).
+        return {
+            self.leading_key: leading_reg[:, : self.n_reg],
+            self.index_key: empty_index,  # indices.reshape(-1).char() (v1 to_onnx.py:469)
+            # the reordered (null-suppressed + pT-ordered) per-vertex outputs — passed
+            # through verbatim as get_maskformer_outputs returns them (the decorator
+            # does the lead-vertex selection; all heavy lifting is HERE, R4-cloned)
+            self.vertices_class_probs_key: vertices_class_probs,
+            self.vertices_regression_key: vertices_regression,
+        }
+
+
+# DEPRECATED one-window alias (USER DESIGN 2026-06-22): the single-node
+# ``MaskFormerObject`` is renamed ``MaskFormerObjects`` (the reconstruction node /
+# "the writer") under the two-node split. The promoted node is a strict superset
+# (same folds, plus the exposed per-vertex leaves), so an existing
+# ``MaskFormerObject`` config / fold test keeps working — the alias resolves to the
+# promoted node. Remove after the migration window.
+MaskFormerObject = MaskFormerObjects
+"""Deprecated alias for `MaskFormerObjects` (the two-node MaskFormer split rename)."""
+
+
+class MFLeadVertexDecorator(nn.Module):
+    """MaskFormer lead-vertex jet-level DECORATOR (plan-29 W3 NEW capability, USER DESIGN).
+
+    The decoration half of the TWO-NODE MaskFormer split — a THIN selector that
+    READS `MaskFormerObjects`'s exposed reordered per-vertex leaves
+    (``vertices_class_probs [B, M, C]`` + ``vertices_regression [B, M, R]``) and
+    emits jet-level GLOBAL scalar leaves (``jet.lead_vertex_pt`` /
+    ``jet.lead_vertex_mass`` / ...). It is a brand-new jet-level capability (NOT a
+    parity fold of any legacy reduce, so it has NO legacy oracle — it is UNIT-TESTED
+    on hand-built inputs), separating object RECONSTRUCTION (Node 1a, the writer)
+    from jet-level DECORATION (this node). The user: it is "basically just reading
+    the vertex outputs that the writer outputs".
+
+    The LEAD VERTEX is selected per-jet as the **highest-pT vertex** (by
+    ``vertices_regression[..., pt_index]``) among the vertices that are ALL of
+
+    - not null: ``vertices_class_probs[..., null_index] < pnull_threshold`` (the
+      same null-probability cut `get_maskformer_outputs` applies, default 0.5), AND
+    - not the primary vertex: the vertex's argmax predicted class
+      (``argmax(vertices_class_probs[..., :])``) is NOT `pv_class_index`, AND
+    - a real vertex class: the argmax predicted class is NOT `null_index` (user
+      sign-off 2026-06-22 — with >=3 classes a vertex can have ``argmax==null`` yet
+      ``pnull < threshold``; this third cut requires the most-likely class to be an
+      actual vertex, not null).
+
+    For each configured output ``{name: reg_index}`` it pulls the selected vertex's
+    ``vertices_regression[..., reg_index]`` and writes the jet-level scalar
+    ``outputs.<jet_stream>.<name>``.
+
+    NOTE: this lead-vertex selection DIFFERS from the legacy ``leading_object``
+    reduce (pT-only, NO PV exclusion / null cut on the *decorator* side — though
+    null suppression already happened in Node 1a). It is therefore a NEW output, NOT
+    a relocation; the legacy ``leading_object`` reduce + Node 1a's leading_object
+    leaf both stay UNTOUCHED (additive).
+
+    Trace-safe no-qualifying-vertex fill (R4/R6 discipline): when NO vertex
+    qualifies (all-null jet, all-PV jet, or ``M == 0`` / ``L == 0`` empty inputs),
+    the jet-level scalars are filled with NaN deterministically — a masked-argmax
+    over a ``[B, M]`` validity mask with an all-``-inf`` pT column gathers a
+    well-defined index whose outputs are then NaN-overwritten where the jet has no
+    qualifying vertex, so the trace stays valid for every batch shape (no
+    data-dependent control flow).
+
+    Dummy-path NaN (surprising but consistent with v1 dummy semantics): when Node
+    1a's `get_maskformer_outputs` hits its ``not null_preds.any()`` dummy path (NO
+    object exceeds the null threshold, i.e. every object "looks real"), it returns
+    an ALL-NaN ``vertices_regression`` while ``vertices_class_probs`` flows through
+    REAL (low-pnull, non-NaN). The decorator then sees ``qualify=True`` for those
+    vertices (low pnull, argmax != PV) but their pT is NaN, so ``masked_pt`` is NaN,
+    ``any_qualify`` is True (the NaN-fill guard does NOT fire), and it gathers NaN
+    regression -> the jet-level scalars are NaN. Likewise the ``n_tracks == 0`` /
+    ``L == 0`` dummy path returns all-NaN regression. So lead-vertex scalars are NaN
+    whenever Node 1a's dummy path is active — not only on the all-null / all-PV /
+    ``M == 0`` paths above. This matches v1's "no predicted objects -> dummy NaN"
+    semantics (v1's ``leading_object`` is also NaN there); surfaced here because the
+    qualify mask passing vertices whose regression is undefined is counterintuitive.
+
+    Parameters
+    ----------
+    source : str
+        The `MaskFormerObjects` exposed per-vertex CLASS-PROBS leaf
+        (``outputs.<object_stream>.<vertices_class_probs_name>``, ``[B, M, C]``). The
+        regression source defaults to the same object stream's
+        ``vertices_regression`` leaf unless `regression_source` overrides it.
+    outputs : Mapping[str, int]
+        ``{output_name: reg_index}`` — each jet-level scalar leaf
+        ``outputs.<jet_stream>.<output_name>`` pulls the lead vertex's
+        ``vertices_regression[..., reg_index]``.
+    pt_index : int
+        The ``vertices_regression`` channel that is the vertex pT (the selection
+        key — highest pT wins). Must index a configured / valid regression channel.
+    pv_class_index : int
+        The vertex class index that marks the PRIMARY vertex (excluded from the
+        lead-vertex selection).
+    pnull_threshold : float, optional
+        The null-probability cut: a vertex with
+        ``class_probs[..., null_index] >= pnull_threshold`` is excluded, by default
+        0.5 (the `get_maskformer_outputs` default).
+    null_index : int | None, optional
+        The class index of the NULL class in ``vertices_class_probs``, by default
+        None = the LAST class (the v1 ``class_probs[:, :, -1]`` null convention,
+        ``reduces.py:215``).
+    jet_stream : str, optional
+        The jet-level output stream (``outputs.<jet_stream>.<name>``), by default
+        ``"jet"``.
+    regression_source : str | None, optional
+        Override for the per-vertex REGRESSION leaf, by default None = the
+        ``source`` object stream's ``vertices_regression`` leaf.
+
+    Raises
+    ------
+    ConfigError
+        For a non-``outputs`` / wildcard source, an empty `outputs` map, a
+        negative/non-int reg index or pt_index, or a missing pt selection channel.
+    """
+
+    def __init__(
+        self,
+        source: str,
+        outputs: Mapping[str, int],
+        pt_index: int,
+        pv_class_index: int,
+        pnull_threshold: float = 0.5,
+        null_index: int | None = None,
+        jet_stream: str = "jet",
+        regression_source: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = _UNNAMED
+        parts = split_key(source)
+        if any(part in {"*", "**"} for part in parts):
+            raise ConfigError(
+                f"MFLeadVertexDecorator source {source!r} contains a wildcard — conversion "
+                "sources are concrete (design §2.2)"
+            )
+        if len(parts) < 2 or parts[0] != "outputs":
+            raise ConfigError(
+                f"MFLeadVertexDecorator source {source!r} must be a "
+                "'outputs.<object_stream>.<vertices_class_probs>' leaf the MaskFormerObjects "
+                "node exposes (the per-vertex class probs) — it reads a bundle leaf, not a raw "
+                "prediction (USER DESIGN 2026-06-22)"
+            )
+        if not outputs:
+            raise ConfigError(
+                "MFLeadVertexDecorator: 'outputs' must map at least one jet-level scalar name to "
+                "the lead vertex's regression channel index (e.g. {lead_vertex_pt: 0})"
+            )
+        self.source = source
+        self.object_stream = parts[1]
+        # the regression leaf defaults to the same object stream's vertices_regression
+        self.regression_source = (
+            regression_source
+            if regression_source is not None
+            else f"outputs.{self.object_stream}.vertices_regression"
+        )
+        reg_parts = split_key(self.regression_source)
+        if len(reg_parts) < 2 or reg_parts[0] != "outputs":
+            raise ConfigError(
+                f"MFLeadVertexDecorator regression_source {self.regression_source!r} must be a "
+                "'outputs.<object_stream>.<vertices_regression>' leaf (the per-vertex regression)"
+            )
+        self.jet_stream = jet_stream
+        self.pt_index = self._checked_index(pt_index, "pt_index")
+        self.pv_class_index = self._checked_index(pv_class_index, "pv_class_index")
+        self.pnull_threshold = float(pnull_threshold)
+        self.null_index = null_index if null_index is None else self._checked_index(
+            null_index, "null_index"
+        )
+        # preserve declaration order (jsonargparse builds an ordered dict)
+        self.outputs_map: tuple[tuple[str, int], ...] = tuple(
+            (name, self._checked_index(idx, f"outputs[{name!r}]")) for name, idx in outputs.items()
+        )
+        self.output_keys: tuple[str, ...] = tuple(
+            f"outputs.{jet_stream}.{name}" for name, _ in self.outputs_map
+        )
+
+    @staticmethod
+    def _checked_index(index: Any, what: str) -> int:
+        """Validate an index is a non-negative int.
+
+        Returns
+        -------
+        int
+            The validated index.
+
+        Raises
+        ------
+        ConfigError
+            For a non-int or negative index.
+        """
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ConfigError(
+                f"MFLeadVertexDecorator: {what} index {index!r} must be a non-negative int"
+            )
+        return index
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare the two per-vertex source leaves -> the jet-level scalar leaves.
+
+        Both ports are active in every mode (``modes=ALL``): the decorator is gated
+        by DEMAND, not a hard mode flag (FIT/VAL prune it via the demand-closure).
+        The per-vertex class-probs + regression requires (``kind=data``) are the
+        leaves `MaskFormerObjects` mints — a node->node edge whose demand keeps the
+        reconstruction node alive — and the node produces one GLOBAL jet-level scalar
+        leaf per configured output. All shapes ``None`` (rank-agnostic); each output
+        is a scalar so `derived_widths` re-emits width 1.
+
+        Returns
+        -------
+        IO
+            The declared requires/produces for this decorator node.
+        """
+        del mode
+        requires = {
+            self.source: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.regression_source: TensorSpec(shape=None, dtype="float32", kind="data"),
+        }
+        produces = {
+            key: TensorSpec(shape=None, dtype="float32", kind="data") for key in self.output_keys
+        }
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """Every jet-level output is a single scalar column (width 1).
+
+        Returns
+        -------
+        dict[str, int]
+            ``{output leaf: 1}`` per configured output.
+        """
+        del widths
+        return dict.fromkeys(self.output_keys, 1)
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Select the lead vertex (highest-pT, non-null, non-PV) and emit jet-level scalars.
+
+        Trace-safe, no data-dependent control flow:
+
+        1. Read ``class_probs [B, M, C]`` + ``regression [B, M, R]`` (the exposed
+           reordered per-vertex leaves). For ``M == 0`` (no objects) every output is
+           an all-NaN ``[B]`` scalar (handled explicitly — masked-argmax over an
+           empty object axis is undefined).
+        2. Build the per-vertex QUALIFY mask: ``pnull < threshold`` (null-prob cut)
+           AND ``argmax(class_probs) != pv_class_index`` (PV exclusion). Null
+           vertices are excluded by the ``pnull < threshold`` cut — the SAME
+           null-probability cut Node 1a's `get_maskformer_outputs` applies. Note
+           Node 1a NaN-suppresses ``regression`` (and zeros ``masks``) for null
+           vertices but does NOT NaN ``class_probs`` (it only reorders it), so a
+           class-probs row is never NaN on the real two-node chain; the cut is the
+           sole exclusion mechanism. (As defensive belt-and-braces, a NaN-class row
+           would still be excluded — ``NaN < threshold`` is False — but that input
+           does not occur upstream.)
+        3. Masked-argmax the pT column (``regression[..., pt_index]`` with
+           non-qualifying vertices set to ``-inf``) -> the lead-vertex index per jet.
+        4. Gather each configured ``regression[..., reg_index]`` at the lead index;
+           where NO vertex qualifies (the masked pT row is all ``-inf``), overwrite
+           the output with NaN (the deterministic empty/all-null/all-PV fill).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{outputs.<jet_stream>.<name>: [B] float32 scalar}`` per configured output.
+        """
+        del mode
+        class_probs = b.get(self.source)  # [B, M, C]
+        regression = b.get(self.regression_source)  # [B, M, R]
+        n_obj = class_probs.shape[1]
+        batch = class_probs.shape[0]
+        if n_obj == 0:
+            # no object queries -> no vertex can qualify; every output is all-NaN.
+            # This python-bool branch on M bakes a constant into the trace (a
+            # TracerWarning), but M (the object-query axis) is FIXED by the decoder
+            # and is NEVER a declared dynamic export input — no export config makes M
+            # dynamic — so the frozen branch is harmless. Do NOT "fix" the warning by
+            # making this data-dependent; that would break the trace if M were ever 0.
+            nan = torch.full((batch,), torch.nan, dtype=torch.float32)
+            return dict.fromkeys(self.output_keys, nan)
+        null_idx = self.null_index if self.null_index is not None else class_probs.shape[-1] - 1
+        pnull = class_probs[..., null_idx]  # [B, M]
+        pred_class = torch.argmax(class_probs, dim=-1)  # [B, M]
+        # qualify = not-null AND not-PV AND argmax-is-a-real-vertex-class.
+        # THREE conditions (user sign-off 2026-06-22):
+        #   (a) pnull < threshold      — the null-prob cut (the SAME cut Node 1a's
+        #       get_maskformer_outputs applies);
+        #   (b) argmax != pv_class_index — exclude the primary vertex;
+        #   (c) argmax != null_idx     — the vertex's MOST-LIKELY class must be a real
+        #       vertex class, NOT null. With >=3 classes a vertex can have argmax==null
+        #       yet pnull<threshold (thin-spread probs, e.g. [.1,.15,.15,.2,.4]); (a)
+        #       alone would let it qualify, so (c) is required for "actually a vertex".
+        # Node 1a NaNs only `regression`/`masks`, never `class_probs` (it just reorders
+        # it), so a class-probs row is never NaN on the real chain; NaN < threshold is
+        # False, so a (non-occurring) NaN-class vertex is excluded — defensive only.
+        qualify = (
+            (pnull < self.pnull_threshold)
+            & (pred_class != self.pv_class_index)
+            & (pred_class != null_idx)
+        )  # [B, M]
+        pt = regression[..., self.pt_index]  # [B, M]
+        # mask non-qualifying vertices to -inf so the argmax never picks them
+        masked_pt = torch.where(qualify, pt, torch.full_like(pt, -torch.inf))  # [B, M]
+        lead = torch.argmax(masked_pt, dim=-1)  # [B] index of the lead vertex per jet
+        any_qualify = qualify.any(dim=-1)  # [B] does this jet have ANY lead vertex?
+        out: dict[str, Tensor] = {}
+        lead_exp = lead.unsqueeze(-1)  # [B, 1] for gather along the object axis
+        for (key, (_name, reg_index)) in zip(self.output_keys, self.outputs_map, strict=True):
+            col = regression[..., reg_index]  # [B, M]
+            value = torch.gather(col, 1, lead_exp).squeeze(1)  # [B] lead-vertex value
+            # deterministic NaN fill where no vertex qualifies (empty/all-null/all-PV)
+            value = torch.where(any_qualify, value, torch.full_like(value, torch.nan))
+            out[key] = value.float()
+        return out

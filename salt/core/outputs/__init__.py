@@ -35,6 +35,9 @@ from salt.core.outputs.producers import (
     Combination,
     ConversionOp,
     IdentityOp,
+    MaskFormerObject,
+    MaskFormerObjects,
+    MFLeadVertexDecorator,
     Regression,
     RegressionDescaleOp,
     SeqClassIndex,
@@ -42,6 +45,7 @@ from salt.core.outputs.producers import (
     SeqClassProbs,
     SeqClassProbsOp,
     TaskOutput,
+    VertexUnionFind,
 )
 from salt.core.outputs.sinks import (
     CollectOutputs,
@@ -61,6 +65,9 @@ __all__ = [
     "H5OutputSink",
     "H5OutputWriter",
     "IdentityOp",
+    "MFLeadVertexDecorator",
+    "MaskFormerObject",
+    "MaskFormerObjects",
     "OnnxExportLeaf",
     "OnnxExportSink",
     "OutputColumn",
@@ -71,4 +78,5 @@ __all__ = [
     "SeqClassProbs",
     "SeqClassProbsOp",
     "TaskOutput",
+    "VertexUnionFind",
 ]
