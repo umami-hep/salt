@@ -110,6 +110,25 @@ _WILDCARD_PARTS = frozenset({"*", "**"})
 _DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
 
 
+def _is_test_persistence_sink(callback: Any) -> bool:
+    """Whether a ``writer_demand``-exposing callback is the TEST persistence sink (W2 B2).
+
+    The ORDER-INDEPENDENT discriminator that keeps an ONNX-only sink
+    (`OnnxExportSink`, whose ``declare_io(Mode.TEST)`` is empty) from being chosen
+    as the TEST writer/sink-node. A `_SinkCallback` advertises ``is_test_sink()``
+    (True for `H5OutputSink`, False for `OnnxExportSink`); a plain duck-typed sink
+    without that method (e.g. `CollectOutputs`) is treated as a TEST sink so the
+    legacy flat-``<sinks>`` path is unchanged.
+
+    Returns
+    -------
+    bool
+        True when the callback should be selected as the TEST persistence sink.
+    """
+    is_test_sink = getattr(callback, "is_test_sink", None)
+    return True if not callable(is_test_sink) else bool(is_test_sink())
+
+
 class SaltModule(lightning.LightningModule):
     """Lightning wrapper around a configured graph-module dict (design §3.4).
 
@@ -423,22 +442,38 @@ class SaltModule(lightning.LightningModule):
         return out
 
     def _attached_writer(self) -> tuple[Any, Any]:
-        """The attached writer callback + reader, if both exist.
+        """The attached TEST writer/sink callback + reader, if both exist.
 
         Duck-typed (a callback exposing ``writer_demand``) so the model side
         stays free of a writers import — the `sink_demand` symmetry
         precedent (design §3.4, §8).
 
+        ORDER-INDEPENDENT TEST-sink selection (plan 29 W2 B2): an ONNX-only sink
+        (`OnnxExportSink`) ALSO exposes ``writer_demand`` but its
+        ``declare_io(Mode.TEST)`` is EMPTY — it must NEVER be chosen as the TEST
+        persistence sink (choosing it would empty the TEST sinks and trip
+        ``_assert_no_dead_preds`` on EVERY ``preds.*``, an order-dependent
+        ``salt2 test`` crash with ``callbacks: [onnx_export, h5_output]``). The
+        ``is_test_sink()`` discriminator (`_SinkCallback`; True for `H5OutputSink`,
+        False for `OnnxExportSink`) skips it regardless of callback order —
+        symmetric to the static ``cli.py`` ``_static_writer_sink_callback``
+        hardening. A plain duck-typed sink without ``is_test_sink`` (e.g.
+        `CollectOutputs`) is treated as a TEST sink (legacy behaviour preserved).
+
         Returns
         -------
         tuple[Any, Any]
-            ``(callback, reader)`` or ``(None, None)`` when no writer
+            ``(callback, reader)`` or ``(None, None)`` when no TEST writer
             callback (or no datamodule boundary) is attached.
         """
         trainer = self._trainer
         callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
         callback = next(
-            (cb for cb in callbacks or [] if callable(getattr(cb, "writer_demand", None))),
+            (
+                cb
+                for cb in callbacks or []
+                if callable(getattr(cb, "writer_demand", None)) and _is_test_persistence_sink(cb)
+            ),
             None,
         )
         if callback is None:

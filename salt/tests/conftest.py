@@ -35,6 +35,13 @@ def pytest_configure(config: pytest.Config) -> None:
         "Skipped on a CPU box unless --run-integration is passed; runs automatically "
         "when a CUDA device is present.",
     )
+    config.addinivalue_line(
+        "markers",
+        "cpu_always: a pure-CPU test that lives under tests/integration/ but does NOT "
+        "need a GPU (e.g. the plan-29 W2 ONNX-trace fold gates). It runs on EVERY "
+        "pytest invocation — the integration/GPU skip never applies — so these CI-load "
+        "bearing CPU gates are never silently skipped.",
+    )
 
 
 def _is_integration(item: pytest.Item) -> bool:
@@ -60,5 +67,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason="integration test: GPU-only (run on a CUDA box, or pass --run-integration)"
     )
     for item in items:
+        # `cpu_always` tests are pure-CPU and must run even on a CPU box without
+        # --run-integration (plan 29 W2 B3: the ONNX-trace fold gates are CI-load
+        # bearing). They opt OUT of the integration/GPU skip.
+        if item.get_closest_marker("cpu_always") is not None:
+            continue
         if _is_integration(item):
             item.add_marker(skip)

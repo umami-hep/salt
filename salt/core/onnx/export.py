@@ -134,22 +134,82 @@ def derive_onnx_sources(export: ExportConfig, variables: Mapping[str, Sequence[s
     return unflatten_spec(flat)
 
 
+def _folded_output_table(adapter: OnnxAdapter) -> str:
+    """Render the folded export-sink output table from the adapter (plan-29 W2 plan_onnx.txt).
+
+    The folded-path counterpart to `manifest_table`: a pure-folded config carries
+    no legacy ``resolved.outputs`` manifest, so the "what does Athena see" table is
+    rendered from the adapter's generated names/dtypes (the OnnxExportSink's output
+    table). One row per flat ONNX output: name, dtype, the folded-source note.
+
+    Returns
+    -------
+    str
+        The rendered output table.
+    """
+    rows = list(zip(adapter.output_names, adapter.output_dtypes, strict=True))
+    width = max((len(name) for name, _ in rows), default=1)
+    lines = [f"ONNX output manifest (folded conversion nodes, model_name={adapter.model_name}):"]
+    lines += [
+        f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)"
+        for name, dtype in rows
+    ]
+    return "\n".join(lines)
+
+
+def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
+    """Find the folded `OnnxExportSink` node among the model modules, if any (R8 dispatch).
+
+    The plan-29 W2 hybrid: an export-NODE config wires an `OnnxExportSink`
+    (``salt.core.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
+    folded conversion leaves (argmax/split/combine) as a terminal node, while any
+    legacy reduce outputs (union_find/maskformer) still ride ``export.outputs``.
+    A config with no such node is the pure legacy path (unchanged).
+
+    Returns
+    -------
+    OnnxExportSink | None
+        The single export sink, or None for a pure legacy-reduce config.
+
+    Raises
+    ------
+    ConfigError
+        When more than one `OnnxExportSink` is configured (the Athena tuple has
+        one ordering authority).
+    """
+    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+
+    found = [m for m in modules.values() if isinstance(m, OnnxExportSink)]
+    if len(found) > 1:
+        raise ConfigError(
+            "more than one OnnxExportSink is configured — the ONNX output tuple has a single "
+            "ordering authority; declare exactly one export sink (design §6.3)"
+        )
+    return found[0] if found else None
+
+
 def compile_onnx_plan(
     modules: dict[str, GraphModule],
     export: ExportConfig,
     variables: Mapping[str, Sequence[str]],
 ) -> Plan:
-    """Compile the ``Mode.ONNX`` plan demanded by the manifest ports.
+    """Compile the ``Mode.ONNX`` plan demanded by the export sinks (folded + legacy, R8).
 
-    `export` must be a manifest-attached resolved config (`attach_manifest`
-    — the writer-derived manifest is the ONLY outputs source since M4.5).
-    Demand pruning removes labels/losses/matcher automatically (design §7);
-    a missing output producer raises the planner's §4.1-quality
-    `ConnectivityError` (attributed to the declaring writer surface). A
-    `ShapeError` on an ``export.inputs`` port (the classic mis-flagged
-    ``sequence:`` mistake — a variable-length stream declared as a
-    ``[1, F]`` global, or vice versa) is re-raised with the config address
-    and the concrete fix appended (§4.1 quality bar).
+    Two demand sources, dispatched per config (plan-29 W2 hybrid, design §6.4 /
+    R8): a folded `OnnxExportSink` in ``model.modules`` anchors the conversion
+    leaves (argmax/split/combine) as a terminal node — its
+    ``declare_io(Mode.ONNX).requires`` are the ONNX sinks; any LEGACY reduce
+    outputs (union_find/maskformer, NOT folded in W2) still ride
+    ``export.outputs`` ports. A config may MIX both without drift; a pure-legacy
+    config (the W0 oracle fixtures) has no export sink and uses
+    ``[out.port for out in export.outputs]`` EXACTLY as before — byte-identical
+    plan.
+
+    `export` must carry the legacy manifest (`attach_manifest`) UNLESS a folded
+    export sink supplies the demand. Demand pruning removes labels/losses/matcher
+    automatically (design §7); a missing output producer raises the planner's
+    §4.1-quality `ConnectivityError`. A `ShapeError` on an ``export.inputs`` port
+    is re-raised with the config address and the concrete fix appended.
 
     Returns
     -------
@@ -159,30 +219,36 @@ def compile_onnx_plan(
     Raises
     ------
     ConfigError
-        When `export` carries no attached manifest.
+        When neither a legacy manifest nor a folded export sink supplies demand.
     ShapeError
         On a rank/shape mismatch — augmented with the ``export.inputs``
         attribution when the offending key is an export input port.
     """
-    if not export.outputs:
+    export_sink = _onnx_export_sink(modules)
+    if not export.outputs and export_sink is None:
         raise ConfigError(
-            "compile_onnx_plan needs a manifest-attached export config — assemble the "
-            "writer-derived outputs first (WriterCallback.onnx_manifest + attach_manifest; "
-            "M4.5 unified manifest)"
+            "compile_onnx_plan needs an output demand source — either a manifest-attached "
+            "export config (WriterCallback.onnx_manifest + attach_manifest; the legacy reduce "
+            "path) or a folded OnnxExportSink in model.modules (plan-29 W2)"
         )
+    # legacy reduce-output ports (union_find/maskformer in a hybrid config); the
+    # folded OnnxExportSink anchors its own leaves as a terminal node (the planner
+    # keeps it via _demand_closure/_is_terminal_consumer), so they need no sinks=
+    sinks = [out.port for out in export.outputs]
+    sink_origins = {
+        out.port: (
+            f"ONNX manifest output {out.port!r} (writer-derived, config: "
+            "writers.modules — M4.5 unified manifest)"
+        )
+        for out in export.outputs
+    }
     try:
         return compile_plan(
             modules,
             Mode.ONNX,
             sources=derive_onnx_sources(export, variables),
-            sinks=[out.port for out in export.outputs],
-            sink_origins={
-                out.port: (
-                    f"ONNX manifest output {out.port!r} (writer-derived, config: "
-                    "writers.modules — M4.5 unified manifest)"
-                )
-                for out in export.outputs
-            },
+            sinks=sinks,
+            sink_origins=sink_origins,
         )
     except ShapeError as err:
         message = str(err)
@@ -264,7 +330,12 @@ def export_graph(
         The adapter (reusable as the checker reference), plan and written
         metadata.
     """
-    resolved = attach_manifest(resolve_export_config(export, run_name), outputs)
+    # plan-29 W2 hybrid: a folded OnnxExportSink supplies the output demand, so a
+    # pure-folded config carries no legacy manifest (`outputs` empty). Only attach
+    # a manifest when legacy reduce outputs are present; otherwise resolve the
+    # export-only half and let the export sink anchor the demand.
+    resolved_half = resolve_export_config(export, run_name)
+    resolved = attach_manifest(resolved_half, outputs) if outputs else resolved_half
     plan = compile_onnx_plan(modules, resolved, variables)
     feature_fields = {
         entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
@@ -314,7 +385,11 @@ def export_graph(
     from salt.core.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
-    plan_txt_path.write_text(plan_table(plan) + "\n\n" + manifest_table(resolved) + "\n")
+    # the legacy reduce manifest renders via `manifest_table`; a pure-folded
+    # config (no `resolved.outputs`) renders the folded export-sink's output table
+    # from the adapter's generated names/dtypes (plan-29 W2)
+    output_table = manifest_table(resolved) if resolved.outputs else _folded_output_table(adapter)
+    plan_txt_path.write_text(plan_table(plan) + "\n\n" + output_table + "\n")
     return ExportResult(
         adapter=adapter,
         plan=plan,

@@ -38,9 +38,11 @@ from typing import Any
 
 import h5py
 import numpy as np
+import torch
 from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
@@ -55,7 +57,14 @@ from salt.core.graph.spec import (
 )
 from salt.core.utils.array_utils import join_structured_arrays
 
-__all__ = ["CollectOutputs", "H5OutputSink", "H5OutputWriter", "OutputColumn"]
+__all__ = [
+    "CollectOutputs",
+    "H5OutputSink",
+    "H5OutputWriter",
+    "OnnxExportLeaf",
+    "OnnxExportSink",
+    "OutputColumn",
+]
 
 _OUTPUTS_NAMESPACE = "outputs"
 """The bundle namespace this sink demands from (design §2.1)."""
@@ -313,6 +322,27 @@ class _SinkCallback(Callback):
             ``module(bundle, mode)`` by the executor.
         """
         return True
+
+    def is_test_sink(self) -> bool:
+        """Whether this sink is the TEST persistence sink (design §2, plan 29 W2 B2).
+
+        The clean, ORDER-INDEPENDENT discriminator `SaltModule` and the writer-less
+        safety check use to pick the TEST persistence sink among callbacks that all
+        expose ``writer_demand``. A sink whose ``declare_io(Mode.TEST).requires`` is
+        non-empty serialises TEST predictions (e.g. `H5OutputSink`); an ONNX-only
+        sink (`OnnxExportSink`, empty TEST requires) returns False so it is NEVER
+        chosen as the TEST writer/sink-node nor counted as TEST persistence — even
+        when it appears FIRST in the ``callbacks:`` list. Symmetric to the static
+        ``cli.py`` hardening (``_static_writer_sink_callback`` excludes the ONNX
+        sink).
+
+        Returns
+        -------
+        bool
+            True when this sink declares TEST requires (a real TEST persistence
+            sink); False for an ONNX-only sink.
+        """
+        return bool(flatten_spec(self.declare_io(Mode.TEST).requires))
 
     def declare_io(self, mode: Mode) -> IO:  # pragma: no cover - overridden by subclasses
         """Declare the sink's requires/produces for `mode` (subclass override).
@@ -1017,6 +1047,398 @@ class H5OutputSink(_SinkCallback):
             raise ConfigError(
                 f"unknown H5OutputSink output template key {err} — available: {sorted(keys)}"
             ) from None
+
+
+@dataclass(frozen=True)
+class OnnxExportLeaf:
+    """One ONNX output: the conversion ``outputs.*`` leaf + its Athena naming (design §4.2/§6.2).
+
+    The plan-29 W2 spelling of the per-output facts the M4.5 `ExportOutput`
+    carried (port / name(s) / dtype / per-token), re-homed onto the export NODE
+    so the conversion already ran in the trace and the sink does NO per-batch
+    compute — it just NAMES the demanded conversion leaves into the flat Athena
+    tuple (the directive's "ONNX writer does essentially NOTHING at finalize").
+
+    Three leaf shapes (design §6.2 mapping table):
+
+    - **split_scalars** (``names`` plural, float32 global): one converted prob
+      leaf (``ClassProbs`` already softmaxed) -> N named scalars. The split is a
+      NAMING concern owned HERE (``torch.split(probs, 1, -1)`` + squeeze, the
+      v1 ``task.py:301`` math), NOT a new conversion node.
+    - **single per-token leaf** (``name`` singular, int8, ``per_token=True``):
+      the conversion node (e.g. ``SeqClassIndex``'s ONNX branch) already produced
+      the int8 ``[L]`` leaf — the sink passes it through under its Athena name and
+      registers its dynamic axis.
+    - **single global leaf** (``name`` singular, float32, ``per_token=False``):
+      a ``Combination`` node's scalar leaf (``pbc``) — passed through under its
+      Athena name, no dynamic axis.
+
+    Parameters
+    ----------
+    key : str
+        The ``outputs.<stream>.<name>`` conversion leaf this output names — the
+        leaf the folded conversion node mints (``SeqClassIndex``/``Combination``/
+        the ``ClassProbs`` probs leaf for ``split_scalars``). Concrete, under the
+        ``outputs`` namespace.
+    name : str | None, optional
+        Single-output Athena suffix (full name ``{model_name}_{name}``).
+        Exclusive with `names`.
+    names : Sequence[str] | None, optional
+        Per-class scalar suffixes for the split (one converted leaf -> N named
+        scalars). Exclusive with `name`.
+    dtype : str, optional
+        The ONNX output dtype (``"float32"``/``"int8"``), by default ``"float32"``.
+    per_token : bool, optional
+        Whether the output carries a dynamic per-token sequence axis (the int8
+        index leaves), by default False (a global scalar).
+    dyn_axis : str | None, optional
+        The dynamic-axis name for a per-token output (default ``n_<stream>`` from
+        the leaf's stream), ignored for global outputs.
+
+    Raises
+    ------
+    ConfigError
+        For a non-``outputs`` / wildcard key, a name/names arity violation, an
+        unsupported dtype, or names combined with per_token.
+    """
+
+    key: str
+    name: str | None = None
+    names: Sequence[str] | None = None
+    dtype: str = "float32"
+    per_token: bool = False
+    dyn_axis: str | None = None
+
+    def __post_init__(self) -> None:
+        parts = self.key.split(KEY_SEP)
+        if any(part in {"*", "**"} for part in parts):
+            raise ConfigError(
+                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output keys are "
+                "concrete (design §2.2)"
+            )
+        if len(parts) < 2 or parts[0] != _OUTPUTS_NAMESPACE:
+            raise ConfigError(
+                f"OnnxExportLeaf key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
+                "namespace — the ONNX sink names the conversion outputs.* leaves the folded "
+                "nodes mint, not raw predictions (design §6.2)"
+            )
+        if (self.name is None) == (self.names is None):
+            raise ConfigError(
+                f"OnnxExportLeaf {self.key!r} must set exactly one of 'name' (single output) or "
+                "'names' (per-class split_scalars) (design §6.2)"
+            )
+        if self.names is not None:
+            if not list(self.names) or len(set(self.names)) != len(self.names):
+                raise ConfigError(
+                    f"OnnxExportLeaf {self.key!r}: 'names' must be a non-empty list without "
+                    f"duplicates, got {self.names!r}"
+                )
+            if self.per_token:
+                raise ConfigError(
+                    f"OnnxExportLeaf {self.key!r}: per-class split_scalars outputs ('names') are "
+                    "GLOBAL float scalars — per_token applies to single-name index leaves only "
+                    "(design §6.2)"
+                )
+        if self.dtype not in {"float32", "int8"}:
+            raise ConfigError(
+                f"OnnxExportLeaf {self.key!r}: dtype must be 'float32' or 'int8', got "
+                f"{self.dtype!r} (the ONNX output dtypes salt2 export supports)"
+            )
+
+    @property
+    def stream(self) -> str:
+        """The leaf's stream (``outputs.<stream>.<name>`` second component).
+
+        Returns
+        -------
+        str
+            The stream name.
+        """
+        return self.key.split(KEY_SEP)[1]
+
+    @property
+    def suffixes(self) -> tuple[str, ...]:
+        """The Athena suffix list (the plural names, or the single name as a 1-tuple).
+
+        Returns
+        -------
+        tuple[str, ...]
+            One suffix per flat ONNX output this leaf expands into.
+        """
+        return tuple(self.names) if self.names is not None else (str(self.name),)
+
+    def resolved_dyn_axis(self) -> str:
+        """The dynamic-axis name for a per-token output (default ``n_<stream>``).
+
+        Returns
+        -------
+        str
+            The configured `dyn_axis`, or the v1 default ``n_<stream>``.
+        """
+        return self.dyn_axis or f"n_{self.stream}"
+
+
+class OnnxExportSink(_SinkCallback):
+    """The plan-29 W2 ONNX sink: a declare-only terminal node naming the conversion leaves (§4.2).
+
+    A pure terminal `SinkModule` for ``Mode.ONNX``: its ONNX-mode ``declare_io``
+    requires the export-output conversion leaves (``kind=data``) the folded nodes
+    mint — ``SeqClassIndex``'s int8 leaf, ``Combination``'s scalar leaf, the
+    ``ClassProbs`` probs leaf the ``split_scalars`` split names — and produces
+    NOTHING. Because every conversion ran inside the traced ``executor.run``, the
+    sink does NO per-batch compute: it just FLATTENS/NAMES the populated
+    ``outputs.*`` into the flat Athena output tuple (``output_names`` / dtypes /
+    dynamic axes — the facts the M4.5 `ExportOutput` held, now derived from the
+    declared leaves + the per-output table).
+
+    It is the folded-path counterpart to the legacy `salt.core.onnx.reduces`
+    path: `compile_onnx_plan` sources its ONNX sinks from
+    ``declare_io(Mode.ONNX).requires`` when an export node is present, and the
+    `OnnxAdapter` reads the named leaves from the executed bundle (the
+    ``split_scalars`` split realised on the sink) instead of running a post-
+    executor ``reduce.fn`` loop for these outputs. union_find / MaskFormer
+    outputs are NOT folded in W2 and keep the legacy reduce path — a config may
+    MIX folded leaves (declared here) with legacy reduce outputs (declared in the
+    export manifest), and the adapter dispatches per output without drift (R8).
+
+    Outside ``Mode.ONNX`` the node declares empty requires AND empty produces, so
+    the planner prunes it from FIT/VAL/TEST — the FIT ``plan_hash`` is unchanged.
+    It has NO Lightning lifecycle (export never runs ``test_step``): the
+    ``open_schema``/``consume``/``flush`` hooks are inert no-ops; its only job is
+    naming the leaves at adapter construction.
+
+    Parameters
+    ----------
+    outputs : Sequence[OnnxExportLeaf | Mapping[str, Any]]
+        The export outputs, in flat Athena TUPLE order — globals, then combines,
+        then per-token aux (the v1 order, the export node's list being the
+        authority, NOT executor topo order, design §6.3). Each entry is an
+        `OnnxExportLeaf` (or a mapping jsonargparse builds into one).
+    model_name : str | None, optional
+        The Athena output-name prefix (``{model_name}_{suffix}``). When None it is
+        supplied at adapter construction from the resolved export config
+        (`model_name`), by default None.
+
+    Raises
+    ------
+    ConfigError
+        For an empty outputs list, a duplicate leaf key, or a duplicate flat
+        Athena suffix.
+    """
+
+    name = "onnx_export"
+    """The graph-node instance name (overridable by the config dict key)."""
+
+    def __init__(
+        self,
+        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]],
+        model_name: str | None = None,
+    ) -> None:
+        super().__init__()
+        leaves = [
+            leaf if isinstance(leaf, OnnxExportLeaf) else OnnxExportLeaf(**dict(leaf))
+            for leaf in outputs or []
+        ]
+        if not leaves:
+            raise ConfigError(
+                "OnnxExportSink needs a non-empty outputs list — name the outputs.* conversion "
+                "leaves the folded nodes mint (design §4.2)"
+            )
+        seen_keys: set[str] = set()
+        seen_suffixes: set[str] = set()
+        for leaf in leaves:
+            if leaf.key in seen_keys:
+                raise ConfigError(
+                    f"OnnxExportSink: duplicate output key {leaf.key!r} — one OnnxExportLeaf per "
+                    "conversion leaf (design §6.2)"
+                )
+            seen_keys.add(leaf.key)
+            for suffix in leaf.suffixes:
+                if suffix in seen_suffixes:
+                    raise ConfigError(
+                        f"OnnxExportSink: duplicate flat ONNX output name {suffix!r} — the Athena "
+                        "output namespace is flat (design §6.3)"
+                    )
+                seen_suffixes.add(suffix)
+        self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
+        self.model_name = model_name
+
+    @property
+    def leaves(self) -> tuple[OnnxExportLeaf, ...]:
+        """The declared export leaves, in flat Athena tuple order.
+
+        Returns
+        -------
+        tuple[OnnxExportLeaf, ...]
+            The configured leaves.
+        """
+        return self._leaves
+
+    @property
+    def outputs(self) -> tuple[str, ...]:
+        """The demanded ``outputs.*`` conversion leaf keys, in declaration order.
+
+        Returns
+        -------
+        tuple[str, ...]
+            The configured leaf keys.
+        """
+        return tuple(leaf.key for leaf in self._leaves)
+
+    # -- graph node surface (design §4.2) ---------------------------------------
+
+    def declare_io(self, mode: Mode) -> IO:
+        """ONNX requires the conversion leaves (``kind=data``); empty produces. Prunes elsewhere.
+
+        In ``Mode.ONNX`` the sink requires every declared ``outputs.*`` conversion
+        leaf (``kind=data``, ``shape``/``dtype`` None — the sink consumes whatever
+        the folded node emits and names it; constraining dtype here would clash
+        with the conversion node's declared torch dtype, mirroring `H5OutputSink`)
+        and produces nothing — a terminal node the demand-closure keeps so the
+        folded conversion nodes are pulled into the ONNX plan by genuine graph
+        demand (replacing the off-graph manifest). In FIT/VAL/TEST it declares
+        empty requires AND produces, so the planner prunes it (the FIT
+        ``plan_hash`` is unperturbed).
+
+        Returns
+        -------
+        IO
+            The declared interface for `mode`.
+        """
+        if mode is not Mode.ONNX:
+            return IO(requires={}, produces={})
+        req = {leaf.key: TensorSpec(shape=None, dtype=None, kind="data") for leaf in self._leaves}
+        return IO(requires=unflatten_spec(req), produces={})
+
+    # -- generated export metadata (design §6.3 — the ExportOutput facts) --------
+
+    def resolved_model_name(self) -> str:
+        """The Athena output prefix, asserting it was supplied.
+
+        Returns
+        -------
+        str
+            The model name.
+
+        Raises
+        ------
+        ConfigError
+            When no `model_name` was set (config or adapter construction).
+        """
+        if self.model_name is None:
+            raise ConfigError(
+                "OnnxExportSink has no model_name — set export.model_name (or the sink's "
+                "model_name) before deriving the ONNX output names (design §6.3)"
+            )
+        return self.model_name
+
+    def output_names(self) -> list[str]:
+        """The flat ONNX output names, in declared tuple order (``{model_name}_{suffix}``).
+
+        The single ordering authority for the folded path (design §6.3): the
+        export node's leaf list order IS the Athena tuple order (globals,
+        combines, per-token aux), INDEPENDENT of executor topo order — so
+        reordering ``model.modules`` for memory tuning never reorders the tuple.
+
+        Returns
+        -------
+        list[str]
+            The generated names, in order.
+        """
+        prefix = self.resolved_model_name()
+        return [f"{prefix}_{suffix}" for leaf in self._leaves for suffix in leaf.suffixes]
+
+    def output_dtypes(self) -> list[str]:
+        """Per-output dtypes, aligned 1:1 with `output_names`.
+
+        Returns
+        -------
+        list[str]
+            ``"float32"`` / ``"int8"`` per flat output.
+        """
+        return [leaf.dtype for leaf in self._leaves for _ in leaf.suffixes]
+
+    def dynamic_axes(self) -> dict[str, dict[int, str]]:
+        """Dynamic-axes mapping for the per-token outputs (``{name: {0: dyn_axis}}``).
+
+        Only per-token leaves register an axis; global scalars (split_scalars,
+        combines) carry none (v1 ``to_onnx.py:309-338``).
+
+        Returns
+        -------
+        dict[str, dict[int, str]]
+            Athena output name -> ``{0: dyn_axis}`` for each per-token output.
+        """
+        prefix = self.resolved_model_name()
+        axes: dict[str, dict[int, str]] = {}
+        for leaf in self._leaves:
+            if leaf.per_token:
+                axes[f"{prefix}_{leaf.suffixes[0]}"] = {0: leaf.resolved_dyn_axis()}
+        return axes
+
+    def named_outputs(self, bundle: Bundle) -> dict[str, Tensor]:
+        """Flatten the executed bundle's conversion leaves into named Athena tensors.
+
+        The declare-only sink's ONE realisation step (design §6.2): NO conversion
+        math (that ran in the trace) — only the ``split_scalars`` NAMING split.
+        For a plural-``names`` leaf the converted prob vector is split into per-
+        class scalars (``torch.split(probs, 1, -1)`` + squeeze, v1 ``task.py:301``);
+        single-name leaves (the int8 index leaf, a combination scalar) pass
+        through under their Athena name. The ``OnnxAdapter`` calls this to source
+        the folded outputs from the bundle instead of running a ``reduce.fn`` loop.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{full Athena name: tensor}`` for every flat output of this sink.
+
+        Raises
+        ------
+        ConfigError
+            When a split leaf's last dim contradicts its declared names count.
+        """
+        prefix = self.resolved_model_name()
+        named: dict[str, Tensor] = {}
+        for leaf in self._leaves:
+            value = bundle.get(leaf.key)
+            if leaf.names is not None:
+                # the split-count guard runs only in EAGER eval, never inside the
+                # trace (it compares the leaf's last dim — a Python-bool branch the
+                # tracer would constant-fold with a TracerWarning); the count is
+                # validated equally by `torch.split(..., strict=True)` zip below
+                if not torch.jit.is_tracing() and value.shape[-1] != len(leaf.names):
+                    raise ConfigError(
+                        f"OnnxExportSink: leaf {leaf.key!r} produces {value.shape[-1]} channels "
+                        f"but declares {len(leaf.names)} names {list(leaf.names)} — one scalar "
+                        "per class (design §6.2)"
+                    )
+                for suffix, part in zip(
+                    leaf.names, torch.split(value, 1, -1), strict=True
+                ):  # v1 task.py:301
+                    named[f"{prefix}_{suffix}"] = part.squeeze()
+            else:
+                named[f"{prefix}_{leaf.name}"] = value
+        return named
+
+    # -- static demand (consumed by SaltModule for the static onnx plan) --------
+
+    def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
+        """The ONNX demand this sink anchors — GENERATED from `declare_io` (design §4.2).
+
+        Mirrors `H5OutputSink.writer_demand`: returns the sink's ONNX-mode
+        ``declare_io`` requires (the conversion leaves), each mapped to a demander
+        description, so the static ``salt2 graph plot --mode onnx`` path (which
+        folds duck-typed ``writer_demand`` into the plan sinks) keeps the sink's
+        leaves demanded and the folded conversion nodes alive.
+
+        Returns
+        -------
+        dict[str, str]
+            ``{leaf key: "sink 'OnnxExportSink' demanding <key>"}``.
+        """
+        del model_modules, reader
+        who = "sink 'OnnxExportSink' demanding"
+        return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.ONNX).requires)}
 
 
 # DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed

@@ -62,13 +62,14 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, sym_dim, unflatten_spec
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 
 __all__ = [
     "ClassProbs",
     "ClassProbsOp",
+    "Combination",
     "ConversionOp",
     "IdentityOp",
     "Regression",
@@ -299,17 +300,43 @@ class SeqClassIndexOp(ConversionOp):
         return 1
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
-        """Masked-softmax then per-token ``argmax`` over the class dim.
+        """Masked-softmax then per-token ``argmax`` over the class dim (mode-branched).
+
+        Two representations of the SAME argmax (design §6.2, R2 — "one
+        conversion path per OUTPUT REPRESENTATION"):
+
+        - **TEST**: ``[B, L]`` integer per-token class indices (``int64``) — the
+          eval columns. The masked softmax zeroes padded tokens; argmax is
+          invariant under it (``reduces.py:28-30``).
+        - **ONNX**: the int8 ``[L]`` leaf with the zero-row append/strip trick
+          carried VERBATIM from ``reduces._bind_argmax`` (``to_onnx.py:415-423``):
+          a zero row is appended along the token axis so the traced argmax stays
+          valid for zero-token jets, then stripped, ``.squeeze(0).char()`` to the
+          Athena int8 output. v1 argmaxed RAW logits where the converted probs
+          here are softmaxed first — argmax is invariant under the (masked)
+          softmax, so the int8 output is identical (folds ``reduces._bind_argmax``).
+
+        The branch is keyed on `mode`, NOT on a hard ``modes`` declaration: the
+        zero-row trick is ONNX-shape-specific (``[1, L, C]`` traced batch) and
+        must NOT run on a TEST batch (it would corrupt the eval int64 column);
+        the masked-softmax+argmax body is shared. Same pattern as
+        `RegressionDescaleOp._descale_source`.
 
         Returns
         -------
         Tensor
-            ``[B, L]`` integer per-token class indices (``int64``).
+            TEST: ``[B, L]`` int64 per-token class indices. ONNX: ``[L]`` int8.
         """
-        del mode
         logits = b.get(pred_key)
         mask = b.get(f"masks.{stream}") if self.has_pad_mask else None
         probs = _masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+        if mode & Mode.ONNX:
+            # zero-row append/strip VERBATIM (to_onnx.py:418-421 / reduces._bind_argmax):
+            # the appended row keeps the traced argmax valid for zero-token jets,
+            # then stripped; .squeeze(0).char() to the int8 [L] Athena output
+            probs = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)
+            out = torch.argmax(probs, dim=-1)[:, :-1]
+            return out.squeeze(0).char()
         return torch.argmax(probs, dim=-1)
 
 
@@ -897,3 +924,165 @@ class Regression(TaskOutput):
                 scaler=scaler,
             ),
         )
+
+
+class Combination(nn.Module):
+    """Linear-combination producer: a NEW ``outputs.*`` leaf from a source bundle leaf (Q2).
+
+    Folds the v1/M4.5 export combine loop (``adapter.py:279-280``,
+    ``to_onnx.py:404-412``) into a normal conversion plan node (design §6.2 /
+    Decisions-Locked Q2). It reads a SOURCE prob/pred bundle leaf — an
+    ``outputs.<stream>.<src>`` leaf a producer already minted (e.g.
+    ``outputs.jets.jets_classification`` ``[B, ..., C]`` softmaxed probs) — and
+    produces a NEW ``outputs.<stream>.<name>`` scalar leaf as a weighted sum over
+    its last-dim channels:
+
+        ``out = sum(scale * source[..., index])`` over ``terms``
+
+    which is bitwise-equal to v1's ``pb + pc`` computed on the renamed scalars
+    (the same float adds, in the same `terms` order — the source leaf is the
+    same softmaxed prob vector the ``split_scalars`` reduce splits into
+    ``GN2v2_pb`` ...). Because it reads a BUNDLE leaf (not renamed Athena output
+    names), the v1 name-space dependency disappears; both sinks consume/name the
+    new leaf like any other ``outputs.*`` leaf.
+
+    It is a normal `GraphModule` conversion node: ``declare_io`` requires the
+    source ``outputs.*`` leaf (``kind=data``, the SAME kind the producer that
+    minted it emits) and produces the new ``outputs.<stream>.<name>`` leaf;
+    ``forward`` runs the sum inside the executor's step loop — per-batch in TEST
+    AND once in the ONNX trace, like every other conversion. The output last dim
+    collapses to a scalar (``derived_widths`` re-emits width 1), so the leaf is a
+    GLOBAL float scalar with no per-token axis (v1's combines are global,
+    ``to_onnx.py:404-412``). The Athena tuple ORDER residual (R3) is owned by the
+    export node's output list, NOT by this node's topo position.
+
+    Parameters
+    ----------
+    source : str
+        The source bundle leaf, an ``outputs.<stream>.<src>`` key (a producer
+        leaf, e.g. ``outputs.jets.jets_classification``). The new leaf is written
+        under the SAME stream as the source.
+    name : str
+        The new output leaf's last component (``outputs.<stream>.<name>``), e.g.
+        ``pbc``.
+    terms : Mapping[int, float]
+        Source last-dim channel index -> scale, in combination order (e.g.
+        ``{0: 1.0, 1: 1.0}`` for ``probs[..., 0] + probs[..., 1]``). At least one
+        term; every index must be a non-negative int.
+
+    Raises
+    ------
+    ConfigError
+        For a non-``outputs`` source, a wildcard source, an empty ``terms``, or a
+        negative/non-int channel index.
+    """
+
+    def __init__(
+        self,
+        source: str,
+        name: str,
+        terms: Mapping[int, float],
+    ) -> None:
+        super().__init__()
+        self.name = _UNNAMED
+        parts = split_key(source)
+        if any(part in {"*", "**"} for part in parts):
+            raise ConfigError(
+                f"Combination source {source!r} contains a wildcard — conversion sources are "
+                "concrete (design §2.2)"
+            )
+        if len(parts) < 2 or parts[0] != "outputs":
+            raise ConfigError(
+                f"Combination source {source!r} must be an 'outputs.<stream>.<name>' producer "
+                "leaf — a combination reads a bundle prob/pred leaf, not a raw prediction or a "
+                "renamed Athena output (design §6.2 / Q2)"
+            )
+        if not terms:
+            raise ConfigError(
+                f"Combination {name!r}: 'terms' must map at least one source channel index to a "
+                "scale (e.g. {0: 1.0, 1: 1.0} for probs[..., 0] + probs[..., 1])"
+            )
+        self.source = source
+        self.output_name = name
+        self.stream = parts[1]
+        # preserve declaration order (jsonargparse builds an ordered dict); the
+        # sum order is load-bearing for the v1 float bitwise-equality (R3)
+        self.terms: tuple[tuple[int, float], ...] = tuple(
+            (self._checked_index(index, name), float(scale)) for index, scale in terms.items()
+        )
+        self.output_key = f"outputs.{self.stream}.{name}"
+
+    @staticmethod
+    def _checked_index(index: Any, name: str) -> int:
+        """Validate a source channel index is a non-negative int.
+
+        Returns
+        -------
+        int
+            The validated index.
+
+        Raises
+        ------
+        ConfigError
+            For a non-int or negative index.
+        """
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ConfigError(
+                f"Combination {name!r}: source channel index {index!r} must be a non-negative "
+                "int (the source leaf's last-dim position to weight)"
+            )
+        return index
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare the source ``outputs.*`` leaf -> the new ``outputs.<stream>.<name>`` leaf.
+
+        Both ports are active in every mode (``modes=ALL``): like the other
+        conversion producers, the combination is gated by DEMAND, not a hard mode
+        flag (FIT/VAL prune it via the demand closure). The source require carries
+        ``kind="data"`` (the kind the producer that minted the source leaf emits),
+        so the edge kind-unifies; both shapes are ``None`` (rank-agnostic — the
+        source is a prob vector and the output collapses its last dim).
+
+        Returns
+        -------
+        IO
+            The declared requires/produces for this combination node.
+        """
+        del mode
+        requires = {self.source: TensorSpec(shape=None, dtype="float32", kind="data")}
+        produces = {self.output_key: TensorSpec(shape=None, dtype="float32", kind="data")}
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
+        """The combination collapses the source last dim to a single scalar column.
+
+        The combined value is a weighted sum over selected channels, so the
+        output last-dim width is always 1 — re-emitted via the bind fixpoint hook
+        (design §6.6) exactly like `SeqClassIndexOp`'s collapse, so the H5 sink can
+        size the column from a TEST-only bind.
+
+        Returns
+        -------
+        dict[str, int]
+            ``{outputs.<stream>.<name>: 1}``.
+        """
+        del widths
+        return {self.output_key: 1}
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Compute ``sum(scale * source[..., index])`` over `terms` (v1 ``to_onnx.py:404-412``).
+
+        The sum runs in the SAME order as the configured `terms` (load-bearing
+        for the v1 float bitwise-equality, R3). A fresh tensor results from the
+        index-and-add, so the output never aliases the source leaf (write-once
+        §2.1).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            The new ``outputs.<stream>.<name>`` global scalar leaf only.
+        """
+        del mode
+        source = b.get(self.source)
+        out = sum(scale * source[..., index] for index, scale in self.terms)
+        return {self.output_key: out}

@@ -32,6 +32,7 @@ from __future__ import annotations
 from salt.core.outputs.producers import (
     ClassProbs,
     ClassProbsOp,
+    Combination,
     ConversionOp,
     IdentityOp,
     Regression,
@@ -42,16 +43,26 @@ from salt.core.outputs.producers import (
     SeqClassProbsOp,
     TaskOutput,
 )
-from salt.core.outputs.sinks import CollectOutputs, H5OutputSink, H5OutputWriter, OutputColumn
+from salt.core.outputs.sinks import (
+    CollectOutputs,
+    H5OutputSink,
+    H5OutputWriter,
+    OnnxExportLeaf,
+    OnnxExportSink,
+    OutputColumn,
+)
 
 __all__ = [
     "ClassProbs",
     "ClassProbsOp",
     "CollectOutputs",
+    "Combination",
     "ConversionOp",
     "H5OutputSink",
     "H5OutputWriter",
     "IdentityOp",
+    "OnnxExportLeaf",
+    "OnnxExportSink",
     "OutputColumn",
     "Regression",
     "RegressionDescaleOp",

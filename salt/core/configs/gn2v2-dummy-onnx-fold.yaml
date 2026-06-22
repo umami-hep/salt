@@ -1,0 +1,93 @@
+# gn2v2-dummy-onnx-fold.yaml — the plan-29 W2 FOLDED ONNX export path for the
+# gn2v2-dummy classification model (design §4.2, §6): the ONNX outputs are minted
+# by in-graph conversion PRODUCERS (argmax/split/combine) and NAMED by a
+# declare-only OnnxExportSink — REPLACING the off-graph reduce manifest for the
+# folded outputs. The union_find/MaskFormer reduces are NOT folded in W2 (W3,
+# DEFERRED) and would keep the legacy reduce path in a hybrid config.
+#
+# Layered ON TOP of gn2v2-dummy.yaml (which ships the unflipped task forward +
+# the export-only `export:` block):
+#
+#   salt2 graph plot --config salt/core/configs/gn2v2-dummy.yaml \
+#     --config salt/core/configs/gn2v2-dummy-onnx-fold.yaml --mode onnx
+#
+# What this override does (design §6, W2):
+#  - adds the FOLDED ONNX conversion producers to model.modules:
+#      jet_probs           (identity TaskOutput, jets_classification -> outputs.jets.jets_classification)
+#      track_origin_index  (SeqClassIndex, track_origin -> outputs.tracks.track_origin int8 argmax,
+#                           folding reduces._bind_argmax)
+#      pbc                 (Combination,  pbc = probs[...,0]+probs[...,1], folding the combine loop)
+#
+# WHY jet_probs is an IDENTITY TaskOutput, NOT ClassProbs (export-faithfulness):
+#   The ClassificationTaskModule STILL softmaxes in Mode.ONNX (the deferred P4
+#   carve-out, tasks.py run_inference ~1241-1245): preds.jets.jets_classification
+#   is ALREADY softmaxed in ONNX. A ClassProbs node would softmax it AGAIN
+#   (double-softmax, pb/pc/pu wrong by up to ~0.14 absolute) — so `salt2 export`
+#   on this demo would ship a WRONG model. An identity TaskOutput passes the
+#   task's already-converted ONNX probs straight through, so the folded split is
+#   bitwise-equal to the v1 single-softmax export TODAY.
+#   FLIP TO ClassProbs once P4 lands: when the task publishes RAW logits in ONNX,
+#   ClassProbs becomes the single softmax and this passthrough must be replaced.
+#    Each is demand-pruned from FIT/VAL/TEST (active only when the export sink
+#    demands its outputs.* leaf in ONNX), so FIT plan_hash is unchanged.
+#  - opts track_vertexing OUT of TEST eval (expose: [fit, val]) — its VertexIndex
+#    is a DEFERRED (W3 union_find) reduce, not folded here.
+#  - deletes the M4.5 writers (so the off-graph manifest is NOT the ONNX source).
+#  - wires the OnnxExportSink at callbacks.onnx_export: it NAMES the folded
+#    conversion leaves into the flat Athena tuple (pb/pc/pu split, pbc combine,
+#    TrackOrigin int8 per-token) with NO per-batch compute. SaltModule /
+#    salt2 graph fold it into the planning module dict so it renders its OWN
+#    `onnx_export (OnnxExportSink)` card in --mode onnx.
+
+model:
+  modules:
+    track_vertexing:
+      class_path: salt.core.nn.tasks.VertexingTaskModule
+      init_args:
+        stream: tracks
+        label: ftagTruthVertexIndex
+        origin_label: ftagTruthOriginLabel
+        context: pooled.global
+        weight: 1.5
+        dense: { hidden_layers: [16], activation: ReLU }
+        expose: [fit, val] # the W3 union_find reduce is DEFERRED — not folded here
+    # FOLDED ONNX conversion producers (design §6.2): each mints a new outputs.*
+    # leaf the OnnxExportSink names.
+    # jet_probs is an IDENTITY TaskOutput (NOT ClassProbs) because the task still
+    # softmaxes in Mode.ONNX (the deferred P4 carve-out, tasks.py run_inference) —
+    # a ClassProbs node here would DOUBLE-softmax and ship a wrong export. The
+    # identity passthrough == the v1 single-softmax export today. Flip to
+    # `salt.core.outputs.ClassProbs` once P4 publishes RAW logits in ONNX. See the
+    # header comment above for the full rationale.
+    jet_probs:
+      class_path: salt.core.outputs.TaskOutput
+      init_args: { task: jets_classification, stream: jets }
+    track_origin_index:
+      class_path: salt.core.outputs.SeqClassIndex
+      init_args: { task: track_origin, stream: tracks }
+    pbc:
+      class_path: salt.core.outputs.Combination
+      init_args:
+        source: outputs.jets.jets_classification
+        name: pbc
+        terms: { 0: 1.0, 1: 1.0 } # pbc = pb + pc (probs[...,0] + probs[...,1])
+
+# Delete the M4.5 WriterCallback (the off-graph ONNX manifest source) — the
+# folded OnnxExportSink below is the ONNX output authority.
+writers:
+  modules:
+    inputs_copy: null
+    tasks: null
+    pad_mask: null
+
+# The declare-only ONNX sink (design §4.2): NAMES the folded conversion leaves
+# into the flat Athena output tuple, in tuple order (globals, combine, per-token
+# aux). model_name defaults from export.model_name (GN2v2dummy).
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
+        - { key: outputs.jets.pbc, name: pbc }
+        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }

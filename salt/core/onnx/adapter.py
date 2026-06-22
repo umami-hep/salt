@@ -19,6 +19,7 @@ input (design §2.5).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -139,7 +140,41 @@ class OnnxAdapter(nn.Module):
             )
             for entry in export.combine
         ]
-        self._ordered = ordered_output_names(export)
+        # plan-29 W2 hybrid dispatch (R8): a folded OnnxExportSink in the plan
+        # owns the conversion outputs (argmax/split/combine) — it NAMES the
+        # demanded outputs.* leaves with no per-batch compute (the conversion ran
+        # in the trace). It coexists with the legacy reduces above (union_find/
+        # maskformer) WITHOUT drift: the folded names come FIRST (the export
+        # node's leaf list is the ordering authority, design §6.3), the legacy
+        # reduce outputs append after.
+        self._export_sink = self._find_export_sink(plan)
+        if self._export_sink is not None and self._export_sink.model_name is None:
+            self._export_sink.model_name = self.model_name
+        legacy_ordered = ordered_output_names(export) if export.outputs else []
+        if self._export_sink is not None:
+            sink_names = self._export_sink.output_names()
+            sink_dtypes = self._export_sink.output_dtypes()
+            # name-collision guard (plan 29 W2 minor): when BOTH demand sources
+            # are present (a hybrid folded-sink + legacy reduce config), the flat
+            # Athena output namespace must stay disjoint — two outputs minting the
+            # SAME ``{model_name}_<suffix>`` would silently clobber one in the
+            # tuple. A clear ConfigError beats a duplicate-named ONNX graph.
+            if legacy_ordered:
+                legacy_names = {name for name, _, _ in legacy_ordered}
+                if overlap := sorted(set(sink_names) & legacy_names):
+                    raise ConfigError(
+                        f"ONNX output name collision {overlap} — the folded OnnxExportSink and "
+                        "the legacy reduce manifest both mint these flat Athena names; the output "
+                        "namespace is flat (design §6.3). Rename one source so the folded + "
+                        "legacy_ordered concatenation stays disjoint."
+                    )
+            folded = [
+                (name, dtype, "onnx_export (folded conversion node)")
+                for name, dtype in zip(sink_names, sink_dtypes, strict=True)
+            ]
+            self._ordered = folded + legacy_ordered
+        else:
+            self._ordered = legacy_ordered
         # the formal export-mode protocol (design §7.2): every module
         # recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math (modelwrapper.py:331-335,
@@ -203,6 +238,10 @@ class OnnxAdapter(nn.Module):
             for entry in self._positional
             if entry.sequence
         }
+        # folded export-sink per-token outputs (argmax int8 leaves) register their
+        # dynamic axis from the sink's output table (plan-29 W2)
+        if self._export_sink is not None:
+            axes.update(self._export_sink.dynamic_axes())
         for reduce in self._reduces:
             axes.update({name: dict(ax) for name, ax in reduce.dynamic_axes.items()})
         return axes
@@ -272,10 +311,20 @@ class OnnxAdapter(nn.Module):
                 b.set(entry.port, source.index_select(-1, getattr(self, f"_alias_index_{i}")))
         b = self._executor.run(b)
         named: dict[str, Tensor] = {}
+        # folded conversion outputs (plan-29 W2): the OnnxExportSink NAMES the
+        # demanded outputs.* leaves the folded nodes (argmax/split/combine) minted
+        # in the executor pass above — NO per-batch compute, only the split_scalars
+        # naming split. Sourced before the legacy reduces so they coexist (R8).
+        if self._export_sink is not None:
+            named.update(self._export_sink.named_outputs(b))
+        # legacy reduces (union_find/maskformer — NOT folded in W2) still run their
+        # post-executor reduce.fn on the raw preds.* port (design §6.4 hybrid)
         for reduce in self._reduces:
             named.update(zip(reduce.output_names, reduce.fn(b), strict=True))
-        # combined outputs from the already-reduced tensors — the exact v1
-        # expression (sum of scale * output, to_onnx.py:404-412)
+        # legacy export.combine post-processing from the already-reduced tensors —
+        # the v1 expression (sum of scale * output, to_onnx.py:404-412). Folded
+        # configs use the Combination conversion node instead (Q2), so this runs
+        # only for the legacy reduce path.
         for combo_name, terms in self._combines:
             named[combo_name] = sum(scale * named[source] for scale, source in terms)
         return tuple(named[name] for name, _, _ in self._ordered)
@@ -315,6 +364,23 @@ class OnnxAdapter(nn.Module):
                 "export input must be a declared dataset feature stream (design §7; known: "
                 f"{sorted(self._fields)})"
             ) from None
+
+    @staticmethod
+    def _find_export_sink(plan: Plan) -> Any:
+        """Find the folded `OnnxExportSink` among the plan steps, if any (R8 dispatch).
+
+        Returns
+        -------
+        OnnxExportSink | None
+            The single export sink in the ONNX plan, or None for a pure
+            legacy-reduce export.
+        """
+        from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+
+        for step in plan.steps:
+            if isinstance(step.module, OnnxExportSink):
+                return step.module
+        return None
 
     def _resolve_alias_gather(self, entry: ExportInput) -> Tensor | None:
         """Resolve an alias entry to its column gather (or None = identity clone).

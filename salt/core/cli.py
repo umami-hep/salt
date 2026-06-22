@@ -364,22 +364,32 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = _static_writer_callback(cli)
     writer_sink_cb = _static_writer_sink_callback(cli)
-    # plan 29 W1: when the callbacks-level persistence sink is a renderable NODE
-    # (H5OutputSink — is_sink()/declare_io), FOLD it into the planning module dict
-    # so it renders its OWN card and anchors demand via its declared requires
-    # (outputs.*/meta.rows/masks.*), NOT the flat <sinks> sentinel. In FIT/VAL/ONNX
-    # its declare_io is empty so the planner collects it as inactive (no card).
-    sink_node = _as_sink_node(writer_sink_cb)
-    if sink_node is not None:
-        if sink_node.name in modules:
-            raise ConfigError(
-                f"sink node name {sink_node.name!r} collides with a pipeline module — instance "
-                "names must be unique across the graph (design §2.2); rename the callback key"
-            )
-        modules[sink_node.name] = sink_node
-    fitval_callbacks = _static_fitval_callbacks(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
+    # plan 29 W1/W2: FOLD every callbacks-level renderable sink NODE into the
+    # planning module dict so each renders its OWN card and anchors demand via its
+    # declared requires (NOT the flat <sinks> sentinel). The H5OutputSink (W1) is
+    # active in TEST only (outputs.*/meta.rows/masks.*); the OnnxExportSink (W2) is
+    # active in ONNX only (the folded conversion leaves). In the other modes a
+    # sink node's declare_io is empty so the planner collects it as inactive (no
+    # card, no plan_hash perturbation).
+    sink_node = _as_sink_node(writer_sink_cb)
+    onnx_sink_node = _static_onnx_export_sink(cli)
+    if onnx_sink_node is not None and onnx_sink_node.model_name is None:
+        # the static render needs a model_name to derive the Athena output names;
+        # default it from the export block / sanitised run name exactly as
+        # `salt2 export` does (design §6.3)
+        onnx_sink_node.model_name = _static_export_model_name(export_cfg, run_name)
+    for node in (sink_node, onnx_sink_node):
+        if node is None:
+            continue
+        if node.name in modules:
+            raise ConfigError(
+                f"sink node name {node.name!r} collides with a pipeline module — instance "
+                "names must be unique across the graph (design §2.2); rename the callback key"
+            )
+        modules[node.name] = node
+    fitval_callbacks = _static_fitval_callbacks(cli)
     sinks: dict[Mode, tuple[str, ...]] = {}
     mode_errors: dict[Mode, str] = {}
     mode_warnings: dict[Mode, str] = {}
@@ -418,6 +428,13 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             except ConfigError as err:
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
+        elif mode is Mode.ONNX and onnx_sink_node is not None:
+            # plan 29 W2 folded ONNX path: the OnnxExportSink node (folded into
+            # `modules` above) anchors ALL its conversion-leaf demand via its
+            # declared requires — a terminal consumer the planner keeps alive,
+            # pulling the folded conversion nodes (argmax/split/combine) into the
+            # ONNX plan. No flat manifest ports needed (it renders its own card).
+            keys = []
         elif mode is Mode.ONNX and writer_cb is not None:
             # the static half of the design §3.1/§4.1 export contract,
             # re-sourced at M4.5: ONNX sinks are the union of the writers'
@@ -601,12 +618,63 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
     Any | None
         The callbacks-level writer sink in trainer order (first match), or None.
     """
+    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+    # the OnnxExportSink (plan 29 W2) ALSO exposes writer_demand, but it is an
+    # ONNX-only sink — never the TEST persistence sink; skip it here so a config
+    # wiring both finds the H5 sink for TEST (the export sink is handled by
+    # `_static_onnx_export_sink`).
     return next(
-        (cb for cb in callbacks or [] if callable(getattr(cb, "writer_demand", None))),
+        (
+            cb
+            for cb in callbacks or []
+            if callable(getattr(cb, "writer_demand", None)) and not isinstance(cb, OnnxExportSink)
+        ),
         None,
     )
+
+
+def _static_onnx_export_sink(cli: Any) -> Any | None:
+    """The configured callbacks-level `OnnxExportSink`, if any (plan 29 W2 folded path).
+
+    The folded ONNX counterpart to `_static_writer_sink_callback`: an
+    `OnnxExportSink` wired at the ``callbacks:`` level names the conversion
+    ``outputs.*`` leaves the folded nodes (argmax/split/combine) mint. Folding it
+    into the planning module dict lets ``salt2 graph plot --mode onnx`` render its
+    OWN ``onnx_export`` card and keep the folded conversion nodes alive (the W2
+    render payoff, replacing the off-graph manifest).
+
+    Returns
+    -------
+    Any | None
+        The first `OnnxExportSink` in trainer order, or None.
+    """
+    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+
+    trainer = getattr(cli, "trainer", None)
+    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+    return next((cb for cb in callbacks or [] if isinstance(cb, OnnxExportSink)), None)
+
+
+def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
+    """The Athena output prefix for the static folded ONNX render (design §6.3).
+
+    Defaults exactly as `salt2 export`: the export block's ``model_name`` when
+    set, else the sanitised run name (``_``/``-`` stripped, v1
+    ``to_onnx.py:687``). Used only to NAME the folded export sink's outputs in the
+    static render (the runtime export re-derives it from the resolved config).
+
+    Returns
+    -------
+    str
+        The model-name prefix.
+    """
+    from salt.core.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
+
+    name = getattr(export_cfg, "model_name", None) if export_cfg is not None else None
+    return name or sanitised_model_name(run_name)
 
 
 def _as_sink_node(callback: Any) -> Any | None:

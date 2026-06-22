@@ -310,6 +310,111 @@ def test_seq_class_index_subclass_forwards_like_op():
 
 
 # ---------------------------------------------------------------------------
+# GATE 2b (plan-29 W2): SeqClassIndex ONNX branch == reduces._bind_argmax,
+#          and is mode-branched (TEST [B,L] int64 unchanged, ONNX [L] int8).
+# ---------------------------------------------------------------------------
+
+
+def _argmax_reduce_oracle(probs_1lc: torch.Tensor) -> torch.Tensor:
+    """The verbatim ``reduces._bind_argmax`` math on a converted ``[1, L, C]`` probs tensor.
+
+    Returns
+    -------
+    Tensor
+        The int8 ``[L]`` ONNX argmax output (the zero-row append/strip + char).
+    """
+    scores = torch.concatenate([probs_1lc, torch.zeros((1, 1, probs_1lc.shape[-1]))], dim=1)
+    return torch.argmax(scores, dim=-1)[:, :-1].squeeze(0).char()
+
+
+def test_seq_class_index_onnx_branch_matches_bind_argmax():
+    """The ONNX branch carries the v1 zero-row argmax trick VERBATIM (folds ``_bind_argmax``).
+
+    `SeqClassIndexOp.convert(mode=Mode.ONNX)` must reproduce the v1 ONNX argmax
+    reduce (``to_onnx.py:415-423`` / ``reduces._bind_argmax``): masked softmax,
+    then the zero-row append/strip trick, ``.squeeze(0).char()`` to int8 ``[L]``.
+    Asserted EXACT against the reduce-math oracle on the converted probs.
+    """
+    torch.manual_seed(7)
+    length, classes = 6, 8
+    logits = torch.randn(1, length, classes)
+    mask = torch.zeros(1, length, dtype=torch.bool)
+    mask[0, 4:] = True  # padded tail
+
+    op = SeqClassIndexOp()
+    b = Bundle({"preds": {_STREAM_T: {"t": logits.clone()}}, "masks": {_STREAM_T: mask}})
+    got = op.convert(b, Mode.ONNX, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
+
+    probs = _masked_softmax(logits.clone(), mask.unsqueeze(-1))
+    oracle = _argmax_reduce_oracle(probs)
+
+    assert got.dtype == torch.int8
+    assert got.shape == (length,)  # [L], the batch dim squeezed (Athena per-token)
+    torch.testing.assert_close(got, oracle, rtol=0, atol=0)
+
+
+def test_seq_class_index_onnx_branch_valid_for_zero_token_jet():
+    """The zero-row trick keeps the ONNX argmax valid for a zero-token jet (L=0).
+
+    The whole point of the appended row (``to_onnx.py:418-421``): ``argmax`` over a
+    zero-length token axis would be undefined, so a constant row is appended then
+    stripped. With L=0 the output is an empty int8 vector — never an error.
+    """
+    op = SeqClassIndexOp()
+    logits = torch.randn(1, 0, 8)  # zero tokens
+    mask = torch.zeros(1, 0, dtype=torch.bool)
+    b = Bundle({"preds": {_STREAM_T: {"t": logits}}, "masks": {_STREAM_T: mask}})
+    got = op.convert(b, Mode.ONNX, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
+    assert got.dtype == torch.int8
+    assert got.shape == (0,)
+
+
+def test_seq_class_index_test_branch_unchanged_by_onnx_fold():
+    """The TEST branch stays ``[B, L]`` int64 — the ONNX zero-row trick is ONNX-only (R2).
+
+    Mode-branching is load-bearing: the zero-row append/strip is ONNX-shape-
+    specific and must NOT run on a TEST batch (it would corrupt the eval int64
+    column / change the width). TEST is unchanged from the pre-W2 behaviour.
+    """
+    torch.manual_seed(8)
+    b_, length, classes = 5, 6, 8
+    logits = torch.randn(b_, length, classes)
+    mask = torch.zeros(b_, length, dtype=torch.bool)
+    mask[0, 3:] = True
+
+    op = SeqClassIndexOp()
+    test_b = Bundle({"preds": {_STREAM_T: {"t": logits.clone()}}, "masks": {_STREAM_T: mask}})
+    got = op.convert(test_b, Mode.TEST, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
+
+    oracle = torch.argmax(_masked_softmax(logits.clone(), mask.unsqueeze(-1)), dim=-1)
+    assert got.dtype == torch.int64
+    assert got.shape == (b_, length)  # [B, L] — full batch, no zero-row strip
+    torch.testing.assert_close(got, oracle, rtol=0, atol=0)
+
+
+def test_seq_class_index_onnx_int8_argmax_invariant_to_softmax():
+    """The ONNX int8 leaf == argmax of the RAW logits on valid tokens (argmax invariance).
+
+    v1 argmaxed RAW logits where the v2 conversion softmaxes first; argmax is
+    invariant under the monotone (masked) softmax, so the int8 output is
+    identical on the valid positions (reduces.py:28-30).
+    """
+    torch.manual_seed(9)
+    length, classes = 7, 8
+    logits = torch.randn(1, length, classes)
+    mask = torch.zeros(1, length, dtype=torch.bool)
+    mask[0, 5:] = True
+
+    op = SeqClassIndexOp()
+    b = Bundle({"preds": {_STREAM_T: {"t": logits.clone()}}, "masks": {_STREAM_T: mask}})
+    got = op.convert(b, Mode.ONNX, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
+
+    raw_argmax = torch.argmax(logits.squeeze(0), dim=-1).char()
+    valid = ~mask.squeeze(0)
+    torch.testing.assert_close(got[valid], raw_argmax[valid], rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # GATE 2b: SeqClassProbs (sequence classification PROBS) == masked softmax,
 #          and == the float values the sequence ClassificationTask.get_h5 packs.
 #          This is the eval-H5 column counterpart of the SeqClassIndex argmax.

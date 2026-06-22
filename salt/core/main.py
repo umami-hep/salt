@@ -414,17 +414,29 @@ def _is_persistence_sink(class_path: str) -> bool:
     the pre-instantiate point (jsonargparse only has the ``class_path`` string
     here) so the writer-less refusal accepts the callbacks-level sink.
 
+    ORDER-INDEPENDENT exclusion of the ONNX-only sink (plan 29 W2 B2): the
+    `OnnxExportSink` ALSO exposes ``writer_demand`` but persists NOTHING in TEST
+    (its ``declare_io(Mode.TEST)`` is empty). A config wiring ONLY an
+    `OnnxExportSink` provides ZERO test persistence, so it must NOT satisfy the
+    ``salt2 test`` writer-less safety check — symmetric to the runtime
+    ``_attached_writer`` / static ``cli.py _static_writer_sink_callback``
+    hardening.
+
     Returns
     -------
     bool
         ``True`` when `class_path` resolves to `H5OutputWriter`, a subclass of
-        it, or any class exposing the ``writer_demand`` surface; ``False`` for an
-        unimportable path (treated as not-a-sink — the genuinely sink-less error
-        still fires) or a plain callback.
+        it, or any class exposing the ``writer_demand`` surface (EXCEPT
+        `OnnxExportSink`); ``False`` for an unimportable path (treated as
+        not-a-sink — the genuinely sink-less error still fires), an ONNX-only
+        sink, or a plain callback.
     """
     import importlib  # noqa: PLC0415 - local, only on the test path
 
-    from salt.core.outputs import H5OutputWriter  # noqa: PLC0415 - avoid import cycle at top
+    from salt.core.outputs import (  # noqa: PLC0415 - avoid import cycle at top
+        H5OutputWriter,
+        OnnxExportSink,
+    )
 
     module_path, _, attr = class_path.rpartition(".")
     if not module_path:
@@ -434,6 +446,8 @@ def _is_persistence_sink(class_path: str) -> bool:
     except Exception:  # noqa: BLE001 - an unresolvable class_path is simply not a sink
         return False
     if not isinstance(cls, type):
+        return False
+    if issubclass(cls, OnnxExportSink):  # ONNX-only sink: no TEST persistence (W2 B2)
         return False
     return issubclass(cls, H5OutputWriter) or callable(getattr(cls, "writer_demand", None))
 
