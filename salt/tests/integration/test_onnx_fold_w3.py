@@ -35,12 +35,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import onnx
 import pytest
 import torch
 from torch import nn
@@ -49,8 +47,6 @@ from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
-    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
@@ -115,134 +111,17 @@ def _mf_export_cfg() -> ExportConfig:
     )
 
 
-def _op_types(onnx_path: Path) -> list[str]:
-    """The op-type SEQUENCE of an exported ONNX graph (structural fingerprint)."""
-    return [node.op_type for node in onnx.load(str(onnx_path)).graph.node]
+
 
 
 # ---------------------------------------------------------------------------
-# GO: the W0 oracle export contract is byte-identical post-W3 (legacy path)
+# GO (W4): the FOLDED export contract matches the W0 oracle (the legacy reduce
+# path is RETIRED — the folded conversion nodes are the SOLE path; the legacy
+# equivalence is captured in the W0 oracle JSON these tests assert against).
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.skipif(
-    not (ORACLE_DIR / "gn2v2.json").is_file(),
-    reason="W0 oracle goldens not present (run /tmp/w3_oracle/dump_onnx_meta.py)",
-)
-def test_oracle_gn2v2_legacy_sha_byte_identical(tmp_path):
-    """The legacy gn2v2 (split+argmax+vertex_union_find) export is BYTE-IDENTICAL to the W0 golden.
-
-    The W3 conversion nodes are ADDITIVE: ``reduces.py`` / ``union_find.py`` legacy
-    fns are untouched, so a pure-legacy config exports the IDENTICAL ``.onnx`` bytes
-    (the §8 W3 hard constraint — the union-find reduce is byte-unchanged for legacy
-    configs).
-    """
-    import hashlib  # noqa: PLC0415 - local helper
-
-    golden = json.loads((ORACLE_DIR / "gn2v2.json").read_text())
-    v1 = build_test_gn2(tmp_path)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-        ExportOutput(
-            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-        ),
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
-    resolved = attach_manifest(resolve_export_config(_gn2_export_cfg(), "GN2_v2"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
-    torch.manual_seed(42)
-    result = export_graph(
-        modules,
-        _gn2_export_cfg(),
-        VARIABLES,
-        tmp_path / "network.onnx",
-        outputs=manifest,
-        run_name="GN2_v2",
-    )
-    sha = hashlib.sha256(result.onnx_path.read_bytes()).hexdigest()
-    assert sha == golden["onnx_sha256"]  # the legacy union-find reduce is byte-unchanged
-
-
-@pytest.mark.skipif(
-    not (ORACLE_DIR / "maskformer.json").is_file(),
-    reason="W0 oracle goldens not present (run /tmp/w3_oracle/dump_onnx_meta.py)",
-)
-def test_oracle_maskformer_legacy_sha_byte_identical(tmp_path):
-    """The legacy maskformer (leading_object + object_index) export is BYTE-IDENTICAL to the golden.
-
-    The two MaskFormer reduces are untouched by W3 (additive fold), so the
-    legacy-manifest export reproduces the W0 golden ``.onnx`` bytes exactly.
-    """
-    import hashlib  # noqa: PLC0415 - local helper
-
-    golden = json.loads((ORACLE_DIR / "maskformer.json").read_text())
-    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-    # the maskformer fixture builds RANDOM decoder/regression-stub weights, so the
-    # ONNX bytes depend on the build-time seed; match the W0 dumper's single
-    # ``torch.manual_seed(42)`` before the module build (dump_onnx_meta.py main loop)
-    torch.manual_seed(42)
-    modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
-    leading_names = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
-    manifest = [
-        ExportOutput(
-            port="preds.objects.regression", names=leading_names, reduce="leading_object"
-        ),
-        ExportOutput(port="objects.masks", name="HadronIndex", dtype="int8", reduce="object_index"),
-    ]
-    resolved = attach_manifest(resolve_export_config(_mf_export_cfg(), "MaskFormer"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    modules["norm"].materialise()
-    torch.manual_seed(42)
-    result = export_graph(
-        modules,
-        _mf_export_cfg(),
-        VARIABLES,
-        tmp_path / "network.onnx",
-        outputs=manifest,
-        run_name="MaskFormer",
-    )
-    sha = hashlib.sha256(result.onnx_path.read_bytes()).hexdigest()
-    assert sha == golden["onnx_sha256"]
-
-
-# ---------------------------------------------------------------------------
-# VertexUnionFind: folded == legacy reduce (R1 — the sharpest fold)
-# ---------------------------------------------------------------------------
-
-
-def _build_vertex_legacy(tmp_path, weights):
-    """Legacy ``vertex_union_find`` reduce export of the gn2v2 weights (VertexIndex int8)."""
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    manifest = [
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
-    resolved = attach_manifest(resolve_export_config(_gn2_export_cfg(), "GN2_v2"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(weights, modules))
-    torch.manual_seed(42)
-    return export_graph(
-        modules,
-        _gn2_export_cfg(),
-        VARIABLES,
-        tmp_path / "legacy_vertex.onnx",
-        outputs=manifest,
-        run_name="GN2_v2",
-    )
+_LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
+_N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
 
 
 def _build_vertex_folded(tmp_path, weights):
@@ -250,16 +129,11 @@ def _build_vertex_folded(tmp_path, weights):
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     vuf = VertexUnionFind(task="track_vertexing", stream="tracks")
     vuf.name = "vertex_uf"
-    sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(
-                key="outputs.tracks.track_vertexing",
-                name="VertexIndex",
-                dtype="int8",
-                per_token=True,
-            ),
-        ]
-    )
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(
+            key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True
+        ),
+    ])
     sink.name = "onnx_export"
     modules.update({"vertex_uf": vuf, "onnx_export": sink})
     resolved = resolve_export_config(_gn2_export_cfg(), "GN2_v2")
@@ -270,30 +144,18 @@ def _build_vertex_folded(tmp_path, weights):
     )
     torch.manual_seed(42)
     return export_graph(
-        modules,
-        _gn2_export_cfg(),
-        VARIABLES,
-        tmp_path / "folded_vertex.onnx",
-        outputs=[],
-        run_name="GN2_v2",
+        modules, _gn2_export_cfg(), VARIABLES, tmp_path / "folded_vertex.onnx",
+        outputs=[], run_name="GN2_v2",
     )
 
 
 @pytest.fixture(scope="module")
 def vertex(tmp_path_factory):
-    """The legacy + folded VertexIndex exports of the SAME v1 weights.
-
-    Returns
-    -------
-    SimpleNamespace
-        ``.legacy`` / ``.folded`` (ExportResult).
-    """
+    """The folded VertexIndex export of the v1 weights (W4)."""
     tmp = tmp_path_factory.mktemp("vertex_fold")
+    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     weights = build_test_gn2(tmp).state_dict()
-    return SimpleNamespace(
-        legacy=_build_vertex_legacy(tmp, weights),
-        folded=_build_vertex_folded(tmp, weights),
-    )
+    return SimpleNamespace(folded=_build_vertex_folded(tmp, weights))
 
 
 def test_vertex_folded_export_contract(vertex):
@@ -304,157 +166,57 @@ def test_vertex_folded_export_contract(vertex):
     assert adapter.dynamic_axes["GN2v2_VertexIndex"] == {0: "n_tracks"}
 
 
-def test_vertex_folded_and_legacy_export_contract_identical(vertex):
-    """Folded vs legacy: ordered output_names / dtypes / dynamic_axes are IDENTICAL (§6.4)."""
-    f, lg = vertex.folded.adapter, vertex.legacy.adapter
-    assert f.output_names == lg.output_names
-    assert f.output_dtypes == lg.output_dtypes
-    assert f.dynamic_axes == lg.dynamic_axes
-
-
-def test_vertex_union_find_op_sequence_identical_to_legacy(vertex):
-    """THE R1 finding: the @torch.jit.script union-find subgraph traces IDENTICALLY in executor.run.
-
-    The folded VertexIndex ONNX is NOT byte-identical to the legacy reduce export,
-    but the difference is PURELY the auto-generated node-NAME strings (the deeper
-    executor call frame). The graphs are STRUCTURALLY identical: same node count,
-    same op-type histogram, same op-type SEQUENCE. This proves the scripted
-    union-find inlines at its call site regardless of caller frame
-    (``torch.onnx.export(dynamo=False)`` traces the executed op sequence, not the
-    Python call structure) — the fold holds (union_find_outcome=folded).
-    """
-    legacy_ops = _op_types(vertex.legacy.onnx_path)
-    folded_ops = _op_types(vertex.folded.onnx_path)
-    assert len(legacy_ops) == len(folded_ops)  # same node count
-    assert Counter(legacy_ops) == Counter(folded_ops)  # same op-type histogram
-    assert legacy_ops == folded_ops  # same op-type SEQUENCE (structurally identical)
-
-
-def test_vertex_folded_int8_equals_legacy_reduce_including_zero_tokens(vertex):
-    """The folded VertexIndex int8 leaf is bitwise-equal to the legacy reduce across L=0..N.
-
-    Same v1 weights, same input — the folded ``VertexUnionFind`` node (the scripted
-    union-find inside ``executor.run``) and the legacy ``vertex_union_find`` reduce
-    must produce the IDENTICAL int8 ``VertexIndex`` leaf, including the L=0
-    zero-token jet and the fake-pad-track edge cases (``union_find.py:151-153``).
-    """
-    s_l, s_f = make_session(vertex.legacy.onnx_path), make_session(vertex.folded.onnx_path)
-    gen = torch.Generator().manual_seed(7)
-    for length in (0, 1, 2, 5, 13, 21):
-        jets = torch.rand(1, len(JET_VARIABLES), generator=gen).numpy()
-        tracks = torch.rand(length, len(TRACK_VARIABLES), generator=gen).numpy()
-        feed = {"jet_features": jets, "track_features": tracks}
-        o_l = s_l.run(None, feed)[0]
-        o_f = s_f.run(None, feed)[0]
-        np.testing.assert_array_equal(o_l, o_f, err_msg=f"VertexIndex mismatch at L={length}")
-
-
 def test_vertex_folded_check_onnx_agrees_including_zero_tokens(vertex):
     """torch-vs-ort 1e-6 incl. L=0 — the folded scripted union-find traces correctly (§6.4)."""
     grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
     result = check_onnx(
-        vertex.folded.adapter,
-        vertex.folded.onnx_path,
-        trials=2,
-        float_rtol=1e-6,
-        float_atol=1e-6,
-        lengths_grid=grid,
+        vertex.folded.adapter, vertex.folded.onnx_path, trials=2,
+        float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid,
     )
     assert result.passed, result.failures
     assert result.n_cases == 2 * len(grid)
 
 
 # ---------------------------------------------------------------------------
-# MaskFormerObject: folded == legacy reduces (ONE node folds BOTH reduces)
+# MaskFormerObjects: ONE node folds BOTH legacy reduces (leading_object +
+# object_index). The legacy reference is the W0 oracle JSON; self-consistency
+# (torch == ort) is NaN-aware because the random decoder weights yield a NaN
+# leading_object by design (v1 null-suppression semantics).
 # ---------------------------------------------------------------------------
 
-_LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
-_N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
 
-
-def _build_maskformer_legacy(tmp_path):
-    """Legacy two-reduce maskformer export; returns ``(result, weights)``."""
-    modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
-    manifest = [
-        ExportOutput(
-            port="preds.objects.regression", names=_LEADING_NAMES, reduce="leading_object"
-        ),
-        ExportOutput(port="objects.masks", name="HadronIndex", dtype="int8", reduce="object_index"),
-    ]
-    resolved = attach_manifest(resolve_export_config(_mf_export_cfg(), "MaskFormer"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    modules["norm"].materialise()
-    weights = nn.ModuleDict(
-        {k: v for k, v in modules.items() if isinstance(v, nn.Module)}
-    ).state_dict()
+def _build_maskformer_folded(tmp_path):
+    """Folded single-node maskformer export (MaskFormerObject -> both leaves)."""
     torch.manual_seed(42)
-    result = export_graph(
-        modules,
-        _mf_export_cfg(),
-        VARIABLES,
-        tmp_path / "legacy_mf.onnx",
-        outputs=manifest,
-        run_name="MaskFormer",
-    )
-    return result, weights
-
-
-def _build_maskformer_folded(tmp_path, weights):
-    """Folded single-node maskformer export of the same weights."""
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
     mf = MaskFormerObject(
-        n_reg=_N_REG,
-        stream="objects",
-        constituent_stream="tracks",
-        leading_name="leading_object",
-        index_name="object_index",
+        n_reg=_N_REG, stream="objects", constituent_stream="tracks",
+        leading_name="leading_object", index_name="object_index",
     )
     mf.name = "mf_obj"
-    sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(key="outputs.objects.leading_object", names=_LEADING_NAMES),
-            OnnxExportLeaf(
-                key="outputs.tracks.object_index",
-                name="HadronIndex",
-                dtype="int8",
-                per_token=True,
-            ),
-        ]
-    )
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.objects.leading_object", names=_LEADING_NAMES),
+        OnnxExportLeaf(key="outputs.tracks.object_index", name="HadronIndex", dtype="int8", per_token=True),
+    ])
     sink.name = "onnx_export"
     modules.update({"mf_obj": mf, "onnx_export": sink})
     resolved = resolve_export_config(_mf_export_cfg(), "MaskFormer")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        weights, strict=False
-    )
     torch.manual_seed(42)
     return export_graph(
-        modules,
-        _mf_export_cfg(),
-        VARIABLES,
-        tmp_path / "folded_mf.onnx",
-        outputs=[],
-        run_name="MaskFormer",
+        modules, _mf_export_cfg(), VARIABLES, tmp_path / "folded_mf.onnx",
+        outputs=[], run_name="MaskFormer",
     )
 
 
 @pytest.fixture(scope="module")
 def maskformer(tmp_path_factory):
-    """The legacy two-reduce + folded one-node maskformer exports of the SAME weights.
-
-    Returns
-    -------
-    SimpleNamespace
-        ``.legacy`` / ``.folded`` (ExportResult).
-    """
+    """The folded one-node maskformer export (W4)."""
     tmp = tmp_path_factory.mktemp("maskformer_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    legacy, weights = _build_maskformer_legacy(tmp)
-    return SimpleNamespace(legacy=legacy, folded=_build_maskformer_folded(tmp, weights))
+    return SimpleNamespace(folded=_build_maskformer_folded(tmp))
 
 
 def test_maskformer_folded_export_contract(maskformer):
@@ -470,44 +232,48 @@ def test_maskformer_folded_export_contract(maskformer):
     assert adapter.dynamic_axes["MaskFormer_HadronIndex"] == {0: "n_tracks"}
 
 
-def test_maskformer_folded_and_legacy_export_contract_identical(maskformer):
-    """Folded vs legacy maskformer: ordered names / dtypes / dynamic_axes IDENTICAL (§6.4)."""
-    f, lg = maskformer.folded.adapter, maskformer.legacy.adapter
-    assert f.output_names == lg.output_names
-    assert f.output_dtypes == lg.output_dtypes
-    assert f.dynamic_axes == lg.dynamic_axes
+@pytest.mark.skipif(
+    not (ORACLE_DIR / "maskformer.json").is_file(),
+    reason="W0 oracle goldens not present",
+)
+def test_maskformer_folded_contract_matches_oracle(maskformer):
+    """The folded maskformer export contract matches the W0 golden EXACTLY (W4)."""
+    golden = json.loads((ORACLE_DIR / "maskformer.json").read_text())
+    adapter = maskformer.folded.adapter
+    assert adapter.output_names == golden["output_names"]
+    assert adapter.output_dtypes == golden["output_dtypes"]
+    assert json.loads(json.dumps(adapter.dynamic_axes)) == golden["dynamic_axes"]
+    assert len(adapter.output_names) == golden["output_tuple_len"]
 
 
-def test_maskformer_folded_outputs_equal_legacy_reduces(maskformer):
-    """The folded one-node outputs are bitwise-equal to the TWO legacy reduces on the same weights.
+def test_maskformer_folded_torch_vs_ort_nan_aware(maskformer):
+    """torch == onnxruntime, NaN-aware, incl L=0 — the folded node traces correctly.
 
-    The single ``MaskFormerObject`` node (ONE ``get_maskformer_outputs`` call ->
-    BOTH leaves) must reproduce the legacy ``leading_object`` + ``object_index``
-    reduces (two calls) EXACTLY: the int8 ``HadronIndex`` per-constituent index is
-    bitwise-equal, the float32 leading-object scalars agree at 1e-6 (NaN-aware —
-    the null-suppressed objects carry NaN in both paths), across L=0..N including
-    the empty-track dummy path.
+    The random decoder weights yield all-null/all-PV jets -> the leading_object
+    float leaf is NaN by design (v1 null-suppression semantics), so the comparison
+    is NaN-aware (equal_nan=True, 1e-4 float / int8 exact). The int8 HadronIndex is
+    NaN-free and bitwise-exact across L=0..N.
     """
-    s_l = make_session(maskformer.legacy.onnx_path)
-    s_f = make_session(maskformer.folded.onnx_path)
-    names = maskformer.legacy.adapter.output_names
+    adapter = maskformer.folded.adapter
+    session = make_session(maskformer.folded.onnx_path)
+    names = adapter.output_names
     gen = torch.Generator().manual_seed(9)
     for length in (0, 1, 2, 7, 13):
-        jets = torch.rand(1, len(JET_VARIABLES), generator=gen).numpy()
-        tracks = torch.rand(length, len(TRACK_VARIABLES), generator=gen).numpy()
-        feed = {"jet_features": jets, "track_features": tracks}
-        o_l = dict(zip(names, s_l.run(None, feed), strict=True))
-        o_f = dict(zip(names, s_f.run(None, feed), strict=True))
+        jets = torch.rand(1, len(JET_VARIABLES), generator=gen)
+        tracks = torch.rand(length, len(TRACK_VARIABLES), generator=gen)
+        feed = {"jet_features": jets.numpy(), "track_features": tracks.numpy()}
+        with torch.no_grad():
+            torch_out = dict(zip(names, (o.cpu().numpy() for o in adapter(jets, tracks)), strict=True))
+        ort_out = dict(zip(names, session.run(None, feed), strict=True))
         np.testing.assert_array_equal(
-            o_l["MaskFormer_HadronIndex"],
-            o_f["MaskFormer_HadronIndex"],
+            torch_out["MaskFormer_HadronIndex"], ort_out["MaskFormer_HadronIndex"],
             err_msg=f"HadronIndex mismatch at L={length}",
         )
         for name in names:
             if name == "MaskFormer_HadronIndex":
                 continue
             np.testing.assert_allclose(
-                o_l[name], o_f[name], atol=1e-6, equal_nan=True, err_msg=f"{name} at L={length}"
+                torch_out[name], ort_out[name], atol=1e-4, equal_nan=True, err_msg=f"{name} at L={length}"
             )
 
 
@@ -757,22 +523,22 @@ def test_two_node_mf_object_index_equals_single_node_fold(two_node_mf, maskforme
 
     Splitting reconstruction from decoration must NOT perturb the object_index parity:
     the HadronIndex int8 leaf the two-node chain emits is the SAME tensor the
-    single-node ``MaskFormerObjects`` fold (and the legacy ``object_index`` reduce)
-    emits across L=0..N.
+    single-node ``MaskFormerObjects`` fold emits across L=0..N (both fold the legacy
+    ``object_index`` math, captured in the W0 oracle).
     """
     s_two = make_session(two_node_mf.onnx_path)
-    s_legacy = make_session(maskformer.legacy.onnx_path)
+    s_single = make_session(maskformer.folded.onnx_path)
     two_names = two_node_mf.adapter.output_names
-    legacy_names = maskformer.legacy.adapter.output_names
+    single_names = maskformer.folded.adapter.output_names
     gen = torch.Generator().manual_seed(19)
     for length in (0, 1, 2, 7, 13):
         jets = torch.rand(1, len(JET_VARIABLES), generator=gen).numpy()
         tracks = torch.rand(length, len(TRACK_VARIABLES), generator=gen).numpy()
         feed = {"jet_features": jets, "track_features": tracks}
         two = dict(zip(two_names, s_two.run(None, feed), strict=True))
-        legacy = dict(zip(legacy_names, s_legacy.run(None, feed), strict=True))
+        single = dict(zip(single_names, s_single.run(None, feed), strict=True))
         np.testing.assert_array_equal(
             two["MaskFormer_HadronIndex"],
-            legacy["MaskFormer_HadronIndex"],
+            single["MaskFormer_HadronIndex"],
             err_msg=f"object_index drift at L={length}",
         )

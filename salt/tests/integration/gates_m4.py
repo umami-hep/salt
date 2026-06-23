@@ -83,7 +83,6 @@ from salt.core.onnx import (
     ExportConfig,
     ExportInput,
     ExportOutput,
-    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
@@ -290,19 +289,19 @@ def writer_manifest(
     streams: Sequence[str],
     sequence_streams: Sequence[str],
 ) -> list[ExportOutput]:
-    """The writer-derived export manifest — the M4.5 mechanism under gate.
+    """The writer-derived export manifest — the M4.5 mechanism (retired at W4).
 
-    A default `TaskWriter` (the ``base2.yaml`` shipped writer, ``onnx:
-    true``) declares the fixture's export entries from the SAME suffix
-    helpers that name the eval columns; O2's identity bar then proves the
-    derived manifest reproduces v1's hand-built output list bitwise — the
-    re-sourcing the M4.5 re-run exists to gate.
+    Kept for the O2 identity bar's expected-name list (the suffix order the
+    folded OnnxExportSink must reproduce): a default `TaskWriter` declares the
+    fixture's export entries from the SAME suffix helpers that name the eval
+    columns. Post-W4 the ONNX outputs are produced by the folded conversion
+    nodes (`_add_gn2_folded_nodes`) named by an OnnxExportSink; this list is now
+    the EXPECTED-output oracle the folded path must match, not the live manifest.
 
     Returns
     -------
     list[ExportOutput]
-        The assembled manifest in the v1 output order (global-stream
-        entries first, then sequence-stream aux entries).
+        The expected entries in v1 output order (global-stream first, then aux).
     """
     writer = TaskWriter()
     writer.name = "tasks"
@@ -312,6 +311,64 @@ def writer_manifest(
         sequence_streams=tuple(sequence_streams),
     )
     return writer.onnx_outputs(ctx)
+
+
+def _sink_leaves_from_manifest(manifest: Sequence[ExportOutput]) -> list[Any]:
+    """Build OnnxExportSink leaves equivalent to a legacy reduce manifest (W4).
+
+    Maps each legacy `ExportOutput` to the conversion `outputs.*` leaf its folded
+    node mints: split_scalars -> ``names`` split; argmax/vertex_union_find ->
+    single int8 per-token ``name``. The leaf key swaps the ``preds`` namespace for
+    ``outputs`` (the conversion node's produced leaf).
+    """
+    from salt.core.outputs import OnnxExportLeaf  # noqa: PLC0415
+
+    leaves = []
+    for out in manifest:
+        key = "outputs." + out.port.split(".", 1)[1]
+        if out.names is not None:
+            leaves.append(OnnxExportLeaf(key=key, names=list(out.names)))
+        else:
+            leaves.append(
+                OnnxExportLeaf(key=key, name=out.name, dtype="int8", per_token=True)
+            )
+    return leaves
+
+
+def _add_gn2_folded_nodes(modules: dict, manifest: Sequence[ExportOutput]) -> Any:
+    """Add the folded conversion nodes + OnnxExportSink for a GN2-shaped manifest (W4).
+
+    For each manifest entry, wire the matching conversion node (ClassProbs for the
+    global split, SeqClassIndex for an argmax aux, VertexUnionFind for the
+    union-find aux) into ``modules`` and return the OnnxExportSink naming the
+    produced ``outputs.*`` leaves in the SAME tuple order.
+
+    Returns
+    -------
+    OnnxExportSink
+        The sink (also added to ``modules`` under ``onnx_export``).
+    """
+    from salt.core.outputs import (  # noqa: PLC0415
+        ClassProbs,
+        OnnxExportSink,
+        SeqClassIndex,
+        VertexUnionFind,
+    )
+
+    for out in manifest:
+        _, stream, task = out.port.split(".")
+        if out.names is not None:
+            node = ClassProbs(task=task, stream=stream)
+        elif out.reduce == "vertex_union_find":
+            node = VertexUnionFind(task=task, stream=stream)
+        else:  # argmax
+            node = SeqClassIndex(task=task, stream=stream)
+        node.name = f"{task}__conv"
+        modules[node.name] = node
+    sink = OnnxExportSink(outputs=_sink_leaves_from_manifest(manifest))
+    sink.name = "onnx_export"
+    modules["onnx_export"] = sink
+    return sink
 
 
 def _gn2_variables() -> dict[str, list[str]]:
@@ -499,10 +556,15 @@ def _build_gn2_pair(workdir: Path, *, with_v1_export: bool = True) -> SimpleName
 
     modules = build_gn2v2_modules(norm_dict)
     manifest = writer_manifest(modules, ("jets", "tracks"), ("tracks",))
-    resolved = attach_manifest(resolve_export_config(gn2_export_config(), RUN_NAME), manifest)
+    # W4: the ONNX outputs are produced by folded conversion nodes named by an
+    # OnnxExportSink (the off-graph reduce manifest is retired)
+    _add_gn2_folded_nodes(modules, manifest)
+    resolved = resolve_export_config(gn2_export_config(), RUN_NAME)
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
+    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
+        map_v1_state_dict(v1.state_dict(), modules), strict=False
+    )
 
     run_dir = workdir / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -524,7 +586,7 @@ def _build_gn2_pair(workdir: Path, *, with_v1_export: bool = True) -> SimpleName
         gn2_export_config(),
         variables,
         workdir / "v2_network.onnx",
-        outputs=manifest,  # writer-derived (M4.5) — the re-sourcing under gate
+        outputs=[],  # W4: the folded OnnxExportSink is the output authority
         run_name=RUN_NAME,
         config=config_payload,
         run_metadata={},  # == the synthesized metadata.yaml content read by v1
@@ -1203,11 +1265,14 @@ def _build_two_stream(workdir: Path) -> SimpleNamespace:
 
     export_cfg = two_stream_export_config()
     manifest = writer_manifest(modules, ("jets", "tracks", "electrons"), ("tracks", "electrons"))
-    resolved = attach_manifest(resolve_export_config(export_cfg, RUN_NAME), manifest)
+    # W4: folded conversion nodes (param-less, so they add no state-dict keys) +
+    # OnnxExportSink replace the off-graph reduce manifest
+    _add_gn2_folded_nodes(modules, manifest)
+    resolved = resolve_export_config(export_cfg, RUN_NAME)
     plan = compile_onnx_plan(modules, resolved, variables)
     torch.manual_seed(42)  # deterministic bind-time init for the v2-only head
     bind_all(modules, resolve_bind_schema([plan]))
-    holder = nn.ModuleDict(modules)
+    holder = nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)})
     mapped = map_v1_state_dict(v1.state_dict(), modules)
     missing, unexpected = holder.load_state_dict(mapped, strict=False)
     assert not unexpected, f"unexpected keys in the v1->v2 transfer: {unexpected}"
@@ -1219,7 +1284,7 @@ def _build_two_stream(workdir: Path) -> SimpleNamespace:
         export_cfg,
         variables,
         workdir / "two_stream.onnx",
-        outputs=manifest,
+        outputs=[],
         run_name=RUN_NAME,
     )
     return SimpleNamespace(

@@ -54,8 +54,6 @@ from salt.core.nn.tasks import ClassificationTaskModule, RegressionTaskModule
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
-    attach_manifest,
     compile_onnx_plan,
     resolve_export_config,
 )
@@ -895,8 +893,19 @@ def compile_vector_concat_onnx(
             ExportInput(port="inputs.global", alias="inputs.jets"),
         ],
     )
-    manifest = [ExportOutput(port="preds.jets.jets_classification", names=list(DIPS_CLASS_NAMES))]
-    resolved = attach_manifest(resolve_export_config(export, "GN3V01"), manifest)
+    # W4: a folded ClassProbs node named by an OnnxExportSink (the off-graph reduce
+    # manifest is retired)
+    from salt.core.outputs import ClassProbs, OnnxExportLeaf, OnnxExportSink  # noqa: PLC0415
+
+    cp = ClassProbs(task="jets_classification", stream="jets")
+    cp.name = "jet_probs"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=list(DIPS_CLASS_NAMES)),
+    ])
+    sink.name = "onnx_export"
+    modules["jet_probs"] = cp
+    modules["onnx_export"] = sink
+    resolved = resolve_export_config(export, "GN3V01")
     variables = {
         "jets": list(JET_VARIABLES),
         "tracks": list(TRACK_VARIABLES),

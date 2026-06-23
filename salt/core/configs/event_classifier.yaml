@@ -126,16 +126,20 @@ writers:
   modules:
     # both heads are on the GLOBAL `events` stream (no sequence-stream task), so
     # there is no pad mask to write — delete the base2.yaml default (design §5.3
-    # null-deletion). InputCopyWriter + TaskWriter keep their events roles.
+    # null-deletion). InputCopyWriter keeps its events role.
     pad_mask: null
+    # plan-29 W4: TaskWriter eval-only (onnx:false) — event_classifier has NO ONNX
+    # export (see below), so the writer never contributes an ONNX manifest anyway;
+    # set onnx:false explicitly so no live config relies on the retired
+    # writer-derived ONNX manifest.
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
 
-# NO export: block — event_classifier is an event-level analysis model with a
-# NON-feature ratio denominator (mHH), so it has no ONNX/Athena export
-# representation (see the §3.3 ONNX note in the header). Validated fit + test
-# only. The eval columns derive from the writers (M4.5 unified manifest): the
-# default TaskWriter declares event_classifier_pggF/_pVBF (split_scalars) and
-# event_classifier_truthMHH (the de-scaled mHH regression). Inspect with
-# `salt2 graph resolve -c <this file>`.
+# NO export: block + NO OnnxExportSink — event_classifier is an event-level
+# analysis model with a NON-feature ratio denominator (mHH), so it has no
+# ONNX/Athena export representation (see the §3.3 ONNX note in the header).
+# Validated fit + test only; `salt2 graph validate --mode onnx` falls back to the
+# all-preds render (no export sink to anchor demand). The eval columns derive from
+# the TaskWriter (event_classifier_pggF/_pVBF + the de-scaled mHH regression).
 
 trainer:
   max_epochs: 30

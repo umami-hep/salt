@@ -37,14 +37,13 @@ from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
-    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
     make_session,
     resolve_export_config,
 )
+from salt.core.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
 from salt.tests._fixtures.gn2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
@@ -56,7 +55,7 @@ from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 from salt.tests.unit.onnx.test_adapter import (
     VARIABLES,
     gn2_export_cfg,
-    gn2_manifest,
+    gn2_folded_modules,
     gn2_resolved,
 )
 
@@ -66,20 +65,23 @@ SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
 
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
-    """Weight-matched GN2 fixture exported through the programmatic core."""
+    """Weight-matched GN2 fixture exported through the FOLDED conversion-node path (W4)."""
     tmp = tmp_path_factory.mktemp("onnx_export")
+    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     v1 = build_test_gn2(tmp)
-    modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
+    modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
+    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
+        map_v1_state_dict(v1.state_dict(), modules), strict=False
+    )
     result = export_graph(
         modules,
         gn2_export_cfg(),
         VARIABLES,
         tmp / "network.onnx",
-        outputs=gn2_manifest(),
+        outputs=[],
         run_name="GN2_v2",
     )
     return SimpleNamespace(v1=v1, modules=modules, result=result, tmp=tmp)
@@ -196,7 +198,7 @@ class TestExportedModel:
             gn2_export_cfg(),
             VARIABLES,
             exported.result.onnx_path,
-            outputs=gn2_manifest(),
+            outputs=[],
             run_name="GN2_v2",
         )
         assert again.plan.plan_hash == exported.result.plan.plan_hash
@@ -283,24 +285,40 @@ def two_stream(tmp_path_factory):
             ),
         ],
     )
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-        ExportOutput(
-            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
+    # W4 folded path: conversion nodes + OnnxExportSink (the off-graph manifest
+    # is retired). The jets head's softmax + the two argmax aux leaves fold into
+    # ClassProbs/SeqClassIndex nodes named by the sink.
+    from salt.core.outputs import ClassProbs
+
+    def _n(node, name):
+        node.name = name
+        return node
+
+    modules.update({
+        "jet_probs": _n(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
+        "track_origin_index": _n(
+            SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
         ),
-        ExportOutput(
-            port="preds.electrons.electron_origin",
-            name="ElectronOrigin",
-            dtype="int8",
-            reduce="argmax",
+        "electron_origin_index": _n(
+            SeqClassIndex(task="electron_origin", stream="electrons"), "electron_origin_index"
         ),
-    ]
-    resolved = attach_manifest(resolve_export_config(export_cfg, "two_stream"), manifest)
+        "onnx_export": _n(OnnxExportSink(outputs=[
+            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
+            OnnxExportLeaf(
+                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
+            ),
+            OnnxExportLeaf(
+                key="outputs.electrons.electron_origin", name="ElectronOrigin", dtype="int8",
+                per_token=True, dyn_axis="n_electrons",
+            ),
+        ]), "onnx_export"),
+    })
+    resolved = resolve_export_config(export_cfg, "two_stream")
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
     result = export_graph(
-        modules, export_cfg, variables, tmp / "two.onnx", outputs=manifest, run_name="two_stream"
+        modules, export_cfg, variables, tmp / "two.onnx", outputs=[], run_name="two_stream"
     )
     return SimpleNamespace(result=result, variables=variables)
 
@@ -535,17 +553,18 @@ class TestSalt2Surface:
         assert meta.description == "GN2v2dummy"
 
     def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
-        # salt2 export --manifest: the writer-derived manifest, no ckpt
-        # needed (M4.5 amendment §2.3 discoverability mitigation)
+        # salt2 export --manifest: the OnnxExportSink-derived manifest, no ckpt
+        # needed (W4: the off-graph writer manifest is retired — the sink names the
+        # folded conversion outputs.* leaves)
         from salt.core.onnx.export import main as export_main
 
         rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "ONNX output manifest (writer-derived, model_name=GN2v2dummy)" in out
+        assert "ONNX output manifest (folded conversion nodes, model_name=GN2v2dummy)" in out
         for name in ("GN2v2dummy_pb", "GN2v2dummy_TrackOrigin", "GN2v2dummy_VertexIndex"):
             assert name in out
-        assert "vertex_union_find preds.tracks.track_vertexing" in out
+        assert "folded conversion node (outputs.* leaf)" in out
 
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
         # the M4.5 migration error must fire on the CLI path with the

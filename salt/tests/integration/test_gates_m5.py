@@ -423,7 +423,7 @@ class TestMF2:
         assert report["checks"]["onnx_object_index_is_int8"]
         assert report["checks"]["onnx_object_index_has_dynamic_token_axis"]
         assert report["checks"]["onnx_index_suffix_is_pinned_HadronIndex"]
-        assert report["checks"]["onnx_manifest_uses_object_reduces"]
+        assert report["checks"]["onnx_sink_names_object_leaves"]  # W4: folded sink leaves
         # torch and onnxruntime agree (int8 exact, leading floats where finite)
         assert report["checks"]["onnx_object_index_int8_exact"]
         assert report["checks"]["onnx_leading_object_floats_agree_where_finite"]
@@ -501,15 +501,16 @@ class TestD1:
         assert report["checks"]["non_string_name_register_reduce_raises"]
         # the gate restores the process-global registry — no probe-reduce residue leaks
         assert report["checks"]["register_reduce_residue_cleared"]
-        # the shipped registry is exactly the five reduces after the gate runs (the
-        # probe was cleaned up, so the in-process exact-set assertions hold)
-        assert set(registered_reduces()) == {
+        # plan-29 W4: the five SHIPPED reduces are RETIRED (folded into conversion
+        # nodes) — the registry carries NONE of them after the gate runs (the probe
+        # was cleaned up, so the in-process registry is empty of shipped reduces)
+        assert {
             "split_scalars",
             "argmax",
             "vertex_union_find",
             "leading_object",
             "object_index",
-        }
+        }.isdisjoint(set(registered_reduces()))
         # the gate claims ONLY the sub-wave-D C-prereqs slice (NO model parity)
         assert "C-prereqs" in report["scope_note"]
         assert "NO model-parity" in report["scope_note"]

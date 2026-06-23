@@ -126,15 +126,31 @@ model:
           dense: {hidden_layers: [128], activation: Mish} # v1 legacy/DL1.yaml:29
       loss:
         class_path: salt.core.nn.LossSum # one task, v1 default (no GLS)
+      # plan-29 W4 folded ONNX conversion producers (design §6.2): mint outputs.* leaves
+      # the OnnxExportSink names; demand-pruned from FIT/VAL/TEST (FIT plan_hash unchanged).
+      jet_probs:
+        class_path: salt.core.outputs.ClassProbs
+        init_args: { task: jets_classification, stream: jets }
 
 writers:
   modules:
     # jets-only: NO sequence stream -> no pad mask to write. Delete the
     # base2.yaml default (design §5.3 null-deletion), mirroring regression.yaml.
-    # InputCopyWriter + TaskWriter keep their jets-stream roles (the 3 flavour
-    # probability columns DL1_p{b,c,u} from the split_scalars of the 3-class
-    # head).
+    # InputCopyWriter keeps its jets-stream role (the 3 flavour probability
+    # columns DL1_p{b,c,u} come from the TaskWriter eval columns).
     pad_mask: null
+    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
+    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+
+# plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
+# leaves into the flat Athena output tuple, in v1/oracle ORDER.
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: DL1 # Athena name: no '_'/'-'

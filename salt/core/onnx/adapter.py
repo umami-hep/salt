@@ -32,10 +32,8 @@ from salt.core.graph.spec import Mode
 from salt.core.onnx.config import (
     ExportConfig,
     ExportInput,
-    ordered_output_names,
     stream_of_input_port,
 )
-from salt.core.onnx.reduces import BoundReduce, ReduceCtx, bind_reduce
 
 __all__ = ["OnnxAdapter"]
 
@@ -46,9 +44,10 @@ class OnnxAdapter(nn.Module):
     Parameters
     ----------
     plan : Plan
-        The compiled ``Mode.ONNX`` plan (sinks = the ``export.outputs``
-        ports). The step modules are registered in an ``nn.ModuleDict`` so
-        their parameters/buffers are visible to ``torch.onnx.export``.
+        The compiled ``Mode.ONNX`` plan (sinks = the `OnnxExportSink`'s
+        declared conversion-leaf requires). The step modules are registered
+        in an ``nn.ModuleDict`` so their parameters/buffers are visible to
+        ``torch.onnx.export``.
     export : ExportConfig
         The RESOLVED export config (`resolve_export_config` output — every
         default filled, ``model_name`` validated).
@@ -113,68 +112,33 @@ class OnnxAdapter(nn.Module):
                 # buffer (non-persistent): moves with .to()/.float() and is
                 # a bind-time constant in the trace (design §7 alias gather)
                 self.register_buffer(f"_alias_index_{i}", idx, persistent=False)
-        produced_specs = {key: spec for step in plan.steps for key, spec in step.produces.items()}
-        ctx = ReduceCtx(
-            model_name=self.model_name,
-            seq_dyn_axis={
-                stream_of_input_port(e.port): str(e.dyn_axis)
-                for e in self._positional
-                if e.sequence
-            },
-            produced_specs=produced_specs,
-        )
-        self._reduces: list[BoundReduce] = [bind_reduce(out, ctx) for out in export.outputs]
-        # export.combine post-processing (M4.5 amendment merge condition 5):
-        # combined outputs are linear combinations of the reduced GLOBAL
-        # outputs (v1 to_onnx.py:404-412), inserted into the flat output
-        # order by `ordered_output_names` — after the global entries,
-        # BEFORE the first per-token aux entry (the v1 insertion rule,
-        # to_onnx.py:272-292)
-        self._combines: list[tuple[str, list[tuple[float, str]]]] = [
-            (
-                f"{self.model_name}_{entry.name}",
-                [
-                    (float(scale), f"{self.model_name}_{suffix}")
-                    for suffix, scale in entry.inputs.items()
-                ],
-            )
-            for entry in export.combine
-        ]
-        # plan-29 W2 hybrid dispatch (R8): a folded OnnxExportSink in the plan
-        # owns the conversion outputs (argmax/split/combine) — it NAMES the
-        # demanded outputs.* leaves with no per-batch compute (the conversion ran
-        # in the trace). It coexists with the legacy reduces above (union_find/
-        # maskformer) WITHOUT drift: the folded names come FIRST (the export
-        # node's leaf list is the ordering authority, design §6.3), the legacy
-        # reduce outputs append after.
+        # plan-29 W4 atomic cutover (R8 closed): the folded OnnxExportSink in the
+        # plan is the SOLE ONNX-output authority. It NAMES the demanded outputs.*
+        # leaves the conversion nodes (ClassProbs/SeqClassIndex/VertexUnionFind/
+        # MaskFormerObjects/Combination) minted in the traced executor pass — NO
+        # per-batch compute, NO post-executor reduce.fn loop, NO combine loop
+        # (combinations are Combination conversion nodes now). The off-graph reduce
+        # manifest (export.outputs) is retired; every ONNX output comes from a
+        # conversion leaf the sink declares (design §4.2, §6).
         self._export_sink = self._find_export_sink(plan)
-        if self._export_sink is not None and self._export_sink.model_name is None:
+        if self._export_sink is None:
+            raise ConfigError(
+                "OnnxAdapter needs a folded OnnxExportSink in the plan — the off-graph reduce "
+                "manifest was retired at plan-29 W4. Declare an OnnxExportSink naming the "
+                "conversion outputs.* leaves (design §4.2/§6); the conversion nodes "
+                "(ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/Combination) own "
+                "the math inside the traced graph."
+            )
+        if self._export_sink.model_name is None:
             self._export_sink.model_name = self.model_name
-        legacy_ordered = ordered_output_names(export) if export.outputs else []
-        if self._export_sink is not None:
-            sink_names = self._export_sink.output_names()
-            sink_dtypes = self._export_sink.output_dtypes()
-            # name-collision guard (plan 29 W2 minor): when BOTH demand sources
-            # are present (a hybrid folded-sink + legacy reduce config), the flat
-            # Athena output namespace must stay disjoint — two outputs minting the
-            # SAME ``{model_name}_<suffix>`` would silently clobber one in the
-            # tuple. A clear ConfigError beats a duplicate-named ONNX graph.
-            if legacy_ordered:
-                legacy_names = {name for name, _, _ in legacy_ordered}
-                if overlap := sorted(set(sink_names) & legacy_names):
-                    raise ConfigError(
-                        f"ONNX output name collision {overlap} — the folded OnnxExportSink and "
-                        "the legacy reduce manifest both mint these flat Athena names; the output "
-                        "namespace is flat (design §6.3). Rename one source so the folded + "
-                        "legacy_ordered concatenation stays disjoint."
-                    )
-            folded = [
-                (name, dtype, "onnx_export (folded conversion node)")
-                for name, dtype in zip(sink_names, sink_dtypes, strict=True)
-            ]
-            self._ordered = folded + legacy_ordered
-        else:
-            self._ordered = legacy_ordered
+        self._ordered = [
+            (name, dtype, "onnx_export (folded conversion node)")
+            for name, dtype in zip(
+                self._export_sink.output_names(),
+                self._export_sink.output_dtypes(),
+                strict=True,
+            )
+        ]
         # the formal export-mode protocol (design §7.2): every module
         # recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math (modelwrapper.py:331-335,
@@ -197,16 +161,15 @@ class OnnxAdapter(nn.Module):
 
     @property
     def output_names(self) -> list[str]:
-        """The flat ONNX output names, in manifest order (combines inserted).
+        """The flat ONNX output names, in declared OnnxExportSink tuple order.
 
         Returns
         -------
         list[str]
-            The generated names (``{model_name}_{suffix}``), ordered by
-            `salt.core.onnx.config.ordered_output_names` — the single
-            ordering authority shared with the metadata and the manifest
-            table (combined outputs before the per-token aux entries, v1
-            ``to_onnx.py:258-292``).
+            The generated names (``{model_name}_{suffix}``), ordered by the
+            `OnnxExportSink`'s declared leaf list — the single ordering
+            authority (globals, combines, per-token aux), independent of the
+            executor topo order (design §6.3).
         """
         return [name for name, _, _ in self._ordered]
 
@@ -238,12 +201,9 @@ class OnnxAdapter(nn.Module):
             for entry in self._positional
             if entry.sequence
         }
-        # folded export-sink per-token outputs (argmax int8 leaves) register their
-        # dynamic axis from the sink's output table (plan-29 W2)
-        if self._export_sink is not None:
-            axes.update(self._export_sink.dynamic_axes())
-        for reduce in self._reduces:
-            axes.update({name: dict(ax) for name, ax in reduce.dynamic_axes.items()})
+        # folded export-sink per-token outputs (argmax/union-find/object-index int8
+        # leaves) register their dynamic axis from the sink's output table (W4)
+        axes.update(self._export_sink.dynamic_axes())
         return axes
 
     def example_inputs(self, sequence_length: int = 40) -> tuple[Tensor, ...]:
@@ -310,23 +270,11 @@ class OnnxAdapter(nn.Module):
             else:
                 b.set(entry.port, source.index_select(-1, getattr(self, f"_alias_index_{i}")))
         b = self._executor.run(b)
-        named: dict[str, Tensor] = {}
-        # folded conversion outputs (plan-29 W2): the OnnxExportSink NAMES the
-        # demanded outputs.* leaves the folded nodes (argmax/split/combine) minted
-        # in the executor pass above — NO per-batch compute, only the split_scalars
-        # naming split. Sourced before the legacy reduces so they coexist (R8).
-        if self._export_sink is not None:
-            named.update(self._export_sink.named_outputs(b))
-        # legacy reduces (union_find/maskformer — NOT folded in W2) still run their
-        # post-executor reduce.fn on the raw preds.* port (design §6.4 hybrid)
-        for reduce in self._reduces:
-            named.update(zip(reduce.output_names, reduce.fn(b), strict=True))
-        # legacy export.combine post-processing from the already-reduced tensors —
-        # the v1 expression (sum of scale * output, to_onnx.py:404-412). Folded
-        # configs use the Combination conversion node instead (Q2), so this runs
-        # only for the legacy reduce path.
-        for combo_name, terms in self._combines:
-            named[combo_name] = sum(scale * named[source] for scale, source in terms)
+        # plan-29 W4: the OnnxExportSink NAMES the demanded outputs.* leaves the
+        # folded conversion nodes minted in the traced executor pass above — NO
+        # per-batch compute (only the split_scalars naming split), NO post-executor
+        # reduce.fn loop, NO combine loop. The sink is the sole output authority.
+        named = self._export_sink.named_outputs(b)
         return tuple(named[name] for name, _, _ in self._ordered)
 
     # -- helpers -----------------------------------------------------------------
@@ -367,13 +315,14 @@ class OnnxAdapter(nn.Module):
 
     @staticmethod
     def _find_export_sink(plan: Plan) -> Any:
-        """Find the folded `OnnxExportSink` among the plan steps, if any (R8 dispatch).
+        """Find the folded `OnnxExportSink` among the plan steps (the output authority, W4).
 
         Returns
         -------
         OnnxExportSink | None
-            The single export sink in the ONNX plan, or None for a pure
-            legacy-reduce export.
+            The single export sink in the ONNX plan, or None when no sink is
+            wired (which the adapter rejects — the off-graph reduce manifest
+            was retired at W4).
         """
         from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 

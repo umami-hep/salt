@@ -18,16 +18,13 @@
 #                           folding reduces._bind_argmax)
 #      pbc                 (Combination,  pbc = probs[...,0]+probs[...,1], folding the combine loop)
 #
-# WHY jet_probs is an IDENTITY TaskOutput, NOT ClassProbs (export-faithfulness):
-#   The ClassificationTaskModule STILL softmaxes in Mode.ONNX (the deferred P4
-#   carve-out, tasks.py run_inference ~1241-1245): preds.jets.jets_classification
-#   is ALREADY softmaxed in ONNX. A ClassProbs node would softmax it AGAIN
-#   (double-softmax, pb/pc/pu wrong by up to ~0.14 absolute) — so `salt2 export`
-#   on this demo would ship a WRONG model. An identity TaskOutput passes the
-#   task's already-converted ONNX probs straight through, so the folded split is
-#   bitwise-equal to the v1 single-softmax export TODAY.
-#   FLIP TO ClassProbs once P4 lands: when the task publishes RAW logits in ONNX,
-#   ClassProbs becomes the single softmax and this passthrough must be replaced.
+# WHY jet_probs is a ClassProbs node (POST-P4 — the atomic cutover):
+#   The ClassificationTaskModule now publishes RAW LOGITS in Mode.ONNX (the P4
+#   carve-out in tasks.py forward is REMOVED), so preds.jets.jets_classification
+#   is un-softmaxed in ONNX. ClassProbs applies the SINGLE softmax inside the
+#   traced graph — bitwise-equal to the v1 single-softmax export. (Pre-P4 this
+#   was an identity TaskOutput stopgap: the task softmaxed in ONNX, so a
+#   ClassProbs node would have DOUBLE-softmaxed.)
 #    Each is demand-pruned from FIT/VAL/TEST (active only when the export sink
 #    demands its outputs.* leaf in ONNX), so FIT plan_hash is unchanged.
 #  - opts track_vertexing OUT of TEST eval (expose: [fit, val]) — its VertexIndex
@@ -50,17 +47,20 @@ model:
         context: pooled.global
         weight: 1.5
         dense: { hidden_layers: [16], activation: ReLU }
-        expose: [fit, val] # the W3 union_find reduce is DEFERRED — not folded here
+        expose: [fit, val] # this DEMO opts vertexing OUT of ONNX (no VertexIndex)
+    # this DEMO drops the base config's VertexUnionFind node (the base exports
+    # VertexIndex; this override opts vertexing out of ONNX entirely to show the
+    # pbc Combination instead — design §6.2 Q2)
+    track_vertex_index: null
     # FOLDED ONNX conversion producers (design §6.2): each mints a new outputs.*
     # leaf the OnnxExportSink names.
-    # jet_probs is an IDENTITY TaskOutput (NOT ClassProbs) because the task still
-    # softmaxes in Mode.ONNX (the deferred P4 carve-out, tasks.py run_inference) —
-    # a ClassProbs node here would DOUBLE-softmax and ship a wrong export. The
-    # identity passthrough == the v1 single-softmax export today. Flip to
-    # `salt.core.outputs.ClassProbs` once P4 publishes RAW logits in ONNX. See the
-    # header comment above for the full rationale.
+    # jet_probs is a ClassProbs node: POST-P4 the classification task publishes
+    # RAW logits in Mode.ONNX (tasks.py forward — the carve-out is removed), so
+    # ClassProbs is the SINGLE softmax inside the traced graph, bitwise-equal to
+    # the v1 single-softmax export (no double-softmax). (Pre-P4 this was an
+    # identity TaskOutput stopgap because the task still softmaxed in ONNX.)
     jet_probs:
-      class_path: salt.core.outputs.TaskOutput
+      class_path: salt.core.outputs.ClassProbs
       init_args: { task: jets_classification, stream: jets }
     track_origin_index:
       class_path: salt.core.outputs.SeqClassIndex

@@ -422,12 +422,26 @@ def deadcode(
         if mode == Mode.ONNX
         else ""
     )
+    # plan-29 W4: a CONVERSION PRODUCER (salt.core.outputs node producing an
+    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/VertexUnionFind/etc.) that
+    # prunes in a non-ONNX mode is the by-design export-pruning story: its
+    # OnnxExportSink (or an H5OutputSink) is inactive in that mode, so the node has
+    # no sink and prunes legitimately. Demote it to info (never --strict-promoted),
+    # exactly like the ONNX-narrowing case — a config carrying ONNX export nodes
+    # must still pass `salt2 graph validate --strict --mode test`.
+    def _is_conversion_producer(name: str) -> bool:
+        return isinstance(getattr(modules.get(name), "output_key", None), str)
+
     out: list[DeadOutput] = [
         DeadOutput(
             name,
             "*",
             f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}",
-            severity="info" if mode == Mode.ONNX else "warning",
+            severity=(
+                "info"
+                if (mode == Mode.ONNX or _is_conversion_producer(name))
+                else "warning"
+            ),
         )
         for name in sorted(res.pruned)
     ]

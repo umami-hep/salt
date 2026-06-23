@@ -29,13 +29,10 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.graph.errors import ConfigError
 from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
-    attach_manifest,
     check_onnx,
     compile_onnx_plan,
     export_graph,
@@ -48,7 +45,7 @@ from salt.core.outputs import (
     OnnxExportLeaf,
     OnnxExportSink,
     SeqClassIndex,
-    TaskOutput,
+    VertexUnionFind,
 )
 from salt.tests._fixtures.gn2_fixture import (
     JET_VARIABLES,
@@ -88,57 +85,55 @@ def _export_cfg() -> ExportConfig:
 # ---------------------------------------------------------------------------
 
 
+def _folded_gn2_export(tmp_path):
+    """A weight-matched GN2 export through the FOLDED path (W4): ClassProbs +
+    SeqClassIndex + VertexUnionFind named by an OnnxExportSink — pb/pc/pu,
+    TrackOrigin int8, VertexIndex int8 (the v1/oracle tuple)."""
+    v1 = build_test_gn2(tmp_path)
+    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+    jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
+    ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
+    vi = VertexUnionFind(task="track_vertexing", stream="tracks"); vi.name = "track_vertex_index"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
+        OnnxExportLeaf(key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True),
+        OnnxExportLeaf(key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True),
+    ]); sink.name = "onnx_export"
+    modules.update({"jet_probs": jp, "track_origin_index": ti, "track_vertex_index": vi, "onnx_export": sink})
+    resolved = resolve_export_config(_export_cfg(), "GN2_v2")
+    plan = compile_onnx_plan(modules, resolved, VARIABLES)
+    bind_all(modules, resolve_bind_schema([plan]))
+    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
+        map_v1_state_dict(v1.state_dict(), modules), strict=False
+    )
+    return export_graph(modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2")
+
+
 @pytest.mark.skipif(
     not (ORACLE_DIR / "gn2v2.json").is_file(),
     reason="W0 oracle goldens not present (run /tmp/w2_oracle/dump_onnx_meta.py)",
 )
-def test_oracle_gn2v2_export_contract_byte_identical(tmp_path):
-    """The legacy gn2v2 (split+argmax+union_find) export contract matches the W0 golden EXACTLY.
+def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
+    """The MIGRATED folded gn2v2 export contract matches the W0 golden EXACTLY (W4).
 
-    Re-builds the W0 ``exported`` fixture and asserts the ORDERED output_names,
-    per-output dtypes, dynamic_axes map, and output-tuple length are byte-
-    identical to ``/tmp/w2_oracle/gn2v2.json`` — a reorder/rename/redtype is a
-    FAIL (the §6.4 ONNX-bitwise gate; the legacy reduce path is untouched by W2).
+    POST-W4 the gn2v2 export is the FOLDED conversion-node path (ClassProbs +
+    SeqClassIndex + VertexUnionFind named by an OnnxExportSink) — the off-graph
+    reduce manifest is retired. The ORDERED output_names, per-output dtypes,
+    dynamic_axes map, and output-tuple length must still be byte-identical to
+    ``/tmp/w2_oracle/gn2v2.json`` (raw .onnx bytes differ — node names move when
+    the conversions fold, §6.4; the criterion is the contract-field identity).
     """
     golden = json.loads((ORACLE_DIR / "gn2v2.json").read_text())
-    v1 = build_test_gn2(tmp_path)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-        ExportOutput(
-            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-        ),
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
-    resolved = attach_manifest(resolve_export_config(_export_cfg(), "GN2_v2"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
-    result = export_graph(
-        modules,
-        _export_cfg(),
-        VARIABLES,
-        tmp_path / "network.onnx",
-        outputs=manifest,
-        run_name="GN2_v2",
-    )
+    result = _folded_gn2_export(tmp_path)
     adapter = result.adapter
     assert adapter.output_names == golden["output_names"]  # ORDERED list-equality
     assert adapter.output_dtypes == golden["output_dtypes"]
-    # dynamic_axes JSON uses string axis keys; compare via the same json round-trip
     assert json.loads(json.dumps(adapter.dynamic_axes)) == golden["dynamic_axes"]
-    # graph output tuple length matches
     example = adapter.example_inputs(sequence_length=5)
     with torch.no_grad():
         out_tuple = adapter(*example)
     assert len(out_tuple) == golden["output_tuple_len"]
     assert len(adapter.output_names) == golden["output_tuple_len"]
-    # the .onnx output names match the adapter (Athena schema)
     session = make_session(result.onnx_path)
     assert [o.name for o in session.get_outputs()] == golden["output_names"]
 
@@ -246,251 +241,48 @@ def test_folded_combination_equals_pb_plus_pc(folded):
     np.testing.assert_array_equal(pbc, pb_plus_pc)
 
 
+
 # ---------------------------------------------------------------------------
-# folded == legacy reduces (R8 — no drift between the two paths)
+# folded correctness vs the v1 weight oracle + the W0 oracle contract (W4: the
+# legacy reduce path is RETIRED — folded is the SOLE path. The argmax/union-find
+# math equivalence vs v1's chains is proven in test_onnx_fold_w3.py).
 # ---------------------------------------------------------------------------
 
 
-def test_folded_int8_argmax_equals_legacy_reduce(tmp_path):
-    """The folded SeqClassIndex int8 leaf is bitwise-equal to the legacy ``argmax`` reduce.
+def test_folded_pb_pc_pu_equal_single_v1_softmax(tmp_path):
+    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the v1 raw logits.
 
-    Both paths export the SAME v1 weights — the folded conversion node and the
-    legacy ``_bind_argmax`` reduce must produce the identical int8 ``TrackOrigin``
-    leaf on the same input (the W2 hybrid carries the math VERBATIM, no drift).
+    The classification task now publishes RAW logits in ONNX (P4), so the folded
+    ClassProbs node applies the SINGLE softmax inside the traced graph. The
+    exported pb/pc/pu must match a single softmax of the weight-matched v1 head's
+    raw logits within 1e-6 — proving the cutover did NOT double-softmax.
     """
+    result = _folded_gn2_export(tmp_path)
     v1 = build_test_gn2(tmp_path)
-    weights = v1.state_dict()
-
-    # legacy reduce export
-    mod_l = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-        ExportOutput(
-            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-        ),
-    ]
-    res_l = attach_manifest(resolve_export_config(_export_cfg(), "GN2_v2"), manifest)
-    plan_l = compile_onnx_plan(mod_l, res_l, VARIABLES)
-    bind_all(mod_l, resolve_bind_schema([plan_l]))
-    nn.ModuleDict(mod_l).load_state_dict(map_v1_state_dict(weights, mod_l))
-    r_l = export_graph(
-        mod_l,
-        _export_cfg(),
-        VARIABLES,
-        tmp_path / "legacy.onnx",
-        outputs=manifest,
-        run_name="GN2_v2",
-    )
-
-    # folded conversion-node export (same weights). The folded TrackOrigin int8
-    # leaf comes from a SeqClassIndex node (folding _bind_argmax) — the leaf the
-    # OnnxExportSink names. NOTE: the folded jets split deliberately reuses the
-    # task's already-softmaxed ONNX probs via an identity TaskOutput (the gn2v2
-    # fixture task still publishes converted probs in ONNX — the P4 carve-out,
-    # tasks.py:25-26 — so a ClassProbs node would DOUBLE-softmax; the eventual P4
-    # flip publishes raw logits and ClassProbs becomes the single softmax). The
-    # int8 argmax equivalence below is softmax-invariant either way, so it pins
-    # the "folds _bind_argmax" claim independent of the P4 timing.
-    mod_f = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    jet_probs = TaskOutput(
-        task="jets_classification", stream="jets"
-    )  # identity: task pre-softmaxes
-    jet_probs.name = "jet_probs"
-    track_index = SeqClassIndex(task="track_origin", stream="tracks")
-    track_index.name = "track_origin_index"
-    export_sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-            ),
-        ]
-    )
-    export_sink.name = "onnx_export"
-    mod_f.update({
-        "jet_probs": jet_probs,
-        "track_origin_index": track_index,
-        "onnx_export": export_sink,
-    })
-    res_f = resolve_export_config(_export_cfg(), "GN2_v2")
-    plan_f = compile_onnx_plan(mod_f, res_f, VARIABLES)
-    bind_all(mod_f, resolve_bind_schema([plan_f]))
-    nn.ModuleDict({k: v for k, v in mod_f.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(weights, mod_f), strict=False
-    )
-    r_f = export_graph(
-        mod_f, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2"
-    )
-
-    # same weights, same input -> the int8 TrackOrigin leaf must be IDENTICAL
-    # (the folded SeqClassIndex node == the legacy argmax reduce, no drift, R8)
-    s_l, s_f = make_session(r_l.onnx_path), make_session(r_f.onnx_path)
-    gen = torch.Generator().manual_seed(21)
-    jets = torch.rand(1, len(JET_VARIABLES), generator=gen).numpy()
-    tracks = torch.rand(13, len(TRACK_VARIABLES), generator=gen).numpy()
-    feed = {"jet_features": jets, "track_features": tracks}
-    o_l = dict(zip(r_l.adapter.output_names, s_l.run(None, feed), strict=True))
-    o_f = dict(zip(r_f.adapter.output_names, s_f.run(None, feed), strict=True))
-    np.testing.assert_array_equal(o_l["GN2v2_TrackOrigin"], o_f["GN2v2_TrackOrigin"])
-    # the float split scalars match too: the identity TaskOutput passes the task's
-    # already-softmaxed ONNX probs through, and the legacy split_scalars reduce
-    # splits the SAME leaf — so the folded sink's split is bitwise the same scalars
-    for suffix in ("pb", "pc", "pu"):
-        np.testing.assert_allclose(o_l[f"GN2v2_{suffix}"], o_f[f"GN2v2_{suffix}"], atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# hybrid: folded split+argmax (export node) + LEGACY vertex_union_find reduce
-# (pins the 'folded + legacy_ordered' concatenation ORDER, adapter.py ~161)
-# ---------------------------------------------------------------------------
-
-
-def _hybrid_modules(tmp_path):
-    """A GN2v2 module dict with a folded sink (pb/pc/pu + TrackOrigin) + weights.
-
-    The folded `OnnxExportSink` names the split (pb/pc/pu via the identity
-    TaskOutput, softmax-faithful per the P4 carve-out) and the int8 ``TrackOrigin``
-    argmax (`SeqClassIndex`); the LEGACY ``VertexIndex`` rides the reduce manifest
-    (``vertex_union_find``, NOT folded in W2).
-
-    Returns
-    -------
-    tuple
-        ``(modules, v1)`` — the GN2v2 module dict (sink + producers folded in)
-        and the v1 weight oracle.
-    """
-    v1 = build_test_gn2(tmp_path)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    jet_probs = TaskOutput(task="jets_classification", stream="jets")  # softmax-faithful identity
-    jet_probs.name = "jet_probs"
-    track_index = SeqClassIndex(task="track_origin", stream="tracks")
-    track_index.name = "track_origin_index"
-    export_sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-            ),
-        ]
-    )
-    export_sink.name = "onnx_export"
-    modules.update({
-        "jet_probs": jet_probs,
-        "track_origin_index": track_index,
-        "onnx_export": export_sink,
-    })
-    return modules, v1
-
-
-def _bind_load_hybrid(modules, v1, manifest):
-    """Compile the hybrid ONNX plan (folded sink + legacy manifest), bind, load v1 weights.
-
-    Returns
-    -------
-    ExportConfig
-        The resolved+manifest-attached export config (ready for ``export_graph``).
-    """
-    resolved = attach_manifest(resolve_export_config(_export_cfg(), "GN2_v2"), manifest)
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(v1.state_dict(), modules), strict=False
-    )
-    return resolved
-
-
-def test_hybrid_folded_plus_legacy_reduce_preserves_oracle_order(tmp_path):
-    """A MIXED export (folded split+argmax + LEGACY vertex_union_find) keeps the v1 tuple order.
-
-    Pins the ``folded + legacy_ordered`` concatenation (adapter.py ~161): the
-    folded outputs come FIRST (the export node's leaf list is the ordering
-    authority, design §6.3), the legacy reduce outputs append after — so the
-    Athena tuple is the v1/oracle order ``[..pb, pc, pu, TrackOrigin, VertexIndex]``
-    EXACTLY. ``check_onnx``'s per-NAME agreement would NOT catch a consistent
-    reorder, so this list-equality assertion is the guard against a future
-    late-fold/early-legacy config silently reordering the Athena tuple.
-    """
-    modules, v1 = _hybrid_modules(tmp_path)
-    manifest = [
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
-    _bind_load_hybrid(modules, v1, manifest)
-    result = export_graph(
-        modules,
-        _export_cfg(),
-        VARIABLES,
-        tmp_path / "hybrid.onnx",
-        outputs=manifest,
-        run_name="GN2_v2",
-    )
-    adapter = result.adapter
-    # the EXACT v1/oracle Athena tuple order — folded (pb/pc/pu, TrackOrigin)
-    # then legacy (VertexIndex), matching /tmp/w2_oracle/gn2v2.json output_names
-    assert adapter.output_names == [
-        "GN2v2_pb",
-        "GN2v2_pc",
-        "GN2v2_pu",
-        "GN2v2_TrackOrigin",
-        "GN2v2_VertexIndex",
-    ]
-    assert adapter.output_dtypes == ["float32", "float32", "float32", "int8", "int8"]
-    # the per-name onnx schema matches the adapter (the Athena schema), in order
+    v1.eval()
     session = make_session(result.onnx_path)
-    assert [o.name for o in session.get_outputs()] == adapter.output_names
+    gen = torch.Generator().manual_seed(31)
+    for _ in range(4):
+        jets = torch.rand(1, len(JET_VARIABLES), generator=gen)
+        tracks = torch.rand(7, len(TRACK_VARIABLES), generator=gen)
+        out = dict(zip(result.adapter.output_names,
+                       session.run(None, {"jet_features": jets.numpy(), "track_features": tracks.numpy()}),
+                       strict=True))
+        folded = np.array([np.ravel(out[f"GN2v2_{s}"])[0] for s in ("pb", "pc", "pu")])
+        with torch.no_grad():
+            preds, _ = v1({"jets": jets.clone(), "tracks": tracks.unsqueeze(0).clone()},
+                          {"tracks": torch.zeros((1, 7), dtype=torch.bool)}, None)
+        ref = torch.softmax(preds["jets"]["jets_classification"], dim=-1).numpy().ravel()
+        np.testing.assert_allclose(folded, ref, atol=1e-6)
 
 
-def test_hybrid_name_collision_raises_configerror(tmp_path):
-    """Folded-sink and legacy-reduce output names MUST be DISJOINT (name-collision guard).
-
-    When BOTH demand sources are present, the flat Athena output namespace must
-    stay disjoint — a folded leaf and a legacy reduce both minting the SAME
-    ``{model_name}_<suffix>`` would silently clobber one in the tuple. The adapter
-    raises a clear `ConfigError` naming the overlap. Here the folded sink names the
-    int8 track leaf ``VertexIndex`` AND the legacy ``vertex_union_find`` reduce
-    also names ``VertexIndex`` — the collision must hard-error, not ship a
-    duplicate-named ONNX graph.
-    """
-    v1 = build_test_gn2(tmp_path)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    jet_probs = TaskOutput(task="jets_classification", stream="jets")
-    jet_probs.name = "jet_probs"
-    track_index = SeqClassIndex(task="track_origin", stream="tracks")
-    track_index.name = "track_origin_index"
-    # the folded sink NAMES the int8 track-origin leaf 'VertexIndex' (collision bait)
-    export_sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="VertexIndex", dtype="int8", per_token=True
-            ),
-        ]
-    )
-    export_sink.name = "onnx_export"
-    modules.update({
-        "jet_probs": jet_probs,
-        "track_origin_index": track_index,
-        "onnx_export": export_sink,
-    })
-    # the LEGACY reduce ALSO mints 'VertexIndex' (vertex_union_find on the vertexing head)
-    manifest = [
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
-    _bind_load_hybrid(modules, v1, manifest)
-    with pytest.raises(ConfigError, match=r"GN2v2_VertexIndex"):
-        export_graph(
-            modules,
-            _export_cfg(),
-            VARIABLES,
-            tmp_path / "collide.onnx",
-            outputs=manifest,
-            run_name="GN2_v2",
-        )
+@pytest.mark.skipif(
+    not (ORACLE_DIR / "gn2v2.json").is_file(),
+    reason="W0 oracle goldens not present",
+)
+def test_folded_int8_track_origin_check_onnx(tmp_path):
+    """The folded int8 TrackOrigin leaf is torch-vs-ort exact incl L=0 (folds _bind_argmax)."""
+    result = _folded_gn2_export(tmp_path)
+    grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
+    cr = check_onnx(result.adapter, result.onnx_path, trials=2, float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid)
+    assert cr.passed, cr.failures

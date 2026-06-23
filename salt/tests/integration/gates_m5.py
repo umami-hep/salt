@@ -1792,7 +1792,13 @@ def run_l3(
     eager_b.set("masks.tracks", torch.zeros(1, tracks.shape[0], dtype=torch.bool))
     eager_b.set("inputs.global", jets.clone())  # identity alias clones jets
     eager_out = Executor(onnx_plan).run(eager_b)
-    eager_probs = eager_out.get("preds.jets.jets_classification")
+    # W4: the adapter outputs the SOFTMAXED ClassProbs leaf (outputs.*), so the
+    # eager reference reads that converted leaf — NOT the raw preds.* logits the
+    # classification task now publishes in ONNX (post-P4). The ClassProbs node runs
+    # inside the SAME onnx_plan, so reading its produced leaf keeps the gate's teeth
+    # (the adapter wraps the plan; input-reorder / alias-gather / output-stack are
+    # still under test).
+    eager_probs = eager_out.get("outputs.jets.jets_classification")
     onnx_probs = torch.stack([o.reshape(-1)[0] for o in onnx_out])
     diffs["onnx_identity_vs_eager"] = _max_abs(onnx_probs, eager_probs.reshape(-1))
     checks["onnx_identity_runs_and_matches_eager"] = diffs["onnx_identity_vs_eager"] <= PARITY_ATOL
@@ -2705,7 +2711,7 @@ def run_mf2(
     declare = WriterDeclareCtx(
         model_modules=modules, streams=("jets", "tracks"), sequence_streams=("tracks",)
     )
-    manifest = writer.onnx_outputs(declare)
+    manifest = writer.onnx_outputs(declare)  # the EXPECTED Athena names (oracle)
     export = ExportConfig(
         model_name="MFv2",
         inputs=[
@@ -2713,17 +2719,34 @@ def run_mf2(
             ExportInput(port="inputs.tracks", sequence=True, dyn_axis="n_tracks"),
         ],
     )
-    resolved = attach_manifest(resolve_export_config(export, "MFv2"), manifest)
+    # W4: ONE folded MaskFormerObjects node mints BOTH the leading-object float
+    # leaves + the object-index int8 leaf (folding the two legacy reduces); the
+    # OnnxExportSink names them. Map the writer manifest's suffixes onto the leaves.
+    from salt.core.outputs import MaskFormerObjects, OnnxExportLeaf, OnnxExportSink  # noqa: PLC0415
+
+    reg_suffixes = list(writer._regression_suffixes(modules))  # noqa: SLF001 - gate adapter
+    lead_entry = next(e for e in manifest if e.names is not None)
+    mf = MaskFormerObjects(n_reg=len(reg_suffixes), stream="objects", constituent_stream="tracks")
+    mf.name = "mf_obj"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.objects.leading_object", names=list(lead_entry.names)),
+        OnnxExportLeaf(
+            key="outputs.tracks.object_index", name=OBJECT_INDEX.onnx, dtype="int8", per_token=True
+        ),
+    ])
+    sink.name = "onnx_export"
+    modules = {**modules, "mf_obj": mf, "onnx_export": sink}
+    resolved = resolve_export_config(export, "MFv2")
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
     materialise_all(modules)
     result = export_graph(
-        modules, export, variables, outdir / "mf_objects.onnx", outputs=manifest, run_name="MFv2"
+        modules, export, variables, outdir / "mf_objects.onnx", outputs=[], run_name="MFv2"
     )
     session = make_session(result.onnx_path)
     out_types = {o.name: o.type for o in session.get_outputs()}
     out_axes = {o.name: o.shape for o in session.get_outputs()}
-    leading_names = [f"MFv2_leading_objects_{t}" for t in writer._regression_suffixes(modules)]  # noqa: SLF001 - gate adapter
+    leading_names = [f"MFv2_leading_objects_{t}" for t in reg_suffixes]
     index_name = f"MFv2_{OBJECT_INDEX.onnx}"
     checks["onnx_leading_object_is_float32"] = all(
         out_types.get(n) == "tensor(float)" for n in leading_names
@@ -2731,10 +2754,10 @@ def run_mf2(
     checks["onnx_object_index_is_int8"] = out_types.get(index_name) == "tensor(int8)"
     checks["onnx_object_index_has_dynamic_token_axis"] = out_axes.get(index_name) == ["n_tracks"]
     checks["onnx_index_suffix_is_pinned_HadronIndex"] = index_name == "MFv2_HadronIndex"
-    # the manifest carries the two writer-declared reduces (not a TaskWriter family)
-    checks["onnx_manifest_uses_object_reduces"] = sorted(e.reduce for e in resolved.outputs) == [
-        "leading_object",
-        "object_index",
+    # the folded sink names exactly the two object leaves (leading + index)
+    checks["onnx_sink_names_object_leaves"] = result.adapter.output_names == [
+        *leading_names,
+        index_name,
     ]
 
     # torch-vs-onnxruntime agreement, computed DIRECTLY (not via check_onnx's

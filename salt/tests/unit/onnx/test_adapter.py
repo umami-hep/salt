@@ -18,7 +18,6 @@ from torch import nn
 
 from salt.core.graph import Bundle, Mode
 from salt.core.graph.errors import ConfigError, ConnectivityError, ShapeError
-from salt.core.graph.spec import TensorSpec
 from salt.core.nn import (
     Concat,
     GlobalAttentionPooling,
@@ -34,26 +33,29 @@ from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
     OnnxAdapter,
-    attach_manifest,
     compile_onnx_plan,
     derive_onnx_sources,
     resolve_export_config,
     sanitised_model_name,
     validate_model_name,
 )
-from salt.core.onnx.config import _resolve_output, default_athena_name
+from salt.core.onnx.config import ExportOutput, _resolve_output, default_athena_name
 from salt.core.onnx.reduces import (
     BoundReduce,
     ReduceCtx,
     bind_reduce,
-    per_token_reduces,
     reduce_dtype,
     register_reduce,
     registered_reduces,
 )
-from salt.models.task import mask_fill_flattened
+from salt.core.outputs import (
+    ClassProbs,
+    OnnxExportLeaf,
+    OnnxExportSink,
+    SeqClassIndex,
+    VertexUnionFind,
+)
 from salt.tests._fixtures.gn2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -61,13 +63,12 @@ from salt.tests._fixtures.gn2_fixture import (
     write_parity_norm_dict,
 )
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
-from salt.utils.union_find import get_node_assignment_jit
 
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
 
 def gn2_export_cfg(**overrides) -> ExportConfig:
-    # export-only half (M4.5) — outputs come from gn2_manifest()/the writers
+    # export-only half (W4) — the outputs come from the folded OnnxExportSink
     cfg = ExportConfig(
         model_name="GN2v2",
         inputs=[
@@ -82,29 +83,42 @@ def gn2_export_cfg(**overrides) -> ExportConfig:
     return cfg
 
 
-def gn2_manifest() -> list[ExportOutput]:
-    # the GN2 output manifest, as the default TaskWriter derives it (the
-    # writer-derivation itself is covered in test_manifest.py — these unit
-    # tests exercise the resolution/adapter mechanics on the same entries)
-    return [
-        ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"]),
-        ExportOutput(
-            port="preds.tracks.track_origin", name="TrackOrigin", dtype="int8", reduce="argmax"
-        ),
-        ExportOutput(
-            port="preds.tracks.track_vertexing",
-            name="VertexIndex",
-            dtype="int8",
-            reduce="vertex_union_find",
-        ),
-    ]
+def _named(node, name):
+    node.name = name
+    return node
 
 
-def gn2_resolved(run_name: str = "GN2_v2", manifest=None, **overrides) -> ExportConfig:
-    return attach_manifest(
-        resolve_export_config(gn2_export_cfg(**overrides), run_name),
-        gn2_manifest() if manifest is None else manifest,
-    )
+def gn2_folded_modules(tmp_path):
+    """The GN2 module dict + the folded conversion nodes + OnnxExportSink (W4 path)."""
+    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+    modules.update({
+        "jet_probs": _named(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
+        "track_origin_index": _named(
+            SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
+        ),
+        "track_vertex_index": _named(
+            VertexUnionFind(task="track_vertexing", stream="tracks"), "track_vertex_index"
+        ),
+        "onnx_export": _named(gn2_export_sink(), "onnx_export"),
+    })
+    return modules
+
+
+def gn2_export_sink() -> OnnxExportSink:
+    """The GN2 OnnxExportSink: pb/pc/pu (split), TrackOrigin int8, VertexIndex int8."""
+    return OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
+        OnnxExportLeaf(
+            key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
+        ),
+        OnnxExportLeaf(
+            key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True
+        ),
+    ])
+
+
+def gn2_resolved(run_name: str = "GN2_v2", **overrides) -> ExportConfig:
+    return resolve_export_config(gn2_export_cfg(**overrides), run_name)
 
 
 # ---------------------------------------------------------------------------
@@ -213,240 +227,87 @@ class TestResolveInputs:
             resolve_export_config(gn2_export_cfg(inputs=[]), "m")
 
 
-class TestResolveOutputs:
-    # since M4.5 outputs are writer-derived and resolved via attach_manifest
-    # (the M4 per-entry rules unchanged)
-
-    def test_config_declared_outputs_are_the_migration_hard_error(self):
-        # the M4.5 §4.1-bar error: export.outputs is gone; the message must
-        # point at the writers and the inspection tooling
-        cfg = gn2_export_cfg(outputs=gn2_manifest())
-        with pytest.raises(ConfigError, match="REMOVED by the M4.5") as excinfo:
-            resolve_export_config(cfg, "m")
-        message = str(excinfo.value)
-        assert "writers" in message
-        assert "salt2 export --manifest" in message
-        assert "fix:" in message
+class TestExportSinkOutputs:
+    # plan-29 W4: the ONNX output manifest is declared by the OnnxExportSink, whose
+    # OnnxExportLeaf carries the per-output naming/dtype/per-token rules the M4.5
+    # ExportOutput + attach_manifest used to validate (the conversion math itself is
+    # proven bitwise in test_onnx_fold_w2/w3). These assert the migrated surface.
 
     def test_name_and_names_exclusive(self):
-        manifest = gn2_manifest()
-        manifest[0].name = "both"
         with pytest.raises(ConfigError, match="exactly one of"):
-            gn2_resolved(manifest=manifest)
+            OnnxExportLeaf(key="outputs.jets.c", name="both", names=["pb", "pc"])
 
-    def test_single_name_needs_explicit_reduce(self):
-        manifest = gn2_manifest()
-        manifest[1].reduce = None
-        with pytest.raises(ConfigError, match="explicit 'reduce'"):
-            gn2_resolved(manifest=manifest)
-
-    def test_names_imply_split_scalars(self):
-        resolved = gn2_resolved()
-        assert resolved.outputs[0].reduce == "split_scalars"
-        assert resolved.outputs[0].dtype == "float32"
-        manifest = gn2_manifest()
-        manifest[0].reduce = "argmax"
-        with pytest.raises(ConfigError, match="split_scalars"):
-            gn2_resolved(manifest=manifest)
+    def test_names_default_to_split(self):
+        leaf = OnnxExportLeaf(key="outputs.jets.c", names=["pb", "pc", "pu"])
+        assert leaf.suffixes == ("pb", "pc", "pu")
+        assert leaf.dtype == "float32"
+        assert not leaf.per_token  # split_scalars leaves are GLOBAL float scalars
 
     def test_aux_dtype_is_int8(self):
-        resolved = gn2_resolved()
-        assert resolved.outputs[1].dtype == "int8"
-        manifest = gn2_manifest()
-        manifest[1].dtype = "float32"
-        with pytest.raises(ConfigError, match="int8"):
-            gn2_resolved(manifest=manifest)
+        leaf = OnnxExportLeaf(
+            key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
+        )
+        assert leaf.dtype == "int8"
+        assert leaf.per_token
 
-    def test_unknown_reduce(self):
-        manifest = gn2_manifest()
-        manifest[1].reduce = "not_a_registered_reduce"  # never registered
-        with pytest.raises(ConfigError, match="unknown reduce"):
-            gn2_resolved(manifest=manifest)
+    def test_bad_dtype_rejected(self):
+        with pytest.raises(ConfigError, match="float32.*int8|int8.*float32"):
+            OnnxExportLeaf(key="outputs.jets.c", name="x", dtype="float64")
+
+    def test_split_names_with_per_token_rejected(self):
+        with pytest.raises(ConfigError, match="per_token"):
+            OnnxExportLeaf(key="outputs.tracks.c", names=["pb", "pc"], per_token=True)
+
+    def test_non_outputs_key_rejected(self):
+        with pytest.raises(ConfigError, match="outputs"):
+            OnnxExportLeaf(key="preds.jets.c", names=["pb", "pc"])
 
     def test_duplicate_output_name_rejected(self):
-        manifest = gn2_manifest()
-        manifest[1].name = "pb"  # collides with the split_scalars suffix
-        with pytest.raises(ConfigError, match="twice"):
-            gn2_resolved(manifest=manifest)
+        with pytest.raises(ConfigError, match="duplicate flat ONNX output name"):
+            OnnxExportSink(outputs=[
+                OnnxExportLeaf(key="outputs.jets.a", names=["pb", "pc"]),
+                OnnxExportLeaf(key="outputs.jets.b", name="pb", dtype="int8", per_token=True),
+            ])
 
-    def test_empty_manifest_rejected(self):
-        with pytest.raises(ConfigError, match="no ONNX outputs"):
-            gn2_resolved(manifest=[])
+    def test_empty_sink_rejected(self):
+        with pytest.raises(ConfigError, match="non-empty"):
+            OnnxExportSink(outputs=[])
 
 
 # ---------------------------------------------------------------------------
-# reduces (design §7.3) on hand-made bundles
+# plan-29 W4: the SHIPPED reduces are RETIRED — folded into conversion nodes.
+# The argmax/union_find/maskformer math is now proven BITWISE in
+# test_onnx_fold_w2.py (SeqClassIndex/Combination) and test_onnx_fold_w3.py
+# (VertexUnionFind/MaskFormerObjects) against the same v1 chains these reduces
+# composed. These tests pin the RETIREMENT (no shipped reduce registered).
 # ---------------------------------------------------------------------------
 
 
-def make_ctx(**produced) -> ReduceCtx:
-    return ReduceCtx(
-        model_name="M",
-        seq_dyn_axis={"tracks": "n_tracks"},
-        produced_specs={key: TensorSpec(shape=shape) for key, shape in produced.items()},
-    )
+class TestRetiredReduces:
+    def test_no_shipped_reduces_registered(self):
+        # the five shipped reduce REGISTRATIONS are gone at W4 (the conversion
+        # nodes own the math); registered_reduces() carries no shipped name
+        from salt.core.onnx.reduces import registered_reduces  # noqa: PLC0415
 
+        shipped = {"split_scalars", "argmax", "vertex_union_find", "leading_object", "object_index"}
+        assert shipped.isdisjoint(set(registered_reduces()))
 
-class TestReduces:
-    def test_split_scalars(self):
-        out = ExportOutput(
-            port="preds.jets.c", names=["pb", "pc", "pu"], reduce="split_scalars", dtype="float32"
+    def test_split_named_split_helper_is_the_sink(self):
+        # the split_scalars NAMING split now lives on the OnnxExportSink (v1
+        # task.py:301 torch.split+squeeze) — pinned here on a hand-made bundle
+        sink = OnnxExportSink(
+            outputs=[OnnxExportLeaf(key="outputs.jets.c", names=["pb", "pc", "pu"])],
+            model_name="M",
         )
-        bound = bind_reduce(out, make_ctx(**{"preds.jets.c": ("B", 3)}))
-        assert bound.output_names == ("M_pb", "M_pc", "M_pu")
-        assert bound.dtypes == ("float32",) * 3
-        assert bound.dynamic_axes == {}
         b = Bundle()
         probs = torch.tensor([[0.5, 0.3, 0.2]])
-        b.set("preds.jets.c", probs)
-        scalars = bound.fn(b)
-        assert len(scalars) == 3
-        # v1 split+squeeze (task.py:301): 0-dim scalars
-        assert all(s.dim() == 0 for s in scalars)
-        assert torch.allclose(torch.stack(scalars), probs.squeeze(0))
-
-    def test_split_scalars_class_count_mismatch(self):
-        out = ExportOutput(
-            port="preds.jets.c", names=["pb", "pc"], reduce="split_scalars", dtype="float32"
+        b.set("outputs.jets.c", probs)
+        named = sink.named_outputs(b)
+        assert set(named) == {"M_pb", "M_pc", "M_pu"}
+        assert all(named[k].dim() == 0 for k in named)  # v1 split+squeeze -> 0-dim scalars
+        assert torch.allclose(
+            torch.stack([named["M_pb"], named["M_pc"], named["M_pu"]]), probs.squeeze(0)
         )
-        with pytest.raises(ConfigError, match="2 names"):
-            bind_reduce(out, make_ctx(**{"preds.jets.c": ("B", 3)}))
-
-    @pytest.mark.parametrize("length", [0, 1, 7])
-    def test_argmax_matches_plain_argmax(self, length):
-        out = ExportOutput(port="preds.tracks.o", name="TrackOrigin", reduce="argmax", dtype="int8")
-        bound = bind_reduce(out, make_ctx(**{"preds.tracks.o": None}))
-        assert bound.output_names == ("M_TrackOrigin",)
-        assert bound.dynamic_axes == {"M_TrackOrigin": {0: "n_tracks"}}
-        gen = torch.Generator().manual_seed(3)
-        scores = torch.rand(1, length, 8, generator=gen)
-        b = Bundle()
-        b.set("preds.tracks.o", scores)
-        (got,) = bound.fn(b)
-        assert got.dtype == torch.int8
-        assert got.shape == (length,)
-        # the zero-row append/strip (to_onnx.py:415-423) never changes values
-        expected = torch.argmax(scores, dim=-1).squeeze(0).char()
-        assert torch.equal(got, expected.reshape(-1))
-
-    def test_vertex_union_find_matches_v1_chain(self):
-        out = ExportOutput(
-            port="preds.tracks.v", name="VertexIndex", reduce="vertex_union_find", dtype="int8"
-        )
-        bound = bind_reduce(out, make_ctx(**{"preds.tracks.v": None}))
-        length = 5
-        gen = torch.Generator().manual_seed(4)
-        scores = torch.randn(length * (length - 1), 1, generator=gen)
-        mask = torch.zeros((1, length), dtype=torch.bool)
-        b = Bundle()
-        b.set("preds.tracks.v", scores)
-        b.set("masks.tracks", mask)
-        (got,) = bound.fn(b)
-        expected = (
-            mask_fill_flattened(get_node_assignment_jit(scores, mask), mask).reshape(-1).char()
-        )
-        assert got.dtype == torch.int8
-        assert torch.equal(got, expected)
-
-    def test_aux_reduce_needs_sequence_stream(self):
-        out = ExportOutput(port="preds.jets.o", name="X", reduce="argmax", dtype="int8")
-        with pytest.raises(ConfigError, match="no sequence entry"):
-            bind_reduce(out, make_ctx(**{"preds.jets.o": None}))
-
-    def test_aux_reduce_needs_preds_port(self):
-        out = ExportOutput(port="pooled.global", name="X", reduce="argmax", dtype="int8")
-        with pytest.raises(ConfigError, match="preds.<stream>.<task>"):
-            bind_reduce(out, make_ctx(**{"pooled.global": None}))
-
-
-# ---------------------------------------------------------------------------
-# the MaskFormer object reduces (M5 sub-wave C) vs the v1 get_maskformer_outputs
-# ---------------------------------------------------------------------------
-
-
-def _mf_object_bundle(b: int = 1, m: int = 5, n_cls: int = 3, t: int = 8, seed: int = 9) -> Bundle:
-    """A bundle carrying the decoder object keys the MaskFormer reduces read."""
-    gen = torch.Generator().manual_seed(seed)
-    bundle = Bundle()
-    bundle.set("objects.class_probs", torch.randn(b, m, n_cls, generator=gen).softmax(-1))
-    bundle.set("objects.masks", torch.randn(b, m, t, generator=gen))
-    bundle.set("preds.objects.regression", torch.randn(b, m, 3, generator=gen))
-    return bundle
-
-
-class TestMaskFormerReduces:
-    def _ctx(self):
-        return ReduceCtx(
-            model_name="MFv2",
-            seq_dyn_axis={"tracks": "n_tracks"},
-            produced_specs={"preds.objects.regression": TensorSpec(shape=("B", 5, 3))},
-        )
-
-    def test_leading_object_matches_v1_helper(self):
-        from salt.models.maskformer import get_maskformer_outputs
-
-        out = ExportOutput(
-            port="preds.objects.regression",
-            names=["lead_pt", "lead_Lxy", "lead_mass"],
-            reduce="leading_object",
-        )
-        bound = bind_reduce(out, self._ctx())
-        assert bound.output_names == ("MFv2_lead_pt", "MFv2_lead_Lxy", "MFv2_lead_mass")
-        assert bound.dtypes == ("float32",) * 3
-        assert bound.dynamic_axes == {}  # GLOBAL scalars
-        b = _mf_object_bundle()
-        scalars = bound.fn(b)
-        # v1 op chain on a CLONE (the reduce must not mutate the bundle)
-        objs = {
-            "class_probs": b.get("objects.class_probs").clone(),
-            "masks": b.get("objects.masks").clone(),
-            "regression": b.get("preds.objects.regression").clone(),
-        }
-        v1_leading, _, _, _ = get_maskformer_outputs(objs, apply_reorder=True)
-        for i, s in enumerate(scalars):
-            assert s.dim() == 0  # 0-dim scalar per target (v1 leading_reg[0][i])
-            assert torch.equal(s, v1_leading[0, i]) or (
-                torch.isnan(s) and torch.isnan(v1_leading[0, i])
-            )
-
-    def test_leading_object_does_not_mutate_the_bundle(self):
-        out = ExportOutput(
-            port="preds.objects.regression", names=["a", "b", "c"], reduce="leading_object"
-        )
-        bound = bind_reduce(out, self._ctx())
-        b = _mf_object_bundle()
-        before = b.get("preds.objects.regression").clone()
-        bound.fn(b)  # v1's get_maskformer_outputs mutates in place — the reduce clones
-        assert torch.equal(b.get("preds.objects.regression"), before)
-
-    def test_object_index_matches_v1_helper(self):
-        from salt.models.maskformer import get_maskformer_outputs
-
-        out = ExportOutput(
-            port="objects.masks", name="HadronIndex", reduce="object_index", dtype="int8"
-        )
-        bound = bind_reduce(out, self._ctx())
-        assert bound.output_names == ("MFv2_HadronIndex",)
-        assert bound.dtypes == ("int8",)
-        assert bound.dynamic_axes == {"MFv2_HadronIndex": {0: "n_tracks"}}  # PER-TOKEN
-        b = _mf_object_bundle()
-        (got,) = bound.fn(b)
-        objs = {
-            "class_probs": b.get("objects.class_probs").clone(),
-            "masks": b.get("objects.masks").clone(),
-            "regression": b.get("preds.objects.regression").clone(),
-        }
-        _, v1_indices, _, _ = get_maskformer_outputs(objs, apply_reorder=True)
-        assert got.dtype == torch.int8
-        assert torch.equal(got, v1_indices.reshape(-1).char())  # v1 to_onnx.py:469
-
-    def test_object_index_needs_one_sequence_stream(self):
-        out = ExportOutput(
-            port="objects.masks", name="HadronIndex", reduce="object_index", dtype="int8"
-        )
-        ctx = ReduceCtx(model_name="MFv2", seq_dyn_axis={}, produced_specs={})
-        with pytest.raises(ConfigError, match="EXACTLY one sequence"):
-            bind_reduce(out, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -493,34 +354,32 @@ def fresh_reduce_name():
 
 
 class TestRegisterReduce:
-    """The public `register_reduce` live-registry surface."""
+    """The public `register_reduce` live-registry surface (SURVIVES W4 — R7).
 
-    def test_shipped_reduces_are_registered_with_declared_dtypes(self):
-        # the three core reduces + the two MaskFormer object reduces register at
-        # import via register_reduce, with the dtypes/per-token flags that replace
-        # the frozen M4.5 tuples (leading_object/object_index land in sub-wave C)
-        assert set(registered_reduces()) == {
+    The five SHIPPED reduces are retired (folded into conversion nodes), but the
+    public `register_reduce` API stays so a downstream custom export-only writer
+    can register its own export math. These tests exercise that surviving surface
+    with a freshly-registered PROBE reduce (no shipped reduce involved).
+    """
+
+    def test_no_shipped_reduces_registered_at_import(self):
+        # the registry starts EMPTY of the retired shipped reduces (W4)
+        assert {
             "split_scalars",
             "argmax",
             "vertex_union_find",
             "leading_object",
             "object_index",
-        }
-        assert reduce_dtype("split_scalars") == "float32"
-        assert reduce_dtype("argmax") == "int8"
-        assert reduce_dtype("vertex_union_find") == "int8"
-        # leading_object is GLOBAL float32 scalars; object_index is PER-TOKEN int8
-        assert reduce_dtype("leading_object") == "float32"
-        assert reduce_dtype("object_index") == "int8"
-        assert set(per_token_reduces()) == {"argmax", "vertex_union_find", "object_index"}
+        }.isdisjoint(set(registered_reduces()))
 
-    def test_config_known_reduces_is_a_live_registry_view(self):
-        # the config-level public names are LIVE views of the registry (PEP 562
-        # __getattr__), not the M4.5 frozen tuples
+    def test_config_known_reduces_is_a_live_registry_view(self, fresh_reduce_name):
+        # the config-level public names stay a LIVE view of the registry (PEP 562
+        # __getattr__); a freshly-registered probe reduce shows up in the view
         from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
+        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
         assert set(cfg.KNOWN_REDUCES) == set(registered_reduces())
-        assert set(cfg.PER_TOKEN_REDUCES) == set(per_token_reduces())
+        assert fresh_reduce_name in cfg.KNOWN_REDUCES
 
     def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
@@ -557,11 +416,12 @@ class TestRegisterReduce:
                 )
             )
 
-    def test_duplicate_registration_rejected(self):
-        # re-registering a shipped name is a hard error (no silent override —
-        # would mask a real collision otherwise)
+    def test_duplicate_registration_rejected(self, fresh_reduce_name):
+        # re-registering an already-registered name is a hard error (no silent
+        # override — would mask a real collision otherwise)
+        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
         with pytest.raises(ConfigError, match="already registered"):
-            register_reduce("argmax", _bind_passthrough_int8, dtype="int8")
+            register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
 
     def test_bad_declared_dtype_rejected(self, fresh_reduce_name):
         with pytest.raises(ConfigError, match=r"float32.*int8|int8.*float32"):
@@ -589,12 +449,15 @@ class TestRegisterReduce:
 @pytest.fixture(scope="module")
 def gn2_modules(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("onnx_adapter_fixture")
+    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     v1 = build_test_gn2(tmp)
-    modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
+    modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict(modules).load_state_dict(map_v1_state_dict(v1.state_dict(), modules))
+    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
+        map_v1_state_dict(v1.state_dict(), modules), strict=False
+    )
     return modules, resolved, plan
 
 
@@ -618,19 +481,25 @@ class TestOnnxPlan:
         assert flat["inputs.tracks"].shape == ("B", "T:tracks", len(TRACK_VARIABLES))
         assert flat["masks.tracks"].kind == "pad_mask"
 
-    def test_missing_output_producer_is_a_named_error(self, gn2_modules):
-        modules, resolved, _ = gn2_modules
-        manifest = gn2_manifest()
-        manifest[0].port = "preds.jets.typo_task"
-        bad = gn2_resolved(manifest=manifest)
-        with pytest.raises(ConnectivityError, match="ONNX manifest output"):
-            compile_onnx_plan(modules, bad, VARIABLES)
+    def test_missing_output_producer_is_a_named_error(self, tmp_path):
+        # a sink leaf naming a conversion leaf no node produces is a connectivity
+        # error (the folded sink anchors the demand — W4)
+        write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+        bad_sink = OnnxExportSink(outputs=[
+            OnnxExportLeaf(key="outputs.jets.typo_task", names=["pb", "pc", "pu"]),
+        ])
+        bad_sink.name = "onnx_export"
+        modules["onnx_export"] = bad_sink
+        with pytest.raises(ConnectivityError):
+            compile_onnx_plan(modules, gn2_resolved(), VARIABLES)
 
-    def test_manifest_less_config_cannot_compile(self, gn2_modules):
-        modules, _, _ = gn2_modules
-        half = resolve_export_config(gn2_export_cfg(), "m")
-        with pytest.raises(ConfigError, match="manifest-attached"):
-            compile_onnx_plan(modules, half, VARIABLES)
+    def test_sinkless_config_cannot_compile(self, tmp_path):
+        # W4: without a folded OnnxExportSink there is no ONNX-output demand source
+        write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+        with pytest.raises(ConfigError, match="OnnxExportSink"):
+            compile_onnx_plan(modules, gn2_resolved(), VARIABLES)
 
     def test_missing_variables_stream(self):
         resolved = gn2_resolved(run_name="m")
@@ -647,7 +516,7 @@ class TestOnnxPlan:
         cfg = gn2_export_cfg()
         cfg.inputs[1].sequence = False
         cfg.inputs[1].dyn_axis = None
-        bad = attach_manifest(resolve_export_config(cfg, "m"), gn2_manifest())
+        bad = resolve_export_config(cfg, "m")
         with pytest.raises(ShapeError) as excinfo:
             compile_onnx_plan(modules, bad, VARIABLES)
         message = str(excinfo.value)
@@ -726,7 +595,7 @@ class TestAliasGather:
         modules, _, _ = gn2_modules
         cfg = gn2_export_cfg()
         cfg.inputs.append(ExportInput(port="inputs.global", alias="inputs.jets"))
-        resolved = attach_manifest(resolve_export_config(cfg, "m"), gn2_manifest())
+        resolved = resolve_export_config(cfg, "m")
         variables = {**VARIABLES, "global": alias_variables}
         plan = compile_onnx_plan(modules, resolved, variables)
         fields = {f"inputs.{s}": tuple(names) for s, names in variables.items()}
@@ -810,10 +679,16 @@ def _flash_export_cfg() -> ExportConfig:
 class TestExportModeProtocol:
     def _compiled(self, tmp_path, *, materialise: bool):
         modules = build_flash_gn2_modules(tmp_path)
-        resolved = attach_manifest(
-            resolve_export_config(_flash_export_cfg(), "flash_run"),
-            [ExportOutput(port="preds.jets.jets_classification", names=["pb", "pc", "pu"])],
+        modules["jet_probs"] = _named(
+            ClassProbs(task="jets_classification", stream="jets"), "jet_probs"
         )
+        modules["onnx_export"] = _named(
+            OnnxExportSink(outputs=[
+                OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
+            ]),
+            "onnx_export",
+        )
+        resolved = resolve_export_config(_flash_export_cfg(), "flash_run")
         plan = compile_onnx_plan(modules, resolved, VARIABLES)
         bind_all(modules, resolve_bind_schema([plan]))
         if materialise:

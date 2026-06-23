@@ -99,6 +99,13 @@ def task_modules(model_modules: Mapping[str, GraphModule]) -> dict[str, GraphMod
     config declaration order, which is also the v1 ``model.tasks`` order
     for converted configs (design §9.2).
 
+    The plan-29 conversion PRODUCERS (`salt.core.outputs.TaskOutput` and its
+    `ClassProbs`/`SeqClassIndex`/`Regression` subclasses) also expose
+    ``pred_key``/``stream`` (they READ ``preds.<stream>.<task>``), but they are
+    NOT task heads — they produce an ``outputs.*`` leaf (``output_key``) and ship
+    no TEST-column rendering. Exclude any module carrying an ``output_key`` so the
+    TaskWriter never tries to render eval columns for a conversion node (W4).
+
     Parameters
     ----------
     model_modules : Mapping[str, GraphModule]
@@ -115,6 +122,7 @@ def task_modules(model_modules: Mapping[str, GraphModule]) -> dict[str, GraphMod
         for name, module in model_modules.items()
         if isinstance(getattr(module, "pred_key", None), str)
         and isinstance(getattr(module, "stream", None), str)
+        and not isinstance(getattr(module, "output_key", None), str)  # exclude conversion producers
     }
 
 

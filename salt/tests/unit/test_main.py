@@ -58,6 +58,11 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
+    # plan-29 W4 folded ONNX conversion producers (in model.modules; the
+    # OnnxExportSink is a callback, not a model module)
+    "jet_probs",
+    "track_origin_index",
+    "track_vertex_index",
 }
 
 FOURTH_TASK_YAML = """

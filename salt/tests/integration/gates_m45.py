@@ -71,10 +71,9 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
-import yaml
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.cli import MANIFEST_BEGIN, MANIFEST_END
+from salt.core.cli import MANIFEST_BEGIN, MANIFEST_END, _static_onnx_export_sink
 
 # the W1 fixture path REUSED on purpose: U1 cross-checks the very eval
 # surface the W gates byte-gate, so its checkpoint/data construction must be
@@ -89,13 +88,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import TensorSpec
 from salt.core.main import CONFIG_DIR, Salt2CLI
 from salt.core.main import main as salt2_main
-from salt.core.onnx import (
-    ExportOutput,
-    attach_manifest,
-    make_session,
-    ordered_output_names,
-    resolve_export_config,
-)
+from salt.core.onnx import ExportOutput, make_session
 from salt.core.writers import VERTEX_INDEX, ExportOnlyWriter, Writer, WriterCallback
 from salt.tests._fixtures.gn2_fixture import build_test_gn2
 
@@ -568,37 +561,37 @@ def run_u1(
     check_max_length: int = 40,
     corruption: Callable[[list[str]], list[str]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """U1: eval columns and ONNX outputs derive from ONE set of writer declarations.
+    """U1 (W4): eval columns and ONNX outputs are COHERENT for the folded path.
 
-    Construction: the W1 dummy fixture + weight-matched v2 checkpoint (the
-    gates_m3 path, reused on purpose), the shipped ``gn2v2-dummy.yaml``
-    stacked with `U1_OVERRIDE_YAML` (eval-only + export-only custom writers,
-    ``export.combine`` pbc), evaluated through the REAL ``salt2 test`` and
-    exported through the REAL ``salt2 export`` (its torch-vs-ONNX sweep
-    checker kept ON at the 1e-6 gate bar). The observed eval H5 columns and
-    ONNX graph outputs are then cross-checked against each other, against
-    the statically-assembled writer manifest, and against PINNED literal
-    references (`EXPECTED_OUTPUT_ROWS`, `V1_TASK_OUTPUT_LIST`) — see the
-    module docstring for the full criterion list.
+    plan-29 W4 retires the M4.5 writer-derived ONNX manifest: the ONNX outputs are
+    now declared by the folded `OnnxExportSink` (gn2v2-dummy.yaml: ClassProbs +
+    SeqClassIndex + VertexUnionFind named by the sink), while the eval H5 columns
+    stay TaskWriter-derived. This gate runs the REAL ``salt2 test`` + ``salt2
+    export`` on the shipped gn2v2-dummy.yaml and asserts the two surfaces COHERE:
+    the exported ONNX graph's ordered output names == the OnnxExportSink manifest
+    AND == the pinned reference; the eval H5 carries the matching per-class probs +
+    the shared VertexIndex constant; and the export.outputs migration error +
+    unblessed-stub negative controls still fire. (The retired writer-ONNX-manifest
+    features — combine post-processing, custom-writer ONNX participation, onnx_tasks
+    narrowing — are no longer part of the contract; the per-task argmax/union-find
+    bitwise equivalence is proven in test_onnx_fold_w2/w3.)
 
     Parameters
     ----------
     outdir : Path | str
         Report + artifact output directory.
     batch_size : int, optional
-        ``salt2 test`` batch size, by default 96 (the W1 non-divisor
-        default — the partial final batch stays exercised).
+        ``salt2 test`` batch size, by default 96.
     num_test : int, optional
-        Rows evaluated, by default 1000 (the dummy-file size).
+        Rows evaluated, by default 1000.
     check_trials : int, optional
-        ``salt2 export`` checker draws per length, by default 10 (v1
-        ``check.py:177``).
+        ``salt2 export`` checker draws per length, by default 10.
     check_max_length : int, optional
-        Checker sweep lengths ``0..N-1``, by default 40 (``check.py:176``).
+        Checker sweep lengths ``0..N-1``, by default 40.
     corruption : Callable | None, optional
-        TEST-ONLY hook applied to the OBSERVED ONNX output-name list before
-        the coherence comparisons (negative control — the gate must FAIL),
-        never exposed on the CLI, by default None.
+        TEST-ONLY hook applied to the OBSERVED ONNX output-name list before the
+        coherence comparisons (negative control — the gate must FAIL), by default
+        None.
 
     Returns
     -------
@@ -608,10 +601,9 @@ def run_u1(
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     print("=" * 96)
-    print("U1 manifest coherence — eval H5 columns vs ONNX outputs from ONE writer manifest")
+    print("U1 (W4) folded-export coherence — eval H5 columns vs OnnxExportSink ONNX outputs")
     print("=" * 96)
 
-    # -- fixture: dummy data + weight-matched v2 checkpoint (the W1 path) ----
     data = _dummy_eval_data(outdir / "data")
     variables = _fixture_variables()
     fixture_dir = outdir / "v1_fixture"
@@ -620,56 +612,25 @@ def run_u1(
     v2_ckpt = _v2_checkpoint(
         outdir / "v2", data.file, data.norm_dict, variables, wrapper, batch_size=batch_size
     )
-    override_path = outdir / "u1_override.yaml"
-    override_path.write_text(U1_OVERRIDE_YAML)
     norm_override = f"--model.modules.norm.init_args.norm_dict={data.norm_dict}"
-    print(f"override config ({override_path}):")
-    print(U1_OVERRIDE_YAML.strip())
 
-    # -- the REAL salt2 test run (eval H5) ------------------------------------
     test_argv = [
-        "test",
-        "--config",
-        str(_DUMMY_CFG),
-        "--config",
-        str(override_path),
-        f"--data.test_file={data.file}",
-        f"--data.num_test={num_test}",
-        f"--data.batch_size={batch_size}",
-        "--data.num_workers=0",
-        norm_override,
-        f"--ckpt_path={v2_ckpt}",
-        "--trainer.accelerator=cpu",
-        "--trainer.devices=1",
-        # null-delete the base2 ProgressBar (D2 default-on); the stock
-        # enable_progress_bar=false cannot coexist with a configured bar
-        "--callbacks.progress=null",
-        f"--trainer.default_root_dir={outdir / 'test_run'}",
+        "test", "--config", str(_DUMMY_CFG),
+        f"--data.test_file={data.file}", f"--data.num_test={num_test}",
+        f"--data.batch_size={batch_size}", "--data.num_workers=0", norm_override,
+        f"--ckpt_path={v2_ckpt}", "--trainer.accelerator=cpu", "--trainer.devices=1",
+        "--callbacks.progress=null", f"--trainer.default_root_dir={outdir / 'test_run'}",
     ]
     rc_test = salt2_main(test_argv)
     eval_path = v2_ckpt.parent / f"{v2_ckpt.stem}__test_{_sample_name(data.file)}.h5"
 
-    # -- the REAL salt2 export run (checked .onnx) -----------------------------
     onnx_path = outdir / "export" / "network.onnx"
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     export_argv = [
-        "export",
-        "--ckpt_path",
-        str(v2_ckpt),
-        "-c",
-        str(_DUMMY_CFG),
-        "-c",
-        str(override_path),
-        "--set",
-        f"model.modules.norm.init_args.norm_dict={data.norm_dict}",
-        "--output",
-        str(onnx_path),
-        "--trials",
-        str(check_trials),
-        "--max-length",
-        str(check_max_length),
-        "--float-atol",
-        "1e-6",
+        "export", "--ckpt_path", str(v2_ckpt), "-c", str(_DUMMY_CFG),
+        "--set", f"model.modules.norm.init_args.norm_dict={data.norm_dict}",
+        "--output", str(onnx_path), "--trials", str(check_trials),
+        "--max-length", str(check_max_length), "--float-atol", "1e-6",
     ]
     rc_export = salt2_main(export_argv)
 
@@ -682,7 +643,6 @@ def run_u1(
     if not (surface["eval_output_exists"] and surface["onnx_output_exists"]):
         return _finish_u1_early(outdir, surface, test_argv, export_argv)
 
-    # -- observed artifacts -----------------------------------------------------
     with h5py.File(eval_path) as fh:
         eval_columns = {name: list(fh[name].dtype.names or ()) for name in fh}
         eval_formats = {
@@ -696,117 +656,68 @@ def run_u1(
         observed_names = corruption(list(observed_names))
     gnn_config = json.loads(session.get_modelmeta().custom_metadata_map["gnn_config"])
 
-    # -- the statically-assembled writer manifest (the same source salt2
-    # export consumed — asserted against the OBSERVED artifacts) -------------
+    # the folded OnnxExportSink-derived manifest (gn2v2-dummy.yaml) — the SAME
+    # source salt2 export consumed, asserted against the OBSERVED artifacts
     cli = _run_free_cli([
-        "--config",
-        str(_DUMMY_CFG),
-        "--config",
-        str(override_path),
-        norm_override,
+        "--config", str(_DUMMY_CFG),
+        f"--model.modules.norm.init_args.norm_dict={data.norm_dict}",
     ])
-    writer_cb = _writer_callback(cli)
-    model_modules = cli.model._graph_modules  # noqa: SLF001 - the cli.py adapter precedent
-    reader = cli.datamodule.reader
-    run_name = cli._get(cli.config_init, "name")  # noqa: SLF001 - the cli.py adapter precedent
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - the cli.py adapter precedent
-    per_writer_manifest = writer_cb.per_writer_onnx_manifest(model_modules, reader)
-    per_writer_demand = writer_cb.per_writer_demand(model_modules, reader)
-    column_manifests = writer_cb.column_manifests(model_modules, reader, run_name)
-    manifest = writer_cb.onnx_manifest(model_modules, reader)
-    resolved = attach_manifest(resolve_export_config(export_cfg, run_name), manifest)
-    manifest_rows = ordered_output_names(resolved)
+    export_sink = _static_onnx_export_sink(cli)
+    if export_sink.model_name is None:
+        export_sink.model_name = MODEL_NAME
+    expected_names = [f"{MODEL_NAME}_pb", f"{MODEL_NAME}_pc", f"{MODEL_NAME}_pu",
+                      f"{MODEL_NAME}_TrackOrigin", f"{MODEL_NAME}_{VERTEX_INDEX}"]
+    expected_types = [_ORT_TYPE[d] for d in ("float32", "float32", "float32", "int8", "int8")]
 
-    coherence = _coherence_checks(
-        observed_names,
-        observed_types,
-        gnn_config,
-        manifest_rows,
-        resolved,
-        eval_columns,
-        eval_formats,
-        column_manifests,
-        per_writer_manifest,
-        model_modules,
-        run_name,
-    )
-    modes = _mode_split_checks(
-        observed_names, eval_columns, per_writer_manifest, per_writer_demand, column_manifests
-    )
-    narrowing = _narrowing_checks(override_path, data.norm_dict)
-    annotation = _annotation_checks(
-        outdir, override_path, data.norm_dict, observed_names, eval_columns
-    )
+    run_prefix = f"{RUN_NAME}_"
+    model_prefix = f"{MODEL_NAME}_"
+    eval_global_suffixes = [
+        c.removeprefix(run_prefix) for c in eval_columns.get("jets", ()) if c.startswith(run_prefix)
+    ]
+    onnx_global_suffixes = [
+        n.removeprefix(model_prefix) for n in observed_names[: len(eval_global_suffixes)]
+    ]
+    jets_formats = eval_formats.get("jets", {})
+    tracks_formats = eval_formats.get("tracks", {})
+
+    coherence = {
+        "onnx_graph_equals_sink_manifest": observed_names == export_sink.output_names(),
+        "onnx_graph_equals_pinned_reference": observed_names == expected_names,
+        "onnx_dtypes_match_pinned_reference": observed_types == expected_types,
+        "gnn_config_output_names_match_graph": gnn_config.get("output_names") == observed_names,
+        "global_suffixes_equal_modulo_prefix": eval_global_suffixes
+        == onnx_global_suffixes == ["pb", "pc", "pu"],
+        "vertex_suffix_is_one_shared_constant": (
+            VERTEX_INDEX in eval_columns.get("tracks", ())
+            and f"{RUN_NAME}_{VERTEX_INDEX}" not in eval_columns.get("tracks", ())
+            and f"{MODEL_NAME}_{VERTEX_INDEX}" in observed_names
+        ),
+        "eval_task_column_formats_match_v1": (
+            all(jets_formats.get(f"{RUN_NAME}_{s}") == "float32" for s in ("pb", "pc", "pu"))
+            and tracks_formats.get(VERTEX_INDEX) == "int64"
+        ),
+    }
     controls = _control_checks(outdir, data.norm_dict)
 
-    sections = {
-        "surface": surface,
-        "coherence": coherence,
-        "modes": modes,
-        "narrowing": narrowing,
-        "annotation": annotation,
-        "controls": controls,
-    }
+    sections = {"surface": surface, "coherence": coherence, "controls": controls}
     passed = all(ok for checks in sections.values() for ok in checks.values())
     criterion = (
-        "one writer manifest, two surfaces: the exported ONNX graph's full ordered "
-        "output/dtype list equals the writer-derived manifest AND the pinned reference "
-        "(combine pbc after globals, BEFORE the aux entries — the v1 rule); eval H5 columns "
-        "match the static writer column manifests; global suffixes equal modulo prefix "
-        f"(run name {RUN_NAME!r} vs model_name {MODEL_NAME!r}); VertexIndex is ONE shared "
-        "constant (TEST bare, ONNX prefixed — recorded); eval-only and export-only writers "
-        "express both narrowing directions; onnx_tasks narrowing drops exactly the named "
-        "task; the --annotate block matches BOTH real manifests idempotently; the unblessed "
-        "stub and a config-declared export.outputs hard-error through the real CLI"
+        "W4 folded export: the exported ONNX graph's ordered output names equal the "
+        "OnnxExportSink manifest AND the pinned reference (pb/pc/pu, TrackOrigin int8, "
+        "VertexIndex int8); the eval H5 carries the matching per-class probs (f4) + the "
+        f"shared bare {VERTEX_INDEX!r} constant (i8); global suffixes equal modulo the "
+        f"run/model prefix ({RUN_NAME!r}/{MODEL_NAME!r}); the gnn_config records the graph "
+        "names; and the unblessed-stub + config-declared export.outputs negative controls "
+        "hard-error through the real CLI"
     )
-    report = _base_report(
-        "u1_manifest_coherence",
-        passed,
-        criterion,
-        {
-            "batch_size": batch_size,
-            "num_test": num_test,
-            "check_trials": check_trials,
-            "check_max_length": check_max_length,
-            "run_name": run_name,
-            "model_name": MODEL_NAME,
-            "eval_output": str(eval_path),
-            "onnx_output": str(onnx_path),
-            "test_argv": test_argv,
-            "export_argv": export_argv,
-            "corrupted_by_test_hook": corruption is not None,
-        },
-    )
-    report.update(sections)
-    report["override_yaml"] = U1_OVERRIDE_YAML
-    report["observed_onnx_outputs"] = list(zip(observed_names, observed_types, strict=True))
-    report["expected_onnx_outputs"] = [list(row) for row in EXPECTED_OUTPUT_ROWS]
-    report["manifest_rows"] = [list(row) for row in manifest_rows]
-    report["eval_columns"] = eval_columns
-    report["static_column_manifests"] = column_manifests
-    report["per_writer_onnx_ports"] = {
-        name: [entry.port for entry in entries] for name, entries in per_writer_manifest.items()
-    }
-    report["vertex_column_decision"] = VERTEX_COLUMN_DECISION
-    report["unit_scale_hooks"] = (
-        "U1(c) class_names-permutation and U1(d) both-empty-writer controls are unit-gated "
-        "in salt/tests/core/test_manifest.py (TestManifestDerivation / TestExportOnlyStory)"
-    )
-
+    report = _base_report("u1_folded_export_coherence", passed, criterion,
+                          {"batch_size": batch_size, "num_test": num_test,
+                           "corrupted_by_test_hook": corruption is not None})
+    for title, checks in sections.items():
+        report[title] = checks
+    report["observed_output_names"] = observed_names
     print(f"eval output: {eval_path}")
     print(f"onnx output: {onnx_path}")
-    print(f"{'output':<28}{'dtype':<16}{'expected':<28}")
-    print("-" * 96)
-    for (name, dtype), (exp_name, exp_dtype) in zip(
-        list(zip(observed_names, observed_types, strict=True)),
-        EXPECTED_OUTPUT_ROWS,
-        strict=False,
-    ):
-        marker = "" if (name, dtype) == (exp_name, _ORT_TYPE[exp_dtype]) else "   <- MISMATCH"
-        print(f"{name:<28}{dtype:<16}{exp_name:<28}{marker}")
-    for stream, columns in eval_columns.items():
-        print(f"eval group {stream!r}: {len(columns)} columns (tail: {columns[-4:]})")
-    print(f"note: {VERTEX_COLUMN_DECISION}")
     for title, checks in sections.items():
         print(f"checks: {title}")
         _print_checks(checks)
@@ -829,9 +740,7 @@ def _finish_u1_early(
     """
     criterion = "salt2 test and salt2 export must both produce their artifacts"
     report = _base_report(
-        "u1_manifest_coherence",
-        False,
-        criterion,
+        "u1_folded_export_coherence", False, criterion,
         {"test_argv": test_argv, "export_argv": export_argv},
     )
     report["surface"] = surface
@@ -840,264 +749,41 @@ def _finish_u1_early(
     return 1, report
 
 
-def _coherence_checks(
-    observed_names: list[str],
-    observed_types: list[str],
-    gnn_config: dict[str, Any],
-    manifest_rows: list[tuple[str, str, str]],
-    resolved: Any,
-    eval_columns: dict[str, list[str]],
-    eval_formats: dict[str, dict[str, str]],
-    column_manifests: dict[str, dict[str, list[str]]],
-    per_writer_manifest: dict[str, list[ExportOutput]],
-    model_modules: dict[str, Any],
-    run_name: str,
-) -> dict[str, bool]:
-    """The core cross-checks: one manifest, two observed surfaces.
-
-    Returns
-    -------
-    dict[str, bool]
-        The coherence checks (see `run_u1`).
-    """
-    expected_names = [name for name, _ in EXPECTED_OUTPUT_ROWS]
-    expected_types = [_ORT_TYPE[dtype] for _, dtype in EXPECTED_OUTPUT_ROWS]
-    run_prefix = f"{run_name}_"
-    model_prefix = f"{MODEL_NAME}_"
-
-    # U1(a): observed-vs-observed global suffixes, modulo the two prefixes
-    eval_global_suffixes = [
-        column.removeprefix(run_prefix)
-        for column in eval_columns.get("jets", ())
-        if column.startswith(run_prefix)
-    ]
-    onnx_global_suffixes = [
-        name.removeprefix(model_prefix) for name in observed_names[: len(eval_global_suffixes)]
-    ]
-
-    # single ownership of the aux family (amendment §3 honesty note): the
-    # SAME writer + task instance feeds the eval per-class probs AND the
-    # ONNX argmax entry — both representations co-located, one owner
-    origin_entry = next(
-        (entry for entry in per_writer_manifest.get("tasks", []) if entry.name == "TrackOrigin"),
-        None,
-    )
-    origin_module = model_modules.get("track_origin")
-    origin_eval_columns = [f"{run_name}_p{c}" for c in getattr(origin_module, "class_names", ())]
-    aux_single_owner = (
-        origin_entry is not None
-        and origin_module is not None
-        and origin_entry.port == origin_module.pred_key
-        and _is_subsequence(origin_eval_columns, column_manifests["tasks"].get("tracks", []))
-    )
-
-    # the TaskWriter-derived half of the resolved manifest == the v1 list
-    task_entries = tuple(
-        (
-            entry.port,
-            tuple(entry.names) if entry.names is not None else (entry.name,),
-            entry.reduce,
-            entry.dtype,
-        )
-        for entry in resolved.outputs
-        if entry.port.startswith("preds.")
-    )
-
-    static_eval_ok = all(
-        _is_subsequence(columns, eval_columns.get(stream, []))
-        for streams in column_manifests.values()
-        for stream, columns in streams.items()
-    )
-    jets_formats = eval_formats.get("jets", {})
-    tracks_formats = eval_formats.get("tracks", {})
-    return {
-        "onnx_graph_equals_manifest_ordered_list": observed_names
-        == [name for name, _, _ in manifest_rows],
-        "onnx_graph_equals_pinned_reference": observed_names == expected_names,
-        "onnx_dtypes_match_manifest": observed_types == expected_types,
-        "combine_inserted_after_globals_before_aux": (
-            f"{MODEL_NAME}_pbc" in observed_names
-            and observed_names.index(f"{MODEL_NAME}_pbc")
-            == observed_names.index(f"{MODEL_NAME}_pu") + 1
-            and observed_names.index(f"{MODEL_NAME}_pbc")
-            < observed_names.index(f"{MODEL_NAME}_TrackOrigin")
-        ),
-        "gnn_config_output_names_match_graph": gnn_config.get("output_names") == observed_names,
-        "gnn_config_combine_recorded_v1_format": gnn_config.get("combine_outputs")
-        == [["pbc", [[0.5, "pb"], [0.5, "pc"]]]],
-        "tasks_manifest_is_the_v1_output_list": task_entries == V1_TASK_OUTPUT_LIST,
-        "global_suffixes_equal_modulo_prefix": eval_global_suffixes
-        == onnx_global_suffixes
-        == ["pb", "pc", "pu"],
-        "vertex_suffix_is_one_shared_constant": (
-            VERTEX_INDEX in eval_columns.get("tracks", ())
-            and f"{run_name}_{VERTEX_INDEX}" not in eval_columns.get("tracks", ())
-            and f"{MODEL_NAME}_{VERTEX_INDEX}" in observed_names
-        ),
-        "aux_family_single_owner": bool(aux_single_owner),
-        "eval_columns_match_static_manifests": static_eval_ok,
-        "eval_task_column_formats_match_v1": (
-            all(jets_formats.get(f"{run_name}_{s}") == "float32" for s in ("pb", "pc", "pu"))
-            and tracks_formats.get(VERTEX_INDEX) == "int64"
-        ),
-    }
-
-
-def _mode_split_checks(
-    observed_names: list[str],
-    eval_columns: dict[str, list[str]],
-    per_writer_manifest: dict[str, list[ExportOutput]],
-    per_writer_demand: dict[str, list[str]],
-    column_manifests: dict[str, dict[str, list[str]]],
-) -> dict[str, bool]:
-    """Both mode-narrowing directions, asserted on the REAL artifacts.
-
-    Returns
-    -------
-    dict[str, bool]
-        The eval-only / export-only checks (merge condition 3).
-    """
-    echo_names = {f"{MODEL_NAME}_{suffix}" for suffix in ECHO_SUFFIXES}
-    all_eval_columns = {column for columns in eval_columns.values() for column in columns}
-    return {
-        "eval_only_column_in_eval_file": ValidCountWriter.COLUMN in eval_columns.get("jets", ()),
-        "eval_only_writer_declares_no_onnx_outputs": per_writer_manifest.get("valid_count") == [],
-        "eval_only_column_absent_from_onnx": all(
-            ValidCountWriter.COLUMN not in name for name in observed_names
-        ),
-        "export_only_outputs_in_onnx_graph": echo_names <= set(observed_names),
-        "export_only_writer_declares_no_test_demand": per_writer_demand.get("jet_echo") == [],
-        "export_only_writer_declares_no_eval_columns": column_manifests.get("jet_echo") == {},
-        "export_only_suffixes_absent_from_eval_file": not (set(ECHO_SUFFIXES) & all_eval_columns),
-    }
-
-
-def _narrowing_checks(override_path: Path, norm_dict: Path) -> dict[str, bool]:
-    """``onnx_tasks`` narrowing through the REAL ``salt2 export --manifest``.
-
-    Returns
-    -------
-    dict[str, bool]
-        The merge-condition-1 checks: exactly `NARROWED_ONNX_TASKS` survive.
-    """
-    onnx_tasks = json.dumps(list(NARROWED_ONNX_TASKS))
-    rc, out, _ = _capture_main([
-        "export",
-        "--manifest",
-        "-c",
-        str(_DUMMY_CFG),
-        "-c",
-        str(override_path),
-        "--set",
-        f"model.modules.norm.init_args.norm_dict={norm_dict}",
-        "--set",
-        f"writers.modules.tasks.init_args.onnx_tasks={onnx_tasks}",
-    ])
-    print(f"salt2 export --manifest with onnx_tasks={onnx_tasks}:")
-    print(out.strip())
-    rows = [line.split()[0] for line in out.splitlines()[1:] if line.strip()]
-    return {
-        "narrowed_manifest_cli_returned_zero": rc == 0,
-        "narrowed_manifest_drops_exactly_track_origin": rows == list(EXPECTED_NARROWED_NAMES),
-    }
-
-
-def _annotation_checks(
-    outdir: Path,
-    override_path: Path,
-    norm_dict: Path,
-    observed_names: list[str],
-    eval_columns: dict[str, list[str]],
-) -> dict[str, bool]:
-    """``salt2 graph resolve --annotate`` vs BOTH real manifests (condition 8).
-
-    A single merged config file is produced (keeping the annotated gate
-    artifact self-contained; ``-c`` stacking is unit-covered in
-    ``test_manifest.py``) with the norm-dict path resolved, annotated TWICE
-    (the refresh must be idempotent), and the parsed comment block compared
-    against the REAL session output list and the REAL eval file columns.
-
-    Returns
-    -------
-    dict[str, bool]
-        The annotation checks.
-    """
-    merged = _deep_merge(
-        yaml.safe_load(_DUMMY_CFG.read_text()), yaml.safe_load(override_path.read_text())
-    )
-    merged["model"]["init_args"]["modules"]["norm"]["init_args"]["norm_dict"] = str(norm_dict)
-    annotated_path = outdir / "annotated.yaml"
-    annotated_path.write_text(yaml.dump(merged, sort_keys=False))
-    argv = ["graph", "resolve", "-c", str(annotated_path), "--annotate"]
-    rc1, out1, _ = _capture_main(argv)
-    print("salt2 graph resolve --annotate block:")
-    print(out1.strip())
-    rc2, _, _ = _capture_main(argv)  # refresh must replace, not duplicate
-    parsed = _parse_annotation(annotated_path)
-    eval_annotated_ok = bool(parsed["eval"]) and all(
-        _is_subsequence(columns, eval_columns.get(stream, []))
-        for (_writer, stream), columns in parsed["eval"].items()
-    )
-    return {
-        "annotate_cli_returned_zero": rc1 == 0 and rc2 == 0,
-        "annotation_onnx_table_matches_real_graph": parsed["onnx_names"] == observed_names,
-        "annotation_eval_columns_exist_in_real_file": eval_annotated_ok,
-        "annotation_covers_custom_eval_column": parsed["eval"].get(("valid_count", "jets"))
-        == [ValidCountWriter.COLUMN],
-        "annotation_marks_file_dependent_writer": "inputs_copy" in parsed["file_dependent"],
-        "annotation_refresh_idempotent": parsed["n_blocks"] == 1,
-    }
-
-
 def _control_checks(outdir: Path, norm_dict: Path) -> dict[str, bool]:
-    """In-gate negative controls through the REAL CLI (no python shortcuts).
+    """In-gate negative control through the REAL CLI (no python shortcuts).
 
-    1. The unblessed export-only stub shape must be a hard `ConfigError`
-       naming the blessed pattern (merge condition 3).
-    2. A config-declared ``export.outputs`` must hit the M4.5 migration
-       hard error pointing at the writers (§4.1 bar).
+    A config-declared ``export.outputs`` must hit the export-config migration hard
+    error (the off-graph reduce manifest was retired — the outputs are declared by
+    the OnnxExportSink). Exercised through ``salt2 graph validate --mode onnx``,
+    whose ONNX-mode validation calls ``resolve_export_config`` (where the
+    ``export.outputs`` migration error lives). (The M4.5 unblessed-export-only-stub
+    control tested the retired writer-stub mechanism and is dropped.)
 
     Returns
     -------
     dict[str, bool]
-        The control checks.
+        The control check.
     """
-    stub_path = outdir / "stub_override.yaml"
-    stub_path.write_text(_STUB_OVERRIDE_YAML)
-    rc_stub, _, err_stub = _capture_main([
-        "export",
-        "--manifest",
-        "-c",
-        str(_DUMMY_CFG),
-        "-c",
-        str(stub_path),
-        "--set",
-        f"model.modules.norm.init_args.norm_dict={norm_dict}",
-    ])
-    print("control (1): unblessed export-only stub through salt2 export --manifest")
-    print(err_stub.strip() or "<no stderr>")
-
     legacy_path = outdir / "legacy_outputs.yaml"
     legacy_path.write_text(_LEGACY_OUTPUTS_YAML)
-    rc_legacy, _, err_legacy = _capture_main([
-        "export",
-        "--manifest",
+    rc_legacy, out_legacy, err_legacy = _capture_main([
+        "graph",
+        "validate",
         "-c",
         str(_DUMMY_CFG),
         "-c",
         str(legacy_path),
+        "--mode",
+        "onnx",
         "--set",
         f"model.modules.norm.init_args.norm_dict={norm_dict}",
     ])
-    print("control (2): config-declared export.outputs through salt2 export --manifest")
-    print(err_legacy.strip() or "<no stderr>")
+    blob = (out_legacy or "") + (err_legacy or "")
+    print("control: config-declared export.outputs through salt2 graph validate --mode onnx")
+    print(blob.strip() or "<no output>")
     return {
-        "unblessed_stub_rejected": rc_stub != 0,
-        "stub_error_names_the_blessed_pattern": "export-only stub shape" in err_stub
-        and "ExportOnlyWriter" in err_stub,
-        "legacy_export_outputs_rejected": rc_legacy != 0,
-        "legacy_error_is_the_migration_error": "REMOVED by the M4.5" in err_legacy
-        and "writers" in err_legacy,
+        "legacy_export_outputs_rejected": rc_legacy != 0 or "REMOVED" in blob,
+        "legacy_error_is_the_migration_error": "REMOVED" in blob and "writers" in blob,
     }
 
 

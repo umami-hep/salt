@@ -199,9 +199,7 @@ from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
-    ExportOutput,
     OnnxAdapter,
-    attach_manifest,
     check_onnx,
     export_graph,
     make_session,
@@ -905,15 +903,23 @@ def run_vs1(
         model_name="DL1v2",
         inputs=[ExportInput(port="inputs.jets", name="jet_features")],  # global, NOT sequence
     )
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=list(head.class_suffixes))
-    ]
+    # W4: the ONNX outputs are produced by a folded ClassProbs node named by an
+    # OnnxExportSink (the off-graph reduce manifest is retired)
+    from salt.core.outputs import ClassProbs, OnnxExportLeaf, OnnxExportSink  # noqa: PLC0415
+
+    cp = ClassProbs(task="jets_classification", stream="jets")
+    cp.name = "jet_probs"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=list(head.class_suffixes)),
+    ])
+    sink.name = "onnx_export"
+    modules = {**modules, "jet_probs": cp, "onnx_export": sink}
     result = export_graph(
         modules,
         export,
         {"jets": list(_VS1_JET_VARIABLES)},
         onnx_path,
-        outputs=manifest,
+        outputs=[],
         run_name="DL1v2",
     )
     # the adapter declares NO token (n_*) dynamic axis at all (no sequence input,
@@ -934,15 +940,12 @@ def run_vs1(
     # emit an n_* axis for a sequence input, so the DL1 graph's absence of one
     # is BY-DESIGN, not a vacuously-passing iteration (adapter.py:201-205,
     # config.py:713 dyn_axis=(entry.dyn_axis or f"n_{stream}")).
-    seq_probe_cfg = attach_manifest(
-        resolve_export_config(
-            ExportConfig(
-                model_name="DL1v2SeqProbe",
-                inputs=[ExportInput(port="inputs.jets", name="jet_features", sequence=True)],
-            ),
-            run_name="DL1v2SeqProbe",
+    seq_probe_cfg = resolve_export_config(
+        ExportConfig(
+            model_name="DL1v2SeqProbe",
+            inputs=[ExportInput(port="inputs.jets", name="jet_features", sequence=True)],
         ),
-        manifest,
+        run_name="DL1v2SeqProbe",
     )
     probe = OnnxAdapter(result.adapter.plan, seq_probe_cfg, {"jets": tuple(_VS1_JET_VARIABLES)})
     probe_axes = probe.dynamic_axes
@@ -2055,16 +2058,24 @@ def _ed1_onnx_trace(
     # the GN2XE flavour head is the export sink (split_scalars global reduce,
     # exactly the VS1/MU pattern); the edge path is internal to the trace.
     head = enc_modules["jets_classification"]
-    manifest = [
-        ExportOutput(port="preds.jets.jets_classification", names=list(head.class_suffixes))
-    ]
+    # W4: the GN2XE flavour head's ONNX output is a folded ClassProbs node named by
+    # an OnnxExportSink (the off-graph reduce manifest is retired)
+    from salt.core.outputs import ClassProbs, OnnxExportLeaf, OnnxExportSink  # noqa: PLC0415
+
+    cp = ClassProbs(task="jets_classification", stream="jets")
+    cp.name = "jet_probs"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=list(head.class_suffixes)),
+    ])
+    sink.name = "onnx_export"
+    enc_modules = {**enc_modules, "jet_probs": cp, "onnx_export": sink}
     onnx_path = outdir / "ed1_gn2xe_edge.onnx"
     result = export_graph(
         enc_modules,
         _ed1_export_config(),
         {"tracks": list(_ED1_TRACK_VARIABLES)},
         onnx_path,
-        outputs=manifest,
+        outputs=[],
         run_name="GN2XEv2EdgeProbe",
     )
     # (a) the track input registers a DYNAMIC token axis (n_tracks) — the single

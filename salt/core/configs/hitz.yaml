@@ -102,24 +102,36 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+      # plan-29 W4 folded ONNX conversion producer (design §6.2): the gaussian
+      # head publishes the de-scaled [B, 2R] (means ‖ stddevs) in ONNX (NOT flipped
+      # by P4), so this IDENTITY TaskOutput passes it through as an outputs.* leaf
+      # the OnnxExportSink splits into the mean + _stddev scalars.
+      gaussian_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression, stream: jets } }
 
 writers:
   modules:
     # the only task is a pooled GLOBAL gaussian head (no sequence-stream task),
     # so there is no pad mask to write — delete the base2.yaml default (design
-    # §5.3 null-deletion). InputCopyWriter + TaskWriter keep their jets-stream
-    # roles (gaussian columns: <run>_TruthJetPVz + _stddev, split_scalars).
+    # §5.3 null-deletion). InputCopyWriter keeps its jets-stream role.
     pad_mask: null
+    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
+    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+
+# plan-29 W4 declare-only ONNX sink (design §4.2): splits the de-scaled gaussian
+# leaf into the mean + _stddev scalars (the v1/oracle order).
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.gaussian_regression, names: [TruthJetPVz, TruthJetPVz_stddev] }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: Hitz # Athena name: no '_'/'-'
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the default
-  # TaskWriter declares Hitz_TruthJetPVz + Hitz_TruthJetPVz_stddev (split_scalars).
-  # The stddev = sqrt(softplus(var)) is traced in-graph (design-conformance, no v1
-  # ONNX golden). Inspect with `salt2 graph resolve -c <this file>`.
 
 trainer:
   max_epochs: 100

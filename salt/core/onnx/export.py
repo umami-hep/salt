@@ -31,7 +31,7 @@ import argparse
 import sys
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,12 +52,10 @@ from salt.core.onnx.adapter import OnnxAdapter
 from salt.core.onnx.check import CheckResult, check_onnx
 from salt.core.onnx.config import (
     ExportConfig,
-    ExportInput,
-    ExportOutput,
-    attach_manifest,
-    manifest_table,
     resolve_export_config,
+    sanitised_model_name,
     stream_of_input_port,
+    validate_model_name,
 )
 from salt.core.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
 
@@ -225,23 +223,19 @@ def compile_onnx_plan(
         attribution when the offending key is an export input port.
     """
     export_sink = _onnx_export_sink(modules)
-    if not export.outputs and export_sink is None:
+    if export_sink is None:
         raise ConfigError(
-            "compile_onnx_plan needs an output demand source — either a manifest-attached "
-            "export config (WriterCallback.onnx_manifest + attach_manifest; the legacy reduce "
-            "path) or a folded OnnxExportSink in model.modules (plan-29 W2)"
+            "compile_onnx_plan needs a folded OnnxExportSink in model.modules (plan-29 W4) — "
+            "the off-graph reduce manifest (WriterCallback.onnx_manifest + attach_manifest) "
+            "was retired. Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
+            "conversion nodes (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/"
+            "Combination) own the math inside the traced graph (design §4.2/§6)."
         )
-    # legacy reduce-output ports (union_find/maskformer in a hybrid config); the
-    # folded OnnxExportSink anchors its own leaves as a terminal node (the planner
-    # keeps it via _demand_closure/_is_terminal_consumer), so they need no sinks=
-    sinks = [out.port for out in export.outputs]
-    sink_origins = {
-        out.port: (
-            f"ONNX manifest output {out.port!r} (writer-derived, config: "
-            "writers.modules — M4.5 unified manifest)"
-        )
-        for out in export.outputs
-    }
+    # the folded OnnxExportSink anchors ALL its conversion leaves as a terminal
+    # node (the planner keeps it via _demand_closure/_is_terminal_consumer +
+    # pulls in the folded conversion nodes), so no flat `sinks=` are needed.
+    sinks: list[str] = []
+    sink_origins: dict[str, str] = {}
     try:
         return compile_plan(
             modules,
@@ -276,7 +270,7 @@ def export_graph(
     variables: Mapping[str, Sequence[str]],
     onnx_path: str | Path,
     *,
-    outputs: Sequence[ExportOutput],
+    outputs: Sequence[Any] = (),
     run_name: str = "salt",
     config: Mapping[str, Any] | None = None,
     run_metadata: Mapping[str, Any] | None = None,
@@ -330,12 +324,16 @@ def export_graph(
         The adapter (reusable as the checker reference), plan and written
         metadata.
     """
-    # plan-29 W2 hybrid: a folded OnnxExportSink supplies the output demand, so a
-    # pure-folded config carries no legacy manifest (`outputs` empty). Only attach
-    # a manifest when legacy reduce outputs are present; otherwise resolve the
-    # export-only half and let the export sink anchor the demand.
-    resolved_half = resolve_export_config(export, run_name)
-    resolved = attach_manifest(resolved_half, outputs) if outputs else resolved_half
+    # plan-29 W4: the folded OnnxExportSink supplies the entire output demand —
+    # the off-graph reduce manifest is retired, so `outputs` is always empty and
+    # only the export-only half (model_name/inputs) is resolved here.
+    if outputs:
+        raise ConfigError(
+            "export_graph no longer accepts a reduce-manifest `outputs=` list — the off-graph "
+            "reduce manifest was retired at plan-29 W4. Wire an OnnxExportSink naming the "
+            "conversion outputs.* leaves instead (design §4.2/§6)."
+        )
+    resolved = resolve_export_config(export, run_name)
     plan = compile_onnx_plan(modules, resolved, variables)
     feature_fields = {
         entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
@@ -385,10 +383,9 @@ def export_graph(
     from salt.core.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
-    # the legacy reduce manifest renders via `manifest_table`; a pure-folded
-    # config (no `resolved.outputs`) renders the folded export-sink's output table
-    # from the adapter's generated names/dtypes (plan-29 W2)
-    output_table = manifest_table(resolved) if resolved.outputs else _folded_output_table(adapter)
+    # plan-29 W4: the folded export-sink's output table renders from the adapter's
+    # generated names/dtypes (the off-graph reduce manifest is retired).
+    output_table = _folded_output_table(adapter)
     plan_txt_path.write_text(plan_table(plan) + "\n\n" + output_table + "\n")
     return ExportResult(
         adapter=adapter,
@@ -687,45 +684,9 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     return [inferred]
 
 
-def _writer_manifest_from_cli(cli: Any) -> list[ExportOutput]:
-    """Assemble the writer-derived output manifest from a run-free CLI parse.
-
-    The CLI half of the M4.5 unified manifest: the parsed ``writers:``
-    block is assembled into a `WriterCallback` (exactly as
-    ``Salt2CLI.instantiate_trainer`` does at runtime) and its
-    ``onnx_manifest`` — the same declarations that name the eval columns —
-    becomes the export-output list.
-
-    Returns
-    -------
-    list[ExportOutput]
-        The assembled manifest, collision-checked.
-
-    Raises
-    ------
-    ConfigError
-        When the config carries no writer modules (the manifest has no
-        source).
-    """
-    from salt.core.writers import WriterCallback  # noqa: PLC0415 - heavy/circular
-
-    writer_modules = {
-        name: writer
-        for name, writer in (cli._get(cli.config_init, "writers.modules") or {}).items()  # noqa: SLF001 - main.py precedent
-        if writer is not None
-    }
-    if not writer_modules:
-        raise ConfigError(
-            "the config declares no writer modules — since M4.5 the ONNX output manifest "
-            "derives from writers.modules (the same declarations that name the eval "
-            "columns; base2.yaml ships inputs_copy/tasks/pad_mask defaults). Restore the "
-            "writers block (design §8, amendment-unified-writers.md §2)"
-        )
-    callback = WriterCallback(modules=writer_modules)
-    return callback.onnx_manifest(
-        cli.model._graph_modules,  # noqa: SLF001 - same-package adapter (cli.py precedent)
-        cli.datamodule.reader,
-    )
+# plan-29 W4: `_writer_manifest_from_cli` (the M4.5 writer-derived ONNX manifest
+# assembly) is RETIRED — the ONNX output manifest now derives from the folded
+# OnnxExportSink's declared leaves, found via `salt.core.cli._static_onnx_export_sink`.
 
 
 def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
@@ -736,21 +697,32 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
     int
         0 on success (errors raise `GraphError`, handled by `main`).
     """
+    from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+
     config_paths = _resolve_config_paths(parsed)
     cli = _run_free_cli(config_paths, parsed.set_overrides)
     export_cfg = cli._get(cli.config_init, "export") or ExportConfig()  # noqa: SLF001 - main.py precedent
     if parsed.name is not None:
         export_cfg.model_name = parsed.name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
-    outputs = _writer_manifest_from_cli(cli)
-    if not export_cfg.inputs:
-        # the manifest needs no inputs: --manifest must work on configs that
-        # have not declared export.inputs yet (outputs derive from writers
-        # alone), so a throwaway input satisfies the export-half resolution
-        # for this print-only path
-        export_cfg = replace(export_cfg, inputs=[ExportInput(port="inputs.placeholder")])
-    resolved = attach_manifest(resolve_export_config(export_cfg, run_name), outputs)
-    print(manifest_table(resolved))
+    # plan-29 W4: the manifest derives from the folded OnnxExportSink's declared
+    # leaves (the off-graph writer manifest is retired).
+    export_sink = _static_onnx_export_sink(cli)
+    if export_sink is None:
+        raise ConfigError(
+            "config has no OnnxExportSink — since plan-29 W4 the ONNX output manifest is "
+            "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
+            "outputs.* leaves. Add the conversion nodes + the OnnxExportSink (design §4.2/§6)."
+        )
+    if export_sink.model_name is None:
+        export_sink.model_name = validate_model_name(
+            export_cfg.model_name or sanitised_model_name(run_name)
+        )
+    rows = list(zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True))
+    width = max((len(name) for name, _ in rows), default=1)
+    print(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")
+    for name, dtype in rows:
+        print(f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)")
     return 0
 
 
@@ -789,9 +761,21 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         export_cfg.model_name = parsed.name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     variables = _features_variables(cli)
-    # the writer-derived output manifest (M4.5 unified manifest) — assembled
-    # BEFORE the checkpoint load so config errors stay cheap
-    outputs = _writer_manifest_from_cli(cli)
+    # plan-29 W4: the folded OnnxExportSink (wired at callbacks:) is the SOLE ONNX
+    # output authority (the off-graph writer manifest is retired). Find it on the
+    # parsed CLI and fold it into the planning module dict so its declared leaves
+    # anchor the ONNX plan demand.
+    from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+
+    export_sink = _static_onnx_export_sink(cli)
+    if export_sink is None:
+        raise ConfigError(
+            "config has no OnnxExportSink — since plan-29 W4 the ONNX output manifest is "
+            "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
+            "outputs.* leaves the folded nodes mint (ClassProbs/SeqClassIndex/VertexUnionFind/"
+            "MaskFormerObjects/Combination). The off-graph reduce manifest was retired; add the "
+            "conversion nodes + the OnnxExportSink to the run config (design §4.2/§6)."
+        )
     # data-less checkpoint load: binds from the stored salt_core schema
     # BEFORE the strict state-dict load (saltmodule.py:861-893)
     model = SaltModule.load_from_checkpoint(
@@ -800,8 +784,17 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         map_location=torch.device("cpu"),
         weights_only=False,  # pytorch 2.6+ default flip (v1 to_onnx.py:666)
     )
-    resolved_half = resolve_export_config(export_cfg, run_name)
-    resolved = attach_manifest(resolved_half, outputs)
+    resolved = resolve_export_config(export_cfg, run_name)
+    if export_sink.model_name is None:
+        export_sink.model_name = resolved.model_name
+    # fold the export sink into the modules the planner/adapter see
+    modules = dict(model._graph_modules)  # noqa: SLF001 - same-package adapter
+    if export_sink.name in modules:
+        raise ConfigError(
+            f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
+            "the callbacks key (design §2.2)"
+        )
+    modules[export_sink.name] = export_sink
     _cross_check_schema(model, resolved, variables)
     onnx_path: Path = parsed.output or (config_path.parent / "network.onnx")
     if onnx_path.exists() and not parsed.overwrite:
@@ -809,15 +802,14 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     print("-" * 100)
     print(f"Converting model to ONNX (model_name={resolved.model_name})...")
     print("-" * 100)
-    print(manifest_table(resolved))
     with open(config_path) as fh:
         config_payload = yaml.safe_load(fh) or {}
     result = export_graph(
-        model._graph_modules,  # noqa: SLF001 - same-package adapter
-        resolved_half,  # export_graph re-resolves + attaches (outputs= below)
+        modules,
+        resolved,  # already-resolved export-only half (outputs=[] below)
         variables,
         onnx_path,
-        outputs=outputs,
+        outputs=[],
         run_name=run_name,
         config=config_payload,
         run_metadata=load_run_metadata(config_path),

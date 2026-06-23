@@ -224,6 +224,35 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum # v1 default sum-of-weighted-losses
+      # plan-29 W4 folded ONNX conversion producers (design §6.2): mint outputs.* leaves
+      # the OnnxExportSink names; demand-pruned from FIT/VAL/TEST (FIT plan_hash unchanged).
+      jet_probs:
+        class_path: salt.core.outputs.ClassProbs
+        init_args: { task: jets_classification, stream: jets }
+      track_origin_index:
+        class_path: salt.core.outputs.SeqClassIndex
+        init_args: { task: track_origin, stream: tracks }
+      track_vertex_index:
+        class_path: salt.core.outputs.VertexUnionFind
+        init_args: { task: track_vertexing, stream: tracks }
+
+
+# plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
+# folded OnnxExportSink below, not the off-graph writer manifest (retired).
+writers:
+  modules:
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+
+# plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
+# leaves into the flat Athena output tuple, in v1/oracle ORDER.
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.jets_classification, names: [phbb, phcc, ptop, pqcdbb, pqcdbx, pqcdcx, pqcdll] }
+        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }
+        - { key: outputs.tracks.track_vertexing, name: VertexIndex, dtype: int8, per_token: true }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: GN2Xqcdsplit # Athena name: no '_'/'-'

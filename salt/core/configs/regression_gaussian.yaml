@@ -114,6 +114,12 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+      # plan-29 W4 folded ONNX conversion producers (design §6.2): IDENTITY
+      # TaskOutput passthroughs of each gaussian head's de-scaled [B(,L), 2R]
+      # ONNX output (NOT flipped by P4) — the OnnxExportSink splits each into the
+      # mean + _stddev scalars.
+      gaussian_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression, stream: jets } }
+      gaussian_seq_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression_no_global_object, stream: tracks } }
 
 writers:
   modules:
@@ -122,17 +128,25 @@ writers:
     # output (R means + R _stddev per head).
     pad_mask:
       class_path: salt.core.writers.PadMaskWriter
+    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
+    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+
+# plan-29 W4 declare-only ONNX sink (design §4.2): splits each de-scaled gaussian
+# leaf into mean + _stddev scalars (v1/oracle order: global head, then per-token).
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.gaussian_regression, names: [HadronConeExclTruthLabelPt, HadronConeExclTruthLabelPt_stddev] }
+        - { key: outputs.tracks.gaussian_regression_no_global_object, names: [dummyOutput_dPhi, dummyOutput_dPhi_stddev] }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: regressionGaussian # Athena name: no '_'/'-'
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # default TaskWriter declares regressionGaussian_HadronConeExclTruthLabelPt +
-  # _stddev (split_scalars) and the per-token dummyOutput_dPhi + _stddev. The
-  # stddev = sqrt(softplus(var)) is traced in-graph (design-conformance, no v1
-  # ONNX golden). Inspect with `salt2 graph resolve -c <this file>`.
 
 trainer:
   max_epochs: 2

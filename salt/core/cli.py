@@ -102,7 +102,7 @@ from salt.core.graph.spec import (
     unflatten_spec,
 )
 from salt.core.nn.bind import resolve_bind_schema
-from salt.core.onnx.config import attach_manifest, manifest_table, resolve_export_config
+from salt.core.onnx.config import resolve_export_config
 from salt.core.render import dot_source, plan_table
 from salt.core.schema import dump_schema, load_schema, save_schema
 
@@ -429,55 +429,27 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
         elif mode is Mode.ONNX and onnx_sink_node is not None:
-            # plan 29 W2 folded ONNX path: the OnnxExportSink node (folded into
-            # `modules` above) anchors ALL its conversion-leaf demand via its
-            # declared requires — a terminal consumer the planner keeps alive,
-            # pulling the folded conversion nodes (argmax/split/combine) into the
-            # ONNX plan. No flat manifest ports needed (it renders its own card).
+            # plan 29 W4 folded ONNX path (the SOLE ONNX-output authority): the
+            # OnnxExportSink node (folded into `modules` above) anchors ALL its
+            # conversion-leaf demand via its declared requires — a terminal
+            # consumer the planner keeps alive, pulling the folded conversion nodes
+            # (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/
+            # Combination) into the ONNX plan. No flat manifest ports needed (it
+            # renders its own card). The export-only half (model_name/inputs) is
+            # validated below if an export: block is present.
             keys = []
-        elif mode is Mode.ONNX and writer_cb is not None:
-            # the static half of the design §3.1/§4.1 export contract,
-            # re-sourced at M4.5: ONNX sinks are the union of the writers'
-            # declared manifest ports (the unified output manifest —
-            # exactly what `salt2 export` will trace), and the export-only
-            # half of the export: block is validated as `salt2 export`
-            # does (model_name rule, input entries, rename/combine against
-            # the manifest, the export.outputs migration error) — a broken
-            # manifest fails HERE instead of months later at export time
-            try:
-                per_writer = writer_cb.per_writer_onnx_manifest(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
-                manifest = writer_cb.onnx_manifest(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
-                if export_cfg is not None and manifest:
-                    # validates the export-only half + rename/combine vs the
-                    # manifest, incl. the export.outputs migration error
-                    attach_manifest(resolve_export_config(export_cfg, run_name), manifest)
-                elif export_cfg is None:
-                    mode_warnings[mode] = (
-                        "the config has no export: block — outputs derive from the writers "
-                        "(checked), but export.inputs/model_name were NOT checked; declare "
-                        "the export-only half (design §5.1, §7) so `salt2 graph validate "
-                        "--mode onnx` gates everything `salt2 export` will trace"
-                    )
-                if manifest:
-                    keys = [out.port for out in manifest]
-                    sink_origins[mode] = {
-                        out.port: (
-                            f"ONNX manifest output {out.port!r} (writer {wname!r}, config: "
-                            f"writers.modules.{wname})"
-                        )
-                        for wname, entries in per_writer.items()
-                        for out in entries
-                    }
-                else:
-                    mode_warnings[mode] = (
-                        "the configured writers declare no ONNX outputs (all narrowed out?) "
-                        "— ONNX sinks fall back to every preds.* key; check TaskWriter "
-                        "onnx/onnx_streams/onnx_tasks (M4.5 unified manifest)"
-                    )
-                    keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
-            except ConfigError as err:
-                mode_errors[mode] = str(err)
-                keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
+            if export_cfg is not None:
+                try:
+                    resolve_export_config(export_cfg, run_name)
+                except ConfigError as err:
+                    mode_errors[mode] = str(err)
+            else:
+                mode_warnings[mode] = (
+                    "the config has no export: block — the OnnxExportSink names the outputs, "
+                    "but export.inputs/model_name were NOT checked; declare the export-only "
+                    "half (design §5.1, §7) so `salt2 graph validate --mode onnx` gates "
+                    "everything `salt2 export` will trace"
+                )
         elif mode & Mode.TRAINING and fitval_callbacks:
             # the static half of the design §3.1/§3.4 FIT/VAL-sink contract
             # (D-prereq): configured metrics callbacks DECLARE plan sinks the
@@ -500,11 +472,11 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         else:
             if mode is Mode.ONNX:
                 mode_warnings[mode] = (
-                    "the config has no writers: block — the ONNX contract was NOT checked "
-                    "(sinks fall back to every preds.* key); the ONNX output manifest "
-                    "derives from writers.modules (M4.5 unified manifest; base2.yaml ships "
-                    "defaults) so `salt2 graph validate --mode onnx` gates what "
-                    "`salt2 export` will trace"
+                    "the config declares no OnnxExportSink — the ONNX contract was NOT checked "
+                    "(sinks fall back to every preds.* key); since plan-29 W4 the ONNX output "
+                    "manifest is declared by an OnnxExportSink (callbacks.onnx_export) naming "
+                    "the conversion outputs.* leaves, so `salt2 graph validate --mode onnx` "
+                    "gates what `salt2 export` will trace"
                 )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
         # writer row alignment (design §8): a flat meta.rows sink — UNLESS a sink
@@ -1628,26 +1600,34 @@ def _manifest_block(
         lines.extend(
             f"#   [{wname}] {stream}: {' '.join(columns)}" for stream, columns in streams.items()
         )
-    manifest = writer_cb.onnx_manifest(modules, reader)
-    if not manifest:
+    # plan-29 W4: the ONNX-output annotation derives from the folded OnnxExportSink
+    # (the off-graph writer manifest is retired), not from writer_cb.onnx_manifest.
+    export_sink = _static_onnx_export_sink(cli)
+    if export_sink is None:
         lines.extend((
-            "# onnx outputs (salt2 export): NONE — the writers declare no ONNX outputs",
+            "# onnx outputs (salt2 export): NONE — no OnnxExportSink declared",
             MANIFEST_END,
         ))
         return "\n".join(lines)
-    from dataclasses import replace  # noqa: PLC0415 - stdlib, annotation-path only
+    from salt.core.onnx.config import (  # noqa: PLC0415 - heavy package
+        sanitised_model_name,
+        validate_model_name,
+    )
 
-    from salt.core.onnx.config import ExportConfig, ExportInput  # noqa: PLC0415 - heavy package
-
-    export_half = export_cfg if export_cfg is not None else ExportConfig()
-    if not export_half.inputs:
-        # the manifest needs no inputs — satisfy the export-half resolution
-        # for this print-only path (the salt2 export --manifest precedent)
-        export_half = replace(export_half, inputs=[ExportInput(port="inputs.placeholder")])
-    resolved = attach_manifest(resolve_export_config(export_half, run_name), manifest)
+    if export_sink.model_name is None:
+        export_sink.model_name = validate_model_name(
+            (export_cfg.model_name if export_cfg is not None else None) or sanitised_model_name(run_name)
+        )
     source_note = " — default from run name):" if export_cfg is None else "):"
-    lines.append(f"# onnx outputs (salt2 export; model_name {resolved.model_name!r}{source_note}")
-    lines.extend(f"#   {line}" for line in manifest_table(resolved).splitlines()[1:])
+    lines.append(
+        f"# onnx outputs (salt2 export; model_name {export_sink.model_name!r}{source_note}"
+    )
+    rows = zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True)
+    width = max((len(n) for n in export_sink.output_names()), default=1)
+    lines.extend(
+        f"#   {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)"
+        for name, dtype in rows
+    )
     lines.append(MANIFEST_END)
     return "\n".join(lines)
 

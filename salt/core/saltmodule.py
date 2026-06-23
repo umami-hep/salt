@@ -708,18 +708,13 @@ class SaltModule(lightning.LightningModule):
             ``["loss.total"]`` plus the callback-declared FIT/VAL demand
             keys in FIT/VAL. In TEST with a writer callback
             (attached or passed), the writer-demanded model-produced keys —
-            demand-gating proper (design §8). In ONNX with a writer
-            callback, the union of the writers' declared manifest ports
-            (``WriterCallback.onnx_manifest`` — the M4.5 unified manifest:
-            ONE demand mechanism in both output modes, amendment §4); the
-            export path's `salt.core.onnx.export.compile_onnx_plan` anchors
-            on the same manifest. Without writers (programmatic
-            ``Trainer.test``, toy configs), every declared ``preds.*`` key
-            in declaration order (the M2 fallback). Note the asymmetry, by
-            design: TEST narrowing trips the dead-preds hard error (an
-            eval column silently dropped is a bug), ONNX narrowing is
-            legitimate (the Athena surface is narrower than eval —
-            ``onnx_streams``/``onnx_tasks``).
+            demand-gating proper (design §8). In ONNX the manifest is NO
+            LONGER writer-derived (plan-29 W4): the folded `OnnxExportSink`
+            terminal node anchors its own conversion-leaf demand once folded
+            into the planning module dict (`cli.py` / `export.py`), so this
+            method has no ONNX writer branch — it falls through to every
+            declared ``preds.*`` key in declaration order (the M2 fallback)
+            when no export-sink demand is present.
 
         Raises
         ------
@@ -760,13 +755,12 @@ class SaltModule(lightning.LightningModule):
                         "produces — check writers.modules (design §8)"
                     )
                 return consumed
-        if mode is Mode.ONNX:
-            if writers is None or reader is None:
-                writers, reader = self._attached_writer()
-            if writers is not None and callable(getattr(writers, "onnx_manifest", None)):
-                manifest = writers.onnx_manifest(self._graph_modules, reader)
-                if manifest:
-                    return [out.port for out in manifest]
+        # plan-29 W4: the ONNX output manifest is no longer writer-derived — the
+        # folded OnnxExportSink (a terminal node in `_graph_modules` once folded in
+        # by `cli.py` / `export.py`) anchors its conversion-leaf demand itself, so
+        # `_model_sinks(Mode.ONNX)` has no writer-manifest branch any more. When no
+        # export sink demand is present it falls back to every preds.* key (the M2
+        # all-preds render fallback below).
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "

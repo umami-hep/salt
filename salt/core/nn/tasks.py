@@ -1210,23 +1210,24 @@ class ClassificationTaskModule(_TaskModuleBase):
             self.task.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed v1 head; RAW logits in FIT|VAL|TEST, probs in ONNX.
+        """Run the composed v1 head; RAW logits in EVERY non-training mode.
 
         The v1 head is handed SINGLE-STREAM label/mask dicts: its internal
         ``input_name_mask`` slicing is the identity on per-stream inputs,
         and the loss masking (pad fold to ``ignore_index=-1``, the ``-2``
         label fold, task.py:218-227) runs verbatim.
 
-        Mode semantics (P1.5 flip — design §2 "no per-task forward
-        branching"): the task now publishes RAW logits in EVERY non-ONNX mode
-        (FIT/VAL unchanged; TEST is the flip — it no longer softmaxes here).
-        The eval conversion (softmax / masked softmax) is OWNED by the
-        classification conversion producers (`ClassProbs`/`SeqClassProbs`) on
-        the live path and by `get_h5` on the transitional M4.5 oracle path
-        (both read this raw leaf and `run_inference` it once — design §4a).
-        ONNX is the documented carve-out (deferred to P4): export still
-        publishes the converted probs in `forward` so the ONNX export + its
-        tests are untouched until the producers are traced.
+        Mode semantics (P4 atomic cutover — design §2 "no per-task forward
+        branching" + §6/R9): the task now publishes RAW logits in EVERY
+        non-training mode (FIT/VAL unchanged; TEST flipped at P1.5; ONNX
+        flipped HERE at P4). The eval conversion (softmax / masked softmax) is
+        OWNED by the classification conversion producers (`ClassProbs` /
+        `SeqClassProbs` / `SeqClassIndex`) on the live path and by `get_h5` on
+        the transitional M4.5 oracle path (both read this raw leaf and
+        `run_inference` it once — design §4a). Pre-P4 ONNX kept softmaxing here
+        (the deferred carve-out so the export trace was untouched); now the
+        folded `ClassProbs` node owns the single softmax inside the traced
+        graph, so there is NO double-softmax.
 
         Returns
         -------
@@ -1238,18 +1239,21 @@ class ClassificationTaskModule(_TaskModuleBase):
         ctx = b.get(self.context) if self.context is not None else None
         # objects-stream (query-bank) heads have no pad mask (v1 task.py:547)
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        if mode & Mode.ONNX:
-            # ONNX carve-out (deferred to P4): keep publishing converted probs
-            # so the export trace + tests are unaffected (design §2 mode table).
-            preds, _ = self.task(x, None, None, context=ctx)
-            return {self.pred_key: self.task.run_inference(preds, mask)}
         if mode & Mode.TRAINING:
             labels_dict = {self.stream: {self.label: b.get(self.label_key)}}
             pad_masks = {self.stream: mask} if self.has_pad_mask else None
             preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
-        # TEST (P1.5 flip): publish RAW logits — conversion moves to the
-        # producers (live path) / get_h5 (M4.5 oracle path), design §2.
+        # TEST and ONNX (P4 atomic cutover): publish RAW logits in EVERY non-
+        # training mode — the classification task no longer softmaxes anywhere.
+        # The eval conversion (softmax / masked softmax) is OWNED by the
+        # classification conversion producers (`ClassProbs`/`SeqClassProbs`/
+        # `SeqClassIndex`) on the live path and by `get_h5` on the transitional
+        # M4.5 oracle path (both read this raw leaf and `run_inference` it once).
+        # Pre-P4 ONNX kept publishing the converted probs (the deferred carve-out
+        # so the export trace was untouched); now the folded `ClassProbs` node
+        # owns the softmax, so a single softmax happens in the traced graph (no
+        # double-softmax — design §6 / R9).
         preds, _ = self.task(x, None, None, context=ctx)
         return {self.pred_key: preds}
 

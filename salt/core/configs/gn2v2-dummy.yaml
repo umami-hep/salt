@@ -143,6 +143,27 @@ model:
           # name-based form ({heavy: [FromB, ...]}) lands in M3
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+      # plan-29 W4 folded ONNX conversion producers (design §6.2): each mints an
+      # outputs.* leaf the OnnxExportSink names. Demand-pruned from FIT/VAL/TEST
+      # (active only when the export sink demands its leaf in ONNX), so the FIT
+      # plan_hash is unchanged. POST-P4 the classification task publishes RAW
+      # logits in ONNX, so ClassProbs/SeqClassIndex own the single softmax/argmax.
+      jet_probs:
+        class_path: salt.core.outputs.ClassProbs
+        init_args: { task: jets_classification, stream: jets }
+      track_origin_index:
+        class_path: salt.core.outputs.SeqClassIndex
+        init_args: { task: track_origin, stream: tracks }
+      track_vertex_index:
+        class_path: salt.core.outputs.VertexUnionFind
+        init_args: { task: track_vertexing, stream: tracks }
+
+# Disable the TaskWriter ONNX manifest (eval-only): the ONNX outputs derive from
+# the folded OnnxExportSink below, not the off-graph writer manifest (retired at
+# plan-29 W4). TEST H5 columns are unchanged.
+writers:
+  modules:
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: GN2v2dummy # Athena name: no '_'/'-' (validated at export only);
@@ -150,19 +171,18 @@ export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); iner
   inputs:
     - { port: inputs.jets, name: jet_features } # [1, F] global
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # default TaskWriter (base2.yaml, onnx: true) declares
-  #   GN2v2dummy_pb/_pc/_pu        (split_scalars, from class_names)
-  #   GN2v2dummy_TrackOrigin       (argmax int8, Pascal-case of the task name)
-  #   GN2v2dummy_VertexIndex       (vertex_union_find int8 — the reduce owns
-  #                                 union-find inside the traced graph on the
-  #                                 RAW edge scores the task publishes in ONNX
-  #                                 mode; v1 placement to_onnx.py:426-431,
-  #                                 design §3.3 per-family exception)
-  # Inspect with `salt2 export --manifest -c <this file>` or
-  # `salt2 graph resolve -c <this file> [--annotate]`; narrow per writer with
-  # TaskWriter onnx/onnx_streams/onnx_tasks, rename with onnx_names, and
-  # post-process with export.rename / export.combine.
+
+# The declare-only ONNX sink (design §4.2): NAMES the folded conversion leaves
+# into the flat Athena output tuple, in tuple ORDER (globals, then per-token aux
+# — the v1/oracle order). model_name defaults from export.model_name.
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
+        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }
+        - { key: outputs.tracks.track_vertexing, name: VertexIndex, dtype: int8, per_token: true }
 
 trainer:
   max_epochs: 2

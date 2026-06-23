@@ -21,9 +21,9 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode, flatten_spec
 from salt.core.onnx.reduces import (
     get_maskformer_outputs,
-    get_node_assignment_jit,
     mask_fill_flattened,
 )
+from salt.core.utils.union_find import get_node_assignment_jit
 from salt.core.outputs import (
     H5OutputSink,
     MaskFormerObject,

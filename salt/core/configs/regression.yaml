@@ -155,24 +155,44 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+      # plan-29 W4 folded ONNX conversion producers (design §6.2): each regression
+      # head's de-scaled ONNX prediction is published as an outputs.* leaf the
+      # OnnxExportSink names. The regression task OWNS the de-scaling in ONNX (NOT
+      # flipped by P4 — its de-scale carve-out stays), so these are IDENTITY
+      # TaskOutput passthroughs of the task's already-de-scaled values.
+      reg_normed_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_normed, stream: jets } }
+      reg_multinorm_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multinorm, stream: jets } }
+      reg_ratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_ratio, stream: jets } }
+      reg_multiratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multiratio, stream: jets } }
+      reg_seq_tracks_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_seq_tracks, stream: tracks } }
 
 writers:
   modules:
     # no sequence-stream task -> no pad mask to write; delete the base2.yaml
-    # default (design §5.3 null-deletion). InputCopyWriter + TaskWriter keep
-    # their jets-stream roles (regression columns: <run>_<suffix> f4 per target).
+    # default (design §5.3 null-deletion). InputCopyWriter keeps its jets role.
     pad_mask: null
+    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
+    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
+    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+
+# plan-29 W4 declare-only ONNX sink (design §4.2): names the de-scaled regression
+# leaves into the flat Athena output tuple, in v1/oracle ORDER.
+callbacks:
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      outputs:
+        - { key: outputs.jets.reg_normed, names: [HadronConeExclTruthLabelPt] }
+        - { key: outputs.jets.reg_multinorm, names: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt] }
+        - { key: outputs.jets.reg_ratio, names: [pt] }
+        - { key: outputs.jets.reg_multiratio, names: [truthMass, truthPt] }
+        - { key: outputs.tracks.reg_seq_tracks, names: [dummyOutput_dPhi, dummyOutput_dEta] }
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: regression # Athena name: no '_'/'-' (validated at export only)
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # default TaskWriter declares regression_HadronConeExclTruthLabelPt,
-  # regression_R10..Mass/Pt, regression_pt (split_scalars). The ratio head's
-  # ONNX de-scaling gathers pt_btagJes from the declared jet input by name.
-  # Inspect with `salt2 graph resolve -c <this file>`.
 
 trainer:
   max_epochs: 2

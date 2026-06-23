@@ -41,6 +41,12 @@ model:
         weight: 1.5
         dense: {hidden_layers: [16], activation: ReLU}
         expose: [fit, val] # opt the deferred (P2) vertexing head out of TEST eval
+    # drop the base gn2v2-dummy ONNX conversion nodes that this TEST cutover does
+    # not use: track_origin_index (this cutover writes the full SeqClassProbs
+    # columns, not the argmax index) and track_vertex_index (vertexing is opted out
+    # of TEST here). jet_probs (ClassProbs) is shared, so it is re-declared below.
+    track_origin_index: null
+    track_vertex_index: null
     # classification conversion producers (design §2 layer 1): read the RAW
     # logits the flipped task forward publishes and softmax once.
     jet_probs:
@@ -64,6 +70,10 @@ writers:
 # source fields (v1 InputCopyWriter default); write_pad_mask -> boolean tracks
 # mask. Column order (copies, probs, mask) matches the v1 group layout.
 callbacks:
+  # this TEST cutover does no ONNX export — drop the base gn2v2-dummy OnnxExportSink
+  # (else its ONNX-mode demand for outputs.tracks.track_vertexing has no producer,
+  # the vertexing head being opted out here)
+  onnx_export: null
   h5_output:
     class_path: salt.core.outputs.H5OutputWriter
     init_args:
