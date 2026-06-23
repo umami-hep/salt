@@ -3,7 +3,7 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor, nn
 
-from salt.models import MaskFormerLoss
+from salt.models.maskformer_loss import MaskFormerLoss
 from salt.models.transformer import GLU, Attention
 from salt.stypes import Tensors
 from salt.utils.mask_utils import indices_from_mask
@@ -42,6 +42,10 @@ class MaskDecoder(nn.Module):
     aux_loss : bool, optional
         If ``True``, store intermediate predictions after each decoder layer
         for auxiliary losses, by default ``False``.
+    constituent_name : str | None, optional
+        Name of the constituent collection to use for the decoder, by default ``None``.
+    class_weights : list[float] | None, optional
+        Optional class weights forwarded to :class:`MaskFormerLoss`, by default ``None``.
     """
 
     def __init__(
@@ -54,6 +58,8 @@ class MaskDecoder(nn.Module):
         num_objects: int,
         loss_config: Mapping,
         aux_loss: bool = False,
+        constituent_name: str | None = None,
+        class_weights: list[float] | None = None,
     ):
         super().__init__()
         self.aux_loss = aux_loss
@@ -71,7 +77,10 @@ class MaskDecoder(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
 
-        self.mask_loss = MaskFormerLoss(**loss_config, num_objects=num_objects)
+        self.mask_loss = MaskFormerLoss(
+            **loss_config, num_objects=num_objects, class_weights=class_weights
+        )
+        self.constituent_name = constituent_name
 
     def get_preds(
         self,
@@ -166,14 +175,35 @@ class MaskDecoder(nn.Module):
         # MF only supports one input, if we have multiple then we have no way of knowing
         # what section of the embedding relates to objects we want to generate masks for
         if isinstance(pad_mask, dict):
-            assert len(pad_mask) == 1, "Maskformer only supports one input."
-            pad_mask = next(iter(pad_mask.values()))
+            if self.constituent_name is not None:
+                # Create the mask to extract only the relevent consituent embeddings
+                emb_mask = torch.zeros(
+                    preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+                )
+
+                i = 0
+                for k, v in pad_mask.items():
+                    if k == self.constituent_name:
+                        emb_mask[i : i + v.shape[1]] = True
+                        break
+                    i += v.shape[1]
+                pad_mask = pad_mask[self.constituent_name]
+            else:
+                assert len(pad_mask) == 1, "Maskformer only supports one input."
+                pad_mask = next(iter(pad_mask.values()))
+                emb_mask = torch.ones(
+                    preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+                )
+        else:
+            emb_mask = torch.ones(
+                preds["embed_xs"].shape[1], dtype=torch.bool, device=preds["embed_xs"].device
+            )
 
         x = preds["embed_xs"]
+        x = x[:, emb_mask, :]
         # apply norm
         q = self.norm1(self.inital_q.expand(x.shape[0], -1, -1))
         x = self.norm2(x)
-
         # Add a dummy track to the inputs (and to pad mask) to stop onnx complaining
         xpad = torch.zeros((x.shape[0], 1, x.shape[-1]), device=x.device, dtype=x.dtype)
         x = torch.cat([x, xpad], dim=1)
@@ -190,7 +220,6 @@ class MaskDecoder(nn.Module):
                 intermediate_outputs.append({"embed": q, **self.get_preds(q, x, pad_mask)})
             q, x = layer(q, x, kv_mask=pad_mask)
         mf_preds = self.get_preds(q, x, pad_mask)
-
         # Un-pad the embedding x, get the mf_predictions, and then unpad them as well
         preds["objects"] = {"embed": q, "x": x[:, :-1, :], **mf_preds}
         preds["objects"]["masks"] = preds["objects"]["masks"][:, :, :-1]
@@ -198,7 +227,32 @@ class MaskDecoder(nn.Module):
             preds["intermediate_outputs"] = intermediate_outputs
 
         if labels is not None:
-            return self.mask_loss(preds, tasks, labels)
+            # Check if label and query dimensions match (they won't for test
+            # data which may have different padding, e.g. 25 vs 15 objects)
+            label_dim = next(iter(labels["objects"].values())).shape[1]
+            query_dim = preds["objects"]["embed"].shape[1]
+
+            if label_dim == query_dim:
+                # Dimensions match (train + val): full loss path with matching.
+                # Do not nan_to_num regression targets here — invalid slots are filtered
+                # downstream by class_label == null_index. Zeroing NaN would train every
+                # null-matched Hungarian slot to predict 0.
+                return self.mask_loss(preds, tasks, labels)
+
+            # Dimension mismatch (test data): produce predictions without loss
+            for task in tasks:
+                if task.input_name == "objects":
+                    task_pred = task.net(preds["objects"]["embed"])
+                    preds["objects"][task.name] = task_pred
+
+        # Inference / ONNX export path: labels are unavailable, so object tasks
+        # are not handled by the loss. Still run them to expose object-level
+        # predictions such as regression.
+        if labels is None:
+            for task in tasks:
+                if task.input_name == "objects":
+                    task_pred = task.net(preds["objects"]["embed"])
+                    preds["objects"][task.name] = task_pred
 
         return preds, labels, {}
 
@@ -392,6 +446,8 @@ class MaskDecoderLayer(nn.Module):
             self.kv_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
             self.kv_dense = GLU(embed_dim)
         self.mask_net = mask_net
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(
         self,
@@ -451,4 +507,8 @@ class MaskDecoderLayer(nn.Module):
 
             kv = kv + self.kv_ca(kv, q, attn_mask=attn_mask)
             kv = kv + self.kv_dense(kv)
+        # Perform a normalization step
+        q = self.norm1(q)
+        kv = self.norm2(kv)
+
         return q, kv

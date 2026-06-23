@@ -14,6 +14,7 @@ from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
 from salt.utils.array_utils import listify
+from salt.utils.configs import MaskformerObjectConfig
 
 
 # add support for converting yaml lists to tensors
@@ -102,6 +103,13 @@ class SaltCLI(LightningCLI):
         parser.link_arguments("name", "model.name")
         parser.link_arguments("data.global_object", "model.global_object")
 
+        # Auto-link of model.mask_decoder.num_objects → data.mf_config.object.max_objects
+        # is performed in `before_instantiate_classes` instead of via
+        # `parser.link_arguments`. jsonargparse cannot link cleanly into the
+        # dataclass-backed `mf_config` (the ``null:`` YAML key becomes a
+        # Python ``None`` and triggers `NSKeyError: Key must be a string`
+        # when jsonargparse tries to wrap the nested dict as a Namespace).
+
     def add_arguments_to_parser(self, parser: Any) -> None:
         """Add SALT-specific CLI arguments to the parser.
 
@@ -174,7 +182,7 @@ class SaltCLI(LightningCLI):
         config = self.config[self.subcommand] if self.subcommand else self.config
         sc_tasks = config.model.model.init_args.tasks.init_args.modules
 
-        labels: dict = {}
+        labels: dict = config.data.get("labels") or {}
         for task in sc_tasks:
             assert "Task" in task["class_path"]
             self.collect_labels_from_task(
@@ -204,6 +212,38 @@ class SaltCLI(LightningCLI):
                 maskformer_config.object.class_label,
             ]
             labels[maskformer_config.constituent.name] += [maskformer_config.constituent.id_label]
+            if (
+                config.model.model.init_args.get("mask_decoder")
+                .get("init_args", {})
+                .get("class_weights")
+                is None
+            ):
+                config.model.model.init_args.mask_decoder.init_args.class_weights = (
+                    MaskformerObjectConfig(**maskformer_config.object).object_weights
+                )
+                print(
+                    "OBJECT WEIGHTS",
+                    config.model.model.init_args.mask_decoder.init_args.class_weights,
+                )
+
+            # Auto-link mask_decoder.num_objects → mf_config.object.max_objects
+            # when the user did not set max_objects explicitly. This mirrors a
+            # `link_arguments` call but works against the dataclass-backed
+            # mf_config which jsonargparse doesn't link cleanly into.
+            mask_decoder_init = config.model.model.init_args.mask_decoder.get("init_args", {}) or {}
+            num_objects_val = mask_decoder_init.get("num_objects")
+            obj_cfg = maskformer_config.object
+            if (
+                num_objects_val is not None
+                and obj_cfg.get("max_objects") is None
+                and obj_cfg.get("num_objects") is None
+            ):
+                obj_cfg.max_objects = num_objects_val
+                obj_cfg.num_objects = num_objects_val
+                print(
+                    f"Auto-linked mf_config.object.max_objects = "
+                    f"mask_decoder.num_objects = {num_objects_val}"
+                )
 
         config.data.labels = labels
 

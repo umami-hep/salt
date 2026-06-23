@@ -1,9 +1,71 @@
-from typing import Any
-
-import scipy
 import torch
+from py_lap_solver.solvers import Solvers
 from torch import Tensor, nn
 from torch.nn import functional
+
+SOLVER_REGISTRY = Solvers.get_available_solvers()
+
+
+def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: int) -> Tensor:
+    """Fill unmatched assignments (-1 values) with remaining prediction indices (vectorized).
+
+    Parameters
+    ----------
+    assignments : Tensor
+        Tensor of shape (batch_size, num_objects) containing assignment indices.
+        Values of -1 indicate unmatched objects.
+    num_predictions : int
+        Total number of predictions available.
+
+    Returns
+    -------
+    Tensor
+        Assignments with -1 values replaced by unused prediction indices.
+    """
+    batch_size, _num_objects = assignments.shape
+    device = assignments.device
+
+    # Create mask for unmatched assignments
+    unmatched_mask = assignments < 0
+
+    # Early exit if no unmatched assignments
+    if not unmatched_mask.any():
+        return assignments
+
+    all_indices = torch.arange(num_predictions, device=device).unsqueeze(0).expand(batch_size, -1)
+
+    # Mark which indices are already used
+    # We need to create a mask where True means the index is used
+    used_mask = torch.zeros(batch_size, num_predictions, dtype=torch.bool, device=device)
+
+    # For valid assignments (>= 0), mark them as used
+    valid_mask = assignments >= 0
+    if valid_mask.any():
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand_as(assignments)
+        used_mask[batch_indices[valid_mask], assignments[valid_mask]] = True
+
+    # Get unused indices (available for assignment)
+    available_mask = ~used_mask  # Shape: (batch_size, num_predictions)
+
+    # Sort available indices per batch to get them in order
+    # For each batch element, we want to extract available indices in sorted order
+    # Use a trick: multiply by large number to push non-available to the end
+    sort_keys = all_indices.float() + (~available_mask).float() * 1e10
+    sorted_indices = torch.argsort(sort_keys, dim=1)
+    sorted_available = torch.gather(all_indices, 1, sorted_indices)
+
+    # Now sorted_available has all available indices at the beginning of each row
+
+    # Get cumulative position of each unmatched slot within its batch
+    # This tells us which available index to use (0th, 1st, 2nd, ...)
+    unmatched_ranks = torch.cumsum(unmatched_mask.long(), dim=1) - 1
+
+    # For each unmatched position, gather the corresponding available index
+    # unmatched_ranks tells us which position in sorted_available to use
+    filled_indices = torch.gather(sorted_available, 1, unmatched_ranks.clamp(min=0))
+
+    # Replace -1 values with the filled indices (only where unmatched_mask is True)
+    return torch.where(unmatched_mask, filled_indices, assignments)
 
 
 @torch.jit.script
@@ -148,6 +210,13 @@ class HungarianMatcher(nn.Module):
         Weights for individual loss components, e.g.
         ``{"object_class_ce": 1.0, "mask_dice": 1.0, "mask_ce": 0.0, "mask_focal": 0.0,
         "regression": 0.0}``.
+    solver_name : str, optional
+        Name of the LAP solver to use, by default ``"BatchedScipyOMP"``.
+
+    Raises
+    ------
+    ValueError
+        If ``solver_name`` is not available in ``SOLVER_REGISTRY``.
 
     Notes
     -----
@@ -159,6 +228,7 @@ class HungarianMatcher(nn.Module):
         num_classes: int,
         num_objects: int,
         loss_weights: dict[str, float],
+        solver_name: str = "BatchedScipyOMP",
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -167,6 +237,11 @@ class HungarianMatcher(nn.Module):
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
 
         self.global_step = 0
+        if solver_name not in SOLVER_REGISTRY:
+            available_solvers = ", ".join(sorted(SOLVER_REGISTRY))
+            msg = f"Unknown LAP solver '{solver_name}'. Available solvers: {available_solvers}"
+            raise ValueError(msg)
+        self.solver_name = solver_name
 
     def get_batch_cost(
         self,
@@ -204,6 +279,7 @@ class HungarianMatcher(nn.Module):
         obj_class_tgt = targets["object_class"].detach()
         obj_class_pred = preds["class_probs"].detach()
         mask_pred = preds["masks"].detach()
+        mask_pred = mask_pred.clamp(min=-1e4, max=1e4)
         mask_tgt = targets["masks"].detach().to(mask_pred.dtype)
 
         valid_obj_idx = obj_class_tgt != self.num_classes
@@ -214,6 +290,7 @@ class HungarianMatcher(nn.Module):
             obj_class_tgt[:, : self.num_classes].unsqueeze(1).expand(-1, obj_class_pred.size(1), -1)
         )
         valid_obj_mask = obj_class_tgt != self.num_classes
+
         output = torch.gather(obj_class_pred, 2, obj_class_tgt * valid_obj_mask) * valid_obj_mask
         obj_class_cost = torch.zeros((bs, self.num_objects, self.num_objects), device=dev)
         obj_class_cost[:, :, : self.num_classes] = -output
@@ -224,19 +301,49 @@ class HungarianMatcher(nn.Module):
         # add mask costs
         if self.loss_weights.get("mask_dice"):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
+            if torch.isinf(cost_mask_dice).any() or torch.isnan(cost_mask_dice).any():
+                print(
+                    "Nans in cost matrix, DICE; this is probably due to the "
+                    "mask dice targets being inf."
+                )
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
             cost_matrix += self.loss_weights["mask_dice"] * cost_mask_dice
         if self.loss_weights.get("mask_ce"):
             cost_mask_ce = batch_sigmoid_ce_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_ce"] * cost_mask_ce
+            if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
+                print(
+                    "Nans in cost matrix, CE this is probably due to the mask ce targets being inf."
+                )
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
+                print("Mask cost:", cost_mask_ce)
         if self.loss_weights.get("mask_focal"):
             cost_mask_focal = batch_sigmoid_focal_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_focal"] * cost_mask_focal
+            if torch.isinf(cost_matrix).any() or torch.isnan(cost_matrix).any():
+                print(
+                    "Nans in cost matrix, FOCAL; this is probably due to the "
+                    "mask focal loss targets being inf."
+                )
+                print("Mask targets:", mask_tgt)
+                print("Mask predictions:", mask_pred)
 
         # add regression costs
         if "regression" in preds and self.loss_weights.get("regression"):
             reg_pred = preds["regression"]
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
-            cost_matrix += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
+            reg_tgt = torch.nan_to_num(reg_tgt, nan=0.0, posinf=0.0, neginf=0.0)
+            reg_cost = batch_mae_loss(reg_pred, reg_tgt)
+            # TODO(npond): Figure out why we have nans in the targets.
+            if torch.isnan(reg_cost).any() or torch.isinf(reg_cost).any():
+                print(
+                    "Nans or infs in cost matrix, REG; this is probably due to "
+                    "the regression targets being nan."
+                )
+                print("Regression targets:", reg_cost)
+            cost_matrix += self.loss_weights["regression"] * reg_cost
 
         # set entries corresponding to invalid objects to nan
         # (these are removed later when running LSAP)
@@ -270,48 +377,16 @@ class HungarianMatcher(nn.Module):
             Assigned target indices per batch of shape ``[B, M]``; unassigned
             slots are filled to cover all ``num_objects`` by appending remaining indices.
         """
-        batch_size = preds["class_logits"].shape[0]
+        device = preds["class_logits"].device
 
-        idxs: list[list[int]] = []
-        self.default_idx = set(range(self.num_objects))
+        # Get the full cost matrix, then run batched LSAP
+        full_cost, batch_n = self.get_batch_cost(preds, targets)
+        batch_n = batch_n.squeeze(-1).cpu().numpy()
 
-        # Get the full cost matrix, then run lsap on each batch element
-        full_cost, n_batch = self.get_batch_cost(preds, targets)
-        full_cost = full_cost.to(torch.float32).cpu().numpy()
-
-        for batch_idx in range(batch_size):
-            # get the cost matrix for this batch element
-            cost_matrix = full_cost[batch_idx][:, : n_batch[batch_idx]]
-
-            # get the optimal assignment
-            idx = self.lap(cost_matrix)
-
-            idxs.append(idx)
-
-        # get the device so we can put the indices on the same device as the predictions
-        d = preds["class_logits"].device
-        # format indices to allow simple indexing
-        idxs_tensor = torch.tensor(idxs).to(d)
-        batch_arange = torch.arange(len(idxs)).unsqueeze(1).to(d)
-        idxs_tuple = (batch_arange, idxs_tensor)  # shape-compatible indexing tuple
-
+        solver = SOLVER_REGISTRY[self.solver_name]
+        full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
+        assignments = solver.batch_solve(full_cost, num_valid=batch_n)
+        assignments = torch.from_numpy(assignments).to(torch.int64).to(device)
+        assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
         self.global_step += 1
-        return idxs_tuple
-
-    def lap(self, cost: Any) -> list[int]:
-        """Solve the linear sum assignment problem for a single cost matrix.
-
-        Parameters
-        ----------
-        cost : Any
-            Cost matrix of shape ``[N, M]``.
-
-        Returns
-        -------
-        list[int]
-            Ordered list of selected target indices ``idx`` aligned with sources,
-            extended by appending any remaining indices to cover all ``num_objects``.
-        """
-        src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
-        idx = src_idx[tgt_idx]
-        return list(idx) + sorted(self.default_idx - set(idx))
+        return (torch.arange(len(assignments)).unsqueeze(1).to(assignments.device), assignments)

@@ -223,6 +223,21 @@ class ModelWrapper(lightning.LightningModule):
         x = self.norm(inputs)
         return self.model(x, pad_masks, labels)
 
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Normalise ``torch.compile`` key prefixes in the saved state_dict.
+
+        Training with ``--compile`` wraps ``self.model`` in
+        ``torch._dynamo.OptimizedModule``, which prepends ``_orig_mod.`` to every
+        parameter key when the checkpoint is saved. Loading such a checkpoint
+        into a non-compiled module fails with a strict state_dict mismatch.
+        Mirrors the offline :mod:`salt.utils.repair_ckpt` logic, applied
+        in-memory before Lightning calls ``load_state_dict``.
+        """
+        state_dict = checkpoint.get("state_dict")
+        if not state_dict or not any("_orig_mod." in k for k in state_dict):
+            return
+        checkpoint["state_dict"] = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
     def shared_step(self, batch: tuple, evaluation: bool = False):
         """Unpack a batch, run forward, and compute loss.
 
@@ -333,8 +348,8 @@ class ModelWrapper(lightning.LightningModule):
             and self.trainer.precision == "32-true"
         ):
             change_attn_backends(self, backend="torch-math")
-        inputs, pad_masks, _ = batch
-        batch = (inputs, pad_masks, None)
+        inputs, pad_masks, labels = batch
+        batch = (inputs, pad_masks, labels)
         return self.shared_step(batch, evaluation=True)[0]
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:

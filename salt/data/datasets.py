@@ -21,7 +21,7 @@ from torch.utils.data import Dataset
 
 from salt.stypes import Vars
 from salt.utils.array_utils import maybe_copy
-from salt.utils.configs import LabellerConfig, MaskformerConfig
+from salt.utils.configs import LabellerConfig, MaskformerConfig, MaskformerObjectConfig
 from salt.utils.inputs import as_half
 from salt.utils.mask_utils import build_target_masks
 
@@ -34,6 +34,138 @@ OPERATORS = {
     ">": operator.gt,
     "<": operator.lt,
 }
+
+
+def _select_objects(batch: np.ndarray, obj_config: MaskformerObjectConfig) -> np.ndarray:
+    """Apply per-jet cuts, sort, PV-pin, and truncation to the objects array.
+
+    The selection has four phases applied per-jet:
+
+    1. **Cuts** — vertices failing any :attr:`MaskformerObjectConfig.cuts`
+       entry are dropped. NaN values fail (strict). PV is exempt.
+    2. **PV pin** — vertices whose ``class_label`` raw value maps to
+       ``pv_class`` are placed at slot 0 (in the order they appeared in
+       the HDF5 file).
+    3. **Sort** — surviving non-PV vertices are sorted by
+       :attr:`MaskformerObjectConfig.sort_by` (default descending).
+    4. **Truncate** — only the first ``max_objects`` survivors are kept.
+
+    Pad slots in the output have ``valid=False``, ``id_label=-1``, and
+    ``class_label`` set to the raw null value, so downstream code
+    (:func:`build_target_masks`, :meth:`SaltDataset.process_labels`)
+    treats them as invalid.
+
+    Parameters
+    ----------
+    batch : np.ndarray
+        Structured array of shape ``(n_jets, n_in)`` freshly read from
+        HDF5.
+    obj_config : MaskformerObjectConfig
+        Object configuration carrying ``cuts``, ``sort_by``,
+        ``sort_descending``, ``pv_class``, and ``max_objects``.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array of the same dtype, shape ``(n_jets, n_out)``
+        where ``n_out = max_objects`` if set, else ``n_in``.
+
+    Raises
+    ------
+    KeyError
+        If a configured cut/sort field is missing from the input dtype.
+    """
+    n_jets, n_in = batch.shape
+    n_out = obj_config.max_objects if obj_config.max_objects is not None else n_in
+
+    # Validate required fields exist in the structured array
+    needed: set[str] = set()
+    if obj_config.cuts:
+        needed.update(c.field for c in obj_config.cuts)
+    if obj_config.sort_by is not None:
+        needed.add(obj_config.sort_by)
+    if obj_config.class_label is not None and obj_config.pv_class is not None:
+        needed.add(obj_config.class_label)
+    missing = needed - set(batch.dtype.names)
+    if missing:
+        raise KeyError(
+            f"Object selection requires fields {sorted(missing)} but batch "
+            f"dtype has {batch.dtype.names}. Add the missing fields to "
+            "data.variables.objects in the config."
+        )
+
+    # Build per-vertex 'survives cuts' mask, vectorised over (n_jets, n_in).
+    # NaN in any cut field FAILS the cut.
+    keep = np.ones((n_jets, n_in), dtype=bool)
+    if obj_config.cuts:
+        for cut in obj_config.cuts:
+            vals = batch[cut.field]
+            ok = np.ones_like(vals, dtype=bool)
+            if np.issubdtype(vals.dtype, np.floating):
+                ok &= ~np.isnan(vals)  # NaN fails
+            if cut.min is not None:
+                ok &= vals >= cut.min
+            if cut.max is not None:
+                ok &= vals <= cut.max
+            keep &= ok
+
+    # Padding slots from the file are not candidates
+    has_valid = "valid" in batch.dtype.names
+    if has_valid:
+        keep &= batch["valid"].astype(bool)
+
+    # PV identification (vectorised). PV is always pinned at slot 0 and
+    # exempt from cuts/sorts.
+    pv_raw = obj_config.pv_raw_values
+    class_field = obj_config.class_label
+    if pv_raw is not None and class_field is not None and class_field in batch.dtype.names:
+        pv_mask = np.isin(batch[class_field], list(pv_raw))
+        if has_valid:
+            pv_mask &= batch["valid"].astype(bool)
+    else:
+        pv_mask = np.zeros((n_jets, n_in), dtype=bool)
+
+    sort_field = obj_config.sort_by
+    out = np.zeros((n_jets, n_out), dtype=batch.dtype)  # valid defaults to 0/False
+
+    for j in range(n_jets):
+        row = batch[j]
+        is_pv_j = pv_mask[j]
+        non_pv_keep_j = keep[j] & ~is_pv_j
+
+        pv_idx = np.where(is_pv_j)[0]
+        non_pv_idx = np.where(non_pv_keep_j)[0]
+
+        if sort_field is not None and len(non_pv_idx) > 0:
+            order = np.argsort(row[sort_field][non_pv_idx], kind="stable")
+            if obj_config.sort_descending:
+                order = order[::-1]
+            non_pv_idx = non_pv_idx[order]
+
+        chosen = np.concatenate([pv_idx, non_pv_idx])[:n_out]
+        if len(chosen) > 0:
+            out[j, : len(chosen)] = row[chosen]
+
+    # Sentinel-fill pad slots so they don't collide with real IDs in
+    # build_target_masks and so process_labels maps them cleanly to null.
+    # No 'valid' field -> there is no clean way to infer pad slots, so leave
+    # id/class fields untouched in that case.
+    pad_mask = ~out["valid"].astype(bool) if has_valid else np.zeros((n_jets, n_out), dtype=bool)
+
+    id_field = obj_config.id_label
+    if id_field in out.dtype.names and pad_mask.any():
+        out[id_field][pad_mask] = -1  # mask_utils.build_target_masks treats -1 as invalid
+
+    null_raw = obj_config.null_raw_value
+    if (
+        class_field is not None
+        and class_field in out.dtype.names
+        and null_raw is not None
+        and pad_mask.any()
+    ):
+        out[class_field][pad_mask] = null_raw
+
+    return out
 
 
 class SaltDataset(Dataset):
@@ -414,6 +546,21 @@ class SaltDataset(Dataset):
         """
         return int(self.num)
 
+    def _needs_object_selection(self) -> bool:
+        """Whether ``_select_objects`` should run for the configured ``mf_config``.
+
+        Returns
+        -------
+        bool
+            ``True`` if any of ``cuts``, ``sort_by``, or ``max_objects`` is
+            configured. ``False`` short-circuits the legacy fast path
+            (no object selection).
+        """
+        if self.mf_config is None:
+            return False
+        obj = self.mf_config.object
+        return obj.cuts is not None or obj.sort_by is not None or obj.max_objects is not None
+
     def __getitem__(
         self, object_idx: slice
     ) -> tuple[
@@ -460,6 +607,14 @@ class SaltDataset(Dataset):
             shape = (object_idx.stop - object_idx.start, *self.dss[input_name].shape[1:])
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
+
+            # MaskFormer per-jet object selection (cuts, sort, PV-pin, truncate)
+            if (
+                input_name == "objects"
+                and self.mf_config is not None
+                and self._needs_object_selection()
+            ):
+                batch = _select_objects(batch, self.mf_config.object)
 
             # apply selections for constituent inputs
             if self.selectors and (selector := self.selectors.get(input_name)):
@@ -515,12 +670,21 @@ class SaltDataset(Dataset):
                 inputs[input_name] = torch.from_numpy(maybe_copy(flat_array))
 
                 # apply the input padding mask
+                # "objects" is excluded because it carries MaskFormer per-jet
+                # truth-vertex metadata (Lxy, pt, etc. used by _select_objects /
+                # build_target_masks), not encoder input. If a pad_mask were
+                # written for "objects" it would leak into the encoder's
+                # concatenated mask via SaltModel.forward → Transformer.forward
+                # (which builds `mask = cat(pad_mask.values())`) and produce a
+                # shape mismatch against the concatenated input `x` (which only
+                # contains init_net streams like tracks/flows). See exp 22 fix.
                 if "valid" in batch.dtype.names and input_name not in {
                     "parameters",
                     self.global_object,
                     "global",
+                    "objects",
                 }:
-                    pad_masks[input_name] = ~torch.from_numpy(batch["valid"])
+                    pad_masks[input_name] = ~torch.from_numpy(batch["valid"]).bool()
                     inputs[input_name][pad_masks[input_name]] = 0
 
                 # check inputs are finite
@@ -639,8 +803,21 @@ class SaltDataset(Dataset):
                     and label == self.mf_config.object.class_label
                 ):
                     for k, v in self.mf_config.object.class_map.items():
-                        x[x == k] = v
-                        labels[input_name]["object_class"] = x
+                        for kk in k:
+                            x[x == kk] = v
+                    # Optional Lxy cut: re-label far-tracker vertices to null.
+                    # Vertices with |Lxy| > max_lxy_mm cannot be reconstructed by the
+                    # tracker and should not contribute classification or regression loss.
+                    # NaN Lxy (legitimate on null slots) is safe: np.abs(nan) > thr is
+                    # always False, so null slots are never accidentally re-labelled.
+                    # NOTE: lxy_field must appear in data.variables.objects in the config.
+                    if self.mf_config.object.max_lxy_mm is not None:
+                        lxy_field = self.mf_config.object.lxy_field
+                        lxy = maybe_copy(batch[lxy_field])
+                        null_idx = self.mf_config.object.null_index
+                        too_far = np.abs(lxy) > self.mf_config.object.max_lxy_mm
+                        x[too_far] = null_idx
+                labels[input_name]["object_class"] = x
                 labels[input_name][label] = x
             return labels[input_name]
         return None

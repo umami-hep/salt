@@ -116,9 +116,16 @@ class MaskFormerLoss(nn.Module):
         Same as loss_weights but for the matching cost, by default None
     null_class_weight: float, optional
         Relative classification weight applied to the no-object category, by default 0.5
+    class_weights: list[float] | None, optional
+        Optional weights for object classes, with or without the null class.
     losses: list[str] | None, optional
         List of all the losses to be applied. See get_loss for list of available losses,
         by default None
+
+    Raises
+    ------
+    ValueError
+        If ``class_weights`` has an invalid length.
     """
 
     def __init__(
@@ -128,6 +135,7 @@ class MaskFormerLoss(nn.Module):
         loss_weights: dict,
         matcher_weights: dict | None = None,
         null_class_weight: float = 0.5,
+        class_weights: list[float] | None = None,
         losses: list[str] | None = None,
     ):
         super().__init__()
@@ -136,6 +144,19 @@ class MaskFormerLoss(nn.Module):
         assert self.num_classes > 0
         if self.num_classes == 1:
             empty_weight = torch.tensor([self.null_class_weight])
+        elif class_weights is not None:
+            if len(class_weights) == self.num_classes + 1:
+                # if class_weights is provided, it must be of size num_classes + 1
+                empty_weight = torch.tensor(class_weights)
+            elif len(class_weights) == self.num_classes:
+                # if class_weights is provided, it must be of size num_classes
+                # and we add the null class weight at the end
+                empty_weight = torch.tensor([*class_weights, self.null_class_weight])
+            else:
+                raise ValueError(
+                    f"Invalid class_weights length: {len(class_weights)}. "
+                    f"Expected {self.num_classes} or {self.num_classes + 1}."
+                )
         else:
             empty_weight = torch.ones(self.num_classes + 1)
             empty_weight[-1] = self.null_class_weight
@@ -345,5 +366,34 @@ class MaskFormerLoss(nn.Module):
         # compute the requested losses
         for loss in self.losses:
             losses.update(self.get_loss(loss, preds, labels))
+
+        # compute regression loss on Hungarian-matched predictions.
+        # Filter by class_label == null_index (self.num_classes) rather than isnan —
+        # NaN targets are not a reliable sentinel (they don't survive nan_to_num,
+        # float16 arithmetic, etc.). object_class is the single source of truth
+        # for "this slot has no real truth vertex, skip its regression".
+        valid = labels["objects"]["object_class"] != self.num_classes  # [B, M]
+
+        for task in tasks:
+            if task.input_name == "objects" and task.name in preds["objects"]:
+                matched_preds = preds["objects"][task.name]
+                matched_targets = labels["objects"][task.name]
+
+                if matched_preds.ndim == 3:
+                    valid_mask = valid.unsqueeze(-1).expand_as(matched_preds)
+                else:
+                    valid_mask = valid
+                pred_v = matched_preds[valid_mask]
+                tgt_v = matched_targets[valid_mask]
+
+                if pred_v.numel() == 0:
+                    # edge case: batch has no real vertices at all
+                    task_loss = matched_preds.sum() * 0.0
+                else:
+                    task_loss = task.loss(pred_v, tgt_v)
+                    if task_loss.ndim > 0:
+                        task_loss = task_loss.mean()
+                    task_loss = task_loss * task.weight
+                losses[task.name] = task_loss * self.loss_weights.get("regression", 1.0)
 
         return preds, labels, losses

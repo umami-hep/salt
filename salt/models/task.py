@@ -479,6 +479,10 @@ class RegressionTaskBase(TaskBase, ABC):
             # dimension. This allows us to keep the same code for both global and query scaling
             if len(targets.shape) == 3:
                 targets = targets.transpose(1, 2)
+
+        # TODO(npond): Move this or use a more robust target sanitisation step.
+        if targets is not None:
+            targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
         return targets
 
 

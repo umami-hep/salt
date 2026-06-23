@@ -6,6 +6,7 @@ from salt.callbacks.checkpoint import Checkpoint
 from salt.callbacks.confusion_matrix import ConfusionMatrixCallback
 from salt.callbacks.gradient_logger import GradientLoggerCallback
 from salt.callbacks.integrated_gradients_writer import IntegratedGradientWriter
+from salt.callbacks.maskformer_confusion_matrix import MaskformerConfusionMatrix
 from salt.callbacks.maskformer_metrics import MaskformerMetrics
 from salt.callbacks.performancewriter import PerformanceWriter
 from salt.callbacks.predictionwriter import PredictionWriter
@@ -17,6 +18,7 @@ __all__ = [
     "ConfusionMatrixCallback",
     "GradientLoggerCallback",
     "IntegratedGradientWriter",
+    "MaskformerConfusionMatrix",
     "MaskformerMetrics",
     "PerformanceWriter",
     "PredictionWriter",

@@ -7,6 +7,7 @@ from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
+from salt.data.datasets import _select_objects
 from salt.models.task import (
     ClassificationTask,
     GaussianRegressionTask,
@@ -130,6 +131,12 @@ class PredictionWriter(Callback):
             if "objects" not in self.outputs:
                 self.outputs["objects"] = {}
 
+            self.object_params = {
+                "class_label": self.ds.mf_config.object.class_label,
+                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
+                "constituent_name": self.ds.mf_config.constituent.name,
+            }
+
     def _read_inputs_slice(
         self,
         dataset_name: str,
@@ -159,7 +166,23 @@ class PredictionWriter(Callback):
         """
         with h5py.File(self.filename, "r") as f:
             dset = f[dataset_name]
-            return dset.fields(list(variables))[blow:bhigh]
+            slice_arr = dset.fields(list(variables))[blow:bhigh]
+
+        # Mirror the training-time per-jet object selection (cuts → PV-pin →
+        # sort → truncate) on the objects input so the written H5 has the
+        # same shape as the model's predictions. Without this, the writer
+        # zero-pads (B, max_objects) preds to the raw (B, n_in) input shape
+        # and downstream consumers see ghost padding slots.
+        objects_dataset_name = self.input_map.get("objects")
+        if (
+            self.ds.mf_config is not None
+            and objects_dataset_name is not None
+            and dataset_name == objects_dataset_name
+            and self.ds._needs_object_selection()  # noqa: SLF001
+        ):
+            slice_arr = _select_objects(slice_arr, self.ds.mf_config.object)
+
+        return slice_arr
 
     @property
     def output_path(self) -> Path:
@@ -265,14 +288,10 @@ class PredictionWriter(Callback):
                 add_mask = True
 
         if self.write_objects and self.ds.mf_config:
-            self.object_params = {
-                "class_label": self.ds.mf_config.object.class_label,
-                "label_map": [f"p{name}" for name in self.ds.mf_config.object.class_names],
-            }
-
             # Generate the object outputs of the form (B, N) where N is the number of objects
             objects = outputs["objects"]
-
+            constituent_name = self.object_params["constituent_name"]
+            obj_pad_masks = pad_masks[constituent_name].cpu().numpy()
             probs_dtype = np.dtype([
                 (f"{module.name}_{n}", self.precision) for n in self.object_params["label_map"]
             ])
@@ -288,15 +307,12 @@ class PredictionWriter(Callback):
             mask_indices = indices_from_mask(objects["masks"].cpu().sigmoid() > 0.5)
             dtype = np.dtype([(f"{module.name}_MaskIndex", "i8")])
             mask_indices = mask_indices.int().cpu().numpy()
+            mask_indices = np.where(~obj_pad_masks, mask_indices, -1)
+            if constituent_name not in to_write:
+                to_write[constituent_name] = {}
+            to_write[constituent_name]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
 
-            tracks_pad = pad_masks.get("tracks")
-            if tracks_pad is not None:
-                tracks_pad_np = tracks_pad.cpu().numpy()
-                mask_indices = np.where(~tracks_pad_np, mask_indices, -1)
-
-            to_write["tracks"]["mask_index"] = u2s(np.expand_dims(mask_indices, -1), dtype)
-
-            # Write the truth mask and mask logits to their own dset
+            # Write truth masks and predicted mask logits to the same group
             to_write["object_masks"] = {}
             to_write["object_masks"]["tgt_masks"] = u2s(
                 labels["objects"]["masks"].cpu().unsqueeze(-1).numpy(),
