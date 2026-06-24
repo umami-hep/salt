@@ -193,6 +193,37 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def _auto_collect_fields(
+    model_modules: Mapping[str, Any], run_name: str
+) -> list[tuple[str, Any, Any]]:
+    """Walk the active conversion producers and collect their field manifests (plan 31 W5.1).
+
+    Returns one ``(output_key, producer, OutputField)`` triple per FINAL field of
+    every model module exposing the W5.0 ``output_columns(run_name, model_modules)``
+    surface (the conversion producers). Non-``final`` fields (exposed intermediates
+    a downstream node consumes — e.g. `MaskFormerObjects`' per-vertex leaves) are
+    DROPPED here so the sinks never auto-collect them (plan 31 R-C). The order is
+    the model module declaration order then the producer's field order — the H5
+    group column order + the ONNX tuple base order (the ONNX sink re-orders globals
+    -> combines -> per-token aux on top, §6.3).
+
+    Returns
+    -------
+    list[tuple[str, Any, OutputField]]
+        ``(output_key, producer, field)`` for every final field, in module order.
+    """
+    triples: list[tuple[str, Any, Any]] = []
+    for module in model_modules.values():
+        oc = getattr(module, "output_columns", None)
+        output_key = getattr(module, "output_key", None)
+        if not callable(oc) or not isinstance(output_key, str):
+            continue
+        for field in oc(run_name, model_modules):
+            if field.final:
+                triples.append((output_key, module, field))
+    return triples
+
+
 @dataclass(frozen=True)
 class OutputColumn:
     """One ``outputs.*`` leaf's declarative H5 column schema (design §1, §4 P4).
@@ -508,7 +539,8 @@ class H5OutputSink(_SinkCallback):
 
     def __init__(
         self,
-        outputs: Sequence[OutputColumn | Mapping[str, Any]],
+        outputs: Sequence[OutputColumn | Mapping[str, Any]] | None = None,
+        collections: Sequence[str] | None = None,
         copy_inputs: Mapping[str, Sequence[str]] | None = None,
         write_pad_mask: bool | Sequence[str] = False,
         output: str = DEFAULT_OUTPUT,
@@ -518,10 +550,19 @@ class H5OutputSink(_SinkCallback):
         cols = [
             c if isinstance(c, OutputColumn) else OutputColumn(**dict(c)) for c in outputs or []
         ]
-        if not cols:
+        # AUTO-COLLECT mode (plan 31 W5.1): when `outputs` is omitted (or empty)
+        # the sink discovers the active conversion producers feeding the declared
+        # `collections` (or every stream with a `final` H5 producer leaf when
+        # `collections` is omitted too) and assembles each per-stream H5 group from
+        # their `output_columns()` field manifest — no hand-listed `OutputColumn`s.
+        # The explicit `outputs:` form is the OVERRIDE (the MaskFormer escape hatch
+        # + any manual column table) and wins when present.
+        self._auto_collect = not cols
+        self._collections = tuple(collections) if collections is not None else None
+        if not self._auto_collect and collections is not None:
             raise ConfigError(
-                "H5OutputSink needs a non-empty outputs list — name the outputs.* leaves "
-                "(OutputColumn) to serialise (design §4.1)"
+                "H5OutputSink: `collections` is the auto-collect stream selector — it is "
+                "incompatible with an explicit `outputs:` column table (design §4.1 / plan 31 §3.2)"
             )
         seen: set[str] = set()
         for col in cols:
@@ -531,7 +572,14 @@ class H5OutputSink(_SinkCallback):
                     "outputs.* leaf (design §2.2)"
                 )
             seen.add(col.key)
+        self._explicit_columns: tuple[OutputColumn, ...] = tuple(cols)
+        # the resolved column table — the explicit list, or the auto-collected one
+        # cached after the first resolve (auto-collect mode, plan 31 W5.1).
         self._columns: tuple[OutputColumn, ...] = tuple(cols)
+        self._columns_resolved = not self._auto_collect
+        # the model module dict, captured at fold/compile time so auto-collect can
+        # walk the active producers (plan 31 W5.1 — `bind_model_modules`).
+        self._model_modules: Mapping[str, Any] | None = None
         self.copy_inputs = {s: list(v) for s, v in (copy_inputs or {}).items()}
         self.write_pad_mask = write_pad_mask
         self.output = output
@@ -570,6 +618,131 @@ class H5OutputSink(_SinkCallback):
         """
         return tuple(col.key for col in self._columns)
 
+    # -- auto-collect resolution (plan 31 W5.1) ---------------------------------
+
+    def is_test_sink(self) -> bool:
+        """An `H5OutputSink` is ALWAYS the TEST persistence sink (plan 31 W5.1).
+
+        Overrides the base `_SinkCallback.is_test_sink`, which probes
+        ``declare_io(Mode.TEST).requires`` — a circular dependency in AUTO-COLLECT
+        mode (resolving the columns needs the model modules, which are bound only
+        AFTER this sink is recognised as the TEST sink). An `H5OutputSink` serialises
+        TEST predictions by construction (it always demands ``meta.rows`` at minimum),
+        so the discriminator is a cheap constant True — order-independent and
+        resolution-free.
+
+        Returns
+        -------
+        bool
+            Always True.
+        """
+        return True
+
+    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
+        """Capture the model module dict so auto-collect can walk the producers (W5.1).
+
+        Called by `SaltModule.compile_mode` before the planner consults
+        `declare_io`, and by `writer_demand` (static-plan path) — both have the
+        module dict. In explicit-``outputs`` mode this is inert.
+        """
+        if self._auto_collect:
+            self._model_modules = model_modules
+
+    def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
+        """Resolve the H5 column table — explicit, or auto-collected from producers (W5.1).
+
+        In explicit-``outputs`` mode returns the configured columns unchanged. In
+        auto-collect mode it walks the captured model modules' conversion producers
+        (`_auto_collect_fields`), keeps the FINAL fields with an ``h5_name`` whose
+        stream is in the selected `collections` (or every such stream when
+        `collections` is omitted), groups them into ONE `OutputColumn` per producer
+        leaf (suffixes concatenated by field order), and HARD-ERRORS on a duplicate
+        flat H5 column (two producers minting the same ``{run_name}_{suffix}`` in one
+        stream). The resolved table is cached (it is run-name-stable: the suffixes
+        do not depend on the run name).
+
+        Returns
+        -------
+        tuple[OutputColumn, ...]
+            The H5 columns, in producer declaration order.
+
+        Raises
+        ------
+        ConfigError
+            When auto-collect has no captured modules, finds no producer leaf, or
+            two producers mint the same flat H5 column.
+        """
+        if self._columns_resolved:
+            return self._columns
+        if self._model_modules is None:
+            raise ConfigError(
+                "H5OutputSink auto-collect has no model modules bound — the sink discovers "
+                "the conversion producers from the model (plan 31 W5.1); ensure it is wired at "
+                "callbacks: on a SaltModule (bind_model_modules is called at compile)"
+            )
+        triples = _auto_collect_fields(self._model_modules, run_name)
+        # group the FINAL H5 fields by producer output_key, preserving order
+        by_key: dict[str, list[Any]] = {}
+        key_order: list[str] = []
+        for output_key, _producer, field in triples:
+            if field.h5_name is None:
+                continue
+            stream = output_key.split(KEY_SEP)[1]
+            if self._collections is not None and stream not in self._collections:
+                continue
+            if output_key not in by_key:
+                by_key[output_key] = []
+                key_order.append(output_key)
+            by_key[output_key].append(field)
+        if not key_order:
+            raise ConfigError(
+                "H5OutputSink auto-collect found no producer with a final H5 output column"
+                + (f" in collections {list(self._collections)}" if self._collections else "")
+                + " — wire the conversion producers (ClassProbs/SeqClassProbs/Regression/...) in "
+                "model.modules, or use an explicit outputs: table (plan 31 §3.2)"
+            )
+        # STATIC HARD dup-name guard (plan 31 W5.1): two producers minting the same
+        # flat {run_name}_{suffix} in one stream is a ConfigError at resolve time
+        # (compile/open_schema), before any write.
+        seen_cols: dict[tuple[str, str], str] = {}
+        columns: list[OutputColumn] = []
+        for output_key in key_order:
+            fields = by_key[output_key]
+            stream = output_key.split(KEY_SEP)[1]
+            # all fields of one leaf must share the prefix policy (they always do —
+            # one op family per leaf); use the first field's prefix
+            prefix = fields[0].prefix
+            dtype = fields[0].dtype
+            suffixes = [f.h5_name for f in fields]
+            col = OutputColumn(key=output_key, suffixes=suffixes, dtype=dtype, prefix=prefix)
+            for column_name in col.column_names(run_name):
+                if (other := seen_cols.get((stream, column_name))) is not None:
+                    raise ConfigError(
+                        f"H5OutputSink auto-collect: flat column {column_name!r} in stream "
+                        f"{stream!r} is minted by BOTH {other} AND {output_key!r} — two producers "
+                        "cannot emit the same H5 column (plan 31 W5.1 static dup-name guard)"
+                    )
+                seen_cols[stream, column_name] = output_key
+            columns.append(col)
+        resolved = tuple(columns)
+        self._columns = resolved
+        self._columns_resolved = True
+        return resolved
+
+    def _ensure_columns(self) -> tuple[OutputColumn, ...]:
+        """The resolved columns for the CURRENT run name (auto-collect aware).
+
+        Uses the cached run name (`_run_name`, set at `open_schema`) for the prefix;
+        before a run (static demand) the suffixes are run-name-independent, so a
+        provisional resolve with the placeholder run name yields the same KEYS.
+
+        Returns
+        -------
+        tuple[OutputColumn, ...]
+            The resolved H5 columns.
+        """
+        return self._resolve_columns(self._run_name)
+
     # -- graph node surface (design §4.1) ---------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
@@ -599,8 +772,11 @@ class H5OutputSink(_SinkCallback):
         # producer's torch dtype (``"float32"``). Constraining it would conflict
         # with the producer's declared dtype; the sink consumes whatever leaf the
         # producer emits and casts at write time (design §4.1, kind unifies).
+        # `_ensure_columns` resolves the explicit table OR the auto-collected one
+        # (plan 31 W5.1) — the demanded KEYS are run-name-independent.
         req: dict[str, TensorSpec] = {
-            col.key: TensorSpec(shape=None, dtype=None, kind="data") for col in self._columns
+            col.key: TensorSpec(shape=None, dtype=None, kind="data")
+            for col in self._ensure_columns()
         }
         req["meta.rows"] = TensorSpec(shape=None, dtype="int64", kind="meta")
         for stream in self._pad_mask_streams():
@@ -642,7 +818,10 @@ class H5OutputSink(_SinkCallback):
             ``{dotted key: "sink 'H5OutputSink' demanding <key>"}`` in
             declaration order (outputs, then meta.rows, then masks).
         """
-        del model_modules, reader
+        del reader
+        # capture the modules so auto-collect (omitted `outputs:`) can resolve on
+        # the static-plan path too (plan 31 W5.1); inert in explicit-`outputs` mode.
+        self.bind_model_modules(model_modules)
         who = "sink 'H5OutputSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
@@ -659,7 +838,7 @@ class H5OutputSink(_SinkCallback):
             return ()
         if self.write_pad_mask is True:
             seen: dict[str, None] = {}
-            for col in self._columns:
+            for col in self._ensure_columns():
                 seen.setdefault(col.stream, None)
             return tuple(seen)
         return tuple(dict.fromkeys(self.write_pad_mask))
@@ -838,7 +1017,7 @@ class H5OutputSink(_SinkCallback):
         """
         out: dict[str, np.ndarray] = {}
         frags: dict[str, list[np.ndarray]] = {}
-        for col in self._columns:
+        for col in self._ensure_columns():
             tensor = bundle.get(col.key)
             values = tensor.detach().cpu().numpy()
             # the producer leaf may be [B] / [B, L] (collapsed index columns) or
@@ -978,7 +1157,7 @@ class H5OutputSink(_SinkCallback):
                 np.dtype([(fname, ds.dtype[fname]) for fname in fields]),
                 f"copy_inputs[{stream!r}]",
             )
-        for col in self._columns:
+        for col in self._ensure_columns():
             _add(col.stream, col.np_dtype(self._run_name), f"output {col.key!r}")
         for stream in self._mask_streams:
             _add(stream, np.dtype([("mask", "?")]), f"pad mask[{stream!r}]")
@@ -1231,7 +1410,7 @@ class OnnxExportSink(_SinkCallback):
 
     def __init__(
         self,
-        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]],
+        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
         model_name: str | None = None,
     ) -> None:
         super().__init__()
@@ -1239,11 +1418,29 @@ class OnnxExportSink(_SinkCallback):
             leaf if isinstance(leaf, OnnxExportLeaf) else OnnxExportLeaf(**dict(leaf))
             for leaf in outputs or []
         ]
-        if not leaves:
-            raise ConfigError(
-                "OnnxExportSink needs a non-empty outputs list — name the outputs.* conversion "
-                "leaves the folded nodes mint (design §4.2)"
-            )
+        # AUTO-COLLECT mode (plan 31 W5.1): when `outputs` is omitted the sink
+        # collects the conversion producers' `output_columns()` ONNX fields and
+        # assembles the Athena tuple in the ORDERED contract (globals -> combines ->
+        # per-token aux, §6.3 — NOT executor topo order), with a static dup guard.
+        # The explicit `outputs:` form is the OVERRIDE (the W4 export configs keep
+        # their hand-listed tuple unchanged).
+        self._auto_collect = not leaves
+        self._leaves_resolved = not self._auto_collect
+        self._model_modules: Mapping[str, Any] | None = None
+        if leaves:
+            self._validate_leaves(leaves)
+        self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
+        self.model_name = model_name
+
+    @staticmethod
+    def _validate_leaves(leaves: Sequence[OnnxExportLeaf]) -> None:
+        """Reject a duplicate leaf key or a duplicate flat Athena suffix (static dup guard).
+
+        Raises
+        ------
+        ConfigError
+            For a duplicate leaf key or a duplicate flat ONNX output name.
+        """
         seen_keys: set[str] = set()
         seen_suffixes: set[str] = set()
         for leaf in leaves:
@@ -1257,11 +1454,110 @@ class OnnxExportSink(_SinkCallback):
                 if suffix in seen_suffixes:
                     raise ConfigError(
                         f"OnnxExportSink: duplicate flat ONNX output name {suffix!r} — the Athena "
-                        "output namespace is flat (design §6.3)"
+                        "output namespace is flat (design §6.3 / plan 31 W5.1 dup guard)"
                     )
                 seen_suffixes.add(suffix)
-        self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
-        self.model_name = model_name
+
+    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
+        """Capture the model module dict so ONNX auto-collect can walk producers (W5.1).
+
+        Inert in explicit-``outputs`` mode.
+        """
+        if self._auto_collect:
+            self._model_modules = model_modules
+
+    def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
+        """Resolve the export leaves — explicit, or auto-collected from producers (W5.1).
+
+        In auto-collect mode it walks the captured model modules' conversion
+        producers (`_auto_collect_fields`), keeps the FINAL fields with an
+        ``onnx_name``, builds one `OnnxExportLeaf` per producer leaf (a per-class
+        ``ClassProbs``/regression leaf -> ``names`` split_scalars; a single
+        index/combination leaf -> ``name``), and ORDERS them per the Athena tuple
+        contract: GLOBAL float entries first, then COMBINATION entries, then the
+        PER-TOKEN aux entries (`ordered_output_names` rule, §6.3). A static dup
+        guard rejects two producers minting the same flat suffix. Cached.
+
+        Returns
+        -------
+        tuple[OnnxExportLeaf, ...]
+            The export leaves, in Athena tuple order.
+
+        Raises
+        ------
+        ConfigError
+            When auto-collect has no captured modules, finds no ONNX leaf, or two
+            producers mint the same flat suffix.
+        """
+        if self._leaves_resolved:
+            return self._leaves
+        if self._model_modules is None:
+            raise ConfigError(
+                "OnnxExportSink auto-collect has no model modules bound — the sink discovers the "
+                "conversion producers from the model (plan 31 W5.1); ensure it is wired at "
+                "callbacks: on a SaltModule"
+            )
+        # import here to avoid a producers<->sinks import cycle at module load
+        from salt.core.outputs.producers import Combination  # noqa: PLC0415
+
+        triples = _auto_collect_fields(self._model_modules, self._run_name_for_onnx())
+        globals_block: list[OnnxExportLeaf] = []
+        combines_block: list[OnnxExportLeaf] = []
+        per_token_block: list[OnnxExportLeaf] = []
+        # group fields by producer output_key (one leaf per producer output)
+        by_key: dict[str, tuple[Any, list[Any]]] = {}
+        key_order: list[str] = []
+        for output_key, producer, field in triples:
+            if field.resolved_onnx_name is None:
+                continue
+            if output_key not in by_key:
+                by_key[output_key] = (producer, [])
+                key_order.append(output_key)
+            by_key[output_key][1].append(field)
+        for output_key in key_order:
+            producer, fields = by_key[output_key]
+            names = [f.resolved_onnx_name for f in fields]
+            onnx_dtype = fields[0].onnx_dtype
+            per_token = fields[0].axis == "per_token"
+            if per_token:
+                # a single per-token index leaf (argmax / union-find) -> `name`
+                leaf = OnnxExportLeaf(
+                    key=output_key, name=names[0], dtype=onnx_dtype, per_token=True
+                )
+                per_token_block.append(leaf)
+            elif len(names) == 1 and isinstance(producer, Combination):
+                combines_block.append(OnnxExportLeaf(key=output_key, name=names[0], dtype="float32"))
+            else:
+                # a global float leaf -> `names` split_scalars (one scalar per name)
+                leaf = OnnxExportLeaf(key=output_key, names=names, dtype="float32")
+                globals_block.append(leaf)
+        ordered = (*globals_block, *combines_block, *per_token_block)
+        if not ordered:
+            raise ConfigError(
+                "OnnxExportSink auto-collect found no producer with an ONNX output leaf — wire the "
+                "conversion producers (ClassProbs/SeqClassIndex/VertexUnionFind/...) in "
+                "model.modules, or use an explicit outputs: table (plan 31 §3.3)"
+            )
+        self._validate_leaves(ordered)  # static dup guard (plan 31 W5.1)
+        self._leaves = ordered
+        self._leaves_resolved = True
+        return ordered
+
+    @staticmethod
+    def _run_name_for_onnx() -> str:
+        """A placeholder run name for ONNX manifest resolution.
+
+        ONNX suffixes are run-name-INDEPENDENT (the exporter prefixes
+        ``{model_name}_``), so the producer field manifest's onnx_name needs no real
+        run name; the field resolution only uses ``run_name`` to strip an H5 prefix,
+        which the ONNX side does not consult.
+
+        Returns
+        -------
+        str
+            A constant placeholder.
+        """
+        return "onnx"
 
     @property
     def leaves(self) -> tuple[OnnxExportLeaf, ...]:
@@ -1270,9 +1566,9 @@ class OnnxExportSink(_SinkCallback):
         Returns
         -------
         tuple[OnnxExportLeaf, ...]
-            The configured leaves.
+            The configured (or auto-collected) leaves.
         """
-        return self._leaves
+        return self._ensure_leaves()
 
     @property
     def outputs(self) -> tuple[str, ...]:
@@ -1281,9 +1577,9 @@ class OnnxExportSink(_SinkCallback):
         Returns
         -------
         tuple[str, ...]
-            The configured leaf keys.
+            The configured (or auto-collected) leaf keys.
         """
-        return tuple(leaf.key for leaf in self._leaves)
+        return tuple(leaf.key for leaf in self._ensure_leaves())
 
     # -- graph node surface (design §4.2) ---------------------------------------
 
@@ -1307,7 +1603,10 @@ class OnnxExportSink(_SinkCallback):
         """
         if mode is not Mode.ONNX:
             return IO(requires={}, produces={})
-        req = {leaf.key: TensorSpec(shape=None, dtype=None, kind="data") for leaf in self._leaves}
+        req = {
+            leaf.key: TensorSpec(shape=None, dtype=None, kind="data")
+            for leaf in self._ensure_leaves()
+        }
         return IO(requires=unflatten_spec(req), produces={})
 
     # -- generated export metadata (design §6.3 — the ExportOutput facts) --------
@@ -1346,7 +1645,7 @@ class OnnxExportSink(_SinkCallback):
             The generated names, in order.
         """
         prefix = self.resolved_model_name()
-        return [f"{prefix}_{suffix}" for leaf in self._leaves for suffix in leaf.suffixes]
+        return [f"{prefix}_{suffix}" for leaf in self._ensure_leaves() for suffix in leaf.suffixes]
 
     def output_dtypes(self) -> list[str]:
         """Per-output dtypes, aligned 1:1 with `output_names`.
@@ -1356,7 +1655,7 @@ class OnnxExportSink(_SinkCallback):
         list[str]
             ``"float32"`` / ``"int8"`` per flat output.
         """
-        return [leaf.dtype for leaf in self._leaves for _ in leaf.suffixes]
+        return [leaf.dtype for leaf in self._ensure_leaves() for _ in leaf.suffixes]
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         """Dynamic-axes mapping for the per-token outputs (``{name: {0: dyn_axis}}``).
@@ -1371,7 +1670,7 @@ class OnnxExportSink(_SinkCallback):
         """
         prefix = self.resolved_model_name()
         axes: dict[str, dict[int, str]] = {}
-        for leaf in self._leaves:
+        for leaf in self._ensure_leaves():
             if leaf.per_token:
                 axes[f"{prefix}_{leaf.suffixes[0]}"] = {0: leaf.resolved_dyn_axis()}
         return axes
@@ -1399,7 +1698,7 @@ class OnnxExportSink(_SinkCallback):
         """
         prefix = self.resolved_model_name()
         named: dict[str, Tensor] = {}
-        for leaf in self._leaves:
+        for leaf in self._ensure_leaves():
             value = bundle.get(leaf.key)
             if leaf.names is not None:
                 # the split-count guard runs only in EAGER eval, never inside the
@@ -1436,7 +1735,10 @@ class OnnxExportSink(_SinkCallback):
         dict[str, str]
             ``{leaf key: "sink 'OnnxExportSink' demanding <key>"}``.
         """
-        del model_modules, reader
+        del reader
+        # capture the modules so ONNX auto-collect (omitted `outputs:`) resolves on
+        # the static-plan path too (plan 31 W5.1); inert in explicit mode.
+        self.bind_model_modules(model_modules)
         who = "sink 'OnnxExportSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.ONNX).requires)}
 

@@ -55,6 +55,7 @@ contract is identical for every op.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -73,6 +74,7 @@ from salt.core.onnx.reduces import get_maskformer_outputs, mask_fill_flattened
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 from salt.core.utils.union_find import get_node_assignment_jit
+from salt.core.writers.names import VERTEX_INDEX, pascal_case
 
 __all__ = [
     "ClassProbs",
@@ -83,6 +85,7 @@ __all__ = [
     "MFLeadVertexDecorator",
     "MaskFormerObject",
     "MaskFormerObjects",
+    "OutputField",
     "Regression",
     "RegressionDescaleOp",
     "SeqClassIndex",
@@ -95,6 +98,126 @@ __all__ = [
 
 _UNNAMED = "unnamed"
 """Placeholder instance name — config assembly assigns the dict key (design §2.2)."""
+
+
+@dataclass(frozen=True)
+class OutputField:
+    """One self-described output column a producer mints (plan 31 W5.0 field manifest).
+
+    The plan-31 producer field-manifest entry: a producer resolves its output
+    columns FROM THE TASK IT WRAPS (reusing the legacy ``task.output_names()`` /
+    ``class_suffixes`` / ``output_suffixes`` / `VERTEX_INDEX` logic), so the
+    auto-collecting sinks reproduce the legacy `TaskWriter` schema EXACTLY without
+    hand-listing per config. Each field carries BOTH serialisation names because
+    they can DIVERGE (plan 31 §3.1): a classification per-token head's H5 columns
+    are the per-class prob suffixes (``pb``/``pc`` ...) while its ONNX output is the
+    argmax index under the Athena name (``TrackOrigin``); regression's H5 *and*
+    ONNX share the target/custom suffix. ``onnx_name`` DEFAULTS to ``h5_name``.
+
+    A field carrying ``h5_name=None`` has no H5 representation (e.g. the ONNX-only
+    `SeqClassIndex` argmax leaf, whose H5 counterpart is `SeqClassProbs`'s prob
+    columns); ``onnx_name=None`` has no ONNX representation (e.g. `SeqClassProbs`'s
+    H5 prob columns, whose ONNX counterpart is `SeqClassIndex`). The H5 sink
+    collects fields with an ``h5_name``; the ONNX sink collects fields with an
+    ``onnx_name`` (plan 31 §3.4 — one metadata source, two representations).
+
+    Parameters
+    ----------
+    h5_name : str | None
+        The H5 column suffix (run-name-prefixed by the sink unless ``prefix=False``)
+        — the legacy ``task.output_names()`` suffix. ``None`` when the field has no
+        H5 representation (an ONNX-only leaf).
+    onnx_name : str | None
+        The flat ONNX (Athena) output suffix (``{model_name}_{onnx_name}``).
+        Defaults to ``h5_name`` when not given; ``None`` when the field has no ONNX
+        representation (an H5-only leaf).
+    dtype : str
+        The H5/ONNX serialisation dtype — the numpy descriptor for H5 (``"f4"`` /
+        ``"i8"`` / ``"i1"``) AND the equivalent ONNX dtype (``"float32"`` /
+        ``"int8"``). The sink maps between the two namespaces as needed.
+    axis : str
+        ``"global"`` (a jet-level scalar ``[N]``) or ``"per_token"`` (a sequence
+        column ``[N, T]`` / a dynamic ONNX axis).
+    final : bool
+        ``True`` for a written/exported leaf (the default for a producer's primary
+        output); ``False`` for an exposed INTERMEDIATE leaf consumed only by a
+        downstream node (e.g. `MaskFormerObjects`' per-vertex leaves the
+        `MFLeadVertexDecorator` reads), which the sinks must NOT auto-collect.
+    prefix : bool
+        Whether the H5 column is ``{run_name}_{h5_name}`` (the v1 default) or the
+        bare ``h5_name`` (the v1 ``VertexIndex`` byte-parity column). ONNX always
+        prefixes with ``{model_name}_``.
+    """
+
+    h5_name: str | None
+    onnx_name: str | None = None
+    dtype: str = "f4"
+    axis: str = "global"
+    final: bool = True
+    prefix: bool = True
+
+    def __post_init__(self) -> None:
+        if self.axis not in {"global", "per_token"}:
+            raise ConfigError(
+                f"OutputField axis must be 'global' or 'per_token', got {self.axis!r}"
+            )
+        if self.h5_name is None and self.onnx_name is None:
+            raise ConfigError(
+                "OutputField needs at least one of h5_name / onnx_name (a field with neither "
+                "has no representation in any sink)"
+            )
+
+    @property
+    def resolved_onnx_name(self) -> str | None:
+        """The ONNX suffix, defaulting to `h5_name` when not explicitly set.
+
+        Returns
+        -------
+        str | None
+            `onnx_name` if given, else `h5_name` (None only for an H5-only field
+            that explicitly passed ``onnx_name`` not set AND h5_name None — which
+            ``__post_init__`` forbids, so this is None only when onnx is suppressed).
+        """
+        return self.onnx_name if self.onnx_name is not None else self.h5_name
+
+    @property
+    def onnx_dtype(self) -> str:
+        """The ONNX dtype namespace mapping of `dtype` (``f4 -> float32``, ``i1/i8 -> int8``).
+
+        Returns
+        -------
+        str
+            ``"float32"`` or ``"int8"``.
+        """
+        return "int8" if self.dtype in {"i1", "i8", "int8"} else "float32"
+
+
+def _resolve_task(model_modules: Mapping[str, Any], task_name: str, who: str) -> Any:
+    """Look up the wrapped task module by name in the model module dict (W5.0).
+
+    A producer resolves its output column NAMES from the task it wraps so the
+    auto-collecting sinks reproduce the legacy ``task.output_names()`` schema
+    EXACTLY (plan 31 §3.1). The sink — which holds the model module dict — threads
+    it into ``output_columns(run_name, model_modules)``.
+
+    Returns
+    -------
+    Any
+        The resolved task module.
+
+    Raises
+    ------
+    ConfigError
+        When the named task is absent from the model module dict.
+    """
+    task = model_modules.get(task_name)
+    if task is None:
+        raise ConfigError(
+            f"{who}: wrapped task {task_name!r} is not in the model modules — a conversion "
+            "producer's output_columns() resolve their names from the task they wrap "
+            "(plan 31 §3.1)"
+        )
+    return task
 
 
 def _add_dims(x: Tensor, ndim: int) -> Tensor:
@@ -196,6 +319,49 @@ class ConversionOp:
         """
         return in_width
 
+    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
+        """The field manifest this op's output leaf expands into (plan 31 W5.0).
+
+        Resolved FROM THE WRAPPED TASK so the auto-collecting sinks reproduce the
+        legacy ``task.output_names()`` schema EXACTLY. The base (identity copy)
+        mirrors the wrapped task's own ``output_names``: one field per column, the
+        suffix the bare task column name (run-name prefix STRIPPED — the sink
+        re-prefixes), dtype the task descriptor, axis per the task's sequence flag.
+        Subclasses override where the representation diverges (argmax index,
+        regression descale). This default serves an IDENTITY ``TaskOutput`` over a
+        task that owns its own rendering (e.g. the regression descale passthrough,
+        the W5 stopgap).
+
+        Parameters
+        ----------
+        task : Any
+            The wrapped task module (resolved by the producer).
+        run_name : str
+            The run name — used only to STRIP the prefix the task baked in, so the
+            returned suffix is bare (the sink re-prefixes per its own run name).
+
+        Returns
+        -------
+        list[OutputField]
+            One field per task output column.
+
+        Raises
+        ------
+        ConfigError
+            When the wrapped task ships no ``output_names`` rendering.
+        """
+        names = task.output_names(run_name)
+        sequence = bool(getattr(task, "sequence", False))
+        axis = "per_token" if sequence else "global"
+        fields: list[OutputField] = []
+        for column, dtype in names:
+            suffix = column[len(run_name) + 1 :] if column.startswith(f"{run_name}_") else column
+            prefix = column.startswith(f"{run_name}_")
+            fields.append(
+                OutputField(h5_name=suffix, dtype=str(dtype), axis=axis, final=True, prefix=prefix)
+            )
+        return fields
+
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Identity copy of the prediction leaf (P0 passthrough).
 
@@ -242,6 +408,27 @@ class ClassProbsOp(ConversionOp):
 
     def __init__(self, bce: bool = False) -> None:
         self.bce = bool(bce)
+
+    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
+        """One float global field per class — the ``class_suffixes`` (v1 task.py:140-151).
+
+        The global (pooled) classification probabilities: H5 columns AND ONNX
+        ``split_scalars`` scalars are the SAME per-class suffixes (``pb``/``pc`` ...),
+        so ``onnx_name`` defaults to ``h5_name``. The legacy `TaskWriter` derives
+        these from ``task.output_names(run_name)`` (H5) and
+        ``task.onnx_outputs()`` (ONNX, the `class_suffixes`); both are reproduced
+        here from the same `class_suffixes`.
+
+        Returns
+        -------
+        list[OutputField]
+            One ``f4`` global field per class, in class order.
+        """
+        del run_name
+        return [
+            OutputField(h5_name=px, dtype="f4", axis="global", final=True)
+            for px in task.class_suffixes
+        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Sigmoid (BCE) or softmax over the class dim (v1 ``tasks.py:312-328``).
@@ -310,6 +497,34 @@ class SeqClassIndexOp(ConversionOp):
         """
         del in_width
         return 1
+
+    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
+        """One int8 per-token ONNX field, named ``pascal_case(task)`` (e.g. ``TrackOrigin``).
+
+        The ONNX-ONLY argmax index leaf (folds ``reduces._bind_argmax``): the
+        legacy sequence-classification ``onnx_outputs`` emits a single int8 ``argmax``
+        entry whose suffix is the Pascal-case of the task instance name
+        (``track_origin -> TrackOrigin``, v1 ``to_onnx.py:283-292``). It has NO H5
+        column (``h5_name=None``): the TEST H5 carries the full prob vector via the
+        sibling `SeqClassProbs` producer — the two-representation split (plan 31
+        §3.1 / design §6.2 R2).
+
+        Returns
+        -------
+        list[OutputField]
+            One int8 per-token field with ``h5_name=None`` and the Athena
+            ``onnx_name``.
+        """
+        del run_name
+        return [
+            OutputField(
+                h5_name=None,
+                onnx_name=pascal_case(task.name),
+                dtype="int8",
+                axis="per_token",
+                final=True,
+            )
+        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Masked-softmax then per-token ``argmax`` over the class dim (mode-branched).
@@ -392,6 +607,28 @@ class SeqClassProbsOp(ConversionOp):
                 shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
             )
         }
+
+    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
+        """One float per-token H5 field per class — the ``class_suffixes`` (v1 task.py:140-151).
+
+        The TEST-H5-ONLY per-token prob columns: the legacy sequence-classification
+        ``output_names`` emits one ``{run_name}_{px}`` ``f4`` column per class. There
+        is NO ONNX representation here (``onnx_name=None``) — the ONNX export uses the
+        sibling `SeqClassIndex` argmax index (the two-representation split, plan 31
+        §3.1).
+
+        Returns
+        -------
+        list[OutputField]
+            One ``f4`` per-token field per class (H5-only), in class order.
+        """
+        del run_name
+        return [
+            OutputField(
+                h5_name=px, onnx_name=None, dtype="f4", axis="per_token", final=True
+            )
+            for px in task.class_suffixes
+        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Masked-softmax over the class dim (v1 ``tasks.py:322-327``).
@@ -532,6 +769,28 @@ class RegressionDescaleOp(ConversionOp):
             ``inputs.<stream>``.
         """
         return f"inputs.{self.stream}"
+
+    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
+        """One float field per regression output — the ``output_suffixes`` (v1 task.py:511-517).
+
+        The de-scaled regression values: H5 columns AND ONNX ``split_scalars``
+        scalars are the SAME suffixes (``custom_output_names`` else the targets;
+        doubled for a gaussian head — R means then R ``_stddev``), so ``onnx_name``
+        defaults to ``h5_name``. Reproduces the legacy ``task.output_names`` (H5) and
+        ``task.onnx_outputs`` (ONNX) from the one ``output_suffixes`` source.
+
+        Returns
+        -------
+        list[OutputField]
+            One ``f4`` field per regression output, in column order (global for a
+            pooled head, per-token for a sequence head).
+        """
+        del run_name
+        axis = "per_token" if bool(getattr(task, "sequence", False)) else "global"
+        return [
+            OutputField(h5_name=suffix, dtype="f4", axis=axis, final=True)
+            for suffix in task.output_suffixes
+        ]
 
     def extra_requires(self, stream: str) -> dict[str, TensorSpec]:
         """Demand the ratio-denominator sources (FD §3.3 mode-split de-scaling).
@@ -781,6 +1040,35 @@ class TaskOutput(nn.Module):
         """
         converted = self.op.convert(b, mode, pred_key=self.pred_key, stream=self.stream)
         return {self.output_key: converted}
+
+    def output_columns(
+        self, run_name: str, model_modules: Mapping[str, Any]
+    ) -> list[OutputField]:
+        """The field manifest this producer's ``outputs.*`` leaf expands into (W5.0).
+
+        Resolves the wrapped task (`task`) from `model_modules` and delegates to the
+        op's `output_columns`, so the auto-collecting sinks reproduce the legacy
+        ``task.output_names()`` / ``task.onnx_outputs()`` schema EXACTLY (plan 31
+        §3.1). Each op family decides the H5/ONNX names + dtype + axis + the H5/ONNX
+        split (a per-token classification head is two producers — `SeqClassProbs`
+        for the H5 prob columns, `SeqClassIndex` for the ONNX argmax index).
+
+        Parameters
+        ----------
+        run_name : str
+            The run name (the task's H5 column prefix; the op strips it to bare
+            suffixes the sink re-prefixes).
+        model_modules : Mapping[str, Any]
+            The model-side module dict, threaded by the sink so the producer can
+            resolve the task it wraps.
+
+        Returns
+        -------
+        list[OutputField]
+            The field manifest for this producer's output leaf.
+        """
+        task = _resolve_task(model_modules, self.task, f"producer {self.name!r}")
+        return self.op.output_columns(task, run_name)
 
 
 class ClassProbs(TaskOutput):
@@ -1099,6 +1387,23 @@ class Combination(nn.Module):
         out = sum(scale * source[..., index] for index, scale in self.terms)
         return {self.output_key: out}
 
+    def output_columns(
+        self, run_name: str, model_modules: Mapping[str, Any]
+    ) -> list[OutputField]:
+        """One float global field named after the combination (``pbc``) — H5 + ONNX (W5.0).
+
+        A combination is its own self-named output (no wrapped task): a single
+        ``f4`` GLOBAL scalar under `output_name`, present in BOTH the H5 columns and
+        the ONNX tuple (``onnx_name`` defaults to ``h5_name``).
+
+        Returns
+        -------
+        list[OutputField]
+            A single ``f4`` global field named `output_name`.
+        """
+        del run_name, model_modules
+        return [OutputField(h5_name=self.output_name, dtype="f4", axis="global", final=True)]
+
 
 class VertexUnionFind(nn.Module):
     """In-graph union-find conversion node (plan-29 W3, folds ``reduces._bind_vertex_union_find``).
@@ -1190,13 +1495,25 @@ class VertexUnionFind(nn.Module):
             The declared requires/produces for this conversion node.
         """
         del mode
+        # plan 31 W5.1/W5.2: ONNX-ONLY ports. VertexUnionFind is ONNX-only BY
+        # CONSTRUCTION (the union-find chain is shaped for the traced [1, L, ...]
+        # export batch; the TEST vertex column is the vertexing task's own get_h5,
+        # a DEFERRED H5 family with no conversion producer). Gating the ports to
+        # Mode.ONNX (not the demand-gating the SHARED softmax producers use) makes the
+        # node INACTIVE in FIT/VAL/TEST — so a config that opts the vertexing head out
+        # of TEST does not trip the planner's pre-prune connectivity check on this
+        # node's preds.* require (which would otherwise be unsatisfiable in TEST). It
+        # also prevents accidental TEST wiring of the export-shaped int8 leaf.
         requires = {
-            self.pred_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.pred_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
             self.mask_key: TensorSpec(
-                shape=("B", sym_dim("T", self.stream)), dtype="bool", kind="pad_mask"
+                shape=("B", sym_dim("T", self.stream)), dtype="bool", kind="pad_mask",
+                modes=Mode.ONNX,
             ),
         }
-        produces = {self.output_key: TensorSpec(shape=None, dtype="int8", kind="data")}
+        produces = {
+            self.output_key: TensorSpec(shape=None, dtype="int8", kind="data", modes=Mode.ONNX)
+        }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
@@ -1237,6 +1554,35 @@ class VertexUnionFind(nn.Module):
         vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
         vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
         return {self.output_key: vertex_list.reshape(-1).char()}
+
+    def output_columns(
+        self, run_name: str, model_modules: Mapping[str, Any]
+    ) -> list[OutputField]:
+        """One int8 per-token ONNX field on the shared `VERTEX_INDEX` suffix (W5.0).
+
+        The union-find vertex assignment is an ONNX-ONLY leaf (folds
+        ``reduces._bind_vertex_union_find``): the legacy vertexing ``onnx_outputs``
+        emits one int8 ``vertex_union_find`` entry under the shared `VERTEX_INDEX`
+        suffix (v1 ``to_onnx.py:286-288``). It has NO auto-collected H5 column
+        (``h5_name=None``): the TEST H5 vertex column is the vertexing TASK's own
+        ``get_h5`` (a DEFERRED family with no conversion producer, plan 31 §6 W5
+        scope) — vertexing-bearing configs opt the head out of TEST eval.
+
+        Returns
+        -------
+        list[OutputField]
+            One int8 per-token field (ONNX-only) on `VERTEX_INDEX`.
+        """
+        del run_name, model_modules
+        return [
+            OutputField(
+                h5_name=None,
+                onnx_name=VERTEX_INDEX,
+                dtype="int8",
+                axis="per_token",
+                final=True,
+            )
+        ]
 
 
 class MaskFormerObjects(nn.Module):
@@ -1498,6 +1844,47 @@ class MaskFormerObjects(nn.Module):
             self.vertices_class_probs_key: vertices_class_probs,
             self.vertices_regression_key: vertices_regression,
         }
+
+    def output_columns(
+        self, run_name: str, model_modules: Mapping[str, Any]
+    ) -> list[OutputField]:
+        """The MaskFormer object leaves' field manifest — index + leading + intermediates (W5.0).
+
+        MaskFormer eval/export migration is W6-DEFERRED (plan 31 §5): this manifest
+        is provided so the auto-collecting sinks can be unit-tested for the
+        ``final`` distinction (plan 31 R-C — the per-vertex leaves the
+        `MFLeadVertexDecorator` reads must NOT be auto-collected). The
+        ``object_index`` is the int8 per-token ONNX leaf (folds
+        ``_bind_object_index``); the leading-regression is the global float ONNX
+        leaf (folds ``_bind_leading_object``). The per-vertex ``vertices_class_probs``
+        / ``vertices_regression`` are EXPOSED INTERMEDIATES (``final=False``).
+        Resolving the legacy MaskFormer Athena names (``HadronIndex`` / per-object
+        leading suffixes) stays a W6 concern; the W6 sink uses the explicit
+        override, so the names here are the bare leaf names (placeholders that the
+        dup-guard / final-flag unit tests exercise without claiming legacy parity).
+
+        Returns
+        -------
+        list[OutputField]
+            object_index (int8 per-token, final), leading_object (f4 global, final),
+            and the two per-vertex intermediates (final=False).
+        """
+        del run_name, model_modules
+        return [
+            OutputField(
+                h5_name=None, onnx_name=self.index_name, dtype="int8",
+                axis="per_token", final=True,
+            ),
+            OutputField(h5_name=self.leading_name, dtype="f4", axis="global", final=True),
+            OutputField(
+                h5_name="vertices_class_probs", onnx_name=None, dtype="f4",
+                axis="per_token", final=False,
+            ),
+            OutputField(
+                h5_name="vertices_regression", onnx_name=None, dtype="f4",
+                axis="per_token", final=False,
+            ),
+        ]
 
 
 # DEPRECATED one-window alias (USER DESIGN 2026-06-22): the single-node
@@ -1801,3 +2188,25 @@ class MFLeadVertexDecorator(nn.Module):
             value = torch.where(any_qualify, value, torch.full_like(value, torch.nan))
             out[key] = value.float()
         return out
+
+    def output_columns(
+        self, run_name: str, model_modules: Mapping[str, Any]
+    ) -> list[OutputField]:
+        """One float global jet-level field per configured lead-vertex scalar (W5.0).
+
+        The decorator's jet-level scalars (``lead_vertex_pt`` / ``lead_vertex_mass``
+        / ...) are each a single ``f4`` GLOBAL output, present in both H5 and ONNX
+        (``onnx_name`` defaults to ``h5_name``). A NEW capability with no legacy
+        oracle (plan 31 W6 / design W3); provided for the auto-collect sinks +
+        unit tests.
+
+        Returns
+        -------
+        list[OutputField]
+            One ``f4`` global field per configured output name, in declaration order.
+        """
+        del run_name, model_modules
+        return [
+            OutputField(h5_name=name, dtype="f4", axis="global", final=True)
+            for name, _ in self.outputs_map
+        ]

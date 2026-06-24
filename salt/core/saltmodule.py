@@ -805,6 +805,12 @@ class SaltModule(lightning.LightningModule):
         # their preds.*) alive (design §4.1).
         modules = dict(self._graph_modules)
         sink_node = self._attached_sink_node()
+        # plan 31 W5.1: give an auto-collecting sink node (omitted `outputs:`) the
+        # model module dict BEFORE the planner consults its `declare_io`, so it can
+        # discover the active conversion producers feeding its collections. Inert
+        # for an explicit-`outputs` sink (`bind_model_modules` no-ops there).
+        if sink_node is not None and callable(getattr(sink_node, "bind_model_modules", None)):
+            sink_node.bind_model_modules(self._graph_modules)
         folded_sink = sink_node is not None and mode is Mode.TEST
         if folded_sink:
             # the sink node anchors ALL its demand via its declared requires

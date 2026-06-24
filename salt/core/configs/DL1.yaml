@@ -132,20 +132,29 @@ model:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: jets_classification, stream: jets }
 
+# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
+# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
+# of the cutover). Null-merge deletes the base2.yaml default writers so the
+# WriterCallback is not assembled.
 writers:
   modules:
-    # jets-only: NO sequence stream -> no pad mask to write. Delete the
-    # base2.yaml default (design §5.3 null-deletion), mirroring regression.yaml.
-    # InputCopyWriter keeps its jets-stream role (the 3 flavour probability
-    # columns DL1_p{b,c,u} come from the TaskWriter eval columns).
+    inputs_copy: null
+    tasks: null
     pad_mask: null
-    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
-    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
 
 # plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
 # leaves into the flat Athena output tuple, in v1/oracle ORDER.
+# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
+# producers feeding the jets stream (jet_probs' pb/pc/pu) and assembles the eval H5
+# group from their output_columns() field manifest — no hand-listed columns. DL1 is
+# jets-only (NO sequence stream), so write_pad_mask is false.
 callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      collections: [jets]
+      copy_inputs: { jets: [] }
+      write_pad_mask: false
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:

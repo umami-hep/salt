@@ -252,11 +252,20 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: *dropout}
       loss:
         class_path: salt.core.nn.LossSum # v1 default sum-of-weighted-losses
-      # plan-29 W4 folded ONNX conversion producers (design §6.2): mint outputs.* leaves
-      # the OnnxExportSink names; demand-pruned from FIT/VAL/TEST (FIT plan_hash unchanged).
+      # plan-29 W4/W5 conversion producers (design §6.2): mint outputs.* leaves the
+      # sinks auto-collect. ONNX (W4): jet_probs/track_origin_index/track_vertex_index;
+      # TEST H5 (W5.2): jet_probs (global probs) + track_origin_probs (per-token probs).
+      # All demand-pruned from FIT/VAL (FIT plan_hash unchanged).
       jet_probs:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: jets_classification, stream: jets }
+      track_origin_probs:
+        # distinct leaf name (track_origin_probs) so it does NOT collide with the
+        # ONNX argmax index producer (track_origin_index) on outputs.tracks.track_origin
+        # (write-once graph layer). The H5 column names come from the task's
+        # class_suffixes (pPileup/...), not the leaf name, so parity is unaffected.
+        class_path: salt.core.outputs.SeqClassProbs
+        init_args: { task: track_origin, stream: tracks, name: track_origin_probs }
       track_origin_index:
         class_path: salt.core.outputs.SeqClassIndex
         init_args: { task: track_origin, stream: tracks }
@@ -265,15 +274,31 @@ model:
         init_args: { task: track_vertexing, stream: tracks }
 
 
-# plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
-# folded OnnxExportSink below, not the off-graph writer manifest (retired).
+# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
+# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
+# of the cutover). Null-merge deletes the base2.yaml default writers so the
+# WriterCallback is not assembled.
 writers:
   modules:
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+    inputs_copy: null
+    tasks: null
+    pad_mask: null
 
 # plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
 # leaves into the flat Athena output tuple, in v1/oracle ORDER.
+# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
+# producers feeding each stream and assembles the eval H5 groups from their
+# output_columns() field manifest — no hand-listed columns. The jets group gets
+# jet_probs' probs; the tracks group gets track_origin_probs' origin probs + the
+# boolean pad mask. (Vertexing's VertexIndex eval column is DEFERRED — the head
+# auto-prunes from TEST.)
 callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      collections: [jets, tracks]
+      copy_inputs: { jets: [], tracks: [] }
+      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:

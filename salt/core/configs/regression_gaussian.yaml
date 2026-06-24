@@ -114,27 +114,44 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4 folded ONNX conversion producers (design §6.2): IDENTITY
-      # TaskOutput passthroughs of each gaussian head's de-scaled [B(,L), 2R]
-      # ONNX output (NOT flipped by P4) — the OnnxExportSink splits each into the
-      # mean + _stddev scalars.
+      # plan-29 W4/W5.2 conversion producers (design §6.2): IDENTITY TaskOutput
+      # passthroughs of each gaussian head's de-scaled [B(,L), 2R] output — the
+      # OnnxExportSink splits each into mean + _stddev scalars (ONNX), and the
+      # auto-collect H5OutputSink collects them as f4 columns (TEST, W5.2).
+      #
+      # W5 REGRESSION STOPGAP (plan 31 §5.2): IDENTITY passthroughs because
+      # RegressionTaskModule.forward still DESCALES in TEST/ONNX (NOT P1.5-flipped),
+      # so the passthrough emits the already-DESCALED [B, 2R] (mean ‖ stddev) values =
+      # matches the legacy gaussian WriterCallback in BOTH H5 and ONNX. MUST swap to a
+      # Regression (RegressionDescaleOp) producer when RegressionTaskModule is later
+      # flipped to publish RAW targets (else passthrough emits raw -> breaks). Mirrors
+      # the W2 identity-TaskOutput-before-P4 pattern.
       gaussian_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression, stream: jets } }
       gaussian_seq_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression_no_global_object, stream: tracks } }
 
+# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter + PadMaskWriter) is RETIRED for
+# this config — the auto-collect H5OutputSink below is the live TEST persistence sink
+# (it owns the pad-mask column via write_pad_mask). Null-merge deletes the base2.yaml
+# default writers so the WriterCallback is not assembled.
 writers:
   modules:
-    # a per-token (tracks) gaussian head needs the pad-mask column; keep the
-    # base2.yaml pad_mask writer. TaskWriter columns: <run>_<suffix> f4 per
-    # output (R means + R _stddev per head).
-    pad_mask:
-      class_path: salt.core.writers.PadMaskWriter
-    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
-    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+    inputs_copy: null
+    tasks: null
+    pad_mask: null
 
 # plan-29 W4 declare-only ONNX sink (design §4.2): splits each de-scaled gaussian
 # leaf into mean + _stddev scalars (v1/oracle order: global head, then per-token).
+# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): collects the gaussian identity
+# producers; the H5 columns are {run}_{output_suffixes} — gaussian doubling (R means
+# then R _stddev): jets -> HadronConeExclTruthLabelPt(_stddev); tracks (per-token) ->
+# dummyOutput_dPhi(_stddev) — REPRODUCING the legacy gaussian WriterCallback schema.
 callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      collections: [jets, tracks]
+      copy_inputs: { jets: [], tracks: [] }
+      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:

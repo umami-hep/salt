@@ -203,9 +203,17 @@ def test_leaf_rejects_unknown_dtype():
         OnnxExportLeaf(key=_TRK, name="T", dtype="float16")
 
 
-def test_sink_rejects_empty_outputs():
-    with pytest.raises(ConfigError, match="non-empty outputs list"):
-        OnnxExportSink(outputs=[])
+def test_sink_empty_outputs_enters_auto_collect():
+    """Plan 31 W5.1: an OMITTED/empty `outputs` is AUTO-COLLECT mode (no longer an error).
+
+    The explicit-list construction error is replaced by deferred resolution: an
+    auto-collecting sink with no model modules bound raises at resolve time (a clear
+    actionable message), not at construction.
+    """
+    sink = OnnxExportSink(outputs=[], model_name="M")
+    assert sink._auto_collect is True  # noqa: SLF001 - asserting the mode flag
+    with pytest.raises(ConfigError, match="has no model modules bound"):
+        sink.output_names()
 
 
 def test_sink_rejects_duplicate_leaf_key():

@@ -157,27 +157,51 @@ model:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
       # plan-29 W4 folded ONNX conversion producers (design §6.2): each regression
       # head's de-scaled ONNX prediction is published as an outputs.* leaf the
-      # OnnxExportSink names. The regression task OWNS the de-scaling in ONNX (NOT
-      # flipped by P4 — its de-scale carve-out stays), so these are IDENTITY
-      # TaskOutput passthroughs of the task's already-de-scaled values.
+      # OnnxExportSink names; plan-29 W5.2 the auto-collect H5OutputSink ALSO collects
+      # them (regression as an output this pass).
+      #
+      # W5 REGRESSION STOPGAP (plan 31 §5.2): these are IDENTITY TaskOutput passthroughs
+      # because RegressionTaskModule.forward still DESCALES in TEST/ONNX (it is NOT
+      # P1.5-flipped — the de-scale carve-out stays), so the identity passthrough emits
+      # the already-DESCALED values = matches the legacy regression WriterCallback in
+      # BOTH TEST H5 and ONNX. This MUST swap to a Regression (RegressionDescaleOp)
+      # producer when RegressionTaskModule is later flipped to publish RAW targets (else
+      # the identity passthrough would emit raw -> breaks both H5 and ONNX). Mirrors the
+      # W2 identity-TaskOutput-before-P4 pattern.
       reg_normed_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_normed, stream: jets } }
       reg_multinorm_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multinorm, stream: jets } }
       reg_ratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_ratio, stream: jets } }
       reg_multiratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multiratio, stream: jets } }
       reg_seq_tracks_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_seq_tracks, stream: tracks } }
 
+# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config — the
+# auto-collect H5OutputSink below is the live TEST persistence sink. Null-merge deletes
+# the base2.yaml default writers so the WriterCallback is not assembled.
 writers:
   modules:
-    # no sequence-stream task -> no pad mask to write; delete the base2.yaml
-    # default (design §5.3 null-deletion). InputCopyWriter keeps its jets role.
+    inputs_copy: null
+    tasks: null
     pad_mask: null
-    # plan-29 W4: TaskWriter eval-only (onnx:false) — ONNX outputs derive from the
-    # folded OnnxExportSink below, not the off-graph writer manifest (retired).
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
 
 # plan-29 W4 declare-only ONNX sink (design §4.2): names the de-scaled regression
-# leaves into the flat Athena output tuple, in v1/oracle ORDER.
+# leaves into the flat Athena output tuple, in v1/oracle ORDER (KEPT explicit — the
+# ONNX side is unchanged from W4; the Athena physics names DIFFER from the H5 column
+# names, so the explicit `names:` are the authority for the tuple).
+# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the regression identity
+# producers (reg_*_out) and assembles the eval H5 groups from their output_columns()
+# field manifest — the H5 columns are the task target/custom names ({run}_{suffix}),
+# REPRODUCING the legacy regression WriterCallback schema EXACTLY (the pilot's
+# hand-listed reg_normed/reg_multinorm_0 names DIVERGED from legacy and are replaced).
+# H5 names per head: reg_normed -> HadronConeExclTruthLabelPt; reg_multinorm ->
+# R10TruthLabel_R22v1_TruthJetMass/_TruthJetPt; reg_ratio -> pt; reg_multiratio ->
+# truthMass/truthPt; reg_seq_tracks -> dummyOutput_dPhi/dEta (per-token).
 callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      collections: [jets, tracks]
+      copy_inputs: {jets: [pt_btagJes, eta_btagJes, mass], tracks: [d0, z0SinTheta, dphi, deta, qOverP]}
+      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:

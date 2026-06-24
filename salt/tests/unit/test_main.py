@@ -152,7 +152,9 @@ class TestParseAndInstantiate:
         # (real-data runs are the gates experiment's job — no /data here)
         cli = make_cli(data, config=OPENDATA_CFG)
         assert isinstance(cli.model, SaltModule)
-        assert set(cli.model.net.keys()) == GN2V2_MODULES
+        # plan-29 W5.2: the open-data config adds the H5-side SeqClassProbs producer
+        # (track_origin_probs) for the auto-collect H5OutputSink eval columns
+        assert set(cli.model.net.keys()) == GN2V2_MODULES | {"track_origin_probs"}
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
         assert list(jets_task.class_names) == ["bjets", "cjets", "ujets", "taujets"]

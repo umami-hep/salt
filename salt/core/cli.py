@@ -389,6 +389,12 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 "names must be unique across the graph (design §2.2); rename the callback key"
             )
         modules[node.name] = node
+    # plan 31 W5.1: give an auto-collecting sink the (sink-inclusive) module dict so
+    # its declare_io can discover the conversion producers on the STATIC graph path
+    # (salt2 graph validate/plot) too — the runtime path binds in SaltModule.compile_mode.
+    for node in (sink_node, onnx_sink_node):
+        if node is not None and callable(getattr(node, "bind_model_modules", None)):
+            node.bind_model_modules(modules)
     fitval_callbacks = _static_fitval_callbacks(cli)
     sinks: dict[Mode, tuple[str, ...]] = {}
     mode_errors: dict[Mode, str] = {}

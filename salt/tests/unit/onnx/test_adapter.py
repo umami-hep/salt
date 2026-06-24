@@ -269,9 +269,16 @@ class TestExportSinkOutputs:
                 OnnxExportLeaf(key="outputs.jets.b", name="pb", dtype="int8", per_token=True),
             ])
 
-    def test_empty_sink_rejected(self):
-        with pytest.raises(ConfigError, match="non-empty"):
-            OnnxExportSink(outputs=[])
+    def test_empty_sink_enters_auto_collect(self):
+        """Plan 31 W5.1: an omitted/empty `outputs` is AUTO-COLLECT mode (no longer rejected).
+
+        Construction succeeds (deferred resolution); a sink with no model modules
+        bound raises at resolve time with an actionable message.
+        """
+        sink = OnnxExportSink(outputs=[], model_name="M")
+        assert sink._auto_collect is True  # noqa: SLF001 - asserting the mode flag
+        with pytest.raises(ConfigError, match="has no model modules bound"):
+            sink.output_names()
 
 
 # ---------------------------------------------------------------------------

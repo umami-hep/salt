@@ -121,25 +121,51 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+      # plan-29 W5.2 conversion producers (design §6.2): mint outputs.* leaves the
+      # auto-collect H5OutputSink discovers (event_classifier has NO ONNX export —
+      # there is no OnnxExportSink, so these feed TEST H5 only). Demand-pruned from
+      # FIT/VAL (FIT plan_hash unchanged).
+      events_probs:
+        class_path: salt.core.outputs.ClassProbs
+        init_args: { task: events_classification, stream: events }
+      # W5 REGRESSION STOPGAP (plan 31 §5.2): regression producers are IDENTITY
+      # TaskOutput passthroughs because RegressionTaskModule.forward still DESCALES in
+      # TEST/ONNX (it is NOT P1.5-flipped), so the identity passthrough emits the
+      # already-descaled values = matches legacy. This MUST swap to a Regression
+      # (RegressionDescaleOp) producer when RegressionTaskModule is later flipped to
+      # publish raw targets (else identity passthrough emits raw -> breaks). Mirrors
+      # the W2 identity-TaskOutput-before-P4 pattern.
+      mHH_reg_out:
+        class_path: salt.core.outputs.TaskOutput
+        init_args: { task: mHH_regression, stream: events }
 
+# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
+# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
+# of the cutover). Null-merge deletes the base2.yaml default writers so the
+# WriterCallback is not assembled.
 writers:
   modules:
-    # both heads are on the GLOBAL `events` stream (no sequence-stream task), so
-    # there is no pad mask to write — delete the base2.yaml default (design §5.3
-    # null-deletion). InputCopyWriter keeps its events role.
+    inputs_copy: null
+    tasks: null
     pad_mask: null
-    # plan-29 W4: TaskWriter eval-only (onnx:false) — event_classifier has NO ONNX
-    # export (see below), so the writer never contributes an ONNX manifest anyway;
-    # set onnx:false explicitly so no live config relies on the retired
-    # writer-derived ONNX manifest.
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
 
+# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
+# producers feeding the events stream (events_probs' pggF/pVBF + mHH_reg_out's
+# de-scaled regression column) and assembles the eval H5 group from their
+# output_columns() field manifest — no hand-listed columns. Both heads are on the
+# GLOBAL `events` stream (no sequence-stream task), so write_pad_mask is false.
+#
 # NO export: block + NO OnnxExportSink — event_classifier is an event-level
 # analysis model with a NON-feature ratio denominator (mHH), so it has no
 # ONNX/Athena export representation (see the §3.3 ONNX note in the header).
-# Validated fit + test only; `salt2 graph validate --mode onnx` falls back to the
-# all-preds render (no export sink to anchor demand). The eval columns derive from
-# the TaskWriter (event_classifier_pggF/_pVBF + the de-scaled mHH regression).
+# Validated fit + test only; there is no ONNX export sink to anchor onnx-mode demand.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      collections: [events]
+      copy_inputs: { events: [] }
+      write_pad_mask: false
 
 trainer:
   max_epochs: 30
