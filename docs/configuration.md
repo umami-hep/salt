@@ -266,7 +266,7 @@ data:
         ...
 ```
 
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) config.
 
 
 #### Edge Features

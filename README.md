@@ -1,9 +1,11 @@
 [![docs](https://img.shields.io/badge/info-documentation-informational)](https://ftag-salt.docs.cern.ch/)
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.07217/status.svg)](https://doi.org/10.21105/joss.07217)
+[![pipeline status](https://gitlab.cern.ch/aft/algorithms/salt/badges/main/pipeline.svg)](https://gitlab.cern.ch/aft/algorithms/salt/-/commits/main)
+[![coverage report](https://gitlab.cern.ch/aft/algorithms/salt/badges/main/coverage.svg)](https://gitlab.cern.ch/aft/algorithms/salt/-/commits/main)
 
 # Salt
 
-This is the home of Salt, a framework for training multi-model and multi-task models models in the style of GN2.
+This is the home of Salt, a framework for training multi-model and multi-task models in the style of GN2.
 
 Documentation is available [here](https://ftag-salt.docs.cern.ch/).
 
