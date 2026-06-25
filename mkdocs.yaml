@@ -86,7 +86,10 @@ markdown_extensions:
   - toc:
       permalink: "#"
 
+extra:
+  repo_url: https://gitlab.cern.ch/aft/algorithms/salt/
+
 extra_javascript:
   - "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML"
 
-copyright: Copyright &copy; 2022 - 2023 CERN for the benefit of the ATLAS collaboration
+copyright: Copyright &copy; 2022 - 2026 CERN for the benefit of the ATLAS collaboration
