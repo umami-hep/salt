@@ -147,6 +147,18 @@ class OutputField:
         Whether the H5 column is ``{run_name}_{h5_name}`` (the v1 default) or the
         bare ``h5_name`` (the v1 ``VertexIndex`` byte-parity column). ONNX always
         prefixes with ``{model_name}_``.
+    value : Tensor | None
+        The graph-visible converted result this field describes (plan 34 W34.1).
+        ``None`` for the static plan-31 manifest path (``output_columns`` mints
+        name/dtype/axis metadata BEFORE any forward, so it has no tensor); the
+        plan-34 task-side ``get_output(b, mode, run_name)`` path FILLS it with the
+        converted torch tensor (softmax / masked-softmax / argmax — traceable
+        ops, so ONNX sees them in-graph). The sink applies the
+        ``{run_name}``/``{model_name}`` prefix, the f4->f2 downcast and the H5
+        packing — the value stays a raw torch tensor at full precision (no prefix,
+        no pack baked in). A field describes a SINGLE serialisation leaf, so a
+        multi-class head returns one field per class, each carrying that class's
+        column of `value`'s last axis (see ``ClassificationTaskModule.get_output``).
     """
 
     h5_name: str | None
@@ -155,6 +167,7 @@ class OutputField:
     axis: str = "global"
     final: bool = True
     prefix: bool = True
+    value: Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.axis not in {"global", "per_token"}:

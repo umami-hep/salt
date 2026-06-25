@@ -55,6 +55,7 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.modules import Dense, _reject_width_keys, _stream_len
 from salt.core.onnx.config import ExportOutput
+from salt.core.outputs.producers import OutputField
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 from salt.core.utils.union_find import get_node_assignment_jit
@@ -981,6 +982,82 @@ class _TaskModuleBase(nn.Module):
         """
         raise ConfigError(self._no_render_msg("ONNX output"))
 
+    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
+        """Render this task's converted, graph-visible output fields (plan 34 W34.1).
+
+        The unifying serialisation-space entry point: it reads the task's RAW
+        ``preds.*`` leaf (loss-space — ``forward`` no longer converts) plus any
+        output-time deps (`output_time_requires`, e.g. the stream pad mask) from
+        `b`, applies the eval conversion (softmax / masked-softmax / argmax /
+        descale / union-find — the SAME math the family's ``run_inference`` /
+        the legacy `ConversionOp` producer runs, VERBATIM, in TRACEABLE torch
+        ops so ONNX sees them in-graph), and returns one `OutputField` per
+        SERIALISATION LEAF. Each field carries the converted torch tensor as
+        its ``value`` plus the BARE suffix + dtype + axis + ordering metadata —
+        it does NOT pack a structured numpy array (the H5 sink packs), does NOT
+        prefix the run/model name (the sink prefixes) and does NOT downcast to
+        half precision (the sink downcasts). The H5-vs-ONNX representation split
+        is keyed on `mode` (probs for H5 modes, per-class scalars / argmax index
+        for ONNX) — see the per-family override.
+
+        This UNIFIES the conversion + naming responsibilities of `get_h5`
+        (TEST values) and `onnx_outputs` (ONNX manifest) onto one method; those
+        two legacy methods stay for the transitional oracle path. The base
+        raises for a task family that ships no output rendering (the
+        unsupported-family guard, mirroring `get_h5`/`onnx_outputs`).
+
+        Parameters
+        ----------
+        b : Bundle
+            The executed bundle (carries the RAW ``preds.*`` leaf + any
+            output-time dep, e.g. ``masks.<stream>``).
+        mode : Mode
+            The execution mode — selects the H5 (probs) vs ONNX
+            (split-scalars / argmax index) representation.
+        run_name : str
+            The run ``name:`` — accepted for symmetry with `get_h5`/`output_names`
+            but NOT baked into the field names (the sink prefixes), so the
+            classification override deletes it.
+
+        Raises
+        ------
+        ConfigError
+            For a task family that ships no output rendering. The per-family
+            override returns ``list[OutputField]`` (one field per serialisation
+            leaf, each carrying a torch ``value``).
+        """
+        del b, mode, run_name
+        raise ConfigError(self._no_render_msg("output"))
+
+    def output_time_requires(self, mode: Mode) -> list[str]:
+        """The NON-pred bundle keys `get_output` needs at output time (plan 34 W34.1).
+
+        Declares the extra dependencies (beyond the task's own ``preds.*`` leaf)
+        that `get_output` reads — for `RunTaskOutput` to add to its
+        ``declare_io`` requires in W34.2. A per-token (sequence) head needs the
+        stream pad mask (``masks.<stream>``) for the masked softmax; a global
+        (pooled) head needs nothing extra. Mirrors the legacy
+        `ConversionOp.extra_requires` set, but task-side and mode-aware (a global
+        head returns ``[]`` in every mode; a seq head returns the pad-mask key
+        whenever it has one, in every mode that runs `get_output`).
+
+        The base returns ``[]`` (a task family with no output-time deps); the
+        per-family override declares its own.
+
+        Parameters
+        ----------
+        mode : Mode
+            The execution mode (accepted for families whose deps are mode-split;
+            the base ignores it).
+
+        Returns
+        -------
+        list[str]
+            Dotted bundle keys (empty by default).
+        """
+        del mode
+        return []
+
     def _no_render_msg(self, what: str) -> str:
         """The unsupported-family error message (moved off the writer).
 
@@ -1335,6 +1412,170 @@ class ClassificationTaskModule(_TaskModuleBase):
                 reduce="argmax",
                 dtype="int8",
             )
+        ]
+
+    def output_time_requires(self, mode: Mode) -> list[str]:
+        """The non-pred deps `get_output` reads: the stream pad mask for a seq head.
+
+        A per-token (sequence) classification head's masked softmax reads
+        ``masks.<stream>`` (the same `extra_requires` the legacy
+        `SeqClassProbsOp`/`SeqClassIndexOp` declared). A global (pooled) head's
+        plain softmax / sigmoid needs nothing beyond the pred leaf. The
+        objects-stream query-bank seq head has no pad mask (`has_pad_mask` False)
+        so even a sequence head returns ``[]`` there — exactly v1's objects-stream
+        exemption (task.py:547). Mode-independent for this family.
+
+        Returns
+        -------
+        list[str]
+            ``["masks.<stream>"]`` for a padded seq head, else ``[]``.
+        """
+        del mode
+        # `has_pad_mask` already implies `sequence` (tasks.py:881:
+        # `self.sequence and self.stream not in _NO_PAD_MASK_STREAMS`), so the
+        # bare `has_pad_mask` guard covers all three cases: global [] / no-pad-mask
+        # seq [] / padded seq [masks.<stream>].
+        if self.has_pad_mask:
+            return [f"masks.{self.stream}"]
+        return []
+
+    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
+        """Softmax/argmax the RAW logits into graph-visible `OutputField`s (plan 34 W34.1).
+
+        Reads the RAW ``preds.*`` logits (forward is loss-space) + the stream pad
+        mask (seq head) and runs the eval conversion in TRACEABLE torch ops,
+        folding the EXACT math of the legacy `ClassProbsOp` / `SeqClassProbsOp` /
+        `SeqClassIndexOp` (``producers.py``) which itself mirrors the absorbed
+        ``run_inference`` (``tasks.py``). Per mode:
+
+        - **Global (pooled) head**: ``sigmoid`` (BCE) else ``softmax(dim=-1)``.
+          BOTH H5 and ONNX use the per-class ``class_suffixes`` (the legacy
+          ``output_names`` H5 columns AND ``split_scalars`` ONNX scalars share the
+          suffixes). One ``f4`` global field PER CLASS, ``value`` = that class's
+          column ``probs[..., c]``. The value shape is MODE-FAITHFUL to the sink it
+          feeds:
+
+          - **H5 modes** (FIT/VAL/TEST): the per-class column ``[B]`` — exactly the
+            float column ``get_h5`` packs (tasks.py:1364). No squeeze (a B=1 H5 leaf
+            must stay ``[1]`` to match ``get_h5``).
+          - **ONNX**: the 0-dim scalar ``[]`` the live ONNX sink mints. The sink
+            (`OnnxExportSink.named_outputs`, sinks.py:1714-1717) takes the full
+            ``[1, C]`` leaf and does ``torch.split(value, 1, -1)`` then
+            ``part.squeeze()`` (NO dim arg → drops ALL size-1 dims). On the batch-1
+            ONNX trace the global logits are ``[1, C]`` (the adapter keeps batch dim
+            1 for globals), so ``probs[..., c]`` is ``[1]`` and ``.squeeze()`` yields
+            ``[]`` — the rank-0 scalar Athena/v1 expects. So ``probs[..., c]`` alone
+            (``[1]``) does NOT match the v1 trace; ``get_output`` squeezes in ONNX
+            mode to reproduce it byte-for-byte.
+
+          ``run_name`` is NOT baked in (the sink prefixes), so it is deleted.
+
+          .. note:: W34.2 sink-wiring decision — get_output now owns the global ONNX
+             squeeze (each per-class field value is already the 0-dim scalar). When
+             the dumb ``OnnxExportSink`` is wired to consume these per-class field
+             values DIRECTLY (the "sink supplies names, does no math" contract, plan
+             §4), it must NOT re-split / re-squeeze: it names the already-scalar
+             values. The legacy plural-names ``leaf.names`` split path stays only for
+             the static (value-less) plan-31 leaves.
+        - **Sequence (per-token) head**:
+            - **H5 modes** (FIT/VAL/TEST): masked softmax (padded tokens read
+              ``0.0`` — the v1 eval byte-parity quirk). One ``f4`` per-token field
+              PER CLASS, ``onnx_name=None`` (H5-only — the ONNX side is the argmax
+              index), ``value`` = ``probs[..., c]`` (shape ``[B, L]``).
+            - **ONNX**: masked softmax then the zero-row-append/strip ``argmax``
+              VERBATIM from `SeqClassIndexOp.convert` (``producers.py:560-567`` /
+              ``to_onnx.py:418-421``), yielding the ``[L]`` int8 leaf. ONE field
+              with ``h5_name=None`` (ONNX-only), ``onnx_name=pascal_case(name)``
+              (e.g. ``TrackOrigin``), ``dtype="int8"`` (per-token), ``value`` =
+              the int8 tensor.
+
+        The probs (H5) and index (ONNX) leaves carry DISTINCT logical names (the
+        per-class suffixes vs the pascal-case task name) so the write-once
+        ``outputs.*`` constraint holds when both are minted (today's
+        ``track_origin_probs`` vs ``track_origin_index`` split — the RunTaskOutput
+        leaf name disambiguates in W34.2). The H5 packing (``u2s``), the
+        ``{run_name}``/``{model_name}`` prefix and the f4->f2 downcast all stay in
+        the sink — this method returns full-precision torch tensors only.
+
+        Returns
+        -------
+        list[OutputField]
+            Per-class probability fields (H5 modes), or a single argmax-index
+            field (ONNX seq head); each carries a torch ``value``.
+        """
+        del run_name
+        assert self.task is not None, "get_output before bind()"
+        logits = b.get(self.pred_key)
+        if not self.sequence:
+            # global (pooled) head: sigmoid (BCE) / softmax(dim=-1) — verbatim
+            # ClassProbsOp.convert (producers.py:441-448) / run_inference
+            # (tasks.py:329-333).
+            if isinstance(self.task.loss, torch.nn.BCEWithLogitsLoss):
+                probs = torch.sigmoid(logits)
+            else:
+                assert logits.ndim == 2, "global classification head expects [B, C] logits"
+                probs = torch.softmax(logits, dim=-1)
+            # The per-class value shape is MODE-FAITHFUL to the live sinks: in ONNX
+            # the sink mints a 0-dim scalar (`OnnxExportSink.named_outputs`,
+            # sinks.py:1714-1717: `torch.split(probs, 1, -1)` then `part.squeeze()` —
+            # NO dim arg → drops ALL size-1 dims; on the batch-1 ONNX trace the global
+            # logits are `[1, C]`, so `probs[..., c]` is `[1]` and `.squeeze()` yields
+            # the `[]` scalar Athena/v1 expects). In H5/TEST modes the sink packs the
+            # full `[B]` per-class column (`get_h5`, tasks.py:1364), so the value MUST
+            # stay `[B]` (squeezing there would diverge from get_h5 at B=1). We mirror
+            # the sink exactly: squeeze only in ONNX mode.
+            squeeze_global = bool(mode & Mode.ONNX)
+            return [
+                OutputField(
+                    h5_name=px,
+                    dtype="f4",
+                    axis="global",
+                    final=True,
+                    value=probs[..., c].squeeze() if squeeze_global else probs[..., c],
+                )
+                for c, px in enumerate(self.class_suffixes)
+            ]
+        # sequence (per-token) head: masked softmax (padded tokens -> 0.0) —
+        # verbatim SeqClassProbsOp/SeqClassIndexOp (producers.py:559) /
+        # run_inference (tasks.py:334-336).
+        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+        probs = _masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+        if mode & Mode.ONNX:
+            # ONNX argmax index: zero-row append/strip VERBATIM (producers.py:560-567 /
+            # to_onnx.py:418-421) -> [L] int8 leaf under the pascal-case task name.
+            padded = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)
+            index = torch.argmax(padded, dim=-1)[:, :-1].squeeze(0).char()
+            return [
+                OutputField(
+                    h5_name=None,
+                    onnx_name=pascal_case(self.name),
+                    dtype="int8",
+                    axis="per_token",
+                    final=True,
+                    value=index,
+                )
+            ]
+        # These seq probs fields are H5-ONLY (the ONNX side of a seq head is the
+        # argmax index leaf above, NOT per-class probs). The H5-only intent is
+        # carried by `onnx_name=None` + `axis=per_token`, but it is NOT enforceable
+        # via `resolved_onnx_name`: that property falls back to `h5_name` when
+        # `onnx_name` is None (producers.py:194), so these fields REPORT a per-class
+        # ONNX suffix. They are reached only in H5 modes because get_output mode-keys
+        # (Mode.ONNX returns the argmax leaf above and never reaches here). The W34.2
+        # RunTaskOutput/sink consumer MUST select ONNX outputs by MODE (call
+        # get_output(b, Mode.ONNX, ...)), NOT by enumerating resolved_onnx_name across
+        # all fields — otherwise these H5-only probs would falsely claim ONNX names
+        # and collide with the argmax leaf.
+        return [
+            OutputField(
+                h5_name=px,
+                onnx_name=None,
+                dtype="f4",
+                axis="per_token",
+                final=True,
+                value=probs[..., c],
+            )
+            for c, px in enumerate(self.class_suffixes)
         ]
 
 
