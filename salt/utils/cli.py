@@ -72,7 +72,7 @@ def get_best_epoch(config_path: Path) -> str:
     ckpt_dir = Path(config_path.parent / "ckpts")
     print("No --ckpt_path specified, looking for best checkpoint in", ckpt_dir)
     ckpts = list(Path(ckpt_dir).glob("*.ckpt"))
-    exp = r"(?<=loss=)(?:(?:\d+(?:\.\d*)?|\.\d+))"
+    exp = r"(?<=loss=)-?(?:\d+(?:\.\d*)?|\.\d+)"
     losses = [float(re.findall(exp, Path(ckpt).name)[0]) for ckpt in ckpts]
     ckpt = ckpts[np.argmin(losses)]
     print("Using checkpoint", ckpt)
