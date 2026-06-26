@@ -194,6 +194,7 @@ class SaltModule(lightning.LightningModule):
         mup: Mapping[str, Any] | None = None,
         name: str = "salt",
         debug: bool = False,
+        outputs: dict[str, GraphModule | None] | None = None,
     ) -> None:
         super().__init__()
         # assembly-time None filtering (design §5.3): a null entry — from a
@@ -246,6 +247,10 @@ class SaltModule(lightning.LightningModule):
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
         self._graph_modules: dict[str, GraphModule] = dict(modules)
+        # plan 34 W34.2: the top-level outputs: section, composed AFTER the model
+        # (empty until `compose_output_section` runs — either here from the
+        # `outputs=` ctor arg, or from Salt2CLI.instantiate_classes on the CLI path).
+        self._output_section: dict[str, GraphModule] = {}
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
         self.schema: ResolvedSchema | None = None
@@ -253,6 +258,66 @@ class SaltModule(lightning.LightningModule):
         self._materialised = False
         self._loaded_from_checkpoint = False
         self._ckpt_plan_hashes: dict[str, str] = {}
+        # programmatic-construction path: compose the outputs: section now (the CLI
+        # path passes outputs=None here and composes via instantiate_classes).
+        if outputs:
+            self.compose_output_section(
+                {key: w for key, w in outputs.items() if w is not None}
+            )
+
+    def compose_output_section(self, section: Mapping[str, GraphModule]) -> None:
+        """Compose the plan-34 top-level ``outputs:`` section onto the model (W34.2).
+
+        The new plan-34 fold site: the section writers (`RunTaskOutput` /
+        `InputCopyWriter` / `PadMaskWriter`) are folded into the planning module
+        dict (and `net`, so they ride the ModuleDict — they carry no params, so the
+        state_dict is unchanged and resume is safe). Their ``outputs.*`` leaves reach
+        a sink only in TEST/ONNX, so FIT/VAL demand-prune them (FIT/VAL plan_hash
+        byte-unchanged, plan §6 gate 4). `RunTaskOutput` gets the model module dict
+        so it can resolve the tasks it orchestrates before any ``declare_io``.
+
+        MANIFEST-ONLY writers (`InputCopyWriter` — input copies are re-read from the
+        source H5 by the SINK, never flowing through the graph) are NOT folded into
+        the graph: they have no ``produces``, so the demand closure would prune
+        them. They stay in the section dict for the sink to read their copy spec at
+        ``bind_output_section``.
+
+        Parameters
+        ----------
+        section : Mapping[str, GraphModule]
+            The section writers by instance name, in declaration order (the eval-H5
+            column-order authority).
+
+        Raises
+        ------
+        ConfigError
+            For a section writer whose name collides with a model module.
+        """
+        section = {key: w for key, w in section.items() if w is not None}
+        if not section:
+            return
+        for key, w in section.items():
+            if key in self._graph_modules:
+                raise ConfigError(
+                    f"outputs: section writer {key!r} collides with a model module — instance "
+                    "names are unique across the pipeline graph (plan 34 W34.2)"
+                )
+            w.name = key
+        # the model-side modules (everything already in the graph BEFORE the
+        # section folds in) — RunTaskOutput resolves its tasks against these.
+        model_modules = dict(self._graph_modules)
+        graph_writers = {
+            key: w
+            for key, w in section.items()
+            if not (callable(getattr(w, "is_manifest_only", None)) and w.is_manifest_only())
+        }
+        for key, w in graph_writers.items():
+            self.net[key] = w  # ride the ModuleDict (params-free, state_dict unchanged)
+            self._graph_modules[key] = w
+        self._output_section = dict(section)
+        for w in section.values():
+            if callable(getattr(w, "bind_model_modules", None)):
+                w.bind_model_modules(model_modules)
 
     # -- lifecycle state (read-only — gates and tests assert on these) ---------
 
@@ -509,6 +574,24 @@ class SaltModule(lightning.LightningModule):
         if has_io and callable(is_sink) and bool(is_sink()):
             return callback
         return None
+
+    def _bind_output_section_to_sink(self) -> None:
+        """Bind the outputs: section to every attached sink callback (plan 34 W34.2).
+
+        The dumb sinks resolve their column schema + copy spec + mask streams from
+        the SECTION manifest, so the section must be bound before any
+        declare_io/writer_demand resolution. Binds the section to EVERY attached
+        callback exposing ``bind_output_section`` (the H5 persistence sink AND the
+        ONNX export sink), so both dump the section's outputs.* leaves. No-op when
+        no outputs: section is configured.
+        """
+        if not self._output_section:
+            return
+        trainer = self._trainer
+        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+        for cb in callbacks or []:
+            if callable(getattr(cb, "bind_output_section", None)):
+                cb.bind_output_section(self._output_section)
 
     @staticmethod
     def _fold_sink_node(
@@ -811,6 +894,15 @@ class SaltModule(lightning.LightningModule):
         # for an explicit-`outputs` sink (`bind_model_modules` no-ops there).
         if sink_node is not None and callable(getattr(sink_node, "bind_model_modules", None)):
             sink_node.bind_model_modules(self._graph_modules)
+        # plan 34 W34.2: bind the outputs: section to the sink so it dumps the
+        # section's outputs.* leaves (column schema + copy spec + mask streams from
+        # the section manifest in declaration order, not producer discovery).
+        if (
+            self._output_section
+            and sink_node is not None
+            and callable(getattr(sink_node, "bind_output_section", None))
+        ):
+            sink_node.bind_output_section(self._output_section)
         folded_sink = sink_node is not None and mode is Mode.TEST
         if folded_sink:
             # the sink node anchors ALL its demand via its declared requires
@@ -867,6 +959,10 @@ class SaltModule(lightning.LightningModule):
                 f"stage {stage!r} is not supported by SaltModule in M2 — use trainer.fit or "
                 "trainer.test (validate/predict entry points are M5+, design §9.5)"
             )
+        # plan 34 W34.2: bind the outputs: section to the attached sink BEFORE any
+        # boundary/demand resolution (the sink's declare_io/writer_demand resolves
+        # its columns from the section manifest — it must be bound first).
+        self._bind_output_section_to_sink()
         dm = self._graph_datamodule()
         if stage == "fit":
             self.compile_mode(Mode.FIT, self._boundary(dm.train_dset, "train"))

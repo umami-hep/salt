@@ -56,6 +56,12 @@ from salt.core.outputs.sinks import (
     OnnxExportSink,
     OutputColumn,
 )
+from salt.core.outputs.writers import (
+    InputCopyWriter,
+    OutputSectionWriter,
+    PadMaskWriter,
+    RunTaskOutput,
+)
 
 __all__ = [
     "ClassProbs",
@@ -66,6 +72,7 @@ __all__ = [
     "H5OutputSink",
     "H5OutputWriter",
     "IdentityOp",
+    "InputCopyWriter",
     "MFLeadVertexDecorator",
     "MaskFormerObject",
     "MaskFormerObjects",
@@ -73,8 +80,11 @@ __all__ = [
     "OnnxExportSink",
     "OutputColumn",
     "OutputField",
+    "OutputSectionWriter",
+    "PadMaskWriter",
     "Regression",
     "RegressionDescaleOp",
+    "RunTaskOutput",
     "SeqClassIndex",
     "SeqClassIndexOp",
     "SeqClassProbs",

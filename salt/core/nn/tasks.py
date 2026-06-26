@@ -1029,6 +1029,34 @@ class _TaskModuleBase(nn.Module):
         del b, mode, run_name
         raise ConfigError(self._no_render_msg("output"))
 
+    def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
+        """The value-free serialisation-leaf metadata for `mode` (plan 34 W34.2).
+
+        The bundle-free twin of `get_output`: returns the SAME `OutputField`
+        list (names / dtypes / axis / final / prefix, in the SAME field order),
+        but with every ``value`` left ``None`` — so the dumb sinks can resolve
+        the column NAMES / DTYPES / ORDER at declare/open time, before any batch
+        runs (``get_output`` reads ``preds.*`` and cannot run without a bundle).
+        The per-family override returns the metadata; the base raises for a task
+        family that ships no output rendering (mirroring `get_output`).
+
+        Parameters
+        ----------
+        mode : Mode
+            The execution mode — selects the H5 (probs columns) vs ONNX
+            (split-scalars / argmax index) representation, exactly as
+            `get_output`.
+        run_name : str
+            Accepted for symmetry; NOT baked into the names (the sink prefixes).
+
+        Raises
+        ------
+        ConfigError
+            For a task family that ships no output rendering.
+        """
+        del mode, run_name
+        raise ConfigError(self._no_render_msg("output manifest"))
+
     def output_time_requires(self, mode: Mode) -> list[str]:
         """The NON-pred bundle keys `get_output` needs at output time (plan 34 W34.1).
 
@@ -1576,6 +1604,44 @@ class ClassificationTaskModule(_TaskModuleBase):
                 value=probs[..., c],
             )
             for c, px in enumerate(self.class_suffixes)
+        ]
+
+    def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
+        """The value-free field metadata mirroring `get_output` for `mode` (plan 34 W34.2).
+
+        Returns the SAME `OutputField`s `get_output` mints (names / dtypes / axis /
+        final / prefix, SAME field order) but with ``value=None`` — so the dumb
+        sinks resolve the column schema before any batch runs. The mode split is
+        IDENTICAL to `get_output`:
+
+        - global head -> one ``f4`` global field per class (``class_suffixes``).
+        - seq head, ONNX -> one int8 per-token argmax field (``pascal_case(name)``).
+        - seq head, H5 modes -> one ``f4`` per-token field per class (H5-only).
+
+        Returns
+        -------
+        list[OutputField]
+            The value-free serialisation fields, in field order.
+        """
+        del run_name
+        if not self.sequence:
+            return [
+                OutputField(h5_name=px, dtype="f4", axis="global", final=True)
+                for px in self.class_suffixes
+            ]
+        if mode & Mode.ONNX:
+            return [
+                OutputField(
+                    h5_name=None,
+                    onnx_name=pascal_case(self.name),
+                    dtype="int8",
+                    axis="per_token",
+                    final=True,
+                )
+            ]
+        return [
+            OutputField(h5_name=px, onnx_name=None, dtype="f4", axis="per_token", final=True)
+            for px in self.class_suffixes
         ]
 
 

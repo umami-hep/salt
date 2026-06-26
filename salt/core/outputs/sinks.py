@@ -584,6 +584,21 @@ class H5OutputSink(_SinkCallback):
         self.write_pad_mask = write_pad_mask
         self.output = output
         self.half_precision = half_precision
+        # plan 34 W34.2 DUMB-SECTION mode: when an `outputs:` section is bound
+        # (RunTaskOutput + InputCopyWriter + PadMaskWriter), the sink dumps ALL
+        # active outputs.* leaves and derives its column schema + copy spec +
+        # mask streams from the SECTION manifest in section declaration order
+        # (NOT from producer discovery). The constructor args (outputs/copy_inputs/
+        # write_pad_mask) become a DUMB fallback when no section is bound. This is
+        # the plan-34 cutover path; the plan-31 auto-collect / explicit paths stay
+        # for the not-yet-migrated configs (W34.4 migrates them).
+        self._output_section: Mapping[str, Any] | None = None
+        self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
+        # dumb-section copy resolution: None until a section binds; True means
+        # "copy every stream with a configured task" (v1 default, resolved at
+        # open_schema against the reader).
+        self._copy_all_tasked_streams: bool = False
+        self._copy_variables: dict[str, list[str]] = {}
         # per-test-run state (reset at open_schema)
         self._h5: H5Writer | None = None
         self._rows_written = 0
@@ -648,6 +663,73 @@ class H5OutputSink(_SinkCallback):
         if self._auto_collect:
             self._model_modules = model_modules
 
+    # -- plan 34 W34.2 dumb-section binding -------------------------------------
+
+    def bind_output_section(self, section: Mapping[str, Any]) -> None:
+        """Capture the ``outputs:`` section so the dumb sink dumps its leaves (plan 34 W34.2).
+
+        The section is the ORDERED dict of section writers (`RunTaskOutput`,
+        `InputCopyWriter`, `PadMaskWriter`). When bound, the sink switches to the
+        DUMB path: it dumps ALL active ``outputs.*`` leaves and derives its column
+        schema + input-copy spec + pad-mask streams from the SECTION manifest in
+        SECTION DECLARATION ORDER (the H5 column-order authority, plan §4 / §7
+        risk 4) — the constructor knobs are ignored. The section is bound by the
+        planner/SaltModule after the model (mirroring `bind_model_modules`).
+        """
+        self._output_section = section
+        # the section drives copy_inputs + write_pad_mask too (override the ctor
+        # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter.
+        copy_inputs: dict[str, list[str]] = {}
+        mask_streams: list[str] = []
+        for writer in section.values():
+            if callable(getattr(writer, "copy_spec", None)):
+                spec = writer.copy_spec()
+                streams = spec.get("streams")
+                variables = spec.get("variables") or {}
+                # streams None -> the v1 default (every stream with a configured
+                # task), resolved at open_schema against the reader; encode that as
+                # the sentinel {} (empty fields = all source fields) per stream we
+                # learn at open time. We stash the spec and resolve in open_schema.
+                if streams is None:
+                    self._copy_all_tasked_streams = True
+                    self._copy_variables = variables
+                else:
+                    self._copy_all_tasked_streams = False
+                    for s in streams:
+                        copy_inputs[s] = list(variables.get(s, []))
+                    self._copy_variables = variables
+            if callable(getattr(writer, "mask_streams", None)):
+                mask_streams.extend(writer.mask_streams())
+        if not getattr(self, "_copy_all_tasked_streams", False):
+            self.copy_inputs = copy_inputs
+        self.write_pad_mask = tuple(dict.fromkeys(mask_streams)) if mask_streams else False
+
+    def _is_dumb_section(self) -> bool:
+        """Whether an ``outputs:`` section is bound (the dumb-section path is active).
+
+        Returns
+        -------
+        bool
+            True when `bind_output_section` ran with a non-empty section.
+        """
+        return bool(self._output_section)
+
+    def _run_task_outputs(self) -> list[Any]:
+        """The bound section's `RunTaskOutput` writers (manifest contributors).
+
+        Returns
+        -------
+        list[Any]
+            The RunTaskOutput section writers, in section declaration order.
+        """
+        if not self._output_section:
+            return []
+        return [
+            w
+            for w in self._output_section.values()
+            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
+        ]
+
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve the H5 column table — explicit, or auto-collected from producers (W5.1).
 
@@ -674,6 +756,12 @@ class H5OutputSink(_SinkCallback):
         """
         if self._columns_resolved:
             return self._columns
+        # plan 34 W34.2 DUMB-SECTION path: when the outputs: section is bound, the
+        # H5 column schema comes from the section's RunTaskOutput.manifest_fields
+        # (value-free OutputField metadata) in SECTION DECLARATION ORDER — NOT from
+        # producer discovery. The section field ORDER drives the H5 column order.
+        if self._is_dumb_section():
+            return self._resolve_section_columns(run_name)
         if self._model_modules is None:
             raise ConfigError(
                 "H5OutputSink auto-collect has no model modules bound — the sink discovers "
@@ -721,6 +809,66 @@ class H5OutputSink(_SinkCallback):
                         f"H5OutputSink auto-collect: flat column {column_name!r} in stream "
                         f"{stream!r} is minted by BOTH {other} AND {output_key!r} — two producers "
                         "cannot emit the same H5 column (plan 31 W5.1 static dup-name guard)"
+                    )
+                seen_cols[stream, column_name] = output_key
+            columns.append(col)
+        resolved = tuple(columns)
+        self._columns = resolved
+        self._columns_resolved = True
+        return resolved
+
+    def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
+        """Resolve H5 columns from the bound ``outputs:`` section manifest (plan 34 W34.2).
+
+        Walks the section's `RunTaskOutput` writers' ``manifest_fields(Mode.TEST)``
+        (value-free `OutputField` metadata) in SECTION DECLARATION ORDER, keeps the
+        FINAL fields with an ``h5_name``, and assembles ONE `OutputColumn` per
+        ``outputs.*`` leaf (suffixes in field order). The SECTION field order is the
+        H5 column order authority (NOT executor topo order, plan §4 / §7 risk 4).
+        Caches the resolved table (run-name-stable). The section's
+        InputCopyWriter/PadMaskWriter contribute their columns through the copy /
+        mask paths (`_merge_columns`), not here.
+
+        Returns
+        -------
+        tuple[OutputColumn, ...]
+            The H5 task columns, in section declaration / field order.
+
+        Raises
+        ------
+        ConfigError
+            When the section mints no final H5 task column, or two leaves mint the
+            same flat H5 column.
+        """
+        by_key: dict[str, list[Any]] = {}
+        key_order: list[str] = []
+        for run_task in self._run_task_outputs():
+            for output_key, field in run_task.manifest_fields(Mode.TEST):
+                if field.h5_name is None:
+                    continue
+                if output_key not in by_key:
+                    by_key[output_key] = []
+                    key_order.append(output_key)
+                by_key[output_key].append(field)
+        if not key_order:
+            raise ConfigError(
+                "H5OutputSink (dumb-section) found no RunTaskOutput task with a final H5 column — "
+                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2)"
+            )
+        seen_cols: dict[tuple[str, str], str] = {}
+        columns: list[OutputColumn] = []
+        for output_key in key_order:
+            fields = by_key[output_key]
+            stream = output_key.split(KEY_SEP)[1]
+            prefix = fields[0].prefix
+            dtype = fields[0].dtype
+            suffixes = [f.h5_name for f in fields]
+            col = OutputColumn(key=output_key, suffixes=suffixes, dtype=dtype, prefix=prefix)
+            for column_name in col.column_names(run_name):
+                if (other := seen_cols.get((stream, column_name))) is not None:
+                    raise ConfigError(
+                        f"H5OutputSink (dumb-section): flat column {column_name!r} in stream "
+                        f"{stream!r} is minted by BOTH {other} AND {output_key!r} (plan 34 W34.2)"
                     )
                 seen_cols[stream, column_name] = output_key
             columns.append(col)
@@ -780,9 +928,18 @@ class H5OutputSink(_SinkCallback):
         }
         req["meta.rows"] = TensorSpec(shape=None, dtype="int64", kind="meta")
         for stream in self._pad_mask_streams():
-            req[f"masks.{stream}"] = TensorSpec(
-                shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
-            )
+            if self._is_dumb_section():
+                # plan 34 W34.2: in dumb-section mode the PadMaskWriter section node
+                # produces outputs.<stream>.mask; the sink DEMANDS that leaf (keeping
+                # PadMaskWriter alive in the plan) and reads the bool mask from it —
+                # the section feeds the sink through the graph (plan §4 W34.2).
+                req[f"outputs.{stream}.mask"] = TensorSpec(
+                    shape=None, dtype=None, kind="data"
+                )
+            else:
+                req[f"masks.{stream}"] = TensorSpec(
+                    shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
+                )
         return IO(requires=unflatten_spec(req), produces={})
 
     # -- static demand (consumed by SaltModule, design §8) ----------------------
@@ -1046,7 +1203,13 @@ class H5OutputSink(_SinkCallback):
         """
         out: dict[str, np.ndarray] = {}
         for stream in self._mask_streams:
-            mask = bundle.get(f"masks.{stream}").detach().cpu().numpy()
+            # plan 34 W34.2: in dumb-section mode read the PadMaskWriter's
+            # outputs.<stream>.mask leaf (fed through the graph); otherwise the
+            # bundle's masks.<stream> directly (the plan-31 producer path).
+            mask_key = (
+                f"outputs.{stream}.mask" if self._is_dumb_section() else f"masks.{stream}"
+            )
+            mask = bundle.get(mask_key).detach().cpu().numpy()
             arr = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
             out[stream] = _pad_to(arr, self._seq_lengths[stream])
         return out
@@ -1079,6 +1242,12 @@ class H5OutputSink(_SinkCallback):
             (the v1 ``extra_vars`` validation, ``predictionwriter.py:88-100``).
         """
         self._close_copies()
+        # plan 34 W34.2 dumb-section: InputCopyWriter(streams=None) means "every
+        # reader stream" (the v1 default); resolve it now that the reader streams
+        # are known. The cutover config uses explicit streams, so this branch is a
+        # convenience for the default outputs: section.
+        if self._copy_all_tasked_streams:
+            self.copy_inputs = {s: list(self._copy_variables.get(s, [])) for s in streams}
         if not self.copy_inputs:
             return
         if unknown := sorted(set(self.copy_inputs) - set(streams)):
@@ -1427,6 +1596,8 @@ class OnnxExportSink(_SinkCallback):
         self._auto_collect = not leaves
         self._leaves_resolved = not self._auto_collect
         self._model_modules: Mapping[str, Any] | None = None
+        # plan 34 W34.2 dumb-section binding (see H5OutputSink.bind_output_section).
+        self._output_section: Mapping[str, Any] | None = None
         if leaves:
             self._validate_leaves(leaves)
         self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
@@ -1466,6 +1637,100 @@ class OnnxExportSink(_SinkCallback):
         if self._auto_collect:
             self._model_modules = model_modules
 
+    def bind_output_section(self, section: Mapping[str, Any]) -> None:
+        """Capture the ``outputs:`` section so the dumb ONNX sink names its leaves (plan 34 W34.2).
+
+        When bound, the sink NAMES the per-field ``outputs.*`` leaves the section's
+        `RunTaskOutput` mints (in section declaration order, the canonical
+        globals -> combines -> per-token tuple order, NOT executor topo order). It
+        does NO math and NO ``torch.split`` / ``.squeeze`` — ``get_output`` already
+        squeezed each global per-class value to the 0-dim scalar v1 mints (W34.1),
+        so the dumb sink ONLY names the already-scalar values (plan §4 W34.2 LOCKED
+        no-double-split decision).
+        """
+        self._output_section = section
+        self._leaves_resolved = False
+        self._auto_collect = False
+
+    def _is_dumb_section(self) -> bool:
+        """Whether an ``outputs:`` section is bound (the dumb-section path is active).
+
+        Returns
+        -------
+        bool
+            True when `bind_output_section` ran with a non-empty section.
+        """
+        return bool(self._output_section)
+
+    def _section_run_task_outputs(self) -> list[Any]:
+        """The bound section's `RunTaskOutput` writers, in section declaration order.
+
+        Returns
+        -------
+        list[Any]
+            The RunTaskOutput section writers.
+        """
+        if not self._output_section:
+            return []
+        return [
+            w
+            for w in self._output_section.values()
+            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
+        ]
+
+    def _resolve_section_leaves(self) -> tuple[OnnxExportLeaf, ...]:
+        """Resolve ONNX export leaves from the bound ``outputs:`` section (plan 34 W34.2).
+
+        Walks each section `RunTaskOutput`'s ``manifest_fields(Mode.ONNX)`` (value-
+        free `OutputField` metadata) in SECTION DECLARATION ORDER, keeps the FINAL
+        fields with an ``onnx_name``, and mints ONE `OnnxExportLeaf` PER FIELD — a
+        single ``name`` (NOT a plural ``names`` split, since each per-field leaf is
+        already the single scalar / index `get_output` minted). It then ORDERS them
+        per the canonical Athena tuple contract: GLOBAL float scalars first, then
+        PER-TOKEN aux (argmax / index) — independent of executor topo order, so the
+        v1 tuple order (and the ``/tmp/w4_oracle`` golden) is preserved. A static
+        dup guard rejects two fields minting the same flat suffix.
+
+        Returns
+        -------
+        tuple[OnnxExportLeaf, ...]
+            The export leaves, in Athena tuple order.
+
+        Raises
+        ------
+        ConfigError
+            When the section mints no ONNX leaf, or two fields mint the same suffix.
+        """
+        globals_block: list[OnnxExportLeaf] = []
+        per_token_block: list[OnnxExportLeaf] = []
+        for run_task in self._section_run_task_outputs():
+            for leaf_key, field in run_task.manifest_fields(Mode.ONNX):
+                if field.resolved_onnx_name is None:
+                    continue
+                suffix = field.resolved_onnx_name
+                if field.axis == "per_token":
+                    per_token_block.append(
+                        OnnxExportLeaf(
+                            key=leaf_key, name=suffix, dtype=field.onnx_dtype, per_token=True
+                        )
+                    )
+                else:
+                    # a single already-scalar per-class value -> ONE single-name
+                    # leaf (NOT a split): the dumb sink only names it (plan §4 LOCKED).
+                    globals_block.append(
+                        OnnxExportLeaf(key=leaf_key, name=suffix, dtype=field.onnx_dtype)
+                    )
+        ordered = (*globals_block, *per_token_block)
+        if not ordered:
+            raise ConfigError(
+                "OnnxExportSink (dumb-section) found no RunTaskOutput field with an ONNX leaf — "
+                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2)"
+            )
+        self._validate_leaves(ordered)
+        self._leaves = ordered
+        self._leaves_resolved = True
+        return ordered
+
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
         """Resolve the export leaves — explicit, or auto-collected from producers (W5.1).
 
@@ -1491,6 +1756,10 @@ class OnnxExportSink(_SinkCallback):
         """
         if self._leaves_resolved:
             return self._leaves
+        # plan 34 W34.2 DUMB-SECTION path: name the per-field outputs.* leaves the
+        # section's RunTaskOutput mints (single-name, no re-split — LOCKED decision).
+        if self._is_dumb_section():
+            return self._resolve_section_leaves()
         if self._model_modules is None:
             raise ConfigError(
                 "OnnxExportSink auto-collect has no model modules bound — the sink discovers the "
@@ -1526,7 +1795,9 @@ class OnnxExportSink(_SinkCallback):
                 )
                 per_token_block.append(leaf)
             elif len(names) == 1 and isinstance(producer, Combination):
-                combines_block.append(OnnxExportLeaf(key=output_key, name=names[0], dtype="float32"))
+                combines_block.append(
+                    OnnxExportLeaf(key=output_key, name=names[0], dtype="float32")
+                )
             else:
                 # a global float leaf -> `names` split_scalars (one scalar per name)
                 leaf = OnnxExportLeaf(key=output_key, names=names, dtype="float32")

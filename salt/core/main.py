@@ -62,6 +62,7 @@ from salt.core import cli as graph_cli
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.onnx.config import ExportConfig
+from salt.core.outputs.writers import OutputSectionWriter
 from salt.core.saltmodule import SaltModule
 from salt.core.writers import DEFAULT_OUTPUT, Writer, WriterCallback
 
@@ -673,6 +674,15 @@ class Salt2CLI(LightningCLI):
             "per-group column order)",
         )
         parser.add_argument(
+            "--outputs",
+            type=dict[str, OutputSectionWriter | None] | None,
+            default=None,
+            help="plan-34 W34.2 top-level outputs: section — dict-keyed GraphModule writers "
+            "(RunTaskOutput / InputCopyWriter / PadMaskWriter), deep-mergeable, composed AFTER "
+            "the model; the section field order is the eval-H5 column order (an entry set to "
+            "null is removed). Linked to model.init_args.outputs.",
+        )
+        parser.add_argument(
             "--writers.output",
             type=str,
             default=DEFAULT_OUTPUT,
@@ -718,6 +728,10 @@ class Salt2CLI(LightningCLI):
                 "configs round-trip into the salt2 graph tooling",
             )
         parser.link_arguments("name", "model.init_args.name")
+        # plan 34 W34.2: the top-level outputs: section is NOT a link_arguments
+        # compute (subclass-mode model targets grab the whole namespace) — it is
+        # composed onto the instantiated model in `instantiate_classes` below
+        # (the new fold site, mirroring the writers: -> WriterCallback assembly).
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
         """Assemble ``callbacks:`` dict values and the writers block into the trainer.
@@ -767,6 +781,34 @@ class Salt2CLI(LightningCLI):
             stock = self._get(self.config_init, "trainer.callbacks") or []
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
         return super().instantiate_trainer(**kwargs)
+
+    def instantiate_classes(self) -> None:
+        """Instantiate, then compose the top-level ``outputs:`` section onto the model (W34.2).
+
+        The new plan-34 fold site (mirroring the ``writers:`` -> `WriterCallback`
+        assembly in `instantiate_trainer`): the top-level ``outputs:`` namespace is
+        instantiated by jsonargparse into ``config_init["outputs"]`` (a dict of
+        section writers built from their ``class_path``); after the standard
+        instantiation this composes that section onto the `SaltModule` (folding the
+        section writers into the planning module dict, binding RunTaskOutput's
+        tasks). Done here — NOT via ``link_arguments`` — because a subclass-mode
+        model link target grabs the whole namespace (jsonargparse pitfall).
+        """
+        super().instantiate_classes()
+        section = self._get(self.config_init, "outputs")
+        model = getattr(self, "model", None)
+        composer = getattr(model, "compose_output_section", None) if model is not None else None
+        if section and callable(composer):
+            composer({k: w for k, w in section.items() if w is not None})
+            # bind the section to the sink callbacks NOW (the datamodule setup runs
+            # BEFORE the model setup and resolves the sink's writer_demand, which
+            # needs the section bound — so the model-side setup bind would be too
+            # late). The model stores the SAME section instances, so this binds them
+            # to the live sinks before any setup hook runs.
+            trainer = getattr(self, "trainer", None)
+            for cb in (trainer.callbacks if trainer is not None else []):
+                if callable(getattr(cb, "bind_output_section", None)):
+                    cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
 
     def before_instantiate_classes(self) -> None:
         """Per-stage config patches — the v1 eval + Comet surface kept (utils/cli.py:281-332).
