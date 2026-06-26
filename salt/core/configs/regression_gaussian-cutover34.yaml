@@ -1,0 +1,79 @@
+# regression_gaussian-cutover34.yaml — the PLAN 34 W34.4 GAUSSIAN-section proof:
+# the LIVE cutover of the regression_gaussian.yaml eval path to the
+# get_output()-on-task + outputs:-section + dumb sinks architecture (plan 34 §2).
+# The gaussian analogue of regression-cutover34.yaml — closes the one untested
+# corner (plan §9 line 146: the gaussian outputs:-SECTION path was NOT proven
+# end-to-end before W34.4 routes gaussian heads through the section).
+#
+#   model.modules (raw scaled preds + loss)  ->  outputs: section  ->  dumb sinks
+#       (forward = loss-space)                  (RunTaskOutput            (dump ALL
+#                                                + InputCopyWriter         outputs.*
+#                                                + PadMaskWriter)          leaves)
+#
+# This REPLACES the regression_gaussian.yaml Regression (gaussian=true) PRODUCER
+# nodes (gaussian_out / gaussian_seq_out) in model.modules with a single
+# RunTaskOutput([gaussian tasks]) writer that calls each gaussian
+# RegressionTaskModule.get_output() (W34.3) — the gaussian means‖softplus-stddev
+# one-array de-scale folds onto the task (tasks.py:2968, output_suffixes doubled).
+# regression_gaussian.yaml is the BROADEST gaussian surface: a GLOBAL gaussian
+# head (gaussian_regression, jets) + a PER-TOKEN gaussian head
+# (gaussian_regression_no_global_object, tracks) — so this proves the gaussian
+# get_output de-scale end-to-end in BOTH H5 and ONNX (parity vs the producer
+# oracle).
+#
+# Layered ON TOP of regression_gaussian.yaml:
+#
+#   salt2 test --config salt/core/configs/regression_gaussian.yaml \
+#     --config salt/core/configs/regression_gaussian-cutover34.yaml \
+#     --ckpt_path <ckpt> --data.test_file <file.h5> ...
+#
+# What this override does (plan 34 W34.4):
+#  - DROPS the gaussian Regression producers from model.modules (the get_output
+#    fold replaces them): gaussian_out / gaussian_seq_out -> null.
+#  - composes the NEW top-level outputs: section in EXACT v1 H5 column order:
+#      inputs_copy (InputCopyWriter) -> RunTaskOutput task fields -> pad_mask
+#      (PadMaskWriter). The RunTaskOutput tasks list is the v1 model-declaration
+#      order (global head, then per-token head).
+#  - wires the DUMB H5OutputSink + OnnxExportSink (no init args): they dump ALL
+#    active outputs.* leaves, names/dtypes/order from the bound section manifest.
+#    (--no-check on export: v1 to_onnx has zero gaussian handling, so the
+#    torch-vs-ONNX sweep checker is skipped — the gate asserts onnxruntime values
+#    directly.)
+
+model:
+  modules:
+    # drop the W34.3 gaussian Regression producers: get_output on the task replaces
+    # them (the gaussian means‖softplus-stddev de-scale folds onto the task).
+    gaussian_out: null
+    gaussian_seq_out: null
+
+# The PLAN 34 W34.4 top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
+# -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order
+# (global gaussian head, then per-token gaussian head).
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args:
+      streams: [jets, tracks]
+      variables:
+        jets: []
+        tracks: []
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [gaussian_regression, gaussian_regression_no_global_object]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB sinks (plan 34 W34.4): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound section manifest. The OnnxExportSink
+# names the de-scaled gaussian leaves (the Athena physics names = the task
+# output_suffixes: R means then R _stddev) in canonical tuple order (globals then
+# per-token).
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
