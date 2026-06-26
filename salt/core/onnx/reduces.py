@@ -39,11 +39,22 @@ The two MaskFormer reduces register here too (sub-wave C, plan 10), composing
 v1's `get_maskformer_outputs` (null suppression + pT reorder + index math,
 maskformer.py:244-349) byte-faithfully:
 
-- ``leading_object`` — R float32 GLOBAL scalars, the leading object's de-scaled
-  regression values (v1 ``to_onnx.py:461-468``). The object-regression task
-  already publishes DE-SCALED predictions in ONNX mode (the TEST|ONNX de-scaling
-  branch, ``tasks.py:1063-1067``), so this reduce reorders + selects, never
-  re-inverting scaling.
+- ``leading_object`` — R float32 GLOBAL scalars, the leading object's leading-
+  object regression values (v1 ``to_onnx.py:461-468``). It reorders + selects the
+  leading object; it never inverts scaling.
+  ⚠ plan 34 W34.3 CONSEQUENCE (forward-flip): v1 relied on the object-regression
+  task publishing DE-SCALED ``preds.objects.regression`` in TEST|ONNX, so this
+  reduce could reorder physical values directly. Since W34.3 flipped
+  ``RegressionTaskModule.forward`` to RAW loss-space in TEST|ONNX, that leaf now
+  carries RAW (scaled) values — so this reduce (and its folded ``MaskFormerObjects``
+  producer, ``producers.py``) would reorder/select RAW values. Both are
+  EXPORT-RETIRED today (the off-graph reduce manifest was retired at plan-29 W4 and
+  no MaskFormer config wires the ``MaskFormerObjects`` producer — the MaskFormer
+  eval/export migration is W6-DEFERRED), so nothing live is wrong. But the W6
+  MaskFormer cutover MUST de-scale ``preds.objects.regression`` (via the object
+  regression task's ``run_inference`` / a ``Regression`` producer) BEFORE the
+  ``get_maskformer_outputs`` reorder, exactly as the global/seq regression heads now
+  de-scale on the ``outputs:`` section. Tracked as a W6 hard rule, not a W34.3 fix.
 - ``object_index`` — int8 PER-TOKEN constituent->object index (v1
   ``indices.reshape(-1).char()``, ``to_onnx.py:469``); its single suffix is the
   writer-declared `OBJECT_INDEX.onnx` (``HadronIndex``).

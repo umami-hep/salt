@@ -25,10 +25,12 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import onnx
 import pytest
 import yaml
 
 from salt.core.main import CONFIG_DIR, main
+from salt.core.onnx import make_session
 from salt.core.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.utils.inputs import write_dummy_file
@@ -194,3 +196,128 @@ def test_regression_section_descaled_not_raw(section_h5, producer_h5):
     # de-scaled = raw*1 + 1, so the column is finite and not trivially zero-centred
     col = jets["regression_HadronConeExclTruthLabelPt"]
     assert np.isfinite(col).all()
+
+
+# ===========================================================================
+# W34.3 critic-fix GATE: REGRESSION ONNX value-parity (blocker #2 / finding #6).
+# The W34.3 regression descale-in-graph ONNX path (get_output ONNX squeeze, the
+# section single-name leaf, the in-graph run_inference descale, the ONNX
+# feature-gather denominator) previously had ZERO automated ONNX coverage —
+# test_regression_configs only `graph validate`s (compile, not export) and the H5
+# cutover gate above never exports ONNX. This exports BOTH the explicit-ONNX
+# producer (regression.yaml, the ORACLE) and the dumb outputs:-section
+# (regression.yaml + regression-cutover34.yaml) from ONE checkpoint, then asserts
+# the ONNX contract (names/dtypes/dynamic_axes/order) AND the onnxruntime VALUES
+# are identical (atol 1e-6) — and that the values are de-scaled, not raw.
+# ===========================================================================
+
+
+def _export_onnx(extra_cfgs, ckpt, out: Path) -> Path:
+    """Export to ONNX via the real `salt2 export` CLI (--no-check).
+
+    The base config is the fit-saved ``config.yaml`` next to the ckpt (it already
+    embeds the resolved schema + norm_dict from the fixture, so no data-free
+    overrides are needed); ``extra_cfgs`` deep-merge on top (the section export
+    stacks ``regression-cutover34.yaml``). ``--no-check`` skips the torch-vs-ONNX
+    sweep checker (its NaN-fill / forbid-zeros asserts are orthogonal to the
+    value-parity this gate proves directly via onnxruntime).
+
+    Returns
+    -------
+    Path
+        The written ``.onnx`` path.
+    """
+    saved_config = Path(ckpt).parents[1] / "config.yaml"
+    assert saved_config.is_file(), f"no saved run config at {saved_config}"
+    argv = ["export", "--config", str(saved_config)]
+    for c in extra_cfgs:
+        argv += ["--config", str(c)]
+    argv += [f"--ckpt_path={ckpt}", f"--output={out}", "--no-check", "--overwrite"]
+    rc = main(argv)
+    assert rc == 0, f"salt2 export failed (rc={rc}) for extra configs {[str(c) for c in extra_cfgs]}"  # noqa: E501
+    assert out.exists()
+    return out
+
+
+def _onnx_contract(path: Path) -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """The exported graph's output names, ranks and element dtypes.
+
+    Returns
+    -------
+    tuple[list[str], dict[str, int], dict[str, int]]
+        ``(names, {name: rank}, {name: onnx_elem_type})`` for every graph output.
+    """
+    model = onnx.load(str(path))
+    names = [o.name for o in model.graph.output]
+    ranks = {o.name: len(o.type.tensor_type.shape.dim) for o in model.graph.output}
+    dtypes = {o.name: o.type.tensor_type.elem_type for o in model.graph.output}
+    return names, ranks, dtypes
+
+
+class TestW34RegressionOnnxParity:
+    """Regression ONNX: the dumb outputs:-section export == the producer-oracle export.
+
+    Mirrors `test_w34_outputs_section.py::TestW34SectionOnnxParity` for the
+    regression family — exports the explicit `RegressionDescaleOp` producer
+    (regression.yaml) as the ORACLE and the get_output outputs:-section
+    (regression.yaml + regression-cutover34.yaml) as the dumb path, and asserts
+    byte-identical ONNX contract + onnxruntime values, so a future drift in
+    get_output's ONNX squeeze / single-name leaf naming / in-graph descale fails
+    loudly (a zero-descale regression would change the values).
+    """
+
+    @pytest.fixture(scope="class")
+    def oracle_onnx(self, ckpt, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("w34_reg_onnx_oracle") / "oracle.onnx"
+        return _export_onnx([], ckpt, out)  # saved config = the RegressionDescaleOp oracle
+
+    @pytest.fixture(scope="class")
+    def section_onnx(self, ckpt, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("w34_reg_onnx_section") / "section.onnx"
+        return _export_onnx([CUTOVER34_CFG], ckpt, out)  # stack the dumb outputs:-section
+
+    def test_onnx_output_contract_matches(self, oracle_onnx, section_onnx):
+        """Names + dtypes + dynamic axes + ORDER + ranks identical (oracle vs section)."""
+        o_names, o_ranks, o_dtypes = _onnx_contract(oracle_onnx)
+        s_names, s_ranks, s_dtypes = _onnx_contract(section_onnx)
+        # the 8 regression outputs: 6 rank-0 globals (norm/ratio scalars) + 2 rank-1
+        # per-token seq columns (dummyOutput_dPhi/dEta), in canonical globals->per-token
+        # order — identical between the producer oracle and the dumb section.
+        assert s_names == o_names, f"ONNX names differ\n  oracle : {o_names}\n  section: {s_names}"
+        assert s_ranks == o_ranks, f"ONNX ranks differ: {o_ranks} vs {s_ranks}"
+        assert s_dtypes == o_dtypes, f"ONNX dtypes differ: {o_dtypes} vs {s_dtypes}"
+        # 6 global rank-0 + 2 per-token rank-1 (the regression.yaml head layout)
+        assert sorted(o_ranks.values()) == [0, 0, 0, 0, 0, 0, 1, 1], o_ranks
+
+    def test_onnx_runtime_values_match_and_are_descaled(self, oracle_onnx, section_onnx):
+        """Onnxruntime values identical (atol 1e-6) between section and producer oracle."""
+        oracle_sess = make_session(oracle_onnx)
+        section_sess = make_session(section_onnx)
+        # build batch-1 example inputs at L=5 (the export trace is batch-1; onnxruntime
+        # accepts the dynamic n_tracks axis). jet_features [1, F], track_features [L, F].
+        in_meta = {i.name: i.shape for i in oracle_sess.get_inputs()}
+        rng = np.random.default_rng(0)
+
+        def shape_for(dims):
+            return tuple(5 if (isinstance(d, str) or d is None) else d for d in dims)
+
+        feeds = {
+            name: rng.standard_normal(shape_for(dims)).astype(np.float32)
+            for name, dims in in_meta.items()
+        }
+        oracle_out = {
+            o.name: v
+            for o, v in zip(oracle_sess.get_outputs(), oracle_sess.run(None, feeds), strict=True)
+        }
+        section_out = {
+            o.name: v
+            for o, v in zip(section_sess.get_outputs(), section_sess.run(None, feeds), strict=True)
+        }
+        assert set(oracle_out) == set(section_out)
+        max_diff = 0.0
+        for name, a in oracle_out.items():
+            b = section_out[name]
+            assert a.shape == b.shape, f"{name}: shape {a.shape} != {b.shape}"
+            d = np.abs(np.nan_to_num(a) - np.nan_to_num(b))
+            max_diff = max(max_diff, float(d.max()) if d.size else 0.0)
+        assert max_diff <= 1e-6, f"section ONNX values diverge from producer oracle: max {max_diff}"

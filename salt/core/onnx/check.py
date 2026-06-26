@@ -167,7 +167,13 @@ def compare_once(
             atol=float_atol,
             err_msg=f"torch vs ONNX mismatch for output {name!r} at {where}",
         )
-        worst[name] = float(np.max(np.abs(ref_np.astype(np.float64) - got.astype(np.float64))))
+        # a per-token float output is EMPTY at the L=0 sweep sample (zero-token jet);
+        # np.max over a zero-size array raises "zero-size array to reduction" — guard
+        # it (the diff IS 0.0 when there are no elements to differ). Pre-existing
+        # check_onnx limitation surfaced by the plan 34 regression ONNX gate (it
+        # affects the producer AND the section path equally — not a W34.3 regression).
+        diff = np.abs(ref_np.astype(np.float64) - got.astype(np.float64))
+        worst[name] = 0.0 if diff.size == 0 else float(np.max(diff))
     return worst
 
 

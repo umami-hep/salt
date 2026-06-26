@@ -86,7 +86,9 @@ def _bind_classification(stream, label, class_names, sequence, *, loss=None, inp
     return module
 
 
-def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, scaler=None, fields=()):
+def _bind_regression(
+    stream, targets, *, sequence, denoms=None, norm=None, scaler=None, gaussian=False, fields=()
+):
     """Build + bind a `RegressionTaskModule` against a hand-built schema.
 
     Returns
@@ -98,6 +100,7 @@ def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, scale
         stream=stream,
         targets=targets,
         sequence=sequence,
+        gaussian=gaussian,
         target_denominators=denoms,
         norm_params=norm,
         scaler=scaler,
@@ -640,6 +643,111 @@ def test_regression_subclass_forwards_like_op():
         rtol=0,
         atol=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# W34.3 critic-fix GATE: the gaussian + sequence producer branches == the task's
+# run_inference oracle (the branches test_producers.py previously left untested).
+# After the per-token axis fix (run_inference now indexes [..., i]), the producer
+# (already last-axis) and the task path agree on global AND per-token heads.
+# ---------------------------------------------------------------------------
+
+
+def _gaussian_concat(means_stds: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    """Concat the task's ``(means, stds)`` into the producer's one ``[..., 2R]`` array.
+
+    Returns
+    -------
+    torch.Tensor
+        The ``means ‖ stds`` one-array form the gaussian producer publishes.
+    """
+    means, stds = means_stds
+    return torch.cat([means, stds], dim=-1)
+
+
+def test_regression_gaussian_global_producer_matches_task_run_inference():
+    """Global gaussian head: ``RegressionDescaleOp(gaussian=True)`` == means‖stds oracle.
+
+    The gaussian producer ``_convert_gaussian`` REIMPLEMENTS the v1 loop rather
+    than calling ``run_inference`` — so it is asserted directly against the task's
+    ``GaussianRegressionTask.run_inference`` (concatenated means‖stds, the FD
+    1567-1568 one-array contract). R=1 (every shipped gaussian head is R=1).
+    """
+    torch.manual_seed(20)
+    norm = {"mean": [2.0], "std": [3.0]}
+    module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, gaussian=True, norm=norm)
+    preds = torch.randn(8, 2)  # [B, 2R] = mean ‖ raw-var
+
+    oracle = _gaussian_concat(module.task.run_inference(preds.clone()))
+
+    op = RegressionDescaleOp(stream=_STREAM_J, targets=["mHH"], norm_params=norm, gaussian=True)
+    got = _producer(op, stream=_STREAM_J, task="t").forward(
+        Bundle({"preds": {_STREAM_J: {"t": preds.clone()}}}), Mode.TEST
+    )[f"outputs.{_STREAM_J}.out"]
+
+    torch.testing.assert_close(got, oracle, rtol=0, atol=_FLOAT_TOL)
+
+
+def test_regression_gaussian_per_token_producer_matches_task_run_inference():
+    """Per-token gaussian seq head: producer == task on EVERY token (W34.3 axis fix).
+
+    The shipped ``regression_gaussian.yaml gaussian_seq_out`` head is per-token
+    gaussian. Pre-fix the task indexed the first (token) axis and diverged from
+    the producer's last-axis ``_convert_gaussian``; post-fix both index the target
+    channel so means‖stds agree on every token, incl. NaN at masked positions.
+    """
+    torch.manual_seed(21)
+    norm = {"mean": [1.0], "std": [1.0]}
+    module = _bind_regression(_STREAM_T, ["dphi"], sequence=True, gaussian=True, norm=norm)
+    preds = torch.randn(3, 4, 2)  # [B, L, 2R]
+    mask = torch.zeros(3, 4, dtype=torch.bool)
+    mask[0, 3] = True  # a real padded position -> NaN-filled means + stds
+
+    oracle = _gaussian_concat(module.task.run_inference(preds.clone(), pad_mask=mask))
+
+    op = RegressionDescaleOp(
+        stream=_STREAM_T, targets=["dphi"], norm_params=norm, gaussian=True, sequence=True
+    )
+    got = _producer(op, stream=_STREAM_T, task="t").forward(
+        Bundle({"preds": {_STREAM_T: {"t": preds.clone()}}, "masks": {_STREAM_T: mask}}), Mode.TEST
+    )[f"outputs.{_STREAM_T}.out"]
+
+    torch.testing.assert_close(got, oracle, rtol=0, atol=_FLOAT_TOL, equal_nan=True)
+    # the masked position is NaN on both sides (sanity on the nan-fill path)
+    assert torch.isnan(got[0, 3]).all()
+    assert torch.isnan(oracle[0, 3]).all()
+
+
+def test_regression_sequence_nan_fill_producer_matches_task_with_real_padding():
+    """Per-token scaled seq head: producer ``_nan_fill`` == task run_inference NaN-fill.
+
+    Uses a norm_params per-token head with a pad mask that has REAL padded rows
+    (the existing scaler test deliberately used an all-valid mask, leaving the
+    nan-fill path untested). The W34.3 axis fix makes the task's de-scale loop
+    last-axis, so producer == task on the valid rows AND both NaN-fill the padded
+    rows identically.
+    """
+    torch.manual_seed(22)
+    norm = {"mean": [10.0, 20.0], "std": [2.0, 0.5]}
+    module = _bind_regression(_STREAM_T, ["a", "b"], sequence=True, norm=norm)
+    preds = torch.randn(2, 5, 2)  # [B, L, R]
+    mask = torch.zeros(2, 5, dtype=torch.bool)
+    mask[0, 4] = True
+    mask[1, 3] = True
+    mask[1, 4] = True  # real padded rows on both jets
+
+    oracle = module.task.run_inference(preds.clone(), pad_mask=mask)
+
+    op = RegressionDescaleOp(stream=_STREAM_T, targets=["a", "b"], norm_params=norm, sequence=True)
+    got = _producer(op, stream=_STREAM_T, task="t").forward(
+        Bundle({"preds": {_STREAM_T: {"t": preds.clone()}}, "masks": {_STREAM_T: mask}}), Mode.TEST
+    )[f"outputs.{_STREAM_T}.out"]
+
+    torch.testing.assert_close(got, oracle, rtol=0, atol=_FLOAT_TOL, equal_nan=True)
+    # the de-scale reached EVERY token's columns (not just tokens 0,1 — the pre-fix
+    # first-axis bug left later tokens raw); token 2 of jet 0 is a valid scaled row
+    assert torch.isfinite(got[0, 2]).all()
+    assert torch.isnan(got[0, 4]).all()
 
 
 # ---------------------------------------------------------------------------

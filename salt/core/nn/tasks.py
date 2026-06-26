@@ -533,7 +533,21 @@ class _AbsorbedRegressionTask(_AbsorbedRegressionTaskBase):
     def run_inference(
         self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
     ) -> Tensor:
-        """Invert target scaling to the original space (v1 task.py:567-602, verbatim).
+        """Invert target scaling to the original space (v1 task.py:567-602).
+
+        plan 34 W34.3 critic-fix (per-token axis correctness): the de-scale loops
+        now index the LAST (target-channel) axis ``preds[..., i]`` instead of v1's
+        first axis ``preds[:, i]``. For a GLOBAL ``[B, R]`` head ``[..., i]`` is
+        bit-identical to v1's ``[:, i]`` (axis 1 IS the channel axis) — so every
+        shipped global head is byte-unchanged. For a per-token ``[B, L, R]`` head
+        v1's ``[:, i]`` addressed TOKEN ``i`` (scaling tokens 0..R-1, leaving later
+        tokens raw, and crashing at ``L == 0``); ``[..., i]`` correctly de-scales
+        column ``i`` of EVERY token, matching the ``RegressionDescaleOp`` producer
+        (``producers.py:907-915``) so the producer / get_output / get_h5 paths
+        de-scale identically on a per-token head. The scaler branch already used the
+        per-token-faithful trailing index — it is folded into the same ``[..., i]``
+        form (global-safe: a scaler is only configured on per-token MaskFormer-style
+        heads today, but ``[..., i]`` works for both ranks).
 
         Returns
         -------
@@ -543,14 +557,14 @@ class _AbsorbedRegressionTask(_AbsorbedRegressionTaskBase):
         preds = preds.float()
         if self.target_denominators is not None and labels is not None:
             for i in range(len(self.targets)):
-                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
+                preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
-                preds[:, i] *= self.norm_params["std"][i]
-                preds[:, i] += self.norm_params["mean"][i]
+                preds[..., i] *= self.norm_params["std"][i]
+                preds[..., i] += self.norm_params["mean"][i]
         elif self.scaler is not None:
             for i in range(len(self.targets)):
-                preds[:, :, i] = self.scaler.inverse(self.targets[i], preds[:, :, i])
+                preds[..., i] = self.scaler.inverse(self.targets[i], preds[..., i])
 
         # apply mask if available
         if pad_mask is not None:
@@ -617,12 +631,27 @@ class _AbsorbedGaussianRegressionTask(_AbsorbedRegressionTaskBase):
     def run_inference(
         self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
-        """Invert scaling for means + (sqrt of) variances (v1 task.py:729-774, verbatim).
+        """Invert scaling for means + (sqrt of) variances (v1 task.py:729-774).
+
+        plan 34 W34.3 critic-fix (per-token axis correctness): the de-scale loops
+        index the LAST axis ``preds[..., i]`` / ``preds[..., i + 1]`` instead of
+        v1's first axis ``preds[:, i]`` / ``preds[:, i + 1]``. For a GLOBAL ``[B, 2R]``
+        head this is bit-identical to v1 (axis 1 IS the 2R channel axis), so the
+        shipped global gaussian heads (Dipz/hitz/regression_gaussian global) are
+        byte-unchanged. For a per-token ``[B, L, 2R]`` head v1's first-axis index
+        addressed TOKEN 0/1 (corrupting track data, never reaching the stddev
+        channel, and crashing at ``L == 0``); the trailing index correctly de-scales
+        column ``i`` (mean) / ``i + 1`` (var) of EVERY token, matching the
+        ``RegressionDescaleOp._convert_gaussian`` producer (``producers.py:959-970``)
+        so the producer / get_output / get_h5 paths agree on a per-token gaussian
+        head. The ``i`` / ``i + 1`` index pairing is the v1 means‖vars layout for an
+        R=1 head (all shipped gaussian heads are R=1) — preserved verbatim (the
+        producer shares the same pairing), only the AXIS is corrected.
 
         Returns
         -------
         tuple[Tensor, Tensor]
-            De-scaled ``(means, stds)`` each of shape ``[B, R]``.
+            De-scaled ``(means, stds)`` each of shape ``[..., R]``.
 
         Raises
         ------
@@ -631,15 +660,16 @@ class _AbsorbedGaussianRegressionTask(_AbsorbedRegressionTaskBase):
         """
         if self.target_denominators is not None and labels is not None:
             for i in range(len(self.targets)):
-                preds[:, i] *= labels[self.input_name][self.target_denominators[i]]
-                preds[:, i + 1] *= labels[self.input_name][self.target_denominators[i]]
+                preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
+                preds[..., i + 1] *= labels[self.input_name][self.target_denominators[i]]
         elif self.norm_params is not None:
             for i in range(len(self.norm_params["mean"])):
-                preds[:, i] *= self.norm_params["std"][i]
-                preds[:, i] += self.norm_params["mean"][i]
+                preds[..., i] *= self.norm_params["std"][i]
+                preds[..., i] += self.norm_params["mean"][i]
                 # return stddev as sqrt(var)
-                preds[:, i + 1] = (
-                    torch.sqrt(nn.functional.softplus(preds[:, i + 1])) * self.norm_params["std"][i]
+                preds[..., i + 1] = (
+                    torch.sqrt(nn.functional.softplus(preds[..., i + 1]))
+                    * self.norm_params["std"][i]
                 )
         else:
             raise ValueError("Inference for Gaussian regression requires scaling parameters.")
@@ -2814,7 +2844,14 @@ class RegressionTaskModule(_TaskModuleBase):
             ``[..., 2R]`` (gaussian, means ‖ stds).
         """
         assert self.task is not None, "de-scale before bind()"
-        preds = b.get(self.pred_key)
+        # clone before the in-place de-scale: `run_inference` does `preds.float()`
+        # (a no-op ALIAS when the leaf is already float32) then mutates it in place
+        # (`preds[..., i] *= ...`), so a bare `b.get(...)` would rewrite the bundle's
+        # RAW `preds.*` leaf — a write-once §2.1 violation that double-de-scales on
+        # any second read of the leaf. `.float().clone()` matches the producer's
+        # identical write-once guard (`producers.py:902`) so both paths leave the
+        # raw leaf byte-unchanged (plan §4: de-scale exactly ONCE per leaf).
+        preds = b.get(self.pred_key).float().clone()
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
         labels = self._descale_source(b, mode) if self.target_denominators is not None else None
         descaled = self.task.run_inference(preds, labels=labels, pad_mask=mask)
@@ -2863,18 +2900,32 @@ class RegressionTaskModule(_TaskModuleBase):
         return u2s(preds.float().cpu().numpy(), dtype)
 
     def onnx_outputs(self) -> list[ExportOutput]:
-        """Per-target ``split_scalars`` float32 entry (v1 get_onnx, task.py:625-642).
+        """The LEGACY M4.5 ``split_scalars`` manifest entry — RETIRED on the export path.
 
-        One ``split_scalars`` reduce splitting the de-scaled ``[B, R]`` preds
-        into R squeezed scalars; the suffixes ARE `output_suffixes` (minus the
-        run-name prefix — the exporter prepends ``{model_name}_``). Rename via
-        the task's ``custom_output_names``, NOT the writer's ``onnx_names``
-        (single ownership, amendment §2.2).
+        This is the v1 ``get_onnx`` (task.py:625-642) manifest shape: one
+        ``split_scalars`` entry naming the R suffixes (`output_suffixes` minus the
+        run-name prefix — the exporter prepended ``{model_name}_``). It is the M4.5
+        ``WriterCallback.onnx_manifest`` API and is still ASSERTED by the manifest
+        gates (names/reduce/suffix lockstep), but it NO LONGER drives a real ONNX
+        export: plan-29 W4 retired the off-graph reduce manifest, so ``split_scalars``
+        is unregistered (``reduces.py``), ``export_graph`` rejects a non-empty
+        ``outputs=`` manifest, and ``OnnxAdapter`` requires a folded ``OnnxExportSink``.
+
+        CRITICAL (plan 34 W34.3): the entry's ``port`` is the RAW ``preds.*`` leaf
+        the W34.3 forward-flip now publishes (pre-flip the forward de-scaled, so this
+        port held PHYSICAL values; post-flip it holds RAW scaled values). Because
+        ``split_scalars`` is a naming-only splitter (it never de-scales), this entry
+        would emit RAW values IF it could ever run — but it cannot (export-retired,
+        above). The LIVE ONNX de-scale lives on the ``Regression`` (``RegressionDescaleOp``)
+        producer / the ``outputs:`` section ``get_output`` (``_descaled_preds`` ->
+        traceable ``run_inference``), which a config wires via an ``OnnxExportSink``.
+        A regression config WITHOUT an ``OnnxExportSink`` cannot ONNX-export its
+        regression head at all (it does not silently export raw).
 
         Returns
         -------
         list[ExportOutput]
-            One ``split_scalars`` entry.
+            One ``split_scalars`` entry (the legacy manifest API; export-retired).
         """
         return [
             ExportOutput(
