@@ -114,20 +114,34 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4/W5.2 conversion producers (design §6.2): IDENTITY TaskOutput
-      # passthroughs of each gaussian head's de-scaled [B(,L), 2R] output — the
-      # OnnxExportSink splits each into mean + _stddev scalars (ONNX), and the
-      # auto-collect H5OutputSink collects them as f4 columns (TEST, W5.2).
+      # plan-29 W4/W5.2 conversion producers (design §6.2): the OnnxExportSink
+      # splits each de-scaled [B(,L), 2R] gaussian leaf into mean + _stddev scalars
+      # (ONNX), and the auto-collect H5OutputSink collects them as f4 columns (TEST).
       #
-      # W5 REGRESSION STOPGAP (plan 31 §5.2): IDENTITY passthroughs because
-      # RegressionTaskModule.forward still DESCALES in TEST/ONNX (NOT P1.5-flipped),
-      # so the passthrough emits the already-DESCALED [B, 2R] (mean ‖ stddev) values =
-      # matches the legacy gaussian WriterCallback in BOTH H5 and ONNX. MUST swap to a
-      # Regression (RegressionDescaleOp) producer when RegressionTaskModule is later
-      # flipped to publish RAW targets (else passthrough emits raw -> breaks). Mirrors
-      # the W2 identity-TaskOutput-before-P4 pattern.
-      gaussian_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression, stream: jets } }
-      gaussian_seq_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: gaussian_regression_no_global_object, stream: tracks } }
+      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
+      # in TEST/ONNX (the atomic forward-flip), so these are REAL Regression
+      # (RegressionDescaleOp, gaussian=true) producers — they de-scale the raw [B, 2R]
+      # into mean ‖ stddev = sqrt(softplus(var)) * std, matching the legacy gaussian
+      # WriterCallback in BOTH H5 and ONNX. (Were IDENTITY TaskOutput passthroughs
+      # pre-flip; the swap keeps the gaussian de-scale running exactly ONCE now that
+      # the forward no longer de-scales.)
+      gaussian_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: gaussian_regression
+          stream: jets
+          targets: HadronConeExclTruthLabelPt
+          norm_params: {mean: 1.0, std: 1.0}
+          gaussian: true
+      gaussian_seq_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: gaussian_regression_no_global_object
+          stream: tracks
+          targets: dphi
+          norm_params: {mean: 1.0, std: 1.0}
+          gaussian: true
+          sequence: true # per-token head: NaN-fill padded positions (v1 run_inference)
 
 # plan-29 W5.2: the M4.5 WriterCallback (TaskWriter + PadMaskWriter) is RETIRED for
 # this config — the auto-collect H5OutputSink below is the live TEST persistence sink

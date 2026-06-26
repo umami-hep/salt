@@ -160,19 +160,48 @@ model:
       # OnnxExportSink names; plan-29 W5.2 the auto-collect H5OutputSink ALSO collects
       # them (regression as an output this pass).
       #
-      # W5 REGRESSION STOPGAP (plan 31 §5.2): these are IDENTITY TaskOutput passthroughs
-      # because RegressionTaskModule.forward still DESCALES in TEST/ONNX (it is NOT
-      # P1.5-flipped — the de-scale carve-out stays), so the identity passthrough emits
-      # the already-DESCALED values = matches the legacy regression WriterCallback in
-      # BOTH TEST H5 and ONNX. This MUST swap to a Regression (RegressionDescaleOp)
-      # producer when RegressionTaskModule is later flipped to publish RAW targets (else
-      # the identity passthrough would emit raw -> breaks both H5 and ONNX). Mirrors the
-      # W2 identity-TaskOutput-before-P4 pattern.
-      reg_normed_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_normed, stream: jets } }
-      reg_multinorm_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multinorm, stream: jets } }
-      reg_ratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_ratio, stream: jets } }
-      reg_multiratio_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_multiratio, stream: jets } }
-      reg_seq_tracks_out: { class_path: salt.core.outputs.TaskOutput, init_args: { task: reg_seq_tracks, stream: tracks } }
+      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
+      # in TEST/ONNX (the atomic forward-flip), so these are REAL Regression
+      # (RegressionDescaleOp) producers — they de-scale the raw preds back to physical
+      # values, matching the legacy regression WriterCallback in BOTH TEST H5 and ONNX.
+      # (Were IDENTITY TaskOutput passthroughs pre-flip; the swap keeps de-scale running
+      # exactly ONCE now that the forward no longer de-scales.) Each carries the head's
+      # targets + the SAME scaling the head config declares.
+      reg_normed_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: reg_normed
+          stream: jets
+          targets: HadronConeExclTruthLabelPt
+          norm_params: {mean: 1.0, std: 1.0}
+      reg_multinorm_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: reg_multinorm
+          stream: jets
+          targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+          norm_params: {mean: [1.0, 2.0], std: [3.0, 4.0]}
+      reg_ratio_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: reg_ratio
+          stream: jets
+          targets: HadronConeExclTruthLabelPt
+          target_denominators: pt_btagJes
+      reg_multiratio_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: reg_multiratio
+          stream: jets
+          targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
+          target_denominators: [mass, pt_btagJes]
+      reg_seq_tracks_out:
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: reg_seq_tracks
+          stream: tracks
+          targets: [dphi, deta]
+          sequence: true # per-token head: NaN-fill padded positions (v1 run_inference)
 
 # plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config — the
 # auto-collect H5OutputSink below is the live TEST persistence sink. Null-merge deletes

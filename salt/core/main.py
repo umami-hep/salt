@@ -679,8 +679,10 @@ class Salt2CLI(LightningCLI):
             default=None,
             help="plan-34 W34.2 top-level outputs: section — dict-keyed GraphModule writers "
             "(RunTaskOutput / InputCopyWriter / PadMaskWriter), deep-mergeable, composed AFTER "
-            "the model; the section field order is the eval-H5 column order (an entry set to "
-            "null is removed). Linked to model.init_args.outputs.",
+            "the model; the section field order drives the eval-H5 TASK-column order (an entry "
+            "set to null is removed). NOT a link_arguments link — the section is composed onto "
+            "the model in instantiate_classes (SaltModule.compose_output_section), not wired via "
+            "link_arguments.",
         )
         parser.add_argument(
             "--writers.output",

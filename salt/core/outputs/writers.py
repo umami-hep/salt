@@ -22,14 +22,15 @@ Three section writers ship here (plan 34 §2):
   pad-mask leaf (read from ``masks.<stream>``); the per-token file-length
   re-expansion (incl. the ``mask=False`` truncation quirk) stays in the SINK.
 
-**Column ORDER ownership** (plan §4 W34.2 / §7 risk 4): the default ``outputs:``
-section instantiates writers in the EXACT v1 H5 order — ``InputCopyWriter`` ->
-``RunTaskOutput`` task fields -> ``PadMaskWriter``. The section's field order
-(``section_fields``) drives the H5 column order, NOT the executor topo order —
-so reordering for memory tuning never reshuffles the eval H5 columns. Each
-section writer exposes ``section_fields(mode, run_name) -> list[(output_key,
-OutputField)]`` so the dumb sinks collect names/dtypes/order from the SECTION
-(not from producer discovery) in declaration order.
+**Column ORDER ownership** (plan §4 W34.2 / §7 risk 4): the copies -> tasks ->
+mask BLOCK order is enforced by the dumb H5 sink's ``_merge_columns`` (input copies
+first, then the task output columns, then the pad mask). WITHIN the task block, the
+section's ``RunTaskOutput`` field order — the v1 model-declaration order — drives the
+H5 TASK-column order, NOT the executor topo order, so reordering for memory tuning
+never reshuffles the eval H5 task columns. Each ``RunTaskOutput`` exposes
+``manifest_fields(mode) -> list[(output_key, OutputField)]`` so the dumb sinks collect
+the task-column names/dtypes/order from the SECTION (not from producer discovery) in
+declaration order.
 
 All section writers are ``GraphModule``s with ``modes=ALL`` ports, gated by
 DEMAND: in FIT/VAL nothing demands ``outputs.*`` (losses read ``preds.*``), so
@@ -251,7 +252,7 @@ class RunTaskOutput(OutputSectionWriter):
         for task in self._resolved_tasks().values():
             requires[task.pred_key] = TensorSpec(shape=None, dtype=None, kind="data")
             for dep in task.output_time_requires(mode):
-                requires.setdefault(dep, TensorSpec(shape=None, dtype="bool", kind="pad_mask"))
+                requires.setdefault(dep, _dep_spec(dep))
             for field in _task_manifest(task, mode):
                 produces[self.field_leaf_key(task, field)] = TensorSpec(
                     shape=None, dtype=None, kind="data"
@@ -336,6 +337,31 @@ class RunTaskOutput(OutputSectionWriter):
             Always True.
         """
         return True
+
+
+def _dep_spec(dep: str) -> TensorSpec:
+    """The require `TensorSpec` for an output-time dep, keyed on its namespace (plan 34 W34.3).
+
+    A task's ``output_time_requires`` mixes namespaces (plan §4): the stream pad mask
+    (``masks.<stream>`` -> ``kind=pad_mask`` bool), a regression ratio-denominator
+    LABEL (``labels.<stream>.<denom>`` -> ``kind=label`` float, the TEST source), and
+    the raw input Feature (``inputs.<stream>`` -> ``kind=data`` float, the ONNX source).
+    The require kind MUST match the dataset-source kind or the planner's kind-unify
+    raises (a label dep declared ``pad_mask`` is the W34.3 regression-cutover bug).
+
+    Returns
+    -------
+    TensorSpec
+        The namespace-appropriate require spec (shape-agnostic; the source/producer
+        carries the concrete shape).
+    """
+    namespace = dep.split(".", 1)[0]
+    if namespace == "masks":
+        return TensorSpec(shape=None, dtype="bool", kind="pad_mask")
+    if namespace == "labels":
+        return TensorSpec(shape=None, dtype="float32", kind="label")
+    # inputs.* (the ONNX ratio-denominator Feature) — a raw data tensor
+    return TensorSpec(shape=None, dtype="float32", kind="data")
 
 
 def _task_manifest(task: Any, mode: Mode) -> list[OutputField]:

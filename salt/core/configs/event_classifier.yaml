@@ -128,16 +128,20 @@ model:
       events_probs:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: events_classification, stream: events }
-      # W5 REGRESSION STOPGAP (plan 31 §5.2): regression producers are IDENTITY
-      # TaskOutput passthroughs because RegressionTaskModule.forward still DESCALES in
-      # TEST/ONNX (it is NOT P1.5-flipped), so the identity passthrough emits the
-      # already-descaled values = matches legacy. This MUST swap to a Regression
-      # (RegressionDescaleOp) producer when RegressionTaskModule is later flipped to
-      # publish raw targets (else identity passthrough emits raw -> breaks). Mirrors
-      # the W2 identity-TaskOutput-before-P4 pattern.
+      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
+      # in TEST/ONNX (the atomic forward-flip), so this is a REAL Regression
+      # (RegressionDescaleOp) producer — it de-scales the raw preds back to physical
+      # values, matching the legacy WriterCallback. The mHH ratio denominator is a
+      # LABEL (not an input Feature) so TEST de-scaling reads labels.events.mHH
+      # (v1 task.py:587-589); event_classifier has NO ONNX export. (Was an IDENTITY
+      # TaskOutput passthrough pre-flip; the swap keeps de-scale running exactly ONCE.)
       mHH_reg_out:
-        class_path: salt.core.outputs.TaskOutput
-        init_args: { task: mHH_regression, stream: events }
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: mHH_regression
+          stream: events
+          targets: truthMHH
+          target_denominators: mHH
 
 # plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
 # the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side

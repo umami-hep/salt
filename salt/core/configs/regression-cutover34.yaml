@@ -1,0 +1,72 @@
+# regression-cutover34.yaml — the PLAN 34 W34.3 LIVE cutover of the regression.yaml
+# eval path to the get_output()-on-task + outputs:-section + dumb sinks architecture
+# (plan 34 §2). The regression analogue of gn2v2-dummy-cutover34.yaml.
+#
+#   model.modules (raw scaled preds + loss)  ->  outputs: section  ->  dumb sinks
+#       (forward = loss-space)                  (RunTaskOutput            (dump ALL
+#                                                + InputCopyWriter         outputs.*
+#                                                + PadMaskWriter)          leaves)
+#
+# This REPLACES the regression.yaml Regression (RegressionDescaleOp) PRODUCER nodes
+# in model.modules with a single RunTaskOutput([reg tasks]) writer that calls each
+# RegressionTaskModule.get_output() (W34.3) — the de-scale folds onto the task. The
+# dumb sinks dump ALL active outputs.* leaves; the SECTION supplies names+dtypes+
+# ORDER. regression.yaml is the broadest non-gaussian surface: norm_params (scalar
+# + vector), ratio-denominator with a FEATURE denom (ONNX-gatherable), and a
+# per-token sequence head — so this proves regression get_output de-scale end-to-end
+# in BOTH H5 and ONNX (parity vs the auto-collect-producer oracle).
+#
+# Layered ON TOP of regression.yaml:
+#
+#   salt2 test --config salt/core/configs/regression.yaml \
+#     --config salt/core/configs/regression-cutover34.yaml \
+#     --ckpt_path <ckpt> --data.test_file <file.h5> ...
+#
+# What this override does (plan 34 W34.3):
+#  - DROPS the Regression producers from model.modules (the get_output fold replaces
+#    them): reg_normed_out/reg_multinorm_out/reg_ratio_out/reg_multiratio_out/
+#    reg_seq_tracks_out -> null.
+#  - composes the NEW top-level outputs: section in EXACT v1 H5 column order:
+#      inputs_copy (InputCopyWriter) -> RunTaskOutput task fields -> pad_mask
+#      (PadMaskWriter). The section FIELD ORDER drives the H5 task-column order.
+#  - wires the DUMB H5OutputSink + OnnxExportSink (no init args): they dump ALL
+#    active outputs.* leaves, names/dtypes/order from the bound section manifest.
+
+model:
+  modules:
+    # drop the W34.3 Regression producers: get_output on the task replaces them
+    reg_normed_out: null
+    reg_multinorm_out: null
+    reg_ratio_out: null
+    reg_multiratio_out: null
+    reg_seq_tracks_out: null
+
+# The PLAN 34 W34.3 top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
+# -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order
+# (the regression head column order).
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args:
+      streams: [jets, tracks]
+      variables:
+        jets: [pt_btagJes, eta_btagJes, mass]
+        tracks: [d0, z0SinTheta, dphi, deta, qOverP]
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [reg_normed, reg_multinorm, reg_ratio, reg_multiratio, reg_seq_tracks]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB sinks (plan 34 W34.3): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound section manifest. The OnnxExportSink
+# names the de-scaled regression leaves (the Athena physics names = the task
+# output_suffixes) in canonical tuple order (globals then per-token).
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink

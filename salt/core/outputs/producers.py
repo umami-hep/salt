@@ -686,12 +686,12 @@ class RegressionDescaleOp(ConversionOp):
     stream : str
         The regressed stream (denominator labels live under
         ``labels.<stream>.<denom>``; the input Feature is ``inputs.<stream>``).
-    targets : Sequence[str]
-        The regression target names, in column order (R targets). Used to index
-        the functional scaler and to size the descale loop, matching v1's
-        ``range(len(self.targets))``.
-    target_denominators : Sequence[str] | None, optional
-        Per-target ratio-denominator variable names (``target/denom`` at train,
+    targets : str | Sequence[str]
+        The regression target name(s), in column order (R targets; a bare string
+        for a single target). Used to index the functional scaler and to size the
+        descale loop, matching v1's ``range(len(self.targets))``.
+    target_denominators : str | Sequence[str] | None, optional
+        Per-target ratio-denominator variable name(s) (``target/denom`` at train,
         ``pred * denom`` at de-scale), by default None. Mutually exclusive with
         `norm_params` / `scaler`.
     norm_params : Mapping[str, Any] | None, optional
@@ -710,20 +710,42 @@ class RegressionDescaleOp(ConversionOp):
     def __init__(
         self,
         stream: str,
-        targets: Sequence[str],
-        target_denominators: Sequence[str] | None = None,
+        targets: str | Sequence[str],
+        target_denominators: str | Sequence[str] | None = None,
         norm_params: Mapping[str, Any] | None = None,
         scaler: Mapping[str, Mapping[str, Any]] | None = None,
+        gaussian: bool = False,
+        sequence: bool = False,
     ) -> None:
         self.stream = stream
-        self.targets = tuple(targets)
+        # accept a scalar string OR a sequence (mirrors RegressionTaskModule.targets,
+        # tasks.py — the config YAML surface uses a bare string for a single target)
+        self.targets = tuple(listify(targets))
         if not self.targets:
             raise ConfigError("RegressionDescaleOp: targets is required and non-empty")
+        # plan 34 W34.3: a per-token (sequence) regression head NaN-fills padded
+        # positions after de-scaling (v1 run_inference, tasks.py:557 / :649-650) — the
+        # SAME quirk the task's get_output reproduces, so the producer path matches the
+        # get_output path AND the legacy WriterCallback. The pad mask is read from
+        # masks.<stream>; a global head NaN-fills nothing.
+        self.sequence = bool(sequence)
         self.target_denominators = (
             tuple(listify(target_denominators)) if target_denominators is not None else None
         )
         self.norm_params = self._checked_norm_params(norm_params)
         self.scaler = RegressionTargetScaler(dict(scaler)) if scaler is not None else None
+        # plan 34 W34.3: gaussian heads publish [..., 2R] (means ‖ raw variances)
+        # and de-scale to [..., 2R] (means ‖ stddev = sqrt(softplus(var)) * std),
+        # mirroring v1 GaussianRegressionTask.run_inference (tasks.py:616-652). The
+        # gaussian descale supports norm_params (mean/std) and ratio denominators —
+        # NOT a functional scaler (v1 has none for gaussian).
+        self.gaussian = bool(gaussian)
+        if self.gaussian and self.scaler is not None:
+            raise ConfigError(
+                "RegressionDescaleOp: gaussian de-scaling has no functional-scaler branch "
+                "(v1 GaussianRegressionTask.run_inference, tasks.py:616-652) — use norm_params "
+                "or target_denominators"
+            )
         n_methods = sum(
             x is not None for x in (self.target_denominators, self.norm_params, self.scaler)
         )
@@ -806,20 +828,26 @@ class RegressionDescaleOp(ConversionOp):
         ]
 
     def extra_requires(self, stream: str) -> dict[str, TensorSpec]:
-        """Demand the ratio-denominator sources (FD §3.3 mode-split de-scaling).
+        """Demand the ratio-denominator sources (+ pad mask for a seq head).
 
         FIT|VAL|TEST read each denominator from ``labels.<stream>.<denom>``;
         ONNX gathers them by name from the raw ``inputs.<stream>`` Feature
-        tensor. norm_params / scaler need no external source.
+        tensor. norm_params / scaler need no external source. A per-token
+        (``sequence``) head additionally demands ``masks.<stream>`` for the
+        post-de-scale NaN fill (plan 34 W34.3).
 
         Returns
         -------
         dict[str, TensorSpec]
-            The denominator-source ports (empty when not a ratio head).
+            The denominator-source ports + (seq) the pad mask.
         """
-        if self.target_denominators is None:
-            return {}
         out: dict[str, TensorSpec] = {}
+        if self.sequence:
+            out[f"masks.{stream}"] = TensorSpec(
+                shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
+            )
+        if self.target_denominators is None:
+            return out
         for denom in self.target_denominators:
             out[f"labels.{stream}.{denom}"] = TensorSpec(
                 shape=None,
@@ -872,6 +900,8 @@ class RegressionDescaleOp(ConversionOp):
         # mutate the bundle's ``preds.*`` leaf in place (the v1 task owns its
         # fresh ``preds`` and can mutate it; a producer must not, write-once §2.1)
         preds = b.get(pred_key).float().clone()
+        if self.gaussian:
+            return self._convert_gaussian(preds, b, mode, stream)
         if self.target_denominators is not None:
             denoms = self._descale_source(b, mode, stream)
             for i, denom in enumerate(self.target_denominators):
@@ -883,7 +913,65 @@ class RegressionDescaleOp(ConversionOp):
         elif self.scaler is not None:
             for i in range(len(self.targets)):
                 preds[..., i] = self.scaler.inverse(self.targets[i], preds[..., i])
-        return preds
+        return self._nan_fill(preds, b, stream)
+
+    def _nan_fill(self, preds: Tensor, b: Bundle, stream: str) -> Tensor:
+        """NaN-fill padded positions for a seq head (v1 run_inference, tasks.py:557).
+
+        Reproduces the post-de-scale ``torch.masked_fill(preds, mask.unsqueeze(-1),
+        nan)`` the task's ``run_inference`` applies (and that the task's get_output
+        reproduces), so the producer path matches the get_output path AND the legacy
+        WriterCallback at padded positions. A global head NaN-fills nothing.
+
+        Returns
+        -------
+        Tensor
+            ``preds`` with padded positions set to NaN (seq head), else unchanged.
+        """
+        if not self.sequence:
+            return preds
+        mask = b.get(f"masks.{stream}")
+        return torch.masked_fill(preds, mask.unsqueeze(-1), torch.nan)
+
+    def _convert_gaussian(self, preds: Tensor, b: Bundle, mode: Mode, stream: str) -> Tensor:
+        """De-scale a gaussian head's ``[..., 2R]`` means ‖ raw-variances (plan 34 W34.3).
+
+        Mirrors v1 ``GaussianRegressionTask.run_inference`` (tasks.py:616-652)
+        VERBATIM: the means in columns ``[0:R]`` de-scale like a plain regression
+        head (ratio-denom OR mean/std), and the variances in ``[R:2R]`` become
+        ``stddev = sqrt(softplus(var)) * std`` (norm_params) or are scaled by the
+        denominator (ratio). The published ``[..., 2R]`` array is means ‖ stddevs
+        (the FD 1567-1568 one-array contract the writer splits on ``_stddev``).
+
+        Note: the v1 gaussian indexing is ``preds[:, i]`` / ``preds[:, i+1]`` for
+        ``i in range(R)`` — index-aligned for the R=1 shipped gaussian configs;
+        the loop is reproduced here on the last axis (``preds[..., j]``) so it
+        broadcasts over a per-token sequence head too.
+
+        Returns
+        -------
+        Tensor
+            The de-scaled ``[..., 2R]`` means ‖ stddevs.
+        """
+        n = len(self.targets)
+        if self.target_denominators is not None:
+            denoms = self._descale_source(b, mode, stream)
+            for i, denom in enumerate(self.target_denominators):
+                # v1: preds[:, i] (mean) and preds[:, i + 1] (var) both * denom
+                preds[..., i] *= denoms[denom]
+                preds[..., i + 1] *= denoms[denom]
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[..., i] *= self.norm_params["std"][i]
+                preds[..., i] += self.norm_params["mean"][i]
+                preds[..., i + 1] = (
+                    torch.sqrt(nn.functional.softplus(preds[..., i + 1]))
+                    * self.norm_params["std"][i]
+                )
+        del n
+        # gaussian run_inference NaN-fills means + stds at padded positions
+        # (tasks.py:648-650); _nan_fill masks the whole [..., 2R] array equivalently
+        return self._nan_fill(preds, b, stream)
 
     def _descale_source(self, b: Bundle, mode: Mode, stream: str) -> dict[str, Tensor]:
         """Gather the per-denominator de-scaling source (FD §3.3 mode split).
@@ -1202,28 +1290,41 @@ class Regression(TaskOutput):
     stream : str
         The regressed stream (also the output stream and the denominator-source
         stream).
-    targets : Sequence[str]
-        The regression target names, in column order.
+    targets : str | Sequence[str]
+        The regression target name(s), in column order (a bare string for one).
     name : str | None, optional
         The output leaf name, by default `task`.
-    target_denominators : Sequence[str] | None, optional
-        Per-target ratio-denominator variable names, by default None. Mutually
+    target_denominators : str | Sequence[str] | None, optional
+        Per-target ratio-denominator variable name(s), by default None. Mutually
         exclusive with `norm_params` / `scaler`.
     norm_params : Mapping[str, Any] | None, optional
         ``{"mean": ..., "std": ...}`` per-target normalisation, by default None.
     scaler : Mapping[str, Mapping[str, Any]] | None, optional
         Per-target functional scaling config, by default None.
+    gaussian : bool, optional
+        Whether the source head is a gaussian (``mu``/``sigma``) head publishing
+        ``[..., 2R]`` (means ‖ raw variances), de-scaled to means ‖ ``stddev =
+        sqrt(softplus(var)) * std`` (plan 34 W34.3, v1 ``GaussianRegressionTask.
+        run_inference``), by default False. The descaled width stays ``2R``; the
+        sink splits on ``_stddev`` via the gaussian-doubled ``output_suffixes``.
+    sequence : bool, optional
+        Whether the source head is per-token (a sequence stream), by default False.
+        A seq head NaN-fills padded positions after de-scaling (v1 run_inference,
+        tasks.py:557 / :648-650) — the SAME quirk the task's get_output reproduces,
+        so the producer path matches get_output AND the legacy WriterCallback.
     """
 
     def __init__(
         self,
         task: str,
         stream: str,
-        targets: Sequence[str],
+        targets: str | Sequence[str],
         name: str | None = None,
-        target_denominators: Sequence[str] | None = None,
+        target_denominators: str | Sequence[str] | None = None,
         norm_params: Mapping[str, Any] | None = None,
         scaler: Mapping[str, Mapping[str, Any]] | None = None,
+        gaussian: bool = False,
+        sequence: bool = False,
     ) -> None:
         super().__init__(
             task=task,
@@ -1235,6 +1336,8 @@ class Regression(TaskOutput):
                 target_denominators=target_denominators,
                 norm_params=norm_params,
                 scaler=scaler,
+                gaussian=gaussian,
+                sequence=sequence,
             ),
         )
 

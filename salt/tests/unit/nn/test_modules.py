@@ -1882,7 +1882,13 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_test_descale_uses_label_denominator(self, norm_paths):
-        """TEST de-scales the ratio target with the LABEL denominator (v1 get_h5)."""
+        """TEST forward = RAW scaled preds (W34.3 flip); get_h5 de-scales via the LABEL denom.
+
+        Plan 34 W34.3: the TEST forward no longer de-scales — it publishes the RAW
+        scaled preds. The ratio de-scale (with the LABEL denominator, v1 get_h5) now
+        lives in get_h5 / get_output. This asserts BOTH: the TEST plan's preds.* leaf
+        is raw, and get_h5 reproduces the v1 label-sourced de-scaling.
+        """
         targets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
         task = RegressionTaskModule(
             stream="jets",
@@ -1911,10 +1917,15 @@ class TestRegressionTaskModule:
         pooled = b.get("pooled.global")
         with torch.no_grad():
             raw, _ = task.task(pooled, {}, None, context=None)
+        # W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale)
+        assert torch.allclose(v2_test, raw, atol=1e-6)
+        # get_h5 now owns the de-scale (label-sourced denominator, v1 get_h5)
+        h5 = task.get_h5(b, run_name="reg")
+        with torch.no_grad():
             ref = task.task.run_inference(
                 raw.clone(), labels={"jets": {"pt_btagJes": labels["labels.jets.pt_btagJes"]}}
             )
-        assert torch.allclose(v2_test, ref, atol=1e-6)
+        assert torch.allclose(torch.as_tensor(h5["reg_pt"]), ref[..., 0], atol=1e-6)
 
     def test_onnx_descale_uses_input_feature_by_name(self, norm_paths):
         """ONNX de-scales with the denominator gathered BY NAME from inputs.<stream>.
@@ -1954,25 +1965,35 @@ class TestRegressionTaskModule:
         b_test = _run(test, with_labels=True)
         v2_onnx = b_onnx.get("preds.jets.regression")
         v2_test = b_test.get("preds.jets.regression")
-        # v1 reference: denominator from the inputs.jets column named pt_btagJes
+        # W34.3: BOTH forwards publish the RAW scaled preds (no de-scale in forward),
+        # so the raw TEST and ONNX preds are IDENTICAL (same weights, same inputs).
+        assert torch.allclose(v2_onnx, v2_test, atol=1e-6)
+        # the de-scaling now lives in get_output (mode-split denominator source):
+        # ONNX gathers the denominator BY NAME from inputs.jets; TEST from labels.
         col = JET_VARIABLES.index("pt_btagJes")
         denom_from_input = inputs["jets"][..., col]
         pooled = b_onnx.get("pooled.global")
         with torch.no_grad():
             raw, _ = task.task(pooled, {}, None, context=None)
-            ref = task.task.run_inference(
+            ref_onnx = task.task.run_inference(
                 raw.clone(), labels={"jets": {"pt_btagJes": denom_from_input}}
             )
-        assert torch.allclose(v2_onnx, ref, atol=1e-6)
-        # different denominator source -> different de-scaled values
-        assert not torch.allclose(v2_onnx, v2_test, atol=1e-6)
+        (onnx_field,) = task.get_output(b_onnx, Mode.ONNX, "reg")
+        # ONNX get_output de-scales by-name from the input Feature; value is the
+        # squeezed scalar at B>1 it stays [B] (squeeze drops no non-size-1 dim)
+        assert torch.allclose(onnx_field.value, ref_onnx[..., 0], atol=1e-6)
+        # the TEST get_output de-scales from the LABEL denominator -> a DIFFERENT
+        # result than the ONNX (input-Feature) de-scale
+        (test_field,) = task.get_output(b_test, Mode.TEST, "reg")
+        assert not torch.allclose(test_field.value, onnx_field.value, atol=1e-6)
 
     def test_sequence_scaler_descale_parity_and_nan_padding(self):
-        """Per-token (sequence) regression + functional scaler: forward + de-scale.
+        """Per-token (sequence) regression + functional scaler: RAW forward, get_output de-scale.
 
-        Reproduces the MaskFormer ``objects``-style query regression: the v1
-        scaler ``run_inference`` indexes the 3D ``[B, L, R]`` preds
-        (task.py:594-596) and nan-pads masked positions.
+        Plan 34 W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale,
+        NO nan-pad). The scaler de-scale + masked-position nan-pad (v1 run_inference,
+        task.py:594-596) now live in get_output. Reproduces the MaskFormer
+        ``objects``-style query regression on the 3D ``[B, L, R]`` preds.
         """
         d = 16
         scaler = {"pt": {"op": "log", "op_scale": 0.2}, "mass": {"op": "linear", "op_scale": 10}}
@@ -1999,12 +2020,20 @@ class TestRegressionTaskModule:
             test_out = task.forward(bt, Mode.TEST)
         pred = test_out["preds.tracks.regression"]
         assert pred.shape == (B, T, 2)
-        assert torch.isnan(pred[:, T - 1]).all()  # masked positions nan-padded
-        # parity vs a direct v1 forward + scaler run_inference
+        # W34.3: the TEST forward emits the RAW scaled preds (no de-scale, no nan-pad)
         with torch.no_grad():
             raw, _ = task.task(x, {}, {"tracks": mask}, context=None)
+        assert torch.equal(pred, raw)
+        # get_output now owns the scaler de-scale + the masked-position nan-pad
+        bt2 = Bundle()
+        bt2.set("preds.tracks.regression", pred)
+        bt2.set("masks.tracks", mask)
+        with torch.no_grad():
+            fields = task.get_output(bt2, Mode.TEST, "reg")
             ref = task.task.run_inference(raw.clone(), labels=None, pad_mask=mask)
-        assert torch.equal(torch.nan_to_num(pred), torch.nan_to_num(ref))
+        for i, f in enumerate(fields):
+            assert torch.isnan(f.value[:, T - 1]).all()  # masked positions nan-padded
+            assert torch.equal(torch.nan_to_num(f.value), torch.nan_to_num(ref[..., i]))
 
     # -- Gaussian (mu/sigma, output==2R, NLL, stddev=sqrt) — A3 -----------------
 
@@ -2075,7 +2104,13 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_gaussian_test_descale_one_array_means_then_stddev(self, norm_paths):
-        """TEST publishes ONE [B, 2R] array (means ‖ stddevs); parity vs v1 tuple."""
+        """TEST forward = RAW [B, 2R] (W34.3); get_output publishes means ‖ stddevs.
+
+        Plan 34 W34.3: the gaussian TEST forward publishes the RAW [B, 2R] (means ‖
+        raw variances) — NO de-scale. The de-scale + the means‖stddev one-array
+        re-concat (parity vs the v1 (means, stds) tuple) now live in get_output /
+        get_h5.
+        """
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -2101,11 +2136,16 @@ class TestRegressionTaskModule:
         pooled = b.get("pooled.global")
         with torch.no_grad():
             raw, _ = task.task(pooled, {}, None, context=None)
+        # W34.3: the gaussian TEST forward publishes the RAW [B, 2R] (NO de-scale)
+        assert torch.allclose(v2_test, raw, atol=1e-6)
+        # get_output owns the de-scale + the means‖stds one-array re-concat
+        with torch.no_grad():
             ref_means, ref_stds = task.task.run_inference(raw.clone())
-        # the published array is the v1 (means, stds) re-concatenated
-        assert torch.allclose(v2_test, torch.cat([ref_means, ref_stds], dim=-1), atol=1e-6)
-        # the second column IS sqrt(softplus(var)) * std (v1 task.py:762-764)
-        assert (v2_test[:, 1] > 0).all()
+            fields = task.get_output(b, Mode.TEST, "reg")
+        descaled = torch.stack([f.value for f in fields], dim=-1)
+        assert torch.allclose(descaled, torch.cat([ref_means, ref_stds], dim=-1), atol=1e-6)
+        # the stddev column IS sqrt(softplus(var)) * std (v1 task.py:762-764)
+        assert (fields[1].value > 0).all()
 
     # -- sample_weight + NaN masking (inside composed v1 nan_loss) — A3 ---------
 
@@ -2262,13 +2302,13 @@ class TestGn2V2Execution:
         assert not torch.allclose(logits.sum(-1), torch.ones(B))  # not softmaxed
 
     def test_test_plan_classification_preds_are_raw_logits(self, gn2v2):
-        """TEST classification preds are RAW logits since the P1.5 flip (design §2).
+        """TEST classification + vertexing preds are RAW since the flips (design §2).
 
         The classification eval conversion (softmax) moved OUT of ``forward`` and
-        INTO the producers / ``get_h5``, so the executed TEST ``preds.*`` for the
-        classification heads are now RAW logits (NOT softmaxed). Regression /
-        vertexing are NOT flipped (P2): vertexing TEST output stays the per-node
-        assignment (the forward still converts).
+        INTO the producers / ``get_h5`` (P1.5). Plan 34 W34.3 ALSO flips vertexing:
+        the TEST ``forward`` now publishes the RAW ``[E, 1]`` edge scores (the
+        union-find moved to get_output / get_h5), so the executed TEST ``preds.*``
+        for ALL three heads are raw.
         """
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.TEST)
@@ -2290,9 +2330,11 @@ class TestGn2V2Execution:
         assert not torch.allclose(
             track_logits[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-3
         )
-        # vertexing (NOT flipped) TEST output: per-node assignments unflattened to
-        # the batch shape, padded positions -inf (task.py:985-986,1003-1035)
-        assert b.get("preds.tracks.track_vertexing").shape == (B, T, 1)
+        # vertexing (W34.3 flipped) TEST output: RAW [E, 1] edge scores (the
+        # union-find moved off forward to get_output / get_h5), NOT the [B, T, 1]
+        # per-node assignments the forward used to publish.
+        vtx = b.get("preds.tracks.track_vertexing")
+        assert vtx.ndim == 2 and vtx.shape[1] == 1  # [E, 1] raw edge scores
 
     def test_onnx_plan_keeps_raw_vertexing_scores(self, gn2v2):
         """ONNX vertexing publishes raw edge scores for the export reduce (§3.3)."""

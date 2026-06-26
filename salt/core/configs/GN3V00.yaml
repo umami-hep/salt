@@ -193,9 +193,18 @@ model:
       jet_probs:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: jets_classification, stream: jets }
+      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
+      # in TEST/ONNX (the atomic forward-flip), so this is a REAL Regression
+      # (RegressionDescaleOp) producer — it de-scales the raw ratio prediction
+      # (pred * pt_btagJes) back to physical pT, matching legacy in BOTH H5 and ONNX.
+      # (Was an IDENTITY TaskOutput passthrough pre-flip.)
       jet_pt_reg:
-        class_path: salt.core.outputs.TaskOutput
-        init_args: { task: jet_pt_regression, stream: jets }
+        class_path: salt.core.outputs.Regression
+        init_args:
+          task: jet_pt_regression
+          stream: jets
+          targets: ptFromTruthDressedWZJet
+          target_denominators: pt_btagJes
       track_origin_probs:
         # distinct leaf name (track_origin_probs) so it does NOT collide with the
         # ONNX argmax index producer (track_origin_index) on outputs.tracks.track_origin

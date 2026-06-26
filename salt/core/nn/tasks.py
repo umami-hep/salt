@@ -55,6 +55,7 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.modules import Dense, _reject_width_keys, _stream_len
 from salt.core.onnx.config import ExportOutput
+from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.producers import OutputField
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
@@ -1947,12 +1948,24 @@ class VertexingTaskModule(_TaskModuleBase):
         )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed v1 head; per-mode outputs per design §3.3.
+        """Run the composed v1 head; RAW edge scores in EVERY non-training mode (plan 34 W34.3).
 
         The labels dict carries the origin labels under the v1-derived key
         (``label.replace("VertexIndex", "OriginLabel")``) so the composed
         loss finds them — the *graph* dependency is the declared
         ``origin_label`` port.
+
+        Mode semantics (plan 34 W34.3 atomic forward-flip — design §2): the
+        task now publishes the RAW ``[E, 1]`` edge scores in EVERY non-training
+        mode (FIT/VAL unchanged; **TEST flipped HERE** — it used to run
+        ``run_inference`` (union-find) and publish the per-node assignments;
+        ONNX was ALREADY raw, the union-find living in the export reduce). The
+        union-find conversion is now OWNED by ``get_output`` on the live path
+        (the ``RunTaskOutput`` consumer reads this raw leaf and union-finds it
+        once) and by ``get_h5`` on the transitional M4.5 oracle path (it reads
+        this raw leaf and ``run_inference``-s it once) — exactly the W34.1
+        classification pattern. The conversion happens exactly ONCE per leaf on
+        either path (no double-conversion, no zero-conversion — plan §4).
 
         Returns
         -------
@@ -1974,11 +1987,13 @@ class VertexingTaskModule(_TaskModuleBase):
             }
             preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
+        # TEST and ONNX (plan 34 W34.3 atomic flip): publish the RAW [E, 1] edge
+        # scores in EVERY non-training mode — the vertexing task no longer runs
+        # union-find anywhere. The eval conversion (union-find -> per-node int8
+        # assignments) is OWNED by the conversion producer / get_output on the
+        # live path and by get_h5 on the transitional oracle path (both read this
+        # raw leaf and run the union-find ONCE).
         preds, _ = self.task(x, None, pad_masks, context=ctx)
-        if mode & Mode.TEST:
-            # per-node assignments — v1 writer semantics (task.py:985-986,1003)
-            return {self.pred_key: self.task.run_inference(preds, mask)}
-        # ONNX: raw edge scores; union-find lives in the export reduce (§3.3)
         return {self.pred_key: preds}
 
     # -- output rendering (v1 VertexingTask.output_names/get_h5 + naming) -------
@@ -2000,17 +2015,27 @@ class VertexingTaskModule(_TaskModuleBase):
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
         """Per-node vertex assignments as one ``i8`` column (v1 task.py:988-1005).
 
-        The TEST forward publishes the union-find assignments (design §3.3),
-        so this is the writer-side EXACT v1 op chain ``preds.int().cpu()`` ->
-        u2s i8 verbatim — padded positions read the int32 cast of ``-inf``
-        (-2147483648).
+        Since the plan 34 W34.3 flip the TEST ``forward`` publishes the RAW
+        ``[E, 1]`` edge scores (design §2), so this M4.5-oracle path now runs the
+        union-find conversion ITSELF: it ``run_inference``-s the raw ``preds.*``
+        leaf (``get_node_assignment_jit`` -> ``_mask_fill_flattened``, the SAME
+        math the forward used to run) before the EXACT v1 op chain
+        ``preds.int().cpu()`` -> u2s i8. The conversion happens exactly ONCE on
+        this path (the producer / get_output path converts independently — no
+        double-conversion, plan §4). The mask is read from ``masks.<stream>``
+        (present in the TEST bundle — the vertexing head declares it as a forward
+        require). Padded positions read the int32 cast of ``-inf``
+        (-2147483648). The OUTPUT is byte-identical to pre-flip (union-find-then-
+        pack == flip-then-union-find-then-pack).
 
         Returns
         -------
         np.ndarray
             ``[B, L]`` structured array with one ``i8`` field.
         """
-        preds = b.get(self.pred_key)
+        assert self.task is not None, "get_h5 before bind()"
+        mask = b.get(f"masks.{self.stream}")
+        preds = self.task.run_inference(b.get(self.pred_key), mask)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.int().cpu().numpy(), dtype)
 
@@ -2034,6 +2059,128 @@ class VertexingTaskModule(_TaskModuleBase):
                 name=VERTEX_INDEX,
                 reduce="vertex_union_find",
                 dtype="int8",
+            )
+        ]
+
+    def output_time_requires(self, mode: Mode) -> list[str]:
+        """The non-pred dep `get_output` reads: the stream pad mask (plan 34 W34.3).
+
+        The vertexing union-find reads the stream's ``masks.<stream>`` pad mask
+        (the all-valid / padded mask the union-find + ``mask_fill_flattened``
+        consume — the SAME ``extra_requires`` the legacy `VertexUnionFind`
+        producer declared, producers.py:1522). A vertexing head always has a pad
+        mask (its ``forward`` requires ``masks.<stream>`` unconditionally), so
+        this is mode-independent.
+
+        Returns
+        -------
+        list[str]
+            ``["masks.<stream>"]``.
+        """
+        del mode
+        return [f"masks.{self.stream}"]
+
+    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
+        """Union-find the RAW edge scores into a graph-visible int8 leaf (plan 34 W34.3).
+
+        Reads the RAW ``preds.*`` ``[E, 1]`` edge scores (forward is loss-space
+        since the W34.3 flip) + the stream pad mask and runs the union-find
+        conversion in TRACEABLE torch ops, folding the EXACT chain of the legacy
+        `VertexUnionFind` producer (producers.py:1567-1569) / the task's own
+        ``run_inference`` (tasks.py:773-782). Per mode:
+
+        - **ONNX**: the export-shaped chain VERBATIM —
+          ``get_node_assignment_jit`` -> ``mask_fill_flattened`` ->
+          ``.reshape(-1).char()`` (the IDENTICAL ops the `VertexUnionFind`
+          producer runs, so the traced subgraph is byte-identical) — one int8
+          ``[L]`` per-token field under the shared `VERTEX_INDEX` suffix (the
+          exporter prepends ``{model_name}_``).
+        - **H5 modes** (TEST): ``run_inference`` (``get_node_assignment_jit`` ->
+          ``_mask_fill_flattened`` -> ``[B, L, 1]`` with ``-inf`` padding) then
+          ``.int()`` — the EXACT value ``get_h5`` packs (tasks.py:2031). One int8
+          per-token field, ``axis="per_token"``, ``dtype="i8"`` (the v1 int64
+          ``VertexIndex`` column), ``onnx_name=None`` (the ONNX side is the
+          ``.char()`` index leaf above). The column ``prefix`` follows
+          ``prefix_vertex_column`` (bare ``VertexIndex`` by default, v1 byte-
+          parity).
+
+        ``run_name`` is NOT baked in (the sink prefixes), so it is deleted.
+
+        Returns
+        -------
+        list[OutputField]
+            One int8 vertex-index field (the per-token union-find assignment).
+        """
+        del run_name
+        assert self.task is not None, "get_output before bind()"
+        edge_scores = b.get(self.pred_key)
+        mask = b.get(f"masks.{self.stream}")
+        if mode & Mode.ONNX:
+            # ONNX export-shaped union-find — VERBATIM the VertexUnionFind producer
+            # chain (producers.py:1567-1569) so the traced subgraph is identical.
+            vertex_indices = get_node_assignment_jit(edge_scores, mask)
+            vertex_list = mask_fill_flattened(vertex_indices, mask)
+            return [
+                OutputField(
+                    h5_name=None,
+                    onnx_name=VERTEX_INDEX,
+                    dtype="int8",
+                    axis="per_token",
+                    final=True,
+                    value=vertex_list.reshape(-1).char(),
+                )
+            ]
+        # H5 (TEST): run_inference union-find -> .int(), the EXACT value get_h5 packs
+        # ([B, L, 1] with -inf padding cast to int32 -> u2s i8 by the sink).
+        preds = self.task.run_inference(edge_scores, mask).int()
+        return [
+            OutputField(
+                h5_name=VERTEX_INDEX,
+                onnx_name=None,
+                dtype="i8",
+                axis="per_token",
+                final=True,
+                prefix=self.prefix_vertex_column,
+                value=preds,
+            )
+        ]
+
+    def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
+        """The value-free field metadata mirroring `get_output` for `mode` (plan 34 W34.3).
+
+        Returns the SAME `OutputField` `get_output` mints (name / dtype / axis /
+        final / prefix, value-free) so the dumb sinks resolve the column schema
+        before any batch runs:
+
+        - ONNX -> one int8 per-token field under the shared `VERTEX_INDEX` ONNX
+          suffix (``h5_name=None``).
+        - H5 modes -> one ``i8`` per-token ``VertexIndex`` field (``onnx_name=None``,
+          ``prefix`` per ``prefix_vertex_column``).
+
+        Returns
+        -------
+        list[OutputField]
+            The value-free serialisation field.
+        """
+        del run_name
+        if mode & Mode.ONNX:
+            return [
+                OutputField(
+                    h5_name=None,
+                    onnx_name=VERTEX_INDEX,
+                    dtype="int8",
+                    axis="per_token",
+                    final=True,
+                )
+            ]
+        return [
+            OutputField(
+                h5_name=VERTEX_INDEX,
+                onnx_name=None,
+                dtype="i8",
+                axis="per_token",
+                final=True,
+                prefix=self.prefix_vertex_column,
             )
         ]
 
@@ -2550,17 +2697,26 @@ class RegressionTaskModule(_TaskModuleBase):
                 )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed v1 head; RAW preds + loss in FIT|VAL, de-scaled in TEST/ONNX.
+        """Run the composed v1 head; RAW scaled preds in EVERY non-training mode (plan 34 W34.3).
 
         The v1 head is handed a SINGLE-STREAM targets dict (its
         ``input_name_mask`` slicing is the identity on per-stream inputs). The
         per-sample weight (when configured) rides in that dict so the composed
-        ``nan_loss`` finds it (task.py:430). In TEST/ONNX the denominator
-        provider differs (FD §3.3): TEST sources it from the label group, ONNX
-        gathers it by name from the raw input Feature tensor. A gaussian head's
-        de-scaling returns a v1 ``(means, stds)`` TUPLE — re-concatenated to one
-        ``[B, 2R]`` array here (FD 1567-1568 one-array contract); the writer
-        owns the ``_stddev`` split.
+        ``nan_loss`` finds it (task.py:430).
+
+        Mode semantics (plan 34 W34.3 atomic forward-flip — design §2): the task
+        now publishes the RAW (training-space, SCALED) ``[..., R]`` predictions
+        in EVERY non-training mode (FIT/VAL unchanged; **TEST/ONNX flipped HERE**
+        — they used to ``run_inference``-de-scale, returning the physical values,
+        gaussian as a re-concatenated ``[..., 2R]`` means‖stds array). The eval
+        de-scaling (incl. the gaussian means‖softplus-stddev one-array concat) is
+        now OWNED by ``get_output`` on the live path (the ``RunTaskOutput``
+        consumer reads this raw leaf and de-scales it once) and by ``get_h5`` on
+        the transitional M4.5 oracle path (it reads this raw leaf and de-scales
+        once). The de-scaling happens exactly ONCE per leaf on either path (no
+        double-de-scale, no zero-de-scale — plan §4). The mode-split denominator
+        SOURCE (FD §3.3: labels in TEST, the input Feature by name in ONNX) moves
+        with the de-scaling onto ``get_output`` / ``get_h5``.
 
         Returns
         -------
@@ -2599,18 +2755,14 @@ class RegressionTaskModule(_TaskModuleBase):
                     self.targets_key: self.task.get_targets(targets_dict),
                 }
             return {self.pred_key: preds, self.loss_key: loss}
-        # TEST|ONNX: de-scaled physical values (design §3.3). v1 forward with an
-        # empty targets dict returns raw preds; run_inference inverts scaling.
+        # TEST|ONNX (plan 34 W34.3 atomic flip): publish the RAW (scaled) preds in
+        # EVERY non-training mode — the regression task no longer de-scales here.
+        # The eval de-scaling (incl. the gaussian means‖stds concat) is OWNED by
+        # get_output on the live path and by get_h5 on the transitional oracle
+        # path (both read this raw leaf and de-scale ONCE). v1 forward with an
+        # empty targets dict returns the raw scaled preds.
         preds, _ = self.task(x, {}, pad_masks, context=ctx)
-        labels = self._descale_source(b, mode) if self.target_denominators is not None else None
-        descaled = self.task.run_inference(preds, labels=labels, pad_mask=mask)
-        if self.gaussian:
-            # v1 GaussianRegressionTask.run_inference returns (means, stds);
-            # publish ONE [..., 2R] array (means ‖ stds) for the single-leaf
-            # graph contract (FD 1567-1568)
-            means, stds = descaled
-            return {self.pred_key: torch.cat([means, stds], dim=-1)}
-        return {self.pred_key: descaled}
+        return {self.pred_key: preds}
 
     def _descale_source(self, b: Bundle, mode: Mode) -> dict[str, dict[str, Tensor]]:
         """Build the per-denominator de-scaling source dict (FD §3.3 mode split).
@@ -2641,6 +2793,39 @@ class RegressionTaskModule(_TaskModuleBase):
             }
         }
 
+    def _descaled_preds(self, b: Bundle, mode: Mode) -> Tensor:
+        """De-scale the RAW ``preds.*`` leaf to physical values (plan 34 W34.3).
+
+        The de-scaling math the W34.3 flip moved OFF ``forward`` (which now
+        publishes RAW scaled preds) and ONTO the serialisation path. Reads the
+        RAW ``preds.*`` leaf + the mode-split denominator source (FD §3.3: labels
+        in TEST, the input Feature by name in ONNX) + the pad mask, and runs
+        ``self.task.run_inference`` VERBATIM — the SAME call the old TEST/ONNX
+        forward made (tasks.py pre-flip). A gaussian head's ``run_inference``
+        returns a ``(means, stds)`` TUPLE re-concatenated to ONE ``[..., 2R]``
+        array (means ‖ stds) here (FD 1567-1568 one-array contract). Both
+        ``get_h5`` (oracle path) and ``get_output`` (live path) call this so the
+        de-scaling happens once and is byte-identical between the two.
+
+        Returns
+        -------
+        Tensor
+            The de-scaled physical predictions: ``[..., R]`` (plain) or
+            ``[..., 2R]`` (gaussian, means ‖ stds).
+        """
+        assert self.task is not None, "de-scale before bind()"
+        preds = b.get(self.pred_key)
+        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+        labels = self._descale_source(b, mode) if self.target_denominators is not None else None
+        descaled = self.task.run_inference(preds, labels=labels, pad_mask=mask)
+        if self.gaussian:
+            # v1 GaussianRegressionTask.run_inference returns (means, stds);
+            # publish ONE [..., 2R] array (means ‖ stds) for the single-leaf
+            # graph contract (FD 1567-1568)
+            means, stds = descaled
+            return torch.cat([means, stds], dim=-1)
+        return descaled
+
     # -- output rendering (v1 RegressionTask.output_names/get_h5/get_onnx) ------
 
     def output_names(self, run_name: str) -> list[tuple[str, str]]:
@@ -2660,17 +2845,20 @@ class RegressionTaskModule(_TaskModuleBase):
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
         """The de-scaled values as ``f4`` columns (v1 task.py:604-623).
 
-        The TEST forward already inverted the scaling and concatenated a
-        gaussian head's means ‖ stddevs into one ``[..., 2R]`` array (design
-        §3.3), so this is the writer-side ``de-scaled values -> f4 u2s``
-        conversion verbatim.
+        Since the plan 34 W34.3 flip the TEST ``forward`` publishes RAW scaled
+        preds (design §2), so this M4.5-oracle path now de-scales ITSELF via
+        ``_descaled_preds`` (``run_inference`` + the gaussian means‖stds concat —
+        the SAME math the forward used to run) before the ``de-scaled values ->
+        f4 u2s`` pack. The conversion happens exactly ONCE on this path (the
+        producer / get_output path de-scales independently — no double-de-scale,
+        plan §4). The OUTPUT is byte-identical to pre-flip.
 
         Returns
         -------
         np.ndarray
             ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
         """
-        preds = b.get(self.pred_key)
+        preds = self._descaled_preds(b, Mode.TEST)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.float().cpu().numpy(), dtype)
 
@@ -2694,6 +2882,108 @@ class RegressionTaskModule(_TaskModuleBase):
                 names=list(self.output_suffixes),
                 reduce="split_scalars",
             )
+        ]
+
+    def output_time_requires(self, mode: Mode) -> list[str]:
+        """The non-pred deps `get_output` reads: denom source(s) + pad mask (plan 34 W34.3).
+
+        Mirrors the legacy `RegressionDescaleOp.extra_requires` (producers.py:808)
+        plus the pad mask, mode-aware (FD §3.3 mode split):
+
+        - a ratio head (``target_denominators``) reads its denominator source —
+          ``labels.<stream>.<denom>`` in FIT|VAL|TEST, the raw input Feature
+          ``inputs.<stream>`` (gathered by NAME) in ONNX.
+        - a padded sequence head reads the stream pad mask ``masks.<stream>`` (the
+          ``run_inference`` NaN-fill). A global / objects-stream head needs no
+          pad mask.
+
+        ``norm_params`` / ``scaler`` need no external source (mode-independent).
+
+        Returns
+        -------
+        list[str]
+            The dotted bundle keys `get_output` reads at output time, in order.
+        """
+        deps: list[str] = []
+        if self.target_denominators is not None:
+            if mode & Mode.ONNX:
+                deps.append(self.input_feature_key)
+            else:
+                deps.extend(self.denom_label_keys)
+        if self.has_pad_mask:
+            deps.append(f"masks.{self.stream}")
+        return deps
+
+    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
+        """De-scale the RAW preds into graph-visible `OutputField`s (plan 34 W34.3).
+
+        Reads the RAW ``preds.*`` leaf (forward is loss-space since the W34.3
+        flip) + the mode-split denominator source + the pad mask, and de-scales
+        in TRACEABLE torch ops via ``_descaled_preds`` (``self.task.run_inference``
+        VERBATIM — the SAME math the legacy `RegressionDescaleOp` producer /
+        the pre-flip forward ran; incl. the gaussian means‖softplus-stddev
+        one-array concat). It then mints ONE ``f4`` `OutputField` PER output
+        column (``output_suffixes`` — ``custom_output_names`` else the targets,
+        DOUBLED for a gaussian head: R means then R ``_stddev``). The H5 and ONNX
+        suffixes are the SAME (regression's ``output_names`` H5 columns AND
+        ``split_scalars`` ONNX scalars share the suffixes), so each field carries
+        both (``onnx_name`` defaults to ``h5_name``). The per-column value shape
+        is MODE-FAITHFUL to the live sink:
+
+        - **H5 modes** (TEST): the per-column ``[B]`` (global) / ``[B, L]`` (seq)
+          value — exactly the float column ``get_h5`` packs. No squeeze.
+        - **ONNX**: the v1 ``split_scalars`` shape — ``torch.split(preds, 1, -1)``
+          then ``.squeeze()`` (drops ALL size-1 dims). On the batch-1 ONNX trace a
+          global head's de-scaled preds are ``[1, R]`` so ``preds[..., i]`` is
+          ``[1]`` -> ``.squeeze()`` yields the ``[]`` scalar Athena/v1 expects; a
+          per-token head's ``[1, L, R]`` -> ``preds[..., i]`` is ``[1, L]`` ->
+          ``.squeeze()`` yields the ``[L]`` per-token vector (batch dim dropped).
+          The dumb `OnnxExportSink` then NAMES each already-shaped value directly
+          (single-``name`` leaf, no re-split — the W34.2 LOCKED no-double-split
+          decision).
+
+        ``run_name`` is NOT baked in (the sink prefixes), so it is deleted.
+
+        Returns
+        -------
+        list[OutputField]
+            One ``f4`` field per output column (de-scaled physical value), in
+            column order.
+        """
+        del run_name
+        preds = self._descaled_preds(b, mode)
+        axis = "per_token" if self.sequence else "global"
+        squeeze = bool(mode & Mode.ONNX)
+        return [
+            OutputField(
+                h5_name=suffix,
+                dtype="f4",
+                axis=axis,
+                final=True,
+                value=preds[..., i].squeeze() if squeeze else preds[..., i],
+            )
+            for i, suffix in enumerate(self.output_suffixes)
+        ]
+
+    def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
+        """The value-free field metadata mirroring `get_output` for `mode` (plan 34 W34.3).
+
+        Returns the SAME `OutputField`s `get_output` mints (one ``f4`` field per
+        ``output_suffixes`` entry — gaussian-doubled — global or per_token,
+        value-free) so the dumb sinks resolve the column schema before any batch
+        runs. The H5/ONNX suffixes are identical, so each field carries both
+        (``onnx_name`` defaults to ``h5_name``).
+
+        Returns
+        -------
+        list[OutputField]
+            The value-free serialisation fields, in column order.
+        """
+        del run_name, mode
+        axis = "per_token" if self.sequence else "global"
+        return [
+            OutputField(h5_name=suffix, dtype="f4", axis=axis, final=True)
+            for suffix in self.output_suffixes
         ]
 
 

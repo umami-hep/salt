@@ -174,16 +174,22 @@ def make_preds_bundle(b: int = 5, length: int = L_FILE, seed: int = 3) -> Bundle
     # pre-softmaxed) for the classification heads — feeding softmaxed values here
     # would double-convert. The masked-softmax track_origin get_h5 reads
     # masks.tracks, so the bundle carries it (True = padded; the last two
-    # positions are padded). Vertexing is NOT flipped (its forward still converts
-    # in TEST), so its preds.* stays the per-node assignment the v1 op-chain
-    # get_h5 expects (-inf padded rows).
+    # positions are padded).
+    #
+    # Plan 34 W34.3 flips vertexing too: its TEST forward now publishes the RAW
+    # [E, 1] edge scores (the union-find moved INTO get_h5 / get_output). So this
+    # bundle feeds RAW edge scores for the COMPRESSED valid-node graph — one
+    # directed edge score per ordered pair of valid (non-padded) tracks per row
+    # (E = b * n_valid * (n_valid - 1)); get_h5 union-finds them into the [B, L]
+    # per-node assignment column (padded rows -> -inf -> int32 -2147483648).
     gen = torch.Generator().manual_seed(seed)
     jets = torch.randn(b, 3, generator=gen)
     origin = torch.randn(b, length, 8, generator=gen)
-    vertex = torch.randint(-1, 4, (b, length, 1), generator=gen).float()
-    vertex[:, -2:] = float("-inf")  # padded rows (v1 mask_fill_flattened encoding)
     mask = torch.zeros(b, length, dtype=torch.bool)
     mask[:, -2:] = True  # padded track positions (True = padded)
+    n_valid = length - 2
+    n_edges = b * n_valid * (n_valid - 1)
+    vertex = torch.randn(n_edges, 1, generator=gen)  # RAW [E, 1] edge scores
     return Bundle({
         "preds": {
             "jets": {"jets_classification": jets},

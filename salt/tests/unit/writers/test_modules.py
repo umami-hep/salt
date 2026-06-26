@@ -85,8 +85,13 @@ class TestTaskWriter:
         jets = torch.softmax(bundle.get(PRED_KEYS[0]), -1).numpy()
         for i, col in enumerate(JET_PROB_COLS):
             assert out["jets"][col].tobytes() == jets[:, i].astype("f4").tobytes()
-        # vertexing (NOT flipped): the exact v1 op chain .int() -> u2s i8 (task.py:1003)
-        vertex = bundle.get(PRED_KEYS[2]).int().numpy()[..., 0].astype("i8")
+        # vertexing (W34.3 flipped): get_h5 union-finds the RAW [E, 1] edge scores
+        # itself (run_inference) then .int() -> u2s i8 (task.py:988-1005). The padded
+        # rows read the int32 cast of -inf (-2147483648).
+        vtx = bound_modules["track_vertexing"]
+        with torch.no_grad():
+            ufound = vtx.task.run_inference(bundle.get(PRED_KEYS[2]), bundle.get("masks.tracks"))
+        vertex = ufound.int().numpy()[..., 0].astype("i8")
         assert out["tracks"]["VertexIndex"].tobytes() == vertex.tobytes()
         assert (out["tracks"]["VertexIndex"][:, -2:] == np.int64(-2147483648)).all()
 
@@ -162,13 +167,18 @@ class TestTaskRendersItsOwnOutput:
         vtx.prefix_vertex_column = True
         assert vtx.output_names("salt") == [("salt_VertexIndex", "i8")]
 
-    def test_vertexing_get_h5_is_v1_int_opchain(self, modules):
-        # the EXACT v1 op chain .int().cpu() -> u2s i8 (task.py:988-1005),
-        # -inf padded rows read the int32 cast (-2147483648)
+    def test_vertexing_get_h5_is_v1_int_opchain(self, bound_modules):
+        # plan 34 W34.3: get_h5 union-finds the RAW [E, 1] edge scores ITSELF
+        # (run_inference) then the EXACT v1 op chain .int().cpu() -> u2s i8
+        # (task.py:988-1005); -inf padded rows read the int32 cast (-2147483648).
+        # (Needs a BOUND module — run_inference uses the composed v1 head.)
         bundle = make_preds_bundle()
-        arr = modules["track_vertexing"].get_h5(bundle, "salt")
+        vtx = bound_modules["track_vertexing"]
+        arr = vtx.get_h5(bundle, "salt")
         assert arr.dtype.names == ("VertexIndex",)
-        vertex = bundle.get(PRED_KEYS[2]).int().numpy()[..., 0].astype("i8")
+        with torch.no_grad():
+            ufound = vtx.task.run_inference(bundle.get(PRED_KEYS[2]), bundle.get("masks.tracks"))
+        vertex = ufound.int().numpy()[..., 0].astype("i8")
         assert arr["VertexIndex"].tobytes() == vertex.tobytes()
         assert (arr["VertexIndex"][:, -2:] == np.int64(-2147483648)).all()
 

@@ -37,16 +37,10 @@
 
 model:
   modules:
-    track_vertexing:
-      class_path: salt.core.nn.tasks.VertexingTaskModule
-      init_args:
-        stream: tracks
-        label: ftagTruthVertexIndex
-        origin_label: ftagTruthOriginLabel
-        context: pooled.global
-        weight: 1.5
-        dense: {hidden_layers: [16], activation: ReLU}
-        expose: [fit, val] # opt the deferred (W34.3) vertexing head out of TEST eval
+    # plan 34 W34.3: track_vertexing is now FULLY exposed (no expose opt-out) — its
+    # eval column (VertexIndex i8) + ONNX leaf (VertexIndex int8) are minted by
+    # get_output on the task (the W34.3 vtx fold), proven byte-for-byte against the
+    # legacy WriterCallback (H5) and the /tmp/w4_oracle golden (ONNX VertexIndex).
     # drop the plan-29/31 conversion producers: get_output on the task replaces them
     track_origin_index: null
     track_vertex_index: null
@@ -71,17 +65,23 @@ outputs:
     init_args: {streams: [jets, tracks]} # all source fields (v1 default)
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
-    init_args: {tasks: [jets_classification, track_origin]}
+    # plan 34 W34.3: track_vertexing JOINS the orchestrated tasks — its get_output
+    # mints the VertexIndex i8 H5 column (TEST) + the VertexIndex int8 ONNX leaf.
+    init_args: {tasks: [jets_classification, track_origin, track_vertexing]}
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.2): no init args — they dump ALL active outputs.*
-# leaves, with names/dtypes/order from the bound outputs: section manifest. The
-# H5OutputSink keeps the FIXED-mode serialisation mechanics (u2s pack, per-token
-# pad re-expansion, input-copy file re-read, v1 group naming/path). This TEST
-# cutover does no ONNX export, so the base gn2v2-dummy OnnxExportSink is dropped.
+# The DUMB sinks (plan 34 W34.2/W34.3): no init args — they dump ALL active
+# outputs.* leaves, with names/dtypes/order from the bound outputs: section
+# manifest. The H5OutputSink keeps the FIXED-mode serialisation mechanics (u2s
+# pack, per-token pad re-expansion, input-copy file re-read, v1 group naming/path).
+# The DUMB OnnxExportSink (re-enabled at W34.3) names the section's get_output ONNX
+# leaves (pb/pc/pu globals + TrackOrigin + VertexIndex per-token int8) in the
+# canonical Athena tuple order — proven against the full /tmp/w4_oracle gn2v2.json
+# golden (incl VertexIndex).
 callbacks:
-  onnx_export: null
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
   h5_output:
     class_path: salt.core.outputs.H5OutputSink

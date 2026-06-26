@@ -36,11 +36,13 @@ from salt.core.graph.errors import ConfigError
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.tasks import (
     ClassificationTaskModule,
+    RegressionTaskModule,
+    VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
-from salt.core.outputs import ClassProbs, SeqClassIndex, SeqClassProbs
+from salt.core.outputs import ClassProbs, Regression, SeqClassIndex, SeqClassProbs, VertexUnionFind
 from salt.core.outputs.producers import OutputField
-from salt.core.writers.names import pascal_case
+from salt.core.writers.names import VERTEX_INDEX, pascal_case
 
 _FLOAT_TOL = 1e-6
 _STREAM_J = "jets"
@@ -469,3 +471,295 @@ def test_base_get_output_raises_for_unsupported_family():
         base.get_output(Bundle({}), Mode.TEST, _RUN)
     # the base output_time_requires is the empty default
     assert _TaskModuleBase.output_time_requires(base, Mode.TEST) == []
+
+
+# ===========================================================================
+# GATE D — vertexing (plan 34 W34.3): union-find int8 (TEST i8 / ONNX char index)
+# ===========================================================================
+
+
+def _bind_vertexing(stream=_STREAM_T):
+    """Build + bind a `VertexingTaskModule` against a hand-built schema.
+
+    Returns
+    -------
+    VertexingTaskModule
+        The bound module (``module.task`` is the absorbed v1 head ORACLE that owns
+        ``run_inference`` union-find).
+    """
+    module = VertexingTaskModule(
+        stream=stream,
+        label="ftagTruthVertexIndex",
+        origin_label="ftagTruthOriginLabel",
+        context="pooled.global",
+        dense={"hidden_layers": [4], "activation": "ReLU"},
+    )
+    module.name = "track_vertexing"
+    schema = ResolvedSchema(widths={module.input_key: 8, module.context: 4})
+    module.bind(schema)
+    return module
+
+
+def _vtx_bundle(module, edge_scores, mask):
+    """A bundle carrying the RAW vertexing edge scores + the stream pad mask.
+
+    Returns
+    -------
+    Bundle
+        The output-time bundle the vertexing `get_output` reads.
+    """
+    return Bundle({
+        "preds": {module.stream: {module.name: edge_scores}},
+        "masks": {module.stream: mask},
+    })
+
+
+def test_vtx_output_time_requires_pad_mask():
+    """The vertexing head declares ``masks.<stream>`` as its output-time dep (W34.2 surface)."""
+    module = _bind_vertexing()
+    assert module.output_time_requires(Mode.TEST) == [f"masks.{_STREAM_T}"]
+    assert module.output_time_requires(Mode.ONNX) == [f"masks.{_STREAM_T}"]
+
+
+def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
+    """Vertexing (ONNX): the field ``value`` == the `VertexUnionFind` producer leaf.
+
+    The producer runs ``get_node_assignment_jit`` -> ``mask_fill_flattened`` ->
+    ``.reshape(-1).char()`` on the RAW edge scores; ``get_output`` folds the IDENTICAL
+    chain. Names the leaf ``VertexIndex`` int8 per-token (the shared cross-mode const).
+    """
+    module = _bind_vertexing()
+    gen = torch.Generator().manual_seed(3)
+    n_tracks = 4
+    n_edges = n_tracks * (n_tracks - 1)
+    edge_scores = torch.rand(n_edges, 1, generator=gen)
+    mask = torch.zeros(1, n_tracks, dtype=torch.bool)
+
+    producer = VertexUnionFind(task=module.name, stream=_STREAM_T)
+    producer.name = "track_vertex_index"
+    oracle = producer.forward(_vtx_bundle(module, edge_scores, mask), Mode.ONNX)[
+        f"outputs.{_STREAM_T}.track_vertexing"
+    ]
+
+    (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.ONNX, _RUN)
+    assert field.h5_name is None  # ONNX-only leaf
+    assert field.resolved_onnx_name == VERTEX_INDEX
+    assert field.onnx_dtype == "int8"
+    assert field.axis == "per_token"
+    assert field.value.dtype == torch.int8
+    torch.testing.assert_close(field.value, oracle, rtol=0, atol=0)  # int — EXACT
+
+
+def test_vtx_get_output_test_matches_get_h5_run_inference():
+    """Vertexing (TEST): the field ``value`` == the int-cast union-find ``get_h5`` packs.
+
+    ``get_h5`` ``run_inference``-s the raw edge scores (union-find) then ``.int()`` ->
+    u2s i8; ``get_output`` mints the SAME int-cast union-find value as a ``[B, L, 1]``
+    leaf (bare ``VertexIndex`` i8, prefix follows ``prefix_vertex_column``).
+    """
+    module = _bind_vertexing()
+    gen = torch.Generator().manual_seed(7)
+    # the head emits one edge score per ordered pair of VALID tracks (the compressed
+    # adjacency graph), so n_edges = n_valid * (n_valid - 1). Use an all-valid mask
+    # so the edge count matches (the union-find chain is shaped for the valid graph).
+    n_tracks = 5
+    n_edges = n_tracks * (n_tracks - 1)
+    edge_scores = torch.rand(n_edges, 1, generator=gen)
+    mask = torch.zeros(1, n_tracks, dtype=torch.bool)
+
+    structured = module.get_h5(_vtx_bundle(module, edge_scores, mask), run_name=_RUN)
+    (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.TEST, _RUN)
+    assert field.h5_name == VERTEX_INDEX
+    assert field.onnx_name is None  # H5-only (ONNX side is the .char() index)
+    assert field.dtype == "i8"
+    assert field.axis == "per_token"
+    assert field.prefix is False  # bare VertexIndex (v1 byte-parity, default)
+    # the get_h5 column (bare VertexIndex) and the get_output int value must match
+    np.testing.assert_array_equal(
+        field.value.cpu().numpy().reshape(structured[VERTEX_INDEX].shape),
+        structured[VERTEX_INDEX],
+    )
+
+
+def test_vtx_get_output_manifest_mirrors_get_output():
+    """Vertexing `get_output_manifest` == `get_output` field metadata (value-free)."""
+    module = _bind_vertexing()
+    for mode in (Mode.TEST, Mode.ONNX):
+        (mf,) = module.get_output_manifest(mode, _RUN)
+        assert mf.value is None
+        assert mf.axis == "per_token"
+        assert mf.dtype == ("int8" if mode & Mode.ONNX else "i8")
+        if mode & Mode.ONNX:
+            assert mf.h5_name is None
+            assert mf.resolved_onnx_name == VERTEX_INDEX
+        else:
+            assert mf.h5_name == VERTEX_INDEX
+            assert mf.onnx_name is None
+            assert mf.prefix is False
+
+
+def test_vtx_get_output_prefix_follows_prefix_vertex_column():
+    """``prefix_vertex_column=True`` flips the H5 VertexIndex column to run-name-prefixed."""
+    module = VertexingTaskModule(
+        stream=_STREAM_T,
+        label="ftagTruthVertexIndex",
+        origin_label="ftagTruthOriginLabel",
+        context="pooled.global",
+        dense={"hidden_layers": [4], "activation": "ReLU"},
+        prefix_vertex_column=True,
+    )
+    module.name = "track_vertexing"
+    module.bind(ResolvedSchema(widths={module.input_key: 8, module.context: 4}))
+    edge_scores = torch.rand(4 * 3, 1)
+    mask = torch.zeros(1, 4, dtype=torch.bool)
+    (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.TEST, _RUN)
+    assert field.prefix is True
+
+
+# ===========================================================================
+# GATE E — regression (plan 34 W34.3): de-scale (TEST f4 / ONNX squeezed scalars)
+# ===========================================================================
+
+
+def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, fields=(), gaussian=False):
+    """Build + bind a `RegressionTaskModule` against a hand-built schema.
+
+    Returns
+    -------
+    RegressionTaskModule
+        The bound module (``module.task`` is the absorbed v1 head ORACLE owning
+        ``run_inference`` de-scaling).
+    """
+    module = RegressionTaskModule(
+        stream=stream,
+        targets=targets,
+        sequence=sequence,
+        target_denominators=denoms,
+        norm_params=norm,
+        gaussian=gaussian,
+    )
+    module.name = f"{stream}_reg"
+    schema = ResolvedSchema(
+        widths={module.input_key: 8}, fields={module.input_feature_key: fields}
+    )
+    module.bind(schema)
+    return module
+
+
+def _reg_bundle(module, preds, *, mask=None, labels=None, inputs=None):
+    """A bundle carrying the RAW (scaled) regression preds + denom source / pad mask.
+
+    Returns
+    -------
+    Bundle
+        The output-time bundle the regression `get_output` reads.
+    """
+    data: dict = {"preds": {module.stream: {module.name: preds}}}
+    if mask is not None:
+        data["masks"] = {module.stream: mask}
+    if labels is not None:
+        data["labels"] = {module.stream: labels}
+    if inputs is not None:
+        data["inputs"] = {module.stream: inputs}
+    return Bundle(data)
+
+
+def test_reg_norm_params_get_output_matches_get_h5():
+    """Regression norm_params global head: get_output value == get_h5 columns."""
+    torch.manual_seed(20)
+    module = _bind_regression(
+        _STREAM_J, ["mHH", "dR"], sequence=False, norm={"mean": [1.0, 2.0], "std": [3.0, 4.0]}
+    )
+    preds = torch.randn(6, 2)
+    structured = module.get_h5(_reg_bundle(module, preds.clone()), run_name=_RUN)
+    fields = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
+    assert [f.h5_name for f in fields] == ["mHH", "dR"]
+    for f in fields:
+        assert f.dtype == "f4" and f.axis == "global"
+        np.testing.assert_allclose(
+            f.value.numpy(), structured[f"{_RUN}_{f.h5_name}"], rtol=0, atol=_FLOAT_TOL
+        )
+
+
+def test_reg_get_output_value_matches_regression_descale_producer():
+    """Regression: each get_output value == the per-column of the `Regression` producer leaf."""
+    torch.manual_seed(21)
+    module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, norm={"mean": 1.0, "std": 2.0})
+    preds = torch.randn(5, 1)
+    producer = Regression(
+        task=module.name, stream=_STREAM_J, name="out", targets=["mHH"],
+        norm_params={"mean": 1.0, "std": 2.0},
+    )
+    producer.name = "p"
+    producer_out = producer.forward(_reg_bundle(module, preds.clone()), Mode.TEST)[
+        f"outputs.{_STREAM_J}.out"
+    ]
+    (field,) = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
+    torch.testing.assert_close(field.value, producer_out[..., 0], rtol=0, atol=_FLOAT_TOL)
+
+
+def test_reg_get_output_onnx_global_squeezed_scalar():
+    """Regression global ONNX: each value is the squeezed 0-dim scalar at B=1 (split_scalars)."""
+    torch.manual_seed(22)
+    module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, norm={"mean": 0.5, "std": 2.0})
+    preds = torch.randn(1, 1)  # batch-1 ONNX trace shape
+    (field,) = module.get_output(_reg_bundle(module, preds.clone()), Mode.ONNX, _RUN)
+    # the v1 split_scalars shape: split [1, R] into [1,1] then .squeeze() -> []
+    descaled = module._descaled_preds(_reg_bundle(module, preds.clone()), Mode.ONNX)  # noqa: SLF001
+    sink_scalar = descaled[..., 0].squeeze()
+    assert field.value.shape == () == sink_scalar.shape
+    torch.testing.assert_close(field.value, sink_scalar, rtol=0, atol=_FLOAT_TOL)
+
+
+def test_reg_ratio_output_time_requires_mode_split():
+    """Ratio head output_time_requires: label denom in TEST, input Feature in ONNX (+pad mask)."""
+    module = _bind_regression(
+        _STREAM_J, ["m_over_mHH"], sequence=False, denoms=["mHH"], fields=("mHH",)
+    )
+    assert module.output_time_requires(Mode.TEST) == [f"labels.{_STREAM_J}.mHH"]
+    assert module.output_time_requires(Mode.ONNX) == [module.input_feature_key]
+
+
+def test_reg_ratio_get_output_test_matches_get_h5():
+    """Ratio head (TEST): get_output value == get_h5 (de-scale via labels.<stream>.<denom>)."""
+    torch.manual_seed(23)
+    module = _bind_regression(
+        _STREAM_J, ["m_over_mHH"], sequence=False, denoms=["mHH"], fields=("mHH",)
+    )
+    preds = torch.randn(7, 1)
+    denom = torch.rand(7)
+    b1 = _reg_bundle(module, preds.clone(), labels={"mHH": denom.clone()})
+    b2 = _reg_bundle(module, preds.clone(), labels={"mHH": denom.clone()})
+    structured = module.get_h5(b1, run_name=_RUN)
+    (field,) = module.get_output(b2, Mode.TEST, _RUN)
+    np.testing.assert_allclose(
+        field.value.numpy(), structured[f"{_RUN}_m_over_mHH"], rtol=0, atol=_FLOAT_TOL
+    )
+
+
+def test_reg_gaussian_get_output_matches_get_h5_one_array():
+    """Gaussian head: get_output mints 2R fields (means ‖ _stddev) == get_h5 columns."""
+    torch.manual_seed(24)
+    module = _bind_regression(
+        _STREAM_J, ["mu"], sequence=False, norm={"mean": 0.0, "std": 2.0}, gaussian=True
+    )
+    preds = torch.randn(5, 2)  # gaussian head: [B, 2R] (mean ‖ raw var)
+    structured = module.get_h5(_reg_bundle(module, preds.clone()), run_name=_RUN)
+    fields = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
+    assert [f.h5_name for f in fields] == ["mu", "mu_stddev"]
+    for f in fields:
+        np.testing.assert_allclose(
+            f.value.numpy(), structured[f"{_RUN}_{f.h5_name}"], rtol=0, atol=_FLOAT_TOL
+        )
+
+
+def test_reg_get_output_manifest_mirrors_get_output():
+    """Regression `get_output_manifest` == `get_output` field names/dtypes (value-free)."""
+    module = _bind_regression(
+        _STREAM_J, ["mHH", "dR"], sequence=False, norm={"mean": [1.0, 2.0], "std": [3.0, 4.0]}
+    )
+    for mode in (Mode.TEST, Mode.ONNX):
+        manifest = module.get_output_manifest(mode, _RUN)
+        assert [m.h5_name for m in manifest] == ["mHH", "dR"]
+        for m in manifest:
+            assert m.value is None and m.dtype == "f4" and m.axis == "global"
