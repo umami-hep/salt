@@ -18,25 +18,27 @@ classifiers = [
 ]
 
 dependencies = [
-  "atlas-ftag-tools==0.3.1",
-  "comet_ml>=3.49.7",
-  "filelock>=3.12",
-  "h5py>=3.14.0",
-  "jsonargparse[signatures,argcomplete]>=4.32.0",
-  "lightning==2.6.1",
-  "lion-pytorch>=0.2.2",
-  "numpy>=2.2.6",
-  "onnx==1.20.1",
-  "onnxruntime==1.20.1",
-  "onnxscript",
-  "puma-hep==0.5.1",
-  "rich>=14.1.0",
-  "scipy>=1.15.3",
+  "atlas-ftag-tools==0.3.3",
+  "comet_ml>=3.58.3",
+  "filelock>=3.29.4",
+  "h5py>=3.16.0",
+  "jsonargparse[signatures,argcomplete]>=4.49.0",
+  "lightning==2.6.5",
+  "lion-pytorch>=0.2.4",
+  "numpy>=2.5.0",
+  "onnx==1.22.0",
+  "onnxruntime==1.27.0",
+  "onnxscript>=0.7.0",
+  "puma-hep==0.5.3",
+  "rich>=15.0.0",
+  "scipy>=1.18.0",
+  # torch stays pinned to 2.12.0: the prebuilt flash-attn wheel is built against
+  # torch2.12 (cu126/cp314). Bumping torch would break that wheel match.
   "torch==2.12.0",
-  "torchmetrics==1.8.2",
-  "torchvision==0.27.0",
-  "tqdm>=4.66.1",
-  "umami-preprocessing==0.3.0",
+  "torchmetrics==1.9.0",
+  "torchvision==0.27.1",
+  "tqdm>=4.68.3",
+  "umami-preprocessing==0.3.1",
 ]
 
 [project.optional-dependencies]
@@ -48,8 +50,8 @@ dependencies = [
 #   physlite = ["salt[root]", "any-physlite-specific-pkg"]
 #   easyjet = ["salt[root]"]   # when easyjet needs nothing beyond root
 root = [
-  "uproot>=5",
-  "awkward>=2",
+  "uproot>=5.7.4",
+  "awkward>=2.9.1",
 ]
 # `pip install 'salt[easyjet]'`  — installs uproot + awkward for EasyjetReader.
 easyjet = [
@@ -62,7 +64,7 @@ muP = [
   "mup>=1.0.0",
   "s3fs==2024.10.0",
   "s3path>=0.5.0",
-  "tensorboard>=2.14.1",
+  "tensorboard>=2.20.0",
 ]
 flash = [
   "flash-attn==2.8.3",
