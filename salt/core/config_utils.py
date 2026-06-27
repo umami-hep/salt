@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import tempfile
 from pathlib import Path
 
@@ -22,7 +21,7 @@ def disable_logger_in_config(config_path: str) -> str:
     Cache is per config-file (hash of input path) so parallel runs reuse it.
     """
     # Cache key: hash of the input config path (so runs sharing a config reuse it)
-    cache_key = hashlib.md5(config_path.encode()).hexdigest()[:8]
+    cache_key = hashlib.md5(config_path.encode(), usedforsecurity=False).hexdigest()[:8]
     cached_path = Path(tempfile.gettempdir()) / f"salt_config_no_logger_{cache_key}.yaml"
     if cached_path.exists():
         return str(cached_path)
@@ -39,5 +38,8 @@ def disable_logger_in_config(config_path: str) -> str:
     # Write to /tmp with deterministic name
     cached_path.parent.mkdir(exist_ok=True)
     with open(cached_path, "w") as f:
-        yaml.dump(cfg, f)
+        # sort_keys=False: preserve the config's declared order — several tests
+        # assert ordered structures (e.g. writers: inputs_copy -> tasks ->
+        # pad_mask), which a default alphabetising dump would mangle.
+        yaml.dump(cfg, f, sort_keys=False)
     return str(cached_path)
