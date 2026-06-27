@@ -73,29 +73,15 @@ callbacks:
   artifacts:
     class_path: salt.core.callbacks.GraphArtifacts
 
-# Prediction writers (design §8): assembled into ONE WriterCallback that owns
-# the single eval H5 file ({ckpt_dir}/{ckpt_stem}__test_{sample}.h5, the v1
-# path contract). The modules dict deep-merges across config files; an entry
-# set to null is deleted (--writers.modules.pad_mask=null). Module ORDER is
-# the per-group COLUMN order — inputs_copy -> tasks -> pad_mask reproduces the
-# v1 PredictionWriter layout (input copies, task columns in model declaration
-# order, the boolean mask last). TaskWriter defaults to "every configured
-# task" and InputCopyWriter to "every stream with a configured task" (v1
-# derive-from-the-model), so a new aux task is persisted automatically;
-# narrowing the TaskWriter `tasks` list trips the TEST dead-preds hard error
-# for any prediction no writer consumes (design §4.2).
-#
-# M4.5 unified manifest: the writers are ALSO the ONNX output manifest —
-# TaskWriter (onnx: true by default) declares the export outputs from the
-# SAME task declarations that name the eval columns, so a new aux task lands
-# in eval AND export with zero extra config (narrow with onnx/onnx_streams/
-# onnx_tasks, rename with onnx_names). InputCopyWriter/PadMaskWriter are
-# eval-only by design. Inspect the assembled manifest with
-# `salt2 export --manifest` or `salt2 graph resolve [--annotate]`.
-writers:
-  output: "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
-  half_precision: false
-  modules:
-    inputs_copy: {class_path: salt.core.writers.InputCopyWriter}
-    tasks: {class_path: salt.core.writers.TaskWriter}
-    pad_mask: {class_path: salt.core.writers.PadMaskWriter}
+# plan 34 W34.4c — the base2 persistence default is RETIRED. base2 no longer
+# ships a `writers:` (WriterCallback) block: after the get_output()-on-task +
+# outputs:-section + dumb-sink cutover, base2 cannot carry a derive-from-all-
+# tasks default (RunTaskOutput hard-raises on an empty/unknown task list, and
+# InputCopyWriter/PadMaskWriter need explicit stream names base2 can't know;
+# plan §4 corrected). EVERY config now enumerates its OWN top-level `outputs:`
+# section (InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter, in v1
+# H5 column order) + dumb `H5OutputSink`/`OnnxExportSink` callbacks. base2 ships
+# seed_everything / trainer / callbacks ONLY — NO persistence layer. (The legacy
+# `--writers.modules`/`--writers.output`/`--writers.half_precision` CLI arg
+# surface is RETAINED for the producer-oracle configs that still null-merge it;
+# its removal is W34.4d/W6.)

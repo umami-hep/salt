@@ -141,12 +141,27 @@ model:
       loss:
         class_path: salt.core.nn.LossSum
 
-writers:
-  modules:
-    # the only task is on the GLOBAL `event` stream (no sequence-stream task), so
-    # there is no pad mask to write — delete the base2.yaml default (design §5.3
-    # null-deletion). InputCopyWriter + TaskWriter keep their event roles.
-    pad_mask: null
+# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
+# default (now retired) and null-deleted pad_mask. It supplies its OWN top-level
+# outputs: section + dumb H5 sink. The softmax folds onto the task via get_output
+# (W34.1), orchestrated by the RunTaskOutput writer below; the dumb sink dumps ALL
+# active outputs.* leaves, the SECTION supplies names/dtypes/ORDER. The only task
+# is on the GLOBAL `event` stream (no sequence-stream task), so there is NO
+# PadMaskWriter. `jets` feeds the encoder but carries no task, so only `event` is
+# copied. NO OnnxExportSink (event-level multi-sample config — fit/test only).
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [event]} # all source fields (v1 default), the only tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [events_classification]}
+
+# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
 
 trainer:
   max_epochs: 20

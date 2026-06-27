@@ -69,3 +69,17 @@ model:
               -5114: 1, 5112: 0, -5112: 1, 533: 1, -533: 0,
             }
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+
+# plan 34 W34.4c: this overlay ADDS jets_charge to the GN3V00 stack
+# (jets_classification, track_origin, track_vertexing, track_type,
+# jet_pt_regression). RunTaskOutput.tasks is a LIST → cross-config merge REPLACES
+# (not deep-merges), so this overlay MUST re-state the FULL run_tasks list (all 6
+# tasks); the inherited GN3V00 inputs_copy / pad_mask / dumb H5+ONNX sinks
+# deep-merge unchanged. This overlay is never-run-alone (always stacked on GN3V00),
+# so the composed result carries the full 6-task section + GN3V00's OnnxExportSink.
+# v1 model-declaration order: the GN3V00 five, then jets_charge.
+outputs:
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression, jets_charge]

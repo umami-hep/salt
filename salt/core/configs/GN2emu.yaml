@@ -251,21 +251,37 @@ model:
       loss:
         class_path: salt.core.nn.LossSum # v1 default loss_mode (weighted; NOT GLS)
 
-writers:
-  modules:
-    # GN2emu has TWO vertexing heads (track_vertexing on tracks,
-    # electron_vertexing on electrons); both eval-persist fine in FIT/TEST
-    # (distinct H5 groups). In a hypothetical flat ONNX namespace they would
-    # collide on the `VertexIndex` suffix, so narrow ONNX participation to the
-    # v1-deployment set (v1 GN2emu emits a single `track_vertexing` aux output
-    # from the tracks `aux_sequence_object`, to_onnx.py:425-432). This keeps
-    # `salt2 graph validate --mode onnx` clean; GN2emu itself is NOT exportable
-    # (no export: block — see the note below), so this is purely validation
-    # hygiene for the two-vertexing-head graph.
-    tasks:
-      class_path: salt.core.writers.TaskWriter
-      init_args:
-        onnx_tasks: [jets_classification, track_origin, track_vertexing]
+# plan 34 W34.4c: this config previously relied on the base2 WriterCallback
+# default (now retired) with a narrowed-ONNX TaskWriter. It supplies its OWN
+# top-level outputs: section + dumb H5 sink. The 1:1 conversion math (softmax /
+# union-find) folds onto each task via get_output (W34.1/W34.3), orchestrated by
+# the RunTaskOutput writer below; the dumb sink dumps ALL active outputs.* leaves,
+# the SECTION supplies names/dtypes/ORDER. GN2emu has TWO sequence streams with
+# tasks (tracks: origin+vertexing, electrons: origin+vertexing), so BOTH get a
+# pad-mask column (distinct H5 groups; in a hypothetical flat ONNX namespace the
+# two VertexIndex heads would collide, but GN2emu is NOT exportable — no export:
+# block, no OnnxExportSink — so the old onnx_tasks narrowing is moot). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task
+# fields -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration
+# order (jets_classification, track_origin, track_vertexing, electron_origin,
+# electron_vertexing). NO OnnxExportSink (fit/test only — see the note below).
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks, electrons]} # all source fields (v1 default), every tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing, electron_origin, electron_vertexing]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks, electrons]}
+
+# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
 
 # NO `export:` block — GN2emu is FIT/TEST-only (no ONNX representation), exactly
 # like event_classifier. The GN2emu `global` is its OWN 14-var soft-muon vector

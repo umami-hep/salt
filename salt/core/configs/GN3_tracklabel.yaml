@@ -43,6 +43,7 @@ model:
             [NegMuon, NegElectron, NegKaon, NegPion, NoTruth, Other, Pion, Kaon, Electron, Muon]
           weight_source: null # v1 use_class_dict — override at fit
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      # NOTE: outputs.run_tasks (below) is RE-STATED to add track_type + track_source.
       # 7-class track source (v1 use_class_dict, GN3_tracklabel.yaml:70)
       track_source:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
@@ -63,3 +64,18 @@ model:
             ]
           weight_source: null # v1 use_class_dict — override at fit
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+
+# plan 34 W34.4c: this overlay ADDS track_type + track_source to the GN3_baseline
+# stack (jets_classification, track_origin, track_vertexing). RunTaskOutput.tasks
+# is a LIST → cross-config merge REPLACES (not deep-merges), so this overlay MUST
+# re-state the FULL run_tasks list (all 5 tasks); the inherited GN3_baseline
+# inputs_copy / pad_mask / dumb sinks deep-merge unchanged. This overlay is
+# never-run-alone (always stacked base -> loose -> flow -> LepID_SMT -> this), so
+# the composed result carries the full 5-task section. NO regression task in this
+# variant (matrix §2). v1 model-declaration order: jets_classification,
+# track_origin, track_vertexing, track_type, track_source.
+outputs:
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing, track_type, track_source]

@@ -131,17 +131,6 @@ model:
 # reads labels.events.mHH (v1 task.py:587-589); event_classifier has NO ONNX export.
 # Both heads are on the GLOBAL `events` stream (no sequence-stream task), so the
 # section has NO PadMaskWriter.
-
-# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
-# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
-# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
-# retires the legacy writers: default in W34.4c.)
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
-
 # The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
 # writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
 outputs:

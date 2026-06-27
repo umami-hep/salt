@@ -231,6 +231,21 @@ model:
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
 
+# plan 34 W34.4c — MaskFormer stays on the LEGACY WriterCallback path (deliberate,
+# the W6 hard rule). This config's `writers:` block ALREADY declares all four
+# writers EXPLICITLY (inputs_copy / tasks / pad_mask / object_writer) — it never
+# relied on the base2 default, so the base2 flip (W34.4c) does NOT break it; this
+# block is unchanged. The 1:1 jets_classification / track_origin heads are NOT
+# moved to an outputs: section here because the MaskFormerObjectWriter's eval H5
+# object groups (class probs + MaskIndex + the object_masks extra_groups group) and
+# its ONNX leading_object / object_index reduces have NO dumb-H5OutputSink /
+# get_output equivalent yet: `MaskFormerObjects` is ONNX-ONLY by construction
+# (producers.py:1752-1755) and the full MaskFormer ONNX descale is flagged a W6
+# hard rule (plan §9 line 149; reduces.py). A hybrid (1:1 heads on a dumb sink +
+# object_writer on the WriterCallback) would double-own the single eval H5 file and
+# risk an ONNX-port collision, so MaskFormer migrates WHOLESALE in W6 (extra_groups
+# sink support + MaskFormer descale), NOT here. Current MaskFormer ONNX behaviour is
+# preserved byte-for-byte.
 writers:
   modules:
     inputs_copy: {class_path: salt.core.writers.InputCopyWriter}

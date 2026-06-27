@@ -47,14 +47,6 @@ model:
     jet_probs: null
     track_origin_probs: null
 
-# Delete the M4.5 WriterCallback for THIS config (null-merge, design §5.3); the
-# outputs: section + dumb sinks below are the live persistence/export layer.
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
-
 # The PLAN 34 W34.2 top-level outputs: section (composed AFTER the model). Section
 # writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
 # -> PadMaskWriter. The section field order is the H5 column-order authority (NOT

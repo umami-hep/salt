@@ -861,8 +861,11 @@ class Salt2CLI(LightningCLI):
             raise ConfigError(
                 "salt2 test needs a persistence sink — at least one writer under "
                 "writers.modules OR a callbacks-level H5OutputWriter sink; predictions "
-                "would otherwise be computed and never persisted (design §4.2, §8; "
-                "base2.yaml ships inputs_copy/tasks/pad_mask defaults)"
+                "would otherwise be computed and never persisted (design §4.2, §8). "
+                "base2.yaml no longer ships a persistence default (plan 34 W34.4c): "
+                "supply your own top-level outputs: section (InputCopyWriter -> "
+                "RunTaskOutput -> PadMaskWriter, in v1 H5 column order) with a dumb "
+                "callbacks-level salt.core.outputs.H5OutputSink"
             )
         if not cfg.get("ckpt_path"):
             configs = cfg.get("config") or []

@@ -93,7 +93,9 @@ class WriterCallback(Callback):
         if not modules:
             raise ConfigError(
                 "WriterCallback needs a non-empty writer dict — configure writers.modules "
-                "(design §8; base2.yaml ships inputs_copy/tasks/pad_mask defaults)"
+                "(design §8). plan 34 W34.4c: base2.yaml no longer ships a writers default; "
+                "configs supply their own writers.modules OR a top-level outputs: section "
+                "with dumb sinks instead"
             )
         for name, writer in modules.items():
             if not isinstance(writer, Writer):

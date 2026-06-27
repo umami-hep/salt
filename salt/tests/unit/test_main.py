@@ -317,12 +317,19 @@ class TestCallbacksDict:
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
 
     def test_writers_defaults_assembled(self, data):
-        # base2.yaml ships the v1-layout writer order (M3, design §8)
+        # plan 34 W34.4c: base2.yaml NO LONGER ships a writers: default (the
+        # WriterCallback default is retired; each config enumerates its own
+        # outputs: section + dumb sinks). The producer-ORACLE gn2v2-dummy.yaml
+        # (DUMMY_CFG) now declares its OWN complete writer set EXPLICITLY in v1
+        # column order (inputs_copy -> tasks -> pad_mask, M3 / design §8), since
+        # it must stay on the WriterCallback / producer path until W34.4d.
         cli = make_cli(data)
         wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
         assert list(wcb.writers) == ["inputs_copy", "tasks", "pad_mask"]
 
     def test_writers_null_deletes(self, data):
+        # plan 34 W34.4c: null-merge still deletes one of gn2v2-dummy.yaml's OWN
+        # explicit writers (no longer a base2 default) — siblings survive.
         cli = make_cli(data, extra=["--writers.modules.pad_mask=null"])
         wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
         assert "pad_mask" not in wcb.writers

@@ -306,8 +306,38 @@ model:
       loss:
         class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
 
-writers:
-  modules: {} # base2.yaml defaults: InputCopyWriter, PadMaskWriter, TaskWriter
+# plan 34 W34.4c: this config previously relied on the base2 WriterCallback
+# default (`writers: modules: {}`, now retired). It supplies its OWN top-level
+# outputs: section + dumb sinks. The 1:1 conversion math (softmax / regression
+# de-scale / union-find) folds onto each task via get_output (W34.1/W34.3),
+# orchestrated by the RunTaskOutput writer below; the dumb sinks dump ALL active
+# outputs.* leaves, the SECTION supplies names/dtypes/ORDER. Section writers in
+# EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields ->
+# PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order
+# (jets_classification, track_origin, track_vertexing, track_type,
+# jet_pt_regression, jets_charge): jets = flavour probs, jet_pt_reg, charge probs;
+# tracks = origin probs, VertexIndex, type probs. flows/electrons/global have no
+# task, so they are NOT in inputs_copy/pad_mask. (TOY dims untouched — only the
+# output layer is added, per the CLAUDE.md gn3v01 gotcha.)
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression, jets_charge]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB sinks (plan 34 W34.4c): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: GN3V01 # Athena name: no '_'/'-'

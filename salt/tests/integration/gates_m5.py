@@ -4206,9 +4206,11 @@ def _write_probe_writer_config(outdir: Path, *, kind: str, dtype: str | None, fn
     import yaml  # noqa: PLC0415 - gate-local: shipped-config round-trip for the e2e probe
 
     spec = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())
-    # base2.yaml ships writers.modules (inputs_copy/tasks/pad_mask); the trainer
-    # parser deep-merges this addition into them, so the probe joins the real
-    # writer set the runtime TEST path carries.
+    # plan 34 W34.4c: base2.yaml no longer ships a writers default — gn2v2-dummy.yaml
+    # itself now declares writers.modules (inputs_copy/tasks/pad_mask) explicitly (the
+    # producer-oracle stays on the WriterCallback path until W34.4d). The trainer
+    # parser deep-merges this probe addition into that set, so the probe joins the
+    # real writer set the runtime TEST path carries.
     writers = spec.setdefault("writers", {}).setdefault("modules", {})
     init_args: dict[str, Any] = {"key": "preds.jets.jets_classification", "kind": kind}
     if dtype is not None:

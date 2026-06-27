@@ -160,13 +160,44 @@ model:
       loss:
         class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
 
+# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
+# default (now retired). It supplies its OWN top-level outputs: section + dumb
+# sinks. The 1:1 conversion math (softmax / regression de-scale / union-find)
+# folds onto each task via get_output (W34.1/W34.3), orchestrated by the
+# RunTaskOutput writer below; the dumb sinks dump ALL active outputs.* leaves, the
+# SECTION supplies names/dtypes/ORDER. Section writers in EXACT v1 H5 column order
+# — InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter. The RunTaskOutput
+# tasks list is the v1 model-declaration order (jets_classification, track_origin,
+# track_vertexing, track_type, jet_pt_regression): jets = class probs then
+# jet_pt_reg; tracks = origin probs, VertexIndex, type probs. flows feeds the
+# encoder but has no task, so it is NOT in inputs_copy/pad_mask.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB sinks (plan 34 W34.4c): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: GN3v00 # Athena name: no '_'/'-'
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
     - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest).
+  # outputs: NONE — derived from the outputs: section (plan 34 W34.4c).
 
 trainer:
   max_epochs: 40

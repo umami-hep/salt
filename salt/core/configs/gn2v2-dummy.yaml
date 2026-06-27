@@ -158,12 +158,20 @@ model:
         class_path: salt.core.outputs.VertexUnionFind
         init_args: { task: track_vertexing, stream: tracks }
 
-# Disable the TaskWriter ONNX manifest (eval-only): the ONNX outputs derive from
-# the folded OnnxExportSink below, not the off-graph writer manifest (retired at
-# plan-29 W4). TEST H5 columns are unchanged.
+# The COMPLETE WriterCallback writer set (inputs_copy -> tasks -> pad_mask, the
+# v1 H5 column order). plan 34 W34.4c: base2 no longer ships the default writer
+# set, so this PRODUCER-ORACLE config (which must stay on the WriterCallback /
+# producer path until W34.4d retires it) declares all three writers EXPLICITLY —
+# the legacy InputCopyWriter (every tasked stream, all source fields) + the
+# TaskWriter + the PadMaskWriter (the boolean tracks mask). The TaskWriter sets
+# onnx: false (eval-only): the ONNX outputs derive from the folded OnnxExportSink
+# below, not the off-graph writer manifest (retired at plan-29 W4). TEST H5
+# columns are byte-unchanged from the prior base2-inherited form.
 writers:
   modules:
+    inputs_copy: { class_path: salt.core.writers.InputCopyWriter }
     tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
+    pad_mask: { class_path: salt.core.writers.PadMaskWriter }
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: GN2v2dummy # Athena name: no '_'/'-' (validated at export only);

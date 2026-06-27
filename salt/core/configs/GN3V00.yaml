@@ -195,17 +195,6 @@ model:
 # ORDER. NOTE: this RESTORES the per-token VertexIndex eval H5 column (v1
 # WriterCallback parity) the superseded W5 auto-collect H5 sink deferred — vertexing
 # get_output mints it in BOTH TEST (i8) and ONNX (int8).
-
-# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
-# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
-# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
-# retires the legacy writers: default in W34.4c.)
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
-
 # The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
 # writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
 # -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order

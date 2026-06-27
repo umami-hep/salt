@@ -116,17 +116,35 @@ model:
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
 
-writers:
-  modules:
-    # no sequence-stream task -> no pad mask to write (design §5.3 null-deletion).
-    pad_mask: null
+# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
+# default (now retired) and null-deleted pad_mask. It supplies its OWN top-level
+# outputs: section + dumb H5 sink. The regression de-scale folds onto the task via
+# get_output (W34.3), orchestrated by the RunTaskOutput writer below; the dumb sink
+# dumps ALL active outputs.* leaves, the SECTION supplies names/dtypes/ORDER. The
+# only task (reg_multi_target) is on the GLOBAL jets stream (no sequence-stream
+# task), so there is NO PadMaskWriter; tracks feeds the body but has no task, so
+# only jets is copied. NO OnnxExportSink: v1 regression_multi_target is NOT
+# ONNX-exported (test_pipeline do_onnx=False) — H5-only.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets]} # all source fields (v1 default), the only tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [reg_multi_target]}
+
+# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: regressionMultiTarget # Athena name: no '_'/'-'
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the writers. The MultiTarget label is a
+  # outputs: NONE — derived from the outputs: section. The MultiTarget label is a
   # FIT|VAL-only training target, absent from the export graph.
 
 trainer:

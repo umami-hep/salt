@@ -162,6 +162,34 @@ model:
       loss:
         class_path: salt.core.nn.LossSum
 
+# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
+# default (now retired). It supplies its OWN top-level outputs: section + dumb H5
+# sink. The 1:1 conversion math (softmax / union-find) folds onto each task via
+# get_output (W34.1/W34.3), orchestrated by the RunTaskOutput writer below; the
+# dumb sink dumps ALL active outputs.* leaves, the SECTION supplies names/dtypes/
+# ORDER. Section writers in EXACT v1 H5 column order — InputCopyWriter ->
+# RunTaskOutput task fields -> PadMaskWriter. The RunTaskOutput tasks list is the
+# v1 model-declaration order (jets_classification, track_origin, track_vertexing):
+# jets = class probs; tracks = origin probs then VertexIndex (i8 in TEST).
+# NO OnnxExportSink (no export: block — fit/test only).
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest.
+callbacks:
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+
 trainer:
   max_epochs: 40
   precision: 32-true
