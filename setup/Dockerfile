@@ -1,5 +1,9 @@
 # base image
-FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-devel
+# CUDA 12.6 (not 13.0): CERN's k8s-gpu CI runners ship driver 570.x / CUDA 12.8.
+# A cuda13.0 torch refuses to init CUDA there ("driver too old, found 12080"), so
+# the image is pinned to a CUDA-12 toolkit that runs on the 12.8 runner driver via
+# minor-version compatibility (and on any newer cluster driver too).
+FROM pytorch/pytorch:2.12.0-cuda12.6-cudnn9-devel
 
 # local and envs
 ENV LANG=C.UTF-8
@@ -29,7 +33,7 @@ COPY salt/__init__.py salt/__init__.py
 # Install flash-attn after torch so it can import the already-installed torch.
 # The correct prebuilt wheel can be found here: https://flashattn.dev/#finder
 RUN uv pip install --system --no-deps \
-    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl"
+    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp312-cp312-linux_x86_64.whl"
 
 # Install dependencies (make use of caching, skip flash because it's already installed)
 RUN uv pip install --system --group dev ".[muP]"
