@@ -25,7 +25,7 @@ dependencies = [
   "jsonargparse[signatures,argcomplete]>=4.49.0",
   "lightning==2.6.5",
   "lion-pytorch>=0.2.4",
-  "numpy>=2.5.0",
+  "numpy>=2.3.2",  # upper-bounded to <2.4 by puma-hep; 2.3.x has cp314 wheels
   "onnx==1.22.0",
   "onnxruntime==1.27.0",
   "onnxscript>=0.7.0",
