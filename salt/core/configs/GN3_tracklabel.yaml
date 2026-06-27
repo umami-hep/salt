@@ -44,23 +44,44 @@ model:
           weight_source: null # v1 use_class_dict — override at fit
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       # NOTE: outputs.run_tasks (below) is RE-STATED to add track_type + track_source.
-      # 7-class track source (v1 use_class_dict, GN3_tracklabel.yaml:70)
+      # 7-class track source (v1 use_class_dict, GN3_tracklabel.yaml:70).
+      #
+      # COLUMN DISAMBIGUATION (plan 34 W34.4c): class_names is the OUTPUT-COLUMN
+      # naming only — it is index-aligned with the head outputs, INDEPENDENT of the
+      # label/label_map training mapping (tasks.py:1184-1208). The H5 flat column is
+      # `{run_name}_p{ClassName}` (tasks.py class_suffixes / output_names), with NO
+      # task-name in the flat column — exactly v1's `{model_name}_{px}` scheme
+      # (legacy task.py:150-151). Three heads share the `tracks` stream here
+      # (track_origin / track_type / track_source) and their RAW source labels
+      # COLLIDE: NoTruth (track_type ∩ track_source) and FromB/FromBC/FromC/FromTau
+      # (track_origin ∩ track_source). v1 NEVER hit this because base.yaml's
+      # PredictionWriter ships `write_tracks=False` (predictionwriter.py:51,261) —
+      # NO track-stream head was ever written to the eval H5, so there is NO v1
+      # column oracle for any of these. v2's outputs: section DOES persist track
+      # heads (W34.4b), so the bare-suffix collision surfaces (the dumb H5OutputSink
+      # dup-name guard fires, same ValueError v1's join_structured_arrays would have
+      # raised on the duplicate structured-dtype field). Fix: give track_source's
+      # columns a `Src` prefix so all three heads' columns are unique on `tracks`.
+      # This renames ONLY the persisted column suffixes (no training change, no v1
+      # oracle to break).
       track_source:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
           label: ftagTruthSourceLabel
-          # 7 source classes (v1 use_class_dict autodiscovered; names baked here)
+          # 7 source classes (v1 use_class_dict autodiscovered; names baked here).
+          # `Src`-prefixed to disambiguate the shared-stream column collision with
+          # track_origin (FromB/BC/C/Tau) and track_type (NoTruth) — see note above.
           class_names:
             [
-              NoTruth,
-              FromB,
-              FromBC,
-              FromC,
-              FromTau,
-              FromFragmentation,
-              FromSecondary,
+              SrcNoTruth,
+              SrcFromB,
+              SrcFromBC,
+              SrcFromC,
+              SrcFromTau,
+              SrcFromFragmentation,
+              SrcFromSecondary,
             ]
           weight_source: null # v1 use_class_dict — override at fit
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
