@@ -524,11 +524,16 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
     ConfigError
         When the parse fails (with the documented ``--set`` hint).
     """
+    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
     from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (module docstring)
 
     args: list[str] = []
     for path in paths:
-        args.extend(["--config", str(path)])
+        # Disable the logger in keyless envs (no COMET_API_KEY) so run-free
+        # parsing (graph tools, tests) doesn't fail at instantiate_classes with
+        # "Comet.ml requires an API key"
+        cfg_no_logger = disable_logger_in_config(str(path))
+        args.extend(["--config", cfg_no_logger])
     for entry in set_overrides or []:
         if "=" not in entry:
             raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")

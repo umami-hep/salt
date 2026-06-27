@@ -94,11 +94,16 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
     """
     import warnings  # noqa: PLC0415 - local, parse-time only
 
+    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
     from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
     for cfg in configs:
-        args.extend(["--config", str(cfg)])
+        # Disable the logger in keyless envs (no COMET_API_KEY) so run-free
+        # parsing (tests, graph tooling, coord-check) doesn't fail at
+        # instantiate_classes with "Comet.ml requires an API key"
+        cfg_no_logger = disable_logger_in_config(str(cfg))
+        args.extend(["--config", cfg_no_logger])
     for entry in set_overrides:
         if "=" not in entry:
             raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")

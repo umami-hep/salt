@@ -35,6 +35,7 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
 from salt.core.callbacks import Checkpoint, ProgressBar
+from salt.core.config_utils import disable_logger_in_config
 from salt.core.data import GraphDataModule
 from salt.core.main import CONFIG_DIR, Salt2CLI, main
 from salt.core.nn.tasks import ClassificationTaskModule
@@ -112,9 +113,14 @@ def required_overrides(data) -> list[str]:
 
 
 def make_cli(data, extra: list[str] | None = None, config: Path = DUMMY_CFG) -> Salt2CLI:
-    """Parse + instantiate (run=False) through the real CLI surface."""
+    """Parse + instantiate (run=False) through the real CLI surface.
+
+    The config is modified to disable trainer.logger (keyless test envs fail
+    during instantiate_classes with "Comet.ml requires an API key").
+    """
+    cfg = disable_logger_in_config(str(config))
     return Salt2CLI(
-        args=["--config", str(config), *required_overrides(data), *(extra or [])],
+        args=["--config", cfg, *required_overrides(data), *(extra or [])],
         run=False,
     )
 

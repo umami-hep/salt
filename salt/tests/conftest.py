@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 
+from salt.core.config_utils import disable_logger_in_config  # noqa: F401
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
