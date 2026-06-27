@@ -22,12 +22,7 @@ dependencies = [
   "comet_ml>=3.58.3",
   "filelock>=3.29.4",
   "h5py>=3.16.0",
-  # 4.48 regressed subclass/Union validation: a class_path Namespace (model,
-  # logger, modules) no longer validates against its Union subtype, breaking the
-  # salt2 CLI parser (~52 test_main/test_callbacks/test_render failures). 4.47 is
-  # the last good release; lightning only needs >=4.39,<5.0. Pinned below 4.48
-  # until the upstream regression is fixed (verified in salt-py314.sif).
-  "jsonargparse[signatures,argcomplete]>=4.39,<4.48",
+  "jsonargparse[signatures,argcomplete]>=4.49.0",
   "lightning==2.6.5",
   "lion-pytorch>=0.2.4",
   "numpy>=2.3.2",  # upper-bounded to <2.4 by puma-hep; 2.3.x has cp314 wheels

@@ -50,13 +50,6 @@ unit-tests:
 modular-unit-tests:
   extends: .test-template
   script:
-    # TEMP EXPERIMENT (plan 35 Phase 1): does removing flash-attn fix the
-    # jsonargparse Union-validation skew that only reproduces in the CUDA image?
-    # Probe presence, uninstall, confirm absence, then run the suite. REVERT
-    # this block once it has answered.
-    - 'python -c "import flash_attn; print(\"flash_attn PRESENT:\", flash_attn.__version__)" || echo "flash_attn already absent"'
-    - uv pip uninstall flash-attn || pip uninstall -y flash-attn || true
-    - 'python -c "import flash_attn" 2>&1 && echo "WARN: flash_attn STILL importable" || echo "flash_attn now ABSENT (expected)"'
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
 modular-parity-control:
