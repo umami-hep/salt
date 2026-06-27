@@ -43,7 +43,7 @@ COPY salt/__init__.py salt/__init__.py
 # resolves see torch already satisfied (==2.12.0 matches the +cu126 local build)
 # and flash-attn can import it. cp314 wheels are published for both.
 RUN uv pip install --index-url https://download.pytorch.org/whl/cu126 \
-    "torch==2.12.0" "torchvision==0.27.1"
+    "torch==2.12.1" "torchvision==0.27.1"
 
 # Install flash-attn after torch so it can import the already-installed torch.
 # The correct prebuilt wheel can be found here: https://flashattn.dev/#finder
