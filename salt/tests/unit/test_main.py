@@ -152,12 +152,22 @@ class TestParseAndInstantiate:
         # (real-data runs are the gates experiment's job — no /data here)
         cli = make_cli(data, config=OPENDATA_CFG)
         assert isinstance(cli.model, SaltModule)
-        # plan-29 W5.2: the open-data config adds the H5-side SeqClassProbs producer
-        # (track_origin_probs) for the auto-collect H5OutputSink eval columns
-        assert set(cli.model.net.keys()) == GN2V2_MODULES | {"track_origin_probs"}
+        # plan 34 W34.4b: the open-data config is RELOCATED onto the outputs:
+        # section + dumb sinks — the plan-29/31 conversion PRODUCERS (jet_probs/
+        # track_origin_index/track_vertex_index) are RETIRED from model.modules
+        # (the get_output fold replaces them). model.net carries the model modules
+        # (nets + tasks + loss) PLUS the composed section GRAPH-node writers
+        # (run_tasks + pad_mask; inputs_copy is manifest-only, not an nn.Module so
+        # not in net). No conversion producers remain.
+        non_producer = GN2V2_MODULES - {"jet_probs", "track_origin_index", "track_vertex_index"}
+        assert set(cli.model.net.keys()) == non_producer | {"run_tasks", "pad_mask"}
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
         assert list(jets_task.class_names) == ["bjets", "cjets", "ujets", "taujets"]
+        # the plan-34 outputs: section is composed onto the model (W34.4b)
+        section = cli.model._output_section  # noqa: SLF001
+        assert set(section) == {"inputs_copy", "run_tasks", "pad_mask"}
+        assert section["run_tasks"].is_run_task_output()
 
 
 # ---------------------------------------------------------------------------

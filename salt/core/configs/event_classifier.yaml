@@ -121,55 +121,46 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W5.2 conversion producers (design §6.2): mint outputs.* leaves the
-      # auto-collect H5OutputSink discovers (event_classifier has NO ONNX export —
-      # there is no OnnxExportSink, so these feed TEST H5 only). Demand-pruned from
-      # FIT/VAL (FIT plan_hash unchanged).
-      events_probs:
-        class_path: salt.core.outputs.ClassProbs
-        init_args: { task: events_classification, stream: events }
-      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
-      # in TEST/ONNX (the atomic forward-flip), so this is a REAL Regression
-      # (RegressionDescaleOp) producer — it de-scales the raw preds back to physical
-      # values, matching the legacy WriterCallback. The mHH ratio denominator is a
-      # LABEL (not an input Feature) so TEST de-scaling reads labels.events.mHH
-      # (v1 task.py:587-589); event_classifier has NO ONNX export. (Was an IDENTITY
-      # TaskOutput passthrough pre-flip; the swap keeps de-scale running exactly ONCE.)
-      mHH_reg_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: mHH_regression
-          stream: events
-          targets: truthMHH
-          target_denominators: mHH
 
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
-# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
-# of the cutover). Null-merge deletes the base2.yaml default writers so the
-# WriterCallback is not assembled.
+# plan 34 W34.4b: the plan-29/31 conversion PRODUCER nodes (events_probs ClassProbs
+# + mHH_reg_out Regression) are RETIRED — the softmax / regression de-scale folds
+# back ONTO each task via get_output (W34.1/W34.3), orchestrated by the RunTaskOutput
+# writer below. The dumb H5OutputSink dumps ALL active outputs.* leaves; the SECTION
+# supplies names + dtypes + ORDER (events_classification probs then mHH_regression).
+# The mHH ratio denominator is a LABEL (not an input Feature) so TEST de-scaling
+# reads labels.events.mHH (v1 task.py:587-589); event_classifier has NO ONNX export.
+# Both heads are on the GLOBAL `events` stream (no sequence-stream task), so the
+# section has NO PadMaskWriter.
+
+# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
+# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
+# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
+# retires the legacy writers: default in W34.4c.)
 writers:
   modules:
     inputs_copy: null
     tasks: null
     pad_mask: null
 
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
-# producers feeding the events stream (events_probs' pggF/pVBF + mHH_reg_out's
-# de-scaled regression column) and assembles the eval H5 group from their
-# output_columns() field manifest — no hand-listed columns. Both heads are on the
-# GLOBAL `events` stream (no sequence-stream task), so write_pad_mask is false.
+# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [events]} # all events source fields (v1 default), copy_inputs={events: []} parity
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [events_classification, mHH_regression]}
+
+# The DUMB H5OutputSink (plan 34 W34.4b): no init args — it dumps ALL active
+# outputs.* leaves, names/dtypes/order from the bound outputs: section manifest.
 #
-# NO export: block + NO OnnxExportSink — event_classifier is an event-level
-# analysis model with a NON-feature ratio denominator (mHH), so it has no
-# ONNX/Athena export representation (see the §3.3 ONNX note in the header).
-# Validated fit + test only; there is no ONNX export sink to anchor onnx-mode demand.
+# NO export: block + NO OnnxExportSink — event_classifier is an event-level analysis
+# model with a NON-feature ratio denominator (mHH), so it has no ONNX/Athena export
+# representation (see the §3.3 ONNX note in the header). Validated fit + test only.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [events]
-      copy_inputs: { events: [] }
-      write_pad_mask: false
 
 trainer:
   max_epochs: 30

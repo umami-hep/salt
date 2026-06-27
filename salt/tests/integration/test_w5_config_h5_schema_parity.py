@@ -25,21 +25,18 @@ from salt.core.onnx.export import _run_free_cli
 
 pytestmark = pytest.mark.cpu_always
 
-# the W5.2-migrated configs (classification-family + regression) and the run-free
-# --set overrides each needs to instantiate data-free (norm_dict + class_dict).
+# the W5.2 auto-collect H5OutputSink schema gate. The production Class-a-prime
+# classification/regression/gaussian configs were RELOCATED onto the plan-34
+# ``outputs:`` section + dumb sinks in W34.4b (the auto-collect producer path no
+# longer applies to them — their section H5 schema is gated byte-for-byte against
+# the legacy WriterCallback by the cutover34 tests, test_w34_outputs_section.py /
+# test_w34_regression_cutover.py / test_w34_gaussian_cutover.py). The only configs
+# still on the W5 auto-collect path are the PRESERVED oracle configs ``regression``
+# and ``regression_gaussian`` (the parity oracles the cutover34 tests compare
+# AGAINST — they keep the RegressionDescaleOp/Regression producers + auto-collect
+# sink); this gate continues to guard their auto-collect schema == legacy.
 _NORM = "model.modules.norm.init_args.norm_dict=unused.yaml"
 MIGRATED = {
-    "gn2v2-opendata": [_NORM],
-    "GN2_muP": [_NORM],
-    "GN2XE": [_NORM],
-    "GN2X_qcdsplit": [_NORM],
-    "GN3V00": [_NORM],
-    "GN3X": [_NORM],
-    "dips": [_NORM],
-    "DL1": [_NORM],
-    "event_classifier": [_NORM],
-    "Dipz": [_NORM],
-    "hitz": [_NORM],
     "regression": [_NORM],
     "regression_gaussian": [_NORM],
 }

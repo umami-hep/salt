@@ -103,49 +103,46 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
-      # in TEST/ONNX (the atomic forward-flip), so this is a REAL Regression
-      # (RegressionDescaleOp, gaussian=true) producer — it de-scales the raw [B, 2R]
-      # into mean ‖ stddev = sqrt(softplus(var)) * std; the OnnxExportSink splits it
-      # into mean + _stddev scalars. (Was an IDENTITY TaskOutput passthrough pre-flip.)
-      gaussian_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: gaussian_regression
-          stream: jets
-          targets: TruthJetPVz
-          norm_params: {mean: 0.0, std: 37.81209182739258}
-          gaussian: true
 
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
-# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
-# of the cutover). Null-merge deletes the base2.yaml default writers so the
-# WriterCallback is not assembled.
+# plan 34 W34.4b: the plan-29/31 Regression (gaussian=true) producer (gaussian_out)
+# is RETIRED — the gaussian means ‖ softplus-stddev one-array de-scale folds back
+# ONTO the task via get_output (W34.3), orchestrated by the RunTaskOutput writer
+# below. The dumb sinks dump ALL active outputs.* leaves; the SECTION supplies names
+# + dtypes + ORDER (mean then _stddev). Proven byte-for-byte against the producer
+# oracle in test_w34_gaussian_cutover.py (the regression_gaussian-cutover34 sibling).
+# The only task is a pooled GLOBAL gaussian head (no sequence-stream task), so the
+# section has NO PadMaskWriter (write_pad_mask was false).
+
+# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
+# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
+# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
+# retires the legacy writers: default in W34.4c.)
 writers:
   modules:
     inputs_copy: null
     tasks: null
     pad_mask: null
 
-# plan-29 W4 declare-only ONNX sink (design §4.2): splits the de-scaled gaussian
-# leaf into the mean + _stddev scalars.
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
-# producer feeding the jets stream (gaussian_out -> TruthJetPVz + _stddev) and
-# assembles the eval H5 group from its output_columns() field manifest — no
-# hand-listed columns. The only task is a pooled GLOBAL gaussian head (no
-# sequence-stream task), so write_pad_mask is false.
+# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets]} # all jets source fields (v1 default), copy_inputs={jets: []} parity
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [gaussian_regression]}
+
+# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest. The
+# OnnxExportSink names the de-scaled gaussian leaves (TruthJetPVz mean + _stddev)
+# in the canonical tuple order. (--no-check on export: v1 to_onnx has zero gaussian
+# handling, so the torch-vs-ONNX sweep checker is skipped.)
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [jets]
-      copy_inputs: { jets: [] }
-      write_pad_mask: false
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.gaussian_regression, names: [TruthJetPVz, TruthJetPVz_stddev] }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: Dipz # Athena name: no '_'/'-'

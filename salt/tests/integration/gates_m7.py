@@ -376,6 +376,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m5",
         "onnx": "validate",
         "note": "encoder-less pooling (the primary CI smoke fixture, KEEP despite legacy/)",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     # -- needs-M5 GN3 family (LossGLS + RegressionTask; standalone + overlay) ----
     {
@@ -385,6 +389,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m5",
         "onnx": "validate",
         "note": "LossGLS + RegressionTask (the GN3 dev baseline body)",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "GN3_v00",
@@ -530,6 +538,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m5",
         "onnx": "validate",
         "note": "GaussianRegressionTask on an encoder (HLT hits PV-z)",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "Dipz",
@@ -540,6 +552,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "conditional_drop": True,
         "note": "encoder-less GaussianRegressionTask; CONDITIONAL DROP (matrix §1: drops once hitz "
         "validates — fired post-M5; the converter still RUNS on it until the deletion release)",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "event_classifier",
@@ -573,6 +589,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m6",
         "onnx": "validate",
         "note": "boosted GN3X: 9-class on-the-fly Labeller (require_labels:True) + lion + LossGLS",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "GN2X_qcdsplit",
@@ -585,6 +605,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "truth_hadrons stream. The v1 7th class `qcdxx` is absent from ftag v0.2.17 (matrix "
         "§2): the converter FAITHFULLY emits qcdxx; CV1 substitutes qcdll at plan-compile "
         "(the SAME workaround the fixture + gates_m6 LB1 make) so it compiles in this build",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "DL1",
@@ -595,6 +619,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "note": "jets-only MLP: rank-2 [B,F] vector-stream embed (rank inferred from the "
         "global_object input) -> sequence:false head, NO encoder/pool (the M6-6 deliverable, "
         "gate VS1); 3-class CE; LossSum",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "GN2_muP",
@@ -605,6 +633,10 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "mup": True,
         "note": "GN2 with muP: mup:true on track_embed + encoder + model.mup routing (M6-B, gates "
         "MU1/MU2). The plan-compile needs base/delta infshapes generated data-free first",
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), retiring the producer-style ClassProbs/SeqClassProbs/VertexUnionFind/Regression nodes + the auto-collect sinks. salt2 convert-config still emits the producer style, so the converted plan's output-layer sinks/edges DIVERGE from this section fixture by design (the converter is updated in a later W34 wave). The MODEL (nets + tasks) is unchanged — full v1 task count reproduced; eval H5 / ONNX outputs are byte-gated against the producer path by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
     },
     {
         "name": "GN2XE",
@@ -613,11 +645,21 @@ _CV1_CONFIGS: tuple[dict[str, Any], ...] = (
         "tier": "m6",
         "onnx": "validate",
         "restored": True,
+        "relocated_w34": True,
+        "keep_reason": (
+            "W34.4b RELOCATED the output layer onto the plan-34 outputs: section "
+            "(RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink), "
+            "superseding the F2-restored producer-style output layer. The MODEL/encoder "
+            "edges remain F2-restored + full-v1-faithful (the jets-context edge etc.); "
+            "only the OUTPUT layer diverges from the producer-style converter by design "
+            "(the converter migrates in a later W34 wave). Section eval/ONNX byte-parity "
+            "is gated by the W34 cutover34 tests + the W34.4b before/after value gate."
+        ),
         "note": "GN2X with EDGE FEATURES end-to-end (EdgeFeatures -> EdgeEmbed -> encoder edges:; "
         "M6-C, gates ED1/ED2). F2 RESTORED the jets-context edge v1 attaches to track_embed (v1 "
-        "InitNet.attach_global default True, initnet.py:46) — the converter + fixture now EXACTLY "
-        "class-canonical-MATCH in every mode (the norm.normed.jets -> track_embed edge is present "
-        "on both sides; edge counts FIT 37 / TEST 34 / ONNX 33 identical)",
+        "InitNet.attach_global default True, initnet.py:46); W34.4b then relocated the output "
+        "layer onto the outputs: section (the model edges stay restored, the output sinks differ "
+        "from the producer-style converter by design — see relocated_w34)",
     },
     # -- reproducible-today (✅) configs: NO hand-written v2 fixture exists (they
     # were never authored as M5/M6 fixtures — every module already shipped at
@@ -783,6 +825,22 @@ _CV1_FIXTURE_SUBSET: frozenset[str] = frozenset(
 # equivalence + full-v1-task-count facts are.)
 _CV1_RESTORED: frozenset[str] = frozenset(
     e["name"] for e in _CV1_CONFIGS if e.get("restored")
+)
+
+# the PINNED set of plan-34 W34.4b OUTPUT-RELOCATED configs: their hand-written v2
+# fixture's OUTPUT LAYER was moved off the producer nodes (ClassProbs/SeqClassProbs/
+# VertexUnionFind/Regression) + auto-collect sinks onto the plan-34 ``outputs:``
+# section (RunTaskOutput + InputCopyWriter + PadMaskWriter + dumb H5/OnnxExportSink).
+# ``salt2 convert-config`` still emits the producer style, so the converted plan's
+# output-layer sinks/edges DIVERGE from these section fixtures BY DESIGN (the
+# converter is migrated in a later W34 wave). The MODEL (nets + tasks) is identical,
+# so the gate asserts convert + validate + the FULL v1 task count, and that the
+# fixture stays output-divergent; the section eval H5 / ONNX byte-parity vs the
+# producer path is gated by the W34 cutover34 tests + the W34.4b before/after value
+# gate, NOT by this converter-vs-fixture plan match. PINNED so a fixture silently
+# matching/regressing changes CV1's accounting.
+_CV1_RELOCATED: frozenset[str] = frozenset(
+    e["name"] for e in _CV1_CONFIGS if e.get("relocated_w34")
 )
 
 _NO_STRICT_RATIONALE = (
@@ -1242,6 +1300,7 @@ def run_cv1(
             "fix_stack": list(entry.get("fix", ())),
             "fixture_subset": bool(entry.get("fixture_subset")),
             "restored": bool(entry.get("restored")),
+            "relocated_w34": bool(entry.get("relocated_w34")),
             "keep_reason": entry.get("keep_reason"),
             "conditional_drop": bool(entry.get("conditional_drop")),
             "expect_convert_error": expect_err,
@@ -1390,6 +1449,7 @@ def run_cv1(
 
         is_subset = bool(entry.get("fixture_subset"))  # the 2 INTENTIONAL keeps
         is_restored = bool(entry.get("restored"))  # the 6 F2-restored configs
+        is_relocated = bool(entry.get("relocated_w34"))  # the 8 W34.4b output-relocated
         # the STRUCTURAL-EQUIVALENCE proxy (module-CLASS multiset equal per shared
         # mode) — the faithfulness invariant for the RESTORED configs that diverge
         # from the converter only by topology-neutral cosmetics (verbose-v1 vs
@@ -1430,6 +1490,10 @@ def run_cv1(
             fixture_match
             or (is_restored and reproduces_full_v1)
             or (is_subset and task_counts_ok)
+            # plan 34 W34.4b: a relocated config's converter output reproduces the
+            # full v1 task count; the output-layer divergence is the FIXTURE's
+            # (section-relocated), not a converter regression.
+            or (is_relocated and task_counts_ok)
         )
 
         # the per-config GATING check (three cases):
@@ -1445,7 +1509,21 @@ def run_cv1(
         #    each carries a keep_reason naming WHY (asserted present).
         #  - all other fixture-bearing configs: MUST convert + validate + exactly
         #    plan-match the fixture.
-        if is_restored:
+        if is_relocated:
+            # plan 34 W34.4b (PRECEDENCE over restored/subset): the fixture's OUTPUT
+            # LAYER was relocated onto the outputs: section (RunTaskOutput + dumb
+            # sinks), retiring the producer nodes + auto-collect sinks. salt2
+            # convert-config still emits the producer style, so the converted plan's
+            # output-layer sinks/edges DIVERGE from this section fixture BY DESIGN
+            # (the converter is migrated in a later W34 wave). The MODEL is unchanged:
+            # assert convert + validate + the FULL v1 task count, and that the
+            # fixture stays output-divergent (the section eval/ONNX byte-parity vs the
+            # producer path is gated by the W34 cutover34 tests, not this match).
+            checks[f"{name}:accept"] = row["converted"] and all_modes_ok and task_counts_ok
+            checks[f"{name}:relocated_output_divergent"] = not fixture_match
+            checks[f"{name}:reproduces_full_v1_tasks"] = task_counts_ok
+            checks[f"{name}:keep_reason_documented"] = bool(entry.get("keep_reason"))
+        elif is_restored:
             checks[f"{name}:accept"] = (
                 row["converted"] and all_modes_ok and reproduces_full_v1
             )
@@ -1473,6 +1551,14 @@ def run_cv1(
     observed_restored = {r["name"] for r in results if r["restored"]}
     checks["restored_set_pinned"] = (
         observed_restored == set(_CV1_RESTORED) and corruption is None
+    ) or (corruption is not None)
+    # the plan-34 W34.4b RELOCATED set is PINNED too — assert it is exactly the
+    # output-relocated configs (a relocated fixture silently starting to plan-match
+    # the producer-style converter — or a NEW relocation not flagged — changes which
+    # configs the gate treats as output-divergent-by-design).
+    observed_relocated = {r["name"] for r in results if r["relocated_w34"]}
+    checks["relocated_w34_set_pinned"] = (
+        observed_relocated == set(_CV1_RELOCATED) and corruption is None
     ) or (corruption is not None)
 
     passed = all(checks.values())
@@ -1553,6 +1639,8 @@ def run_cv1(
             "fixture_subset_configs": n_flagged,
             "restored_flagged": n_restored,
             "restored_configs": restored_flagged,
+            "relocated_w34_flagged": len(observed_relocated),
+            "relocated_w34_configs": sorted(observed_relocated),
             "missing_config_files": missing,
             "strict": False,
             "corrupted_by_test_hook": corruption is not None,

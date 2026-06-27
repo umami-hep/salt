@@ -215,60 +215,52 @@ model:
           dense: {hidden_layers: [16], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
-      # plan-29 W4/W5 conversion producers (design §6.2): mint outputs.* leaves the
-      # sinks auto-collect. ONNX (W4): jet_probs/track_origin_index/track_vertex_index;
-      # TEST H5 (W5.2): jet_probs (global probs) + track_origin_probs (per-token probs).
-      # All demand-pruned from FIT/VAL (FIT plan_hash unchanged).
-      jet_probs:
-        class_path: salt.core.outputs.ClassProbs
-        init_args: { task: jets_classification, stream: jets }
-      track_origin_probs:
-        # distinct leaf name (track_origin_probs) so it does NOT collide with the
-        # ONNX argmax index producer (track_origin_index) on outputs.tracks.track_origin
-        # (write-once graph layer). The H5 column names come from the task's
-        # class_suffixes (pPileup/...), not the leaf name, so parity is unaffected.
-        class_path: salt.core.outputs.SeqClassProbs
-        init_args: { task: track_origin, stream: tracks, name: track_origin_probs }
-      track_origin_index:
-        class_path: salt.core.outputs.SeqClassIndex
-        init_args: { task: track_origin, stream: tracks }
-      track_vertex_index:
-        class_path: salt.core.outputs.VertexUnionFind
-        init_args: { task: track_vertexing, stream: tracks }
+# plan 34 W34.4b: the plan-29/31 conversion PRODUCER nodes (jet_probs/
+# track_origin_probs/track_origin_index/track_vertex_index) are RETIRED — the 1:1
+# conversion math folds back ONTO each task via get_output (W34.1/W34.3),
+# orchestrated by the RunTaskOutput writer in the outputs: section below. The dumb
+# sinks dump ALL active outputs.* leaves; the SECTION supplies names + dtypes +
+# ORDER. Proven byte-for-byte against the legacy WriterCallback oracle in
+# test_w34_outputs_section.py (the gn2v2-dummy-cutover34 sibling of this config).
+# NOTE: this RESTORES the per-token VertexIndex eval H5 column (v1 WriterCallback
+# parity) that the superseded W5 auto-collect H5 sink deferred — the vertexing
+# get_output mints it in BOTH TEST (i8 VertexIndex) and ONNX (int8 VertexIndex).
 
-
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
-# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
-# of the cutover). Null-merge deletes the base2.yaml default writers so the
-# WriterCallback is not assembled.
+# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
+# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
+# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
+# retires the legacy writers: default in W34.4c.)
 writers:
   modules:
     inputs_copy: null
     tasks: null
     pad_mask: null
 
-# plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
-# leaves into the flat Athena output tuple, in v1/oracle ORDER.
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
-# producers feeding each stream and assembles the eval H5 groups from their
-# output_columns() field manifest — no hand-listed columns. The jets group gets
-# jet_probs' probs; the tracks group gets track_origin_probs' origin probs + the
-# boolean pad mask. (Vertexing's VertexIndex eval column is DEFERRED — the head
-# auto-prunes from TEST.)
+# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
+# -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]} # all source fields (v1 default), copy_inputs={} parity
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin, track_vertexing]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest. The
+# OnnxExportSink names the section's get_output ONNX leaves (the head's class_names
+# split_scalars + TrackOrigin argmax int8 + VertexIndex union-find int8) in the
+# canonical Athena tuple order.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [jets, tracks]
-      copy_inputs: { jets: [], tracks: [] }
-      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.jets_classification, names: [phtautauhad, phbb, phcc, ptop, pqcdbb, pqcdbx, pqcdcx, pqcdll, pWqq] }
-        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }
-        - { key: outputs.tracks.track_vertexing, name: VertexIndex, dtype: int8, per_token: true }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: GN3XPV01 # Athena name: no '_'/'-'

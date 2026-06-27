@@ -102,40 +102,42 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU, dropout: 0.1}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4 folded ONNX conversion producers (design §6.2): mint outputs.* leaves
-      # the OnnxExportSink names; demand-pruned from FIT/VAL/TEST (FIT plan_hash unchanged).
-      jet_probs:
-        class_path: salt.core.outputs.ClassProbs
-        init_args: { task: jets_classification, stream: jets }
 
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config —
-# the auto-collect H5OutputSink below is the live TEST persistence sink (the H5 side
-# of the cutover). Null-merge deletes the base2.yaml default writers so the
-# WriterCallback is not assembled.
+# plan 34 W34.4b: the plan-29/31 ClassProbs producer (jet_probs) is RETIRED — the
+# softmax folds onto the task via get_output (W34.1), orchestrated by the
+# RunTaskOutput writer below. The dumb sinks dump ALL active outputs.* leaves; the
+# SECTION supplies names + dtypes + ORDER. DiPS has NO sequence-stream task, so the
+# section has NO PadMaskWriter (write_pad_mask was false).
+
+# plan 34 W34.4b: delete the base2.yaml default WriterCallback (inputs_copy/tasks/
+# pad_mask) for THIS config — the outputs: section + dumb sinks below are the live
+# persistence/export layer (null-merge, design §5.3). (Removed wholesale when base2
+# retires the legacy writers: default in W34.4c.)
 writers:
   modules:
     inputs_copy: null
     tasks: null
     pad_mask: null
 
-# plan-29 W4 declare-only ONNX sink (design §4.2): names the folded conversion
-# leaves into the flat Athena output tuple, in v1/oracle ORDER.
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the active conversion
-# producers feeding the jets stream (jet_probs' pu/pc/pb) and assembles the eval H5
-# group from their output_columns() field manifest — no hand-listed columns. DiPS
-# has NO sequence-stream task, so write_pad_mask is false.
+# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
+# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets]} # all jets source fields (v1 default), copy_inputs={jets: []} parity
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [jets_classification]}
+
+# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
+# leaves, names/dtypes/order from the bound outputs: section manifest. The
+# OnnxExportSink names the section's get_output ONNX leaves (dips_pu/_pc/_pb
+# split_scalars from the head's class_names) in canonical tuple order.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [jets]
-      copy_inputs: { jets: [] }
-      write_pad_mask: false
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.jets_classification, names: [pu, pc, pb] }
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: dips # Athena name: no '_'/'-' (validated at export only)

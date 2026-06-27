@@ -195,10 +195,19 @@ class TestCV1:
         _code, report = run_cv1(tmp_path)
         for c in report["configs"]:
             # only the FIXTURE-bearing configs that are NEITHER restored NOR
-            # intentional-keeps plan-match exactly; the ✅ today configs have no
-            # fixture (skipped), the 6 restored configs are structurally
-            # equivalent (not byte-exact), the 2 keeps are divergent by design
-            if c["today"] or c["restored"] or c["name"] in _CV1_FIXTURE_SUBSET:
+            # intentional-keeps NOR W34.4b-output-relocated plan-match exactly; the
+            # ✅ today configs have no fixture (skipped), the 6 restored configs are
+            # structurally equivalent (not byte-exact), the 2 keeps are divergent by
+            # design, and the 8 plan-34 W34.4b RELOCATED configs diverge in the
+            # output layer by design (the producer-style converter vs the section
+            # fixture — see _CV1_RELOCATED; their eval/ONNX byte-parity is gated by
+            # the W34 cutover34 tests, not this converter-vs-fixture match).
+            if (
+                c["today"]
+                or c["restored"]
+                or c.get("relocated_w34")
+                or c["name"] in _CV1_FIXTURE_SUBSET
+            ):
                 continue
             assert c["fixture_match"], (
                 f"{c['name']} converted plan != hand-written fixture plan: "
@@ -227,6 +236,18 @@ class TestCV1:
         _code, report = run_cv1(tmp_path)
         for c in report["configs"]:
             if not c["restored"]:
+                continue
+            # plan 34 W34.4b: a restored config whose OUTPUT layer was relocated onto
+            # the outputs: section (GN2XE) is no longer structurally equivalent to the
+            # producer-style converter in the OUTPUT layer — it is gated by the
+            # relocated branch instead (the model edges stay F2-restored). Skip the
+            # structural-equivalence assertion for relocated configs.
+            if c.get("relocated_w34"):
+                assert c["converted"], c["name"]
+                assert c["validate"].get("fit") == 0, c["name"]
+                assert c["validate"].get("test") == 0, c["name"]
+                assert c["task_counts_faithful"], c["name"]
+                assert c["converter_faithful_to_v1"], c["name"]
                 continue
             assert c["converted"], c["name"]
             assert c["validate"].get("fit") == 0, c["name"]
@@ -285,7 +306,17 @@ class TestCV1:
             )
             # each keep documents WHY it diverges (the codex CVF finding)
             assert c["keep_reason"], f"{c['name']} keep lacks a documented keep_reason"
-            assert report["checks"][f"{c['name']}:intentional_keep_divergent"]
+            # the divergence check key is `intentional_keep_divergent` for a pure
+            # keep, or `relocated_output_divergent` for a keep whose output layer was
+            # ALSO W34.4b-relocated (event_classifier — the relocated branch takes
+            # gating precedence). Either witnesses the same fact: it is NOT a 1:1
+            # converter match.
+            divergence_check = (
+                report["checks"].get(f"{c['name']}:relocated_output_divergent")
+                if c.get("relocated_w34")
+                else report["checks"].get(f"{c['name']}:intentional_keep_divergent")
+            )
+            assert divergence_check, c["name"]
             assert report["checks"][f"{c['name']}:keep_reason_documented"]
             assert c["converter_faithful_to_v1"]
             assert c["converted"]
