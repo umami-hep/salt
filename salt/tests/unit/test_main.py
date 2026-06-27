@@ -788,10 +788,11 @@ class TestGraphFitConfigAdapter:
         assert "writers" in err
 
     def test_validate_onnx_bad_onnx_tasks_fails(self, capsys):
-        # the M4.5 replacement for the typo'd-export-port guarantee: the
-        # writer-derived manifest is validated statically — a TaskWriter
-        # onnx_tasks entry naming no task fails `validate --mode onnx`
-        # with the writer's config address (amendment merge condition 1)
+        # gn2v2-dummy's `tasks` writer ships `onnx: false` (W34.4c), so layering
+        # an onnx_tasks narrowing on top is a contradiction the TaskWriter
+        # constructor rejects ('onnx: false' disables ONNX participation). The
+        # instantiate-time error is surfaced by `salt2 graph validate` as a clean
+        # rc=1 carrying the offending value — not an uncaught traceback.
         rc = main([
             "graph",
             "validate",
@@ -807,7 +808,7 @@ class TestGraphFitConfigAdapter:
         assert rc == 1
         err = capsys.readouterr().err
         assert "track_vertexin" in err
-        assert "writers.modules.tasks" in err
+        assert "TaskWriter" in err
 
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks

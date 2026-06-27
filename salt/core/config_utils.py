@@ -35,6 +35,14 @@ def disable_logger_in_config(config_path: str) -> str:
         cfg["trainer"] = {}
     cfg["trainer"]["logger"] = False
 
+    # Drop fit/test-subcommand-only load keys: a saved run config.yaml carries
+    # `ckpt_path` and (lightning 2.6.5+) `weights_only` at the top level, which
+    # the run-free top-level parser does not register and rejects with NSKeyError
+    # ("Option 'weights_only' is not accepted"). The graph tooling never loads a
+    # checkpoint, so these are irrelevant for run-free parsing.
+    for fit_only_key in ("ckpt_path", "weights_only"):
+        cfg.pop(fit_only_key, None)
+
     # Write to /tmp with deterministic name
     cached_path.parent.mkdir(exist_ok=True)
     with open(cached_path, "w") as f:

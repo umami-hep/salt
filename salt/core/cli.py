@@ -555,6 +555,17 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
             "Required init_args left as overrides in the YAML header can be supplied "
             "data-free via --set, e.g. --set model.modules.norm.init_args.norm_dict=unused.yaml"
         ) from err
+    except ValueError as err:
+        # jsonargparse raises a ValueError at instantiate_classes when a module's
+        # __init__ validation fails (e.g. a salt writer/module ConfigError raised
+        # in its constructor, wrapped as "Does not validate against any of the
+        # Union subtypes"). Surface its message as a clean ConfigError so the
+        # graph tooling reports rc=1 with the underlying error instead of crashing
+        # with an uncaught traceback.
+        raise ConfigError(
+            f"trainer config {' '.join(str(p) for p in paths)} failed to instantiate "
+            f"through the salt2 surface:\n{err}"
+        ) from err
 
 
 def _static_writer_callback(cli: Any) -> Any | None:
