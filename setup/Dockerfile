@@ -1,5 +1,11 @@
 # base image
-FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-devel
+# nvidia/cuda (NOT pytorch/pytorch): the pytorch images are pinned to Python
+# 3.12, and we want Python 3.14. We bring our own Python (via uv) and install
+# torch from the cu126 wheel index instead. CUDA 12.6 (not 13.x) because CERN's
+# k8s-gpu CI runners ship driver 570.x / CUDA 12.8 — a cuda13 stack fails there
+# with "driver too old, found 12080"; cu126 runs on the 12.8 driver via
+# minor-version compatibility (and on any newer cluster driver too).
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
 
 # local and envs
 ENV LANG=C.UTF-8
@@ -12,30 +18,44 @@ WORKDIR /salt
 
 # add some packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git openssh-client ca-certificates h5utils wget vim nano build-essential jq krb5-user \
+    git openssh-client ca-certificates h5utils wget curl vim nano build-essential jq krb5-user \
     && rm -rf /var/lib/apt/lists/*
 
-# install uv for Python package management
+# install uv for Python package + interpreter management
 RUN wget -qO- https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
-ENV UV_BREAK_SYSTEM_PACKAGES=1
 ENV UV_NO_CACHE=1
+
+# Bring our own Python 3.14 (the base image has no Python) and put a venv on PATH.
+# Everything below installs into /opt/venv, so plain `python`/`pip`/`salt` resolve
+# to the 3.14 interpreter.
+RUN uv python install 3.14
+RUN uv venv --python 3.14 /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # --- deps layer (only files needed to compute metadata/deps) ---
 # pyproject + init so setuptools can read __version__
 COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
+# Install torch (+torchvision) from the CUDA 12.6 wheel index FIRST, so the later
+# resolves see torch already satisfied (==2.12.0 matches the +cu126 local build)
+# and flash-attn can import it. cp314 wheels are published for both.
+RUN uv pip install --index-url https://download.pytorch.org/whl/cu126 \
+    "torch==2.12.1" "torchvision==0.27.1"
+
 # Install flash-attn after torch so it can import the already-installed torch.
 # The correct prebuilt wheel can be found here: https://flashattn.dev/#finder
-RUN uv pip install --system --no-deps \
-    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp312-cp312-linux_x86_64.whl"
+# (cp314 / cu126 / torch2.12 variant to match the Python + CUDA + torch above.)
+RUN uv pip install --no-deps \
+    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl"
 
-# Install dependencies (make use of caching, skip flash because it's already installed)
-RUN uv pip install --system --group dev ".[muP]"
+# Install dependencies (torch already satisfied above; flash already installed)
+RUN uv pip install --group dev ".[muP]"
 
 # Copy and install package (Source layer)
 COPY . .
 
 # Editable install without re-resolving deps
-RUN uv pip install --system -e . --no-deps
+RUN uv pip install -e . --no-deps

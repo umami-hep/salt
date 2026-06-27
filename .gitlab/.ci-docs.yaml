@@ -1,6 +1,6 @@
 # Build the site on all MR pipelines + the default branch (artifact = docs preview)
 test_docs_build: &docs_build
-  image: registry.cern.ch/docker.io/library/python:3.11.2
+  image: registry.cern.ch/docker.io/library/python:3.14
   stage: docs
   needs: []
   before_script:
