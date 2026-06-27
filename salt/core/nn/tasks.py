@@ -45,7 +45,6 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
-from ftag import Flavours
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor, nn
 
@@ -1272,6 +1271,17 @@ class ClassificationTaskModule(_TaskModuleBase):
         list[str]
             One suffix per ``class_names`` entry, in class order.
         """
+        # Imported lazily, NOT at module level: ``Flavours`` is a ftag
+        # ``LabelContainer`` instance whose ``__getattr__`` raises ``KeyError``
+        # (not ``AttributeError``) for unknown names. jsonargparse >=4.48 walks a
+        # function's module globals with ``hasattr(value, "__args__")`` when
+        # resolving annotations (``implements_protocol`` against ``GraphModule``);
+        # a module-level ``Flavours`` makes that ``hasattr`` raise, so this
+        # module's task classes fail the ``GraphModule`` protocol check and the
+        # whole ``model.modules`` config is rejected at parse time. Keeping the
+        # import local removes ``Flavours`` from the module globals.
+        from ftag import Flavours  # noqa: PLC0415
+
         return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
 
     def output_names(self, run_name: str) -> list[tuple[str, str]]:
