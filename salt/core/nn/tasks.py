@@ -474,6 +474,20 @@ class _AbsorbedRegressionTaskBase(_AbsorbedTaskBase):
             # dimension. This allows us to keep the same code for both global and query scaling
             if len(targets.shape) == 3:
                 targets = targets.transpose(1, 2)
+
+        # MFU-1 (upstream task.py RegressionTaskBase.get_targets): robust target
+        # sanitisation. Runs here -- BEFORE forward's pad-mask NaN fill (forward
+        # line ~524) and before nan_loss (line ~412). The two NaN mechanisms act on
+        # DISJOINT sets and do not double-count:
+        #   * nan_to_num zeroes NaN/inf in the *data* targets (treats them as valid
+        #     0.0 targets), matching upstream's behaviour on dirty inputs.
+        #   * nan_loss's isnan-masking removes the PADDING entries, which forward
+        #     fills with NaN AFTER get_targets returns -- so they are still NaN at
+        #     loss time and remain correctly masked out.
+        # No-op on clean data: real targets are finite, so nan_to_num leaves them
+        # unchanged; padding NaNs are added downstream and untouched here.
+        if targets is not None:
+            targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
         return targets
 
 

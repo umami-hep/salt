@@ -370,6 +370,44 @@ class TestCheckpoint:
         finally:
             model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
 
+    def test_compiled_checkpoint_orig_mod_prefix_stripped(self, fitted):
+        """MFU-1: a ``--compile``-trained checkpoint carries torch.compile's
+        ``_orig_mod.`` prefix on every state_dict key. on_load_checkpoint
+        strips it in-place so the checkpoint loads into a non-compiled module.
+        """
+        ckpt = torch.load(fitted["ckpt"], weights_only=False)
+        prefixed = copy.deepcopy(ckpt)
+        clean_keys = set(prefixed["state_dict"])
+        # emulate torch._dynamo.OptimizedModule prefixing every key
+        prefixed["state_dict"] = {
+            f"_orig_mod.{k}": v for k, v in prefixed["state_dict"].items()
+        }
+        model = fitted["model"]
+        before = model.loaded_from_checkpoint
+        try:
+            model.on_load_checkpoint(prefixed)
+            assert set(prefixed["state_dict"]) == clean_keys
+            assert not any("_orig_mod." in k for k in prefixed["state_dict"])
+        finally:
+            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model._ckpt_plan_hashes = {}  # noqa: SLF001
+
+    def test_noncompiled_checkpoint_state_dict_untouched(self, fitted):
+        """MFU-1 no-op: a normally-trained checkpoint has no ``_orig_mod.`` keys,
+        so the strip leaves the state_dict keys unchanged.
+        """
+        ckpt = torch.load(fitted["ckpt"], weights_only=False)
+        clean = copy.deepcopy(ckpt)
+        keys_before = set(clean["state_dict"])
+        model = fitted["model"]
+        before = model.loaded_from_checkpoint
+        try:
+            model.on_load_checkpoint(clean)
+            assert set(clean["state_dict"]) == keys_before
+        finally:
+            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model._ckpt_plan_hashes = {}  # noqa: SLF001
+
 
 class TestNormGarbageGuard:
     def test_fresh_fit_reads_current_norm_file(self, data, tmp_path):

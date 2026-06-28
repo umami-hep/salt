@@ -1372,7 +1372,20 @@ class SaltModule(lightning.LightningModule):
         Also marks the instance as checkpoint-loaded, which disables
         `materialise` (values arrive via the state_dict). A FIT plan-hash
         mismatch propagates as `ConfigError` from `_verify_ckpt_hash`.
+
+        MFU-1 (upstream modelwrapper.on_load_checkpoint): training with
+        ``--compile`` wraps the model in ``torch._dynamo.OptimizedModule``, which
+        prepends ``_orig_mod.`` to every state_dict key. Strip that prefix in-place
+        before Lightning's strict ``load_state_dict`` so a compile-trained
+        checkpoint loads into a non-compiled eval module. No-op on checkpoints
+        written without ``--compile`` (no key contains the prefix).
         """
+        state_dict = checkpoint.get("state_dict")
+        if state_dict and any("_orig_mod." in k for k in state_dict):
+            checkpoint["state_dict"] = {
+                k.replace("_orig_mod.", ""): v for k, v in state_dict.items()
+            }
+
         self._loaded_from_checkpoint = True
         payload = checkpoint.get(CKPT_KEY)
         if payload is None:

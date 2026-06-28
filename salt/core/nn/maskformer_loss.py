@@ -285,6 +285,10 @@ class HungarianMatcher(nn.Module):
         obj_class_tgt = targets["object_class"].detach()
         obj_class_pred = preds["class_probs"].detach()
         mask_pred = preds["masks"].detach()
+        # MFU-1 (upstream matcher.py): clamp mask logits to a finite range before
+        # building the mask cost terms. No-op on clean data (logits well inside
+        # +/-1e4); guards against inf/NaN cost -> garbage LSAP assignment.
+        mask_pred = mask_pred.clamp(min=-1e4, max=1e4)
         mask_tgt = targets["masks"].detach().to(mask_pred.dtype)
 
         valid_obj_idx = obj_class_tgt != self.num_classes
@@ -317,6 +321,10 @@ class HungarianMatcher(nn.Module):
         if "regression" in preds and self.loss_weights.get("regression"):
             reg_pred = preds["regression"]
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
+            # MFU-1 (upstream matcher.py): sanitise regression targets used in the
+            # cost matrix. No-op on clean (finite) targets; guards against nan/inf
+            # targets producing nan MAE cost -> garbage LSAP assignment.
+            reg_tgt = torch.nan_to_num(reg_tgt, nan=0.0, posinf=0.0, neginf=0.0)
             cost_matrix += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
 
         # set entries corresponding to invalid objects to nan
