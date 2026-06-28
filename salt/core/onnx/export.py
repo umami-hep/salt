@@ -506,10 +506,17 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
         ``salt2 graph``).
     """
     from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
+    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
     for path in config_paths:
-        args.extend(["--config", str(path)])
+        # run-free parse: a saved run config.yaml carries fit/test-subcommand-only
+        # top-level keys (`ckpt_path`, and lightning 2.6.5+ `weights_only`) the
+        # top-level parser rejects with NSKeyError, plus a default-ON CometLogger
+        # that fails keyless. Strip both + disable the logger via a /tmp copy. The
+        # embedded ONNX config payload is still read from the ORIGINAL path in
+        # _export_from_cli, so this affects parsing only.
+        args.extend(["--config", disable_logger_in_config(str(path))])
     for entry in set_overrides:
         if "=" not in entry:
             raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
