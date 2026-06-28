@@ -59,8 +59,13 @@ from salt.core.onnx import (
 )
 from salt.models import Dense as V1Dense
 from salt.models import Transformer as V1Transformer
-from salt.models.maskformer import MaskDecoder as V1MaskDecoder
-from salt.models.maskformer_loss import MaskFormerLoss as V1MaskFormerLoss
+# MFU-0 step B: the MaskFormer parity oracle (MF1a/MF1c) is pinned to upstream
+# 6570e85 via a vendored snapshot, NOT the live salt.models copies (which diverge
+# under the MFU absorption work). See salt/tests/_fixtures/upstream_mf_snapshot/.
+from salt.tests._fixtures.upstream_mf_snapshot.maskformer import MaskDecoder as V1MaskDecoder
+from salt.tests._fixtures.upstream_mf_snapshot.maskformer_loss import (
+    MaskFormerLoss as V1MaskFormerLoss,
+)
 from salt.models.task import GaussianRegressionTask as V1GaussianRegressionTask
 from salt.models.task import RegressionTask as V1RegressionTask
 from salt.tests._fixtures.gn2_fixture import (

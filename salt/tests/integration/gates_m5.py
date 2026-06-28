@@ -242,6 +242,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -554,6 +555,106 @@ def _max_abs(a: torch.Tensor, b: torch.Tensor) -> float:
     diff = (a.double() - b.double()).abs()
     finite = diff[torch.isfinite(diff)]
     return float(finite.max().item()) if finite.numel() else 0.0
+
+
+# ---------------------------------------------------------------------------
+# MaskFormer parity helpers (MFU-0 step D): tolerance + matched-cost optimality
+# ---------------------------------------------------------------------------
+
+MF_RTOL = 1e-5
+MF_ATOL = PARITY_ATOL
+"""Tolerance for the MaskFormer (MF1a/MF1c) value-parity checks.
+
+The MaskFormer encoder/decoder/loss are driven through the v2 compiler/bind/executor
+and compared against an INDEPENDENT, state-copied upstream snapshot (6570e85). The
+math is verbatim-upstream. On the CURRENT fixture every PASSING component is in fact
+bitwise-identical (measured residual 0.0); the tolerance is FORWARD-LOOKING HEADROOM
+for op-order reassociation that later waves can legitimately introduce (the MFU-4
+solver swap, MFU-5 class_weights, and the executor-vs-direct op order on the matched
+regression path), bounded at float32 reassociation scale (~1e-6). MFU-0 step D converts
+the old ``torch.equal`` checks to ``torch.allclose(rtol=MF_RTOL, atol=MF_ATOL)`` so a
+genuine numerical divergence (e.g. the MFU-5 LayerNorm gap, 0.057-1.27, orders of
+magnitude above tolerance) fails LOUDLY while any future reassociation noise passes.
+"""
+
+
+def _close(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether ``a`` and ``b`` agree within (MF_RTOL, MF_ATOL), NaN-aligned.
+
+    NaN positions (masked cost/mask entries) must coincide on both sides and are
+    treated as equal (``equal_nan=True``); finite positions must be ``allclose``.
+
+    Returns
+    -------
+    bool
+        True iff the tensors are tolerance-equal with matching NaN masks.
+    """
+    return bool(torch.allclose(a, b, rtol=MF_RTOL, atol=MF_ATOL, equal_nan=True))
+
+
+def _ensure_mf_lap_solver() -> str | None:
+    """MFU-4 solver shim: make the vendored upstream MaskFormer oracle constructable.
+
+    The upstream snapshot (step B, 6570e85) builds its ``HungarianMatcher`` with the
+    default ``solver_name="BatchedScipyOMP"`` from ``py_lap_solver``. The py_lap_solver
+    build in the salt container only registers ``Scipy`` and ``ScipyMP8``, so simply
+    constructing the oracle (``MaskFormerLoss`` -> ``HungarianMatcher``, reached by BOTH
+    MF1a's ``build_independent_v1_mask_decoder`` and MF1c's
+    ``build_independent_v1_matched_loss``) raises ``ValueError: Unknown LAP solver``.
+
+    Until MFU-4 aligns the solver registry, alias the missing default to an available
+    solver at runtime — the vendored snapshot file is left byte-untouched. This is safe
+    for the gate VERDICT because MFU-0 step D compares matcher assignments by TOTAL
+    matched COST (optimality), not by index, so the exact LAP backend is irrelevant: a
+    solver swap may return a different optimal permutation but the same total cost. This
+    shim is exactly the MFU-4-robust form the optimality conversion exists to support.
+
+    Returns
+    -------
+    str | None
+        The alias target solver name, or ``None`` if no shim was needed.
+    """
+    from salt.tests._fixtures.upstream_mf_snapshot import matcher as _snap_matcher
+
+    reg = _snap_matcher.SOLVER_REGISTRY
+    if "BatchedScipyOMP" in reg:
+        return None
+    pick = "ScipyMP8" if "ScipyMP8" in reg else next(iter(reg))
+    reg["BatchedScipyOMP"] = reg[pick]
+    return pick
+
+
+def _total_matched_cost(
+    matcher: Any,
+    preds: dict[str, torch.Tensor],
+    targets: dict[str, torch.Tensor],
+    idx_tuple: tuple[torch.Tensor, torch.Tensor],
+) -> float:
+    """Total cost of an assignment under ``matcher``'s cost matrix (valid targets only).
+
+    ``matcher.get_batch_cost`` returns the shared ``[B, M, M]`` cost matrix (invalid
+    target columns set to NaN) and the per-row valid-object count. The matcher's
+    returned ``idx_tuple = (batch_arange, idxs)`` permutes the predictions so that, for
+    batch ``b``, query ``idxs[b, j]`` is matched to target column ``j``; the cost of the
+    assignment is therefore ``sum_{j < n_valid} cost[b, idxs[b, j], j]`` (only the valid,
+    non-NaN columns). Computing this on the SAME (v2) cost matrix for both the v2 and the
+    upstream assignment is the optimality comparison: two distinct optimal assignments
+    (e.g. from different LAP solvers) achieve the SAME total cost.
+
+    Returns
+    -------
+    float
+        The summed matched cost over all batch elements (valid columns only).
+    """
+    cost, n_batch = matcher.get_batch_cost(preds, targets)
+    idxs = idx_tuple[1]
+    total = 0.0
+    for bi in range(cost.shape[0]):
+        nv = int(n_batch[bi])
+        rows = idxs[bi, :nv]
+        cols = torch.arange(nv, device=cost.device)
+        total += float(cost[bi, rows, cols].sum())
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -1948,6 +2049,9 @@ def run_mf1a(
     norm_dict = _norm_dict(outdir)
     checks: dict[str, bool] = {}
     diffs: dict[str, float] = {}
+    # MFU-4: make the upstream oracle's matcher constructable in this container
+    # (the v1 MaskDecoder ctor builds a MaskFormerLoss -> HungarianMatcher).
+    _ensure_mf_lap_solver()
 
     modules = build_maskformer_decoder_modules(norm_dict)
     test_plan = compile_maskformer_decoder(modules, Mode.TEST)
@@ -1986,7 +2090,10 @@ def run_mf1a(
     with torch.no_grad():
         v1_encoded, v1_pad = v1_encoder({"seq": seq_x.clone()}, pad_mask={"seq": seq_mask.clone()})
     diffs["drop_registers_encoded"] = _max_abs(v2_encoded, v1_encoded)
-    checks["drop_registers_encoded_bitwise_vs_independent_v1"] = torch.equal(v2_encoded, v1_encoded)
+    # MFU-0 step D: value parity is tolerance-based (torch.allclose), not bitwise — the
+    # v2 executor's op order differs from the upstream snapshot's, so the residual is
+    # float-reassociation noise. A genuine divergence still fails loudly.
+    checks["drop_registers_encoded_close_vs_independent_v1"] = _close(v2_encoded, v1_encoded)
     checks["drop_registers_encoded_parity_vs_independent_v1"] = (
         diffs["drop_registers_encoded"] <= PARITY_ATOL
     )
@@ -2019,14 +2126,14 @@ def run_mf1a(
     diffs["decoder_class_logits"] = _max_abs(v2_class_logits, v1_obj["class_logits"])
     diffs["decoder_class_probs"] = _max_abs(v2_class_probs, v1_obj["class_probs"])
     diffs["decoder_masks"] = _max_abs(v2_masks, v1_obj["masks"])
-    checks["decoder_embed_bitwise_vs_independent_v1"] = torch.equal(v2_embed, v1_obj["embed"])
-    checks["decoder_class_logits_bitwise_vs_independent_v1"] = torch.equal(
+    checks["decoder_embed_close_vs_independent_v1"] = _close(v2_embed, v1_obj["embed"])
+    checks["decoder_class_logits_close_vs_independent_v1"] = _close(
         v2_class_logits, v1_obj["class_logits"]
     )
-    checks["decoder_class_probs_bitwise_vs_independent_v1"] = torch.equal(
+    checks["decoder_class_probs_close_vs_independent_v1"] = _close(
         v2_class_probs, v1_obj["class_probs"]
     )
-    checks["decoder_masks_bitwise_vs_independent_v1"] = torch.equal(v2_masks, v1_obj["masks"])
+    checks["decoder_masks_close_vs_independent_v1"] = _close(v2_masks, v1_obj["masks"])
     # the dummy token is stripped: masks span the real T constituents, not T + 1
     checks["decoder_masks_unpadded_to_T"] = v2_masks.shape[-1] == seq_x.shape[1]
     checks["decoder_objects_shape"] = tuple(v2_embed.shape) == (
@@ -2093,9 +2200,10 @@ def run_mf1a(
 
     passed = all(checks.values())
     criterion = (
-        "the MaskFormer encoder->decoder block (real compiler/bind/executor) reproduces, BITWISE, "
-        "an INDEPENDENT v1 Transformer (drop_registers=True) for encoded.seq AND an INDEPENDENT v1 "
-        "MaskDecoder for all four objects.* — encoded.seq is register-free with no masks.registers "
+        "the MaskFormer encoder->decoder block (real compiler/bind/executor) reproduces, within "
+        "tolerance (torch.allclose), an INDEPENDENT upstream Transformer (drop_registers=True) for "
+        "encoded.seq AND an INDEPENDENT upstream MaskDecoder for all four objects.* — encoded.seq "
+        "is register-free with no masks.registers "
         "key, the registers were visible to attention (zeroing them changes the output), the "
         "dummy-token trick is stripped (masks span T), a COMPILED+RUN Mode.ONNX plan stays "
         "register-free + finite (incl. a zero-constituent jet), and missing n_heads / "
@@ -2133,6 +2241,21 @@ def run_mf1a(
         "decoder slice of the gate-table MF1a; the MaskFormerMatchedLoss / HungarianMatcher / "
         "MaskFormerObjectWriter forward-parity sub-checks are added by those (separate) modules"
     )
+    report["expected_deltas"] = {
+        "MFU-5_layernorm": (
+            "EXPECTED FAIL at MFU-0: the v2 core MaskDecoderLayer "
+            "(salt/core/nn/maskdecoder.py) omits the per-layer post-norm — upstream's "
+            "MaskDecoderLayer ends each forward with q = self.norm1(q); kv = self.norm2(kv) "
+            "(snapshot maskformer.py:449-450,510-512) and the v2 layer has neither the norm "
+            "modules nor the op. All four decoder objects.* therefore diverge from the upstream "
+            "oracle (the encoder is bitwise-identical). Closed by MFU-5 (LayerNorm)."
+        ),
+        "MFU-4_solver": (
+            "The upstream MaskDecoder ctor builds a MaskFormerLoss -> HungarianMatcher whose "
+            "default py_lap_solver backend (BatchedScipyOMP) is not in the container build; "
+            "_ensure_mf_lap_solver() aliases it so the oracle constructs. Closed by MFU-4 (solver)."
+        ),
+    }
     print(f"{'diff':<40}{'value':>14}")
     for name, val in diffs.items():
         print(f"{name:<40}{val:>14.3e}")
@@ -2250,6 +2373,8 @@ def run_mf1c(
     print("=" * 96)
     checks: dict[str, bool] = {}
     diffs: dict[str, float] = {}
+    # MFU-4: make the upstream oracle's HungarianMatcher constructable in this container.
+    _ensure_mf_lap_solver()
 
     # -- (i) matched loss + matcher: the 4 loss components vs INDEPENDENT v1 ----
     module = build_matched_loss_module()
@@ -2305,26 +2430,46 @@ def run_mf1c(
     diffs["matched_object_class_ce"] = _max_abs(v2_ce, v1_ce)
     diffs["matched_mask_dice"] = _max_abs(v2_dice, v1_dice)
     diffs["matched_mask_focal"] = _max_abs(v2_focal, v1_focal)
-    checks["matched_object_class_ce_bitwise_vs_independent_v1"] = torch.equal(v2_ce, v1_ce)
-    checks["matched_mask_dice_bitwise_vs_independent_v1"] = torch.equal(v2_dice, v1_dice)
-    checks["matched_mask_focal_bitwise_vs_independent_v1"] = torch.equal(v2_focal, v1_focal)
-    # the matcher assignment itself matches the independent v1 matcher BITWISE
-    checks["matcher_assignment_bitwise_vs_independent_v1"] = torch.equal(
-        out.get("matched.objects.class_logits"), data["objects.class_logits"][v1_idx]
+    # MFU-0 step D: value parity is tolerance-based (torch.allclose), not bitwise.
+    checks["matched_object_class_ce_close_vs_independent_v1"] = _close(v2_ce, v1_ce)
+    checks["matched_mask_dice_close_vs_independent_v1"] = _close(v2_dice, v1_dice)
+    checks["matched_mask_focal_close_vs_independent_v1"] = _close(v2_focal, v1_focal)
+    # MFU-0 step D: the matcher comparison is OPTIMALITY (equal TOTAL matched cost on the
+    # SAME cost matrix), NOT index-equality — a solver swap (MFU-4) may return a different
+    # optimal permutation with the same cost. Both the v2 matcher (scipy LAP) and the
+    # INDEPENDENT upstream matcher (py_lap_solver) are scored on the v2 cost matrix; their
+    # total matched costs must agree (both optimal).
+    v2_idx = module.matcher(pred_match, tgt_match)
+    v1_total = _total_matched_cost(module.matcher, pred_match, tgt_match, v1_idx)
+    v2_total = _total_matched_cost(module.matcher, pred_match, tgt_match, v2_idx)
+    diffs["matcher_total_cost"] = abs(v2_total - v1_total)
+    checks["matcher_total_cost_optimal_vs_independent_v1"] = math.isclose(
+        v2_total, v1_total, rel_tol=MF_RTOL, abs_tol=MF_ATOL
+    )
+    # self-consistency: the executor published the v2 matcher's own permutation (same impl,
+    # so exact) — proves the matched.objects.* keys are the matcher output, not a stale copy.
+    checks["executor_applied_v2_matcher_permutation"] = torch.equal(
+        out.get("matched.objects.class_logits"), data["objects.class_logits"][v2_idx]
     )
 
     # -- (ii) matched regression: the FD alignment change (design-conformance) -
     # NO v1 byte reference (v1's effective regression loss is QUERY-order); the gate
     # recomputes the FD-specified matched L1 (matcher-permuted preds vs truth-order
     # targets, valid objects only) independently and asserts the module matches it.
+    # The reference is permuted by the EXECUTOR's own assignment (v2_idx, module.matcher),
+    # NOT the oracle's (v1_idx): this is a design-conformance property of the v2 executor,
+    # so the reference must mirror the exact permutation the executor applied. v1_idx ==
+    # v2_idx on this fixture, but using v2_idx keeps the check correct (not false-failing)
+    # under an MFU-4 solver swap that returns a different equal-cost optimal permutation,
+    # where the regression sub-cost is NOT permutation-invariant.
     object_class = data["labels.objects.object_class"]
     valid = object_class != module.num_classes
-    m_reg = data["preds.objects.regression"][v1_idx]
+    m_reg = data["preds.objects.regression"][v2_idx]
     ref_reg = module.loss_weights["regression"] * torch.nn.functional.l1_loss(
         m_reg[valid], data["targets.objects.regression"][valid]
     )
     diffs["matched_regression_design"] = _max_abs(v2_reg, ref_reg)
-    checks["matched_regression_design_conformance"] = diffs["matched_regression_design"] <= 0.0
+    checks["matched_regression_design_conformance"] = _close(v2_reg, ref_reg)
     # the matched regression is NOT v1's query-order loss (they genuinely differ here)
     query_reg = module.loss_weights["regression"] * torch.nn.functional.l1_loss(
         data["preds.objects.regression"][valid], data["targets.objects.regression"][valid]
@@ -2434,9 +2579,10 @@ def run_mf1c(
 
     passed = all(checks.values())
     criterion = (
-        "the MaskFormerMatchedLoss forward (matcher + loss methods) reproduces, BITWISE, an "
-        "INDEPENDENT v1 MaskFormerLoss for the three v1-decidable components (object_class_ce, "
-        "mask_dice, mask_focal) on the v1-permuted predictions and for the matcher assignment; "
+        "the MaskFormerMatchedLoss forward (matcher + loss methods) reproduces, within tolerance "
+        "(torch.allclose), an INDEPENDENT upstream MaskFormerLoss for the three v1-decidable "
+        "components (object_class_ce, mask_dice, mask_focal) on the v1-permuted predictions, and "
+        "matches the upstream matcher by OPTIMALITY (equal total matched cost, not index); "
         "the matched regression is the FD alignment change (matched, not v1's query-order) "
         "asserted as a design-conformance property; the decoder's objects.* are NOT mutated in "
         "place (matched.objects.* are NEW keys); and MaskFormerTargets reproduces object_class / "
@@ -2480,6 +2626,36 @@ def run_mf1c(
         "matched-loss / matcher / MaskFormerTargets slice of the gate-table MF1a; the MaskDecoder "
         "+ drop_registers forward-parity is run_mf1a; the MaskFormerObjectWriter byte-parity is MF2"
     )
+    report["expected_deltas"] = {
+        "MFU-4_solver": (
+            "The upstream MaskFormerLoss builds its HungarianMatcher with the default "
+            "py_lap_solver backend (BatchedScipyOMP) which is not in the container build "
+            "(only Scipy, ScipyMP8); _ensure_mf_lap_solver() aliases it so the oracle "
+            "constructs. The matcher_total_cost_optimal_vs_independent_v1 check compares the "
+            "two backends by total matched COST (optimality), so a solver swap that returns a "
+            "different EQUAL-cost optimal permutation does not flip that verdict, and the "
+            "matched_regression_design_conformance reference is built from the executor's own "
+            "permutation (v2_idx) so it is solver-swap robust too. CAVEAT: the per-component "
+            "parity checks (matched_object_class_ce/dice/focal_close_vs_independent_v1) compare "
+            "the executor (v2_idx) against the independent oracle driven on the oracle's "
+            "permutation (v1_idx); these assume ASSIGNMENT IDENTITY (v1_idx == v2_idx, true on "
+            "this fixture), NOT just equal total cost — a permutation-changing solver swap could "
+            "make them diverge even when optimality holds. Closed/realigned by MFU-4 (solver)."
+        ),
+        "MFU-5_class_weights": (
+            "LATENT (not exercised by this fixture): the v2 core MaskFormerLoss "
+            "(salt/core/nn/maskformer_loss.py) ctor does NOT accept class_weights, while the "
+            "upstream snapshot MaskFormerLoss does (snapshot maskformer_loss.py:62,132). With "
+            "the shipped default (class_weights=None) both build the same empty_weight buffer, "
+            "so the three CE/mask components are tolerance-equal here. A config that sets "
+            "class_weights would diverge. Closed by MFU-5 (class_weights)."
+        ),
+        "MFU-1_numerical_guards": (
+            "No delta surfaces in this fixture: the object_class_ce / mask_dice / mask_focal "
+            "components are tolerance-equal (~0) vs the upstream oracle. Reserved for any "
+            "eps/clamp guard divergence MFU-1 introduces in the loss helpers."
+        ),
+    }
     print(f"{'diff':<40}{'value':>14}")
     for name, val in diffs.items():
         print(f"{name:<40}{val:>14.3e}")

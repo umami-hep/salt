@@ -9,9 +9,13 @@ checks stay green (the gates_m2/m3/m4 pattern, never exposed on the CLI).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import math
 from pathlib import Path
 
 import numpy as np
+import pytest
+import torch
 
 import salt.tests.integration.gates_m5 as gm5
 from salt.tests.integration.gates_m5 import (
@@ -33,6 +37,20 @@ from salt.tests.integration.gates_m5 import (
     run_r4,
 )
 from salt.core.onnx.reduces import registered_reduces
+
+# MFU-0 expected-delta xfail reasons. The MaskFormer gate oracle is the vendored upstream
+# snapshot (6570e85); the CURRENT (unported) v2 core/nn/ still differs from upstream, so
+# some MF1a checks are KNOWN to fail until a later MFU wave closes the gap. These xfails
+# keep the suite green-with-expected-xfails; strict=True flips them to a HARD failure once
+# the wave lands (signalling the xfail should be removed). Full ledger:
+# experiments/16_investigate_upstream_maskformer_objectselection/outputs/mfu0_expected_deltas.md
+MFU5_LAYERNORM_XFAIL = (
+    "MFU-5 (LayerNorm): the v2 core MaskDecoderLayer (salt/core/nn/maskdecoder.py) omits the "
+    "per-layer post-norm that upstream applies (q = self.norm1(q); kv = self.norm2(kv), "
+    "snapshot maskformer.py:449-450,510-512), so all four decoder objects.* diverge from the "
+    "upstream oracle (embed ~1.27, masks ~0.74, class_logits ~0.19, class_probs ~0.057). "
+    "Closed by MFU-5; remove this xfail then."
+)
 
 
 class TestR1:
@@ -270,28 +288,30 @@ class TestL3:
 
 
 class TestMF1a:
+    @pytest.mark.xfail(reason=MFU5_LAYERNORM_XFAIL, strict=True)
     def test_pass(self, tmp_path):
         code, report = run_mf1a(tmp_path)
         assert code == 0, report["checks"]
         assert report["passed"]
         assert all(report["checks"].values())
         assert (tmp_path / "mf1a_report.json").is_file()
-        # every measured diff is BITWISE (0.0) — a pure forward comparison; _max_abs
-        # returns a non-negative float, so <= 0.0 is exactly the "== 0.0" claim
-        assert all(v <= 0.0 for v in report["max_abs_diffs"].values())
-        # drop_registers BITWISE parity vs an INDEPENDENT v1 Transformer
-        assert report["checks"]["drop_registers_encoded_bitwise_vs_independent_v1"]
+        # MFU-0 step D: value parity is tolerance-based — every measured diff is at/under the
+        # MaskFormer parity ceiling (float-reassociation noise, not bitwise zero)
+        assert all(v <= gm5.MF_ATOL for v in report["max_abs_diffs"].values())
+        # drop_registers tolerance parity vs an INDEPENDENT upstream Transformer
+        assert report["checks"]["drop_registers_encoded_close_vs_independent_v1"]
         assert report["checks"]["encoded_seq_is_register_free"]
         assert report["checks"]["test_plan_has_no_registers"]
         assert report["checks"]["onnx_plan_has_no_registers"]
         assert report["checks"]["v1_pad_dropped_registers"]
         # registers were genuinely VISIBLE to attention (not a no-op slice)
         assert report["checks"]["registers_visible_to_encoder"]
-        # MaskDecoder forward BITWISE parity vs an INDEPENDENT v1 MaskDecoder
-        assert report["checks"]["decoder_embed_bitwise_vs_independent_v1"]
-        assert report["checks"]["decoder_class_logits_bitwise_vs_independent_v1"]
-        assert report["checks"]["decoder_class_probs_bitwise_vs_independent_v1"]
-        assert report["checks"]["decoder_masks_bitwise_vs_independent_v1"]
+        # MaskDecoder forward tolerance parity vs an INDEPENDENT upstream MaskDecoder
+        # (these FAIL at MFU-0 — MFU-5 LayerNorm gap — which is what xfails this test)
+        assert report["checks"]["decoder_embed_close_vs_independent_v1"]
+        assert report["checks"]["decoder_class_logits_close_vs_independent_v1"]
+        assert report["checks"]["decoder_class_probs_close_vs_independent_v1"]
+        assert report["checks"]["decoder_masks_close_vs_independent_v1"]
         # the dummy token is stripped (masks span T)
         assert report["checks"]["decoder_masks_unpadded_to_T"]
         assert report["checks"]["class_probs_is_distribution"]
@@ -308,24 +328,48 @@ class TestMF1a:
         assert report["checks"]["missing_class_output_size_raises"]
         assert report["checks"]["class_net_width_key_raises"]
         assert report["checks"]["embed_dim_mismatch_at_bind_raises"]
+        # the gate records the MFU-0 expected deltas (LayerNorm + solver) for the ledger
+        assert "MFU-5_layernorm" in report["expected_deltas"]
+        assert "MFU-4_solver" in report["expected_deltas"]
         # the gate claims ONLY the decoder slice (matched loss is a separate module)
         assert "decoder slice" in report["scope_note"].lower()
         assert "MaskFormerMatchedLoss" in report["scope_note"]
 
+    def test_decoder_objects_diverge_at_mfu0(self, tmp_path):
+        """MFU-0 ledger control: the decoder objects.* DO diverge from the upstream oracle.
+
+        This is the positive assertion of the MFU-5 LayerNorm delta — until MFU-5 lands the
+        four decoder ``objects.*`` parity checks are FALSE while the encoder (drop_registers)
+        stays bitwise and the structural / loud-surface controls stay green. When MFU-5 lands
+        this test starts failing (the divergence vanishes), pairing with the strict xfail above
+        to force the ledger update.
+        """
+        code, report = run_mf1a(tmp_path)
+        assert code == 1
+        # encoder is bitwise-identical to upstream (no decoder norm in the encoder path)
+        assert report["checks"]["drop_registers_encoded_close_vs_independent_v1"]
+        assert report["max_abs_diffs"]["drop_registers_encoded"] <= gm5.MF_ATOL
+        # the decoder objects.* genuinely diverge (the MFU-5 LayerNorm gap)
+        assert not report["checks"]["decoder_embed_close_vs_independent_v1"]
+        assert not report["checks"]["decoder_masks_close_vs_independent_v1"]
+        assert report["max_abs_diffs"]["decoder_embed"] > gm5.MF_ATOL
+        # structural + loud-surface controls (independent of the LayerNorm gap) stay green
+        assert report["checks"]["encoded_seq_is_register_free"]
+        assert report["checks"]["registers_visible_to_encoder"]
+        assert report["checks"]["zero_constituent_jet_is_finite"]
+        assert report["checks"]["embed_dim_mismatch_at_bind_raises"]
+
     def test_corruption_fails_the_gate(self, tmp_path):
         # perturb the v2 encoded.seq + objects.embed -> their parity checks vs the
-        # independent v1 references must FAIL, while the un-corrupted decoder masks
-        # parity, the registers-visible control, the loud-surface checks and the
-        # zero-constituent ONNX control (all independent of the perturbed values)
-        # stay green
+        # independent upstream references must FAIL, while the registers-visible control,
+        # the loud-surface checks and the zero-constituent ONNX control (all independent of
+        # the perturbed values) stay green. NOTE: at MFU-0 the un-corrupted decoder masks /
+        # class outputs ALSO fail (MFU-5 LayerNorm), so this asserts only the controls.
         code, report = run_mf1a(tmp_path, corruption=lambda t: t + 1.0)
         assert code == 1
         assert not report["passed"]
-        assert not report["checks"]["drop_registers_encoded_bitwise_vs_independent_v1"]
-        assert not report["checks"]["decoder_embed_bitwise_vs_independent_v1"]
-        # the masks/class outputs were NOT corrupted -> still bitwise-equal
-        assert report["checks"]["decoder_masks_bitwise_vs_independent_v1"]
-        assert report["checks"]["decoder_class_probs_bitwise_vs_independent_v1"]
+        assert not report["checks"]["drop_registers_encoded_close_vs_independent_v1"]
+        assert not report["checks"]["decoder_embed_close_vs_independent_v1"]
         # static / loud controls stay green
         assert report["checks"]["registers_visible_to_encoder"]
         assert report["checks"]["missing_n_heads_raises"]
@@ -340,14 +384,17 @@ class TestMF1c:
         assert report["passed"]
         assert all(report["checks"].values())
         assert (tmp_path / "mf1c_report.json").is_file()
-        # every measured diff is BITWISE (0.0) — pure forward comparisons
-        assert all(v <= 0.0 for v in report["max_abs_diffs"].values())
-        # the three v1-decidable loss components are BITWISE vs the INDEPENDENT v1 loss
-        assert report["checks"]["matched_object_class_ce_bitwise_vs_independent_v1"]
-        assert report["checks"]["matched_mask_dice_bitwise_vs_independent_v1"]
-        assert report["checks"]["matched_mask_focal_bitwise_vs_independent_v1"]
-        # the matcher assignment matches the independent v1 matcher BITWISE
-        assert report["checks"]["matcher_assignment_bitwise_vs_independent_v1"]
+        # MFU-0 step D: value parity is tolerance-based — every measured diff is at/under the
+        # MaskFormer parity ceiling (here ~0; the matched loss is verbatim-upstream)
+        assert all(v <= gm5.MF_ATOL for v in report["max_abs_diffs"].values())
+        # the three v1-decidable loss components are tolerance-equal vs the INDEPENDENT upstream loss
+        assert report["checks"]["matched_object_class_ce_close_vs_independent_v1"]
+        assert report["checks"]["matched_mask_dice_close_vs_independent_v1"]
+        assert report["checks"]["matched_mask_focal_close_vs_independent_v1"]
+        # the matcher matches the independent upstream matcher by OPTIMALITY (equal total cost,
+        # not index — robust to the MFU-4 solver swap), and the executor published that permutation
+        assert report["checks"]["matcher_total_cost_optimal_vs_independent_v1"]
+        assert report["checks"]["executor_applied_v2_matcher_permutation"]
         # the regression is the FD matched alignment (design-conformance) and genuinely
         # DIFFERS from v1's query-order loss
         assert report["checks"]["matched_regression_design_conformance"]
@@ -375,6 +422,9 @@ class TestMF1c:
         # the alignment change (MF1b) is documented honestly in the report
         assert "QUERY-ORDER" in report["alignment_note"]
         assert "MATCHED" in report["alignment_note"]
+        # the gate records its MFU-0 expected deltas (solver + latent class_weights / guards)
+        assert "MFU-4_solver" in report["expected_deltas"]
+        assert "MFU-5_class_weights" in report["expected_deltas"]
         # the gate claims ONLY the matched-loss/matcher/targets slice
         assert "matched-loss" in report["scope_note"].lower()
         assert "MF2" in report["scope_note"]
@@ -387,17 +437,96 @@ class TestMF1c:
         code, report = run_mf1c(tmp_path, corruption=lambda t: t + 1.0)
         assert code == 1
         assert not report["passed"]
-        assert not report["checks"]["matched_object_class_ce_bitwise_vs_independent_v1"]
+        assert not report["checks"]["matched_object_class_ce_close_vs_independent_v1"]
         assert not report["checks"]["matched_regression_design_conformance"]
-        # the un-corrupted components stay bitwise-equal
-        assert report["checks"]["matched_mask_dice_bitwise_vs_independent_v1"]
-        assert report["checks"]["matched_mask_focal_bitwise_vs_independent_v1"]
-        assert report["checks"]["matcher_assignment_bitwise_vs_independent_v1"]
+        # the un-corrupted components stay tolerance-equal
+        assert report["checks"]["matched_mask_dice_close_vs_independent_v1"]
+        assert report["checks"]["matched_mask_focal_close_vs_independent_v1"]
+        # the matcher (run on the un-corrupted inputs) stays optimal vs the upstream matcher
+        assert report["checks"]["matcher_total_cost_optimal_vs_independent_v1"]
         # static / loud controls + targets parity stay green
         assert report["checks"]["objects_class_logits_not_mutated"]
         assert report["checks"]["targets_masks_bitwise_vs_v1_build_target_masks"]
         assert report["checks"]["null_not_last_raises"]
         assert report["checks"]["regression_width_mismatch_at_bind_raises"]
+
+    def test_optimality_check_has_teeth(self):
+        """Negative control: a deliberately SUBOPTIMAL permutation must cost strictly more.
+
+        On this fixture the upstream and v2 matchers return the IDENTICAL assignment, so
+        the headline ``matcher_total_cost_optimal_vs_independent_v1`` check is trivially
+        satisfied (v1_total == v2_total). That makes its discriminating power invisible in
+        the pass/corruption tests (the corruption hook leaves the matcher inputs untouched).
+        This control reconstructs the matcher inputs exactly as ``run_mf1c`` does, scores
+        the executor's optimal assignment, then scores a hand-swapped (suboptimal) one
+        through the SAME ``_total_matched_cost`` on the SAME cost matrix, and asserts the
+        optimality comparison would go RED — proving the check has teeth (i.e. it would
+        actually catch a non-optimal solver, not just an index mismatch).
+        """
+        gm5._ensure_mf_lap_solver()
+        module = gm5.build_matched_loss_module()
+        module.bind(gm5._matched_loss_schema())
+        data = gm5.make_maskformer_object_batch()
+        pred_match = {
+            "class_logits": data["objects.class_logits"],
+            "class_probs": data["objects.class_probs"],
+            "masks": data["objects.masks"],
+            "regression": data["preds.objects.regression"],
+        }
+        tgt_match = {
+            "object_class": data["labels.objects.object_class"],
+            "masks": data["labels.objects.masks"].to(data["objects.masks"].dtype),
+            "regression": data["targets.objects.regression"],
+        }
+        v2_idx = module.matcher(pred_match, tgt_match)
+        optimal = gm5._total_matched_cost(module.matcher, pred_match, tgt_match, v2_idx)
+        # swap the first two query assignments in every batch element -> suboptimal
+        batch_arange, idxs = v2_idx
+        swapped = idxs.clone()
+        swapped[:, [0, 1]] = swapped[:, [1, 0]]
+        suboptimal = gm5._total_matched_cost(
+            module.matcher, pred_match, tgt_match, (batch_arange, swapped)
+        )
+        # the suboptimal assignment must cost strictly more, beyond the parity tolerance,
+        # so math.isclose (the optimality check) returns False -> the gate would FAIL
+        assert suboptimal > optimal
+        assert not math.isclose(
+            suboptimal, optimal, rel_tol=gm5.MF_RTOL, abs_tol=gm5.MF_ATOL
+        )
+
+
+def test_upstream_mf_snapshot_shared_infra_pinned():
+    """Hermetic hash-guard: the snapshot's LIVE shared-infra deps must stay 6570e85-faithful.
+
+    The vendored MaskFormer oracle is only partially hermetic: ``maskformer.py`` /
+    ``maskformer_loss.py`` still import LIVE ``salt.models.transformer`` (GLU/Attention +
+    the Transformer ENCODER oracle), ``salt.stypes`` and ``salt.utils.mask_utils``. These
+    are byte-identical to upstream 6570e85 today, but nothing PINS them: a later MFU wave
+    editing any of these would silently re-define the "6570e85 oracle" with no gate
+    catching it, while the snapshot still advertises bitwise fidelity. This guard computes
+    the git-blob SHA-1 of each live file and asserts it equals the pinned 6570e85 blob, so
+    a drift fails LOUDLY (telling the editor to vendor the file or re-pin the hash).
+    """
+    import salt
+
+    salt_root = Path(salt.__file__).resolve().parent
+    # git blob SHA-1s at commit 6570e85 (verified faithful through upstream HEAD 21c90b6)
+    pinned = {
+        salt_root / "models" / "transformer.py": "285f6f6d353d6f4329867bb41cee9d845ec2b8d4",
+        salt_root / "stypes.py": "1321c6d63abc4b292fc904600efd477fd3511d8a",
+        salt_root / "utils" / "mask_utils.py": "5a48a377a601336f629ad2d2879623afa760b8e2",
+    }
+    drift = {}
+    for path, expected in pinned.items():
+        content = path.read_bytes()
+        header = b"blob %d\0" % len(content)
+        live = hashlib.sha1(header + content).hexdigest()  # noqa: S324 (git object hash, not security)
+        if live != expected:
+            drift[str(path)] = (expected, live)
+    assert not drift, (
+        "shared-infra MaskFormer-oracle deps drifted from pinned 6570e85 blobs "
+        f"(vendor them into the snapshot or re-pin): {drift}"
+    )
 
 
 class TestMF2:

@@ -1,0 +1,160 @@
+{
+  "source_commit": "6570e85881a395bbbd27db673f0be2c4b57e1898",
+  "config": "salt/configs/MaskFormer.yaml",
+  "model_name": "MaskFormer",
+  "writer": "salt.callbacks.predictionwriter.PredictionWriter",
+  "writer_args": {
+    "write_tracks": true,
+    "write_objects": true
+  },
+  "writer_version_attr": "v0.3.3",
+  "dims": {
+    "M_max_objects": 5,
+    "C_max_constituents": 40
+  },
+  "groups": {
+    "jets": {
+      "shape": [
+        "B"
+      ],
+      "fields": {
+        "pt": "float32",
+        "eta": "float32",
+        "mass": "float32",
+        "pt_btagJes": "float32",
+        "eta_btagJes": "float32",
+        "ptFromTruthDressedWZJet": "float32",
+        "HadronConeExclTruthLabelPt": "float32",
+        "HadronConeExclTruthLabelLxy": "float32",
+        "n_tracks": "float32",
+        "n_truth_promptLepton": "float32",
+        "sample_weight": "float32",
+        "softMuon_pt": "float32",
+        "softMuon_dR": "float32",
+        "softMuon_eta": "float32",
+        "softMuon_phi": "float32",
+        "softMuon_qOverPratio": "float32",
+        "softMuon_momentumBalanceSignificance": "float32",
+        "softMuon_scatteringNeighbourSignificance": "float32",
+        "softMuon_pTrel": "float32",
+        "softMuon_ip3dD0": "float32",
+        "softMuon_ip3dZ0": "float32",
+        "softMuon_ip3dD0Significance": "float32",
+        "softMuon_ip3dZ0Significance": "float32",
+        "softMuon_ip3dD0Uncertainty": "float32",
+        "softMuon_ip3dZ0Uncertainty": "float32",
+        "R10TruthLabel_R22v1": "float32",
+        "R10TruthLabel_R22v1_TruthJetMass": "float32",
+        "R10TruthLabel_R22v1_TruthJetPt": "float32",
+        "GN2Xv00_phbb": "float32",
+        "GN2Xv00_phcc": "float32",
+        "GN2Xv00_ptop": "float32",
+        "GN2Xv00_pqcd": "float32",
+        "GN2XWithMassv00_phbb": "float32",
+        "GN2XWithMassv00_phcc": "float32",
+        "GN2XWithMassv00_ptop": "float32",
+        "GN2XWithMassv00_pqcd": "float32",
+        "Xbb2020v3_Higgs": "float32",
+        "Xbb2020v3_Top": "float32",
+        "Xbb2020v3_QCD": "float32",
+        "flavour_label": "int32",
+        "HadronConeExclTruthLabelID": "int32",
+        "HadronGhostInitialTruthLabelPdgId": "int32",
+        "MaskFormer_pb": "float32",
+        "MaskFormer_pc": "float32",
+        "MaskFormer_pu": "float32"
+      }
+    },
+    "object_masks": {
+      "shape": [
+        "B",
+        "M",
+        "C"
+      ],
+      "fields": {
+        "truth_mask": "int64",
+        "mask_logits": "float32"
+      }
+    },
+    "tracks": {
+      "shape": [
+        "B",
+        "C"
+      ],
+      "fields": {
+        "d0": "float32",
+        "z0SinTheta": "float32",
+        "dphi": "float32",
+        "deta": "float32",
+        "qOverP": "float32",
+        "IP3D_signed_d0_significance": "float32",
+        "IP3D_signed_z0_significance": "float32",
+        "lifetimeSignedD0Significance": "float32",
+        "lifetimeSignedZ0SinThetaSignificance": "float32",
+        "phiUncertainty": "float32",
+        "thetaUncertainty": "float32",
+        "qOverPUncertainty": "float32",
+        "numberOfPixelHits": "float32",
+        "numberOfSCTHits": "float32",
+        "numberOfInnermostPixelLayerHits": "float32",
+        "numberOfNextToInnermostPixelLayerHits": "float32",
+        "numberOfInnermostPixelLayerSharedHits": "float32",
+        "numberOfInnermostPixelLayerSplitHits": "float32",
+        "numberOfPixelSharedHits": "float32",
+        "numberOfPixelSplitHits": "float32",
+        "numberOfSCTSharedHits": "float32",
+        "numberOfPixelHoles": "float32",
+        "numberOfSCTHoles": "float32",
+        "pt": "float32",
+        "eta": "float32",
+        "phi": "float32",
+        "subjetIndex": "float32",
+        "leptonID": "float32",
+        "muon_quality": "float32",
+        "muon_qOverPratio": "float32",
+        "muon_momentumBalanceSignificance": "float32",
+        "muon_scatteringNeighbourSignificance": "float32",
+        "ftagTruthOriginLabel": "int32",
+        "ftagTruthTypeLabel": "int32",
+        "ftagTruthVertexIndex": "int32",
+        "ftagTruthParentBarcode": "int32",
+        "valid": "bool",
+        "MaskFormer_pPileup": "float32",
+        "MaskFormer_pFake": "float32",
+        "MaskFormer_pPrimary": "float32",
+        "MaskFormer_pFromB": "float32",
+        "MaskFormer_pFromBC": "float32",
+        "MaskFormer_pFromC": "float32",
+        "MaskFormer_pFromTau": "float32",
+        "MaskFormer_pOtherSecondary": "float32",
+        "MaskFormer_MaskIndex": "int64",
+        "mask": "bool"
+      }
+    },
+    "truth_hadrons": {
+      "shape": [
+        "B",
+        "M"
+      ],
+      "fields": {
+        "pt": "float32",
+        "Lxy": "float32",
+        "deta": "float32",
+        "dphi": "float32",
+        "mass": "float32",
+        "barcode": "int32",
+        "flavour": "int32",
+        "valid": "bool",
+        "MaskFormer_pt": "float32",
+        "MaskFormer_Lxy": "float32",
+        "MaskFormer_deta": "float32",
+        "MaskFormer_dphi": "float32",
+        "MaskFormer_mass": "float32",
+        "MaskFormer_pb": "float32",
+        "MaskFormer_pc": "float32",
+        "MaskFormer_pnull": "float32",
+        "class_label": "int64"
+      }
+    }
+  }
+}
