@@ -57,6 +57,25 @@ modular-parity-control:
   script:
     - JUNIT_FILE=reports/modular-parity-gn2.xml run_test salt/tests/integration/test_parity_gn2.py --run-integration
 
+# --------------- MODULAR (v2) CPU INTEGRATION GATES ---------------
+# The W34/W5 section-path gates live under salt/tests/integration but are
+# `cpu_always` (pure-CPU, data-free static schema + ONNX-trace-fold checks). The
+# conftest marks them CI-load-bearing — they must NEVER be silently skipped — yet
+# `modular-unit-tests` (salt/tests/unit only) and `modular-parity-control`
+# (parity_gn2 only) don't collect them, so without this job they never run in CI.
+# These gate the W34.4d cutover: the migrated configs' `outputs:`-section H5/ONNX
+# schema == legacy authority. Run WITHOUT --run-integration so only the cpu_always
+# tests execute (any GPU-only sibling in these files is skipped on the CPU runner).
+modular-integration-cpu-gates:
+  extends: .test-template
+  script:
+    - JUNIT_FILE=reports/modular-int-w34-section.xml run_test salt/tests/integration/test_w34_outputs_section.py
+    - JUNIT_FILE=reports/modular-int-w34-regression.xml run_test salt/tests/integration/test_w34_regression_cutover.py
+    - JUNIT_FILE=reports/modular-int-w34-gaussian.xml run_test salt/tests/integration/test_w34_gaussian_cutover.py
+    - JUNIT_FILE=reports/modular-int-w5-schema.xml run_test salt/tests/integration/test_w5_config_h5_schema_parity.py
+    - JUNIT_FILE=reports/modular-int-onnx-fold-w2.xml run_test salt/tests/integration/test_onnx_fold_w2.py
+    - JUNIT_FILE=reports/modular-int-onnx-fold-w3.xml run_test salt/tests/integration/test_onnx_fold_w3.py
+
 # --------------------- GPU RUNNER (k8s-gpu) SMOKE ---------------------
 # Proves the GPU path end-to-end on CERN's k8s-gpu fleet before moving the heavy
 # jobs there: GPU visible, our salt test image actually ships CUDA torch, and a

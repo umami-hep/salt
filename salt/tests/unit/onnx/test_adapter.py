@@ -269,15 +269,15 @@ class TestExportSinkOutputs:
                 OnnxExportLeaf(key="outputs.jets.b", name="pb", dtype="int8", per_token=True),
             ])
 
-    def test_empty_sink_enters_auto_collect(self):
-        """Plan 31 W5.1: an omitted/empty `outputs` is AUTO-COLLECT mode (no longer rejected).
+    def test_empty_sink_defers_to_section(self):
+        """W34.4d: an omitted/empty `outputs` defers to a bound `outputs:` section.
 
-        Construction succeeds (deferred resolution); a sink with no model modules
-        bound raises at resolve time with an actionable message.
+        Construction succeeds (deferred resolution from a dumb section); with NEITHER
+        explicit leaves nor a section bound, resolution raises an actionable error (the
+        auto-collect producer-discovery path was removed in W34.4d).
         """
         sink = OnnxExportSink(outputs=[], model_name="M")
-        assert sink._auto_collect is True  # noqa: SLF001 - asserting the mode flag
-        with pytest.raises(ConfigError, match="has no model modules bound"):
+        with pytest.raises(ConfigError, match="has no export leaves"):
             sink.output_names()
 
 

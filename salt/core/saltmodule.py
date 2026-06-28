@@ -888,12 +888,6 @@ class SaltModule(lightning.LightningModule):
         # their preds.*) alive (design §4.1).
         modules = dict(self._graph_modules)
         sink_node = self._attached_sink_node()
-        # plan 31 W5.1: give an auto-collecting sink node (omitted `outputs:`) the
-        # model module dict BEFORE the planner consults its `declare_io`, so it can
-        # discover the active conversion producers feeding its collections. Inert
-        # for an explicit-`outputs` sink (`bind_model_modules` no-ops there).
-        if sink_node is not None and callable(getattr(sink_node, "bind_model_modules", None)):
-            sink_node.bind_model_modules(self._graph_modules)
         # plan 34 W34.2: bind the outputs: section to the sink so it dumps the
         # section's outputs.* leaves (column schema + copy spec + mask streams from
         # the section manifest in declaration order, not producer discovery).

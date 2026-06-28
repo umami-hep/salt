@@ -114,64 +114,49 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4/W5.2 conversion producers (design §6.2): the OnnxExportSink
-      # splits each de-scaled [B(,L), 2R] gaussian leaf into mean + _stddev scalars
-      # (ONNX), and the auto-collect H5OutputSink collects them as f4 columns (TEST).
-      #
-      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
-      # in TEST/ONNX (the atomic forward-flip), so these are REAL Regression
-      # (RegressionDescaleOp, gaussian=true) producers — they de-scale the raw [B, 2R]
-      # into mean ‖ stddev = sqrt(softplus(var)) * std, matching the legacy gaussian
-      # WriterCallback in BOTH H5 and ONNX. (Were IDENTITY TaskOutput passthroughs
-      # pre-flip; the swap keeps the gaussian de-scale running exactly ONCE now that
-      # the forward no longer de-scales.)
-      gaussian_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: gaussian_regression
-          stream: jets
-          targets: HadronConeExclTruthLabelPt
-          norm_params: {mean: 1.0, std: 1.0}
-          gaussian: true
-      gaussian_seq_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: gaussian_regression_no_global_object
-          stream: tracks
-          targets: dphi
-          norm_params: {mean: 1.0, std: 1.0}
-          gaussian: true
-          sequence: true # per-token head: NaN-fill padded positions (v1 run_inference)
 
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter + PadMaskWriter) is RETIRED for
-# this config — the auto-collect H5OutputSink below is the live TEST persistence sink
-# (it owns the pad-mask column via write_pad_mask). Null-merge deletes the base2.yaml
-# default writers so the WriterCallback is not assembled.
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
+# plan 34 W34.4d: this config is migrated OFF the (removed) auto-collect H5OutputSink
+# onto the get_output()-on-task + outputs:-section + dumb-sinks architecture (plan 34
+# §2), self-contained (no -cutover34 overlay needed). RegressionTaskModule.forward
+# publishes RAW (scaled) preds in TEST/ONNX (W34.3 forward-flip); a single
+# RunTaskOutput([gaussian tasks]) calls each head's get_output() — the gaussian
+# means‖softplus-stddev one-array de-scale folds onto the task (replacing the W4/W5.2
+# per-head Regression(gaussian=true) producer nodes). The dumb sinks dump ALL active
+# outputs.* leaves; the SECTION supplies names + dtypes + ORDER.
+#
+# The top-level outputs: section is composed AFTER the model. Section writers in EXACT
+# v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter.
+# The RunTaskOutput tasks list is the v1 model-declaration order (global gaussian head,
+# then per-token gaussian head), so the H5 task-column order + the ONNX Athena tuple
+# order match v1.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args:
+      streams: [jets, tracks]
+      variables:
+        jets: []
+        tracks: []
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [gaussian_regression, gaussian_regression_no_global_object]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
 
-# plan-29 W4 declare-only ONNX sink (design §4.2): splits each de-scaled gaussian
-# leaf into mean + _stddev scalars (v1/oracle order: global head, then per-token).
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): collects the gaussian identity
-# producers; the H5 columns are {run}_{output_suffixes} — gaussian doubling (R means
-# then R _stddev): jets -> HadronConeExclTruthLabelPt(_stddev); tracks (per-token) ->
-# dummyOutput_dPhi(_stddev) — REPRODUCING the legacy gaussian WriterCallback schema.
+# The DUMB sinks (plan 34 W34.4d): no init args — they dump ALL active outputs.* leaves,
+# names/dtypes/order from the bound section manifest. The OnnxExportSink names the
+# de-scaled gaussian leaves (the Athena physics names = the task output_suffixes: R
+# means then R _stddev — jets -> HadronConeExclTruthLabelPt(_stddev); tracks
+# (per-token) -> dummyOutput_dPhi(_stddev)) in canonical tuple order (globals then
+# per-token) — byte-identical to the previous explicit OnnxExportSink tuple (proven by
+# test_w34_gaussian_cutover.py).
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [jets, tracks]
-      copy_inputs: { jets: [], tracks: [] }
-      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.gaussian_regression, names: [HadronConeExclTruthLabelPt, HadronConeExclTruthLabelPt_stddev] }
-        - { key: outputs.tracks.gaussian_regression_no_global_object, names: [dummyOutput_dPhi, dummyOutput_dPhi_stddev] }
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: regressionGaussian # Athena name: no '_'/'-'

@@ -231,11 +231,6 @@ def compile_onnx_plan(
             "conversion nodes (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/"
             "Combination) own the math inside the traced graph (design §4.2/§6)."
         )
-    # plan 31 W5.1: an auto-collecting ONNX sink (omitted `outputs:`) discovers its
-    # leaves from the conversion producers — give it the (sink-inclusive) module
-    # dict before the planner consults `declare_io(Mode.ONNX)`. Inert in explicit mode.
-    if callable(getattr(export_sink, "bind_model_modules", None)):
-        export_sink.bind_model_modules(modules)
     # the folded OnnxExportSink anchors ALL its conversion leaves as a terminal
     # node (the planner keeps it via _demand_closure/_is_terminal_consumer +
     # pulls in the folded conversion nodes), so no flat `sinks=` are needed.
@@ -723,10 +718,6 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
         export_sink.model_name = validate_model_name(
             export_cfg.model_name or sanitised_model_name(run_name)
         )
-    # plan 31 W5.1: bind modules so an auto-collecting sink can resolve its leaves
-    # for the static manifest print (inert in explicit mode).
-    if callable(getattr(export_sink, "bind_model_modules", None)):
-        export_sink.bind_model_modules(cli.model._graph_modules)  # noqa: SLF001 - cli precedent
     rows = list(zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True))
     width = max((len(name) for name, _ in rows), default=1)
     print(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")

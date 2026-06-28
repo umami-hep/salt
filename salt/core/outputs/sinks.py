@@ -193,37 +193,6 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-def _auto_collect_fields(
-    model_modules: Mapping[str, Any], run_name: str
-) -> list[tuple[str, Any, Any]]:
-    """Walk the active conversion producers and collect their field manifests (plan 31 W5.1).
-
-    Returns one ``(output_key, producer, OutputField)`` triple per FINAL field of
-    every model module exposing the W5.0 ``output_columns(run_name, model_modules)``
-    surface (the conversion producers). Non-``final`` fields (exposed intermediates
-    a downstream node consumes — e.g. `MaskFormerObjects`' per-vertex leaves) are
-    DROPPED here so the sinks never auto-collect them (plan 31 R-C). The order is
-    the model module declaration order then the producer's field order — the H5
-    group column order + the ONNX tuple base order (the ONNX sink re-orders globals
-    -> combines -> per-token aux on top, §6.3).
-
-    Returns
-    -------
-    list[tuple[str, Any, OutputField]]
-        ``(output_key, producer, field)`` for every final field, in module order.
-    """
-    triples: list[tuple[str, Any, Any]] = []
-    for module in model_modules.values():
-        oc = getattr(module, "output_columns", None)
-        output_key = getattr(module, "output_key", None)
-        if not callable(oc) or not isinstance(output_key, str):
-            continue
-        for field in oc(run_name, model_modules):
-            if field.final:
-                triples.append((output_key, module, field))
-    return triples
-
-
 @dataclass(frozen=True)
 class OutputColumn:
     """One ``outputs.*`` leaf's declarative H5 column schema (design §1, §4 P4).
@@ -540,7 +509,6 @@ class H5OutputSink(_SinkCallback):
     def __init__(
         self,
         outputs: Sequence[OutputColumn | Mapping[str, Any]] | None = None,
-        collections: Sequence[str] | None = None,
         copy_inputs: Mapping[str, Sequence[str]] | None = None,
         write_pad_mask: bool | Sequence[str] = False,
         output: str = DEFAULT_OUTPUT,
@@ -550,20 +518,6 @@ class H5OutputSink(_SinkCallback):
         cols = [
             c if isinstance(c, OutputColumn) else OutputColumn(**dict(c)) for c in outputs or []
         ]
-        # AUTO-COLLECT mode (plan 31 W5.1): when `outputs` is omitted (or empty)
-        # the sink discovers the active conversion producers feeding the declared
-        # `collections` (or every stream with a `final` H5 producer leaf when
-        # `collections` is omitted too) and assembles each per-stream H5 group from
-        # their `output_columns()` field manifest — no hand-listed `OutputColumn`s.
-        # The explicit `outputs:` form is the OVERRIDE (the MaskFormer escape hatch
-        # + any manual column table) and wins when present.
-        self._auto_collect = not cols
-        self._collections = tuple(collections) if collections is not None else None
-        if not self._auto_collect and collections is not None:
-            raise ConfigError(
-                "H5OutputSink: `collections` is the auto-collect stream selector — it is "
-                "incompatible with an explicit `outputs:` column table (design §4.1 / plan 31 §3.2)"
-            )
         seen: set[str] = set()
         for col in cols:
             if col.key in seen:
@@ -573,13 +527,10 @@ class H5OutputSink(_SinkCallback):
                 )
             seen.add(col.key)
         self._explicit_columns: tuple[OutputColumn, ...] = tuple(cols)
-        # the resolved column table — the explicit list, or the auto-collected one
-        # cached after the first resolve (auto-collect mode, plan 31 W5.1).
+        # the resolved column table — the explicit list (resolved up-front), or the
+        # one resolved from the bound outputs: section on first access.
         self._columns: tuple[OutputColumn, ...] = tuple(cols)
-        self._columns_resolved = not self._auto_collect
-        # the model module dict, captured at fold/compile time so auto-collect can
-        # walk the active producers (plan 31 W5.1 — `bind_model_modules`).
-        self._model_modules: Mapping[str, Any] | None = None
+        self._columns_resolved = bool(cols)
         self.copy_inputs = {s: list(v) for s, v in (copy_inputs or {}).items()}
         self.write_pad_mask = write_pad_mask
         self.output = output
@@ -587,11 +538,10 @@ class H5OutputSink(_SinkCallback):
         # plan 34 W34.2 DUMB-SECTION mode: when an `outputs:` section is bound
         # (RunTaskOutput + InputCopyWriter + PadMaskWriter), the sink dumps ALL
         # active outputs.* leaves and derives its column schema + copy spec +
-        # mask streams from the SECTION manifest in section declaration order
-        # (NOT from producer discovery). The constructor args (outputs/copy_inputs/
-        # write_pad_mask) become a DUMB fallback when no section is bound. This is
-        # the plan-34 cutover path; the plan-31 auto-collect / explicit paths stay
-        # for the not-yet-migrated configs (W34.4 migrates them).
+        # mask streams from the SECTION manifest in section declaration order. The
+        # explicit constructor args (outputs/copy_inputs/write_pad_mask) are the
+        # OVERRIDE used when no section is bound (the W6 MaskFormer escape hatch +
+        # any manual column table). One of the two MUST resolve at run setup.
         self._output_section: Mapping[str, Any] | None = None
         self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
         # dumb-section copy resolution: None until a section binds; True means
@@ -633,18 +583,17 @@ class H5OutputSink(_SinkCallback):
         """
         return tuple(col.key for col in self._columns)
 
-    # -- auto-collect resolution (plan 31 W5.1) ---------------------------------
+    # -- column resolution ------------------------------------------------------
 
     def is_test_sink(self) -> bool:
-        """An `H5OutputSink` is ALWAYS the TEST persistence sink (plan 31 W5.1).
+        """An `H5OutputSink` is ALWAYS the TEST persistence sink.
 
         Overrides the base `_SinkCallback.is_test_sink`, which probes
-        ``declare_io(Mode.TEST).requires`` — a circular dependency in AUTO-COLLECT
-        mode (resolving the columns needs the model modules, which are bound only
-        AFTER this sink is recognised as the TEST sink). An `H5OutputSink` serialises
-        TEST predictions by construction (it always demands ``meta.rows`` at minimum),
-        so the discriminator is a cheap constant True — order-independent and
-        resolution-free.
+        ``declare_io(Mode.TEST).requires`` — a dumb-section sink resolves its columns
+        from the bound ``outputs:`` section, which may be bound only AFTER this sink is
+        recognised as the TEST sink. An `H5OutputSink` serialises TEST predictions by
+        construction (it always demands ``meta.rows`` at minimum), so the discriminator
+        is a cheap constant True — order-independent and resolution-free.
 
         Returns
         -------
@@ -652,16 +601,6 @@ class H5OutputSink(_SinkCallback):
             Always True.
         """
         return True
-
-    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
-        """Capture the model module dict so auto-collect can walk the producers (W5.1).
-
-        Called by `SaltModule.compile_mode` before the planner consults
-        `declare_io`, and by `writer_demand` (static-plan path) — both have the
-        module dict. In explicit-``outputs`` mode this is inert.
-        """
-        if self._auto_collect:
-            self._model_modules = model_modules
 
     # -- plan 34 W34.2 dumb-section binding -------------------------------------
 
@@ -674,7 +613,7 @@ class H5OutputSink(_SinkCallback):
         schema + input-copy spec + pad-mask streams from the SECTION manifest in
         SECTION DECLARATION ORDER (the H5 column-order authority, plan §4 / §7
         risk 4) — the constructor knobs are ignored. The section is bound by the
-        planner/SaltModule after the model (mirroring `bind_model_modules`).
+        planner/SaltModule after the model.
         """
         self._output_section = section
         # the section drives copy_inputs + write_pad_mask too (override the ctor
@@ -731,91 +670,38 @@ class H5OutputSink(_SinkCallback):
         ]
 
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve the H5 column table — explicit, or auto-collected from producers (W5.1).
+        """Resolve the H5 column table — explicit, or from the bound ``outputs:`` section.
 
-        In explicit-``outputs`` mode returns the configured columns unchanged. In
-        auto-collect mode it walks the captured model modules' conversion producers
-        (`_auto_collect_fields`), keeps the FINAL fields with an ``h5_name`` whose
-        stream is in the selected `collections` (or every such stream when
-        `collections` is omitted), groups them into ONE `OutputColumn` per producer
-        leaf (suffixes concatenated by field order), and HARD-ERRORS on a duplicate
-        flat H5 column (two producers minting the same ``{run_name}_{suffix}`` in one
-        stream). The resolved table is cached (it is run-name-stable: the suffixes
-        do not depend on the run name).
+        In explicit-``outputs`` mode returns the configured columns unchanged. With a
+        bound dumb ``outputs:`` section the schema comes from the section's
+        ``RunTaskOutput.manifest_fields`` in SECTION DECLARATION ORDER
+        (`_resolve_section_columns`). With neither a sink that has no way to know its
+        columns is a config error.
 
         Returns
         -------
         tuple[OutputColumn, ...]
-            The H5 columns, in producer declaration order.
+            The H5 columns, in declaration / section order.
 
         Raises
         ------
         ConfigError
-            When auto-collect has no captured modules, finds no producer leaf, or
-            two producers mint the same flat H5 column.
+            When neither explicit columns nor an ``outputs:`` section is configured.
         """
         if self._columns_resolved:
             return self._columns
         # plan 34 W34.2 DUMB-SECTION path: when the outputs: section is bound, the
         # H5 column schema comes from the section's RunTaskOutput.manifest_fields
-        # (value-free OutputField metadata) in SECTION DECLARATION ORDER — NOT from
-        # producer discovery. The section field ORDER drives the H5 column order.
+        # (value-free OutputField metadata) in SECTION DECLARATION ORDER. The section
+        # field ORDER drives the H5 column order.
         if self._is_dumb_section():
             return self._resolve_section_columns(run_name)
-        if self._model_modules is None:
-            raise ConfigError(
-                "H5OutputSink auto-collect has no model modules bound — the sink discovers "
-                "the conversion producers from the model (plan 31 W5.1); ensure it is wired at "
-                "callbacks: on a SaltModule (bind_model_modules is called at compile)"
-            )
-        triples = _auto_collect_fields(self._model_modules, run_name)
-        # group the FINAL H5 fields by producer output_key, preserving order
-        by_key: dict[str, list[Any]] = {}
-        key_order: list[str] = []
-        for output_key, _producer, field in triples:
-            if field.h5_name is None:
-                continue
-            stream = output_key.split(KEY_SEP)[1]
-            if self._collections is not None and stream not in self._collections:
-                continue
-            if output_key not in by_key:
-                by_key[output_key] = []
-                key_order.append(output_key)
-            by_key[output_key].append(field)
-        if not key_order:
-            raise ConfigError(
-                "H5OutputSink auto-collect found no producer with a final H5 output column"
-                + (f" in collections {list(self._collections)}" if self._collections else "")
-                + " — wire the conversion producers (ClassProbs/SeqClassProbs/Regression/...) in "
-                "model.modules, or use an explicit outputs: table (plan 31 §3.2)"
-            )
-        # STATIC HARD dup-name guard (plan 31 W5.1): two producers minting the same
-        # flat {run_name}_{suffix} in one stream is a ConfigError at resolve time
-        # (compile/open_schema), before any write.
-        seen_cols: dict[tuple[str, str], str] = {}
-        columns: list[OutputColumn] = []
-        for output_key in key_order:
-            fields = by_key[output_key]
-            stream = output_key.split(KEY_SEP)[1]
-            # all fields of one leaf must share the prefix policy (they always do —
-            # one op family per leaf); use the first field's prefix
-            prefix = fields[0].prefix
-            dtype = fields[0].dtype
-            suffixes = [f.h5_name for f in fields]
-            col = OutputColumn(key=output_key, suffixes=suffixes, dtype=dtype, prefix=prefix)
-            for column_name in col.column_names(run_name):
-                if (other := seen_cols.get((stream, column_name))) is not None:
-                    raise ConfigError(
-                        f"H5OutputSink auto-collect: flat column {column_name!r} in stream "
-                        f"{stream!r} is minted by BOTH {other} AND {output_key!r} — two producers "
-                        "cannot emit the same H5 column (plan 31 W5.1 static dup-name guard)"
-                    )
-                seen_cols[stream, column_name] = output_key
-            columns.append(col)
-        resolved = tuple(columns)
-        self._columns = resolved
-        self._columns_resolved = True
-        return resolved
+        raise ConfigError(
+            "H5OutputSink has no columns to write — give it an explicit `outputs:` "
+            "OutputColumn table, or compose a top-level `outputs:` section "
+            "(RunTaskOutput + InputCopyWriter + PadMaskWriter) that binds to it "
+            "(plan 34 W34.2)"
+        )
 
     def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve H5 columns from the bound ``outputs:`` section manifest (plan 34 W34.2).
@@ -975,10 +861,7 @@ class H5OutputSink(_SinkCallback):
             ``{dotted key: "sink 'H5OutputSink' demanding <key>"}`` in
             declaration order (outputs, then meta.rows, then masks).
         """
-        del reader
-        # capture the modules so auto-collect (omitted `outputs:`) can resolve on
-        # the static-plan path too (plan 31 W5.1); inert in explicit-`outputs` mode.
-        self.bind_model_modules(model_modules)
+        del model_modules, reader
         who = "sink 'H5OutputSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
@@ -1587,15 +1470,11 @@ class OnnxExportSink(_SinkCallback):
             leaf if isinstance(leaf, OnnxExportLeaf) else OnnxExportLeaf(**dict(leaf))
             for leaf in outputs or []
         ]
-        # AUTO-COLLECT mode (plan 31 W5.1): when `outputs` is omitted the sink
-        # collects the conversion producers' `output_columns()` ONNX fields and
-        # assembles the Athena tuple in the ORDERED contract (globals -> combines ->
-        # per-token aux, §6.3 — NOT executor topo order), with a static dup guard.
-        # The explicit `outputs:` form is the OVERRIDE (the W4 export configs keep
-        # their hand-listed tuple unchanged).
-        self._auto_collect = not leaves
-        self._leaves_resolved = not self._auto_collect
-        self._model_modules: Mapping[str, Any] | None = None
+        # The export tuple comes from EITHER the explicit `outputs:` leaf list (the
+        # W4 export configs / the MaskFormer escape hatch) OR a bound dumb `outputs:`
+        # section (plan 34 W34.2). With explicit leaves the tuple is resolved up
+        # front; with a section it resolves lazily on first access. One MUST resolve.
+        self._leaves_resolved = bool(leaves)
         # plan 34 W34.2 dumb-section binding (see H5OutputSink.bind_output_section).
         self._output_section: Mapping[str, Any] | None = None
         if leaves:
@@ -1629,14 +1508,6 @@ class OnnxExportSink(_SinkCallback):
                     )
                 seen_suffixes.add(suffix)
 
-    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
-        """Capture the model module dict so ONNX auto-collect can walk producers (W5.1).
-
-        Inert in explicit-``outputs`` mode.
-        """
-        if self._auto_collect:
-            self._model_modules = model_modules
-
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
         """Capture the ``outputs:`` section so the dumb ONNX sink names its leaves (plan 34 W34.2).
 
@@ -1650,7 +1521,6 @@ class OnnxExportSink(_SinkCallback):
         """
         self._output_section = section
         self._leaves_resolved = False
-        self._auto_collect = False
 
     def _is_dumb_section(self) -> bool:
         """Whether an ``outputs:`` section is bound (the dumb-section path is active).
@@ -1732,16 +1602,12 @@ class OnnxExportSink(_SinkCallback):
         return ordered
 
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """Resolve the export leaves — explicit, or auto-collected from producers (W5.1).
+        """Resolve the export leaves — explicit, or from the bound ``outputs:`` section.
 
-        In auto-collect mode it walks the captured model modules' conversion
-        producers (`_auto_collect_fields`), keeps the FINAL fields with an
-        ``onnx_name``, builds one `OnnxExportLeaf` per producer leaf (a per-class
-        ``ClassProbs``/regression leaf -> ``names`` split_scalars; a single
-        index/combination leaf -> ``name``), and ORDERS them per the Athena tuple
-        contract: GLOBAL float entries first, then COMBINATION entries, then the
-        PER-TOKEN aux entries (`ordered_output_names` rule, §6.3). A static dup
-        guard rejects two producers minting the same flat suffix. Cached.
+        With explicit leaves returns them unchanged. With a bound dumb ``outputs:``
+        section the tuple comes from the section's ``RunTaskOutput`` fields in section
+        declaration order (`_resolve_section_leaves`). With neither it is a config
+        error (the sink has no way to know its export tuple).
 
         Returns
         -------
@@ -1751,8 +1617,7 @@ class OnnxExportSink(_SinkCallback):
         Raises
         ------
         ConfigError
-            When auto-collect has no captured modules, finds no ONNX leaf, or two
-            producers mint the same flat suffix.
+            When neither explicit leaves nor an ``outputs:`` section is configured.
         """
         if self._leaves_resolved:
             return self._leaves
@@ -1760,75 +1625,11 @@ class OnnxExportSink(_SinkCallback):
         # section's RunTaskOutput mints (single-name, no re-split — LOCKED decision).
         if self._is_dumb_section():
             return self._resolve_section_leaves()
-        if self._model_modules is None:
-            raise ConfigError(
-                "OnnxExportSink auto-collect has no model modules bound — the sink discovers the "
-                "conversion producers from the model (plan 31 W5.1); ensure it is wired at "
-                "callbacks: on a SaltModule"
-            )
-        # import here to avoid a producers<->sinks import cycle at module load
-        from salt.core.outputs.producers import Combination  # noqa: PLC0415
-
-        triples = _auto_collect_fields(self._model_modules, self._run_name_for_onnx())
-        globals_block: list[OnnxExportLeaf] = []
-        combines_block: list[OnnxExportLeaf] = []
-        per_token_block: list[OnnxExportLeaf] = []
-        # group fields by producer output_key (one leaf per producer output)
-        by_key: dict[str, tuple[Any, list[Any]]] = {}
-        key_order: list[str] = []
-        for output_key, producer, field in triples:
-            if field.resolved_onnx_name is None:
-                continue
-            if output_key not in by_key:
-                by_key[output_key] = (producer, [])
-                key_order.append(output_key)
-            by_key[output_key][1].append(field)
-        for output_key in key_order:
-            producer, fields = by_key[output_key]
-            names = [f.resolved_onnx_name for f in fields]
-            onnx_dtype = fields[0].onnx_dtype
-            per_token = fields[0].axis == "per_token"
-            if per_token:
-                # a single per-token index leaf (argmax / union-find) -> `name`
-                leaf = OnnxExportLeaf(
-                    key=output_key, name=names[0], dtype=onnx_dtype, per_token=True
-                )
-                per_token_block.append(leaf)
-            elif len(names) == 1 and isinstance(producer, Combination):
-                combines_block.append(
-                    OnnxExportLeaf(key=output_key, name=names[0], dtype="float32")
-                )
-            else:
-                # a global float leaf -> `names` split_scalars (one scalar per name)
-                leaf = OnnxExportLeaf(key=output_key, names=names, dtype="float32")
-                globals_block.append(leaf)
-        ordered = (*globals_block, *combines_block, *per_token_block)
-        if not ordered:
-            raise ConfigError(
-                "OnnxExportSink auto-collect found no producer with an ONNX output leaf — wire the "
-                "conversion producers (ClassProbs/SeqClassIndex/VertexUnionFind/...) in "
-                "model.modules, or use an explicit outputs: table (plan 31 §3.3)"
-            )
-        self._validate_leaves(ordered)  # static dup guard (plan 31 W5.1)
-        self._leaves = ordered
-        self._leaves_resolved = True
-        return ordered
-
-    @staticmethod
-    def _run_name_for_onnx() -> str:
-        """A placeholder run name for ONNX manifest resolution.
-
-        ONNX suffixes are run-name-INDEPENDENT (the exporter prefixes
-        ``{model_name}_``), so the producer field manifest's onnx_name needs no real
-        run name; the field resolution only uses ``run_name`` to strip an H5 prefix,
-        which the ONNX side does not consult.
-
-        Returns
-        -------
-        str
-            A constant placeholder.
-        """
-        return "onnx"
+        raise ConfigError(
+            "OnnxExportSink has no export leaves — give it an explicit `outputs:` "
+            "OnnxExportLeaf list, or compose a top-level `outputs:` section "
+            "(RunTaskOutput) that binds to it (plan 34 W34.2)"
+        )
 
     @property
     def leaves(self) -> tuple[OnnxExportLeaf, ...]:
@@ -2006,10 +1807,7 @@ class OnnxExportSink(_SinkCallback):
         dict[str, str]
             ``{leaf key: "sink 'OnnxExportSink' demanding <key>"}``.
         """
-        del reader
-        # capture the modules so ONNX auto-collect (omitted `outputs:`) resolves on
-        # the static-plan path too (plan 31 W5.1); inert in explicit mode.
-        self.bind_model_modules(model_modules)
+        del model_modules, reader
         who = "sink 'OnnxExportSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.ONNX).requires)}
 

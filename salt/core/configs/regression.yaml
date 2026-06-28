@@ -155,91 +155,48 @@ model:
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4 folded ONNX conversion producers (design §6.2): each regression
-      # head's de-scaled ONNX prediction is published as an outputs.* leaf the
-      # OnnxExportSink names; plan-29 W5.2 the auto-collect H5OutputSink ALSO collects
-      # them (regression as an output this pass).
-      #
-      # plan 34 W34.3: RegressionTaskModule.forward now publishes RAW (scaled) preds
-      # in TEST/ONNX (the atomic forward-flip), so these are REAL Regression
-      # (RegressionDescaleOp) producers — they de-scale the raw preds back to physical
-      # values, matching the legacy regression WriterCallback in BOTH TEST H5 and ONNX.
-      # (Were IDENTITY TaskOutput passthroughs pre-flip; the swap keeps de-scale running
-      # exactly ONCE now that the forward no longer de-scales.) Each carries the head's
-      # targets + the SAME scaling the head config declares.
-      reg_normed_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: reg_normed
-          stream: jets
-          targets: HadronConeExclTruthLabelPt
-          norm_params: {mean: 1.0, std: 1.0}
-      reg_multinorm_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: reg_multinorm
-          stream: jets
-          targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
-          norm_params: {mean: [1.0, 2.0], std: [3.0, 4.0]}
-      reg_ratio_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: reg_ratio
-          stream: jets
-          targets: HadronConeExclTruthLabelPt
-          target_denominators: pt_btagJes
-      reg_multiratio_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: reg_multiratio
-          stream: jets
-          targets: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
-          target_denominators: [mass, pt_btagJes]
-      reg_seq_tracks_out:
-        class_path: salt.core.outputs.Regression
-        init_args:
-          task: reg_seq_tracks
-          stream: tracks
-          targets: [dphi, deta]
-          sequence: true # per-token head: NaN-fill padded positions (v1 run_inference)
 
-# plan-29 W5.2: the M4.5 WriterCallback (TaskWriter) is RETIRED for this config — the
-# auto-collect H5OutputSink below is the live TEST persistence sink. Null-merge deletes
-# the base2.yaml default writers so the WriterCallback is not assembled.
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
+# plan 34 W34.4d: this config is migrated OFF the (removed) auto-collect H5OutputSink
+# onto the get_output()-on-task + outputs:-section + dumb-sinks architecture (plan 34
+# §2), self-contained (no -cutover34 overlay needed). RegressionTaskModule.forward
+# publishes RAW (scaled) preds in TEST/ONNX (W34.3 forward-flip); a single
+# RunTaskOutput([reg tasks]) calls each head's get_output() — the de-scale folds onto
+# the task (replacing the W4/W5.2 per-head Regression producer nodes). The dumb sinks
+# dump ALL active outputs.* leaves; the SECTION supplies names + dtypes + ORDER.
+#
+# The top-level outputs: section is composed AFTER the model. Section writers in EXACT
+# v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter.
+# The RunTaskOutput tasks list is the v1 model-declaration order (the regression head
+# column order), so the H5 task-column order + the ONNX Athena tuple order match v1.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args:
+      streams: [jets, tracks]
+      variables:
+        jets: [pt_btagJes, eta_btagJes, mass]
+        tracks: [d0, z0SinTheta, dphi, deta, qOverP]
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [reg_normed, reg_multinorm, reg_ratio, reg_multiratio, reg_seq_tracks]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
 
-# plan-29 W4 declare-only ONNX sink (design §4.2): names the de-scaled regression
-# leaves into the flat Athena output tuple, in v1/oracle ORDER (KEPT explicit — the
-# ONNX side is unchanged from W4; the Athena physics names DIFFER from the H5 column
-# names, so the explicit `names:` are the authority for the tuple).
-# plan-29 W5.2 auto-collect H5 sink (plan 31 §3.2): discovers the regression identity
-# producers (reg_*_out) and assembles the eval H5 groups from their output_columns()
-# field manifest — the H5 columns are the task target/custom names ({run}_{suffix}),
-# REPRODUCING the legacy regression WriterCallback schema EXACTLY (the pilot's
-# hand-listed reg_normed/reg_multinorm_0 names DIVERGED from legacy and are replaced).
-# H5 names per head: reg_normed -> HadronConeExclTruthLabelPt; reg_multinorm ->
+# The DUMB sinks (plan 34 W34.4d): no init args — they dump ALL active outputs.* leaves,
+# names/dtypes/order from the bound section manifest. The OnnxExportSink names the
+# de-scaled regression leaves (the Athena physics names = the task output_suffixes:
+# reg_normed -> HadronConeExclTruthLabelPt; reg_multinorm ->
 # R10TruthLabel_R22v1_TruthJetMass/_TruthJetPt; reg_ratio -> pt; reg_multiratio ->
-# truthMass/truthPt; reg_seq_tracks -> dummyOutput_dPhi/dEta (per-token).
+# truthMass/truthPt; reg_seq_tracks -> dummyOutput_dPhi/dEta) in canonical tuple order
+# (globals then per-token) — byte-identical to the previous explicit OnnxExportSink
+# tuple (proven by test_w34_regression_cutover.py).
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      collections: [jets, tracks]
-      copy_inputs: {jets: [pt_btagJes, eta_btagJes, mass], tracks: [d0, z0SinTheta, dphi, deta, qOverP]}
-      write_pad_mask: [tracks]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.reg_normed, names: [HadronConeExclTruthLabelPt] }
-        - { key: outputs.jets.reg_multinorm, names: [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt] }
-        - { key: outputs.jets.reg_ratio, names: [pt] }
-        - { key: outputs.jets.reg_multiratio, names: [truthMass, truthPt] }
-        - { key: outputs.tracks.reg_seq_tracks, names: [dummyOutput_dPhi, dummyOutput_dEta] }
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: regression # Athena name: no '_'/'-' (validated at export only)
