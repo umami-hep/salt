@@ -756,6 +756,62 @@ class TestMaskFormerTargets:
         np.testing.assert_array_equal(out["labels.objects.mass"], mass)
         assert out["labels.objects.pt"].dtype == np.float32
 
+    def test_list_valued_raw_class_map_merge(self):
+        """MFU-2: a ``raw`` list merges several raw class ids into one mapped index.
+
+        Ports upstream ``MaskformerObjectConfig`` list-valued class merge. Both raw
+        5 (b) and raw 4 (c) collapse to mapped 0; null(-1) stays mapped LAST. A
+        single-int ``raw`` is the byte-identical special case (the rest of this class).
+        """
+        proc = self._proc(
+            class_map={
+                "heavy": {"raw": [5, 4], "mapped": 0},
+                "null": {"raw": -1, "mapped": 1},
+            }
+        )
+        # _raw_to_mapped merges both raws to 0, null last
+        assert proc._raw_to_mapped == {5: 0, 4: 0, -1: 1}
+        barcode = np.array([[101, 102, -1]], dtype=np.int64)
+        flavour = np.array([[5, 4, -1]], dtype=np.int32)  # both heavy, then null
+        parent = np.array([[101, 102, 0]], dtype=np.int64)
+        out = proc.process(self._batch(barcode, flavour, parent), np.s_[0:1], Mode.FIT)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[0, 0, 1]])
+
+    def test_merge_disjointness_rejected(self):
+        """MFU-2: a raw id mapped to two different classes is a config error."""
+        with pytest.raises(ConfigError, match="mapped to multiple classes"):
+            self._proc(
+                class_map={
+                    "b": {"raw": [5, 4], "mapped": 0},
+                    "c": {"raw": 4, "mapped": 1},  # raw 4 also claimed by b
+                    "null": {"raw": -1, "mapped": 2},
+                }
+            )
+        with pytest.raises(ConfigError, match="must not be empty"):
+            self._proc(
+                class_map={"b": {"raw": [], "mapped": 0}, "null": {"raw": -1, "mapped": 1}}
+            )
+
+    def test_num_objects_max_objects_bridge(self):
+        """MFU-2: ``num_objects``/``max_objects`` alias bridge matches upstream __post_init__."""
+        # alias only: num_objects -> max_objects
+        assert self._proc(num_objects=5, max_objects=None).max_objects == 5
+        # max_objects only: syncs back to num_objects
+        p = self._proc(num_objects=None, max_objects=7)
+        assert p.max_objects == 7 and p.num_objects == 7
+        # both set: max_objects wins, num_objects left as given
+        p = self._proc(num_objects=3, max_objects=9)
+        assert p.max_objects == 9 and p.num_objects == 3
+
+    def test_pv_class_validation(self):
+        """MFU-2: ``pv_class`` must be a valid non-null mapped index (upstream semantics)."""
+        # 3-class map (b,c,null) -> valid pv_class in [0, 1]
+        assert self._proc(pv_class=1).pv_class == 1
+        with pytest.raises(ConfigError, match="must be in"):
+            self._proc(pv_class=2)  # 2 == null index, out of non-null range
+        with pytest.raises(ConfigError, match="must be in"):
+            self._proc(pv_class=-1)
+
 
 class TestDataModule:
     def test_loader_num_workers_matches_direct(self, data):

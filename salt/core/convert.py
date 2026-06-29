@@ -1007,7 +1007,15 @@ def _mf_targets_processor(mf_config: Mapping[str, Any]) -> dict[str, Any]:
     class_map: dict[str, Any] = {}
     for name, spec in (obj.get("object_classes") or {}).items():
         key = "null" if name is None else str(name)
-        class_map[key] = {"raw": spec["raw"], "mapped": spec["mapped"]}
+        # pass 'raw' through UNTOUCHED — it may be an int (the common case) or a
+        # list[int] (a class merge, handled by MaskFormerTargets._checked_class_map).
+        # The null class may omit 'raw' (defaults to -1 there); only copy when present.
+        entry: dict[str, Any] = {"mapped": spec["mapped"]}
+        if "raw" in spec:
+            entry["raw"] = spec["raw"]
+        if "weight" in spec:
+            entry["weight"] = spec["weight"]
+        class_map[key] = entry
     init: dict[str, Any] = {
         # v1 mf_config.object.name — the READ truth-hadron group (e.g.
         # truth_hadrons), NOT the 'objects' decoder-query alias
@@ -1018,6 +1026,19 @@ def _mf_targets_processor(mf_config: Mapping[str, Any]) -> dict[str, Any]:
         "constituent_id": con["id_label"],
         "class_map": class_map,
     }
+    # object-selection config surface (MFU-2: carried, consumed in MFU-3). Pass
+    # each field through only when the v1 config sets it, so configs that don't use
+    # object selection produce a byte-identical mf_targets init_args.
+    for fld in ("cuts", "sort_by", "sort_descending", "pv_class", "max_lxy_mm", "lxy_field"):
+        if fld in obj:
+            init[fld] = obj[fld]
+    # legacy: v1 object.num_objects is the DEPRECATED alias for max_objects. v2's
+    # num_objects is reserved for the decoder query bank (set by the caller from
+    # mask_decoder.num_objects), so route the v1 alias to max_objects here (no
+    # double-set / no conflict with the decoder auto-set). max_objects wins.
+    max_objects = obj.get("max_objects", obj.get("num_objects"))
+    if max_objects is not None:
+        init["max_objects"] = max_objects
     return {"class_path": "salt.core.data.MaskFormerTargets", "init_args": init}
 
 

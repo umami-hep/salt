@@ -15,6 +15,7 @@ from __future__ import annotations
 import operator
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 import numpy as np
@@ -792,6 +793,44 @@ class MultiTarget(Processor):
 _OBJECT_STREAM = "objects"
 
 
+@dataclass(frozen=True)
+class _ObjectCut:
+    """A single field-bound cut on MaskFormer truth objects (MFU-2 config surface).
+
+    Lightweight v2 port of v1 ``salt.utils.configs.ObjectCut`` (configs.py) — a
+    keep-rule ``min <= batch[field] <= max``. It is CARRIED on the processor for
+    MFU-3 (object selection lands inside ``process()`` there); MFU-2 only parses
+    and validates it. Defined locally rather than importing the orphaned v1
+    dataclass (plan 39, Decision 5). NaN handling / PV exemption / drop semantics
+    are MFU-3 concerns and not encoded here.
+
+    Parameters
+    ----------
+    field : str
+        Object-group field the cut bounds.
+    min : float | None, optional
+        Inclusive lower bound; ``None`` disables it, by default None.
+    max : float | None, optional
+        Inclusive upper bound; ``None`` disables it, by default None.
+
+    Raises
+    ------
+    ConfigError
+        When both ``min`` and ``max`` are ``None`` (v1 ObjectCut.__post_init__).
+    """
+
+    field: str
+    min: float | None = None
+    max: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.min is None and self.max is None:
+            raise ConfigError(
+                f"MaskFormerTargets: ObjectCut on field {self.field!r} must set at least one of "
+                "min/max (v1 ObjectCut.__post_init__, configs.py)"
+            )
+
+
 class MaskFormerTargets(Processor):
     """MaskFormer object targets: ``object_class`` + per-constituent ``masks`` (design §6.2).
 
@@ -843,12 +882,16 @@ class MaskFormerTargets(Processor):
     constituent_id : str
         Constituent identity field tested against ``object_id`` to build masks
         (v1 ``constituent.id_label``; e.g. ``ftagTruthParentBarcode``).
-    class_map : Mapping[str, Mapping[str, int]]
-        ``{name: {raw: int, mapped: int}}`` (v1 ``object.object_classes``). MUST
-        contain a ``null`` entry mapped LAST (``mapped == len(class_map) - 1``),
-        and the ``mapped`` values MUST be exactly ``range(len(class_map))`` (v1
-        configs.py:39-42). jsonargparse may parse the YAML ``null:`` key as a
-        Python ``None`` — both spellings are accepted, normalised to ``"null"``.
+    class_map : Mapping[str, Mapping[str, Any]]
+        ``{name: {raw: int | list[int], mapped: int, weight?: float}}`` (v1
+        ``object.object_classes``). MUST contain a ``null`` entry mapped LAST
+        (``mapped == len(class_map) - 1``), and the ``mapped`` values MUST be
+        exactly ``range(len(class_map))`` (v1 configs.py:39-42). jsonargparse may
+        parse the YAML ``null:`` key as a Python ``None`` — both spellings are
+        accepted, normalised to ``"null"``. ``raw`` may be a single int (the
+        common case) or a list/tuple of ints that all map to the same ``mapped``
+        index — a class *merge* (v1 ``class_map`` tuple keys). An optional scalar
+        ``weight`` per class feeds :attr:`object_weights` (v1, default ``1.0``).
     object_stream : str
         File group holding the object features (v1 ``object.name``; e.g.
         ``truth_hadrons``). The reader serves it as ``raw.<object_stream>``.
@@ -864,14 +907,47 @@ class MaskFormerTargets(Processor):
         The number of object queries ``M`` (v1 ``num_objects``,
         MaskFormer.yaml:36). When set, the produced shapes carry it as a
         concrete dim (a static check that the file's object count matches the
-        decoder's query bank); None leaves ``M`` symbolic.
+        decoder's query bank); None leaves ``M`` symbolic. Doubles as the legacy
+        alias bridged to ``max_objects`` (see below).
+    cuts : Sequence[_ObjectCut | Mapping[str, Any]] | None, optional
+        Per-jet field cuts for MFU-3 object selection (v1 ``object.cuts``).
+        STORED, not consumed in MFU-2 — ``process()`` data behaviour is unchanged.
+        dicts are coerced to :class:`_ObjectCut`. Default None.
+    sort_by : str | None, optional
+        Object-group field to sort survivors by before truncation (v1
+        ``object.sort_by``). STORED for MFU-3. Default None (file slot order).
+    sort_descending : bool, optional
+        Sort direction for ``sort_by`` (v1 ``object.sort_descending``). STORED for
+        MFU-3. Default True.
+    pv_class : int | None, optional
+        Mapped class index identifying the primary vertex pinned at slot 0 (v1
+        ``object.pv_class``). STORED for MFU-3. Validated to a non-null mapped
+        index. ``None`` disables PV pinning. Default 0.
+    max_objects : int | None, optional
+        Max object slots retained per jet after MFU-3 selection (v1
+        ``object.max_objects``). STORED for MFU-3. ``None`` auto-links to
+        ``num_objects`` (the decoder query bank) via the legacy bridge.
+    max_lxy_mm : float | None, optional
+        |Lxy| threshold (mm) above which a vertex is re-labelled to null in MFU-3
+        (v1 ``object.max_lxy_mm``). STORED for MFU-3. Default None (disabled).
+    lxy_field : str, optional
+        Name of the Lxy field used by ``max_lxy_mm`` (v1 ``object.lxy_field``).
+        STORED for MFU-3. Default ``"Lxy"``.
+
+    Attributes
+    ----------
+    object_weights : list[float]
+        Per-class loss weights ordered by mapped index, derived from each class's
+        optional ``weight`` (v1 ``object_weights``). Carried for the MFU-5 loss.
 
     Raises
     ------
     ConfigError
         On a missing ``null`` class, a null not mapped last, ``mapped`` values
-        that are not ``range(len(class_map))``, a duplicate regression target,
-        or a non-positive ``num_objects``.
+        that are not ``range(len(class_map))``, a raw value shared across mapped
+        indices, a non-scalar class weight, a duplicate regression target, a
+        non-positive ``num_objects`` / ``max_objects``, an out-of-range
+        ``pv_class``, or an ``_ObjectCut`` with neither min nor max.
     """
 
     def __init__(
@@ -884,6 +960,13 @@ class MaskFormerTargets(Processor):
         constituent_stream: str,
         regression_targets: Sequence[str] | None = None,
         num_objects: int | None = None,
+        cuts: Sequence[_ObjectCut | Mapping[str, Any]] | None = None,
+        sort_by: str | None = None,
+        sort_descending: bool = True,
+        pv_class: int | None = 0,
+        max_objects: int | None = None,
+        max_lxy_mm: float | None = None,
+        lxy_field: str = "Lxy",
     ) -> None:
         super().__init__()
         self.object_class = str(object_class)
@@ -892,17 +975,57 @@ class MaskFormerTargets(Processor):
         self.object_stream = str(object_stream)
         self.constituent_stream = str(constituent_stream)
         self._raw_to_mapped = self._checked_class_map(class_map)
+        # per-class loss weights, ordered by mapped index (v1 derived property
+        # MaskformerObjectConfig.object_weights, configs.py). Carried for the MFU-5
+        # loss; unused in MFU-2/MFU-3. Defaults to 1.0 per class.
+        self.object_weights: list[float] = self._class_weights(class_map)
         self.regression_targets: tuple[str, ...] = tuple(regression_targets or ())
         if len(set(self.regression_targets)) != len(self.regression_targets):
             raise ConfigError(
                 f"MaskFormerTargets: duplicate regression targets in {self.regression_targets}"
             )
+
+        # --- object-selection config surface (MFU-2: stored, NOT consumed) -------
+        # Generic per-jet field cuts. jsonargparse may hand dicts → coerce to
+        # _ObjectCut (v1 MaskformerObjectConfig.__post_init__ dict→ObjectCut).
+        self.cuts: tuple[_ObjectCut, ...] = tuple(
+            c if isinstance(c, _ObjectCut) else _ObjectCut(**dict(c)) for c in (cuts or ())
+        )
+        self.sort_by = sort_by
+        self.sort_descending = bool(sort_descending)
+        self.max_lxy_mm = max_lxy_mm
+        self.lxy_field = str(lxy_field)
+
+        # legacy num_objects <-> max_objects bridge (v1 MaskformerObjectConfig
+        # __post_init__). In v2 num_objects is ALSO the decoder query bank (M, set
+        # from mask_decoder.num_objects in convert.py); this bridge therefore
+        # auto-links the MFU-3 truncation count (max_objects) to that query bank
+        # when the config leaves it unset — exactly v1's "max_objects auto-linked
+        # from model.mask_decoder.num_objects". max_objects wins when both are set.
+        if max_objects is None and num_objects is not None:
+            max_objects = num_objects
+        if num_objects is None and max_objects is not None:
+            num_objects = max_objects
         if num_objects is not None and num_objects < 1:
             raise ConfigError(f"MaskFormerTargets: num_objects must be >= 1, got {num_objects}")
+        if max_objects is not None and max_objects < 1:
+            raise ConfigError(f"MaskFormerTargets: max_objects must be >= 1, got {max_objects}")
         self.num_objects = num_objects
+        self.max_objects = max_objects
+
+        # PV class must be a valid non-null mapped index (v1 MaskformerObjectConfig
+        # __post_init__ pv_class validation, configs.py). null_index == n_non_null.
+        self.pv_class = pv_class
+        if pv_class is not None:
+            n_non_null = self.null_index
+            if not (0 <= pv_class < n_non_null):
+                raise ConfigError(
+                    f"MaskFormerTargets: pv_class={pv_class} must be in [0, {n_non_null - 1}] "
+                    "(non-null mapped indices; v1 configs.py)"
+                )
 
     @staticmethod
-    def _checked_class_map(class_map: Mapping[str, Mapping[str, int]]) -> dict[int, int]:
+    def _checked_class_map(class_map: Mapping[str, Mapping[str, Any]]) -> dict[int, int]:
         """Validate the class map (null LAST, mapped == range) and return raw->mapped.
 
         Reproduces the v1 ``MaskformerObjectConfig`` invariants (configs.py:36-42)
@@ -911,15 +1034,25 @@ class MaskFormerTargets(Processor):
         ``None``), null mapped LAST, and the ``mapped`` set exactly
         ``range(len(class_map))``.
 
+        A class entry's ``raw`` may be a single int OR a list/tuple of ints that
+        all map to the SAME ``mapped`` index — a class *merge* (v1
+        ``MaskformerObjectConfig.class_map`` property, configs.py, which keys the
+        map by a tuple of raws). The returned flat ``{raw: mapped}`` dict expands
+        each merged raw to its shared mapped index, so ``process()``'s
+        ``np.select`` over the dict keys handles merges with NO logic change. A
+        single-int ``raw`` produces the IDENTICAL dict as before. Merged raw
+        values MUST be disjoint across classes (no raw maps to two mapped indices).
+
         Returns
         -------
         dict[int, int]
-            ``{raw: mapped}`` for every class.
+            ``{raw: mapped}`` for every class, one key per (expanded) raw value.
 
         Raises
         ------
         ConfigError
-            On a missing null, a null not mapped last, or a malformed mapped set.
+            On a missing null, a null not mapped last, a malformed mapped set, an
+            empty raw list, or a raw value shared across two mapped indices.
         """
         if not class_map:
             raise ConfigError("MaskFormerTargets: class_map must not be empty (FD 1108)")
@@ -944,8 +1077,26 @@ class MaskFormerTargets(Processor):
                     f"MaskFormerTargets: class_map[{name!r}] is missing a 'raw' index "
                     "(only the 'null' class may omit it; v1 object_classes)"
                 )
-            # the null class's raw id defaults to -1 (v1 MaskFormer.yaml:177: null raw -1)
-            raw_to_mapped[int(spec.get("raw", -1))] = int(spec["mapped"])
+            mapped = int(spec["mapped"])
+            # the null class's raw id defaults to -1 (v1 MaskFormer.yaml:177: null raw -1).
+            # raw may be a scalar (the common case) or a list/tuple → class merge.
+            raw_spec = spec.get("raw", -1)
+            if isinstance(raw_spec, (list, tuple)):
+                if not raw_spec:
+                    raise ConfigError(
+                        f"MaskFormerTargets: class_map[{name!r}] 'raw' list must not be empty"
+                    )
+                raws = [int(r) for r in raw_spec]
+            else:
+                raws = [int(raw_spec)]
+            for r in raws:
+                if r in raw_to_mapped and raw_to_mapped[r] != mapped:
+                    raise ConfigError(
+                        f"MaskFormerTargets: raw class id {r} is mapped to multiple classes "
+                        f"({raw_to_mapped[r]} and {mapped}) — merged raws must be disjoint "
+                        "across mapped indices (v1 object_classes)"
+                    )
+                raw_to_mapped[r] = mapped
         if names["null"]["mapped"] != n - 1:
             raise ConfigError(
                 f"MaskFormerTargets: the 'null' class must be mapped LAST (to {n - 1}), got "
@@ -953,10 +1104,44 @@ class MaskFormerTargets(Processor):
             )
         if set(raw_to_mapped.values()) != set(range(n)):
             raise ConfigError(
-                f"MaskFormerTargets: mapped class indices {sorted(raw_to_mapped.values())} must be "
-                f"exactly range({n}) (v1 configs.py:42)"
+                f"MaskFormerTargets: mapped class indices {sorted(set(raw_to_mapped.values()))} "
+                f"must be exactly range({n}) (v1 configs.py:42)"
             )
         return raw_to_mapped
+
+    @staticmethod
+    def _class_weights(class_map: Mapping[str, Mapping[str, Any]]) -> list[float]:
+        """Per-class loss weights ordered by mapped index (v1 object_weights).
+
+        Ports v1 ``MaskformerObjectConfig.object_weights`` (configs.py): each class
+        carries an optional scalar ``weight`` (default ``1.0``). v1 returns them in
+        dict-iteration order; v2 orders explicitly by ``mapped`` index so the list
+        index aligns with the class index the MFU-5 loss expects. Stored, not
+        consumed, in MFU-2.
+
+        Returns
+        -------
+        list[float]
+            One weight per class, index ``i`` == the weight of mapped class ``i``.
+
+        Raises
+        ------
+        ConfigError
+            When a class ``weight`` is a list (must be a scalar; v1 assert).
+        """
+        names = {
+            ("null" if name is None else str(name)): dict(spec) for name, spec in class_map.items()
+        }
+        by_mapped: dict[int, float] = {}
+        for name, spec in names.items():
+            w = spec.get("weight", 1.0)
+            if isinstance(w, (list, tuple)):
+                raise ConfigError(
+                    f"MaskFormerTargets: class_map[{name!r}] 'weight' must be a scalar, got {w!r} "
+                    "(v1 object_weights, configs.py)"
+                )
+            by_mapped[int(spec["mapped"])] = float(w)
+        return [by_mapped[i] for i in range(len(by_mapped))]
 
     @property
     def null_index(self) -> int:
@@ -965,9 +1150,11 @@ class MaskFormerTargets(Processor):
         Returns
         -------
         int
-            ``len(class_map) - 1`` — the matcher's ``num_classes`` sentinel.
+            ``max(mapped values)`` == ``num_classes - 1`` — the matcher's
+            ``num_classes`` sentinel. Uses the max mapped value (not the count of
+            raw keys) so it stays correct when classes merge multiple raws.
         """
-        return len(self._raw_to_mapped) - 1
+        return max(self._raw_to_mapped.values())
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare the raw object/constituent fields -> ``labels.objects.*`` (ALL modes).
