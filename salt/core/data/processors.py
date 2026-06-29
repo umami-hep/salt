@@ -23,7 +23,7 @@ from ftag import Labeller
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 
 from salt.core.data.base import Processor, WorkerCtx
-from salt.core.graph.errors import ConfigError
+from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.planner import PlanStep
 from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, sym_dim, unflatten_spec
 
@@ -996,6 +996,41 @@ class MaskFormerTargets(Processor):
         self.max_lxy_mm = max_lxy_mm
         self.lxy_field = str(lxy_field)
 
+        # MFU-3 IDENTITY GATE (plan 39, risk #1). Object selection — and crucially
+        # the pv_class PV-pin REORDER — runs ONLY when the user EXPLICITLY configured
+        # cuts / sort_by / max_objects. It MUST key on the PRE-bridge `max_objects`
+        # argument: the num_objects -> max_objects bridge below sets self.max_objects
+        # from the decoder query bank for EVERY MaskFormer config, so gating on
+        # self.max_objects would fire selection unconditionally and break byte-
+        # identity with MFU-2 (pv_class defaults to 0, so the PV-pin would silently
+        # reorder slot 0). Upstream's _needs_object_selection (datasets.py:562) gates
+        # on max_objects too, but upstream's CLI populates max_objects from the
+        # decoder so it always selects; v2 deliberately keeps the unconfigured path a
+        # no-op. max_lxy relabel is a SEPARATE gate (self.max_lxy_mm is not None).
+        self._should_select: bool = (
+            bool(self.cuts) or sort_by is not None or max_objects is not None
+        )
+
+        # In v2 num_objects is the decoder query bank (the declared label M dim,
+        # set from mask_decoder.num_objects in convert.py) and max_objects is the
+        # MFU-3 selection truncation count. They MUST agree: declare_io produces
+        # object_class with M == num_objects while _select_objects truncates to
+        # max_objects, so a config that sets BOTH to different values would emit a
+        # [B, max_objects] array against a declared [B, num_objects] shape. The
+        # bridge below only equalises them when one is None, so guard the both-set
+        # case explicitly (v1 had a single alias, so this is newly reachable in v2).
+        if (
+            num_objects is not None
+            and max_objects is not None
+            and num_objects != max_objects
+        ):
+            raise ConfigError(
+                f"MaskFormerTargets: num_objects ({num_objects}) and max_objects "
+                f"({max_objects}) are both set but differ — num_objects is the decoder "
+                "query bank (declared label M) and max_objects is the selection "
+                "truncation count; they must be equal (set only one, or set both equal)"
+            )
+
         # legacy num_objects <-> max_objects bridge (v1 MaskformerObjectConfig
         # __post_init__). In v2 num_objects is ALSO the decoder query bank (M, set
         # from mask_decoder.num_objects in convert.py); this bridge therefore
@@ -1023,6 +1058,21 @@ class MaskFormerTargets(Processor):
                     f"MaskFormerTargets: pv_class={pv_class} must be in [0, {n_non_null - 1}] "
                     "(non-null mapped indices; v1 configs.py)"
                 )
+
+        # MFU-3 derived raw-id sets (mapped-index world -> raw-id world). PV raws:
+        # every raw whose mapped == pv_class (upstream pv_raw_values, configs.py:275)
+        # — these classes get pinned at slot 0, exempt from cuts/sorts. null raw: the
+        # raw whose mapped == null_index (upstream null_raw_value, configs.py:297) —
+        # the sentinel written to pad slots' class field so the np.select class-map
+        # maps them cleanly back to null_index.
+        self._pv_raw_values: tuple[int, ...] = (
+            tuple(r for r, m in self._raw_to_mapped.items() if m == self.pv_class)
+            if self.pv_class is not None
+            else ()
+        )
+        self._null_raw_value: int = next(
+            r for r, m in self._raw_to_mapped.items() if m == self.null_index
+        )
 
     @staticmethod
     def _checked_class_map(class_map: Mapping[str, Mapping[str, Any]]) -> dict[int, int]:
@@ -1173,7 +1223,19 @@ class MaskFormerTargets(Processor):
             The declared interface.
         """
         del mode
-        obj_fields = (self.object_class, self.object_id, *self.regression_targets)
+        # base fields always read (MFU-2). When selection is active, the cut/sort
+        # fields must also be read so _select_objects can evaluate them; when the
+        # Lxy relabel is active, lxy_field too. Both are added ONLY under their gate,
+        # so the unconfigured path declares the IDENTICAL requires as MFU-2 (byte-
+        # identity). dict.fromkeys dedupes while preserving first-seen order.
+        obj_field_list = [self.object_class, self.object_id, *self.regression_targets]
+        if self._should_select:
+            obj_field_list += [c.field for c in self.cuts]
+            if self.sort_by is not None:
+                obj_field_list.append(self.sort_by)
+        if self.max_lxy_mm is not None:
+            obj_field_list.append(self.lxy_field)
+        obj_fields = tuple(dict.fromkeys(obj_field_list))
         requires = {
             f"raw.{self.object_stream}": TensorSpec(kind="data", fields=obj_fields),
             f"raw.{self.constituent_stream}": TensorSpec(
@@ -1196,6 +1258,127 @@ class MaskFormerTargets(Processor):
             )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
+    def _select_objects(self, obj: np.ndarray) -> np.ndarray:
+        """Per-jet cuts -> PV-pin -> sort -> truncate (faithful port of v1 _select_objects).
+
+        Ports ``salt/data/datasets.py::_select_objects`` (upstream 39-165) into the
+        mapped-index world. Four per-jet phases:
+
+        1. **CUTS** — drop vertices failing any :class:`_ObjectCut`
+           (``min <= field <= max``); NaN (float) FAILS the cut (strict); AND across
+           cuts. PV is exempt.
+        2. **PV-PIN** — vertices whose raw class is in :attr:`_pv_raw_values` (raws
+           mapping to ``pv_class``) go to slot 0 in input order, EXEMPT from
+           cuts/sorts.
+        3. **SORT** — surviving non-PV vertices sorted by :attr:`sort_by`
+           (``np.argsort`` ``kind="stable"``; reversed if :attr:`sort_descending`).
+        4. **TRUNCATE** — keep ``concat([pv, non_pv])[:n_out]``,
+           ``n_out = max_objects``.
+
+        **Pad convention (risk #2).** The production v2 reader appends an
+        authoritative ``valid`` bool field to every assembled stream
+        (``stream.py:251-255``), keyed exactly as upstream's ``valid``; it is used
+        directly when present (upstream-faithful). The hand-built unit fixtures omit
+        ``valid``, so the code falls back to the v2 pad sentinel: signed-int label
+        fields — INCLUDING ``object_id`` — are padded with ``INT_PAD_SENTINEL = -1``
+        (``stream.py``), so ``object_id == -1`` <=> ``~valid``. Either source feeds
+        cut-candidate masking and the PV partition uniformly. A NEW ``[B, n_out]``
+        structured array is built (pad slots default to 0/False), then pad slots are
+        sentinel-filled: ``id -> -1`` (so ``build_target_masks`` treats them as
+        invalid) and the class field ``-> _null_raw_value`` (so the np.select
+        class-map maps them to ``null_index``).
+
+        Parameters
+        ----------
+        obj : np.ndarray
+            Structured object array ``[B, M_in]`` from ``raw.<object_stream>``.
+
+        Returns
+        -------
+        np.ndarray
+            A NEW structured ``[B, n_out]`` array of the same dtype, with all fields
+            permuted/truncated in lockstep and pad slots sentinel-filled.
+
+        Raises
+        ------
+        SchemaError
+            If a configured cut/sort field (or the class field needed for PV) is
+            absent from the object dtype.
+        """
+        n_jets, n_in = obj.shape
+        n_out = self.max_objects if self.max_objects is not None else n_in
+
+        # required fields must be present in the structured dtype (declare_io adds
+        # them to the read set; this guards a schema-less / mis-wired read).
+        needed: set[str] = {c.field for c in self.cuts}
+        if self.sort_by is not None:
+            needed.add(self.sort_by)
+        if self._pv_raw_values:
+            needed.add(self.object_class)
+        missing = needed - set(obj.dtype.names or ())
+        if missing:
+            raise SchemaError(
+                f"MaskFormerTargets: object selection needs fields {sorted(missing)} but "
+                f"raw.{self.object_stream} has {obj.dtype.names}. Add them to the object "
+                "stream variables/read set."
+            )
+
+        # candidate (non-pad) slots. The production v2 reader appends an
+        # authoritative `valid` bool field to every assembled stream
+        # (stream.py:251-255), keyed exactly as upstream's `valid`; prefer it so a
+        # legitimate object with object_id == -1 is NOT silently dropped. The
+        # hand-built unit fixtures omit `valid`, so fall back to the v2 pad sentinel
+        # object_id == -1 (INT_PAD_SENTINEL, stream.py) == ~valid.
+        if "valid" in (obj.dtype.names or ()):
+            valid = np.asarray(obj["valid"]).astype(bool)
+        else:
+            valid = np.asarray(obj[self.object_id]) != -1
+
+        # per-cut keep mask; NaN (float) FAILS the cut (strict); AND across cuts.
+        keep = valid.copy()
+        for cut in self.cuts:
+            vals = np.asarray(obj[cut.field])
+            ok = np.ones(vals.shape, dtype=bool)
+            if np.issubdtype(vals.dtype, np.floating):
+                ok &= ~np.isnan(vals)
+            if cut.min is not None:
+                ok &= vals >= cut.min
+            if cut.max is not None:
+                ok &= vals <= cut.max
+            keep &= ok
+
+        # PV identification (vectorised). PV is pinned at slot 0 and exempt from
+        # cuts/sorts. Restricted to non-pad slots.
+        if self._pv_raw_values:
+            pv_mask = np.isin(np.asarray(obj[self.object_class]), self._pv_raw_values) & valid
+        else:
+            pv_mask = np.zeros((n_jets, n_in), dtype=bool)
+
+        out = np.zeros((n_jets, n_out), dtype=obj.dtype)  # pad slots default 0/False
+        filled = np.zeros((n_jets, n_out), dtype=bool)
+        sort_vals = np.asarray(obj[self.sort_by]) if self.sort_by is not None else None
+        for j in range(n_jets):
+            is_pv_j = pv_mask[j]
+            pv_idx = np.where(is_pv_j)[0]
+            non_pv_idx = np.where(keep[j] & ~is_pv_j)[0]
+            if sort_vals is not None and non_pv_idx.size:
+                order = np.argsort(sort_vals[j][non_pv_idx], kind="stable")
+                if self.sort_descending:
+                    order = order[::-1]
+                non_pv_idx = non_pv_idx[order]
+            chosen = np.concatenate([pv_idx, non_pv_idx])[:n_out]
+            if chosen.size:
+                out[j, : chosen.size] = obj[j][chosen]
+                filled[j, : chosen.size] = True
+
+        # sentinel-fill pad slots so they don't collide with real ids/classes
+        # (v1 datasets.py:148-164). 'filled' (not a valid field) marks the pads.
+        pad = ~filled
+        if pad.any():
+            out[self.object_id][pad] = -1
+            out[self.object_class][pad] = self._null_raw_value
+        return out
+
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Build the object class, the truth masks, and the raw regression labels.
 
@@ -1217,6 +1400,14 @@ class MaskFormerTargets(Processor):
         con = batch.get(f"raw.{self.constituent_stream}")
         out: dict[str, np.ndarray] = {}
 
+        # MFU-3 object selection (cuts -> PV-pin -> sort -> truncate). GATED: only
+        # when the user explicitly configured cuts/sort_by/max_objects. When OFF,
+        # `obj` is the raw stream untouched -> the blocks below are byte-identical to
+        # MFU-2. The selection rebuilds a NEW [B, n_out] structured array so EVERY
+        # field (class, id, regression, lxy) is permuted/truncated IN LOCKSTEP.
+        if self._should_select:
+            obj = self._select_objects(obj)
+
         # object_class: map raw -> mapped from the ORIGINAL values (atomic, no
         # sequential x[x==k]=v mutation; v1 datasets.py:641-643). Unmapped raw
         # values fall through to the null index (v1 reads only configured classes,
@@ -1224,9 +1415,17 @@ class MaskFormerTargets(Processor):
         raw_class = np.asarray(obj[self.object_class])
         conds = [raw_class == raw for raw in self._raw_to_mapped]
         choices = [self._raw_to_mapped[raw] for raw in self._raw_to_mapped]
-        out[f"labels.{_OBJECT_STREAM}.object_class"] = np.select(
-            conds, choices, default=self.null_index
-        ).astype(np.int64)
+        object_class = np.select(conds, choices, default=self.null_index).astype(np.int64)
+
+        # MFU-3 Lxy relabel (SEPARATE gate, self.max_lxy_mm is not None; v1
+        # datasets.py:814-820). AFTER the class-map: vertices with |Lxy| > max_lxy_mm
+        # cannot be reconstructed by the tracker -> re-label to null. NaN-safe:
+        # np.abs(nan) > thr is always False, so null/pad slots (NaN or 0 Lxy) are
+        # never accidentally relabelled.
+        if self.max_lxy_mm is not None:
+            lxy = np.asarray(obj[self.lxy_field])
+            object_class[np.abs(lxy) > self.max_lxy_mm] = self.null_index
+        out[f"labels.{_OBJECT_STREAM}.object_class"] = object_class
 
         # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T]. v1
         # build_target_masks substitutes -1 ids with -999 IN PLACE before the

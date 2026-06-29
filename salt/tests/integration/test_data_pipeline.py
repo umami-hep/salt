@@ -793,15 +793,25 @@ class TestMaskFormerTargets:
             )
 
     def test_num_objects_max_objects_bridge(self):
-        """MFU-2: ``num_objects``/``max_objects`` alias bridge matches upstream __post_init__."""
+        """MFU-2 bridge + MFU-3 consistency guard.
+
+        Unlike upstream (where ``num_objects`` is a pure deprecated ALIAS for
+        ``max_objects``), v2 splits them: ``num_objects`` is the decoder query bank
+        / declared label M, ``max_objects`` is the selection truncation count. The
+        None-bridge auto-links them; setting BOTH to different values is a shape
+        mismatch (declared M != truncated M) and must raise (MFU-3 guard).
+        """
         # alias only: num_objects -> max_objects
         assert self._proc(num_objects=5, max_objects=None).max_objects == 5
         # max_objects only: syncs back to num_objects
         p = self._proc(num_objects=None, max_objects=7)
         assert p.max_objects == 7 and p.num_objects == 7
-        # both set: max_objects wins, num_objects left as given
-        p = self._proc(num_objects=3, max_objects=9)
-        assert p.max_objects == 9 and p.num_objects == 3
+        # both set EQUAL: fine
+        p = self._proc(num_objects=4, max_objects=4)
+        assert p.max_objects == 4 and p.num_objects == 4
+        # both set DIFFERENT: shape mismatch -> ConfigError (MFU-3 guard)
+        with pytest.raises(ConfigError, match="both set but differ"):
+            self._proc(num_objects=3, max_objects=9)
 
     def test_pv_class_validation(self):
         """MFU-2: ``pv_class`` must be a valid non-null mapped index (upstream semantics)."""
@@ -811,6 +821,128 @@ class TestMaskFormerTargets:
             self._proc(pv_class=2)  # 2 == null index, out of non-null range
         with pytest.raises(ConfigError, match="must be in"):
             self._proc(pv_class=-1)
+
+    # --- MFU-3 object selection ------------------------------------------------
+
+    def test_selection_gate_off_is_identity(self):
+        """MFU-3 IDENTITY GATE: cuts/sort_by/max_objects/max_lxy_mm all unset ->
+        process() is BYTE-IDENTICAL to MFU-2, INCLUDING when a pv_class object is
+        present (the pv_class=0 default must NOT reorder on its own).
+
+        The default ``_proc`` sets num_objects=3 (the decoder query bank), which
+        the bridge mirrors to max_objects=3 — but the gate keys on the PRE-bridge
+        explicit value, so selection stays OFF and nothing reorders.
+        """
+        proc = self._proc()  # no cuts/sort/max_objects/max_lxy; pv_class=0 default
+        # gate is OFF despite num_objects/max_objects being set by the bridge
+        assert proc._should_select is False
+        assert proc.max_objects == 3  # bridge still runs (MFU-2 behaviour intact)
+        # slot 0 is a c-jet (mapped 1), slot 1 is a b-jet == pv_class 0 (mapped 0).
+        # A PV-pin reorder would hoist the b to slot 0 -> [[0, 1, 2]]; identity keeps
+        # the file order -> [[1, 0, 2]].
+        barcode = np.array([[101, 102, -1]], dtype=np.int64)
+        flavour = np.array([[4, 5, -1]], dtype=np.int32)  # c (1), b (0=pv), null (2)
+        parent = np.array([[101, 102, 0]], dtype=np.int64)
+        pt = np.array([[7.0, 9.0, 0.0]], dtype=np.float32)
+        mass = np.array([[1.0, 2.0, 0.0]], dtype=np.float32)
+        out = proc.process(self._batch(barcode, flavour, parent, pt, mass), np.s_[0:1], Mode.FIT)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[1, 0, 2]])
+        # regression labels unpermuted (no selection permutation applied)
+        np.testing.assert_array_equal(out["labels.objects.pt"], pt)
+        np.testing.assert_array_equal(out["labels.objects.mass"], mass)
+        # masks identical to the v1 build_target_masks on the unpermuted barcodes
+        v1 = build_target_masks(torch.as_tensor(barcode.copy()), torch.as_tensor(parent)).numpy()
+        np.testing.assert_array_equal(out["labels.objects.masks"], v1)
+
+    def test_selection_pv_pin_hoists_slot0(self):
+        """PV-pin: a pv_class vertex is moved to slot 0, exempt from sort, in input order."""
+        # gate ON via sort_by; pv_class=0 (b). slot1 is the b (pv) -> hoisted to slot0.
+        proc = self._proc(sort_by="pt", sort_descending=True)
+        assert proc._should_select is True
+        assert proc._pv_raw_values == (5,)  # raw 5 (b) maps to pv_class 0
+        barcode = np.array([[201, 202, 203]], dtype=np.int64)
+        flavour = np.array([[4, 5, 4]], dtype=np.int32)  # c, b(pv), c
+        parent = np.array([[201, 202, 203]], dtype=np.int64)
+        pt = np.array([[10.0, 1.0, 20.0]], dtype=np.float32)
+        mass = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        out = proc.process(self._batch(barcode, flavour, parent, pt, mass), np.s_[0:1], Mode.FIT)
+        # slot0 = b (pv, mapped 0); non-PV sorted by pt desc: c@pt20 then c@pt10
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[0, 1, 1]])
+        # regression permuted in LOCKSTEP: pt [b=1, c=20, c=10]
+        np.testing.assert_array_equal(out["labels.objects.pt"], [[1.0, 20.0, 10.0]])
+
+    def test_selection_sort_descending_and_truncate(self):
+        """Non-PV survivors sort by sort_by (stable) and truncate to max_objects.
+
+        num_objects==max_objects==2 (the v2 consistency invariant: declared label M
+        == selection truncation count); the None-bridge links max_objects from
+        num_objects, and sort_by makes selection active.
+        """
+        proc = self._proc(sort_by="pt", sort_descending=True, num_objects=2, pv_class=None)
+        assert proc.max_objects == 2 and proc.num_objects == 2
+        barcode = np.array([[1, 2, 3]], dtype=np.int64)
+        flavour = np.array([[4, 4, 4]], dtype=np.int32)  # all c
+        parent = np.array([[1, 2, 3]], dtype=np.int64)
+        pt = np.array([[5.0, 30.0, 12.0]], dtype=np.float32)
+        mass = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        out = proc.process(self._batch(barcode, flavour, parent, pt, mass), np.s_[0:1], Mode.FIT)
+        # sorted desc by pt: 30, 12, (5 truncated) -> [B, 2]
+        assert out["labels.objects.object_class"].shape == (1, 2)
+        np.testing.assert_array_equal(out["labels.objects.pt"], [[30.0, 12.0]])
+
+    def test_selection_cut_drops_and_nan_fails(self):
+        """A cut drops failing vertices (NaN fails strict); dropped slots -> null + pad id."""
+        proc = self._proc(cuts=[{"field": "pt", "min": 5.0}], pv_class=None)
+        assert proc._should_select is True
+        barcode = np.array([[10, 11, 12]], dtype=np.int64)
+        flavour = np.array([[4, 4, 4]], dtype=np.int32)  # all c
+        parent = np.array([[10, 11, 12]], dtype=np.int64)
+        pt = np.array([[9.0, 2.0, np.nan]], dtype=np.float32)  # keep, drop(<5), drop(NaN)
+        mass = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        out = proc.process(self._batch(barcode, flavour, parent, pt, mass), np.s_[0:1], Mode.FIT)
+        # only the pt=9 vertex survives; the other two slots become null (mapped 2)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[1, 2, 2]])
+        # pad slots' barcode sentinel-filled to -1 -> no mask match
+        np.testing.assert_array_equal(out["labels.objects.pt"], [[9.0, 0.0, 0.0]])
+
+    def test_selection_max_lxy_relabel(self):
+        """max_lxy_mm relabels far vertices to null AFTER class-map; NaN Lxy is safe."""
+        proc = self._proc(max_lxy_mm=100.0, lxy_field="Lxy", pv_class=None)
+        assert proc._should_select is False  # max_lxy is a SEPARATE gate
+        b, m = 1, 3
+        obj = np.zeros(
+            (b, m),
+            dtype=[("barcode", "i8"), ("flavour", "i4"), ("pt", "f4"), ("mass", "f4"),
+                   ("Lxy", "f4")],
+        )
+        obj["barcode"] = [[1, 2, -1]]
+        obj["flavour"] = [[5, 4, -1]]  # b, c, null
+        obj["Lxy"] = [[50.0, 250.0, np.nan]]  # near, FAR(>100 -> null), NaN(safe)
+        con = np.zeros((b, 3), dtype=[("ftagTruthParentBarcode", "i8")])
+        con["ftagTruthParentBarcode"] = [[1, 2, 0]]
+        bundle = Bundle()
+        bundle.set("raw.truth_hadrons", obj)
+        bundle.set("raw.tracks", con)
+        out = proc.process(bundle, np.s_[0:1], Mode.FIT)
+        # b stays 0; c@Lxy250 -> null (2); the null slot stays 2 (NaN safe)
+        np.testing.assert_array_equal(out["labels.objects.object_class"], [[0, 2, 2]])
+
+    def test_selection_declare_io_requires_fields_only_when_gated(self):
+        """declare_io adds cut/sort/lxy fields to the obj-stream read set ONLY under gates."""
+
+        def obj_fields(proc):
+            req = flatten_spec(proc.declare_io(Mode.FIT).requires)
+            return set(req["raw.truth_hadrons"].fields)
+
+        # default (gate off): only class/id/regression fields (identity with MFU-2)
+        base = obj_fields(self._proc())
+        assert base == {"flavour", "barcode", "pt", "mass"}
+        assert "Lxy" not in base
+        # selection on: cut + sort fields added (deduped against regression pt)
+        sel = obj_fields(self._proc(sort_by="pt", cuts=[{"field": "mass", "min": 1.0}]))
+        assert "pt" in sel and "mass" in sel
+        # max_lxy on (separate gate): lxy_field added
+        assert "Lxy" in obj_fields(self._proc(max_lxy_mm=50.0))
 
 
 class TestDataModule:

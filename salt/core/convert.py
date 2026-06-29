@@ -1285,16 +1285,49 @@ def convert_stack(
         md_objects = (mask_decoder.get("init_args") or {}).get("num_objects")
         if md_objects is not None:
             data_block["modules"]["mf_targets"]["init_args"]["num_objects"] = md_objects
-        # ensure the object (truth_hadron) group is read
-        obj_name = (mf_config.get("object") or {}).get("name")
-        if obj_name and obj_name not in data_block["modules"]["reader"]["init_args"]["groups"]:
-            data_block["modules"]["reader"]["init_args"]["groups"][obj_name] = {
-                "global_object": False
-            }
+        # ensure the object (truth_hadron) group is read. MFU-3: when NO selection
+        # is configured the gate is OFF, so the reader leading-truncate to the
+        # decoder query bank (num_objects) IS the served object set — raw.<obj> is
+        # [B, num_objects] and mf_targets emits the declared [B, M=num_objects]
+        # labels (it re-truncates to the same n_out, so the two agree).
+        #
+        # CRITICAL (selection-vs-upstream): when selection IS configured we must NOT
+        # reader-truncate. Upstream runs cuts/PV-pin/sort over the FULL stored object
+        # width, THEN truncates to max_objects (datasets.py). Leading-truncating to
+        # num_objects first would feed _select_objects an arbitrary file-order subset
+        # and select a DIFFERENT object set whenever M_file > num_objects. Leave the
+        # group untruncated (full file width) and let _select_objects own the
+        # truncation (n_out == max_objects == num_objects via the gate's bridge).
+        obj = mf_config.get("object") or {}
+        _selection_active = (
+            bool(obj.get("cuts"))
+            or obj.get("sort_by") is not None
+            or obj.get("max_objects", obj.get("num_objects")) is not None
+        )
+        obj_groups = data_block["modules"]["reader"]["init_args"]["groups"]
+        obj_name = obj.get("name")
+        if obj_name:
+            obj_group = obj_groups.setdefault(obj_name, {"global_object": False})
+            if md_objects is not None and not _selection_active:
+                obj_group["truncate"] = md_objects
 
     # --- model modules -------------------------------------------------------
     modules: dict[str, Any] = {}
-    norm_streams = [s for s in (data.get("variables") or {}) if not s.startswith("_edge_features_")]
+    # MFU-3 NO_NORM: the MaskFormer object (truth-hadron) stream is a LABEL source
+    # for mf_targets, not an input feature — it must NOT be normalised or embedded.
+    # It is already kept out of `variables` (it is added to the reader groups
+    # separately above), so this exclusion is a no-op for the shipped configs; it
+    # guards against a future config that lists the object stream under variables.
+    mf_object_stream = (
+        ((data.get("mf_config") or {}).get("object") or {}).get("name")
+        if mask_decoder is not None
+        else None
+    )
+    norm_streams = [
+        s
+        for s in (data.get("variables") or {})
+        if not s.startswith("_edge_features_") and s != mf_object_stream
+    ]
     modules["norm"] = {
         "class_path": "salt.core.nn.Normaliser",
         "init_args": {
