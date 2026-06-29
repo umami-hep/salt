@@ -50,8 +50,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import scipy
 import torch
+from py_lap_solver.solvers import Solvers
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -59,6 +59,73 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
+
+# MFU-4 (upstream matcher.py): adopt the upstream py_lap_solver BATCHED LAP path in
+# place of v1's per-batch-element scipy ``linear_sum_assignment`` loop. The cost
+# matrix (``get_batch_cost``) is UNCHANGED — only which solver consumes it changes.
+# ``SOLVER_REGISTRY`` maps solver name -> solver instance for the py_lap_solver build
+# actually installed. The container ships py_lap_solver's full registry (it links
+# libstdc++ via LD_PRELOAD so the batched C++ extension imports), so upstream's
+# default ``"BatchedScipyOMP"`` IS present. We follow upstream EXACTLY: validate the
+# requested solver against this registry and raise on an unknown name (NO silent
+# fallback — a silent swap would mask a regressed container). LAP is exact, so every
+# registry solver yields the SAME total matched cost as scipy; only tie-breaking
+# order can differ.
+SOLVER_REGISTRY = Solvers.get_available_solvers()
+
+
+def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: int) -> Tensor:
+    """Fill unmatched assignments (-1 values) with remaining prediction indices (vectorized).
+
+    Ported verbatim from upstream ``salt.models.matcher`` — pure tensor logic that
+    appends the unused prediction indices (in sorted order) to the ``-1`` slots left
+    by the batched solver for padded/invalid targets. This reproduces v1's
+    ``list(idx) + sorted(default_idx - set(idx))`` tail.
+
+    Parameters
+    ----------
+    assignments : Tensor
+        Tensor of shape (batch_size, num_objects) containing assignment indices.
+        Values of -1 indicate unmatched objects.
+    num_predictions : int
+        Total number of predictions available.
+
+    Returns
+    -------
+    Tensor
+        Assignments with -1 values replaced by unused prediction indices.
+    """
+    batch_size, _num_objects = assignments.shape
+    device = assignments.device
+
+    # Create mask for unmatched assignments
+    unmatched_mask = assignments < 0
+
+    # Early exit if no unmatched assignments
+    if not unmatched_mask.any():
+        return assignments
+
+    all_indices = torch.arange(num_predictions, device=device).unsqueeze(0).expand(batch_size, -1)
+
+    # Mark which indices are already used (True == used)
+    used_mask = torch.zeros(batch_size, num_predictions, dtype=torch.bool, device=device)
+    valid_mask = assignments >= 0
+    if valid_mask.any():
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand_as(assignments)
+        used_mask[batch_indices[valid_mask], assignments[valid_mask]] = True
+
+    # Get unused indices (available for assignment), sorted per batch element
+    available_mask = ~used_mask
+    sort_keys = all_indices.float() + (~available_mask).float() * 1e10
+    sorted_indices = torch.argsort(sort_keys, dim=1)
+    sorted_available = torch.gather(all_indices, 1, sorted_indices)
+
+    # Rank each unmatched slot within its batch element, then gather its filler index
+    unmatched_ranks = torch.cumsum(unmatched_mask.long(), dim=1) - 1
+    filled_indices = torch.gather(sorted_available, 1, unmatched_ranks.clamp(min=0))
+
+    # Replace -1 values with the filled indices (only where unmatched_mask is True)
+    return torch.where(unmatched_mask, filled_indices, assignments)
 
 # M7 W2c-3 (the FINAL absorption): the MaskFormer matched loss + the Hungarian
 # matcher are now v2-NATIVE, copied VERBATIM into this module from v1
@@ -209,11 +276,13 @@ class HungarianMatcher(nn.Module):
     """Solve LSAP matching between predictions and targets via Hungarian algorithm.
 
     M7 W2c-3 v2-native absorption of v1 ``salt.models.matcher.HungarianMatcher``
-    (matcher.py:134-317), COPIED VERBATIM — the same cost matrix assembly
-    (``get_batch_cost``) and the same per-batch scipy ``linear_sum_assignment``
-    LAP (``lap``), so the matched assignment is byte-for-byte v1's (the MF1c gate
-    builds a fresh v1 ``HungarianMatcher`` and asserts ``torch.equal`` on the
-    permuted predictions). The v1 original is UNTOUCHED as the gate oracle.
+    (matcher.py:134-317). The cost matrix assembly (``get_batch_cost``) is byte-for-byte
+    v1's. MFU-4 replaces v1's per-batch-element scipy ``linear_sum_assignment`` loop
+    with the upstream py_lap_solver BATCHED path: the whole-batch cost is transposed to
+    ``[B, M, N]`` and solved in one ``solver.batch_solve`` call (padded targets excluded
+    via ``num_valid``). LAP is exact, so the assignment has the SAME total matched cost
+    as v1's scipy path (the MF1c gate asserts total-matched-cost optimality, not index
+    identity — ties + fill ordering may differ legitimately).
 
     The module aggregates multiple cost terms (classification, mask losses, optional
     regression) into a single cost matrix per batch element and solves the linear
@@ -229,6 +298,14 @@ class HungarianMatcher(nn.Module):
         Weights for individual loss components, e.g.
         ``{"object_class_ce": 1.0, "mask_dice": 1.0, "mask_ce": 0.0, "mask_focal": 0.0,
         "regression": 0.0}``.
+    solver_name : str, optional
+        Name of the py_lap_solver LAP solver to use, by default upstream's
+        ``"BatchedScipyOMP"`` (the OpenMP batched solver the container provides).
+
+    Raises
+    ------
+    ValueError
+        If ``solver_name`` is not available in ``SOLVER_REGISTRY``.
 
     Notes
     -----
@@ -240,12 +317,24 @@ class HungarianMatcher(nn.Module):
         num_classes: int,
         num_objects: int,
         loss_weights: dict[str, float],
+        solver_name: str = "BatchedScipyOMP",
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_objects = num_objects
         self.loss_weights = loss_weights
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
+
+        # MFU-4: validate the requested solver against the installed py_lap_solver build,
+        # EXACTLY as upstream does (matcher.py:__init__). Default mirrors upstream
+        # ("BatchedScipyOMP"); raise a clear error listing the available solvers if the
+        # name is unknown — NO silent fallback (a silent solver swap would mask a
+        # regressed container that dropped the batched OpenMP solver).
+        if solver_name not in SOLVER_REGISTRY:
+            available_solvers = ", ".join(sorted(SOLVER_REGISTRY))
+            msg = f"Unknown LAP solver '{solver_name}'. Available solvers: {available_solvers}"
+            raise ValueError(msg)
+        self.solver_name = solver_name
 
         self.global_step = 0
 
@@ -359,51 +448,35 @@ class HungarianMatcher(nn.Module):
             Assigned target indices per batch of shape ``[B, M]``; unassigned
             slots are filled to cover all ``num_objects`` by appending remaining indices.
         """
-        batch_size = preds["class_logits"].shape[0]
+        device = preds["class_logits"].device
 
-        idxs: list[list[int]] = []
-        self.default_idx = set(range(self.num_objects))
+        # Get the full cost matrix [B, N, M], then run the BATCHED LAP solver.
+        full_cost, batch_n = self.get_batch_cost(preds, targets)
+        # valid target counts per batch element -> 1-D numpy for ``num_valid``
+        batch_n = batch_n.squeeze(-1).cpu().numpy()
 
-        # Get the full cost matrix, then run lsap on each batch element
-        full_cost, n_batch = self.get_batch_cost(preds, targets)
-        full_cost = full_cost.to(torch.float32).cpu().numpy()
+        # MFU-4: solve all batch elements in one call. Transpose [B, N, M] -> [B, M, N]
+        # so targets are the solver ROWS and predictions the COLUMNS; ``num_valid=batch_n``
+        # restricts each problem to its valid target rows (the padded/NaN target rows
+        # M >= batch_n are sliced out, exactly as v1's per-element ``[:, :n_batch]`` slice
+        # dropped the NaN target columns). ``batch_solve`` returns [B, M] where entry
+        # [b, i] is the prediction column assigned to target row i (-1 for the padded
+        # rows beyond ``num_valid``).
+        solver = SOLVER_REGISTRY[self.solver_name]
+        full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
+        assignments = solver.batch_solve(full_cost, num_valid=batch_n)
+        assignments = torch.from_numpy(assignments).to(torch.int64).to(device)
 
-        for batch_idx in range(batch_size):
-            # get the cost matrix for this batch element
-            cost_matrix = full_cost[batch_idx][:, : n_batch[batch_idx]]
-
-            # get the optimal assignment
-            idx = self.lap(cost_matrix)
-
-            idxs.append(idx)
-
-        # get the device so we can put the indices on the same device as the predictions
-        d = preds["class_logits"].device
-        # format indices to allow simple indexing
-        idxs_tensor = torch.tensor(idxs).to(d)
-        batch_arange = torch.arange(len(idxs)).unsqueeze(1).to(d)
-        idxs_tuple = (batch_arange, idxs_tensor)  # shape-compatible indexing tuple
+        # Fill the -1 (padded-target) slots with the unused prediction indices in sorted
+        # order, reproducing v1's ``+ sorted(default_idx - set(idx))`` tail. full_cost is
+        # now [B, M, N], so shape[1] (== num_objects, square cost) is the prediction count.
+        assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
 
         self.global_step += 1
-        return idxs_tuple
-
-    def lap(self, cost: Any) -> list[int]:
-        """Solve the linear sum assignment problem for a single cost matrix.
-
-        Parameters
-        ----------
-        cost : Any
-            Cost matrix of shape ``[N, M]``.
-
-        Returns
-        -------
-        list[int]
-            Ordered list of selected target indices ``idx`` aligned with sources,
-            extended by appending any remaining indices to cover all ``num_objects``.
-        """
-        src_idx, tgt_idx = scipy.optimize.linear_sum_assignment(cost)
-        idx = src_idx[tgt_idx]
-        return list(idx) + sorted(self.default_idx - set(idx))
+        # Same indexing-tuple contract as before: (batch_arange [B, 1], assignments [B, M]),
+        # consumed downstream as ``preds["objects"][k][idx]`` to permute predictions.
+        batch_arange = torch.arange(len(assignments)).unsqueeze(1).to(device)
+        return (batch_arange, assignments)
 
 
 # ---------------------------------------------------------------------------
