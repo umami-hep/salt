@@ -881,7 +881,38 @@ class H5OutputSink(_SinkCallback):
                 req[f"masks.{stream}"] = TensorSpec(
                     shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
                 )
+        # W6b: a manifest-only extra-group node (the MaskFormer object writer)
+        # computes its columns from bundle leaves the SINK must demand on its behalf
+        # (the MaskDecoder products, the MaskFormerTargets labels, the constituent pad
+        # mask) — fold each node's `sink_requires` into the sink's TEST demand so the
+        # planner keeps those producers alive and the consume bundle carries the
+        # leaves. Empty for the shipped non-MaskFormer sinks (byte-identical no-op).
+        for key, spec in self._extra_group_requires().items():
+            req.setdefault(key, spec)
         return IO(requires=unflatten_spec(req), produces={})
+
+    def _extra_group_requires(self) -> dict[str, TensorSpec]:
+        """The decoder/truth/pad-mask demand of each extra-group node, for the sink to anchor (W6b).
+
+        A manifest-only extra-group node mints no graph leaf, so it cannot anchor its
+        own demand; the host sink folds these requires into its TEST ``declare_io``
+        (and thus ``writer_demand``). Nodes without a ``sink_requires`` (the W6a stub,
+        any future graph-folded extra-group node) contribute nothing.
+
+        Returns
+        -------
+        dict[str, TensorSpec]
+            The merged extra-group requires (empty when no extra_groups are configured
+            or none expose ``sink_requires``).
+        """
+        out: dict[str, TensorSpec] = {}
+        for name in self._extra_group_names:
+            node = self._extra_group_node(name)
+            sink_requires = getattr(node, "sink_requires", None)
+            if callable(sink_requires):
+                for key, spec in sink_requires().items():
+                    out.setdefault(key, spec)
+        return out
 
     # -- static demand (consumed by SaltModule, design §8) ----------------------
 
@@ -1057,6 +1088,16 @@ class H5OutputSink(_SinkCallback):
         # pad masks last
         for stream, arr in self._mask_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
+        # W6b: extra-group nodes (the MaskFormer object writer) pack their own
+        # structured arrays from the demanded decoder/truth leaves — byte-identical
+        # to the legacy MaskFormerObjectWriter (the SAME columns()/write() ops). The
+        # `objects` / `object_masks` groups are NEW (extra) groups; the per-token
+        # MaskIndex rides the constituent reader stream and is re-expanded to the
+        # file token length like any per-token column. Appended AFTER the
+        # copy/output/mask fragments so the join order matches `_merge_columns`
+        # (extra-group columns come last). Empty for non-MaskFormer sinks.
+        for stream, arr in self._extra_group_fragments(bundle, rows).items():
+            fragments.setdefault(stream, []).append(arr)
         for stream, arrs in fragments.items():
             for arr in arrs:
                 if len(arr) != n:
@@ -1163,6 +1204,48 @@ class H5OutputSink(_SinkCallback):
             mask = bundle.get(mask_key).detach().cpu().numpy()
             arr = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
             out[stream] = _pad_to(arr, self._seq_lengths[stream])
+        return out
+
+    def _extra_group_fragments(self, bundle: Bundle, rows: slice) -> dict[str, np.ndarray]:
+        """Pack each extra-group node's per-batch structured arrays (W6b).
+
+        For each configured ``extra_groups`` node exposing a ``write`` (the
+        MaskFormer object writer), calls ``write(bundle, rows, run_name, precision)``
+        and collects its per-group structured arrays. A per-token fragment landing on
+        a reader sequence stream (the ``MaskIndex`` on the constituent stream) is
+        re-expanded to the file token length (the v1 ``maybe_pad`` quirk, ``_pad_to``)
+        so it aligns with the reader columns it joins; the NON-reader ``objects`` /
+        ``object_masks`` groups keep their ``[B, M]`` / ``[B, M, T]`` compactness
+        verbatim. Nodes without a ``write`` (the W6a stub) contribute nothing.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            ``{group: structured array}`` per extra-group column block.
+
+        Raises
+        ------
+        ConfigError
+            When two extra-group nodes both write the same group (attribution).
+        """
+        out: dict[str, np.ndarray] = {}
+        if not self._extra_group_names:
+            return out
+        precision = "half" if self.half_precision else "full"
+        for name in self._extra_group_names:
+            node = self._extra_group_node(name)
+            writer = getattr(node, "write", None)
+            if not callable(writer):
+                continue
+            for group, arr in writer(bundle, rows, self._run_name, precision).items():
+                if group in out:
+                    raise ConfigError(
+                        f"H5OutputSink: extra-group group {group!r} written by more than one "
+                        f"extra_groups node (one node owns one group, design §8) — at {name!r}"
+                    )
+                if group in self._seq_lengths and arr.ndim >= 2:
+                    arr = _pad_to(arr, self._seq_lengths[group])
+                out[group] = arr
         return out
 
     def _copy_fragments(self, rows: slice) -> dict[str, np.ndarray]:
@@ -1650,6 +1733,13 @@ class OnnxExportSink(_SinkCallback):
         if leaves:
             self._validate_leaves(leaves)
         self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
+        # W6b: the EXPLICIT leaves (the MaskFormer object reduces — leading_object +
+        # object_index) survive a later `bind_output_section`: when a dumb section is
+        # ALSO bound (the MaskFormer cutover names the 1:1 head leaves through the
+        # section AND the object reduces explicitly), `_resolve_section_leaves` merges
+        # these on top of the section's RunTaskOutput leaves. Empty for the
+        # section-only (gn2v2-opendata) and explicit-only (W4 export) configs.
+        self._explicit_leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
         self.model_name = model_name
 
     @staticmethod
@@ -1760,6 +1850,13 @@ class OnnxExportSink(_SinkCallback):
                     globals_block.append(
                         OnnxExportLeaf(key=leaf_key, name=suffix, dtype=field.onnx_dtype)
                     )
+        # W6b: merge the EXPLICIT leaves (the MaskFormer object reduces a section
+        # cannot mint — leading_object split_scalars + the object_index per-token
+        # leaf) on top of the section leaves, each into its block so the canonical
+        # globals-then-per-token Athena tuple order holds. The dup guard below
+        # rejects any key/suffix clash between the section and explicit leaves.
+        for leaf in self._explicit_leaves:
+            (per_token_block if leaf.per_token else globals_block).append(leaf)
         ordered = (*globals_block, *per_token_block)
         if not ordered:
             raise ConfigError(

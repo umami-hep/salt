@@ -58,6 +58,7 @@ from salt.core.outputs.sinks import (
 )
 from salt.core.outputs.writers import (
     InputCopyWriter,
+    MaskFormerObjectsSink,
     OutputSectionWriter,
     PadMaskWriter,
     RunTaskOutput,
@@ -76,6 +77,7 @@ __all__ = [
     "MFLeadVertexDecorator",
     "MaskFormerObject",
     "MaskFormerObjects",
+    "MaskFormerObjectsSink",
     "OnnxExportLeaf",
     "OnnxExportSink",
     "OutputColumn",

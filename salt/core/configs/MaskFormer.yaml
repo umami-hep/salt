@@ -221,6 +221,24 @@ model:
           # maskformer_loss.py:42,225-226), NOT mask_focal (sigmoid_focal_loss,
           # :67,223-224) — they are different loss functions; mask_ce is faithful
           loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
+      # W6b ONNX FOLD — the MaskFormer object RECONSTRUCTION node (producers.py
+      # MaskFormerObjects): runs get_maskformer_outputs ONCE in the ONNX trace and
+      # mints the two object export leaves the OnnxExportSink names —
+      #   outputs.objects.leading_object  (global float32, the leading-object R
+      #     regression scalars; folds the legacy leading_object reduce), and
+      #   outputs.tracks.object_index     (int8 per-token, the per-constituent
+      #     owning-object index; folds the legacy object_index reduce -> HadronIndex).
+      # ONNX-only by construction: demand-gated, so TEST/FIT/VAL prune it (the eval-H5
+      # objects/object_masks/MaskIndex columns come from the outputs: section's
+      # maskformer_objects sink node, NOT this node). n_reg == the 5 object-regression
+      # targets (preds.objects.regression width).
+      maskformer_objects_onnx:
+        class_path: salt.core.outputs.MaskFormerObjects
+        init_args:
+          n_reg: 5 # == len(regression.targets) — the leading-object regression width
+          regression_task: regression # the leading_object ONNX source (preds.objects.regression)
+          stream: objects
+          constituent_stream: tracks
       # split the (register-free) encoded.seq back into per-stream tensors so the
       # track_origin head reads encoded.tracks (design §3.3 production split path)
       split:
@@ -249,59 +267,88 @@ model:
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
 
-# plan 34 W34.4c — MaskFormer stays on the LEGACY WriterCallback path (deliberate,
-# the W6 hard rule). This config's `writers:` block ALREADY declares all four
-# writers EXPLICITLY (inputs_copy / tasks / pad_mask / object_writer) — it never
-# relied on the base2 default, so the base2 flip (W34.4c) does NOT break it; this
-# block is unchanged. The 1:1 jets_classification / track_origin heads are NOT
-# moved to an outputs: section here because the MaskFormerObjectWriter's eval H5
-# object groups (class probs + MaskIndex + the object_masks extra_groups group) and
-# its ONNX leading_object / object_index reduces have NO dumb-H5OutputSink /
-# get_output equivalent yet: `MaskFormerObjects` is ONNX-ONLY by construction
-# (producers.py:1752-1755) and the full MaskFormer ONNX descale is flagged a W6
-# hard rule (plan §9 line 149; reduces.py). A hybrid (1:1 heads on a dumb sink +
-# object_writer on the WriterCallback) would double-own the single eval H5 file and
-# risk an ONNX-port collision, so MaskFormer migrates WHOLESALE in W6 (extra_groups
-# sink support + MaskFormer descale), NOT here. Current MaskFormer ONNX behaviour is
-# preserved byte-for-byte.
-writers:
-  modules:
-    inputs_copy: {class_path: salt.core.writers.InputCopyWriter}
-    # the jet + track tasks ONLY — the object-class/mask/regression are owned by
-    # the object writer + matched loss, NOT the TaskWriter. Select by task
-    # INSTANCE name so the objects-stream `regression` head's
-    # preds.objects.regression is the object writer's export port alone (no
-    # two-writer ONNX-port collision); `regression` is deliberately omitted
-    tasks:
-      class_path: salt.core.writers.TaskWriter
-      init_args: {tasks: [jets_classification, track_origin]}
-    pad_mask: {class_path: salt.core.writers.PadMaskWriter}
-    # the MaskFormer object writer (AM §3; FD 1186-1213): TEST class probs +
-    # MaskIndex + object_masks group; ONNX leading_object + object_index reduces
-    object_writer:
-      class_path: salt.core.writers.MaskFormerObjectWriter
-      init_args:
-        object_classes: [b, c, "null"] # null LAST (v1 object.class_names; quoted string)
-        object_stream: objects
-        constituent_stream: tracks
-        regression_task: regression # the leading_object ONNX source (preds.objects.regression)
+# W6b — MaskFormer is now FULLY off the legacy `writers:` (WriterCallback) path:
+# the eval H5 + ONNX export are produced by the v2-native outputs: section + the
+# dumb H5OutputSink / OnnxExportSink callbacks (the gn2v2-opendata pattern). The
+# object groups fold onto the H5OutputSink `extra_groups` seam (W6a): the
+# maskformer_objects section node (MaskFormerObjectsSink) emits the v2-native
+# `objects` group (class probs + class_label) + the `object_masks` group
+# (truth_mask + mask_logits) + the MaskIndex column on tracks — BYTE-IDENTICAL to
+# the MFU-6 MaskFormerObjectWriter. The object preds stay in the v2-native
+# `objects` group (named by object_stream), NOT merged into the truth_hadrons
+# stream group (the full upstream truth_hadrons eval-H5 merge is DEFERRED; USER
+# DECISION 2026-06-30). The per-object regression EVAL columns stay DEFERRED too
+# (see the regression head's :197-211 note). Parity is gated in
+# test_maskformer_fold_w6b.py on the writer-owned objects/object_masks/MaskIndex
+# columns + the recorded objects-vs-truth_hadrons / deferred-regression allowlist.
+#
+# Section writers in v1 H5 column order — InputCopyWriter -> RunTaskOutput task
+# fields (the 1:1 jet + track heads) -> PadMaskWriter -> maskformer_objects (the
+# extra-group object columns, appended last). The `regression` (object-regression)
+# head is NOT in the RunTaskOutput list: its preds.objects.regression is owned by
+# the matched loss (FIT|VAL) + the maskformer_objects_onnx node (ONNX) alone.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]} # all source fields (v1 default), copy_inputs={} parity
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification, track_origin]
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+  # the W6b sink-hosted MaskFormer object writer — relocates MaskFormerObjectWriter
+  # onto the H5OutputSink extra_groups seam (manifest-only; the sink folds its demand
+  # + calls its write). Emits objects [B, M] (MaskFormer_pb/_pc/_pnull + class_label)
+  # + object_masks [B, M, T] (truth_mask + mask_logits) + tracks MaskFormer_MaskIndex.
+  maskformer_objects:
+    class_path: salt.core.outputs.MaskFormerObjectsSink
+    init_args:
+      object_classes: [b, c, "null"] # null LAST (v1 object.class_names; quoted string)
+      object_stream: objects
+      constituent_stream: tracks
+      regression_task: regression
 
+# The DUMB sinks: H5OutputSink dumps ALL active outputs.* leaves (names/dtypes/order
+# from the bound outputs: section manifest) AND hosts the maskformer_objects
+# extra-group node (extra_groups: [maskformer_objects]). The OnnxExportSink names the
+# two MaskFormer object export leaves the maskformer_objects_onnx node mints —
+# leading_object (5 leading-object regression scalars, split_scalars) + object_index
+# (HadronIndex int8 per-token) — plus the section's get_output ONNX leaves
+# (MFv2_pb/_pc/_pu jet flavour + _TrackOrigin) in canonical Athena tuple order.
 callbacks:
   # MaskformerMetrics consumes matched.objects.* -> a FIT/VAL graph sink (FD
   # 1200-1202; keeps the matched loss alive under pruning)
   maskformer_metrics:
     class_path: salt.core.callbacks.MaskformerMetrics
+  h5_output:
+    class_path: salt.core.outputs.H5OutputSink
+    init_args:
+      extra_groups: [maskformer_objects] # the W6a non-stream object-group fold
+  onnx_export:
+    class_path: salt.core.outputs.OnnxExportSink
+    init_args:
+      # the two MaskFormer object reduces (maskformer_objects_onnx leaves), in v1
+      # emission order — leading-object scalars then the per-constituent index.
+      outputs:
+        - key: outputs.objects.leading_object # global float32 leading-object regression
+          names: [leading_objects_pt, leading_objects_Lxy, leading_objects_deta,
+                  leading_objects_dphi, leading_objects_mass]
+        - key: outputs.tracks.object_index # int8 per-token owning-object index
+          name: HadronIndex # OBJECT_INDEX.onnx (the PINNED test/onnx suffix divergence)
+          dtype: int8
+          per_token: true
 
 export: # export-ONLY half (design §5.1, §7); inert during fit/test
   model_name: MFv2 # Athena name: no '_'/'-'
   inputs:
     - {port: inputs.jets, name: jet_features} # [1, F] global
     - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # TaskWriter declares MFv2_pb/_pc/_pu (jet flavour) + _TrackOrigin, and the
-  # MaskFormerObjectWriter declares the leading_object 5 suffixes (from
-  # preds.objects.regression) + object_index (HadronIndex int8, from
-  # objects.masks). Inspect with `salt2 graph resolve -c <this file>`.
+  # outputs: NONE — the OnnxExportSink names the conversion leaves (above): the
+  # section's get_output leaves (MFv2_pb/_pc/_pu jet flavour + _TrackOrigin) and the
+  # maskformer_objects_onnx leading_object (5 leading-object regression scalars) +
+  # object_index (HadronIndex int8). Inspect with `salt2 graph resolve -c <this file>`.
 
 trainer:
   max_epochs: 40

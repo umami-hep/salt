@@ -1861,18 +1861,37 @@ class MaskFormerObjects(nn.Module):
             The declared requires/produces for this conversion node.
         """
         del mode
+        # ONNX-ONLY ports (W6b — same gate as `VertexUnionFind`). The
+        # null-suppression + pT-reorder `get_maskformer_outputs` chain is shaped for
+        # the traced export batch (this node is "ONNX-only by construction", the class
+        # docstring), so its ports are gated to `Mode.ONNX` rather than the
+        # demand-gating the SHARED softmax producers use. This makes the node INACTIVE
+        # in FIT/VAL/TEST — so a config that wires it for ONNX export alongside an
+        # object-regression head opted OUT of TEST eval (``expose: [fit, val, onnx]``,
+        # the MaskFormer.yaml W6b cutover) does NOT trip the planner's pre-prune
+        # connectivity check on this node's ``preds.<stream>.<reg_task>`` require
+        # (unsatisfiable in TEST, where the regression pred is not exposed). The ONNX
+        # plan_hash is unchanged (the ports are identical in ONNX).
         requires = {
-            self.class_probs_key: TensorSpec(shape=None, dtype="float32", kind="data"),
-            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data"),
-            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.class_probs_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
+            ),
+            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
+            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
         }
         produces = {
-            self.leading_key: TensorSpec(shape=None, dtype="float32", kind="data"),
-            self.index_key: TensorSpec(shape=None, dtype="int8", kind="data"),
+            self.leading_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
+            ),
+            self.index_key: TensorSpec(shape=None, dtype="int8", kind="data", modes=Mode.ONNX),
             # the exposed reordered per-vertex outputs the MFLeadVertexDecorator reads
             # (a node->node edge — the decorator's demand keeps this node alive)
-            self.vertices_class_probs_key: TensorSpec(shape=None, dtype="float32", kind="data"),
-            self.vertices_regression_key: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.vertices_class_probs_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
+            ),
+            self.vertices_regression_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
+            ),
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
