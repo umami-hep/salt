@@ -95,3 +95,10 @@ callbacks:
           }
       copy_inputs: {jets: [], tracks: []}
       write_pad_mask: [tracks]
+      # W6a: exercise the extra_groups sink mechanism with an EMPTY list — the
+      # no-op path. The sink builds its extra-group ctx and runs the (ported)
+      # _collect_extra_groups, which returns ({}, {}) for [], so the H5 schema is
+      # byte-identical to the pre-W6a sink (proven by this config's CLI parity gate
+      # in test_outputs_h5_parity.py). MaskFormer's real object groups populate
+      # extra_groups in W6b.
+      extra_groups: []
