@@ -69,11 +69,13 @@ class TestMaskFormerObjectWriter:
         return w
 
     def test_requires_decoder_preds_and_truth_labels(self, modules):
-        # the truth requires keep MaskFormerTargets alive in the TEST plan (amendment §3)
+        # the truth requires keep MaskFormerTargets alive in the TEST plan (amendment §3);
+        # masks.tracks is the constituent pad mask `write` reads for the MaskIndex padding
         keys = sorted(self._writer().requires(declare_ctx(modules)))
         assert keys == [
             "labels.objects.masks",
             "labels.objects.object_class",
+            "masks.tracks",
             "objects.class_probs",
             "objects.masks",
         ]

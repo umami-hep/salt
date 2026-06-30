@@ -98,7 +98,18 @@ data:
         object_id: barcode # v1 object.id_label
         constituent_stream: tracks # v1 constituent.name
         constituent_id: ftagTruthParentBarcode # v1 constituent.id_label
-        num_objects: 5 # == the decoder query bank
+        num_objects: 5 # == the decoder query bank (declared label M dim)
+        # FINDING-1 selection opt-in (MFU-6). Upstream's CLI auto-links
+        # max_objects <- model.mask_decoder.num_objects (MFU-7, SKIPPED in v2), so
+        # the shipped config opts in EXPLICITLY: max_objects flips _should_select on
+        # so _select_objects engages (PV-pin + truncate-to-5), reproducing upstream's
+        # default. max_objects == num_objects == 5 (no MFU-5 num_objects/max_objects
+        # guard error); pv_class: 0 is the b-class mapped index = the PV pin. The
+        # truth_hadrons reader group is left UNTRUNCATED (above) so _select_objects
+        # owns the truncation — no double-truncate (MFU-3 reader-truncate fires only
+        # when selection is INACTIVE).
+        max_objects: 5
+        pv_class: 0 # b-class mapped index (the PV pin)
         # v1 object.object_classes -> {name: {raw, mapped}}, null LAST. The
         # null class key is quoted "null" (an unquoted YAML null: would parse to
         # a Python None key — MaskFormerTargets accepts both, but the string is
@@ -186,10 +197,17 @@ model:
           # maskformer_loss.py:329-332)
           publish_targets: true
           # expose preds.objects.regression in FIT|VAL (matched loss) + ONNX (the
-          # object writer's leading_object reduce) but NOT TEST: v1 does NOT write
-          # the object-regression predictions in eval (predictionwriter.py:241
-          # skips objects-stream tasks; only class_probs/MaskIndex/masks are
-          # written), so a TEST pred here would be an unconsumed dead-pred
+          # object writer's leading_object reduce) but NOT TEST. NB: v1 DOES write
+          # per-object regression columns into the eval H5 when write_objects=True —
+          # predictionwriter.py:241 skips objects-stream tasks ONLY when
+          # `not self.write_objects`, and the shipped MaskFormer config sets
+          # write_objects=True (the upstream_6570e85 fixture's truth_hadrons group
+          # carries MaskFormer_pt/_Lxy/_deta/_dphi/_mass). v2 DELIBERATELY scopes the
+          # MFU object writer to class_probs/MaskIndex/object_masks only and defers
+          # the per-object regression eval columns (no v2 writer emits per-object
+          # regression in TEST yet); exposing this pred in TEST would therefore be an
+          # unconsumed dead-pred. Writer-parity is asserted on the writer-owned
+          # objects/object_masks/MaskIndex groups, not the deferred regression cols.
           expose: [fit, val, onnx]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       mf_matched_loss:

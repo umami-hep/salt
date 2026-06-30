@@ -176,6 +176,17 @@ class MaskFormerObjectWriter(Writer):
         """
         return f"{self.object_stream}.masks"
 
+    def _pad_mask_key(self) -> str:
+        """The constituent pad-mask bundle key (``masks.<constituent_stream>``).
+
+        Returns
+        -------
+        str
+            The reader/pad-mask product the MaskIndex padding read consumes
+            (v1 ``pad_masks[constituent_name]``, ``predictionwriter.py:289``).
+        """
+        return f"masks.{self.constituent_stream}"
+
     def _class_label_key(self) -> str:
         """The truth object-class label key (``labels.<object_stream>.object_class``).
 
@@ -216,7 +227,12 @@ class MaskFormerObjectWriter(Writer):
         `MaskFormerTargets` truth labels ``labels.<object_stream>.{object_class,
         masks}`` — the truth requires keep `MaskFormerTargets` alive in the TEST
         plan (amendment §3). Truth labels are TEST-only here (the matched loss
-        owns the FIT|VAL truth demand).
+        owns the FIT|VAL truth demand). The constituent pad mask
+        ``masks.<constituent_stream>`` is ALSO declared (TEST-only,
+        ``kind="pad_mask"`` — the `PadMaskWriter` convention): `write` consumes it
+        to set padded constituents' ``MaskIndex`` to ``-1`` (v1
+        ``np.where(~obj_pad_masks, ...)``, ``predictionwriter.py:289-295``), so the
+        plan must PROVIDE it rather than relying on incidental availability.
 
         Returns
         -------
@@ -227,6 +243,9 @@ class MaskFormerObjectWriter(Writer):
         return {
             self._class_key(): TensorSpec(shape=None, dtype=None),
             self._masks_key(): TensorSpec(shape=None, dtype=None),
+            self._pad_mask_key(): TensorSpec(
+                shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST
+            ),
             self._class_label_key(): TensorSpec(
                 shape=None, dtype="int64", kind="label", modes=Mode.TEST
             ),
@@ -333,7 +352,7 @@ class MaskFormerObjectWriter(Writer):
         # object via indices_from_mask(sigmoid > 0.5) (noindex -2), padded -> -1
         mask_indices = indices_from_mask(masks.cpu().sigmoid() > 0.5)  # [B, T] int64, -2 noindex
         mask_indices = mask_indices.int().cpu().numpy()
-        pad = bundle.get(f"masks.{self.constituent_stream}").cpu().numpy()  # True = padded
+        pad = bundle.get(self._pad_mask_key()).cpu().numpy()  # True = padded
         mask_indices = np.where(~pad, mask_indices, -1)  # padded constituents -> -1 (v1 :295)
         index_arr = u2s(
             np.expand_dims(mask_indices, -1),

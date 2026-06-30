@@ -76,6 +76,7 @@ __all__ = [
     "Checkpoint",
     "ConfusionMatrix",
     "GraphArtifacts",
+    "MaskformerConfusionMatrix",
     "MaskformerMetrics",
     "ProgressBar",
 ]
@@ -657,6 +658,148 @@ def _precision(pred: Tensor, tgt: Tensor) -> Tensor:
     tp = (pred & tgt).sum().float()
     denom = pred.sum().float()
     return tp / denom if denom > 0 else torch.zeros((), device=pred.device)
+
+
+class MaskformerConfusionMatrix(Callback):
+    """Log a per-epoch validation confusion matrix for the MaskFormer object classes.
+
+    The v1 ``MaskformerConfusionMatrix`` port (``maskformer_confusion_matrix.py``),
+    re-expressed in v2's bundle/demand model — a cross of `MaskformerMetrics` (the
+    matched object-class demand) and the generic `ConfusionMatrix` (the
+    accumulate-then-``log_confusion_matrix`` path). Like `MaskformerMetrics` it
+    consumes the matcher-permuted ``matched.objects.*`` keys the
+    `MaskFormerMatchedLoss` publishes (query-i is already aligned to truth-object-i,
+    so the per-object class confusion is well-defined; v1 read the RAW query-order
+    ``preds["objects"]["class_logits"]`` — v2 reads the matched, aligned ones). Like
+    `ConfusionMatrix` it accumulates argmax predictions vs truth labels over the
+    validation epoch and logs the matrix to Comet at epoch end via
+    ``log_confusion_matrix`` — the v1 seaborn-heatmap-to-Comet figure is replaced by
+    Comet's native confusion-matrix logging (the v2 generic-`ConfusionMatrix` path,
+    NO seaborn / scikit-learn dependency).
+
+    `fit_val_demand` declares the consumed ``matched.<input_stream>.{class_logits,
+    object_class}`` keys as FIT/VAL plan sinks (the DP2 mechanism, design §3.1/§3.4)
+    so the matched-loss products survive demand pruning even though no loss anchors
+    them. Pruned from TEST/ONNX (the matched loss is FIT|VAL-only). The accumulated
+    lists + the computed counts matrix are stashed on the callback
+    (``last_truth_labels`` / ``last_pred_labels`` / ``last_matrix``) for logger-free
+    gate inspection (the `ConfusionMatrix` precedent).
+
+    Parameters
+    ----------
+    log_every_n_epochs : int, optional
+        Log only every N validation epochs (v1 ``log_every_n_epochs``), by default
+        1.
+    class_names : list[str] | None, optional
+        Display names for the object classes (null LAST), by default None — the
+        integer mapped indices ``range(num_classes)`` are used. v2 stays
+        task-decoupled: the class count is derived from the matched class-logits
+        last dim (exactly how `MaskformerMetrics` derives ``null_index``), not from
+        a datamodule reach-through (v1 read
+        ``datamodule...mf_config.object.class_names``).
+    input_stream : str, optional
+        The matched object stream name, by default ``objects`` — the
+        ``matched.<input_stream>.*`` keys it reads.
+    """
+
+    def __init__(
+        self,
+        log_every_n_epochs: int = 1,
+        class_names: list[str] | None = None,
+        input_stream: str = "objects",
+    ) -> None:
+        self.log_every_n_epochs = int(log_every_n_epochs)
+        self.class_names = list(class_names) if class_names is not None else None
+        self.input_stream = str(input_stream)
+        self.requires: tuple[str, str] = (
+            f"matched.{self.input_stream}.class_logits",
+            f"matched.{self.input_stream}.object_class",
+        )
+        # per-epoch accumulators (ConfusionMatrix list-of-tensors semantics)
+        self.truth_labels: list[Tensor] = []
+        self.pred_labels: list[Tensor] = []
+        self._num_classes: int = 0
+        # stashed at epoch end for logger-free value comparison (gate inspection)
+        self.last_truth_labels: list[Tensor] = []
+        self.last_pred_labels: list[Tensor] = []
+        self.last_matrix: Tensor | None = None
+
+    def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
+        """The ``matched.objects.*`` keys this callback reads each VAL epoch (design §3.4).
+
+        The DP2 FIT/VAL-sink declaration `SaltModule` consumes
+        (`_callback_demand`): the matcher-permuted class logits + object class anchor
+        the `MaskFormerMatchedLoss` in the FIT/VAL plan so its ``matched.*`` products
+        survive demand pruning. Static / config-only — does not depend on `setup`
+        having run (mirrors `MaskformerMetrics.fit_val_demand`).
+
+        Parameters
+        ----------
+        model_modules : Any
+            The model-side ``{instance name: GraphModule}`` dict (unused — the demand
+            keys are config-derived from ``input_stream``).
+
+        Returns
+        -------
+        tuple[str, ...]
+            The ``matched.<input_stream>.{class_logits,object_class}`` keys.
+        """
+        del model_modules
+        return self.requires
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Reset the per-epoch accumulators (fit only)."""
+        del trainer, pl_module
+        if stage != "fit":
+            return
+        self.truth_labels = []
+        self.pred_labels = []
+
+    def on_validation_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        """Accumulate argmax matched-object predictions and truth classes."""
+        del pl_module, batch, batch_idx, dataloader_idx
+        if trainer.fast_dev_run:  # match MaskformerMetrics / v1 hook convention
+            return
+        bundle: Bundle = outputs["bundle"]
+        logits_key, label_key = self.requires
+        logits = bundle.get(logits_key).detach()
+        self._num_classes = int(logits.shape[-1])  # null LAST (MaskFormerTargets contract)
+        self.truth_labels.append(bundle.get(label_key).detach().cpu().reshape(-1))
+        self.pred_labels.append(logits.argmax(-1).cpu().reshape(-1))
+
+    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Every N epochs: stash the values, log the matrix to Comet, reset."""
+        del pl_module
+        if not self.truth_labels:
+            return
+        if trainer.current_epoch % self.log_every_n_epochs != 0:
+            self.truth_labels = []
+            self.pred_labels = []
+            return
+        n_classes = len(self.class_names) if self.class_names is not None else self._num_classes
+        labels = self.class_names or [str(i) for i in range(n_classes)]
+        self.last_truth_labels = self.truth_labels
+        self.last_pred_labels = self.pred_labels
+        self.last_matrix, _ = ConfusionMatrix.confusion_counts(
+            self.truth_labels, self.pred_labels, n_classes
+        )
+        if isinstance(trainer.logger, CometLogger):
+            trainer.logger.experiment.log_confusion_matrix(
+                y_true=torch.cat(self.truth_labels).tolist(),
+                y_predicted=torch.cat(self.pred_labels).tolist(),
+                labels=labels,
+                epoch=trainer.current_epoch,
+            )
+        self.truth_labels = []
+        self.pred_labels = []
 
 
 class GraphArtifacts(Callback):

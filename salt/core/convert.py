@@ -1694,7 +1694,23 @@ def _convert_export(
 # callbacks (consumed as FIT/VAL graph sinks) need translating.
 _V1_METRIC_CALLBACKS: dict[str, tuple[str, str]] = {
     "MaskformerMetrics": ("maskformer_metrics", "salt.core.callbacks.MaskformerMetrics"),
+    "MaskformerConfusionMatrix": (
+        "maskformer_confusion_matrix",
+        "salt.core.callbacks.MaskformerConfusionMatrix",
+    ),
     "ConfusionMatrixCallback": ("confusion_matrix", "salt.core.callbacks.ConfusionMatrix"),
+}
+
+# v1 -> v2 init_arg translation for callbacks whose v2 signature diverges from v1.
+# When a tail is listed, only the named v1 init_args are carried; the rest are
+# dropped (their v1 behaviour is absorbed by the v2 demand model). v2
+# MaskformerConfusionMatrix(log_every_n_epochs, class_names, input_stream) drops
+# v1's `only_val` (v2 is val-only by construction — the matched.* keys are
+# FIT/VAL plan sinks) and `normalize` (v2 logs via Comet's native
+# log_confusion_matrix, which normalises display-side). Carrying them verbatim
+# would raise TypeError at v2 instantiation.
+_V1_CALLBACK_INIT_ARG_KEEP: dict[str, frozenset[str]] = {
+    "MaskformerConfusionMatrix": frozenset({"log_every_n_epochs", "class_names", "input_stream"}),
 }
 
 
@@ -1719,7 +1735,12 @@ def _convert_callbacks(trainer: Mapping[str, Any]) -> dict[str, Any]:
             key, class_path = _V1_METRIC_CALLBACKS[tail]
             entry: dict[str, Any] = {"class_path": class_path}
             if cb.get("init_args"):
-                entry["init_args"] = dict(cb["init_args"])
+                init_args = dict(cb["init_args"])
+                keep = _V1_CALLBACK_INIT_ARG_KEEP.get(tail)
+                if keep is not None:  # drop v1-only kwargs the v2 signature rejects
+                    init_args = {k: v for k, v in init_args.items() if k in keep}
+                if init_args:
+                    entry["init_args"] = init_args
             out[key] = entry
     return out
 
