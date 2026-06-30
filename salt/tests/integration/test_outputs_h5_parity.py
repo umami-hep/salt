@@ -4,9 +4,11 @@ The MVP gate (design §4b, §4a SEMANTIC H5 parity): on the SAME synthetic GN2-l
 model + the SAME source H5, run BOTH eval sinks and assert per-column array
 equality between their eval H5 files —
 
-- **(a) the M4.5 ``WriterCallback``** (the P1 oracle, ``salt/core/writers``) via
-  the proven ``salt2 test`` CLI surface (`run_test_cli`, the M3 end-to-end
-  harness), and
+- **(a) the M4.5 ``WriterCallback``** (the P1 oracle, ``salt/core/writers``) — now
+  a FROZEN COMMITTED FIXTURE at ``tests/_fixtures/gn2v2_dummy_oracle/oracle.h5``
+  (generated once from ``ckpt.ckpt`` + ``data.h5`` in the same fixture dir and
+  committed; the live WriterCallback run is no longer reproduced each test
+  session — see ``tests/_fixtures/gn2v2_dummy_oracle/provenance.json``), and
 - **(b) the new producers -> ``H5OutputWriter``** via a programmatic
   ``Trainer.test`` (the CLI builds only the legacy ``WriterCallback`` from
   ``writers:``, so the new sink is driven through the public Lightning API: the
@@ -49,6 +51,7 @@ vs got — never weaken the tolerance to pass.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import h5py
@@ -63,20 +66,21 @@ from salt.core.data.datamodule import GraphDataModule
 from salt.core.graph.spec import Mode
 from salt.core.main import CONFIG_DIR, main
 from salt.core.outputs import ClassProbs, H5OutputWriter, OutputColumn, SeqClassProbs
-from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2_fixture import (
-    JET_VARIABLES,
-    TRACK_VARIABLES,
-    write_parity_norm_dict,
-)
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
+from salt.tests._fixtures.gn2_fixture import JET_VARIABLES, TRACK_VARIABLES
 from salt.utils.inputs import write_dummy_file
+
+# ---------------------------------------------------------------------------
+# frozen oracle fixture directory
+# Generated once (commit a9e2ac2) from the WriterCallback path on the synthetic
+# GN2v2 dummy model + data; never regenerated automatically — see provenance.json.
+# ---------------------------------------------------------------------------
+FIXTURE_DIR = Path(__file__).parent.parent / "_fixtures" / "gn2v2_dummy_oracle"
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER_CFG = CONFIG_DIR / "gn2v2-dummy-cutover.yaml"  # the P1.5 live cutover
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
 N_TEST = 300  # data.num_test for both sinks
-L_FILE = 40  # write_dummy_file sequence length
 _FLOAT_TOL = 1e-6
 
 # The P1 classification families compared for parity. Suffixes match the M4.5
@@ -92,22 +96,40 @@ DEFERRED_COLUMNS = {"tracks": ["VertexIndex"]}
 
 
 # ---------------------------------------------------------------------------
-# fixtures: one synthetic source H5 + one trained GN2v2 checkpoint, shared by
-# BOTH eval paths so the only difference under test is the sink.
+# fixtures: frozen data + checkpoint (loaded from the committed fixture dir);
+# the WriterCallback oracle H5 is also frozen — see FIXTURE_DIR/provenance.json.
+# Only the P1 path (path b) and the cutover CLI path (path c) run live.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("h5_parity")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_parity_norm_dict(nd_path, cd_path)
-    # exactly four underscore parts -> the v1 sample heuristic yields 'ttbar'
-    h5_path = base / "pp_output_test_ttbar.h5"
-    write_dummy_file(h5_path, nd_path)
-    schema_path = base / "schema.yaml"
-    save_schema(dump_schema(h5_path), schema_path)
-    return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
+    """Regenerate the synthetic source H5 deterministically; return its paths.
+
+    ``write_dummy_file`` draws from a module-level ``np.random.default_rng(42)``,
+    so the source H5 it writes is byte-identical every session — the SAME bytes the
+    frozen checkpoint + frozen WriterCallback oracle were generated from (commit
+    a9e2ac2; verified equal to the original frozen ``data.h5`` before it was
+    dropped). Regenerating it (rather than committing a 13 MB binary) keeps the
+    fixture lean while the parity comparison stays stable: only the stochastic
+    ``ckpt.ckpt`` and the WriterCallback ``oracle.h5`` need to be frozen. The
+    norm/class dicts + schema stay committed (they define the variable layout the
+    checkpoint was trained against).
+
+    Returns
+    -------
+    dict[str, Path]
+        Keys: ``dir``, ``h5``, ``nd`` (norm dict), ``schema``.
+    """
+    nd = FIXTURE_DIR / "norm_dict.yaml"
+    h5 = tmp_path_factory.mktemp("data") / "data.h5"
+    write_dummy_file(h5, nd)  # deterministic (default_rng(42)) → matches the frozen ckpt/oracle inputs
+    return {
+        "dir": FIXTURE_DIR,
+        "h5": h5,
+        "nd": nd,
+        "schema": FIXTURE_DIR / "schema.yaml",
+    }
 
 
 def _overrides(data) -> list[str]:
@@ -122,63 +144,59 @@ def _overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    """Train the GN2v2 dummy for one short epoch (shared by both eval sinks).
+    """Return a byte-identical tmp copy of the frozen GN2v2 dummy checkpoint.
+
+    The checkpoint was trained once (commit a9e2ac2, 1 epoch, 2 batches,
+    seed_everything=42) and committed alongside the oracle.  Loading a frozen
+    checkpoint removes the stochastic training step from the test session and
+    guarantees that the live P1 / cutover inference uses the SAME weights as
+    the frozen oracle.
+
+    The frozen ckpt is *copied into a tmp dir* before use so the live P1 /
+    cutover paths run against it: the ``GraphPlanWriter`` callback writes its
+    ``graph_*``/``plan_*``/``resolved_io.yaml`` artifacts to the checkpoint's
+    parent directory (``_default_dir`` -> ``Path(ckpt_path).parent``).  Pointing
+    that at a tmp copy keeps the committed fixture directory pristine — running
+    the suite never dirties ``tests/_fixtures/gn2v2_dummy_oracle/``.  The copy is
+    bit-for-bit identical, so weights / determinism / parity are unaffected.
 
     Returns
     -------
     Path
-        The trained checkpoint.
+        A tmp copy of the frozen checkpoint path.
     """
-    fit_dir = tmp_path_factory.mktemp("h5_parity_fit")
-    rc = main([
-        "fit",
-        "--config",
-        str(DUMMY_CFG),
-        f"--data.train_file={data['h5']}",
-        f"--data.val_file={data['h5']}",
-        *_overrides(data),
-        f"--trainer.default_root_dir={fit_dir}",
-        "--trainer.max_epochs=1",
-        "--trainer.limit_train_batches=2",
-        "--trainer.limit_val_batches=2",
-        "--trainer.num_sanity_val_steps=0",
-        "--trainer.log_every_n_steps=1",
-    ])
-    assert rc == 0
-    ckpts = sorted(fit_dir.rglob("*.ckpt"))
-    assert ckpts, f"no checkpoint under {fit_dir}"
-    return ckpts[0]
+    src = FIXTURE_DIR / "ckpt.ckpt"
+    assert src.exists(), f"frozen ckpt not found at {src} — re-run the oracle generator"
+    dst = tmp_path_factory.mktemp("ckpt") / "ckpt.ckpt"
+    shutil.copyfile(src, dst)
+    return dst
 
 
 # ---------------------------------------------------------------------------
-# path (a): the M4.5 WriterCallback oracle (proven salt2 test CLI harness)
+# path (a): the frozen M4.5 WriterCallback oracle (committed static fixture)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def oracle_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the M4.5 ``WriterCallback`` (the P1 oracle, design §4a).
+def oracle_h5() -> Path:
+    """Return the frozen WriterCallback oracle H5 from the fixture directory.
+
+    The oracle was generated once (commit a9e2ac2) by running the M4.5
+    ``WriterCallback`` on the frozen checkpoint + frozen data.h5 (see
+    ``FIXTURE_DIR/provenance.json`` for the exact command and schema/hash record).
+    The live WriterCallback run is no longer reproduced every test session; the
+    committed H5 is loaded directly.
 
     Returns
     -------
     Path
-        The oracle eval H5 file.
+        The frozen oracle H5 path.
     """
-    out = tmp_path_factory.mktemp("oracle") / "oracle.h5"
-    rc = main([
-        "test",
-        "--config",
-        str(DUMMY_CFG),
-        f"--data.test_file={data['h5']}",
-        f"--ckpt_path={ckpt}",
-        f"--data.num_test={N_TEST}",
-        f"--trainer.default_root_dir={data['dir']}",
-        f"--writers.output={out}",
-        *_overrides(data),
-    ])
-    assert rc == 0
-    assert out.exists()
-    return out
+    oracle_path = FIXTURE_DIR / "oracle.h5"
+    assert oracle_path.exists(), (
+        f"frozen oracle not found at {oracle_path} — re-run the oracle generator"
+    )
+    return oracle_path
 
 
 # ---------------------------------------------------------------------------
@@ -494,12 +512,16 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
     forward, and the eval H5 is written by the real CLI. The output path is
     overridden onto a tmp file so the assertion can read it back.
 
+    Uses the FROZEN checkpoint and FROZEN data.h5 (from ``FIXTURE_DIR``) so the
+    output is deterministic and comparable against the frozen oracle.
+
     Returns
     -------
     Path
         The cutover CLI eval H5 file.
     """
     out = tmp_path_factory.mktemp("cutover_cli") / "cutover_cli.h5"
+    root = tmp_path_factory.mktemp("cutover_cli_root")
     rc = main([
         "test",
         "--config",
@@ -509,7 +531,7 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--data.test_file={data['h5']}",
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
-        f"--trainer.default_root_dir={data['dir']}",
+        f"--trainer.default_root_dir={root}",
         f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])

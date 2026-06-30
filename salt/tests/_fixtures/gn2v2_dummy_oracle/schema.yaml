@@ -1,0 +1,175 @@
+schema_version: 1
+attrs:
+  config: '{}'
+  unique_jets: 1000
+groups:
+  electrons:
+    fields:
+      pt: float32
+      ptfrac: float32
+      ptrel: float32
+      dr: float32
+      abs_eta: float32
+      ftagTruthOriginLabel: int32
+      ftagTruthVertexIndex: int32
+      valid: bool
+    attrs: {}
+  flow:
+    fields:
+      pt: float32
+      energy: float32
+      deta: float32
+      dphi: float32
+      isCharged: float32
+      valid: bool
+    attrs: {}
+  flows:
+    fields:
+      pt: float32
+      energy: float32
+      deta: float32
+      dphi: float32
+      isCharged: float32
+      valid: bool
+    attrs: {}
+  jets:
+    fields:
+      pt: float32
+      eta: float32
+      mass: float32
+      pt_btagJes: float32
+      eta_btagJes: float32
+      ptFromTruthDressedWZJet: float32
+      HadronConeExclTruthLabelPt: float32
+      HadronConeExclTruthLabelLxy: float32
+      n_tracks: float32
+      n_truth_promptLepton: float32
+      sample_weight: float32
+      softMuon_pt: float32
+      softMuon_dR: float32
+      softMuon_eta: float32
+      softMuon_phi: float32
+      softMuon_qOverPratio: float32
+      softMuon_momentumBalanceSignificance: float32
+      softMuon_scatteringNeighbourSignificance: float32
+      softMuon_pTrel: float32
+      softMuon_ip3dD0: float32
+      softMuon_ip3dZ0: float32
+      softMuon_ip3dD0Significance: float32
+      softMuon_ip3dZ0Significance: float32
+      softMuon_ip3dD0Uncertainty: float32
+      softMuon_ip3dZ0Uncertainty: float32
+      R10TruthLabel_R22v1: float32
+      R10TruthLabel_R22v1_TruthJetMass: float32
+      R10TruthLabel_R22v1_TruthJetPt: float32
+      GN2Xv00_phbb: float32
+      GN2Xv00_phcc: float32
+      GN2Xv00_ptop: float32
+      GN2Xv00_pqcd: float32
+      GN2XWithMassv00_phbb: float32
+      GN2XWithMassv00_phcc: float32
+      GN2XWithMassv00_ptop: float32
+      GN2XWithMassv00_pqcd: float32
+      Xbb2020v3_Higgs: float32
+      Xbb2020v3_Top: float32
+      Xbb2020v3_QCD: float32
+      flavour_label: int32
+      HadronConeExclTruthLabelID: int32
+      HadronGhostInitialTruthLabelPdgId: int32
+    attrs:
+      flavour_label:
+      - bjets
+      - cjets
+      - ujets
+  tracks:
+    fields:
+      d0: float32
+      z0SinTheta: float32
+      dphi: float32
+      deta: float32
+      qOverP: float32
+      IP3D_signed_d0_significance: float32
+      IP3D_signed_z0_significance: float32
+      phiUncertainty: float32
+      thetaUncertainty: float32
+      qOverPUncertainty: float32
+      numberOfPixelHits: float32
+      numberOfSCTHits: float32
+      numberOfInnermostPixelLayerHits: float32
+      numberOfNextToInnermostPixelLayerHits: float32
+      numberOfInnermostPixelLayerSharedHits: float32
+      numberOfInnermostPixelLayerSplitHits: float32
+      numberOfPixelSharedHits: float32
+      numberOfPixelSplitHits: float32
+      numberOfSCTSharedHits: float32
+      ftagTruthOriginLabel: int32
+      ftagTruthTypeLabel: int32
+      ftagTruthVertexIndex: int32
+      ftagTruthParentBarcode: int32
+      valid: bool
+    attrs: {}
+  tracks_dr:
+    fields:
+      d0: float32
+      z0SinTheta: float32
+      dphi: float32
+      deta: float32
+      qOverP: float32
+      IP3D_signed_d0_significance: float32
+      IP3D_signed_z0_significance: float32
+      phiUncertainty: float32
+      thetaUncertainty: float32
+      qOverPUncertainty: float32
+      numberOfPixelHits: float32
+      numberOfSCTHits: float32
+      numberOfInnermostPixelLayerHits: float32
+      numberOfNextToInnermostPixelLayerHits: float32
+      numberOfInnermostPixelLayerSharedHits: float32
+      numberOfInnermostPixelLayerSplitHits: float32
+      numberOfPixelSharedHits: float32
+      numberOfPixelSplitHits: float32
+      numberOfSCTSharedHits: float32
+      ftagTruthOriginLabel: int32
+      ftagTruthTypeLabel: int32
+      ftagTruthVertexIndex: int32
+      ftagTruthParentBarcode: int32
+      valid: bool
+    attrs: {}
+  tracks_ghost:
+    fields:
+      d0: float32
+      z0SinTheta: float32
+      dphi: float32
+      deta: float32
+      qOverP: float32
+      IP3D_signed_d0_significance: float32
+      IP3D_signed_z0_significance: float32
+      phiUncertainty: float32
+      thetaUncertainty: float32
+      qOverPUncertainty: float32
+      numberOfPixelHits: float32
+      numberOfSCTHits: float32
+      numberOfInnermostPixelLayerHits: float32
+      numberOfNextToInnermostPixelLayerHits: float32
+      numberOfInnermostPixelLayerSharedHits: float32
+      numberOfInnermostPixelLayerSplitHits: float32
+      numberOfPixelSharedHits: float32
+      numberOfPixelSplitHits: float32
+      numberOfSCTSharedHits: float32
+      ftagTruthOriginLabel: int32
+      ftagTruthTypeLabel: int32
+      ftagTruthVertexIndex: int32
+      ftagTruthParentBarcode: int32
+      valid: bool
+    attrs: {}
+  truth_hadrons:
+    fields:
+      pt: float32
+      Lxy: float32
+      deta: float32
+      dphi: float32
+      mass: float32
+      barcode: int32
+      flavour: int32
+      valid: bool
+    attrs: {}
