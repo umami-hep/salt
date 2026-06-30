@@ -731,6 +731,7 @@ def main(args: list[str] | None = None) -> None:
         onnx_feature_map=onnx_feature_map,
         combine_outputs=combine_outputs,
         rename_outputs=rename_outputs,
+        forced_export=parsed_args.force,
     )
 
     # Prepare sequence names for ONNX runtime validation
@@ -770,6 +771,7 @@ def add_metadata(
     onnx_feature_map: list[dict],
     combine_outputs: list[tuple[str, list[tuple[float, str]]]],
     rename_outputs: dict[str, str],
+    forced_export: bool = False,
 ) -> None:
     """Attach training/config metadata and IO schema to the exported ONNX model.
 
@@ -793,6 +795,8 @@ def add_metadata(
         Output combinations specified as (new_name, [(scale, input_name), ...]).
     rename_outputs : dict[str, str]
         Mapping from old output name to new output name.
+    forced_export : bool, optional
+        Indicates whether the export was forced. Defaults to False.
     """
     # Announce metadata step
     print("\n" + "-" * 100)
@@ -807,6 +811,7 @@ def add_metadata(
     metadata["config.yaml"] = config
     metadata["metadata.yaml"] = yaml.safe_load((config_path.parent / "metadata.yaml").read_text())
     metadata["salt_export_hash"] = get_git_hash(Path(__file__).parent)
+    metadata["forced_export"] = forced_export
 
     # Versioning and top-level schema keys used by Athena
     metadata["onnx_model_version"] = "v1"

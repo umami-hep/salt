@@ -79,6 +79,28 @@ def get_best_epoch(config_path: Path) -> str:
     return str(ckpt)
 
 
+def limit_trainer_field_to_one(trainer_config: dict | JsonNamespace, name: str):
+    """Ensure that a trainer config field is set to 1 for testing.
+
+    Parameters
+    ----------
+    trainer_config : dict | JsonNamespace
+        The trainer configuration dictionary.
+    name : str
+        The name of the trainer config field to check and potentially modify.
+
+    Raises
+    ------
+    ValueError
+        If the trainer config field is a list with more than one element.
+    """
+    if isinstance(trainer_config[name], str | int) and int(trainer_config[name]) > 1:
+        print(f"Setting --trainer.{name}=1")
+        trainer_config[name] = "1"
+    elif isinstance(trainer_config[name], list) and len(trainer_config[name]) > 1:
+        raise ValueError(f"Testing requires --trainer.{name}=1")
+
+
 class SaltCLI(LightningCLI):
     """Lightning CLI wrapper that wires SALT configuration conveniences.
 
@@ -364,11 +386,9 @@ class SaltCLI(LightningCLI):
                 assert len(config.config) == 1
                 config.ckpt_path = get_best_epoch(Path(config.config[0].rel_path))
 
-            if isinstance(config.trainer.devices, str | int) and int(config.trainer.devices) > 1:
-                print("Setting --trainer.devices=1")
-                config.trainer.devices = "1"
-            elif isinstance(config.trainer.devices, list) and len(config.trainer.devices) > 1:
-                raise ValueError("Testing requires --trainer.devices=1")
+            # Set trainer devices and num_nodes to 1 for testing
+            limit_trainer_field_to_one(config.trainer, "devices")
+            limit_trainer_field_to_one(config.trainer, "num_nodes")
 
             config.data.move_files_temp = None
 
