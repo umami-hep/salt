@@ -24,10 +24,6 @@ from salt.core.outputs.writer_base import (
     task_modules,
 )
 from salt.core.writers.callback import DEFAULT_OUTPUT, WriterCallback
-from salt.core.writers.integrated_gradients import (
-    IntegratedGradientWriter,
-    integrated_gradients,
-)
 from salt.core.outputs.maskformer import MaskFormerObjectWriter
 from salt.core.writers.modules import InputCopyWriter, PadMaskWriter, TaskWriter
 from salt.core.outputs.names import OBJECT_INDEX, VERTEX_INDEX, ModeSplitSuffix, pascal_case
@@ -38,7 +34,6 @@ __all__ = [
     "VERTEX_INDEX",
     "ExportOnlyWriter",
     "InputCopyWriter",
-    "IntegratedGradientWriter",
     "MaskFormerObjectWriter",
     "ModeSplitSuffix",
     "PadMaskWriter",
@@ -47,7 +42,6 @@ __all__ = [
     "Writer",
     "WriterCallback",
     "WriterDeclareCtx",
-    "integrated_gradients",
     "pascal_case",
     "task_modules",
 ]

@@ -1,4 +1,4 @@
-"""M6 gates harness — LB1 + VS1 + MU1/MU2 + ED1/ED2 + CM1/LR1/S31/IG1 + M6-CONV (plan 12; §9.5).
+"""M6 gates harness — LB1 + VS1 + MU1/MU2 + ED1/ED2 + CM1/LR1/S31 + M6-CONV (plan 12; §9.5).
 
 Standalone gates, each a subcommand of ``python -m salt.tests.integration.gates_m6``, each
 writing a machine-readable ``<gate>_report.json`` into ``--outdir`` and a
@@ -17,7 +17,7 @@ EXACTLY (the same ``run_<gate>(outdir, *, corruption=None) -> (rc, report)``
 shape, ``checks`` dict + ``passed = all(...)``, ``<gate>_report.json`` + stdout
 verdict table, non-zero exit, a python-only ``corruption`` negative-control
 hook proving the parity comparison has teeth, never exposed on the CLI). Later
-M6 sub-waves append their gates (MU1-2/ED1-2/VS1/CM1/LR1/S31/IG1 + M6-CONV) to
+M6 sub-waves append their gates (MU1-2/ED1-2/VS1/CM1/LR1/S31 + M6-CONV) to
 this same file.
 
 Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
@@ -107,23 +107,6 @@ Gate criteria (each justified in its ``run_*`` docstring vs the design/v1 ref):
   while the structural + guard checks stay green. The encoder edge path, the
   edge-stream-first / backend-forcing bind validators (ED2), the GN2XE config,
   and the ONNX dynamic-T register pad are LATER sub-wave C stages.
-
-- **IG1 IntegratedGradientWriter (design-conformance, NON-gating; user-decided
-  IN M6)** — the v2 unified-framework port of v1's `IntegratedGradientWriter`
-  (``salt/callbacks/integrated_gradients_writer.py``, a Lightning Callback over
-  captum) re-authored on the M4.5 unified-writer interface
-  (``salt/core/writers/integrated_gradients.py``; a sibling of `InputCopyWriter`
-  / `PadMaskWriter` / `MaskFormerObjectWriter`). NON-gating: no shipped config
-  requires it. IG1 (a small in-repo fixture, no captum/salt-attribution dep)
-  asserts: one ``{run_name}_IG_{feature}`` f4 column per input feature; the
-  computed attribution equals the LINEAR closed form ``w_i*x_i`` and satisfies
-  completeness (the captum Riemann core, exact for a linear model — the
-  parity-decidable leg); EVAL-ONLY (``onnx_outputs() == []``, NOT ``export_only``,
-  non-empty TEST ``requires``); it integrates with `WriterCallback` alongside the
-  shipped writers (role validation passes, demand ``inputs.<stream>`` collides
-  with none of ``meta.rows``/``preds.*``/``masks.*``); a sequence stream
-  masked-mean-pools to per-jet; and a malformed (non-scalar) attribution shape
-  raises a `ConfigError` (the negative control).
 
 - **M6-CONV — the M7-slice acceptance (this wave's slice)** — the
   newly-authored v2-native M6 configs (sub-wave A: GN3X, GN2X_qcdsplit; sub-wave
@@ -3543,328 +3526,6 @@ def _s31_reader(filename: Path | str | None = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# IG1 — IntegratedGradientWriter (design-conformance, NON-gating; user-decided
-# IN M6, 2026-06-15; sub-wave E; FD §9.5 1719 / §10 1778 "as a Writer")
-# ---------------------------------------------------------------------------
-
-
-def _ig1_fixtures() -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-    """A deterministic IG1 fixture: a known input + a fixed linear weight vector.
-
-    The integrated gradient of a LINEAR scalar output ``F(x) = sum_i w_i x_i``
-    over a zero baseline is CLOSED FORM — ``IG_i = w_i * x_i`` — and it satisfies
-    completeness exactly (``IG.sum() == F(x) - F(0)``). That closed form is the
-    parity-decidable reference IG1 compares the writer's computed attribution
-    against (no captum / salt-attribution dependency; v1's captum core is the
-    same Riemann estimator, exact for a linear model).
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor, list[str]]
-        ``(inputs [B, F], weight [F], feature_names)``.
-    """
-    torch.manual_seed(20260616)
-    feature_names = ["pt", "eta", "d0", "z0", "phi"]
-    weight = torch.randn(len(feature_names), dtype=torch.float64).float()
-    inputs = torch.randn(12, len(feature_names), dtype=torch.float64).float()
-    return inputs, weight, feature_names
-
-
-def _ig1_write_ctx(outdir: Path, run_name: str = "GN2") -> Any:
-    """A minimal `WriteCtx` for the IG1 jets-stream fixture (no real file I/O).
-
-    Returns
-    -------
-    WriteCtx
-        A jets-only vector-stream context (the v1 global-object attribution
-        stream); ``feature_fields`` is left empty so the writer's explicit
-        ``feature_names`` override drives the column names.
-    """
-    from salt.core.outputs.writer_base import WriteCtx  # noqa: PLC0415
-
-    return WriteCtx(
-        output_path=outdir / "ig1.h5",
-        total=12,
-        run_name=run_name,
-        source_path=outdir / "ig1_src.h5",
-        streams=("jets", "tracks"),
-        sequence_streams=("tracks",),
-        group_datasets={"jets": "jets", "tracks": "tracks"},
-        seq_lengths={"tracks": 6},
-        model_modules={},
-        batch_size=12,
-        precision="full",
-    )
-
-
-def run_ig1(
-    outdir: Path | str,
-    *,
-    corruption: Callable[[Callable[[torch.Tensor], torch.Tensor]], Callable[..., Any]]
-    | None = None,
-) -> tuple[int, dict[str, Any]]:
-    """IG1: IntegratedGradientWriter (design-conformance, NON-gating; user-decided IN M6).
-
-    The IntegratedGradientWriter port (sub-wave E; user-decided IN 2026-06-15;
-    FD §9.5 1719 / §10 1778 "as a Writer"; plan 12). The v2 spelling of v1's
-    `IntegratedGradientWriter` (``salt/callbacks/integrated_gradients_writer.py``,
-    a Lightning Callback over captum) re-authored on the M4.5 unified-writer
-    interface — a sibling of `InputCopyWriter` / `PadMaskWriter` /
-    `MaskFormerObjectWriter`. NON-gating: no shipped config requires it (the 🔷
-    movers do not gate on it). IG1 asserts, on a small in-repo fixture (no
-    captum / salt-attribution dependency):
-
-    - **IG-attribution columns produced** — the writer emits one
-      ``{run_name}_IG_{feature}`` f4 column per input feature on the attributed
-      stream, named per input variable (BY NAME, not index arithmetic).
-    - **integrated-gradient parity (decidable)** — for a LINEAR scalar output the
-      writer's computed attribution equals the closed form ``w_i * x_i`` (the IG
-      of a linear model over a zero baseline) to float tolerance, AND satisfies
-      completeness (``IG.sum() == F(x) - F(0)``) — the same Riemann estimator v1
-      delegated to captum, exact for a linear model.
-    - **eval-only (``onnx_outputs() == []``)** — the writer has no ONNX role (the
-      `InputCopyWriter` / `PadMaskWriter` direction) and is NOT ``export_only``;
-      its TEST ``requires`` is non-empty (``inputs.<stream>``), so it is a legal
-      eval-only writer.
-    - **integrates with WriterCallback alongside the shipped writers** — a
-      `WriterCallback` built with the IG writer PLUS `InputCopyWriter` +
-      `TaskWriter` + `PadMaskWriter` passes writer-role validation and merges
-      demand with NO collision (the IG writer consumes ``inputs.<stream>``, the
-      others ``meta.rows`` / ``preds.*`` / ``masks.*``).
-    - **sequence-stream pooling** — attributing a sequence stream (``[B, T, F]``)
-      masked-mean-pools over valid tokens to a per-jet, per-feature attribution
-      (v1 wrote per-jet rows).
-    - **negative control: malformed attribution shape rejected** — a
-      ``forward_fn`` returning a NON-scalar output (the malformed attribution
-      shape) raises a `ConfigError` at ``write`` (the writer cannot attribute a
-      non-scalar; v1's captum wrapper reduced the model to one scalar via
-      add_softmax + output_keys).
-
-    Negative control (``test_gates_m6.py``): the ``corruption`` hook swaps the
-    writer's ``forward_fn`` for a constant (zero-gradient) map, so the parity vs
-    the closed form fails, flipping the gate.
-
-    Returns
-    -------
-    tuple[int, dict[str, Any]]
-        ``(exit_code, report)``.
-    """
-    from salt.core.writers import (  # noqa: PLC0415
-        InputCopyWriter,
-        IntegratedGradientWriter,
-        PadMaskWriter,
-        WriterCallback,
-    )
-    from salt.core.outputs.writer_base import WriterDeclareCtx  # noqa: PLC0415
-
-    outdir = Path(outdir)
-    print("=" * 96)
-    print("IG1 IntegratedGradientWriter (design-conformance, NON-gating; user-decided IN M6)")
-    print("=" * 96)
-    checks: dict[str, bool] = {}
-
-    inputs, weight, feature_names = _ig1_fixtures()
-    run_name = "GN2"
-
-    def linear_forward(x: torch.Tensor) -> torch.Tensor:
-        # F(x) = sum_i w_i x_i -> [B]; IG over a zero baseline = w_i * x_i exactly
-        return (x * weight.to(x.device)).sum(dim=-1)
-
-    fwd = linear_forward
-    if corruption is not None:
-        fwd = corruption(linear_forward)
-
-    writer = IntegratedGradientWriter(
-        forward_fn=fwd, stream="jets", n_steps=64, feature_names=feature_names
-    )
-    writer.name = "integrated_gradients"
-    ctx = _ig1_write_ctx(outdir, run_name)
-    writer.setup(ctx)
-
-    # -- (a) IG-attribution columns produced, named per input variable -------
-    cols = writer.columns(ctx)
-    expected_cols = tuple(f"{run_name}_IG_{n}" for n in feature_names)
-    checks["columns_on_attributed_stream"] = set(cols) == {"jets"}
-    checks["one_ig_column_per_feature"] = cols["jets"].names == expected_cols
-
-    # -- (b) integrated-gradient parity (decidable) vs the linear closed form -
-    bundle = _bundle_inputs("jets", inputs)
-    out = writer.write(bundle, slice(0, inputs.shape[0]))
-    arr = out["jets"]
-    computed = np.stack([arr[c] for c in expected_cols], axis=-1)  # [B, F]
-    closed_form = (weight.numpy() * inputs.numpy()).astype(np.float32)  # IG of a linear model
-    max_abs_err = float(np.abs(computed - closed_form).max())
-    checks["ig_matches_linear_closed_form"] = max_abs_err < 1e-4
-    # completeness: sum of attributions == F(x) - F(0) (F(0) == 0 here)
-    f_x = linear_forward(inputs).numpy()
-    completeness_err = float(np.abs(computed.sum(axis=-1) - f_x).max())
-    checks["ig_satisfies_completeness"] = completeness_err < 1e-3
-
-    # -- (c) eval-only: onnx_outputs() == [] and NOT export_only -------------
-    decl = WriterDeclareCtx(
-        model_modules={}, streams=("jets", "tracks"), sequence_streams=("tracks",)
-    )
-    onnx_outputs = writer.onnx_outputs(decl)
-    checks["onnx_outputs_empty"] = onnx_outputs == []
-    checks["not_export_only"] = writer.export_only is False
-    checks["test_requires_nonempty"] = list(writer.requires(decl)) == ["inputs.jets"]
-
-    # -- (d) integrates with WriterCallback alongside the shipped writers -----
-    # IG on jets + the demand-bearing v1 eval writers (input copy + pad mask).
-    # InputCopyWriter (meta.rows) and PadMaskWriter (masks.tracks) carry
-    # non-empty TEST demand against the fixture reader's streams; TaskWriter /
-    # MaskFormerObjectWriter need configured task/decoder modules (absent in a
-    # writer-only fixture), so the no-collision claim against THEIR demand keys
-    # is checked directly below (the IG writer consumes inputs.<stream>, none of
-    # the shipped writers' demand families do: meta.rows / preds.* / masks.*).
-    ig2 = IntegratedGradientWriter(forward_fn=fwd, stream="jets", n_steps=8, feature_names=["pt"])
-    # explicit streams so InputCopy (jets) + PadMask (tracks) carry non-empty
-    # demand in this writer-only fixture (no task modules to derive streams from)
-    callback = WriterCallback(
-        modules={
-            "inputs_copy": InputCopyWriter(streams=["jets"]),
-            "pad_mask": PadMaskWriter(streams=["tracks"]),
-            "integrated_gradients": ig2,
-        }
-    )
-    reader = _ig1_reader()
-    try:
-        per_writer = callback.per_writer_demand({}, reader)  # runs _validate_writer_roles
-        roles_ok = True
-    except ConfigError as exc:  # pragma: no cover - exercised only on a regression
-        per_writer = {}
-        roles_ok = False
-        print(f"  writer-role validation raised: {exc}")
-    checks["writercallback_role_validation_ok"] = roles_ok
-    ig_demand = set(per_writer.get("integrated_gradients", []))
-    checks["ig_demand_is_inputs_jets"] = ig_demand == {"inputs.jets"}
-    # no collision with the OTHER configured writers' demand (InputCopy meta.rows
-    # + PadMask masks.tracks here)
-    other_keys = {k for n, keys in per_writer.items() if n != "integrated_gradients" for k in keys}
-    checks["no_demand_collision_with_shipped_writers"] = ig_demand.isdisjoint(other_keys)
-    # no collision with the TaskWriter / MaskFormerObjectWriter demand FAMILIES:
-    # the IG demand is the inputs.* namespace, the task/MF writers consume the
-    # preds.* / <obj>.* / labels.* / masks.* families (TaskWriter.requires ->
-    # preds.*, MaskFormerObjectWriter.requires -> <obj>.{class_probs,masks} +
-    # labels.*) — disjoint by namespace, so no shipped writer ever contends for
-    # an inputs.* key.
-    shipped_families = ("preds.", "masks.", "labels.", "meta.")
-    checks["ig_namespace_disjoint_from_task_mf_families"] = all(
-        not k.startswith(shipped_families) for k in ig_demand
-    )
-
-    # -- (e) sequence-stream pooling ([B, T, F] -> per-jet [B, F]) ------------
-    seq_inputs = torch.randn(7, 6, len(feature_names))
-    seq_pad = torch.zeros(7, 6, dtype=torch.bool)
-    seq_pad[:, 4:] = True  # last 2 tokens padded
-
-    def seq_forward(x: torch.Tensor) -> torch.Tensor:
-        return (x.mean(dim=1) * weight.to(x.device)).sum(dim=-1)  # [B]
-
-    seq_writer = IntegratedGradientWriter(
-        forward_fn=seq_forward, stream="tracks", n_steps=16, feature_names=feature_names
-    )
-    seq_writer.name = "ig_tracks"
-    seq_writer.setup(ctx)
-    seq_bundle = _bundle_inputs("tracks", seq_inputs, pad=seq_pad)
-    seq_out = seq_writer.write(seq_bundle, slice(0, seq_inputs.shape[0]))
-    seq_arr = seq_out["tracks"]
-    checks["sequence_stream_pools_to_per_jet"] = seq_arr.shape == (7,) and seq_arr.dtype.names == (
-        tuple(f"{run_name}_IG_{n}" for n in feature_names)
-    )
-
-    # -- (f) negative control: a malformed attribution shape is rejected -----
-    bad_writer = IntegratedGradientWriter(
-        forward_fn=lambda x: x,  # returns [B, F] (NON-scalar) — the malformed shape
-        stream="jets",
-        n_steps=4,
-        feature_names=feature_names,
-    )
-    bad_writer.name = "ig_bad"
-    bad_writer.setup(ctx)
-    checks["malformed_attribution_shape_rejected"] = _raises(
-        ConfigError, bad_writer.write, _bundle_inputs("jets", inputs), slice(0, inputs.shape[0])
-    )
-
-    passed = all(checks.values())
-    criterion = (
-        "the IntegratedGradientWriter (sub-wave E; user-decided IN M6 2026-06-15; FD §9.5 1719 / "
-        "§10 1778 'as a Writer'; plan 12) is the v2 unified-framework port of v1's "
-        "IntegratedGradientWriter (integrated_gradients_writer.py) — a sibling of InputCopyWriter "
-        "/ PadMaskWriter / MaskFormerObjectWriter. NON-gating (no shipped config requires it). It "
-        "produces one {run_name}_IG_{feature} f4 column per input feature; its attribution equals "
-        "the linear closed form w_i*x_i and satisfies completeness (the captum Riemann core, exact "
-        "for a linear model); it is EVAL-ONLY (onnx_outputs() == [], not export_only, non-empty "
-        "TEST requires); it integrates with WriterCallback alongside the shipped writers with no "
-        "demand collision; it pools a sequence stream to per-jet; and a malformed (non-scalar) "
-        "attribution shape raises a ConfigError."
-    )
-    report = _base_report(
-        "ig1_integrated_gradient_writer",
-        passed,
-        criterion,
-        {
-            "stream": "jets",
-            "n_features": len(feature_names),
-            "n_steps": 64,
-            "ig_max_abs_err": max_abs_err,
-            "completeness_err": completeness_err,
-            "non_gating": True,
-            "corrupted_by_test_hook": corruption is not None,
-        },
-    )
-    report["checks"] = checks
-    report["ig_columns"] = list(expected_cols)
-    report["v1_reference"] = (
-        "v1 IntegratedGradientWriter (salt/callbacks/integrated_gradients_writer.py:32) — a "
-        "Lightning Callback that, on on_test_start, wrapped the model in "
-        "salt_attribution.SaltModelCaptumWrapper (:186) and ran captum.attr.IntegratedGradients "
-        "(:193) over the test loader, writing a side-car {ckpt}__attributions_{sample}.h5 "
-        "(:166-172) with feature attributions, baselines and convergence deltas (raised "
-        "ImportError without captum + salt-attribution, :106-112). v2 re-authors the SAME "
-        "integrated-gradient Riemann estimator (Sundararajan 2017; "
-        "salt.core.writers.integrated_gradients.integrated_gradients) ON the M4.5 unified-writer "
-        "interface (requires/columns/write; onnx_outputs()==[] eval-only), so the attributions "
-        "land as columns IN the eval H5 with NO hard captum/salt-attribution "
-        "dependency. The forward closure (forward_fn) replaces the captum wrapper's "
-        "add_softmax+output_keys scalar selection."
-    )
-    _print_checks(checks)
-    _print_verdict("ig1", passed, criterion, _emit_report(report, outdir, "ig1"))
-    return (0 if passed else 1), report
-
-
-def _bundle_inputs(stream: str, x: torch.Tensor, pad: torch.Tensor | None = None) -> Bundle:
-    """Build a minimal executed TEST bundle carrying one input stream (+ optional pad mask).
-
-    Mirrors what ``test_step`` hands `WriterCallback.on_test_batch_end`: the
-    executed ``inputs.<stream>`` leaf (and the ``masks.<stream>`` pad mask for a
-    sequence stream) the IntegratedGradientWriter reads.
-
-    Returns
-    -------
-    Bundle
-        ``{inputs.<stream>: x[, masks.<stream>: pad], meta.rows}``.
-    """
-    data: dict[str, Any] = {"inputs": {stream: x}, "meta": {"rows": torch.tensor([0, x.shape[0]])}}
-    if pad is not None:
-        data["masks"] = {stream: pad}
-    return Bundle(data)
-
-
-def _ig1_reader() -> Any:
-    """A jets+tracks `H5StructuredReader` so `WriterCallback` role validation can run (IG1).
-
-    Returns
-    -------
-    Reader
-        Two streams: a ``jets`` vector stream (the IG attribution target) and a
-        ``tracks`` sequence stream (so PadMaskWriter has a stream to select).
-    """
-    return H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
-
-
-# ---------------------------------------------------------------------------
 # M6-CONV — the M7-slice acceptance for the M6-authored configs (sub-wave A
 # bootstraps it; later M6 waves EXTEND _CONV_M6_CONFIGS)
 # ---------------------------------------------------------------------------
@@ -4320,7 +3981,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "cm2": "CometLogger default-FLIP + gate hygiene (no offline archive; plan-24 Wave 0)",
         "lr1": "lion/HybridMuonAdamW explicit include/exclude routing + zero-match warn (E)",
         "s31": "move_files_temp / S3 staging smoke (design-conformance, NON-gating; E)",
-        "ig1": "IntegratedGradientWriter: IG attribution columns, eval-only, WriterCallback (E)",
         "conv": "M6-CONV: salt2 graph validate (fit/test/onnx) on the M6-authored configs",
     }
     for gate, help_text in helps.items():
@@ -4349,7 +4009,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cm2": run_cm2,
         "lr1": run_lr1,
         "s31": run_s31,
-        "ig1": run_ig1,
         "conv": run_conv,
     }[args.gate]
     code, _ = runner(args.outdir)

@@ -21,7 +21,6 @@ from salt.tests.integration.gates_m6 import (
     run_conv,
     run_ed1,
     run_ed2,
-    run_ig1,
     run_lb1,
     run_lr1,
     run_mu1,
@@ -661,65 +660,10 @@ class TestS31:
         assert report["checks"]["s3_helpers_importable"]
 
 
-class TestIG1:
-    """IG1 — IntegratedGradientWriter (plan 12 sub-wave E; user-decided IN M6; NON-gating).
-
-    Pins the IG-attribution columns (one per input feature), the integrated-
-    gradient parity vs the linear closed form + completeness, the eval-only
-    contract (onnx_outputs()==[], not export_only), the WriterCallback
-    integration with the shipped writers (no demand collision / namespace
-    disjoint from the task/MaskFormer families), sequence-stream pooling, the
-    malformed-shape negative control, and the corruption teeth (a constant
-    forward zeros the gradient so the closed-form parity fails).
-    """
-
-    def test_pass(self, tmp_path):
-        code, report = run_ig1(tmp_path)
-        assert code == 0, report["checks"]
-        assert report["passed"]
-        assert all(report["checks"].values())
-        assert (tmp_path / "ig1_report.json").is_file()
-        # IG-attribution columns, one per input feature
-        assert report["checks"]["columns_on_attributed_stream"]
-        assert report["checks"]["one_ig_column_per_feature"]
-        # integrated-gradient parity (decidable) + completeness
-        assert report["checks"]["ig_matches_linear_closed_form"]
-        assert report["checks"]["ig_satisfies_completeness"]
-        assert report["config"]["ig_max_abs_err"] < 1e-4
-        # eval-only contract
-        assert report["checks"]["onnx_outputs_empty"]
-        assert report["checks"]["not_export_only"]
-        assert report["checks"]["test_requires_nonempty"]
-        # WriterCallback integration alongside the shipped writers
-        assert report["checks"]["writercallback_role_validation_ok"]
-        assert report["checks"]["ig_demand_is_inputs_jets"]
-        assert report["checks"]["no_demand_collision_with_shipped_writers"]
-        assert report["checks"]["ig_namespace_disjoint_from_task_mf_families"]
-        # sequence-stream pooling + negative control
-        assert report["checks"]["sequence_stream_pools_to_per_jet"]
-        assert report["checks"]["malformed_attribution_shape_rejected"]
-        assert report["config"]["non_gating"] is True
-        assert "integrated_gradients_writer.py" in report["v1_reference"]
-        assert report["ig_columns"] == [f"GN2_IG_{n}" for n in ("pt", "eta", "d0", "z0", "phi")]
-
-    def test_corruption_fails_the_gate(self, tmp_path):
-        # swap the linear forward for a constant (zero-gradient) map -> the
-        # computed IG is all zeros, breaking the closed-form parity + completeness;
-        # the value-independent structural checks (columns, eval-only, role
-        # integration, negative control) stay green
-        code, report = run_ig1(tmp_path, corruption=lambda _fwd: lambda x: x.new_zeros(x.shape[0]))
-        assert code == 1
-        assert not report["passed"]
-        assert not report["checks"]["ig_matches_linear_closed_form"]
-        assert report["checks"]["onnx_outputs_empty"]
-        assert report["checks"]["one_ig_column_per_feature"]
-        assert report["checks"]["malformed_attribution_shape_rejected"]
-
-
 class TestCli:
     def test_main_runs_each_gate(self, tmp_path):
         gates = (
-            "lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "cm1", "cm2", "lr1", "s31", "ig1", "conv",
+            "lb1", "vs1", "mu1", "mu2", "ed1", "ed2", "cm1", "cm2", "lr1", "s31", "conv",
         )
         for gate in gates:
             code = main([gate, "--outdir", str(tmp_path / gate)])
