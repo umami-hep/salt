@@ -3580,7 +3580,7 @@ def _ig1_write_ctx(outdir: Path, run_name: str = "GN2") -> Any:
         stream); ``feature_fields`` is left empty so the writer's explicit
         ``feature_names`` override drives the column names.
     """
-    from salt.core.writers.base import WriteCtx  # noqa: PLC0415
+    from salt.core.outputs.writer_base import WriteCtx  # noqa: PLC0415
 
     return WriteCtx(
         output_path=outdir / "ig1.h5",
@@ -3655,7 +3655,7 @@ def run_ig1(
         PadMaskWriter,
         WriterCallback,
     )
-    from salt.core.writers.base import WriterDeclareCtx  # noqa: PLC0415
+    from salt.core.outputs.writer_base import WriterDeclareCtx  # noqa: PLC0415
 
     outdir = Path(outdir)
     print("=" * 96)

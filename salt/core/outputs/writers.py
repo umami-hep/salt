@@ -52,7 +52,8 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.outputs.producers import OutputField
-from salt.core.writers import MaskFormerObjectWriter, WriterDeclareCtx
+from salt.core.outputs.maskformer import MaskFormerObjectWriter
+from salt.core.outputs.writer_base import WriterDeclareCtx
 
 __all__ = [
     "InputCopyWriter",

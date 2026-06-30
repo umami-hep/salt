@@ -548,7 +548,7 @@ class TestExportOnlyStory:
         import inspect
         import re
 
-        import salt.core.writers.base as writer_base
+        import salt.core.outputs.writer_base as writer_base
 
         source = inspect.getsource(writer_base)
         documented = re.findall(r'reduce="(\w+)"', source)

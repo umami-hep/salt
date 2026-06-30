@@ -39,7 +39,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec
 from salt.core.onnx.config import ExportOutput
-from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx, task_modules
+from salt.core.outputs.writer_base import WriteCtx, Writer, WriterDeclareCtx, task_modules
 from salt.core.utils.array_utils import join_structured_arrays
 
 __all__ = ["InputCopyWriter", "PadMaskWriter", "TaskWriter"]

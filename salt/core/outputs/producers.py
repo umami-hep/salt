@@ -74,7 +74,7 @@ from salt.core.onnx.reduces import get_maskformer_outputs, mask_fill_flattened
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 from salt.core.utils.union_find import get_node_assignment_jit
-from salt.core.writers.names import VERTEX_INDEX, pascal_case
+from salt.core.outputs.names import VERTEX_INDEX, pascal_case
 
 __all__ = [
     "ClassProbs",

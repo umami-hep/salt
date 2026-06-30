@@ -24,7 +24,7 @@ policy (one logical declaration, two prefixes):
   file (``{run_name}_pb`` ...) and the graph (``{model_name}_pb`` ...) —
   U1(a), observed-vs-observed;
 - the vertexing output is ONE shared constant
-  (`salt.core.writers.names.VERTEX_INDEX`): bare eval column while
+  (`salt.core.outputs.names.VERTEX_INDEX`): bare eval column while
   ``prefix_vertex_column`` is down (v1 byte parity, recorded), prefixed
   ONNX output (amendment §5 rule 6);
 - both mode-narrowing directions express: the eval-only column lands in
@@ -206,7 +206,7 @@ VERTEX_COLUMN_DECISION = (
     "vertexing column is BARE 'VertexIndex' (i8, no run-name prefix) in TEST while "
     "prefix_vertex_column=false (v1 byte parity, M3 decision) and "
     "'{model_name}_VertexIndex' in ONNX (v1 to_onnx.py:287) — ONE shared suffix constant "
-    "(salt.core.writers.names.VERTEX_INDEX), one per-mode prefix rule, one compat flag "
+    "(salt.core.outputs.names.VERTEX_INDEX), one per-mode prefix rule, one compat flag "
     "(amendment §5 rule 6; the M7 adjudication flips the flag, study CLAUDE.md TODO)"
 )
 """The recorded TEST/ONNX vertex prefix asymmetry U1 asserts (never silent)."""

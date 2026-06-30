@@ -37,7 +37,7 @@ from salt.core.outputs import (
     TaskOutput,
     VertexUnionFind,
 )
-from salt.core.writers.names import VERTEX_INDEX
+from salt.core.outputs.names import VERTEX_INDEX
 
 RUN = "MyRun"
 

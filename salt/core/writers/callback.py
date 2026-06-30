@@ -48,7 +48,7 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError, KindError, ShapeError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec, flatten_spec
 from salt.core.onnx.config import ExportOutput
-from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
+from salt.core.outputs.writer_base import WriteCtx, Writer, WriterDeclareCtx
 from salt.core.utils.array_utils import join_structured_arrays
 
 __all__ = ["WriterCallback"]
@@ -187,7 +187,7 @@ class WriterCallback(Callback):
         The static validator design §2.7 / §8 promises: "the static validator
         proves the writer's inputs exist before a single batch is read". Until
         M5 the `Writer.requires` `TensorSpec` VALUES drove demand by KEY only
-        (the `salt.core.writers.base` deviation note) — key serveability was
+        (the `salt.core.outputs.writer_base` deviation note) — key serveability was
         enforced (a model-produced key anchors the TEST plan; an unserveable
         dataset-namespace key raises at `SaltModule._boundary_demand`), but the
         kind/dtype each writer DECLARES for a consumed key was never unified

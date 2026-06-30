@@ -2872,11 +2872,11 @@ def run_mf2(
     # -- (ii) OBJECT_INDEX imported, NOT re-declared (merge condition 4) --------
     import inspect  # noqa: PLC0415 - gate-local source scan
 
-    from salt.core.writers import maskformer as writer_src  # noqa: PLC0415 - gate-local source scan
+    from salt.core.outputs import maskformer as writer_src  # noqa: PLC0415 - gate-local source scan
 
     source = inspect.getsource(writer_src)
     checks["object_index_imported_not_redeclared"] = (
-        "from salt.core.writers.names import OBJECT_INDEX" in source
+        "from salt.core.outputs.names import OBJECT_INDEX" in source
         and '"MaskIndex"' not in source
         and '"HadronIndex"' not in source
         and "'MaskIndex'" not in source

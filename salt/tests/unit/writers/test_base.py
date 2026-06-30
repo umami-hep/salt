@@ -1,9 +1,9 @@
-"""Tests for `salt.core.writers.base` — the `Writer` base + `validate_specs`.
+"""Tests for `salt.core.outputs.writer_base` — the `Writer` base + `validate_specs`.
 
 `WriterCallback.validate_specs` proves writer inputs exist AND kind/dtype-unify
 on the writer->producer edge, before the first batch (M5 sub-wave D; design
 §2.7/§8). The `Writer` ABC contract these exercise lives in
-``salt/core/writers/base.py``.
+``salt/core/outputs/writer_base.py``.
 
 (Split out of the former monolithic ``test_writers.py``; shared fixtures /
 toy-writers / constants come from ``salt.tests._fixtures.writers_common``.)

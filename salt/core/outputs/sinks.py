@@ -431,7 +431,7 @@ class _SinkCallback(Callback):
 class _ExtraGroupCtx:
     """The minimal write-context an extra-group node reads to size its groups (W6a).
 
-    Duck-types the legacy ``WriteCtx`` surface (salt/core/writers/base.py:154) that
+    Duck-types the legacy ``WriteCtx`` surface (salt/core/outputs/writer_base.py:154) that
     a node's ``extra_groups`` / ``columns`` declaration consumes — the constituent
     ``seq_lengths`` (object masks span a sequence stream's tokens), the reader
     ``streams`` (the shadow check), the row ``total``, and the

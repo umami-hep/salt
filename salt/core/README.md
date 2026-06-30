@@ -162,7 +162,7 @@ classification the suffix list is literally the `class_names`-derived list
 both modes share, so reordering classes moves eval columns AND Athena
 outputs together (the v1 eval-vs-ONNX vertex-naming drift class is
 unrepresentable). Cross-mode suffix constants live in
-`salt.core.writers.names` (`VERTEX_INDEX` shared; the MaskFormer
+`salt.core.outputs.names` (`VERTEX_INDEX` shared; the MaskFormer
 `OBJECT_INDEX` MaskIndex/HadronIndex pair is a pinned, documented v1
 divergence M5 must import).
 

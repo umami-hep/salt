@@ -28,7 +28,7 @@ truth columns NEVER reach ONNX: `requires` is TEST-only, so the
 stays pruned there (amendment §3 — zero special-casing).
 
 The MaskIndex / HadronIndex cross-mode suffix divergence is the PINNED
-`salt.core.writers.names.OBJECT_INDEX` pair (merge condition 4) — this writer
+`salt.core.outputs.names.OBJECT_INDEX` pair (merge condition 4) — this writer
 IMPORTS it, never re-declares the strings (the vertex-drift failure shape it
 exists to kill).
 
@@ -53,8 +53,8 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import GraphModule, Mode, TensorSpec
 from salt.core.onnx.config import ExportOutput
-from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
-from salt.core.writers.names import OBJECT_INDEX
+from salt.core.outputs.writer_base import WriteCtx, Writer, WriterDeclareCtx
+from salt.core.outputs.names import OBJECT_INDEX
 from salt.core.utils.mask_utils import indices_from_mask
 
 __all__ = ["MaskFormerObjectWriter"]

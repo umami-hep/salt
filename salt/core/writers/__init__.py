@@ -12,11 +12,11 @@ manifest: `Writer.onnx_outputs` declares export entries (M4
 `ExportOutput`s) that `WriterCallback.onnx_manifest` assembles for the
 exporter — TEST executes, ONNX declares; eval columns and Athena outputs
 derive from one set of declarations. `ExportOnlyWriter` is the blessed
-export-only pattern; `salt.core.writers.names` owns the cross-mode suffix
+export-only pattern; `salt.core.outputs.names` owns the cross-mode suffix
 constants.
 """
 
-from salt.core.writers.base import (
+from salt.core.outputs.writer_base import (
     ExportOnlyWriter,
     WriteCtx,
     Writer,
@@ -28,9 +28,9 @@ from salt.core.writers.integrated_gradients import (
     IntegratedGradientWriter,
     integrated_gradients,
 )
-from salt.core.writers.maskformer import MaskFormerObjectWriter
+from salt.core.outputs.maskformer import MaskFormerObjectWriter
 from salt.core.writers.modules import InputCopyWriter, PadMaskWriter, TaskWriter
-from salt.core.writers.names import OBJECT_INDEX, VERTEX_INDEX, ModeSplitSuffix, pascal_case
+from salt.core.outputs.names import OBJECT_INDEX, VERTEX_INDEX, ModeSplitSuffix, pascal_case
 
 __all__ = [
     "DEFAULT_OUTPUT",

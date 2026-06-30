@@ -38,7 +38,7 @@ columns; ``TaskWriter(onnx=false)`` narrows per instance), and
 `ExportOnlyWriter` is THE blessed **export-only** pattern (non-empty
 manifest, no TEST role, explicit ``export_only`` flag). A writer with
 neither role is a `ConfigError` (design principle 10 extended to writers).
-Naming: writers declare logical *suffixes* (`salt.core.writers.names`);
+Naming: writers declare logical *suffixes* (`salt.core.outputs.names`);
 TEST prefixes with the run name, ONNX with ``export.model_name``
 (amendment §5).
 

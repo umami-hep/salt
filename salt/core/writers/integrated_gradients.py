@@ -65,7 +65,7 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import TensorSpec
-from salt.core.writers.base import WriteCtx, Writer, WriterDeclareCtx
+from salt.core.outputs.writer_base import WriteCtx, Writer, WriterDeclareCtx
 
 __all__ = ["IntegratedGradientWriter", "integrated_gradients"]
 

@@ -1,4 +1,4 @@
-"""Tests for `salt.core.writers.maskformer` — the MaskFormerObjectWriter.
+"""Tests for `salt.core.outputs.maskformer` — the MaskFormerObjectWriter.
 
 TEST byte-parity vs the v1 op chain + the extra-group plumbing
 (predictionwriter.py:267-308; M5 sub-wave C, plan 10): decoder-preds/truth
@@ -177,11 +177,11 @@ class TestMaskFormerObjectWriter:
             MaskFormerObjectWriter(object_classes=[])
 
     def test_object_index_imported_not_redeclared(self):
-        # merge condition 4: the strings live ONLY in salt.core.writers.names
-        import salt.core.writers.maskformer as src
+        # merge condition 4: the strings live ONLY in salt.core.outputs.names
+        import salt.core.outputs.maskformer as src
 
         source = Path(src.__file__).read_text()
-        assert "from salt.core.writers.names import OBJECT_INDEX" in source
+        assert "from salt.core.outputs.names import OBJECT_INDEX" in source
         assert '"MaskIndex"' not in source and "'MaskIndex'" not in source
         assert '"HadronIndex"' not in source and "'HadronIndex'" not in source
 
