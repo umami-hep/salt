@@ -234,3 +234,190 @@ class TestByteParityVsLegacyWriter:
         assert set(sink) == set(legacy)
         for group in legacy:
             assert sink[group] == legacy[group]
+
+
+# ---------------------------------------------------------------------------
+# T1 — W6b ONNX tuple order: explicit object leaves AFTER the section block
+# ---------------------------------------------------------------------------
+
+# The MaskFormer explicit leaves (the two object reduces that the
+# outputs: section cannot mint). In MaskFormer.yaml emission order:
+_MF_LEADING_LEAF_KEY = "outputs.objects.leading_object"
+_MF_LEADING_LEAF_NAMES = [
+    "leading_objects_pt",
+    "leading_objects_Lxy",
+    "leading_objects_deta",
+    "leading_objects_dphi",
+    "leading_objects_mass",
+]
+_MF_INDEX_LEAF_KEY = "outputs.tracks.object_index"
+_MF_INDEX_LEAF_NAME = "HadronIndex"
+
+# The PINNED full ordered output_names for the MaskFormer OnnxExportSink with
+# model_name="MFv2", section tasks=[jets_classification, track_origin], and the
+# two explicit MF object leaves (leading_object + object_index). Hand-derived
+# from the v1 manifest / writer order: 1:1 head section leaves first (globals
+# pb/pc/pu then per-token TrackOrigin), THEN the object-reduce explicit leaves
+# (global split_scalars leading_objects_* then per-token HadronIndex).
+EXPECTED_MFV2_OUTPUT_NAMES = [
+    "MFv2_pb",
+    "MFv2_pc",
+    "MFv2_pu",
+    "MFv2_TrackOrigin",
+    "MFv2_leading_objects_pt",
+    "MFv2_leading_objects_Lxy",
+    "MFv2_leading_objects_deta",
+    "MFv2_leading_objects_dphi",
+    "MFv2_leading_objects_mass",
+    "MFv2_HadronIndex",
+]
+
+
+class TestW6bOnnxTupleOrder:
+    """T1 — explicit MaskFormer object leaves appear AFTER the section block.
+
+    Pins the full ordered output_names list for the MaskFormer OnnxExportSink:
+    the section's 1:1 head leaves (globals then per-token) come first, then the
+    explicit object-reduce leaves (globals then per-token). Before the fix, the
+    leading_object globals were merged INTO the section's globals block and
+    hoisted AHEAD of the section's per-token TrackOrigin, breaking the v1 order.
+    """
+
+    def _onnx_sink(self, tmp_path: Path):
+        from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
+        from salt.core.outputs.writers import RunTaskOutput
+        from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+        from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
+
+        nd_path = tmp_path / "norm_dict.yaml"
+        cd_path = tmp_path / "class_dict.yaml"
+        write_parity_norm_dict(nd_path, cd_path)
+        modules = build_gn2v2_modules(nd_path)
+        rt = RunTaskOutput(tasks=["jets_classification", "track_origin"])
+        rt.name = "run_tasks"
+        rt.bind_model_modules(modules)
+        # The two explicit MaskFormer object leaves in MaskFormer.yaml order.
+        explicit_leaves = [
+            OnnxExportLeaf(key=_MF_LEADING_LEAF_KEY, names=_MF_LEADING_LEAF_NAMES),
+            OnnxExportLeaf(
+                key=_MF_INDEX_LEAF_KEY,
+                name=_MF_INDEX_LEAF_NAME,
+                dtype="int8",
+                per_token=True,
+            ),
+        ]
+        sink = OnnxExportSink(outputs=explicit_leaves, model_name="MFv2")
+        sink.bind_output_section({"run_tasks": rt})
+        return sink
+
+    def test_output_names_full_ordered_list(self, tmp_path):
+        """The full flat output_names list equals EXPECTED_MFV2_OUTPUT_NAMES exactly.
+
+        Pins ORDER: pb/pc/pu (section globals), TrackOrigin (section per-token),
+        then leading_objects_* (explicit globals), then HadronIndex (explicit per-token).
+        This is the v1 manifest/writer order the OnnxExportSink must reproduce.
+        """
+        sink = self._onnx_sink(tmp_path)
+        assert sink.output_names() == EXPECTED_MFV2_OUTPUT_NAMES
+
+    def test_trackorigin_before_leading_object_globals(self, tmp_path):
+        """TrackOrigin (section per-token) comes BEFORE leading_objects_* (explicit globals).
+
+        The pre-fix code merged explicit globals into the section's globals block,
+        hoisting them ahead of TrackOrigin. After the fix, the entire section block
+        (globals then per-token) precedes the explicit block.
+        """
+        names = self._onnx_sink(tmp_path).output_names()
+        to_idx = names.index("MFv2_TrackOrigin")
+        lo_idx = names.index("MFv2_leading_objects_pt")
+        assert to_idx < lo_idx, (
+            f"TrackOrigin at {to_idx} must precede leading_objects_pt at {lo_idx}"
+        )
+
+    def test_hadron_index_last(self, tmp_path):
+        """HadronIndex (explicit per-token) is the last element of the output tuple."""
+        names = self._onnx_sink(tmp_path).output_names()
+        assert names[-1] == "MFv2_HadronIndex"
+
+
+# ---------------------------------------------------------------------------
+# T2 — object_masks shape guard: mismatch raises ConfigError loudly
+# ---------------------------------------------------------------------------
+
+
+class TestObjectMasksShapeGuard:
+    """T2 — _extra_group_fragments rejects a fragment with wrong per-row shape.
+
+    The MaskFormer object sink declares object_masks as (M, T_file) = (5, 40).
+    Under a tracks `truncate: N` (N < 40) the sink's write() returns
+    object_masks with shape (B, M, N) — a mismatch the H5 write would silently
+    crash on with an h5py broadcast error. The shape guard must raise ConfigError
+    loudly instead, naming the group and explaining the cause.
+    """
+
+    _M = 5    # num objects
+    _T = 40   # T_file (full file constituent width)
+
+    def _sink_with_state(self, extra_shapes=None):
+        """Minimal H5OutputSink with _extra_shapes and a stub extra-group node set up."""
+        from salt.core.outputs import H5OutputSink
+
+        sink = H5OutputSink(extra_groups=["mf_objects"])
+        # Set the internal state that open_schema would normally populate.
+        sink._extra_shapes = extra_shapes or {"object_masks": (self._M, self._T)}  # noqa: SLF001
+        sink._seq_lengths = {"tracks": self._T}  # noqa: SLF001
+        sink._run_name = "MFv2"  # noqa: SLF001
+        return sink
+
+    def _stub_node(self, arr_shape):
+        """A minimal extra-group node stub whose write() returns a fixed-shape array."""
+        dtype = np.dtype([("truth_mask", "i8"), ("mask_logits", "f4")])
+        arr = np.zeros(arr_shape, dtype=dtype)
+
+        class _Stub:
+            def write(self, bundle, rows, run_name, precision):  # noqa: ANN001, ARG002
+                return {"object_masks": arr}
+
+        return _Stub()
+
+    def _sink_and_node(self, arr_shape):
+        sink = self._sink_with_state()
+        stub = self._stub_node(arr_shape)
+        sink._output_section = {"mf_objects": stub}  # noqa: SLF001
+        return sink
+
+    def test_truncated_constituent_axis_raises_config_error(self):
+        """object_masks with T_model < T_file raises ConfigError (not an h5py broadcast crash)."""
+        from salt.core.graph.errors import ConfigError
+
+        B, T_model = 4, 30  # T_model < T_file=40 — a truncated constituent axis
+        sink = self._sink_and_node(arr_shape=(B, self._M, T_model))
+        bundle = Bundle()
+        with pytest.raises(ConfigError, match="object_masks"):
+            sink._extra_group_fragments(bundle, slice(0, B))  # noqa: SLF001
+
+    def test_error_message_names_declared_and_actual_shape(self):
+        """The ConfigError message includes both the declared and actual per-row shapes."""
+        from salt.core.graph.errors import ConfigError
+
+        B, T_model = 4, 30
+        sink = self._sink_and_node(arr_shape=(B, self._M, T_model))
+        bundle = Bundle()
+        with pytest.raises(ConfigError) as exc_info:
+            sink._extra_group_fragments(bundle, slice(0, B))  # noqa: SLF001
+        msg = str(exc_info.value)
+        # The error names the declared shape (M, T_file) and the actual shape (M, T_model).
+        assert f"({self._M}, {self._T})" in msg, f"declared shape not in: {msg}"
+        assert f"({self._M}, {T_model})" in msg, f"actual shape not in: {msg}"
+
+    def test_shipped_maskformer_yaml_width_does_not_raise(self):
+        """The shipped MaskFormer.yaml case (T_model == T_file == 40) does NOT raise.
+
+        This is the critical non-regression: the guard must NOT fire on correctly
+        sized object_masks (the common case where truncate is not set).
+        """
+        B = 4
+        sink = self._sink_and_node(arr_shape=(B, self._M, self._T))  # T_model == T_file
+        bundle = Bundle()
+        result = sink._extra_group_fragments(bundle, slice(0, B))  # noqa: SLF001
+        assert "object_masks" in result

@@ -1214,9 +1214,12 @@ class H5OutputSink(_SinkCallback):
         and collects its per-group structured arrays. A per-token fragment landing on
         a reader sequence stream (the ``MaskIndex`` on the constituent stream) is
         re-expanded to the file token length (the v1 ``maybe_pad`` quirk, ``_pad_to``)
-        so it aligns with the reader columns it joins; the NON-reader ``objects`` /
-        ``object_masks`` groups keep their ``[B, M]`` / ``[B, M, T]`` compactness
-        verbatim. Nodes without a ``write`` (the W6a stub) contribute nothing.
+        so it aligns with the reader columns it joins. NON-reader extra groups (e.g.
+        ``objects`` / ``object_masks``) are written verbatim, but a shape guard
+        rejects any fragment whose per-row shape diverges from the schema-declared
+        extra-group shape — ``object_masks`` must span the full file constituent
+        width and is incompatible with a ``truncate`` on the tracks stream. Nodes
+        without a ``write`` (the W6a stub) contribute nothing.
 
         Returns
         -------
@@ -1226,7 +1229,9 @@ class H5OutputSink(_SinkCallback):
         Raises
         ------
         ConfigError
-            When two extra-group nodes both write the same group (attribution).
+            When two extra-group nodes both write the same group (attribution), or
+            when an extra-group fragment's per-row shape does not match the
+            schema-declared shape (e.g. a truncated constituent axis).
         """
         out: dict[str, np.ndarray] = {}
         if not self._extra_group_names:
@@ -1245,6 +1250,17 @@ class H5OutputSink(_SinkCallback):
                     )
                 if group in self._seq_lengths and arr.ndim >= 2:
                     arr = _pad_to(arr, self._seq_lengths[group])
+                if group in self._extra_shapes:
+                    declared = self._extra_shapes[group]
+                    actual = arr.shape[1:]
+                    if actual != declared:
+                        raise ConfigError(
+                            f"H5OutputSink: extra-group {group!r} fragment per-row shape "
+                            f"{actual} does not match the schema-declared per-row shape "
+                            f"{declared} — tracks `truncate` is not supported with the "
+                            f"MaskFormer object sink; object_masks must span the full file "
+                            f"constituent width"
+                        )
                 out[group] = arr
         return out
 
@@ -1850,14 +1866,17 @@ class OnnxExportSink(_SinkCallback):
                     globals_block.append(
                         OnnxExportLeaf(key=leaf_key, name=suffix, dtype=field.onnx_dtype)
                     )
-        # W6b: merge the EXPLICIT leaves (the MaskFormer object reduces a section
-        # cannot mint — leading_object split_scalars + the object_index per-token
-        # leaf) on top of the section leaves, each into its block so the canonical
-        # globals-then-per-token Athena tuple order holds. The dup guard below
-        # rejects any key/suffix clash between the section and explicit leaves.
-        for leaf in self._explicit_leaves:
-            (per_token_block if leaf.per_token else globals_block).append(leaf)
-        ordered = (*globals_block, *per_token_block)
+        # W6b: the EXPLICIT leaves (the MaskFormer object reduces — leading_object +
+        # object_index) are appended AFTER the entire section block, preserving the
+        # v1 manifest/writer order (object reduces follow the 1:1 head leaves in
+        # writer declaration order). They form their own globals-then-per-token
+        # sub-block appended last — NOT merged into the section's blocks (merging
+        # would hoist the leading_object globals ahead of the section's per-token
+        # TrackOrigin, breaking the v1 tuple order). The dup guard below rejects
+        # any key/suffix clash between section and explicit leaves.
+        explicit_globals = [leaf for leaf in self._explicit_leaves if not leaf.per_token]
+        explicit_per_token = [leaf for leaf in self._explicit_leaves if leaf.per_token]
+        ordered = (*globals_block, *per_token_block, *explicit_globals, *explicit_per_token)
         if not ordered:
             raise ConfigError(
                 "OnnxExportSink (dumb-section) found no RunTaskOutput field with an ONNX leaf — "
