@@ -7,9 +7,9 @@ Training is fully configured via a YAML config file and a CLI powered by [pytorc
 This allows you control all aspects of the training from config or directly via command line arguments.
 
 The configuration is split into two parts.
-The [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
+The [`base.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/base.yaml) config contains model-independent information like the input file paths and batch size.
 This config is used by default for all trainings without you having to explicitly specify it.
-Meanwhile the model configs, for example [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2.yaml) contain a full description of a specific model, including a list of input variables used.
+Meanwhile the model configs, for example [`GN2.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2.yaml) contain a full description of a specific model, including a list of input variables used.
 You can start a training for a given model by providing it as an argument to the `main.py` python script, which is also exposed through the command `salt`.
 
 ```bash
@@ -17,7 +17,7 @@ salt fit --config configs/GN2/GN2.yaml
 ```
 
 The subcommand `fit` specifies you want to train the model, rather than [evaluate](evaluation.md) it.
-It's possible to specify more than one configuration file, for example to override the values set in [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml).
+It's possible to specify more than one configuration file, for example to override the values set in [`base.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/base.yaml).
 The CLI will merge them [automatically](https://pytorch-lightning.readthedocs.io/en/latest/cli/lightning_cli_advanced.html#compose-yaml-files).
 
 ??? info "Running a test training"
@@ -92,7 +92,7 @@ The tag name is the same as the output directory name, which is generated automa
 #### Random Seeds
 
 Training runs are reproducible thanks to the `--seed_everything` flag,
-which is already set for you in the [`base.yaml`]({{repo_url}}-/blob/main/salt/configs/base.yaml) config.
+which is already set for you in the [`base.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/base.yaml) config.
 The flat seeds all random number generators used in the training.
 This means for example that weight initialisation and data shuffling happen in a deterministic way.
 

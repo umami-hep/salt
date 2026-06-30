@@ -38,7 +38,7 @@ The model name is used to construct the output probability variable names in Ath
 ??? tip "Exporting a model trained with `torch.compile()`."
 
     If you trained your model with `torch.compile()`, you need to repair your checkpoint before exporting.
-    You can do this by running the [`repair_ckpt.py`]({{repo_url}}-/blob/main/salt/utils/repair_ckpt.py) 
+    You can do this by running the [`repair_ckpt.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/utils/repair_ckpt.py) 
     script:
 
     ```bash

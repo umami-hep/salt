@@ -53,7 +53,7 @@ These are defined in the model files, rather than the `base.yaml` config.
     You should _not_ include any truth information (unless you are testing this explicitly),
     but rather specify truth labels for each task in your model config.
 
-For example, in [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2.yaml) you will find the following variables:
+For example, in [`GN2.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2.yaml) you will find the following variables:
 
 ```yaml
 data:
@@ -71,7 +71,7 @@ data:
 
 The number of variables specified here will be used to automatically set the `input_size` of your [`salt.models.InitNet`][salt.models.InitNet] modules.
 
-Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) which includes a separate electrons input type.
+Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2emu.yaml) which includes a separate electrons input type.
 
 #### Mapping Input Dataset Names
 
@@ -198,7 +198,7 @@ multi_target:
       custom_target: pt_label_handle
       source: pt_visFromTruthTaus
 ```
-`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config]({{repo_url}}-/blob/main/salt/configs/regression_multi_target.yaml).
+`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_multi_target.yaml).
 
 The allowed values of `opp` are: `"=="`, `"!="`, `">="`, `"<="`, `">"`, `"<"`.
 
@@ -266,7 +266,7 @@ data:
         ...
 ```
 
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) config.
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2emu.yaml) config.
 
 
 #### Edge Features

@@ -99,7 +99,7 @@ Salt requires Python 3.11 to 3.14.
             /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/
         ```
 
-        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](#install-the-salt-package).
 
     === "Pull the image"
 
@@ -128,7 +128,7 @@ Salt requires Python 3.11 to 3.14.
             $APPTAINER_CACHEDIR/salt.simg
         ```
 
-        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](#install-the-salt-package).
 
 
     --------------------------------------------------------

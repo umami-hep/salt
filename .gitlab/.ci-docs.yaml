@@ -7,7 +7,7 @@ test_docs_build: &docs_build
     - python -m pip install uv
     - uv sync --only-group docs
   script:
-    - uv run --no-sync mkdocs build -s -d public
+    - uv run --no-sync zensical build --strict
   artifacts:
     paths:
       - public
