@@ -64,7 +64,6 @@ from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.onnx.config import ExportConfig
 from salt.core.outputs.writers import OutputSectionWriter
 from salt.core.saltmodule import SaltModule
-from salt.core.writers import Writer
 
 __all__ = ["CONFIG_DIR", "DeepMergeParser", "Salt2CLI", "main"]
 

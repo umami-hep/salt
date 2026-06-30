@@ -19,11 +19,9 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.writers import (
-    OBJECT_INDEX,
-    MaskFormerObjectWriter,
-    WriteCtx,
-)
+from salt.core.outputs.maskformer import MaskFormerObjectWriter
+from salt.core.outputs.names import OBJECT_INDEX
+from salt.core.outputs.writer_base import WriteCtx
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (data/modules are fixtures)
     L_FILE,
     data,

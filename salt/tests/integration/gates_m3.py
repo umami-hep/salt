@@ -71,7 +71,7 @@ from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
 from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
 from salt.core.saltmodule import SaltModule
-from salt.core.writers import Writer
+from salt.core.outputs.writer_base import Writer
 from salt.data.datamodules import SaltDataModule
 from salt.data.datasets import SaltDataset
 from salt.tests._fixtures.gn2_fixture import (

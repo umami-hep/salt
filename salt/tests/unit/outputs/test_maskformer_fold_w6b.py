@@ -38,7 +38,8 @@ import pytest
 from salt.core.graph.bundle import Bundle
 from salt.core.outputs import MaskFormerObjectsSink
 from salt.core.outputs.sinks import _ExtraGroupCtx
-from salt.core.writers import OBJECT_INDEX, MaskFormerObjectWriter
+from salt.core.outputs.maskformer import MaskFormerObjectWriter
+from salt.core.outputs.names import OBJECT_INDEX
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (pytest fixtures)
     L_FILE,
     data,
