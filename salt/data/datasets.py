@@ -25,6 +25,9 @@ from salt.utils.configs import LabellerConfig, MaskformerConfig, MaskformerObjec
 from salt.utils.inputs import as_half
 from salt.utils.mask_utils import build_target_masks
 
+# Disable HDF5 file locking (errno 524 on Lustre/GPFS) before any h5py open.
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
 # Define the available operators
 OPERATORS = {
     "==": operator.eq,
@@ -509,7 +512,7 @@ class SaltDataset(Dataset):
             if self._h5 is not None and self._h5.id.valid:
                 self._h5.close()
 
-            self._h5 = h5py.File(self.filename, "r", swmr=True, libver="latest")
+            self._h5 = h5py.File(self.filename, "r", libver="latest")
             self._pid = pid
 
     def _setup(self):
