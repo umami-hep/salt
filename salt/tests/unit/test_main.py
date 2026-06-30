@@ -612,6 +612,40 @@ class TestGraphFitConfigAdapter:
         assert "REMOVED by the M4.5" in err
         assert "writers" in err
 
+    def test_validate_writers_block_raises_clean_migration_error(self, tmp_path, capsys):
+        # W6c removal: a config carrying a live top-level writers: block (a real
+        # writers.modules entry, NOT a null override) must fail with the CLEAN
+        # migration ConfigError — NOT a cryptic jsonargparse class_path resolution
+        # failure ("module has no attribute 'modules'").
+        config = yaml.safe_load(DUMMY_CFG.read_text())
+        config["writers"] = {
+            "modules": {
+                "tasks": {
+                    "class_path": "salt.core.writers.modules.TaskWriter",
+                    "init_args": {"tasks": ["jets_classification"]},
+                }
+            }
+        }
+        bad = tmp_path / "legacy_writers.yaml"
+        bad.write_text(yaml.dump(config, sort_keys=False))
+        rc = main([
+            "graph",
+            "validate",
+            "-c",
+            str(bad),
+            "--mode",
+            "test",
+            "--set",
+            "model.modules.norm.init_args.norm_dict=unused.yaml",
+        ])
+        assert rc == 1
+        err = capsys.readouterr().err
+        # message must mention writers: and removal/migration — NOT a parse-time
+        # AttributeError about a missing 'modules' attribute
+        assert "writers" in err
+        assert ("removed" in err.lower() or "migrate" in err.lower())
+        assert "AttributeError" not in err
+
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks
         # from the writers (the shipped config carries NO export.outputs)

@@ -56,14 +56,6 @@ model:
       class_path: salt.core.outputs.SeqClassProbs
       init_args: {task: track_origin, stream: tracks}
 
-# Delete the M4.5 WriterCallback for THIS config (null-merge, design §5.3);
-# the H5OutputWriter below is the live persistence sink.
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
-
 # The live TEST sink (design §2 layer 2): H5OutputWriter is a plain Lightning
 # callback (dict-keyed, deep-mergeable). Its writer_demand anchors the TEST plan
 # (SaltModule._attached_writer duck-types it). copy_inputs={} per stream -> all

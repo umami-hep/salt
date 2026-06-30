@@ -72,14 +72,6 @@ model:
         name: pbc
         terms: { 0: 1.0, 1: 1.0 } # pbc = pb + pc (probs[...,0] + probs[...,1])
 
-# Delete the M4.5 WriterCallback (the off-graph ONNX manifest source) — the
-# folded OnnxExportSink below is the ONNX output authority.
-writers:
-  modules:
-    inputs_copy: null
-    tasks: null
-    pad_mask: null
-
 # The declare-only ONNX sink (design §4.2): NAMES the folded conversion leaves
 # into the flat Athena output tuple, in tuple order (globals, combine, per-token
 # aux). model_name defaults from export.model_name (GN2v2dummy).

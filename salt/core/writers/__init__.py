@@ -1,19 +1,13 @@
-"""salt v2 prediction writers — the single output manifest (design §2.7, §8; M4.5).
+"""salt v2 writer base types — re-exports from ``salt.core.outputs`` (design §2.7).
 
-The top-level ``writers:`` config block (design §5.1) is assembled by
-`Salt2CLI` into one `WriterCallback` owning a single ftag ``H5Writer`` sink;
-the shipped modules reproduce the v1 `PredictionWriter` output contract
-(``base2.yaml`` order ``inputs_copy -> tasks -> pad_mask``). Writers declare
-their consumed bundle keys, making them first-class TEST-graph sinks
-(demand-gating + the dead-preds hard error, design §4.2).
+The top-level ``writers:`` config block (``WriterCallback`` + ``TaskWriter`` /
+``InputCopyWriter`` / ``PadMaskWriter``) was removed in W6c; migrate to the
+``outputs:`` section + a ``callbacks:`` persistence sink — see
+``gn2v2-dummy.yaml`` for the canonical cutover pattern.
 
-Since the M4.5 unified-manifest amendment, writers are ALSO the ONNX output
-manifest: `Writer.onnx_outputs` declares export entries (M4
-`ExportOutput`s) that `WriterCallback.onnx_manifest` assembles for the
-exporter — TEST executes, ONNX declares; eval columns and Athena outputs
-derive from one set of declarations. `ExportOnlyWriter` is the blessed
-export-only pattern; `salt.core.outputs.names` owns the cross-mode suffix
-constants.
+This module re-exports the REMAINING stable surface from ``salt.core.outputs``:
+the `Writer` ABC, the context types, `ExportOnlyWriter`, `MaskFormerObjectWriter`,
+and the cross-mode suffix constants (``VERTEX_INDEX``, ``OBJECT_INDEX``, etc.).
 """
 
 from salt.core.outputs.writer_base import (
@@ -23,24 +17,17 @@ from salt.core.outputs.writer_base import (
     WriterDeclareCtx,
     task_modules,
 )
-from salt.core.writers.callback import DEFAULT_OUTPUT, WriterCallback
 from salt.core.outputs.maskformer import MaskFormerObjectWriter
-from salt.core.writers.modules import InputCopyWriter, PadMaskWriter, TaskWriter
 from salt.core.outputs.names import OBJECT_INDEX, VERTEX_INDEX, ModeSplitSuffix, pascal_case
 
 __all__ = [
-    "DEFAULT_OUTPUT",
     "OBJECT_INDEX",
     "VERTEX_INDEX",
     "ExportOnlyWriter",
-    "InputCopyWriter",
     "MaskFormerObjectWriter",
     "ModeSplitSuffix",
-    "PadMaskWriter",
-    "TaskWriter",
     "WriteCtx",
     "Writer",
-    "WriterCallback",
     "WriterDeclareCtx",
     "pascal_case",
     "task_modules",

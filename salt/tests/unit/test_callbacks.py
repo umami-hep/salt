@@ -444,24 +444,8 @@ class TestGraphArtifacts:
         GraphArtifacts().on_fit_start(trainer, fitted_model)
         assert (tmp_path / "plan_fit.txt").exists()
 
-    def test_writer_sinks_table_in_plan_test(self, fitted_model, tmp_path):
-        # M3-review fix: plan_test.txt answers "which writer consumes
-        # preds.X" via the per-writer demand table
-        from salt.core.data import H5StructuredReader
-        from salt.core.writers import TaskWriter, WriterCallback
-
-        trainer = stub_trainer(tmp_path)
-        trainer.callbacks = [WriterCallback(modules={"tasks": TaskWriter()})]
-        trainer.datamodule = SimpleNamespace(
-            reader=H5StructuredReader(
-                groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}
-            )
-        )
-        GraphArtifacts().on_test_start(trainer, fitted_model)
-        text = (tmp_path / "plan_test.txt").read_text()
-        assert "# writer sinks (design §8)" in text
-        assert "tasks (TaskWriter): preds.jets.jets_classification" in text
-        assert "preds.tracks.track_vertexing" in text
+    # test_writer_sinks_table_in_plan_test removed in W6c:
+    # WriterCallback/TaskWriter were deleted with callback.py/modules.py.
 
     def test_resolved_io_yaml_written(self, fitted_model, tmp_path):
         # design §4.4: the machine-readable artifact (M3-review fix — it was

@@ -23,7 +23,6 @@ from salt.core.writers import (
     OBJECT_INDEX,
     MaskFormerObjectWriter,
     WriteCtx,
-    WriterCallback,
 )
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (data/modules are fixtures)
     L_FILE,
@@ -185,17 +184,5 @@ class TestMaskFormerObjectWriter:
         assert '"MaskIndex"' not in source and "'MaskIndex'" not in source
         assert '"HadronIndex"' not in source and "'HadronIndex'" not in source
 
-    def test_extra_group_merges_through_writer_callback(self, data):
-        # the extra-group plumbing: the writer's objects/object_masks groups flow
-        # through WriterCallback._merge_columns with their writer-declared shapes
-        mods = mf_writer_modules(data["nd"])
-        cb = WriterCallback(modules={"object_writer": self._writer()})
-        ctx = mf_write_ctx(data, mods)
-        for writer in cb.writers.values():
-            writer.setup(ctx)
-        dtypes, shapes = cb._merge_columns(ctx)
-        assert "objects" in dtypes and "object_masks" in dtypes
-        assert shapes["objects"] == (6, 5)  # (total, M)
-        assert shapes["object_masks"] == (6, 5, 10)  # (total, M, T=n_tracks of the ctx)
-        # the reader-stream MaskIndex column rides on the tracks group
-        assert f"MFrun_{OBJECT_INDEX.test}" in dtypes["tracks"].names
+    # test_extra_group_merges_through_writer_callback removed in W6c:
+    # WriterCallback._merge_columns was deleted with callback.py.

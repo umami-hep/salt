@@ -64,7 +64,7 @@ from salt.core.graph.errors import ConfigError, GraphError
 from salt.core.onnx.config import ExportConfig
 from salt.core.outputs.writers import OutputSectionWriter
 from salt.core.saltmodule import SaltModule
-from salt.core.writers import DEFAULT_OUTPUT, Writer, WriterCallback
+from salt.core.writers import Writer
 
 __all__ = ["CONFIG_DIR", "DeepMergeParser", "Salt2CLI", "main"]
 
@@ -666,11 +666,10 @@ class Salt2CLI(LightningCLI):
         )
         parser.add_argument(
             "--writers.modules",
-            type=dict[str, Writer | None] | None,
+            type=dict[str, Any] | None,
             default=None,
-            help="dict-keyed prediction-writer modules, deep-mergeable; assembled into one "
-            "WriterCallback (design §8; an entry set to null is removed; dict order is the "
-            "per-group column order)",
+            help="REMOVED in W6c — migrate to an ``outputs:``/``callbacks:`` sink; "
+            "a non-null entry here raises ConfigError at instantiate_classes (see gn2v2-dummy.yaml)",
         )
         parser.add_argument(
             "--outputs",
@@ -682,18 +681,6 @@ class Salt2CLI(LightningCLI):
             "set to null is removed). NOT a link_arguments link — the section is composed onto "
             "the model in instantiate_classes (SaltModule.compose_output_section), not wired via "
             "link_arguments.",
-        )
-        parser.add_argument(
-            "--writers.output",
-            type=str,
-            default=DEFAULT_OUTPUT,
-            help="eval-file path template; keys: ckpt_dir, ckpt_stem, sample (design §5.1)",
-        )
-        parser.add_argument(
-            "--writers.half_precision",
-            type=bool,
-            default=False,
-            help="write float columns at half precision (v1 PredictionWriter flag)",
         )
         parser.add_argument(
             "--export",
@@ -765,19 +752,6 @@ class Salt2CLI(LightningCLI):
             for cb in callbacks_dict.values()
             if cb is not None and (has_logger or not _needs_logger(cb))
         ]
-        writer_modules = {
-            name: writer
-            for name, writer in (self._get(self.config_init, "writers.modules") or {}).items()
-            if writer is not None
-        }
-        if writer_modules:
-            assembled.append(
-                WriterCallback(
-                    modules=writer_modules,
-                    output=self._get(self.config_init, "writers.output") or DEFAULT_OUTPUT,
-                    half_precision=bool(self._get(self.config_init, "writers.half_precision")),
-                )
-            )
         if assembled:
             stock = self._get(self.config_init, "trainer.callbacks") or []
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
@@ -786,15 +760,32 @@ class Salt2CLI(LightningCLI):
     def instantiate_classes(self) -> None:
         """Instantiate, then compose the top-level ``outputs:`` section onto the model (W34.2).
 
-        The new plan-34 fold site (mirroring the ``writers:`` -> `WriterCallback`
-        assembly in `instantiate_trainer`): the top-level ``outputs:`` namespace is
+        The plan-34 fold site: the top-level ``outputs:`` namespace is
         instantiated by jsonargparse into ``config_init["outputs"]`` (a dict of
         section writers built from their ``class_path``); after the standard
         instantiation this composes that section onto the `SaltModule` (folding the
         section writers into the planning module dict, binding RunTaskOutput's
         tasks). Done here — NOT via ``link_arguments`` — because a subclass-mode
         model link target grabs the whole namespace (jsonargparse pitfall).
+
+        A MIGRATION ERROR fires first if the config carries a live ``writers:``
+        block (non-null entries under ``writers.modules``): the W6c cutover removed
+        WriterCallback assembly — migrate to an ``outputs:``/``callbacks:`` sink
+        (see gn2v2-dummy.yaml).
         """
+        # Migration guard (W6c): writers: block with live modules is no longer supported.
+        # Null-delete overrides (writers.modules.X: null) are exempt — they are
+        # the cutover configs disabling inherited defaults and produce an empty dict here.
+        live_writer_modules = {
+            name: writer
+            for name, writer in (self._get(self.config, "writers.modules") or {}).items()
+            if writer is not None
+        }
+        if live_writer_modules:
+            raise ConfigError(
+                "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
+                "sink — see gn2v2-dummy.yaml (W6c removal)"
+            )
         super().instantiate_classes()
         section = self._get(self.config_init, "outputs")
         model = getattr(self, "model", None)
@@ -831,14 +822,14 @@ class Salt2CLI(LightningCLI):
         device; a sink-less eval is refused up front (TEST predictions would be
         computed and never persisted — design §4.2, §8). A persistence sink is
         EITHER an M4.5 ``writers.modules`` writer OR a callbacks-level
-        `H5OutputWriter` sink (the P1.5 cutover, design §2 layer 2).
+        `H5OutputWriter` sink (the ``outputs:``/``callbacks:`` sink path, design §2 layer 2).
 
         Raises
         ------
         ConfigError
-            On a sink-less test config (no ``writers.modules`` writer and no
-            callbacks-level persistence sink), an ambiguous config list without
-            ``--ckpt_path``, or an explicit multi-device list.
+            On a sink-less test config (no callbacks-level persistence sink),
+            an ambiguous config list without ``--ckpt_path``, or an explicit
+            multi-device list.
         """
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
@@ -849,22 +840,18 @@ class Salt2CLI(LightningCLI):
         cfg = self.config["test"]
         self.save_config_callback = None  # v1: no config.yaml dump on test (cli.py:312-316)
         cfg.trainer.logger = False
-        writer_modules = cfg.get("writers.modules") or {}
-        has_m45_writer = any(writer is not None for writer in writer_modules.values())
-        # the P1.5 cutover (design §2 layer 2) nulls writers.modules and persists
-        # via a callbacks-level H5OutputWriter sink instead — that is NOT a
-        # writer-less eval, so accept it too (the LIVE cutover path, gn2v2-dummy-
-        # cutover.yaml; SaltModule duck-types the sink's writer_demand surface)
+        # W6c: writers.modules no longer constitutes a valid persistence sink;
+        # a config with live writers.modules will raise the migration error in
+        # instantiate_classes. Accept only the callbacks-level sink path.
         has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
-        if not has_m45_writer and not has_callback_sink:
+        if not has_callback_sink:
             raise ConfigError(
-                "salt2 test needs a persistence sink — at least one writer under "
-                "writers.modules OR a callbacks-level H5OutputWriter sink; predictions "
-                "would otherwise be computed and never persisted (design §4.2, §8). "
-                "base2.yaml no longer ships a persistence default (plan 34 W34.4c): "
-                "supply your own top-level outputs: section (InputCopyWriter -> "
-                "RunTaskOutput -> PadMaskWriter, in v1 H5 column order) with a dumb "
-                "callbacks-level salt.core.outputs.H5OutputSink"
+                "salt2 test needs a persistence sink — a callbacks-level H5OutputWriter "
+                "sink; predictions would otherwise be computed and never persisted "
+                "(design §4.2, §8). Supply a top-level outputs: section "
+                "(InputCopyWriter -> RunTaskOutput -> PadMaskWriter, in v1 H5 column order) "
+                "with a callbacks-level salt.core.outputs.H5OutputSink (W6c removal; "
+                "the writers: block is gone — see gn2v2-dummy.yaml)"
             )
         if not cfg.get("ckpt_path"):
             configs = cfg.get("config") or []
@@ -880,7 +867,7 @@ class Salt2CLI(LightningCLI):
             try:
                 n_devices = int(devices)
             except ValueError:
-                n_devices = None  # "auto" — the WriterCallback single-device assert covers it
+                n_devices = None  # "auto" — single-device eval contract (design §8)
             if n_devices is not None and n_devices > 1:
                 print("salt2 test: forcing --trainer.devices=1 (single-device eval, design §8)")
                 cfg.trainer.devices = "1"

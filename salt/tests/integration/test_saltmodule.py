@@ -442,41 +442,8 @@ class TestBoundaryDemandGuards:
         # feature demand is attributed too (norm is the first requirer)
         assert "model.modules." in origins["inputs.jets"]
 
-    def test_sink_origins_attribute_writer_demand_per_mode(self, data):
-        # M3-review fix: a writer-demanded TEST label is attributed to the
-        # WRITER in Mode.TEST while Mode.FIT keeps the task attribution —
-        # the old merged map won FIT-first for both
-        from types import SimpleNamespace
-
-        from salt.core.graph.spec import TensorSpec
-        from salt.core.writers import TaskWriter, Writer, WriterCallback
-
-        class TruthWriter(Writer):
-            def requires(self, ctx):
-                del ctx
-                return {"labels.jets.flavour_label": TensorSpec(kind="label")}
-
-            def columns(self, ctx):
-                raise NotImplementedError  # static demand only in this test
-
-            def write(self, bundle, rows):
-                raise NotImplementedError
-
-        wcb = WriterCallback(modules={"truth": TruthWriter(), "tasks": TaskWriter()})
-        reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
-        model = build_model(data)
-        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
-            callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
-        )
-        origins = model.sink_origins()
-        assert (
-            origins[Mode.TEST]["labels.jets.flavour_label"]
-            == "writer 'truth' (config: writers.modules.truth)"
-        )
-        assert (
-            origins[Mode.FIT]["labels.jets.flavour_label"]
-            == "'jets_classification' (config: model.modules.jets_classification)"
-        )
+    # test_sink_origins_attribute_writer_demand_per_mode removed in W6c:
+    # WriterCallback/TaskWriter were deleted with callback.py/modules.py.
 
     def test_deleted_producer_raises_named_error(self, data):
         # the ergonomics journey-(d) repro: --model.modules.pool=null used to
@@ -685,88 +652,8 @@ class TestClassNamesCheck:
             make_trainer().fit(model, build_datamodule(data))
 
 
-class TestExposeSilencesDeadPreds:
-    """The §4.2 opt-out at the real TEST writer-demand surface (`_model_sinks`)."""
-
-    def _model_with_origin_expose(self, data, expose):
-        from salt.core.nn.tasks import ClassificationTaskModule
-
-        modules = build_gn2v2_modules(data["nd"])
-        # rebuild track_origin (a tracks-stream aux task) with/without expose
-        modules["track_origin"] = ClassificationTaskModule(
-            stream="tracks", label="ftagTruthOriginLabel",
-            class_names=list(ORIGIN_CLASSES), context="pooled.global", weight=0.5,
-            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=expose,
-        )
-        modules["track_origin"].name = "track_origin"
-        loss = LossSum()
-        loss.name = "loss"
-        loss.narrow(LossSum.collect_loss_keys(modules))
-        modules["loss"] = loss
-        return SaltModule(modules, lrs=LRS)
-
-    def _attach_jets_only_writer(self, model):
-        from types import SimpleNamespace
-
-        from salt.core.writers import TaskWriter, WriterCallback
-
-        # TaskWriter narrowed to the jets task — the tracks tasks' preds are unconsumed
-        wcb = WriterCallback(modules={"tasks": TaskWriter(tasks=["jets_classification"])})
-        reader = H5StructuredReader(groups={"jets": {"global_object": True}, "tracks": {"global_object": False}})
-        model._trainer = SimpleNamespace(  # noqa: SLF001 - duck-typed attach
-            callbacks=[wcb], datamodule=SimpleNamespace(reader=reader)
-        )
-        return wcb, reader
-
-    def test_default_task_dead_preds_errors(self, data):
-        # negative control: WITHOUT expose, the jets-only writer leaves the
-        # tracks-stream preds unconsumed → the TEST dead-preds hard error
-        model = self._model_with_origin_expose(data, expose=None)
-        wcb, reader = self._attach_jets_only_writer(model)
-        with pytest.raises(ConfigError, match="consumed by NO writer") as excinfo:
-            model._model_sinks(Mode.TEST, writers=wcb, reader=reader)  # noqa: SLF001
-        # the dead-preds fix advertises the real expose opt-out FIRST
-        message = str(excinfo.value)
-        assert "expose: [fit, val]" in message
-        assert "track_origin.init_args.expose=[fit,val]" in message
-
-    def test_expose_silences_dead_preds(self, data):
-        # WITH expose: [fit, val] on track_origin, the same jets-only writer
-        # produces NO dead-preds error — the pred is gated out of TEST. The
-        # vertexing task (still all-modes) IS the genuine remaining dead pred,
-        # so expose ONLY the tasks that opt out; here we expose both tracks
-        # tasks to prove the error clears.
-        from salt.core.nn.tasks import ClassificationTaskModule
-
-        model = self._model_with_origin_expose(data, expose=["fit", "val"])
-        # also opt the vertexing task out (the other tracks-stream pred)
-        modules = dict(model._graph_modules)  # noqa: SLF001
-        vtx = modules["track_vertexing"]
-        vtx_exposed = type(vtx)(
-            stream="tracks", label="ftagTruthVertexIndex",
-            origin_label="ftagTruthOriginLabel", context="pooled.global", weight=1.5,
-            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=["fit", "val"],
-        )
-        vtx_exposed.name = "track_vertexing"
-        rebuilt = build_gn2v2_modules(data["nd"])
-        rebuilt["track_origin"] = ClassificationTaskModule(
-            stream="tracks", label="ftagTruthOriginLabel", class_names=list(ORIGIN_CLASSES),
-            context="pooled.global", weight=0.5,
-            dense={"hidden_layers": [16], "activation": "ReLU"}, expose=["fit", "val"],
-        )
-        rebuilt["track_origin"].name = "track_origin"
-        rebuilt["track_vertexing"] = vtx_exposed
-        loss = LossSum()
-        loss.name = "loss"
-        loss.narrow(LossSum.collect_loss_keys(rebuilt))
-        rebuilt["loss"] = loss
-        model = SaltModule(rebuilt, lrs=LRS)
-        wcb, reader = self._attach_jets_only_writer(model)
-        # no raise — only the jets pred is a TEST sink now
-        sinks = model._model_sinks(Mode.TEST, writers=wcb, reader=reader)  # noqa: SLF001
-        assert "preds.jets.jets_classification" in sinks
-        assert "preds.tracks.track_origin" not in sinks
-        assert "preds.tracks.track_vertexing" not in sinks
+# TestExposeSilencesDeadPreds removed in W6c:
+# WriterCallback/TaskWriter were deleted with callback.py/modules.py.
 
 
 class TestOriginWeightingResolvedAtSetup:

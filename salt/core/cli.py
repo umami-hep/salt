@@ -126,9 +126,8 @@ class GraphConfig:
     `reader` is set only for §5.1 trainer configs (the adapter path) — it
     carries the schema artifact for the validate-time class-names check.
     `mode_errors` carries per-mode config errors found while deriving sinks
-    (the TEST dead-preds / invalid-writers errors from the parsed
-    ``writers:`` block, M3-review fix; the ONNX export-block resolution
-    errors — bad ``model_name``, malformed entries — M4-review fix):
+    (the TEST dead-preds errors, the ONNX export-block resolution errors —
+    bad ``model_name``, malformed entries — M4-review fix):
     ``validate``/``deadcode`` report them as error-level findings for that
     mode, ``plan``/``plot``/``why`` raise them when the broken mode is
     requested — the affected mode's sinks fall back to anchor-on-all-preds
@@ -137,15 +136,12 @@ class GraphConfig:
     contract unchecked — design §4.1); ``validate`` reports them
     (promotable with ``--strict``). `sink_origins` enriches missing-sink
     planner errors with the demanding config address (e.g.
-    ``export.outputs``), per mode. `writers` carries the `WriterCallback`
-    built from the parsed ``writers:`` block (set on trainer configs), so
-    ``validate`` can run the TEST writer kind/dtype unification
-    (`WriterCallback.validate_specs`, design §2.7/§8) statically — the same
-    check `SaltModule._validate_writer_specs` runs at ``salt2 test`` setup,
-    now also gated by ``salt2 graph validate``. `model_modules` is the
-    model-side subdict (the `validate_specs` `model_modules` argument, kept
-    separate from the combined `modules` exactly as the runtime path passes
-    `SaltModule._graph_modules`).
+    ``export.outputs``), per mode. `writers` is always ``None`` after W6c
+    (the ``writers:`` block and `WriterCallback` were removed; the
+    ``outputs:``/``callbacks:`` sink path drives TEST sinks instead).
+    `model_modules` is the model-side subdict kept separate from the
+    combined `modules` exactly as the runtime path passes
+    `SaltModule._graph_modules`.
     """
 
     modules: dict[str, GraphModule]
@@ -317,14 +313,11 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     wildcard-narrowing universe comes from the reader's schema artifact.
     Everything stays config-only — no data file is touched (design §2.3).
 
-    The parsed ``writers:`` block enters the TEST sinks exactly as on the
-    runtime path (M3-review fix; design §4.2, §8): a `WriterCallback` is
-    built from ``writers.modules`` and its declared demand anchors the TEST
-    plan, so ``salt2 graph validate``/``deadcode`` fire the dead-preds hard
-    error a real ``salt2 test`` would raise, and writer-demanded
-    dataset-namespace keys (labels/masks/``meta.rows``) keep their producers
-    alive in the static TEST plan. The resulting per-mode errors are carried
-    in `GraphConfig.mode_errors` (see its docstring).
+    The TEST sinks are driven by the callbacks-level sink path
+    (``_static_writer_sink_callback`` / ``_as_sink_node``) — the W6c sink
+    path that replaced the ``writers:`` block (design §4.2, §8).
+    The resulting per-mode errors are carried in `GraphConfig.mode_errors`
+    (see its docstring).
 
     Returns
     -------
@@ -362,7 +355,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             "across the pipeline graph (design §2.2)"
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
-    writer_cb = _static_writer_callback(cli)
+    writer_cb = None  # W6c: writers: block removed; WriterCallback no longer assembled
     writer_sink_cb = _static_writer_sink_callback(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
@@ -395,15 +388,11 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     mode_warnings: dict[Mode, str] = {}
     sink_origins: dict[Mode, dict[str, str]] = {}
     for mode in PRIMARY_MODES:
-        if mode is Mode.TEST and (writer_cb is not None or writer_sink_cb is not None):
+        if mode is Mode.TEST and writer_sink_cb is not None:
+            # W6c: writer_cb (WriterCallback) path removed; only the callbacks-level
+            # sink path (writer_sink_cb / sink_node) drives TEST sinks now.
             try:
-                if writer_cb is not None:
-                    keys = list(model._model_sinks(mode, writers=writer_cb, reader=reader))  # noqa: SLF001 - same-package adapter
-                    demand = writer_cb.writer_demand(model._graph_modules, reader)  # noqa: SLF001 - same-package adapter
-                    # writer-demanded dataset-namespace keys (labels/masks/meta)
-                    # are TEST sinks too — their producers stay alive (design §8)
-                    keys.extend(key for key in demand if key not in keys)
-                elif sink_node is not None:
+                if sink_node is not None:
                     # a renderable sink NODE (plan 29 W1) anchors ALL its demand via
                     # its declared requires (folded into `modules` above) — no flat
                     # sinks needed; its terminal-consumer demand keeps the producers
@@ -494,7 +483,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         mode_errors=mode_errors,
         mode_warnings=mode_warnings,
         sink_origins=sink_origins,
-        writers=writer_cb,
+        writers=None,  # W6c: WriterCallback removed
         model_modules=dict(model._graph_modules),  # noqa: SLF001 - same-package adapter
         mup_cfg=getattr(model, "mup_cfg", None),
     )
@@ -560,34 +549,6 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
             f"trainer config {' '.join(str(p) for p in paths)} failed to instantiate "
             f"through the salt2 surface:\n{err}"
         ) from err
-
-
-def _static_writer_callback(cli: Any) -> Any | None:
-    """Build a `WriterCallback` from the run-free CLI's parsed ``writers:`` block.
-
-    The static-tooling half of the design §8 writers-are-sinks contract
-    (M3-review fix): the same assembly `Salt2CLI.instantiate_trainer`
-    performs at runtime, minus the trainer — `_load_fit_config` feeds the
-    callback into `SaltModule._model_sinks` so TEST sink derivation (and the
-    dead-preds error) match the runtime path exactly.
-
-    Returns
-    -------
-    Any | None
-        The assembled callback, or None when the config carries no writer
-        modules (toy/model-only configs keep the M2 anchor-on-all-preds
-        TEST sinks).
-    """
-    from salt.core.writers import WriterCallback  # noqa: PLC0415 - heavy/circular
-
-    writer_modules = {
-        name: writer
-        for name, writer in (cli._get(cli.config_init, "writers.modules") or {}).items()  # noqa: SLF001 - same-package adapter
-        if writer is not None
-    }
-    if not writer_modules:
-        return None
-    return WriterCallback(modules=writer_modules)
 
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
@@ -958,17 +919,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     so ``--strict`` stays usable as the CI default on standard tagger
     configs.
 
-    For TEST, when a ``writers:`` block is configured, the writer kind/dtype
-    unification (design §2.7/§8) runs statically here too: each writer-declared
-    require's kind/dtype is unified against its producing leaf in the
-    just-compiled TEST plan (the static equivalent of the runtime
-    `SaltModule._validate_writer_specs` producer union), so a writer declaring
-    a wrong kind/dtype (e.g. ``preds.jets.classification`` as ``kind=label`` or
-    ``dtype=int64`` where the task publishes ``data``/``float32``) is a fatal
-    error HERE — at ``salt2 graph validate``, data-free, in CI — instead of
-    surfacing only at ``salt2 test`` setup. Skipped when the TEST sinks already
-    carry a stored mode error (the writers block already failed at demand
-    assembly; `WriterCallback.requires` would re-raise the same root cause).
+    For TEST, the sink-path callbacks (``outputs:``/``callbacks:`` H5 sink)
+    drive the TEST sinks — the former ``writers:`` block and `WriterCallback`
+    were removed in W6c.
 
     Returns
     -------
@@ -1069,34 +1022,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
             bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
             bucket.append(line)
-        if (
-            mode is Mode.TEST
-            and cfg.writers is not None
-            and cfg.model_modules is not None
-            and mode not in cfg.mode_errors
-        ):
-            # writer kind/dtype unification, statically (design §2.7/§8) — the
-            # same check `SaltModule._validate_writer_specs` runs at `salt2 test`
-            # setup, now also gated by `salt2 graph validate` so a wrong writer
-            # kind/dtype fails data-free in CI instead of only at run setup. The
-            # producer universe is assembled from the JUST-COMPILED TEST plan:
-            # every step's produced leaves unioned with the mode-active boundary
-            # sources, the static equivalent of the runtime union of
-            # `model_producer_specs` and `GraphDataset.boundary_specs`. An
-            # executed step-produced leaf WINS over a same-named boundary source,
-            # exactly as runtime (`_validate_writer_specs` does `boundary_specs`
-            # then `.update` model_producer_specs); within the steps the first
-            # producer wins (plan order), mirroring the runtime `setdefault`.
-            producer_specs: dict[str, TensorSpec] = {}
-            for step in plan.steps:
-                for key, spec in step.produces.items():
-                    producer_specs.setdefault(key, spec)
-            for key, spec in plan.sources.items():
-                producer_specs.setdefault(key, spec)
-            try:
-                cfg.writers.validate_specs(cfg.model_modules, cfg.reader, producer_specs)
-            except GraphError as err:
-                errors.append(f"[mode=TEST] writer spec validation: {err}")
+        # W6c: cfg.writers is always None (WriterCallback removed); the
+        # validate_specs block that used it is removed here.
     for info in infos:
         print(f"info: {info}")
     for warning in warnings:
@@ -1560,19 +1487,14 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
             "salt2 graph resolve needs a salt2 trainer config (top-level model:/data: "
             "blocks) — toy graph configs have no writers block (M4.5 unified manifest)"
         )
-    cli = _parse_trainer_cli(paths, args.set)
-    writer_cb = _static_writer_callback(cli)
-    if writer_cb is None:
-        return _fail(
-            "the config declares no writer modules — the output manifest derives from "
-            "writers.modules (M4.5 unified manifest; base2.yaml ships defaults)"
-        )
-    block = _manifest_block(cli, writer_cb, paths, args.set)
-    print(block)
-    if args.annotate:
-        _write_annotation(paths[-1], block)
-        print(f"\nannotated {paths[-1]} (block refreshed in place on the next run)")
-    return 0
+    # W6c: the WriterCallback-based manifest (writers.modules) was removed.
+    # `salt2 graph resolve` no longer has a manifest to derive.
+    return _fail(
+        "salt2 graph resolve is no longer supported (W6c removal): the writers.modules "
+        "manifest block was removed; the eval columns and ONNX outputs are now declared "
+        "by the outputs: section + OnnxExportSink — inspect those directly "
+        "(see gn2v2-dummy.yaml for the canonical config pattern)"
+    )
 
 
 def _manifest_block(
