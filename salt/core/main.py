@@ -73,7 +73,6 @@ CONFIG_DIR = Path(__file__).parent / "configs"
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
 _EXPORT_COMMAND = "export"
-_CONVERT_COMMAND = "convert-config"
 
 # --model.modules.X=null (also the explicit --model.init_args.modules.X=null):
 # jsonargparse's SUBCLASS adapter re-emits nested args as "--key=value"
@@ -1005,12 +1004,6 @@ def main(args: Sequence[str] | None = None) -> int:
         from salt.core.onnx import export as onnx_export  # noqa: PLC0415 - heavy, export-only
 
         return onnx_export.main(argv[1:])
-    if argv and argv[0] == _CONVERT_COMMAND:
-        # local import: the v1->v2 config converter (M7 W1). YAML-only, but it
-        # runs `salt2 graph validate` on its own output, so import at use time.
-        from salt.core import convert  # noqa: PLC0415 - converter, CLI-time only
-
-        return convert.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
         with warnings.catch_warnings():
@@ -1025,8 +1018,7 @@ def main(args: Sequence[str] | None = None) -> int:
                 "why/deadcode/resolve, design §4), 'salt2 schema --help' (schema artifacts, "
                 "§2.6), 'salt2 mup-shapes --help' / 'salt2 mup-coord-check --help' (muP base/"
                 "delta infshapes + coord-check, design §3.4), 'salt2 export --help' (ONNX "
-                "export, §7; --manifest prints the writer-derived output manifest) and "
-                "'salt2 convert-config --help' (v1 YAML -> v2 schema translator, §9.3)"
+                "export, §7; --manifest prints the writer-derived output manifest)"
             )
         raise
     except GraphError as err:
