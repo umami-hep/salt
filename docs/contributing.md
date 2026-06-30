@@ -23,7 +23,7 @@ When adding features or fixing bugs, it's a good idea to let people know what yo
 The following procedure should be followed:
 
 1. (Optional) **Informal discussion** on [mattermost](https://mattermost.web.cern.ch/aft-algs/channels/h5-dumper) to check if the feature/bug exists, and is a suitable addition.
-2. **Open an issue** on [GitLab]({{repo_url}}-/issues). This is a place to describe in more detail the feature/bug, and to work out what is necessary to change in the code.
+2. **Open an issue** on [GitLab](https://gitlab.cern.ch/aft/algorithms/salt/-/issues). This is a place to describe in more detail the feature/bug, and to work out what is necessary to change in the code.
 3. **Assign a responsible person** to the issue. If the person who opened the issue has they capability, by default they should assign themselves to the issue. Otherwise the maintainers will assign a responsible person.
 4. **Merge request**. The assigned person should work on the feature and open a MR. This will be reviewed, any follow-up issues created, and finally merged. The corresponding issue should be closed.
 

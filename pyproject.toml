@@ -68,13 +68,8 @@ dev = [
   "ruff>=0.13.0",
 ]
 docs = [
-  "indicomb2==0.2",
-  "mkdocs==1.5.3",
-  "mkdocs-autorefs==1.4.0",
-  "mkdocs-git-revision-date-localized-plugin",
-  "mkdocs-markdownextradata-plugin>=0.2.5",
-  "mkdocs-material==9.4.7",
-  "mkdocstrings[python]==0.28.2",
+  "zensical",
+  "mkdocstrings-python>=2.0",
 ]
 
 [tool.uv]

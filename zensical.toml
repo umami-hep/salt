@@ -1,0 +1,98 @@
+[project]
+site_name = "Salt documentation"
+site_description = "Documentation for the salt training framework"
+site_author = "Salt Team"
+site_url = "https://ftag-salt.docs.cern.ch/"
+
+docs_dir = "docs"
+site_dir = "public"
+
+repo_name = "GitLab"
+repo_url = "https://gitlab.cern.ch/aft/algorithms/salt/"
+edit_uri = "tree/main/docs"
+
+nav = [
+  { "Introduction" = "index.md" },
+  { "Setup" = "setup.md" },
+  { "Preprocessing" = "preprocessing.md" },
+  { "Training" = "training.md" },
+  { "Configuration" = "configuration.md" },
+  { "Evaluation" = "evaluation.md" },
+  { "ONNX Export" = "export.md" },
+  { "Contributing" = "contributing.md" },
+  { "Tutorial (public)" = "tutorial.md" },
+  { "Tutorial (internal)" = "tutorial-Xbb.md" },
+  { "API Reference" = [
+    { "Data" = "api/data.md" },
+    { "Initialisation" = "api/initialisation.md" },
+    { "Transformer" = "api/transformer.md" },
+    { "Models" = "api/models.md" },
+    { "Tasks" = "api/tasks.md" },
+  ] },
+  { "Docs development" = "docs_development.md" },
+]
+
+extra_javascript = [
+  "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML",
+]
+
+copyright = "Copyright &copy; 2022 - 2026 CERN for the benefit of the ATLAS collaboration"
+
+[project.theme]
+logo = "assets/salt.png"
+variant = "classic"
+features = [
+  "content.code.copy",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.instant",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.plugins.search]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["."]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+line_length = 100
+show_root_heading = true
+show_root_toc_entry = true
+show_root_full_path = true
+docstring_style = "numpy"
+merge_init_into_class = true
+annotations_path = "full"
+show_signature = false
+members = false
+
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.smartsymbols]
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid" },
+]
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+combine_header_slug = true
+[project.markdown_extensions.toc]
+permalink = "#"
