@@ -78,7 +78,6 @@ from salt.utils.inputs import write_dummy_file
 FIXTURE_DIR = Path(__file__).parent.parent / "_fixtures" / "gn2v2_dummy_oracle"
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
-CUTOVER_CFG = CONFIG_DIR / "gn2v2-dummy-cutover.yaml"  # the P1.5 live cutover
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
 N_TEST = 300  # data.num_test for both sinks
 _FLOAT_TOL = 1e-6
@@ -446,14 +445,12 @@ class TestCutoverConfig:
     """
 
     def test_cutover_config_fits_end_to_end(self, data, tmp_path_factory):
-        """The cutover config instantiates + fits (producers pruned from FIT)."""
+        """The migrated DUMMY_CFG instantiates + fits (producers pruned from FIT)."""
         fit_dir = tmp_path_factory.mktemp("cutover_fit")
         rc = main([
             "fit",
             "--config",
             str(DUMMY_CFG),
-            "--config",
-            str(CUTOVER_CFG),
             f"--data.train_file={data['h5']}",
             f"--data.val_file={data['h5']}",
             *_overrides(data),
@@ -465,33 +462,6 @@ class TestCutoverConfig:
         ])
         assert rc == 0
 
-    def test_cutover_config_content(self):
-        """The cutover YAML wires the producers, nulls M4.5 writers, adds the sink."""
-        cfg = yaml.safe_load(CUTOVER_CFG.read_text())
-        mods = cfg["model"]["modules"]
-        # the classification conversion producers (real ops, NOT identity)
-        assert mods["jet_probs"]["class_path"] == "salt.core.outputs.ClassProbs"
-        assert mods["jet_probs"]["init_args"]["task"] == "jets_classification"
-        assert mods["track_origin_probs"]["class_path"] == "salt.core.outputs.SeqClassProbs"
-        assert mods["track_origin_probs"]["init_args"]["task"] == "track_origin"
-        # track_vertexing opted out of TEST (deferred P2)
-        assert mods["track_vertexing"]["init_args"]["expose"] == ["fit", "val"]
-        # M4.5 writers nulled (null-merge deletes the WriterCallback)
-        assert cfg["writers"]["modules"] == {
-            "inputs_copy": None,
-            "tasks": None,
-            "pad_mask": None,
-        }
-        # H5OutputWriter is the live TEST sink (a callbacks: entry)
-        h5 = cfg["callbacks"]["h5_output"]
-        assert h5["class_path"] == "salt.core.outputs.H5OutputWriter"
-        out_keys = {o["key"] for o in h5["init_args"]["outputs"]}
-        assert out_keys == {
-            "outputs.jets.jets_classification",
-            "outputs.tracks.track_origin",
-        }
-        assert h5["init_args"]["write_pad_mask"] == ["tracks"]
-
 
 # ---------------------------------------------------------------------------
 # path (c): the LIVE cutover through the real ``salt2 test`` CLI (closes the
@@ -502,15 +472,15 @@ class TestCutoverConfig:
 
 @pytest.fixture(scope="module")
 def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from ``salt2 test`` on the gn2v2-dummy + cutover configs (the CLI path).
+    """Eval H5 from ``salt2 test`` on the migrated gn2v2-dummy.yaml (the CLI path).
 
-    Runs the LIVE cutover exactly as a user would — ``salt2 test --config
-    gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml --ckpt_path <trained>`` —
-    so the callbacks-level `H5OutputWriter` persistence sink is recognised by the
-    test-stage writer-less check (main.py ``_has_callback_persistence_sink``), the
-    classification conversion producers run on the flipped (RAW-logits) TEST
-    forward, and the eval H5 is written by the real CLI. The output path is
-    overridden onto a tmp file so the assertion can read it back.
+    W6c: the cutover is now baked into DUMMY_CFG — runs ``salt2 test --config
+    gn2v2-dummy.yaml --ckpt_path <trained>`` so the callbacks-level `H5OutputWriter`
+    persistence sink is recognised by the test-stage writer-less check (main.py
+    ``_has_callback_persistence_sink``), the classification conversion producers
+    run on the flipped (RAW-logits) TEST forward, and the eval H5 is written by
+    the real CLI. The output path is overridden onto a tmp file so the assertion
+    can read it back.
 
     Uses the FROZEN checkpoint and FROZEN data.h5 (from ``FIXTURE_DIR``) so the
     output is deterministic and comparable against the frozen oracle.
@@ -518,7 +488,7 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
     Returns
     -------
     Path
-        The cutover CLI eval H5 file.
+        The CLI eval H5 file.
     """
     out = tmp_path_factory.mktemp("cutover_cli") / "cutover_cli.h5"
     root = tmp_path_factory.mktemp("cutover_cli_root")
@@ -526,8 +496,6 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
         "test",
         "--config",
         str(DUMMY_CFG),
-        "--config",
-        str(CUTOVER_CFG),
         f"--data.test_file={data['h5']}",
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
@@ -535,20 +503,21 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the cutover config must run end-to-end (FIX 2)"
-    assert out.exists(), f"the cutover CLI wrote no eval H5 at {out}"
+    assert rc == 0, "salt2 test on the migrated DUMMY_CFG must run end-to-end"
+    assert out.exists(), f"the CLI wrote no eval H5 at {out}"
     return out
 
 
 class TestCutoverCliE2E:
-    """The cutover config drives the new path through ``salt2 test`` end-to-end.
+    """The migrated gn2v2-dummy.yaml drives the new path through ``salt2 test`` end-to-end.
 
-    This is G1 driven via the REAL CLI (not only ``Trainer.test``): the
-    callbacks-level `H5OutputWriter` sink is now accepted by the test-stage check
-    (FIX 2), so ``salt2 test`` on ``gn2v2-dummy.yaml`` + ``gn2v2-dummy-cutover.yaml``
-    runs producers -> sink end-to-end and the eval H5 must match the M4.5 oracle
-    at SEMANTIC parity (ints exact, floats <=1e-6), deferred (P2 vertexing)
-    columns excluded — the same contract as the programmatic `p1_h5` gate.
+    W6c: the cutover is baked directly into gn2v2-dummy.yaml. This is G1 driven
+    via the REAL CLI (not only ``Trainer.test``): the callbacks-level
+    `H5OutputWriter` sink is accepted by the test-stage check, so ``salt2 test``
+    on ``gn2v2-dummy.yaml`` alone runs producers -> sink end-to-end and the eval
+    H5 must match the M4.5 oracle at SEMANTIC parity (ints exact, floats <=1e-6),
+    deferred (P2 vertexing) columns excluded — the same contract as the
+    programmatic `p1_h5` gate.
     """
 
     def test_cli_writes_eval_h5(self, cutover_cli_h5):

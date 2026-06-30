@@ -41,7 +41,6 @@ from salt.core.main import CONFIG_DIR, Salt2CLI, main
 from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.saltmodule import SaltModule
 from salt.core.schema import dump_schema, save_schema
-from salt.core.writers import WriterCallback
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.utils.inputs import write_dummy_file
 
@@ -59,11 +58,12 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # plan-29 W4 folded ONNX conversion producers (in model.modules; the
-    # OnnxExportSink is a callback, not a model module)
+    # W6c: jet_probs (ClassProbs) is the shared ONNX+TEST conversion producer;
+    # track_origin_probs (SeqClassProbs) is the TEST-eval probability producer.
+    # track_origin_index (SeqClassIndex) and track_vertex_index (VertexUnionFind)
+    # are retired from model.modules in this wave.
     "jet_probs",
-    "track_origin_index",
-    "track_vertex_index",
+    "track_origin_probs",
 }
 
 FOURTH_TASK_YAML = """
@@ -165,7 +165,7 @@ class TestParseAndInstantiate:
         # (nets + tasks + loss) PLUS the composed section GRAPH-node writers
         # (run_tasks + pad_mask; inputs_copy is manifest-only, not an nn.Module so
         # not in net). No conversion producers remain.
-        non_producer = GN2V2_MODULES - {"jet_probs", "track_origin_index", "track_vertex_index"}
+        non_producer = GN2V2_MODULES - {"jet_probs", "track_origin_index", "track_vertex_index", "track_origin_probs"}
         assert set(cli.model.net.keys()) == non_producer | {"run_tasks", "pad_mask"}
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
@@ -322,24 +322,6 @@ class TestCallbacksDict:
         assert not any(getattr(cb, "monitor", None) == "val/loss" for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
 
-    def test_writers_defaults_assembled(self, data):
-        # plan 34 W34.4c: base2.yaml NO LONGER ships a writers: default (the
-        # WriterCallback default is retired; each config enumerates its own
-        # outputs: section + dumb sinks). The producer-ORACLE gn2v2-dummy.yaml
-        # (DUMMY_CFG) now declares its OWN complete writer set EXPLICITLY in v1
-        # column order (inputs_copy -> tasks -> pad_mask, M3 / design §8), since
-        # it must stay on the WriterCallback / producer path until W34.4d.
-        cli = make_cli(data)
-        wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
-        assert list(wcb.writers) == ["inputs_copy", "tasks", "pad_mask"]
-
-    def test_writers_null_deletes(self, data):
-        # plan 34 W34.4c: null-merge still deletes one of gn2v2-dummy.yaml's OWN
-        # explicit writers (no longer a base2 default) — siblings survive.
-        cli = make_cli(data, extra=["--writers.modules.pad_mask=null"])
-        wcb = next(cb for cb in cli.trainer.callbacks if isinstance(cb, WriterCallback))
-        assert "pad_mask" not in wcb.writers
-        assert set(wcb.writers) == {"inputs_copy", "tasks"}  # siblings survive
 
 
 # ---------------------------------------------------------------------------
@@ -602,163 +584,6 @@ class TestGraphFitConfigAdapter:
         assert rc == 1
         assert "trainer configs only" in capsys.readouterr().err
 
-    def test_deadcode_sees_narrowed_writers(self, data, capsys):
-        # M3-review MEDIUM fix: static tooling builds the writers' TEST
-        # demand from the parsed writers: block — the §4.2 worked example
-        # (narrowed TaskWriter -> dead-preds ERROR, exit non-zero, culprit
-        # config address named), previously '[deadcode] mode=TEST: OK'
-        rc = main([
-            "graph",
-            "deadcode",
-            "-c",
-            str(DUMMY_CFG),
-            "--mode",
-            "test",
-            *self.set_flags(data),
-            "--set",
-            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
-        ])
-        out = capsys.readouterr().out
-        assert rc == 1
-        assert "consumed by NO writer" in out
-        assert "track_origin" in out and "track_vertexing" in out
-        # §4.2-exemplar attribution: the culprit writer address + excluded
-        # tasks, and the per-task config addresses
-        assert "writers.modules.tasks.init_args.tasks" in out
-        assert "excludes" in out
-        assert "model.modules.track_origin" in out
-
-    def test_validate_errors_on_narrowed_writers_other_modes_still_report(self, data, capsys):
-        # validate (all modes) exits 1 on the stored TEST sink error while
-        # FIT/VAL/ONNX still compile and print their OK lines
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(DUMMY_CFG),
-            *self.set_flags(data),
-            "--set",
-            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
-        ])
-        out, err = capsys.readouterr()
-        assert rc == 1
-        assert "OK [mode=FIT]" in out
-        assert "consumed by NO writer" in err
-
-    def test_plan_test_mode_raises_on_narrowed_writers(self, data, capsys):
-        rc = main([
-            "graph",
-            "plan",
-            "-c",
-            str(DUMMY_CFG),
-            "--mode",
-            "test",
-            *self.set_flags(data),
-            "--set",
-            'writers.modules.tasks.init_args.tasks=["jets_classification"]',
-        ])
-        assert rc == 1
-        assert "consumed by NO writer" in capsys.readouterr().err
-
-    def test_strict_validate_passes_stock_config(self, data):
-        # M3-review fix: unconsumed FIT/VAL preds are info-level (design
-        # §3.3), so the documented CI mode (--strict) works on a standard
-        # tagger config — it used to exit 1 on six preds warnings
-        assert (
-            main(["graph", "validate", "-c", str(DUMMY_CFG), "--strict", *self.set_flags(data)])
-            == 0
-        )
-
-    @staticmethod
-    def _probe_writer_cfg(tmp_path, *, kind, dtype):
-        # an override config adding a probe writer that declares a require on
-        # preds.jets.jets_classification with a chosen (kind, dtype). The probe
-        # is a real importable Writer; validate's TEST writer kind/dtype
-        # unification (cli._cmd_validate) consults its `requires` only.
-        import yaml
-
-        init_args = {"key": "preds.jets.jets_classification", "kind": kind}
-        if dtype is not None:
-            init_args["dtype"] = dtype
-        spec = {
-            "writers": {
-                "modules": {
-                    "spec_probe": {
-                        "class_path": "salt.tests.integration.gates_m5._SpecProbeWriter",
-                        "init_args": init_args,
-                    }
-                }
-            }
-        }
-        path = tmp_path / f"probe_{kind}_{dtype}.yaml"
-        path.write_text(yaml.safe_dump(spec))
-        return path
-
-    def test_validate_wrong_writer_kind_fails_test_mode(self, data, tmp_path, capsys):
-        # the medium critic finding's fix: the writer kind/dtype unification now
-        # runs inside `salt2 graph validate` for TEST (cli._cmd_validate), so a
-        # writer declaring preds.jets.jets_classification as kind=label (the task
-        # publishes kind=data) FAILS the canonical static-validator command
-        # data-free — not only later at `salt2 test` setup
-        override = self._probe_writer_cfg(tmp_path, kind="label", dtype="float32")
-        rc = main([
-            "graph",
-            "validate",
-            "--strict",
-            "--mode",
-            "test",
-            "-c",
-            str(DUMMY_CFG),
-            "-c",
-            str(override),
-            *self.set_flags(data),
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "writer spec validation" in err
-        assert "preds.jets.jets_classification" in err
-        assert "kind=" in err  # the KindError surface
-
-    def test_validate_wrong_writer_dtype_fails_test_mode(self, data, tmp_path, capsys):
-        # the dtype half: a writer declaring int64 where the task publishes
-        # float32 fails the same command with the ShapeError dtype-mismatch surface
-        override = self._probe_writer_cfg(tmp_path, kind="data", dtype="int64")
-        rc = main([
-            "graph",
-            "validate",
-            "--strict",
-            "--mode",
-            "test",
-            "-c",
-            str(DUMMY_CFG),
-            "-c",
-            str(override),
-            *self.set_flags(data),
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "writer spec validation" in err
-        assert "dtype mismatch" in err
-
-    def test_validate_matching_writer_passes_test_mode(self, data, tmp_path):
-        # the inert positive control: a probe declaring the CORRECT data/float32
-        # require passes `salt2 graph validate --strict --mode test` — the
-        # wired-in check has no false positive (and is transparent to a sound config)
-        override = self._probe_writer_cfg(tmp_path, kind="data", dtype="float32")
-        rc = main([
-            "graph",
-            "validate",
-            "--strict",
-            "--mode",
-            "test",
-            "-c",
-            str(DUMMY_CFG),
-            "-c",
-            str(override),
-            *self.set_flags(data),
-        ])
-        assert rc == 0
-
     def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
         # M4.5: export.outputs was removed — a pre-amendment config carrying
         # the section must fail `validate --mode onnx` with the §4.1-bar
@@ -786,29 +611,6 @@ class TestGraphFitConfigAdapter:
         err = capsys.readouterr().err
         assert "REMOVED by the M4.5" in err
         assert "writers" in err
-
-    def test_validate_onnx_bad_onnx_tasks_fails(self, capsys):
-        # gn2v2-dummy's `tasks` writer ships `onnx: false` (W34.4c), so layering
-        # an onnx_tasks narrowing on top is a contradiction the TaskWriter
-        # constructor rejects ('onnx: false' disables ONNX participation). The
-        # instantiate-time error is surfaced by `salt2 graph validate` as a clean
-        # rc=1 carrying the offending value — not an uncaught traceback.
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(DUMMY_CFG),
-            "--mode",
-            "onnx",
-            "--set",
-            "model.modules.norm.init_args.norm_dict=unused.yaml",
-            "--set",
-            'writers.modules.tasks.init_args.onnx_tasks=["track_vertexin"]',
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "track_vertexin" in err
-        assert "TaskWriter" in err
 
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks

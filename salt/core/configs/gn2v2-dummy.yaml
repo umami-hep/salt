@@ -141,37 +141,25 @@ model:
           # origin_weighting takes integer origin IDS in M2 (default
           # heavy: [3, 4, 5], fake: [1] == v1 hardcoded); the design §5.1
           # name-based form ({heavy: [FromB, ...]}) lands in M3
+          expose: [fit, val] # P2-deferred: opt vertexing head out of TEST eval (VertexIndex deferred)
       loss:
         class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # plan-29 W4 folded ONNX conversion producers (design §6.2): each mints an
-      # outputs.* leaf the OnnxExportSink names. Demand-pruned from FIT/VAL/TEST
-      # (active only when the export sink demands its leaf in ONNX), so the FIT
-      # plan_hash is unchanged. POST-P4 the classification task publishes RAW
-      # logits in ONNX, so ClassProbs/SeqClassIndex own the single softmax/argmax.
+      # W6c: migrated to the v2 sink path (H5OutputWriter). jet_probs (ClassProbs)
+      # is the shared ONNX+TEST conversion producer for jets_classification; it
+      # mints outputs.jets.jets_classification for both the OnnxExportSink (ONNX)
+      # and the H5OutputWriter (TEST). track_origin_probs (SeqClassProbs) is the
+      # TEST-eval probability producer for track_origin (masked softmax). The
+      # ONNX-only SeqClassIndex (track_origin_index) and VertexUnionFind
+      # (track_vertex_index) are retired: track_origin goes via SeqClassProbs in
+      # TEST, and vertexing (VertexIndex) is a deferred P2 family not yet emitted.
       jet_probs:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: jets_classification, stream: jets }
-      track_origin_index:
-        class_path: salt.core.outputs.SeqClassIndex
+      track_origin_probs:
+        class_path: salt.core.outputs.SeqClassProbs
         init_args: { task: track_origin, stream: tracks }
-      track_vertex_index:
-        class_path: salt.core.outputs.VertexUnionFind
-        init_args: { task: track_vertexing, stream: tracks }
-
-# The COMPLETE WriterCallback writer set (inputs_copy -> tasks -> pad_mask, the
-# v1 H5 column order). plan 34 W34.4c: base2 no longer ships the default writer
-# set, so this PRODUCER-ORACLE config (which must stay on the WriterCallback /
-# producer path until W34.4d retires it) declares all three writers EXPLICITLY —
-# the legacy InputCopyWriter (every tasked stream, all source fields) + the
-# TaskWriter + the PadMaskWriter (the boolean tracks mask). The TaskWriter sets
-# onnx: false (eval-only): the ONNX outputs derive from the folded OnnxExportSink
-# below, not the off-graph writer manifest (retired at plan-29 W4). TEST H5
-# columns are byte-unchanged from the prior base2-inherited form.
-writers:
-  modules:
-    inputs_copy: { class_path: salt.core.writers.InputCopyWriter }
-    tasks: { class_path: salt.core.writers.TaskWriter, init_args: { onnx: false } }
-    pad_mask: { class_path: salt.core.writers.PadMaskWriter }
+      track_origin_index: null
+      track_vertex_index: null
 
 export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
   model_name: GN2v2dummy # Athena name: no '_'/'-' (validated at export only);
@@ -180,17 +168,38 @@ export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); iner
     - { port: inputs.jets, name: jet_features } # [1, F] global
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
 
-# The declare-only ONNX sink (design §4.2): NAMES the folded conversion leaves
-# into the flat Athena output tuple, in tuple ORDER (globals, then per-token aux
-# — the v1/oracle order). model_name defaults from export.model_name.
+# W6c: v2 sink path. onnx_export keeps only the jets classification output
+# (track_origin_index and track_vertex_index retired; the H5OutputWriter is the
+# TEST persistence sink). h5_output is the live TEST sink — column order
+# (copies, probs, mask) matches the v1 WriterCallback oracle (design §4a parity).
 callbacks:
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:
       outputs:
         - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
-        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }
-        - { key: outputs.tracks.track_vertexing, name: VertexIndex, dtype: int8, per_token: true }
+  h5_output:
+    class_path: salt.core.outputs.H5OutputWriter
+    init_args:
+      outputs:
+        - {key: outputs.jets.jets_classification, suffixes: [pb, pc, pu]}
+        - {
+            key: outputs.tracks.track_origin,
+            suffixes:
+              [
+                pPileup,
+                pFake,
+                pPrimary,
+                pFromB,
+                pFromBC,
+                pFromC,
+                pFromTau,
+                pOtherSecondary,
+              ],
+          }
+      copy_inputs: {jets: [], tracks: []}
+      write_pad_mask: [tracks]
+      extra_groups: []
 
 trainer:
   max_epochs: 2
