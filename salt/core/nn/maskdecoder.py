@@ -460,6 +460,13 @@ class MaskDecoderLayer(nn.Module):
             self.kv_ca = Attention(embed_dim=embed_dim, num_heads=n_heads)
             self.kv_dense = GLU(embed_dim)
         self.mask_net = mask_net
+        # MFU-5 (Δ1): the per-layer post-norms upstream applies at the END of forward
+        # (snapshot maskformer.py:449-450). Same attribute names (norm1/norm2) as v1 so
+        # the per-layer state_dict keys are ``layers.<i>.norm1.* / layers.<i>.norm2.*``
+        # EXACTLY as upstream — the MF1a oracle (a fresh upstream MaskDecoder) then
+        # receives these params via its strict=False state_dict copy.
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(
         self,
@@ -519,4 +526,9 @@ class MaskDecoderLayer(nn.Module):
 
             kv = kv + self.kv_ca(kv, q, attn_mask=attn_mask)
             kv = kv + self.kv_dense(kv)
+        # MFU-5 (Δ1): per-layer post-norm, matching upstream op order EXACTLY — applied
+        # at the END of forward after the last q/kv residual updates, before return
+        # (snapshot maskformer.py:510-512). Closes the MF1a LayerNorm divergence.
+        q = self.norm1(q)
+        kv = self.norm2(kv)
         return q, kv

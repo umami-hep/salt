@@ -596,9 +596,22 @@ class MaskFormerLoss(nn.Module):
         Same as loss_weights but for the matching cost, by default None
     null_class_weight: float, optional
         Relative classification weight applied to the no-object category, by default 0.5
+    class_weights: list[float] | None, optional
+        Optional per-class weights folded into the ``empty_weight`` CE balance buffer
+        EXACTLY as upstream (snapshot maskformer_loss.py:132-159). May be of length
+        ``num_classes`` (the null weight is appended) or ``num_classes + 1`` (used as-is).
+        ``None`` (the shipped default) keeps ``empty_weight`` byte-identical to the
+        pre-MFU-5 v2 buffer. The MFU-2 ``MaskFormerTargets.object_weights`` (the per-class
+        list) is the INTENDED source — the config auto-link that feeds it here is deferred
+        to MFU-7, so today this parameter must be set explicitly, by default None.
     losses: list[str] | None, optional
         List of all the losses to be applied. See get_loss for list of available losses,
         by default None
+
+    Raises
+    ------
+    ValueError
+        If ``class_weights`` has an invalid length.
     """
 
     def __init__(
@@ -608,14 +621,33 @@ class MaskFormerLoss(nn.Module):
         loss_weights: dict,
         matcher_weights: dict | None = None,
         null_class_weight: float = 0.5,
+        class_weights: list[float] | None = None,
         losses: list[str] | None = None,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.null_class_weight = null_class_weight
         assert self.num_classes > 0
+        # MFU-5 (Δ3): fold class_weights into empty_weight EXACTLY as upstream
+        # (snapshot maskformer_loss.py:144-162). The num_classes == 1 binary branch is
+        # FIRST and ignores class_weights (matches v1); a provided class_weights of
+        # length num_classes appends the null weight, length num_classes + 1 is used
+        # as-is, anything else raises. class_weights=None -> the original ones/null
+        # buffer, so the default stays byte-identical to the pre-MFU-5 buffer.
         if self.num_classes == 1:
             empty_weight = torch.tensor([self.null_class_weight])
+        elif class_weights is not None:
+            if len(class_weights) == self.num_classes + 1:
+                # class_weights already includes the null class weight
+                empty_weight = torch.tensor(class_weights)
+            elif len(class_weights) == self.num_classes:
+                # append the null class weight at the end
+                empty_weight = torch.tensor([*class_weights, self.null_class_weight])
+            else:
+                raise ValueError(
+                    f"Invalid class_weights length: {len(class_weights)}. "
+                    f"Expected {self.num_classes} or {self.num_classes + 1}."
+                )
         else:
             empty_weight = torch.ones(self.num_classes + 1)
             empty_weight[-1] = self.null_class_weight
@@ -885,6 +917,14 @@ class MaskFormerMatchedLoss(nn.Module):
     null_class_weight : float, optional
         The class-balance weight on the null category in the CE
         (v1 ``null_class_weight``, maskformer_loss.py:130,135-142), by default 0.5.
+    class_weights : list[float] | None, optional
+        MFU-5 (Δ3): optional per-class CE balance weights, forwarded to the composed
+        ``MaskFormerLoss`` and folded into its ``empty_weight`` buffer EXACTLY as
+        upstream (snapshot maskformer_loss.py:132-159). The MFU-2
+        ``MaskFormerTargets.object_weights`` (per-class list) is the INTENDED source (the
+        config auto-link that feeds it is deferred to MFU-7). ``None``
+        (the shipped default) keeps ``empty_weight`` byte-identical to today (MF1c
+        stays green / clean configs unchanged), by default None.
     input_stream : str, optional
         The decoder's object stream name, by default ``objects`` — the
         ``<input_stream>.{class_logits,class_probs,masks}`` keys it reads.
@@ -909,6 +949,7 @@ class MaskFormerMatchedLoss(nn.Module):
         loss_weights: Mapping[str, float],
         matcher_weights: Mapping[str, float] | None = None,
         null_class_weight: float = 0.5,
+        class_weights: list[float] | None = None,
         input_stream: str = "objects",
     ) -> None:
         super().__init__()
@@ -968,6 +1009,10 @@ class MaskFormerMatchedLoss(nn.Module):
             )
 
         self.null_class_weight = float(null_class_weight)
+        # MFU-5 (Δ3): per-class CE weights forwarded to the composed loss (the MFU-2
+        # MaskFormerTargets.object_weights is the INTENDED source; the config auto-link
+        # that feeds it is deferred to MFU-7). None keeps empty_weight byte-identical.
+        self.class_weights = list(class_weights) if class_weights is not None else None
 
         # compose the absorbed MaskFormerLoss (M7 W2c-3, v2-native above): it owns the
         # absorbed HungarianMatcher, the empty_weight class-balance buffer, and the three
@@ -984,6 +1029,7 @@ class MaskFormerMatchedLoss(nn.Module):
             loss_weights=self.loss_weights,
             matcher_weights=self.matcher_weights,
             null_class_weight=self.null_class_weight,
+            class_weights=self.class_weights,
         )
 
     @property

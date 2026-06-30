@@ -2243,12 +2243,12 @@ def run_mf1a(
     )
     report["expected_deltas"] = {
         "MFU-5_layernorm": (
-            "EXPECTED FAIL at MFU-0: the v2 core MaskDecoderLayer "
-            "(salt/core/nn/maskdecoder.py) omits the per-layer post-norm — upstream's "
-            "MaskDecoderLayer ends each forward with q = self.norm1(q); kv = self.norm2(kv) "
-            "(snapshot maskformer.py:449-450,510-512) and the v2 layer has neither the norm "
-            "modules nor the op. All four decoder objects.* therefore diverge from the upstream "
-            "oracle (the encoder is bitwise-identical). Closed by MFU-5 (LayerNorm)."
+            "CLOSED by MFU-5: the v2 core MaskDecoderLayer (salt/core/nn/maskdecoder.py) "
+            "now ends each forward with q = self.norm1(q); kv = self.norm2(kv) and owns the "
+            "matching norm1/norm2 LayerNorm modules (snapshot maskformer.py:449-450,510-512). "
+            "The layers.<i>.norm1/2 state_dict keys now transfer into the fresh upstream oracle, "
+            "so all four decoder objects.* match it within tolerance (was an EXPECTED FAIL at "
+            "MFU-0 with the encoder bitwise-identical but the decoder diverging)."
         ),
         "MFU-4_solver": (
             "The upstream MaskDecoder ctor builds a MaskFormerLoss -> HungarianMatcher whose "
@@ -2643,12 +2643,13 @@ def run_mf1c(
             "make them diverge even when optimality holds. Closed/realigned by MFU-4 (solver)."
         ),
         "MFU-5_class_weights": (
-            "LATENT (not exercised by this fixture): the v2 core MaskFormerLoss "
-            "(salt/core/nn/maskformer_loss.py) ctor does NOT accept class_weights, while the "
-            "upstream snapshot MaskFormerLoss does (snapshot maskformer_loss.py:62,132). With "
-            "the shipped default (class_weights=None) both build the same empty_weight buffer, "
-            "so the three CE/mask components are tolerance-equal here. A config that sets "
-            "class_weights would diverge. Closed by MFU-5 (class_weights)."
+            "CLOSED by MFU-5 (was LATENT — not exercised by this fixture): the v2 core "
+            "MaskFormerLoss (salt/core/nn/maskformer_loss.py) ctor now ACCEPTS class_weights "
+            "and folds it into empty_weight EXACTLY as the upstream snapshot MaskFormerLoss "
+            "(snapshot maskformer_loss.py:62,132-159); MaskFormerMatchedLoss threads it through "
+            "to the composed v1_loss. With the shipped default (class_weights=None) the "
+            "empty_weight buffer is byte-identical to before, so the three CE/mask components "
+            "stay tolerance-equal here and MF1c is unchanged."
         ),
         "MFU-1_numerical_guards": (
             "No delta surfaces in this fixture: the object_class_ce / mask_dice / mask_focal "

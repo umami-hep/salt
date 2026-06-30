@@ -1142,17 +1142,6 @@ class TestMaskDecoder:
         probs = out.get("objects.class_probs")
         assert torch.allclose(probs.sum(-1), torch.ones(B, MASKFORMER_NUM_OBJECTS), atol=1e-5)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "MFU-0 re-pointed the independent-v1 MaskDecoder oracle to the upstream-6570e85 "
-            "snapshot. v2 diverges from it on: MFU-4 (snapshot matcher defaults to the "
-            "BatchedScipyOMP LAP solver, not yet in the container -> raises at construction) "
-            "and MFU-5 (extra per-layer MaskDecoderLayer LayerNorm changes objects.* outputs). "
-            "Un-xfail when MFU-4 (solver) + MFU-5 (LayerNorm) land. Encoder drop-registers parity "
-            "is independently covered by test_forward_rank_two_bitwise_vs_independent_v1."
-        ),
-    )
     def test_forward_bitwise_vs_independent_v1(self, norm_paths):
         # the four objects.* outputs == an INDEPENDENT v1 MaskDecoder BITWISE; the
         # encoded.seq == an INDEPENDENT v1 Transformer(drop_registers=True) BITWISE

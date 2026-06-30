@@ -38,19 +38,12 @@ from salt.tests.integration.gates_m5 import (
 )
 from salt.core.onnx.reduces import registered_reduces
 
-# MFU-0 expected-delta xfail reasons. The MaskFormer gate oracle is the vendored upstream
-# snapshot (6570e85); the CURRENT (unported) v2 core/nn/ still differs from upstream, so
-# some MF1a checks are KNOWN to fail until a later MFU wave closes the gap. These xfails
-# keep the suite green-with-expected-xfails; strict=True flips them to a HARD failure once
-# the wave lands (signalling the xfail should be removed). Full ledger:
+# MFU-0 expected-delta ledger:
 # experiments/16_investigate_upstream_maskformer_objectselection/outputs/mfu0_expected_deltas.md
-MFU5_LAYERNORM_XFAIL = (
-    "MFU-5 (LayerNorm): the v2 core MaskDecoderLayer (salt/core/nn/maskdecoder.py) omits the "
-    "per-layer post-norm that upstream applies (q = self.norm1(q); kv = self.norm2(kv), "
-    "snapshot maskformer.py:449-450,510-512), so all four decoder objects.* diverge from the "
-    "upstream oracle (embed ~1.27, masks ~0.74, class_logits ~0.19, class_probs ~0.057). "
-    "Closed by MFU-5; remove this xfail then."
-)
+# MFU-5 CLOSED the LayerNorm delta (Δ1): the v2 core MaskDecoderLayer now applies the
+# per-layer post-norm upstream applies (q = self.norm1(q); kv = self.norm2(kv), snapshot
+# maskformer.py:449-450,510-512), so the four decoder objects.* now match the upstream oracle
+# within tolerance — the strict xfail on TestMF1a::test_pass was removed accordingly.
 
 
 class TestR1:
@@ -288,7 +281,6 @@ class TestL3:
 
 
 class TestMF1a:
-    @pytest.mark.xfail(reason=MFU5_LAYERNORM_XFAIL, strict=True)
     def test_pass(self, tmp_path):
         code, report = run_mf1a(tmp_path)
         assert code == 0, report["checks"]
@@ -307,7 +299,7 @@ class TestMF1a:
         # registers were genuinely VISIBLE to attention (not a no-op slice)
         assert report["checks"]["registers_visible_to_encoder"]
         # MaskDecoder forward tolerance parity vs an INDEPENDENT upstream MaskDecoder
-        # (these FAIL at MFU-0 — MFU-5 LayerNorm gap — which is what xfails this test)
+        # (these now PASS — MFU-5 added the per-layer post-norm that closed the LayerNorm gap)
         assert report["checks"]["decoder_embed_close_vs_independent_v1"]
         assert report["checks"]["decoder_class_logits_close_vs_independent_v1"]
         assert report["checks"]["decoder_class_probs_close_vs_independent_v1"]
@@ -335,25 +327,27 @@ class TestMF1a:
         assert "decoder slice" in report["scope_note"].lower()
         assert "MaskFormerMatchedLoss" in report["scope_note"]
 
-    def test_decoder_objects_diverge_at_mfu0(self, tmp_path):
-        """MFU-0 ledger control: the decoder objects.* DO diverge from the upstream oracle.
+    def test_decoder_objects_converge_after_mfu5(self, tmp_path):
+        """MFU-5 ledger control: the decoder objects.* now CONVERGE to the upstream oracle.
 
-        This is the positive assertion of the MFU-5 LayerNorm delta — until MFU-5 lands the
-        four decoder ``objects.*`` parity checks are FALSE while the encoder (drop_registers)
-        stays bitwise and the structural / loud-surface controls stay green. When MFU-5 lands
-        this test starts failing (the divergence vanishes), pairing with the strict xfail above
-        to force the ledger update.
+        The inversion of the former ``test_decoder_objects_diverge_at_mfu0`` positive
+        control. MFU-5 added the per-layer ``MaskDecoderLayer`` post-norm (norm1/norm2,
+        snapshot maskformer.py:449-450,510-512); the matching ``layers.<i>.norm1/2``
+        state_dict keys now transfer into the fresh upstream oracle, so the gate passes
+        and all four decoder ``objects.*`` parity checks are TRUE (within tolerance) — not
+        just the encoder. If the per-layer norms ever regress (wrong name / missing
+        transfer), this convergence vanishes and the control fails loudly.
         """
         code, report = run_mf1a(tmp_path)
-        assert code == 1
+        assert code == 0
         # encoder is bitwise-identical to upstream (no decoder norm in the encoder path)
         assert report["checks"]["drop_registers_encoded_close_vs_independent_v1"]
         assert report["max_abs_diffs"]["drop_registers_encoded"] <= gm5.MF_ATOL
-        # the decoder objects.* genuinely diverge (the MFU-5 LayerNorm gap)
-        assert not report["checks"]["decoder_embed_close_vs_independent_v1"]
-        assert not report["checks"]["decoder_masks_close_vs_independent_v1"]
-        assert report["max_abs_diffs"]["decoder_embed"] > gm5.MF_ATOL
-        # structural + loud-surface controls (independent of the LayerNorm gap) stay green
+        # the decoder objects.* now converge (the MFU-5 LayerNorm gap is closed)
+        assert report["checks"]["decoder_embed_close_vs_independent_v1"]
+        assert report["checks"]["decoder_masks_close_vs_independent_v1"]
+        assert report["max_abs_diffs"]["decoder_embed"] <= gm5.MF_ATOL
+        # structural + loud-surface controls stay green
         assert report["checks"]["encoded_seq_is_register_free"]
         assert report["checks"]["registers_visible_to_encoder"]
         assert report["checks"]["zero_constituent_jet_is_finite"]
@@ -363,8 +357,7 @@ class TestMF1a:
         # perturb the v2 encoded.seq + objects.embed -> their parity checks vs the
         # independent upstream references must FAIL, while the registers-visible control,
         # the loud-surface checks and the zero-constituent ONNX control (all independent of
-        # the perturbed values) stay green. NOTE: at MFU-0 the un-corrupted decoder masks /
-        # class outputs ALSO fail (MFU-5 LayerNorm), so this asserts only the controls.
+        # the perturbed values) stay green.
         code, report = run_mf1a(tmp_path, corruption=lambda t: t + 1.0)
         assert code == 1
         assert not report["passed"]
