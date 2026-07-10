@@ -743,6 +743,38 @@ class Salt2CLI(LightningCLI):
             "test": {"model", "dataloaders", "datamodule"},
         }
 
+    def _parse_ckpt_path(self) -> None:
+        """No-op override of lightning's checkpoint hyper-parameter re-parse (exp-19 fix #3).
+
+        Lightning 2.6's ``LightningCLI._parse_ckpt_path`` (``cli.py:563``) loads
+        ``checkpoint['hyper_parameters']`` whenever ``--ckpt_path`` is set at
+        parse time and RE-PARSES them onto the config as ``{model: <hparams>}``.
+        That contract is incompatible with the v2 design (§3.4): `SaltModule`
+        saves its hyper-parameters with ``ignore=["modules"]`` (modules are
+        runtime graph objects, never reconstructable from hparams), so the
+        re-parse always presents a modules-less model spec. On the production
+        eval surface — ``salt2 test --config <run>/config.yaml --ckpt_path
+        <ckpt>``, the exp-19 smoke job-2629 crash — jsonargparse adapts that
+        spec standalone and the saved config's model block is REPLACED, dying
+        with "the following arguments are required: modules". The W6 suites
+        never hit this seam: sparse original-config invocations happen to merge
+        benignly, and the saved-config eval WITHOUT ``--ckpt_path`` uses the
+        v1 best-checkpoint glob, which assigns ``cfg.ckpt_path`` in
+        ``before_instantiate_classes`` — after this hook has already run.
+
+        The v2 contract is config-driven: the run's saved ``config.yaml`` is
+        the single source of the model architecture; the checkpoint carries
+        weights (+ the ``CKPT_KEY`` payload), which
+        ``trainer.fit/test(ckpt_path=...)`` load unchanged — this override does
+        not touch weight loading or resume state. Data-less programmatic loads
+        go through ``SaltModule.load_from_checkpoint(path, modules=...)``. The
+        hparams re-parse therefore can never contribute information — at best
+        it re-applies values already in the config, at worst it wipes the model
+        — so it is disabled wholesale, matching the already-disabled
+        ``load_from_checkpoint_support=False`` half of the same lightning
+        feature (design §3.4).
+        """
+
     def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
         """Add the salt top-level namespaces and the run-name link (design §5)."""
         parser.add_argument(
