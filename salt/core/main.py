@@ -49,10 +49,12 @@ import re
 import sys
 import warnings
 from collections.abc import Sequence
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 import comet_ml  # noqa: F401 - import-order contract: comet before lightning (v1 main.py:5, §5)
+from jsonargparse import Namespace
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 from lightning.pytorch.loggers.comet import CometLogger
@@ -399,6 +401,35 @@ def _entry_set(entry: Any, key: str, value: Any) -> None:
         entry[key] = value
     else:
         setattr(entry, key, value)
+
+
+def _resolve_class_path(class_path: str) -> type:
+    """Import a dotted ``module.Class`` path and return the class object."""
+    module_path, _, attr = class_path.rpartition(".")
+    module = import_module(module_path)
+    return getattr(module, attr)
+
+
+def _instantiate_class_config(cfg: Any) -> Any:
+    """Instantiate a jsonargparse ``class_path``/``init_args`` config block.
+
+    Mirrors jsonargparse's default subclass instantiation (`class_type(**init_args)`)
+    for the deferred fit logger (`Salt2CLI._reattach_fit_logger`) — a leaf ``cfg``
+    (already a fully-parsed value, not a subclass block) is returned unchanged, and
+    nested ``class_path``/``init_args`` init args are instantiated recursively so an
+    arbitrary user logger block round-trips, not just the scalar-arg `CometLogger`.
+    """
+    if not isinstance(cfg, Namespace):
+        return cfg
+    class_path = cfg.get("class_path")
+    if class_path is None:
+        return cfg
+    cls = _resolve_class_path(class_path)
+    init_args = cfg.get("init_args")
+    kwargs: dict[str, Any] = {}
+    if init_args is not None:
+        kwargs = {key: _instantiate_class_config(val) for key, val in vars(init_args).items()}
+    return cls(**kwargs)
 
 
 def _is_persistence_sink(class_path: str) -> bool:
@@ -785,7 +816,29 @@ class Salt2CLI(LightningCLI):
                 "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
                 "sink — see gn2v2-dummy.yaml (W6c removal)"
             )
+        # Defer the fit-stage experiment logger past the racy validation pass
+        # (plan-42 exp-19 parse-race fix). jsonargparse's `parser.instantiate_classes`
+        # pass validates the `model:` block against `Union[None, SaltModule]`, and
+        # `SaltModule`'s module dict carries `GraphModule` (a runtime_checkable
+        # Protocol). Validating a module namespace against a Protocol makes
+        # jsonargparse walk `sys.modules.values()` (to resolve string forward refs
+        # in the Protocol method signatures — jsonargparse `_postponed_annotations`
+        # `_enrich_globals_for_string_forward_refs`). The default-ON `CometLogger`
+        # (plan-24 Wave 0) is instantiated in that SAME pass, and its `__init__`
+        # EAGERLY starts comet's background upload threads (`comet_ml.start`), which
+        # import modules and mutate `sys.modules`. The two race → "RuntimeError:
+        # dictionary changed size during iteration", caught inside the Union
+        # try/except and surfaced as "model does not validate against any Union
+        # subtype" — the exp-19 smoke crash. (A warm-up parse does NOT help: the
+        # `sys.modules` walk is re-run every pass; only keeping comet threads OFF
+        # the parse window fixes it.) So on `fit` we stash the logger config, null
+        # it for the parser pass (trainer built logger-less, no comet threads), then
+        # re-instantiate and attach it AFTER validation completes — the trainer only
+        # needs a logger at `fit`, well after this. Test/graph/export never carry a
+        # live logger here, so they are untouched.
+        deferred_logger_cfg = self._detach_fit_logger()
         super().instantiate_classes()
+        self._reattach_fit_logger(deferred_logger_cfg)
         section = self._get(self.config_init, "outputs")
         model = getattr(self, "model", None)
         composer = getattr(model, "compose_output_section", None) if model is not None else None
@@ -800,6 +853,46 @@ class Salt2CLI(LightningCLI):
             for cb in (trainer.callbacks if trainer is not None else []):
                 if callable(getattr(cb, "bind_output_section", None)):
                     cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
+
+    def _detach_fit_logger(self) -> Any:
+        """Stash + null the fit-stage ``trainer.logger`` block ahead of the parser pass.
+
+        Returns the un-instantiated logger config (a ``class_path``/``init_args``
+        Namespace) and sets ``trainer.logger = False`` in the fit config so
+        jsonargparse's ``instantiate_classes`` pass builds a logger-less trainer —
+        keeping the eager-comet-thread `CometLogger.__init__` out of the racy
+        model-block validation window (see ``instantiate_classes``). Returns
+        ``None`` (a no-op) outside ``fit`` or when no live logger is configured
+        (``--trainer.logger false`` runs, and every ``test`` run which forces
+        ``logger=False`` in ``before_instantiate_classes``).
+        """
+        if getattr(self.config, "subcommand", None) != "fit":
+            return None
+        cfg = self.config["fit"]
+        logger = getattr(cfg.trainer, "logger", None)
+        if not logger:  # False / None — nothing to defer
+            return None
+        cfg.trainer.logger = False
+        return logger
+
+    def _reattach_fit_logger(self, logger_cfg: Any) -> None:
+        """Instantiate the deferred logger and attach it to the trainer post-validation.
+
+        Called after ``super().instantiate_classes()`` — the racy ``sys.modules``
+        walk is done, so building the `CometLogger` (and starting its comet threads)
+        is now safe. Instantiating the stashed ``class_path``/``init_args`` block
+        directly (rather than through the parser pass) is behaviourally identical
+        for the logger blocks salt configures — the init args are leaf scalars plus
+        the `before_instantiate_classes` Comet patches (``online``, ``prefix``,
+        ``dict_kwargs``, ``experiment_name`` / ``COMET_EXPERIMENT_NAME``), none of
+        which are subclass objects needing a jsonargparse instantiator.
+        """
+        if logger_cfg is None:
+            return
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        trainer.logger = _instantiate_class_config(logger_cfg)
 
     def before_instantiate_classes(self) -> None:
         """Per-stage config patches — the v1 eval + Comet surface kept (utils/cli.py:281-332).
