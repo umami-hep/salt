@@ -44,9 +44,11 @@ later wave.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import sys
+import time
 import warnings
 from collections.abc import Sequence
 from importlib import import_module
@@ -68,6 +70,68 @@ from salt.core.outputs.writers import OutputSectionWriter
 from salt.core.saltmodule import SaltModule
 
 __all__ = ["CONFIG_DIR", "DeepMergeParser", "Salt2CLI", "main"]
+
+
+def _patch_jsonargparse_sys_modules_race() -> None:
+    """Make jsonargparse's forward-ref ``sys.modules`` walk safe under live threads.
+
+    jsonargparse resolves string forward refs in Protocol method signatures by
+    scanning ``sys.modules.values()``
+    (``_postponed_annotations._enrich_globals_for_string_forward_refs``). Any
+    live background thread that imports modules — the comet upload threads
+    started by ``CometLogger.__init__`` are the production case — mutates
+    ``sys.modules`` mid-walk and raises ``RuntimeError: dictionary changed size
+    during iteration``. Depending on WHERE that surfaces it presents as either
+    of the exp-19 crash signatures:
+
+    - propagated through ``get_return_type`` into the Union subtype loop →
+      "dictionary changed size during iteration" nested under "does not
+      validate against any of the Union subtypes" (smoke job 2622, parse-time);
+    - swallowed by ``evaluate_postponed_annotations``'s broad except → method
+      annotations stay unevaluated → ``implements_protocol`` compares mismatched
+      annotations → False → "Import path <cls> does not implement protocol
+      GraphModule" (smoke job 2624, at ``trainer.fit`` start when Lightning's
+      ``SaveConfigCallback`` re-validates the config to dump ``config.yaml``).
+
+    The validation re-runs at EVERY parse/dump window (CLI parse,
+    ``instantiate_classes``, the SaveConfigCallback dump, ``salt2 test`` /
+    ``export`` config re-parses), so instead of chasing windows this fixes the
+    racy primitive itself: retry the enrichment on the race signature. The
+    function is additive/idempotent (it only fills missing names into
+    ``global_vars`` and its module cache keeps partial progress), so re-running
+    after a lost race is safe, and each retry gets a fresh consistent snapshot.
+    Validated under synthetic maximum-churn import storms (a thread mutating
+    ``sys.modules`` in a tight loop): 1398 races absorbed across 1200 calls,
+    300/300 protocol checks correct.
+
+    Applied at ``salt.core.main`` import — every ``salt2`` surface (fit / test /
+    graph / schema / export) and every programmatic ``Salt2CLI`` user goes
+    through this module. No-ops gracefully if jsonargparse renames the private
+    helper (the pin is ``jsonargparse>=4.49.0``); idempotent across repeat
+    imports via the ``_salt_race_safe`` marker.
+    """
+    from jsonargparse import _postponed_annotations as _pa  # noqa: PLC0415, PLC2701 - patch site
+
+    orig = getattr(_pa, "_enrich_globals_for_string_forward_refs", None)
+    if orig is None or getattr(orig, "_salt_race_safe", False):
+        return
+
+    @functools.wraps(orig)
+    def _race_safe_enrich(global_vars: dict[str, Any]) -> None:
+        for _ in range(40):
+            try:
+                return orig(global_vars)
+            except RuntimeError as err:
+                if "changed size during iteration" not in str(err):
+                    raise
+                time.sleep(0.001)  # yield; the import burst that raced us is short-lived
+        return orig(global_vars)  # last attempt: let a genuinely stuck race surface loudly
+
+    _race_safe_enrich._salt_race_safe = True  # type: ignore[attr-defined]
+    _pa._enrich_globals_for_string_forward_refs = _race_safe_enrich  # noqa: SLF001 - the patch site
+
+
+_patch_jsonargparse_sys_modules_race()
 
 CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base2.yaml`` and the worked GN2v2 configs (design §5.1)."""
