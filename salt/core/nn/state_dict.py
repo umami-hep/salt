@@ -1,48 +1,7 @@
-"""v1 -> v2 state-dict mapping (plan 05 stage A2; seeds the M7 ``salt2 import-ckpt``).
+"""v1 -> v2 state-dict mapping.
 
 Maps a v1 ``ModelWrapper`` state_dict onto a v2 module dict built from
-config (`salt.core.nn.modules` / `salt.core.nn.tasks`), so the M2 gates can
-train a v2 model from TRANSFERRED v1 weights (gate G3, loss-curve parity)
-and existing checkpoints have a migration path.
-
-Key correspondences (all v1 paths from modelwrapper.py / saltmodel.py):
-
-The mapping of the v1 norm buffers depends on which v2 normaliser the
-config selects (both are supported):
-
-* default fixed-norm `Normaliser` — ``norm.<stream>_means`` /
-  ``norm.<stream>_stds`` map straight to ``<norm>.means_<stream>`` /
-  ``<norm>.stds_<stream>`` and the ``materialised`` flag is set True
-  (transferred values are real, design §2.3);
-* opt-in `MaskedInputNormaliser` — ``means`` becomes
-  ``running_mean_<stream>`` and ``stds`` becomes ``running_var_<stream>``
-  (= std**2), with the bookkeeping buffers synthesised so the migrated
-  model starts already warmed up.
-
-==============================  ==========================================
-v1 key prefix                   v2 key prefix
-==============================  ==========================================
-``norm.<stream>_means/_stds``   see the per-normaliser mapping above
-``model.init_nets.<i>.net.*``   ``<embed[stream_i]>.net.*``
-``model.encoder.*``             ``<encoder>.encoder.*``
-``model.pool_net.*``            ``<pool>.pool_net.*``
-``model.tasks.<i>.*``           ``<task_i>.task.*``
-==============================  ==========================================
-
-Stream/index association: v1 ``init_nets`` order IS the concat order
-(saltmodel.py:128-129, transformer.py:684-686), so init-net ``i`` maps to
-the `StreamEmbed` for ``Concat.streams[i]``. v1 ``tasks`` order is the
-construction order, which the state_dict alone does not name — by default
-task index ``i`` maps to the ``i``-th task module in module-dict order
-(config order mirrors the v1 config in the M2 gates); pass ``task_order``
-to override.
-
-The mapping is total by construction: any unconsumed v1 key is an error
-(silent weight drops are exactly the failure class the gates exist to
-catch). The synthesised v2-only keys are the chosen normaliser's
-bookkeeping buffers (``materialised`` for the fixed-norm `Normaliser`;
-``num_batches_tracked_<stream>`` / ``num_objects_seen_<stream>`` for the
-self-normalising `MaskedInputNormaliser`).
+config, so a v2 model can be trained from transferred v1 weights.
 """
 
 from __future__ import annotations
@@ -76,14 +35,20 @@ def map_v1_state_dict(
     modules: Mapping[str, GraphModule],
     task_order: Sequence[str] | None = None,
 ) -> dict[str, Tensor]:
-    """Map a v1 `ModelWrapper` state_dict onto a v2 module dict (gate G3).
+    """Map a v1 `ModelWrapper` state_dict onto a v2 module dict.
 
     The returned keys are relative to the MODULE DICT — loadable via
     ``nn.ModuleDict(modules).load_state_dict(mapped)`` after every module's
-    `bind` has run (bind allocates the buffers/layers the load fills,
-    design §2.3). Inside `SaltModule` (``self.net = nn.ModuleDict(...)``)
-    the same keys gain the ``net.`` prefix. Tensor values are shared, not
-    cloned (``load_state_dict`` copies into the target parameters).
+    `bind` has run (bind allocates the buffers/layers the load fills).
+    Inside `SaltModule` (``self.net = nn.ModuleDict(...)``) the same keys
+    gain the ``net.`` prefix. Tensor values are shared, not cloned
+    (``load_state_dict`` copies into the target parameters).
+
+    v1 ``init_nets`` order IS the concat order, so init-net ``i`` maps to
+    the `StreamEmbed` for ``Concat.streams[i]``. v1 ``tasks`` order is the
+    construction order, which the state_dict alone does not name — by
+    default task index ``i`` maps to the ``i``-th task module in
+    module-dict order; pass ``task_order`` to override.
 
     Parameters
     ----------
@@ -96,7 +61,7 @@ def map_v1_state_dict(
         per concat stream, and the task modules.
     task_order : Sequence[str] | None, optional
         v2 instance names in v1 ``model.tasks`` index order, by default the
-        task modules' module-dict order (see module docstring).
+        task modules' module-dict order.
 
     Returns
     -------
@@ -162,13 +127,11 @@ def map_v1_state_dict(
                 # Default fixed-norm `Normaliser`: v1 means/stds map straight to
                 # the v2 means_<stream>/stds_<stream> buffers (bitwise v1 parity).
                 out[f"{norm[0]}.{kind}_{stream}"] = value
-            # The self-normalising `MaskedInputNormaliser` stores
-            # running_mean/running_var (not means/stds). v1's `(x - mean) / std`
-            # maps to v2's `(x - running_mean) / sqrt(running_var + eps)` with
-            # running_mean = v1.means and running_var = v1.stds**2. This is the
-            # migration path: a v1 checkpoint loads already "warmed up" to the v1
-            # statistics (the tiny eps under the sqrt is the deliberate,
-            # documented departure from v1 bitwise parity).
+            # MaskedInputNormaliser stores running_mean/running_var, not means/stds:
+            # v1's `(x - mean) / std` maps to v2's
+            # `(x - running_mean) / sqrt(running_var + eps)`, so running_mean =
+            # v1.means and running_var = v1.stds**2 (the eps is a deliberate,
+            # non-bitwise departure from v1 parity).
             elif kind == "means":
                 out[f"{norm[0]}.running_mean_{stream}"] = value
             else:  # stds -> variance
@@ -181,7 +144,7 @@ def map_v1_state_dict(
                     f"declares {len(embed_names)} streams ({concat[1].streams})"
                 )
             if not rest.startswith("net."):
-                # pos_enc / featurewise parameters — outside the M2 scope
+                # pos_enc / featurewise parameters — not mapped
                 unmapped.append(key)
                 continue
             out[f"{embed_names[index]}.{rest}"] = value
@@ -204,19 +167,14 @@ def map_v1_state_dict(
             f"map_v1_state_dict: {len(unmapped)} v1 keys have no v2 mapping (nothing is "
             f"dropped silently): {sorted(unmapped)}"
         )
-    # Synthesise the chosen normaliser's v2-only bookkeeping buffers that v1 has
-    # no counterpart for.
+    # Synthesise the chosen normaliser's v2-only bookkeeping buffers, which v1
+    # has no counterpart for.
     if not self_normalising:
-        # Default fixed-norm `Normaliser`: transferred values are real, so flag
-        # materialised True (checkpoint-load semantics, design §2.3).
         out[f"{norm[0]}.materialised"] = torch.tensor(True)
     else:
-        # Self-normalising `MaskedInputNormaliser`: the transferred stats count
-        # as "seen" so the running buffers are treated as warmed up
-        # (num_batches_tracked set to 1; the exact object count is unknown, so
-        # num_objects_seen is left at 0 — only the cumulative momentum=None path
-        # would consume it, and a migrated model continues under its configured
-        # fixed momentum).
+        # Transferred stats count as "seen": num_batches_tracked=1. The exact
+        # object count is unknown, so num_objects_seen is left at 0 — only the
+        # cumulative momentum=None path would consume it.
         for stream in norm_streams:
             out[f"{norm[0]}.num_batches_tracked_{stream}"] = torch.tensor(1, dtype=torch.long)
             out[f"{norm[0]}.num_objects_seen_{stream}"] = torch.tensor(0, dtype=torch.long)
@@ -227,11 +185,6 @@ def _single(
     modules: Mapping[str, GraphModule], cls: type | tuple[type, ...]
 ) -> tuple[str, object]:
     """Find the single instance of `cls` (one class or a tuple) in the module dict.
-
-    Returns
-    -------
-    tuple[str, object]
-        ``(instance_name, module)``.
 
     Raises
     ------

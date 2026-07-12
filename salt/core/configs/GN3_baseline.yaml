@@ -1,26 +1,6 @@
-# GN3_baseline.yaml — the GN3 dev baseline in the v2 schema (M5-CONV, GN3
-# family). The v2-native MIGRATED fixture for legacy
-# salt/configs/GN3_dev/GN3_baseline.yaml, and the BASE of the GN3_dev overlay
-# stack (loose / dR / flow / LepID_SMT / tracklabel layer on top of it).
-#
-# A SINGLE track stream (256/128, 4 layers) feeding 3 task heads, combined with
-# the geometric-mean LossGLS (v1 `loss_mode: GLS`). The three tasks:
-#
-#   - jets_classification : 4-class flavour (v1 use_class_dict, output_size 4 —
-#                           the un-split-light dev baseline; GN3_baseline.yaml:55)
-#   - track_origin        : 8-class ftag track-origin
-#   - track_vertexing     : per-track vertex edges (origin-weighted)
-#
-# Track SELECTIONS reproduce v1's `selections: {tracks: [d0 < 3.5, NSHARED <
-# 1.1]}` (GN3_baseline.yaml:89-90) via the H5StructuredReader `selections:` (ftag
-# Cuts; reader.py:163-175). The GN3_baseline_loose overlay nulls them.
-#
-# LossGLS REQUIRES every loss-producing task weight == 1.0 (v1 GLS guard,
-# modelwrapper.py:139-142) — NO task declares a weight, faithful to v1.
-#
-# NO machine paths committed (design §5 placeholder policy). Static validation:
-#   python -m salt.core.main graph validate -c salt/core/configs/GN3_baseline.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# GN3 dev baseline: base of the GN3_dev overlay stack (loose / dR / flow /
+# LepID_SMT / tracklabel layer on top of this). A single track stream feeding
+# 3 task heads with LossGLS (every weight == 1.0).
 
 name: GN3_baseline
 
@@ -33,8 +13,7 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, dataset: tracks_ghost} # v1 input_map
-        # v1 selections: {tracks: [d0 < 3.5, NSHARED < 1.1]} (ftag Cuts)
+          tracks: {global_object: false, dataset: tracks_ghost}
         selections:
           tracks: ["d0 < 3.5", "NSHARED < 1.1"]
     features:
@@ -77,14 +56,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          context: [normed.jets]
           out_dim: &embed_dim 256
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -96,8 +75,8 @@ model:
           dim: *embed_dim
           out_dim: &out_dim 128
           num_layers: 4
-          num_registers: 8 # v1 GN3_dev/GN3_baseline.yaml:36 — 8 register tokens
-          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          num_registers: 8
+          attention: {num_heads: 8, attn_type: torch-math}
           dense: {activation: SiLU, gated: true}
       split:
         class_path: salt.core.nn.Split
@@ -111,9 +90,8 @@ model:
           stream: jets
           input: pooled.global
           label: flavour_label
-          # 4-class dev baseline (v1 output_size 4, un-split light)
           class_names: &gn3_baseline_flavour [bjets, cjets, ujets, taujets]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
@@ -123,34 +101,23 @@ model:
           label: ftagTruthOriginLabel
           class_names: &origin_classes
             [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_vertexing:
         class_path: salt.core.nn.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
+        class_path: salt.core.nn.LossGLS
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired). It supplies its OWN top-level outputs: section + dumb
-# sinks. The 1:1 conversion math (softmax / union-find) folds onto each task via
-# get_output (W34.1/W34.3), orchestrated by the RunTaskOutput writer below; the
-# dumb sinks dump ALL active outputs.* leaves, the SECTION supplies names/dtypes/
-# ORDER. Section writers in EXACT v1 H5 column order — InputCopyWriter ->
-# RunTaskOutput task fields -> PadMaskWriter. The RunTaskOutput tasks list is the
-# v1 model-declaration order (jets_classification, track_origin, track_vertexing):
-# jets = class probs; tracks = origin probs then VertexIndex (i8 in TEST, int8 in
-# ONNX). This is the BASE of the GN3_dev overlay stack — loose/dR/flow/LepID_SMT
-# inherit this section unchanged; tracklabel re-states run_tasks (it adds 2 tasks).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -159,21 +126,18 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4c): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: GN3baseline # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the outputs: section (plan 34 W34.4c).
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 20
-  precision: 32-true # bf16-mixed on GPU clusters (M6 follow-up)
+  precision: 32-true

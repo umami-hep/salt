@@ -1,51 +1,18 @@
-# easyjet_hh4b_ttbar.yaml — an EVENT-level signal-vs-background classifier trained
-# DIRECTLY on TWO per-sample easyjet AnalysisMiniTree ROOT ntuples via the v2
-# modular MultiSampleReader (NO UPP/umami pre-resampling). Demonstrates the v2
-# multi-sample Reader boundary: signal (HH->4b) and background (ttbar) are read
-# by their OWN EasyjetReader sub-readers, proportionally interleaved into one
-# stratified stream, with a per-event sample label injected as raw.event.process.
-# Features / Labels / Normaliser / StreamEmbed / the encoder / the pooling / the
-# task head / salt2 are all UNCHANGED — only the NEW combining layer + this config.
-#
-# Topology (event-level, NO per-jet Split):
-#   MultiSampleReader{signal EasyjetReader(603404) + background EasyjetReader(410471)}
-#     -> Features(jets: kinematics + GN2v01)
-#     -> Labels (exposes labels.event.process from the injected scalar)
-#     -> Normaliser(jets)
-#     -> StreamEmbed(jets) -> Concat -> TransformerEncoder
-#     -> GlobalAttentionPooling (event representation, NO Split)
-#     -> ClassificationTaskModule on `process` (binary signal/bg, EVENT-level)
-#
-# COMMON FEATURE SET: signal is mc23/p7128, background is mc20/p7018 (different
-# campaigns), so only the branches present in BOTH are used (verified at write
-# time): pt/eta/phi/m kinematics + GN2v01 pb/pc/pu scores. Each sub-reader has its
-# OWN branches: map (here identical names), so a name divergence is a config change.
-#
-# STAGE BINDING (per-reader stage-sourcing): each sample carries `sources:
-# {train, val, test}`; the MultiSampleReader re-sources each sub-reader per stage.
-# data.train_file / val_file / test_file are set to placeholder stage keys and are
-# IGNORED by MultiSampleReader (they only satisfy the datamodule's non-None check);
-# the real per-stage data comes from each sample's `sources`. For a single-file
-# smoke (fast_dev_run) point all three stage sources of a sample at the same file.
-#
-# NO machine paths committed (design §5 placeholder policy). uproot + awkward are
-# runtime reader extras (pip install in salt.sif). A typical invocation FROM THE
-# REPO ROOT (the experiment runner fills the ${...} sources + norm_dict):
-#
-#   salt2 fit --config salt/core/configs/easyjet_hh4b_ttbar.yaml \
-#     --data.modules.reader.init_args.samples.0.sources.train $SIGNAL_DIR \
-#     --data.modules.reader.init_args.samples.0.sources.val   $SIGNAL_DIR \
-#     --data.modules.reader.init_args.samples.1.sources.train $TTBAR_FILE \
-#     --data.modules.reader.init_args.samples.1.sources.val   $TTBAR_FILE \
-#     --model.modules.norm.init_args.norm_dict $NORM
+# Event-level signal-vs-background classifier trained directly on two
+# per-sample easyjet AnalysisMiniTree ROOT ntuples via MultiSampleReader (no
+# UPP/umami pre-resampling). Signal (HH->4b, mc23) and background (ttbar,
+# mc20) are read by their own EasyjetReader sub-readers and proportionally
+# interleaved, with a per-event sample label injected as raw.event.process.
+# Only branches common to both campaigns are used.
 
 name: easyjet_hh4b_ttbar
 
 data:
   batch_size: 1000
   num_workers: 4
-  # placeholder stage keys — IGNORED by MultiSampleReader (it sources per sample
-  # via `sources:` below); they only satisfy the datamodule's non-None file check.
+  # placeholder stage keys — ignored by MultiSampleReader, which sources per
+  # sample via `sources:` below; these only satisfy the datamodule's
+  # non-None file check.
   train_file: train
   val_file: val
   test_file: test
@@ -79,7 +46,7 @@ data:
                     branches:
                       eventNumber: eventNumber
                       mcChannelNumber: mcChannelNumber
-            # sources: REQUIRED override per stage (see header) — signal files
+            # sources: REQUIRED override per stage — signal files
           - name: background
             label: 0
             reader:
@@ -87,7 +54,7 @@ data:
               init_args:
                 tree: AnalysisMiniTree
                 groups: *ej_groups
-            # sources: REQUIRED override per stage (see header) — ttbar files
+            # sources: REQUIRED override per stage — ttbar files
     features:
       class_path: salt.core.data.Features
       init_args:
@@ -106,7 +73,7 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header) — jets stream only
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets]
       jet_embed:
         class_path: salt.core.nn.StreamEmbed
@@ -126,11 +93,10 @@ model:
           attention: {num_heads: 4, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
-        # event representation: globally attention-pool the jet tokens (NO Split)
+        # event representation: globally attention-pool the jet tokens (no Split)
         class_path: salt.core.nn.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       events_classification:
-        # EVENT-level binary signal-vs-background head on the injected `process`
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: event
@@ -141,24 +107,14 @@ model:
       loss:
         class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired) and null-deleted pad_mask. It supplies its OWN top-level
-# outputs: section + dumb H5 sink. The softmax folds onto the task via get_output
-# (W34.1), orchestrated by the RunTaskOutput writer below; the dumb sink dumps ALL
-# active outputs.* leaves, the SECTION supplies names/dtypes/ORDER. The only task
-# is on the GLOBAL `event` stream (no sequence-stream task), so there is NO
-# PadMaskWriter. `jets` feeds the encoder but carries no task, so only `event` is
-# copied. NO OnnxExportSink (event-level multi-sample config — fit/test only).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [event]} # all source fields (v1 default), the only tasked stream
+    init_args: {streams: [event]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [events_classification]}
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink

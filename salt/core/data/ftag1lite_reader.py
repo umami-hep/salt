@@ -1,44 +1,36 @@
 """`FTAG1LiteReader` — a config-driven Reader for xAOD DAOD_FTAG1LITE POOL files.
 
-The v2 modular-Reader boundary on a THIRD file type (design §2.4, §6.1): a new
-format is a new `Reader` subclass — `Features` / `Labels` / `Normaliser` / the
-model / ``salt2`` are all UNCHANGED. This reads ATLAS xAOD DAOD POOL files
-(``CollectionTree`` with aux-store branches) via ``uproot`` and emits the same
-``raw.<stream>`` structured numpy arrays + ``masks.<stream>`` pad masks the
-`H5StructuredReader` / `EasyjetReader` produce, so the rest of the pipeline cannot
-tell the three apart.
+Reads ATLAS xAOD DAOD POOL files (``CollectionTree`` with aux-store branches) via
+``uproot`` and emits the same ``raw.<stream>`` / ``masks.<stream>`` structured
+arrays as `H5StructuredReader` / `EasyjetReader`.
 
-Three differences from the easyjet path drive the design:
+Three things distinguish this from the easyjet path:
 
 - **The sample unit is the JET, but the file is keyed by EVENT.** FTAG1LITE stores
   ``std::vector<T>`` jet-level scalars (``[event][jet]``) and
   ``std::vector<std::vector<T>>`` constituent vectors (``[event][jet][track]``).
-  Each small-R jet is one training sample (an H5 row). `prepare` builds an
-  event→jet OFFSET INDEX (cumulative per-event jet counts) so a contiguous
-  jet-slice maps to a covering EVENT range; `read` reads whole events, flattens
-  ``[event][jet] → jet``, and slices to exactly the requested jets.
+  `prepare` builds an event->jet offset index (cumulative per-event jet counts) so
+  a contiguous jet-slice maps to a covering event range; `read` reads whole
+  events, flattens ``[event][jet] -> jet``, and slices to exactly the requested
+  jets.
 
-- **Constituents are DOUBLE-jagged.** A track stream is ``[event][jet][track]``;
+- **Constituents are double-jagged.** A track stream is ``[event][jet][track]``;
   after flattening events away it is ``[jet][track]`` (depth-2 jagged), padded to
-  ``pad_max`` per jet — ``ak.pad_none`` + ``ak.fill_none`` per dtype (float → 0.0,
-  signed-int LABELS → ``-1`` sentinel, unsigned/counts → 0). The result is a
-  structured ``(B, pad_max)`` array with a ``valid`` field + ``masks.<stream> =
-  ~valid`` — exactly the H5 contract.
+  ``pad_max`` per jet (float -> 0.0, signed-int labels -> -1 sentinel, unsigned ->
+  0), giving a structured ``(B, pad_max)`` array with a ``valid`` field.
 
-- **Branch names are config, not hardcoded, and prefixed by the aux store.** The
-  reader takes a ``jet_collection`` (e.g. ``AntiKt4EMPFlowJets``) → the aux
-  prefix ``<collection>AuxDyn.``; per-stream ``groups`` map the v2 FIELD name to
-  the *bare* branch (``pt`` → ``AntiKt4EMPFlowJetsAuxDyn.pt``; ``d0`` →
-  ``...AuxDyn.ft1l_trk_d0_bf16``). ``_bf16`` branches are AUTO-decoded to float32
-  by uproot — no manual decode.
+- **Branch names are config, prefixed by the aux store.** ``jet_collection`` (e.g.
+  ``AntiKt4EMPFlowJets``) gives the aux prefix ``<collection>AuxDyn.``; per-stream
+  ``groups`` map the v2 field name to the bare branch. ``_bf16`` branches are
+  auto-decoded to float32 by uproot.
 
-Cuts (plan 19): an optional `CutSpec` is evaluated at INDEX-BUILD over the
-jet-level scalars, keeping only passing jets in the offset index — ``__len__`` and
-every ``read`` slice are over the FILTERED set. Per-split cuts ride
+An optional `CutSpec` is evaluated at index-build time over the jet-level
+scalars, keeping only passing jets in the offset index — ``__len__`` and every
+``read`` slice are over the filtered set. Per-split cuts ride
 ``with_source(stage=...)``.
 
-``uproot`` and ``awkward`` are imported LAZILY (the optional ``root`` reader
-extra, reuse `_require_root_deps`); ``salt.core`` imports without them.
+``uproot`` and ``awkward`` are imported lazily (the optional ``root`` extra);
+``salt.core`` imports without them.
 """
 
 from __future__ import annotations
@@ -80,27 +72,18 @@ def _require_root_deps() -> None:
         ) from exc
 
 
-# Pad fills (float 0.0, signed-int label -1 sentinel, unsigned 0, bool False) are
-# applied by the shared `Reader.assemble_jagged` / `salt.core.data.stream.pad_fill`
-# helper (plan 24, Wave 2) — no reader-local sentinel constant needed.
-
-
 @dataclass(frozen=True)
 class FTAG1LiteGroupConfig:
-    """Per-stream reader configuration for `FTAG1LiteReader` (plan 19).
+    """Per-stream reader configuration for `FTAG1LiteReader`.
 
-    `branches` maps the v2 FIELD name (``pt``, ``flavour_label``, ``d0``) to the
-    BARE aux-store branch name (``pt``, ``HadronConeExclTruthLabelID``,
-    ``ft1l_trk_d0_bf16``). The reader prepends the aux prefix
-    (``<jet_collection>AuxDyn.``). Field order = config dict order (the
-    structured-array field order).
+    `branches` maps the v2 field name (``pt``, ``flavour_label``, ``d0``) to the
+    bare aux-store branch name; the reader prepends the aux prefix
+    (``<jet_collection>AuxDyn.``). Field order = config dict order.
 
-    `jagged=False` is a jet-level SCALAR stream (``[event][jet]`` → ``(B,)``
-    structured, no pad mask — the ``global_object`` analogue). `jagged=True` is a
-    constituent stream (``[event][jet][track]`` → ``(B, pad_max)`` padded, with a
-    ``valid`` field + pad mask). `pad_max` caps the per-jet constituent
-    multiplicity (the leading N constituents); None auto-resolves the file-wide
-    max in `prepare`.
+    `jagged=False` is a jet-level scalar stream (``[event][jet]`` -> ``(B,)``, no
+    pad mask). `jagged=True` is a constituent stream (``[event][jet][track]`` ->
+    ``(B, pad_max)`` padded, with a ``valid`` field). `pad_max` caps the per-jet
+    constituent multiplicity; None auto-resolves the file-wide max in `prepare`.
     """
 
     branches: dict[str, str]
@@ -119,18 +102,7 @@ class FTAG1LiteGroupConfig:
 
     @property
     def global_object(self) -> bool:
-        """Whether this is a jet-level (global, non-sequence) stream.
-
-        The writers callback (design §8) introspects ``groups[stream].
-        global_object`` to split global (no pad mask) vs sequence (padded,
-        masked) streams. A non-jagged FTAG1LITE stream IS the global object
-        (one value per jet), so ``global_object == not jagged``.
-
-        Returns
-        -------
-        bool
-            True for jet-level scalar streams, False for constituent streams.
-        """
+        """Whether this is a jet-level (global, non-sequence) stream."""
         return not self.jagged
 
 
@@ -138,10 +110,10 @@ class FTAG1LiteGroupConfig:
 class _FileEntry:
     """One file in the deterministic file table: path + per-event jet structure.
 
-    `event_start` is the global offset of this file's first EVENT; `jet_start` is
-    the global offset of this file's first kept JET. `kept_jets` are the local
+    `event_start` is the global offset of this file's first event; `jet_start` is
+    the global offset of this file's first kept jet. `kept_jets` are the local
     (per-file) flat-jet indices that survive the cuts, in flat order; `njets` is
-    the per-event count of KEPT jets (length = n_events), used to map a
+    the per-event count of kept jets (length = n_events), used to map a
     jet-slice back to the covering event range.
     """
 
@@ -156,21 +128,20 @@ class _FileEntry:
 
 
 class FTAG1LiteReader(Reader):
-    """Config-driven Reader for xAOD DAOD_FTAG1LITE POOL files (plan 19, Track C).
+    """Config-driven Reader for xAOD DAOD_FTAG1LITE POOL files.
 
     Each small-R jet (``AntiKt4EMPFlowJets`` by default) is one sample. Jet-level
     ``std::vector<T>`` scalars and ``std::vector<std::vector<T>>`` constituent
     vectors are read via uproot from ``CollectionTree``, flattened
-    ``[event][jet] → jet``, and emitted as the standard ``raw.<stream>`` /
+    ``[event][jet] -> jet``, and emitted as the standard ``raw.<stream>`` /
     ``masks.<stream>`` structured arrays.
 
     Parameters
     ----------
     groups : Mapping[str, FTAG1LiteGroupConfig | Mapping | ...]
-        Stream name → group config (``{branches:, jagged:, pad_max:}``). At least
-        ONE non-jagged (jet-level) stream is required — it carries the served
-        length axis (the flattened jet count) and the cut variables. By convention
-        the jet-level stream is named ``jets``.
+        Stream name -> group config (``{branches:, jagged:, pad_max:}``). At least
+        one non-jagged (jet-level) stream is required — it carries the served
+        length axis and the cut variables. By convention it's named ``jets``.
     jet_collection : str, optional
         The jet collection whose aux store is read, by default
         ``"AntiKt4EMPFlowJets"``. The aux prefix is ``<jet_collection>AuxDyn.``.
@@ -180,10 +151,10 @@ class FTAG1LiteReader(Reader):
     tree : str, optional
         The TTree name, by default ``"CollectionTree"``.
     num : int, optional
-        Number of JETS to serve (post-cut); ``-1`` = all.
+        Number of jets to serve (post-cut); ``-1`` = all.
     cuts : CutSpec | None, optional
-        Index-build-time jet eligibility (plan 19). Evaluated in `prepare` over
-        the jet-level scalars; only passing jets enter the index.
+        Index-build-time jet eligibility. Evaluated in `prepare` over the
+        jet-level scalars; only passing jets enter the index.
     stage : str | None, optional
         The bound stage (``"train"``/``"val"``/``"test"``); selects per-split cuts.
         Set by `with_source(stage=...)`.
@@ -235,8 +206,6 @@ class FTAG1LiteReader(Reader):
         self._mult: dict[str, int] = {}  # stream -> served pad_max
         self._read_fields: dict[str, dict[str, str]] = {}
 
-    # -- config helpers ------------------------------------------------------
-
     @staticmethod
     def _parse_group(
         stream: str, cfg: FTAG1LiteGroupConfig | Mapping[str, Any] | Any
@@ -273,38 +242,19 @@ class FTAG1LiteReader(Reader):
         )
 
     def _branch(self, bare: str) -> str:
-        """The full aux-store branch name for a bare field branch.
-
-        Returns
-        -------
-        str
-            ``<jet_collection>AuxDyn.<bare>``.
-        """
+        """The full aux-store branch name for a bare field branch."""
         return f"{self.aux_prefix}{bare}"
 
     @property
     def streams(self) -> tuple[str, ...]:
-        """The configured stream names, in config order.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Stream names.
-        """
+        """The configured stream names, in config order."""
         return tuple(self.groups)
-
-    # -- GraphModule declaration (config-only, design §2.2/§2.3) -------------
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.* / masks.* / meta.rows`` produces (source node, requires={}).
 
         Sequence dims are concrete when ``pad_max`` is set, else symbolic
         ``T:<stream>``; ``meta.rows`` is TEST-only (mirrors `EasyjetReader`).
-
-        Returns
-        -------
-        IO
-            The declared interface.
         """
         del mode
         flat: dict[str, TensorSpec] = {}
@@ -320,18 +270,11 @@ class FTAG1LiteReader(Reader):
         flat["meta.rows"] = TensorSpec(shape=(2,), dtype="int64", kind="meta", modes=Mode.TEST)
         return IO(produces=unflatten_spec(flat))
 
-    # -- file-touching lifecycle hooks (design §2.3) --------------------------
-
     def _resolve_files(self) -> list[Path]:
         """Glob the source into a deterministic, sorted list of ROOT files.
 
         Matches ``*.root`` AND ``*.pool.root`` (the FTAG1LITE convention) when a
         directory is given.
-
-        Returns
-        -------
-        list[Path]
-            Sorted file paths.
 
         Raises
         ------
@@ -357,16 +300,14 @@ class FTAG1LiteReader(Reader):
         return matches
 
     def prepare(self) -> None:
-        """Resolve files, build the event→jet offset index (post-cut), and the schema.
+        """Resolve files, build the event->jet offset index (post-cut), and the schema.
 
-        Main-process hook (called lazily by ``__len__``, eagerly by the
-        datamodule). Idempotent. For each file: probe the jet-level branches,
-        evaluate the (per-stage) `CutSpec` over a structured jet-scalar record to
-        get the kept-jet mask, store per-event kept-jet counts + the kept flat-jet
+        Idempotent. For each file: probe the jet-level branches, evaluate the
+        (per-stage) `CutSpec` over a structured jet-scalar record to get the
+        kept-jet mask, store per-event kept-jet counts + the kept flat-jet
         indices, and accumulate cumulative jet offsets. Resolves each jagged
-        stream's served ``pad_max`` (config or file-wide max over KEPT jets) and
-        builds the `Schema` from the first file's branch dtypes (+ the auto
-        ``valid`` field on jagged streams).
+        stream's served ``pad_max`` and builds the `Schema` from the first file's
+        branch dtypes (+ the auto ``valid`` field on jagged streams).
 
         Raises
         ------
@@ -484,17 +425,12 @@ class FTAG1LiteReader(Reader):
     def _apply_cuts(
         self, jet_scalar_cols: dict[str, np.ndarray], jet_counts: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate the CutSpec → kept flat-jet indices + per-event kept counts.
+        """Evaluate the CutSpec -> kept flat-jet indices + per-event kept counts.
 
         With no cuts every jet is kept. Otherwise a structured jet-scalar record
         is built from the flat per-jet columns and `CutSpec.eligible` gives the
         keep mask; the per-event kept count is recomputed from the original
         per-event jet boundaries.
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            ``(kept_flat_jet_indices (M,), per_event_kept_counts (n_events,))``.
         """
         n_jets_total = int(jet_counts.sum())
         if self.cuts is None or not self.cuts.for_split(self.stage):
@@ -516,16 +452,11 @@ class FTAG1LiteReader(Reader):
         return kept, per_event_kept
 
     def _stream_max_mult(self, path: Path, stream: str, kept: np.ndarray) -> int:
-        """Max per-jet constituent multiplicity over KEPT jets for one stream.
+        """Max per-jet constituent multiplicity over kept jets for one stream.
 
-        Reads the FIRST branch of the stream (its multiplicity defines the
-        stream's per-jet count), flattens ``[event][jet] → [jet]``, takes the
+        Reads the first branch of the stream (its multiplicity defines the
+        stream's per-jet count), flattens ``[event][jet] -> [jet]``, takes the
         kept jets, and returns the largest track count.
-
-        Returns
-        -------
-        int
-            The max per-jet constituent count over kept jets (0 if none).
         """
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
@@ -544,16 +475,10 @@ class FTAG1LiteReader(Reader):
         """Native-endian numpy dtype name for a (single- or double-jagged) awkward array.
 
         Both jet-level scalars (``[event][jet]``, ndim=2) and constituents
-        (``[event][jet][track]``, ndim=3) are ragged, so the array is FULLY
-        flattened (``axis=None``) to reach the innermost content dtype (the
-        per-jet / per-track scalar type) before reading its numpy dtype. ROOT
-        stores big-endian; the structured array uses NATIVE byte order so the
-        rest of the pipeline sees ordinary native arrays.
-
-        Returns
-        -------
-        str
-            A ``np.dtype(name)``-constructible name.
+        (``[event][jet][track]``, ndim=3) are ragged, so the array is fully
+        flattened (``axis=None``) to reach the innermost content dtype before
+        reading its numpy dtype. ROOT stores big-endian; the structured array
+        uses native byte order so the rest of the pipeline sees ordinary arrays.
         """
         _require_root_deps()
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
@@ -564,39 +489,20 @@ class FTAG1LiteReader(Reader):
         return np.dtype(dtype.newbyteorder("=")).name
 
     def __len__(self) -> int:
-        """Return the number of JETS served (post-cut), resolving on first call.
-
-        Returns
-        -------
-        int
-            The jet (row) count.
-        """
+        """Return the number of jets served (post-cut), resolving on first call."""
         self.prepare()
         assert self._num_rows is not None
         return int(self._num_rows)
 
     @property
     def source_path(self) -> Path:
-        """The first resolved source file.
-
-        Returns
-        -------
-        Path
-            The first concrete ROOT file backing this reader.
-        """
+        """The first resolved source file."""
         self.prepare()
         assert self._table is not None
         return self._table[0].path
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        """The built schema's group for one served stream (design §2.6).
-
-        Returns
-        -------
-        GroupSchema | None
-            The group schema (built in `prepare`), or None before prepare /
-            for an unknown stream.
-        """
+        """The built schema's group for one served stream."""
         if self.schema is None:
             self.prepare()
         if self.schema is None or stream not in self.groups:
@@ -604,13 +510,7 @@ class FTAG1LiteReader(Reader):
         return self.schema.groups.get(stream)
 
     def label_universe(self) -> tuple[str, ...] | None:
-        """The ``labels.<stream>.<field>`` universe for wildcard narrowing (§2.2 rule d).
-
-        Returns
-        -------
-        tuple[str, ...] | None
-            All schema-backed label keys (built in `prepare`).
-        """
+        """The ``labels.<stream>.<field>`` universe for wildcard narrowing."""
         if self.schema is None:
             self.prepare()
         if self.schema is None:
@@ -629,17 +529,12 @@ class FTAG1LiteReader(Reader):
         vds_path: str | Path | None = None,  # accepted for API parity; ROOT has no VDS
         stage: str | None = None,
     ) -> FTAG1LiteReader:
-        """Clone this reader for another source + stage (datamodule pattern, design §6.1).
+        """Clone this reader for another source + stage.
 
         Config-only (no file I/O): group configs / collection / cuts are shared;
         the source binding, ``num``, and ``stage`` change. ``stage`` selects the
         per-split cuts at the next `prepare` (the index is rebuilt for that
         split). ``vds_path`` is accepted for `Reader` API parity but unused.
-
-        Returns
-        -------
-        FTAG1LiteReader
-            A fresh, unbound reader instance (same instance ``name``).
         """
         del vds_path
         clone = FTAG1LiteReader(
@@ -654,15 +549,12 @@ class FTAG1LiteReader(Reader):
         clone.name = self.name
         return clone
 
-    # -- per-worker binding (design §2.3) -------------------------------------
-
     def bind(self, ctx: WorkerCtx) -> None:
         """Per-worker setup: resolve files + record the demand-narrowed read set.
 
-        The per-stream read set is ``demanded fields`` (from `WorkerCtx.
-        read_fields`) intersected with the configured branches; an empty demand
-        falls back to ALL configured branches. Demanded fields absent from the
-        config raise before any step.
+        The per-stream read set is the demanded fields intersected with the
+        configured branches; an empty demand falls back to all configured
+        branches. Demanded fields absent from the config raise before any step.
 
         Raises
         ------
@@ -682,12 +574,10 @@ class FTAG1LiteReader(Reader):
                     )
             self._read_fields[stream] = demanded
 
-    # -- jet-slice -> event-range mapping -------------------------------------
-
     def _covering_events(self, entry: _FileEntry, jlo: int, jhi: int) -> tuple[int, int, int]:
-        """Map a local KEPT-jet range ``[jlo, jhi)`` to a covering local event range.
+        """Map a local kept-jet range ``[jlo, jhi)`` to a covering local event range.
 
-        Uses the per-event KEPT-jet counts: the cumulative sum gives each event's
+        Uses the per-event kept-jet counts: the cumulative sum gives each event's
         kept-jet span; the covering event range is the smallest ``[e0, e1)`` whose
         kept jets include ``[jlo, jhi)``. Also returns the offset of the first
         kept jet of ``e0`` within the flattened-event block, so the caller can
@@ -696,30 +586,19 @@ class FTAG1LiteReader(Reader):
         Returns
         -------
         tuple[int, int, int]
-            ``(e0, e1, jet_offset_in_block)``: local event start/stop and the
-            local jet-offset of ``jlo`` within the ``[e0, e1)`` flattened block.
+            ``(e0, e1, jet_offset_in_block)``.
         """
         cum = np.concatenate([[0], np.cumsum(entry.njets)])  # (n_events+1,)
-        # kept-jet range -> covering local event range (shared OffsetIndex helper, W2)
         return OffsetIndex.covering_range(cum, jlo, jhi)
 
-    # -- the per-batch read (design §6.1) -------------------------------------
-
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one contiguous JET-slice, translating jets→covering events per file.
+        """Read one contiguous jet-slice, translating jets->covering events per file.
 
-        ``rows`` is a contiguous slice over the FILTERED jet index. The slice is
+        ``rows`` is a contiguous slice over the filtered jet index. The slice is
         split per file; within each file the covering local event range is read,
-        events flattened ``[event][jet] → jet``, the kept-jet mask applied, and the
-        block sliced to exactly the requested jets. Jagged streams are padded to
-        ``pad_max`` (``valid`` length first, then per-dtype fills) → structured
-        ``(B, pad_max)`` + ``masks.<stream> = ~valid``. Scalar streams →
-        structured ``(B,)``. ``meta.rows`` is produced in TEST.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            The produced keys, as a flat dotted dict.
+        events flattened ``[event][jet] -> jet``, the kept-jet mask applied, and
+        the block sliced to exactly the requested jets. ``meta.rows`` is produced
+        in TEST.
         """
         if self._table is None:
             self.bind(WorkerCtx(mode=mode, read_fields={}, seed=0))  # standalone (tests)
@@ -742,14 +621,7 @@ class FTAG1LiteReader(Reader):
         return out
 
     def _served_fields(self, stream: str) -> list[str]:
-        """The field names served for a stream (demanded subset or all configured).
-
-        Returns
-        -------
-        list[str]
-            Field names in config order; falls back to all branches when no
-            demand was narrowed for this stream.
-        """
+        """The field names served for a stream (demanded subset or all configured)."""
         cfg = self.groups[stream]
         demanded = self._read_fields.get(stream, {})
         names = set(demanded) if demanded else set(cfg.branches)
@@ -758,19 +630,14 @@ class FTAG1LiteReader(Reader):
     def _read_stream_columns(
         self, stream: str, fields: list[str], start: int, stop: int
     ) -> dict[str, Any]:
-        """Read a stream's demanded branches over a global JET range (multi-file).
+        """Read a stream's demanded branches over a global jet range (multi-file).
 
         For each file overlapping ``[start, stop)`` the covering local event range
         is read, events flattened away, the per-file kept-jet mask applied, and the
         block sliced to the file's contribution. Per-file blocks are concatenated
-        in global jet order. Jet-level fields return a flat awkward/numpy array of
-        length ``stop-start``; constituent fields return a depth-1 jagged
-        ``[jet][track]`` array.
-
-        Returns
-        -------
-        dict[str, Any]
-            ``{field: array}`` of total length ``stop - start``, in global jet order.
+        in global jet order. Jet-level fields return a flat array of length
+        ``stop-start``; constituent fields return a depth-1 jagged ``[jet][track]``
+        array.
         """
         _require_root_deps()
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
@@ -819,15 +686,9 @@ class FTAG1LiteReader(Reader):
     def _stream_config(self, stream: str) -> StreamConfig:
         """The `StreamConfig` for a constituent stream (resolved ``pad_max``, no cuts/sort).
 
-        FTAG1LITE cuts are JET-level (evaluated at index-build over the jet scalars,
-        not per-constituent), so the per-stream config carries only the resolved
-        served ``pad_max`` — `Reader.assemble_jagged` runs the parity-preserving
-        contiguous path (plan 24, Wave 2).
-
-        Returns
-        -------
-        StreamConfig
-            The per-stream cut/sort/pad spec.
+        FTAG1LITE cuts are jet-level (evaluated at index-build over the jet
+        scalars, not per-constituent), so the per-stream config carries only the
+        resolved served ``pad_max``.
         """
         return StreamConfig(pad_max=self._mult[stream], jagged=True)
 
@@ -836,15 +697,10 @@ class FTAG1LiteReader(Reader):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Pad constituent columns to ``pad_max`` via the shared `Reader.assemble_jagged`.
 
-        Delegates to the `Reader`-base cut → sort → truncate → pad assembly (plan 24,
-        Wave 2). With no per-constituent cuts/sort this is byte-for-byte the previous
-        contiguous path: ``valid`` first, leading truncate, per-dtype fill,
-        schema-cast, structured ``(B, T)`` + ``valid`` field.
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            ``(structured (B, T) array, valid (B, T) bool)``.
+        Delegates to the `Reader`-base cut -> sort -> truncate -> pad assembly.
+        With no per-constituent cuts/sort this is the contiguous path: ``valid``
+        first, leading truncate, per-dtype fill, schema-cast, structured
+        ``(B, T)`` + ``valid`` field.
         """
         gschema = self.schema.groups[stream] if self.schema is not None else None
         return self.assemble_jagged(cols, fields, self._stream_config(stream), b, gschema)
@@ -852,13 +708,7 @@ class FTAG1LiteReader(Reader):
     def _assemble_scalar(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
     ) -> np.ndarray:
-        """Assemble a structured ``(B,)`` array from jet-level scalar columns.
-
-        Returns
-        -------
-        np.ndarray
-            The structured ``(B,)`` array, fields in config order.
-        """
+        """Assemble a structured ``(B,)`` array from jet-level scalar columns."""
         gschema = self.schema.groups[stream] if self.schema is not None else None
         dtype_fields: list[tuple[str, np.dtype]] = []
         blocks: dict[str, np.ndarray] = {}
@@ -876,14 +726,7 @@ class FTAG1LiteReader(Reader):
     # -- pickling (fork is free; spawn re-binds in the worker) ----------------
 
     def __getstate__(self) -> dict[str, Any]:
-        """Drop transient probe state so the reader pickles under spawn contexts.
-
-        Returns
-        -------
-        dict[str, Any]
-            The picklable state (file table / read set reset; re-created at
-            prepare/bind).
-        """
+        """Drop transient probe state so the reader pickles under spawn contexts."""
         state = self.__dict__.copy()
         state.update({
             "_table": None,

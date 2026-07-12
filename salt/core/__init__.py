@@ -1,13 +1,9 @@
-"""salt.core — modular v2 core (greenfield namespace, design doc plans/02).
+"""salt.core — modular v2 core.
 
-Re-exports the graph-kernel public API, the dataset schema artifact API
-(design §2.6), and the Lightning integration (`SaltModule`, design §3.4 —
-M2). The dataset pipeline and model modules live in `salt.core.data` and
-`salt.core.nn`. The ``salt2`` CLI lives in `salt.core.main` (entry point
-``salt2 = salt.core.main:main`` — ``fit``/``test`` via `Salt2CLI`, design
-§5; ``graph``/``schema`` dispatch to `salt.core.cli`) and is not
-re-exported here. The legacy ``salt.*`` packages keep working during the
-migration (study key decision 1).
+Re-exports the graph-kernel public API, the dataset schema artifact API,
+and the Lightning integration (`SaltModule`). Dataset/model modules live
+in `salt.core.data` / `salt.core.nn`; the ``salt2`` CLI lives in
+`salt.core.main` and is not re-exported here.
 """
 
 from __future__ import annotations

@@ -1,17 +1,13 @@
-"""v2 torch-vs-ONNX agreement checker (design §7.6; ports v1 ``onnx/check.py``).
+"""Torch-vs-ONNX agreement checker.
 
 The eager `OnnxAdapter` (the SAME module instances the trace saw, torch-math
 forced) is the reference; onnxruntime (CPUExecutionProvider) evaluates the
-exported graph on identical random inputs; outputs are addressed BY NAME
-from the export config — killing v1's negative-index arithmetic
-(``check.py:103,123,138``).
+exported graph on identical random inputs; outputs are addressed BY NAME from
+the export config.
 
-Default bars are v1's (``check.py:81-150``): float outputs at
-``rtol=atol=1e-4`` with no-NaN and no-exact-zero asserts, int8 aux outputs
-exact. Gates invoke with the 1e-6 float bar (plan 07 gate O1 — the recipe
-spike measured 6e-8 worst-case headroom on the GN2 fixture). The sweep is
-v1's: every sequence length 0..39 (INCLUDING the zero-token edge case)
-times `trials` random draws (``check.py:176-178``).
+Default bars: float outputs at ``rtol=atol=1e-4`` with no-NaN and no-exact-zero
+asserts, int8 aux outputs exact. The sweep covers every sequence length
+0..max_length-1 (including the zero-token edge case) times `trials` random draws.
 """
 
 from __future__ import annotations
@@ -35,10 +31,9 @@ class CheckResult:
 
     `worst_abs_diff` is per output name (floats only — int8 outputs are
     exact-or-fail); `failures` carries one message per failed case;
-    `int8_distinct` records the distinct values each int8 output took over
-    the sweep (the ONNX side) — the non-degeneracy evidence: a collapsed
-    argmax/all-one-cluster union-find output would compare exactly while
-    proving nothing (gates O2/O3 assert >= 2 distinct values).
+    `int8_distinct` records the distinct values each int8 output took over the
+    sweep — non-degeneracy evidence: a collapsed argmax/all-one-cluster
+    union-find output would compare exactly while proving nothing.
     """
 
     passed: bool
@@ -49,7 +44,7 @@ class CheckResult:
 
 
 def make_session(onnx_path: str | Path):
-    """Build the CPU onnxruntime session (v1 ``check.py:167-173``).
+    """Build the CPU onnxruntime session.
 
     Returns
     -------
@@ -60,7 +55,7 @@ def make_session(onnx_path: str | Path):
     import onnxruntime as ort  # noqa: PLC0415 - heavy import, checker-only
 
     sess_options = ort.SessionOptions()
-    sess_options.log_severity_level = 3  # check.py:170
+    sess_options.log_severity_level = 3
     return ort.InferenceSession(
         str(onnx_path), providers=["CPUExecutionProvider"], sess_options=sess_options
     )
@@ -69,13 +64,7 @@ def make_session(onnx_path: str | Path):
 def _draw_inputs(
     adapter: OnnxAdapter, lengths: Mapping[str, int], gen: torch.Generator
 ) -> tuple[torch.Tensor, ...]:
-    """Draw one random input tuple: globals ``[1, F]``, sequences ``[L, F]``.
-
-    Returns
-    -------
-    tuple[torch.Tensor, ...]
-        Tensors in the adapter's positional order.
-    """
+    """Draw one random input tuple: globals ``[1, F]``, sequences ``[L, F]``."""
     drawn: list[torch.Tensor] = []
     for entry in adapter._positional:  # noqa: SLF001 - same-package checker
         width = len(adapter._field_list(entry.port))  # noqa: SLF001 - same-package checker
@@ -111,17 +100,16 @@ def compare_once(
     gen : torch.Generator
         Input RNG.
     float_rtol : float, optional
-        Relative tolerance for float outputs, by default 1e-4 (v1 bar).
+        Relative tolerance for float outputs, by default 1e-4.
     float_atol : float, optional
-        Absolute tolerance for float outputs, by default 1e-4 (v1 bar).
+        Absolute tolerance for float outputs, by default 1e-4.
     forbid_zeros : bool, optional
-        Assert float outputs contain no exact zeros (v1's dead-output
-        canary, ``check.py:84-85``), by default True.
+        Assert float outputs contain no exact zeros (a dead-output canary),
+        by default True.
     int8_distinct : MutableMapping[str, set[int]] | None, optional
         When given, the distinct values of each int8 ONNX output are
-        accumulated into it (per output name) BEFORE the exactness assert —
-        the `CheckResult.int8_distinct` non-degeneracy evidence, by default
-        None.
+        accumulated into it (per output name) BEFORE the exactness assert,
+        by default None.
 
     Returns
     -------
@@ -168,10 +156,8 @@ def compare_once(
             err_msg=f"torch vs ONNX mismatch for output {name!r} at {where}",
         )
         # a per-token float output is EMPTY at the L=0 sweep sample (zero-token jet);
-        # np.max over a zero-size array raises "zero-size array to reduction" — guard
-        # it (the diff IS 0.0 when there are no elements to differ). Pre-existing
-        # check_onnx limitation surfaced by the plan 34 regression ONNX gate (it
-        # affects the producer AND the section path equally — not a W34.3 regression).
+        # np.max over a zero-size array raises, so this is guarded (the diff IS 0.0
+        # when there are no elements to differ).
         diff = np.abs(ref_np.astype(np.float64) - got.astype(np.float64))
         worst[name] = 0.0 if diff.size == 0 else float(np.max(diff))
     return worst
@@ -190,13 +176,12 @@ def check_onnx(
     seed: int = 42,
     fail_fast: bool = False,
 ) -> CheckResult:
-    """Sweep the torch-vs-ONNX comparison (v1 ``check.py:153-194`` semantics).
+    """Sweep the torch-vs-ONNX comparison.
 
     By default every sequence stream is swept TOGETHER over
     ``L = 0..max_length-1`` (including the zero-token edge case) with
-    `trials` random draws each — the v1 loop. `lengths_grid` overrides the
-    sweep with explicit per-stream length combinations (the multi-axis
-    grid of design §7 / gate O3).
+    `trials` random draws each. `lengths_grid` overrides the sweep with
+    explicit per-stream length combinations.
 
     Returns
     -------
@@ -242,9 +227,8 @@ def check_onnx(
                 if fail_fast:
                     raise
                 result.passed = False
-                # np.testing.assert_allclose messages BEGIN with a newline —
-                # take the first NON-empty line so failures are never blank
-                # (the O5 'failures reported, never silent' discipline)
+                # np.testing.assert_allclose messages BEGIN with a newline — take
+                # the first NON-empty line so failures are never blank
                 message = next((line for line in str(err).splitlines() if line.strip()), str(err))
                 result.failures.append(message)
                 continue

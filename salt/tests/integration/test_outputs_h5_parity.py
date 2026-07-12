@@ -1,53 +1,4 @@
-"""P1 SEMANTIC H5 PARITY GATE for the producers -> ``H5OutputWriter`` chain (plan 01, P1).
-
-The MVP gate (design §4b, §4a SEMANTIC H5 parity): on the SAME synthetic GN2-like
-model + the SAME source H5, run BOTH eval sinks and assert per-column array
-equality between their eval H5 files —
-
-- **(a) the M4.5 ``WriterCallback``** (the P1 oracle, ``salt/core/writers``) — now
-  a FROZEN COMMITTED FIXTURE at ``tests/_fixtures/gn2v2_dummy_oracle/oracle.h5``
-  (generated once from ``ckpt.ckpt`` + ``data.h5`` in the same fixture dir and
-  committed; the live WriterCallback run is no longer reproduced each test
-  session — see ``tests/_fixtures/gn2v2_dummy_oracle/provenance.json``), and
-- **(b) the new producers -> ``H5OutputWriter``** via a programmatic
-  ``Trainer.test`` (the CLI builds only the legacy ``WriterCallback`` from
-  ``writers:``, so the new sink is driven through the public Lightning API: the
-  classification producers are added to the model module dict — demand-pruned
-  from FIT/VAL so the trained checkpoint loads unchanged, design §4 risk 4 — and
-  ``H5OutputWriter`` is attached as the callback).
-
-Parity is SEMANTIC (design §4a), NOT raw byte-compare: same groups, columns,
-dtypes, shapes; values EXACT for int/bool columns, ``<=1e-6`` for floats. The
-comparison is SCOPED to the families P1 ships — classification (``jets`` 3-class
-probs + ``tracks`` 8-class origin probs) + the input copies + the pad mask. The
-GN2v2 fixture also carries a ``track_vertexing`` head whose eval column
-(``VertexIndex``) is a DEFERRED family (P2, vertexing); those columns are
-EXCLUDED from the comparison and recorded in ``DEFERRED_COLUMNS`` (logged, not
-silently dropped — design §4b).
-
-P1.5 FLIP DONE FOR CLASSIFICATION (the conversion producers are now LOAD-BEARING
-end-to-end — verified in source, ``salt/core/nn/tasks.py``
-``ClassificationTaskModule.forward``/``get_h5``): the P1.5 step (design §2,
-"removes the TEST/ONNX mode-branches inside ``task.forward``") has been applied
-to the CLASSIFICATION family. The classification ``forward`` now publishes RAW
-logits in TEST (the softmax was removed), so ``preds.<stream>.<task>`` in the
-executed TEST bundle is the RAW logits. This gate therefore wires the REAL
-conversion producers — `ClassProbs` (``jets_classification`` -> global softmax)
-and `SeqClassProbs` (``track_origin`` -> masked softmax) — which convert ONCE on
-the new path. The M4.5 oracle path stays LIVE and ALSO converts once, because
-the conversion relocated INTO ``ClassificationTaskModule.get_h5`` (which the M4.5
-``TaskWriter`` calls): ``get_h5`` now ``run_inference``-s the raw leaf before
-packing, so the oracle eval H5 is byte-identical to pre-flip. Conversion happens
-in EXACTLY ONE place per path (producer for the new path, ``get_h5`` for the M4.5
-path; never both on the same leaf) — no double-conversion. The conversion ops'
-MATH is independently proven bitwise against the task ``run_inference`` oracle in
-``test_outputs_producers.py`` (recon PR2). Regression/vertexing are NOT yet
-flipped (P2): the GN2v2 ``track_vertexing`` head's eval column (``VertexIndex``)
-stays a DEFERRED family and is excluded from the comparison (``DEFERRED_COLUMNS``).
-
-If parity cannot be reached the assertion reports the exact column with expected
-vs got — never weaken the tolerance to pass.
-"""
+"""P1 SEMANTIC H5 PARITY GATE for the producers -> ``H5OutputWriter`` chain (plan 01, P1)."""
 
 from __future__ import annotations
 
@@ -70,11 +21,9 @@ from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modul
 from salt.tests._fixtures.gn2_fixture import JET_VARIABLES, TRACK_VARIABLES
 from salt.utils.inputs import write_dummy_file
 
-# ---------------------------------------------------------------------------
 # frozen oracle fixture directory
 # Generated once (commit a9e2ac2) from the WriterCallback path on the synthetic
 # GN2v2 dummy model + data; never regenerated automatically — see provenance.json.
-# ---------------------------------------------------------------------------
 FIXTURE_DIR = Path(__file__).parent.parent / "_fixtures" / "gn2v2_dummy_oracle"
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
@@ -94,32 +43,14 @@ ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
 DEFERRED_COLUMNS = {"tracks": ["VertexIndex"]}
 
 
-# ---------------------------------------------------------------------------
 # fixtures: frozen data + checkpoint (loaded from the committed fixture dir);
 # the WriterCallback oracle H5 is also frozen — see FIXTURE_DIR/provenance.json.
 # Only the P1 path (path b) and the cutover CLI path (path c) run live.
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
-    """Regenerate the synthetic source H5 deterministically; return its paths.
-
-    ``write_dummy_file`` draws from a module-level ``np.random.default_rng(42)``,
-    so the source H5 it writes is byte-identical every session — the SAME bytes the
-    frozen checkpoint + frozen WriterCallback oracle were generated from (commit
-    a9e2ac2; verified equal to the original frozen ``data.h5`` before it was
-    dropped). Regenerating it (rather than committing a 13 MB binary) keeps the
-    fixture lean while the parity comparison stays stable: only the stochastic
-    ``ckpt.ckpt`` and the WriterCallback ``oracle.h5`` need to be frozen. The
-    norm/class dicts + schema stay committed (they define the variable layout the
-    checkpoint was trained against).
-
-    Returns
-    -------
-    dict[str, Path]
-        Keys: ``dir``, ``h5``, ``nd`` (norm dict), ``schema``.
-    """
+    """Regenerate the synthetic source H5 deterministically; return its paths."""
     nd = FIXTURE_DIR / "norm_dict.yaml"
     h5 = tmp_path_factory.mktemp("data") / "data.h5"
     write_dummy_file(h5, nd)  # deterministic (default_rng(42)) → matches the frozen ckpt/oracle inputs
@@ -143,27 +74,7 @@ def _overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    """Return a byte-identical tmp copy of the frozen GN2v2 dummy checkpoint.
-
-    The checkpoint was trained once (commit a9e2ac2, 1 epoch, 2 batches,
-    seed_everything=42) and committed alongside the oracle.  Loading a frozen
-    checkpoint removes the stochastic training step from the test session and
-    guarantees that the live P1 / cutover inference uses the SAME weights as
-    the frozen oracle.
-
-    The frozen ckpt is *copied into a tmp dir* before use so the live P1 /
-    cutover paths run against it: the ``GraphPlanWriter`` callback writes its
-    ``graph_*``/``plan_*``/``resolved_io.yaml`` artifacts to the checkpoint's
-    parent directory (``_default_dir`` -> ``Path(ckpt_path).parent``).  Pointing
-    that at a tmp copy keeps the committed fixture directory pristine — running
-    the suite never dirties ``tests/_fixtures/gn2v2_dummy_oracle/``.  The copy is
-    bit-for-bit identical, so weights / determinism / parity are unaffected.
-
-    Returns
-    -------
-    Path
-        A tmp copy of the frozen checkpoint path.
-    """
+    """Return a byte-identical tmp copy of the frozen GN2v2 dummy checkpoint."""
     src = FIXTURE_DIR / "ckpt.ckpt"
     assert src.exists(), f"frozen ckpt not found at {src} — re-run the oracle generator"
     dst = tmp_path_factory.mktemp("ckpt") / "ckpt.ckpt"
@@ -171,26 +82,12 @@ def ckpt(data, tmp_path_factory) -> Path:
     return dst
 
 
-# ---------------------------------------------------------------------------
 # path (a): the frozen M4.5 WriterCallback oracle (committed static fixture)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def oracle_h5() -> Path:
-    """Return the frozen WriterCallback oracle H5 from the fixture directory.
-
-    The oracle was generated once (commit a9e2ac2) by running the M4.5
-    ``WriterCallback`` on the frozen checkpoint + frozen data.h5 (see
-    ``FIXTURE_DIR/provenance.json`` for the exact command and schema/hash record).
-    The live WriterCallback run is no longer reproduced every test session; the
-    committed H5 is loaded directly.
-
-    Returns
-    -------
-    Path
-        The frozen oracle H5 path.
-    """
+    """Return the frozen WriterCallback oracle H5 from the fixture directory."""
     oracle_path = FIXTURE_DIR / "oracle.h5"
     assert oracle_path.exists(), (
         f"frozen oracle not found at {oracle_path} — re-run the oracle generator"
@@ -198,36 +95,11 @@ def oracle_h5() -> Path:
     return oracle_path
 
 
-# ---------------------------------------------------------------------------
 # path (b): the producers -> H5OutputWriter chain (programmatic Trainer.test)
-# ---------------------------------------------------------------------------
 
 
 def _model_with_producers(data) -> SaltModule:
-    """Build the GN2v2 model and ADD the REAL P1 classification conversion producers.
-
-    Since the P1.5 flip the classification task ``forward`` publishes RAW logits
-    in TEST (design §2), so the producers must do the eval conversion: `ClassProbs`
-    (``jets_classification`` -> global softmax) and `SeqClassProbs`
-    (``track_origin`` -> masked softmax), the SAME math the M4.5 oracle now runs
-    in ``get_h5``. Each converts ONCE — the new path's single conversion site (the
-    M4.5 oracle's is ``get_h5``; never both on the same leaf, no double-convert).
-
-    The producers are TEST-only by demand (design §4 risk 4): pruned from FIT/VAL
-    so the trained checkpoint — which never saw them — loads unchanged.
-
-    track_vertexing is left WITHOUT a producer (deferred P2), and opted OUT of
-    the TEST eval path (expose:[fit,val]) so its ``preds.*`` port is FIT/VAL-only
-    and the dead-preds gate does not require a sink for it (design §4.2/§4 risk
-    5). The training checkpoint is unaffected — FIT/VAL keep the head. This is the
-    same wiring the ``gn2v2-dummy-cutover.yaml`` config encodes for the live CLI
-    path.
-
-    Returns
-    -------
-    SaltModule
-        The GN2v2 model with the real classification conversion producers added.
-    """
+    """Build the GN2v2 model and ADD the REAL P1 classification conversion producers."""
     modules = build_gn2v2_modules(data["nd"])
     modules["track_vertexing"].expose_modes = Mode.FIT | Mode.VAL
     modules["jet_probs"] = ClassProbs(task="jets_classification", stream="jets")
@@ -238,19 +110,7 @@ def _model_with_producers(data) -> SaltModule:
 
 
 def _h5_output_writer(out: Path) -> H5OutputWriter:
-    """The P1 sink mirroring the M4.5 inputs_copy -> tasks -> pad_mask layout.
-
-    copy_inputs copies ALL source fields for each stream (the v1 InputCopyWriter
-    default — every dtype field rides along, including labels/truth), in the file
-    field order; the output columns reproduce the classification prob columns;
-    write_pad_mask adds the boolean tracks mask. The column ORDER (copies, then
-    probs, then mask) matches the oracle group layout.
-
-    Returns
-    -------
-    H5OutputWriter
-        The configured P1 sink.
-    """
+    """The P1 sink mirroring the M4.5 inputs_copy -> tasks -> pad_mask layout."""
     return H5OutputWriter(
         outputs=[
             OutputColumn(key="outputs.jets.jets_classification", suffixes=JET_SUFFIXES),
@@ -264,13 +124,7 @@ def _h5_output_writer(out: Path) -> H5OutputWriter:
 
 @pytest.fixture(scope="module")
 def p1_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the producers -> ``H5OutputWriter`` chain (the P1 path).
-
-    Returns
-    -------
-    Path
-        The P1 eval H5 file.
-    """
+    """Eval H5 from the producers -> ``H5OutputWriter`` chain (the P1 path)."""
     out = tmp_path_factory.mktemp("p1") / "p1.h5"
     model = _model_with_producers(data)
     dm = GraphDataModule(
@@ -307,31 +161,17 @@ def p1_h5(data, ckpt, tmp_path_factory) -> Path:
     return out
 
 
-# ---------------------------------------------------------------------------
 # the semantic-H5-parity comparison (design §4a)
-# ---------------------------------------------------------------------------
 
 
 def _drop_deferred(names: list[str], stream: str) -> list[str]:
-    """Names in `stream` with the DEFERRED (P2) columns removed.
-
-    Returns
-    -------
-    list[str]
-        The names with the deferred columns excluded, order preserved.
-    """
+    """Names in `stream` with the DEFERRED (P2) columns removed."""
     deferred = set(DEFERRED_COLUMNS.get(stream, ()))
     return [n for n in names if n not in deferred]
 
 
 def _compare_column(group: str, col: str, want: np.ndarray, got: np.ndarray) -> str | None:
-    """Compare one column; return a diff message on mismatch, else None.
-
-    Returns
-    -------
-    str | None
-        A human-readable diff message, or ``None`` when the columns match.
-    """
+    """Compare one column; return a diff message on mismatch, else None."""
     if want.dtype != got.dtype:
         return f"{group}.{col}: dtype {want.dtype} (oracle) != {got.dtype} (p1)"
     if want.shape != got.shape:
@@ -395,18 +235,7 @@ class TestH5OutputWriterParity:
         assert not diffs, "SEMANTIC H5 PARITY FAILED:\n" + "\n".join(diffs)
 
     def test_probs_are_softmaxed_not_double_converted(self, p1_h5):
-        """The P1 prob columns are probabilities (sum ~1) — converted EXACTLY ONCE.
-
-        The double-conversion guard (design §4 "double-conversion"): if the new
-        path converted twice (e.g. the task forward still softmaxed AND the
-        producer softmaxed) the columns would be softmax(softmax(logits)) — still
-        in [0, 1] and summing to 1 per row, but a DIFFERENT distribution. The
-        semantic-H5-parity test already pins the exact values vs the M4.5 oracle
-        (which converts once in get_h5), so a double-convert would FAIL parity.
-        This test additionally pins the basic "is a distribution" invariant
-        (sum ~1, not raw logits) on both the global and the masked-softmax
-        sequence head.
-        """
+        """The P1 prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
         with h5py.File(p1_h5) as f:
             jets = f["jets"][:]
             tracks = f["tracks"][:]
@@ -422,27 +251,7 @@ class TestH5OutputWriterParity:
 
 
 class TestCutoverConfig:
-    """The ``gn2v2-dummy-cutover.yaml`` config is the live wiring source of truth.
-
-    It encodes EXACTLY the wiring the programmatic gate (`_model_with_producers`
-    + `_h5_output_writer`) drives: the classification conversion producers
-    (`ClassProbs`/`SeqClassProbs`) in ``model.modules``, ``track_vertexing``
-    opted out of TEST (``expose: [fit, val]``), the M4.5 ``writers:`` nulled, and
-    the `H5OutputWriter` as a ``callbacks:`` sink.
-
-    Three levels of proof: (1) the config FITS end-to-end through the real CLI
-    (``main(['fit', ...])`` instantiates the model + the producers + the sink;
-    the producers are demand-pruned from FIT and the training path is unchanged),
-    (2) the config CONTENT is asserted by parsing the YAML (the exact module
-    classes / null-merge / callback class names), and (3) the config TESTS
-    end-to-end through ``salt2 test`` and the resulting eval H5 matches the M4.5
-    oracle (`TestCutoverCliE2E`). The ``test`` subcommand's writer-less refusal
-    now recognises the callbacks-level `H5OutputWriter` sink (main.py
-    ``_has_callback_persistence_sink``), so the LIVE cutover eval path is proven
-    through the real CLI — closing the prior "live cutover proven only
-    programmatically" gap (the programmatic `p1_h5` gate's wiring mirrors this
-    config exactly, and the CLI path now corroborates it).
-    """
+    """The ``gn2v2-dummy-cutover.yaml`` config is the live wiring source of truth."""
 
     def test_cutover_config_fits_end_to_end(self, data, tmp_path_factory):
         """The migrated DUMMY_CFG instantiates + fits (producers pruned from FIT)."""
@@ -463,33 +272,14 @@ class TestCutoverConfig:
         assert rc == 0
 
 
-# ---------------------------------------------------------------------------
 # path (c): the LIVE cutover through the real ``salt2 test`` CLI (closes the
 # "live cutover proven only programmatically" gap — the cutover config drives
 # the producers -> H5OutputWriter chain end-to-end, the same way a user runs it)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from ``salt2 test`` on the migrated gn2v2-dummy.yaml (the CLI path).
-
-    W6c: the cutover is now baked into DUMMY_CFG — runs ``salt2 test --config
-    gn2v2-dummy.yaml --ckpt_path <trained>`` so the callbacks-level `H5OutputWriter`
-    persistence sink is recognised by the test-stage writer-less check (main.py
-    ``_has_callback_persistence_sink``), the classification conversion producers
-    run on the flipped (RAW-logits) TEST forward, and the eval H5 is written by
-    the real CLI. The output path is overridden onto a tmp file so the assertion
-    can read it back.
-
-    Uses the FROZEN checkpoint and FROZEN data.h5 (from ``FIXTURE_DIR``) so the
-    output is deterministic and comparable against the frozen oracle.
-
-    Returns
-    -------
-    Path
-        The CLI eval H5 file.
-    """
+    """Eval H5 from ``salt2 test`` on the migrated gn2v2-dummy.yaml (the CLI path)."""
     out = tmp_path_factory.mktemp("cutover_cli") / "cutover_cli.h5"
     root = tmp_path_factory.mktemp("cutover_cli_root")
     rc = main([
@@ -509,16 +299,7 @@ def cutover_cli_h5(data, ckpt, tmp_path_factory) -> Path:
 
 
 class TestCutoverCliE2E:
-    """The migrated gn2v2-dummy.yaml drives the new path through ``salt2 test`` end-to-end.
-
-    W6c: the cutover is baked directly into gn2v2-dummy.yaml. This is G1 driven
-    via the REAL CLI (not only ``Trainer.test``): the callbacks-level
-    `H5OutputWriter` sink is accepted by the test-stage check, so ``salt2 test``
-    on ``gn2v2-dummy.yaml`` alone runs producers -> sink end-to-end and the eval
-    H5 must match the M4.5 oracle at SEMANTIC parity (ints exact, floats <=1e-6),
-    deferred (P2 vertexing) columns excluded — the same contract as the
-    programmatic `p1_h5` gate.
-    """
+    """The migrated gn2v2-dummy.yaml drives the new path through ``salt2 test`` end-to-end."""
 
     def test_cli_writes_eval_h5(self, cutover_cli_h5):
         """``salt2 test`` on the cutover config writes a non-empty eval H5."""
@@ -532,12 +313,7 @@ class TestCutoverCliE2E:
             assert set(a.keys()) == set(b.keys())
 
     def test_cli_semantic_h5_parity(self, oracle_h5, cutover_cli_h5):
-        """Per-column array equality vs the M4.5 oracle (deferred P2 columns excluded).
-
-        Proves the LIVE cutover (driven by the real ``salt2 test`` CLI) reproduces
-        the M4.5 ``WriterCallback`` eval H5 — closing the gap where the cutover was
-        previously proven only via the programmatic ``Trainer.test`` (`p1_h5`).
-        """
+        """Per-column array equality vs the M4.5 oracle (deferred P2 columns excluded)."""
         diffs: list[str] = []
         with h5py.File(oracle_h5) as a, h5py.File(cutover_cli_h5) as b:
             for group in a:

@@ -1,28 +1,4 @@
-"""W34.1 unit gate — `ClassificationTaskModule.get_output` parity (plan 34).
-
-Plan 34 folds the eval conversion (softmax / masked-softmax / argmax) back ONTO
-the task as ``get_output(b, mode, run_name) -> list[OutputField]``, retiring the
-standalone `ConversionOp` producer indirection on the live path. This wave is
-STRICTLY ADDITIVE: classification ``forward`` is already raw-everywhere, so
-``get_output`` is a pure addition exercised only by these tests. The gate proves,
-on WEIGHT-MATCHED fixtures, that ``get_output``'s PER-LEAF ``value`` is
-byte/semantic-identical to:
-
-- (a) the corresponding `ConversionOp` producer forward (``ClassProbs`` /
-  ``SeqClassProbs`` / ``SeqClassIndex``), per column;
-- (b) the task's own ``get_h5`` floats (after the sink would prefix/pack) and the
-  ``onnx_outputs`` naming (``class_suffixes`` / ``pascal_case(name)``).
-
-Covered: the global (pooled) head, the seq head probs (H5 modes) + argmax index
-(ONNX), the L=0 zero-token edge case, the masked-softmax pad behaviour (padded
-tokens read 0.0), and the BCE sigmoid branch. ``output_time_requires`` is
-asserted to return the pad-mask key for seq heads and nothing for the global
-head (the W34.2 RunTaskOutput declaration surface).
-
-The metadata contract (bare suffix / dtype / axis / no run-name prefix / no
-half-precision / torch value, NOT a packed numpy struct) is asserted field-by-
-field so the dumb sink keeps sole ownership of prefix + pack + downcast.
-"""
+"""W34.1 unit gate — `ClassificationTaskModule.get_output` parity (plan 34)."""
 
 from __future__ import annotations
 
@@ -50,19 +26,11 @@ _STREAM_T = "tracks"
 _RUN = "GN2"
 
 
-# ---------------------------------------------------------------------------
 # helpers — build + bind a real (weight-matched) task head, run get_output
-# ---------------------------------------------------------------------------
 
 
 def _bind_classification(stream, label, class_names, sequence, *, loss=None, input_key=None):
-    """Build + bind a `ClassificationTaskModule` against a hand-built schema.
-
-    Returns
-    -------
-    ClassificationTaskModule
-        The bound module (``module.task`` is the absorbed v1 head ORACLE).
-    """
+    """Build + bind a `ClassificationTaskModule` against a hand-built schema."""
     module = ClassificationTaskModule(
         stream=stream,
         label=label,
@@ -78,13 +46,7 @@ def _bind_classification(stream, label, class_names, sequence, *, loss=None, inp
 
 
 def _pred_bundle(module, logits, mask=None):
-    """A bundle carrying the task's RAW ``preds.*`` leaf (+ pad mask for a seq head).
-
-    Returns
-    -------
-    Bundle
-        The output-time bundle `get_output` reads from.
-    """
+    """A bundle carrying the task's RAW ``preds.*`` leaf (+ pad mask for a seq head)."""
     data: dict = {"preds": {module.stream: {module.name: logits}}}
     if mask is not None:
         data["masks"] = {module.stream: mask}
@@ -92,13 +54,7 @@ def _pred_bundle(module, logits, mask=None):
 
 
 def _fields_by_h5(fields):
-    """Map ``h5_name -> OutputField`` (skips ONNX-only fields).
-
-    Returns
-    -------
-    dict
-        ``{h5_name: OutputField}`` for the H5-bearing fields.
-    """
+    """Map ``h5_name -> OutputField`` (skips ONNX-only fields)."""
     return {f.h5_name: f for f in fields if f.h5_name is not None}
 
 
@@ -108,11 +64,7 @@ def _fields_by_h5(fields):
 
 
 def test_global_get_output_value_matches_class_probs_producer():
-    """Global head: each `OutputField.value` == the per-class column of `ClassProbs`.
-
-    The producer forward writes the FULL ``[B, C]`` softmax leaf; ``get_output``
-    mints one field per class whose ``value`` is that column. Asserted per-class.
-    """
+    """Global head: each `OutputField.value` == the per-class column of `ClassProbs`."""
     torch.manual_seed(0)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -134,12 +86,7 @@ def test_global_get_output_value_matches_class_probs_producer():
 
 
 def test_global_get_output_value_matches_get_h5_columns():
-    """Global head: per-leaf ``value`` == the f4 floats ``get_h5`` packs (sink prefixes).
-
-    ``get_h5`` softmaxes the raw logits then packs ``{run_name}_{px}`` f4 columns;
-    ``get_output`` applies the same softmax and exposes the bare per-class column.
-    The floats must match (the run-name prefix + packing are sink-side).
-    """
+    """Global head: per-leaf ``value`` == the f4 floats ``get_h5`` packs (sink prefixes)."""
     torch.manual_seed(1)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -156,20 +103,7 @@ def test_global_get_output_value_matches_get_h5_columns():
 
 
 def test_global_get_output_onnx_names_match_onnx_outputs():
-    """Global head ONNX: field suffixes == ``onnx_outputs`` ``class_suffixes`` (split-scalars).
-
-    The global head's ONNX export splits the prob leaf into per-class scalars
-    under the SAME ``class_suffixes`` the H5 columns use; ``get_output`` mints one
-    field per class with ``resolved_onnx_name`` == that suffix and the matching
-    per-class scalar value.
-
-    The ONNX value is gated against the LIVE sink's actual
-    ``torch.split(probs, 1, -1).squeeze()`` (``OnnxExportSink.named_outputs``,
-    sinks.py:1714-1717), NOT the un-squeezed ``probs[..., c]`` — on the batch-1
-    ONNX trace the sink mints a 0-dim scalar ``[]`` while ``probs[..., c]`` is
-    ``[1]``, so a self-consistency-only check would miss the rank divergence.
-    Asserted on BOTH B=1 (the real ONNX trace shape) and B=4.
-    """
+    """Global head ONNX: field suffixes == ``onnx_outputs`` ``class_suffixes`` (split-scalars)."""
     torch.manual_seed(2)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -224,11 +158,7 @@ def test_global_get_output_bce_uses_sigmoid():
 
 
 def test_global_get_output_field_metadata_contract():
-    """Global head fields: bare suffix, f4/global, value is a full-precision torch tensor.
-
-    No run-name prefix in the name, no half-precision in the value/dtype, no
-    packed numpy struct — the sink owns all three (plan 34 §4/§5).
-    """
+    """Global head fields: bare suffix, f4/global, value is a full-precision torch tensor."""
     torch.manual_seed(4)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -329,11 +259,7 @@ def test_seq_get_output_pad_positions_zeroed():
 
 
 def test_seq_get_output_onnx_index_matches_seq_class_index_producer():
-    """Seq head (ONNX): the single field's ``value`` == `SeqClassIndex` int8 argmax leaf.
-
-    Reproduces the zero-row-append/strip ``argmax`` trick VERBATIM and names the
-    leaf ``pascal_case(task)`` (e.g. ``TrackOrigin``), int8, per-token, H5-only-None.
-    """
+    """Seq head (ONNX): the single field's ``value`` == `SeqClassIndex` int8 argmax leaf."""
     torch.manual_seed(8)
     length, classes = 6, 8
     module = _bind_classification(
@@ -375,13 +301,7 @@ def test_seq_get_output_onnx_name_matches_onnx_outputs():
 
 
 def test_seq_get_output_probs_and_index_have_distinct_names():
-    """Write-once: the H5 probs suffixes and the ONNX index name never collide.
-
-    Probs columns are the per-class suffixes (``o0``..); the ONNX argmax leaf is
-    the pascal-case task name (``TrackOrigin``) — distinct leaf identities, so the
-    two representations can co-mint without a write-once ``outputs.*`` clash
-    (today's ``track_origin_probs`` vs ``track_origin_index`` split).
-    """
+    """Write-once: the H5 probs suffixes and the ONNX index name never collide."""
     torch.manual_seed(9)
     module = _bind_classification(
         _STREAM_T, "origin_label", [f"o{i}" for i in range(8)], sequence=True
@@ -479,14 +399,7 @@ def test_base_get_output_raises_for_unsupported_family():
 
 
 def _bind_vertexing(stream=_STREAM_T):
-    """Build + bind a `VertexingTaskModule` against a hand-built schema.
-
-    Returns
-    -------
-    VertexingTaskModule
-        The bound module (``module.task`` is the absorbed v1 head ORACLE that owns
-        ``run_inference`` union-find).
-    """
+    """Build + bind a `VertexingTaskModule` against a hand-built schema."""
     module = VertexingTaskModule(
         stream=stream,
         label="ftagTruthVertexIndex",
@@ -501,13 +414,7 @@ def _bind_vertexing(stream=_STREAM_T):
 
 
 def _vtx_bundle(module, edge_scores, mask):
-    """A bundle carrying the RAW vertexing edge scores + the stream pad mask.
-
-    Returns
-    -------
-    Bundle
-        The output-time bundle the vertexing `get_output` reads.
-    """
+    """A bundle carrying the RAW vertexing edge scores + the stream pad mask."""
     return Bundle({
         "preds": {module.stream: {module.name: edge_scores}},
         "masks": {module.stream: mask},
@@ -522,12 +429,7 @@ def test_vtx_output_time_requires_pad_mask():
 
 
 def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
-    """Vertexing (ONNX): the field ``value`` == the `VertexUnionFind` producer leaf.
-
-    The producer runs ``get_node_assignment_jit`` -> ``mask_fill_flattened`` ->
-    ``.reshape(-1).char()`` on the RAW edge scores; ``get_output`` folds the IDENTICAL
-    chain. Names the leaf ``VertexIndex`` int8 per-token (the shared cross-mode const).
-    """
+    """Vertexing (ONNX): the field ``value`` == the `VertexUnionFind` producer leaf."""
     module = _bind_vertexing()
     gen = torch.Generator().manual_seed(3)
     n_tracks = 4
@@ -551,12 +453,7 @@ def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
 
 
 def test_vtx_get_output_test_matches_get_h5_run_inference():
-    """Vertexing (TEST): the field ``value`` == the int-cast union-find ``get_h5`` packs.
-
-    ``get_h5`` ``run_inference``-s the raw edge scores (union-find) then ``.int()`` ->
-    u2s i8; ``get_output`` mints the SAME int-cast union-find value as a ``[B, L, 1]``
-    leaf (bare ``VertexIndex`` i8, prefix follows ``prefix_vertex_column``).
-    """
+    """Vertexing (TEST): the field ``value`` == the int-cast union-find ``get_h5`` packs."""
     module = _bind_vertexing()
     gen = torch.Generator().manual_seed(7)
     # the head emits one edge score per ordered pair of VALID tracks (the compressed
@@ -622,14 +519,7 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
 
 
 def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, fields=(), gaussian=False):
-    """Build + bind a `RegressionTaskModule` against a hand-built schema.
-
-    Returns
-    -------
-    RegressionTaskModule
-        The bound module (``module.task`` is the absorbed v1 head ORACLE owning
-        ``run_inference`` de-scaling).
-    """
+    """Build + bind a `RegressionTaskModule` against a hand-built schema."""
     module = RegressionTaskModule(
         stream=stream,
         targets=targets,
@@ -647,13 +537,7 @@ def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, field
 
 
 def _reg_bundle(module, preds, *, mask=None, labels=None, inputs=None):
-    """A bundle carrying the RAW (scaled) regression preds + denom source / pad mask.
-
-    Returns
-    -------
-    Bundle
-        The output-time bundle the regression `get_output` reads.
-    """
+    """A bundle carrying the RAW (scaled) regression preds + denom source / pad mask."""
     data: dict = {"preds": {module.stream: {module.name: preds}}}
     if mask is not None:
         data["masks"] = {module.stream: mask}
@@ -769,13 +653,7 @@ def test_reg_get_output_manifest_mirrors_get_output():
 
 
 def test_reg_get_output_does_not_mutate_raw_preds_leaf():
-    """``get_output`` de-scaling must NOT mutate the bundle's RAW ``preds.*`` leaf.
-
-    ``_descaled_preds`` clones before ``run_inference`` (which de-scales IN PLACE),
-    so the raw leaf is byte-unchanged after get_output and a SECOND read does not
-    double-de-scale (write-once §2.1; pre-fix this rewrote ``preds.jets.reg`` and a
-    repeat read double-scaled it).
-    """
+    """``get_output`` de-scaling must NOT mutate the bundle's RAW ``preds.*`` leaf."""
     torch.manual_seed(40)
     module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, norm={"mean": 1.0, "std": 2.0})
     preds = torch.randn(5, 1)
@@ -791,12 +669,7 @@ def test_reg_get_output_does_not_mutate_raw_preds_leaf():
 
 
 def test_reg_seq_get_output_matches_producer_per_token_scaled():
-    """Per-token SCALED seq head: get_output == the `Regression` producer on every token.
-
-    The W34.3 axis fix makes the task's de-scale last-axis, so a per-token
-    norm_params head's get_output matches the producer leaf column-for-column,
-    token-for-token (pre-fix the task scaled only tokens 0..R-1 and crashed at L=0).
-    """
+    """Per-token SCALED seq head: get_output == the `Regression` producer on every token."""
     torch.manual_seed(41)
     norm = {"mean": [10.0, 20.0], "std": [2.0, 0.5]}
     module = _bind_regression(_STREAM_T, ["a", "b"], sequence=True, norm=norm)
@@ -820,14 +693,7 @@ def test_reg_seq_get_output_matches_producer_per_token_scaled():
 
 
 def test_reg_gaussian_seq_get_output_matches_producer_per_token():
-    """Per-token gaussian seq head: get_output stddev == producer on valid positions.
-
-    The shipped ``regression_gaussian.yaml gaussian_seq_out`` head. Pre-fix the
-    task's gaussian de-scale was first-axis (corrupting tracks, the stddev formula
-    never reached the var channel) while the producer was last-axis — they diverged
-    ~2.0. Post-fix both are last-axis: the per-token means ‖ stddev agree, incl. NaN
-    at padded positions.
-    """
+    """Per-token gaussian seq head: get_output stddev == producer on valid positions."""
     torch.manual_seed(42)
     norm = {"mean": [1.0], "std": [1.0]}
     module = _bind_regression(_STREAM_T, ["dphi"], sequence=True, norm=norm, gaussian=True)

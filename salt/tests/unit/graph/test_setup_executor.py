@@ -1,17 +1,4 @@
-"""Kernel tests for the setup-graph compile/execute pipeline.
-
-Covers (plan-24 §3/§4, plan-25 §3.6 / W3.0): the `compile_setup_plan` planner
-reuse (topo + validation, shape-unification SKIPPED), the bespoke
-`run_setup_plan` setup-execution loop (write-once ctx threading), the namespace
-split that keeps setup-only modules OUT of the per-batch compile (the
-`AllModesDeadError` blocker, via `datamodule._is_setup_only`), and the existing
-tensor `compile_plan` as a control proving the `_compile_core` refactor did not
-perturb it.
-
-(Split out of the former ``test_setup_graph.py``: the pure `SourceSpec` /
-`SetupIO` type-system tests live in ``test_setup_spec.py``. This file owns the
-shared setup-only toy DatasetModules used across all the pipeline groups.)
-"""
+"""Kernel tests for the setup-graph compile/execute pipeline."""
 
 from __future__ import annotations
 
@@ -34,20 +21,11 @@ from salt.core.graph.setup_spec import (
 )
 from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# ---------------------------------------------------------------------------
 # dummy setup-only modules (no physics — kernel scope)
-# ---------------------------------------------------------------------------
 
 
 class SetupToy(DatasetModule):
-    """A setup-only DatasetModule: non-empty declare_setup_io, empty declare_io.
-
-    Mirrors the InputSamples/VDS/ShmStage shape — a pure-source node whose only
-    face is the setup graph. The canonical module style RETURNS its newly
-    produced dict (flat dotted keys ok) and the setup-execution loop owns the
-    write-once merge, exactly like the per-batch executor merges `read()` /
-    `process()` returns.
-    """
+    """A setup-only DatasetModule: non-empty declare_setup_io, empty declare_io."""
 
     def __init__(self, name, requires=None, produces=None, values=None):
         super().__init__()
@@ -74,12 +52,7 @@ class SetupToy(DatasetModule):
 
 
 class SelfMergeToy(SetupToy):
-    """A setup-only module that merges into ctx ITSELF and returns ctx (plan-25 §3.8).
-
-    Uses `canonical_produced` to turn its flat dotted produces into the nested
-    single-component form `Bundle.merge` expects (the same canonicalisation the
-    executor applies), then returns the ctx unchanged — the loop adds nothing.
-    """
+    """A setup-only module that merges into ctx ITSELF and returns ctx (plan-25 §3.8)."""
 
     def setup(self, ctx, stage):
         del stage
@@ -116,9 +89,7 @@ def mods(*modules):
     return {m.name: m for m in modules}
 
 
-# ---------------------------------------------------------------------------
 # §4.3 — compile_setup_plan (topo + validation, no shape-unification)
-# ---------------------------------------------------------------------------
 
 
 def chain_modules():
@@ -202,9 +173,7 @@ class TestCompileSetupPlan:
         assert "inp" in plan.module_names
 
 
-# ---------------------------------------------------------------------------
 # §4.3(b) — the setup-execution loop (write-once ctx threading)
-# ---------------------------------------------------------------------------
 
 
 class TestRunSetupPlan:
@@ -270,9 +239,7 @@ class TestRunSetupPlan:
         assert ctx.get("source.r.val.pattern") == "/val.h5"
 
 
-# ---------------------------------------------------------------------------
 # §4.4 / §3.6 — the namespace split (AllModesDeadError blocker)
-# ---------------------------------------------------------------------------
 
 
 class TestNamespaceSplit:
@@ -319,9 +286,7 @@ class TestNamespaceSplit:
             compile_plan(mods(a, setup_mod), Mode.FIT, src_x, sinks=["preds.x"])
 
 
-# ---------------------------------------------------------------------------
 # control — the tensor compile_plan is unaffected by the _compile_core refactor
-# ---------------------------------------------------------------------------
 
 
 class TestTensorPlannerUnaffected:

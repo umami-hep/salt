@@ -1,31 +1,6 @@
-# gn2v2-dummy.yaml — GN2v2 at test scale, for the salt dummy-file generators
-# (design §5.1 worked config, shrunk to the gn2v2_fixture widths: 16-dim,
-# 2 layers, 2 heads, 1 register).
-#
-# Trains on a file from salt.utils.inputs.write_dummy_file with the parity
-# norm dict (salt/tests/core/gn2_fixture.write_parity_norm_dict). NO machine
-# paths are committed — these overrides are REQUIRED (design §5 placeholder
-# policy; the CI/test harness generates the files into a tmp dir).
-# From the REPO ROOT (the config path is relative to your cwd; use
-# `python -m salt.core.main` when the salt2 script is not installed):
-#
-#   salt2 fit --config salt/core/configs/gn2v2-dummy.yaml \
-#     --data.train_file /path/to/pp_output_train.h5 \
-#     --data.val_file   /path/to/pp_output_train.h5 \
-#     --model.modules.norm.init_args.norm_dict /path/to/norm_dict.yaml
-#
-# `norm_dict` is the `Normaliser` module's OWN config (its sole consumer), set on
-# `model.modules.norm.init_args.norm_dict` — NOT a top-level fan-out flag. The
-# test harness supplies it as a tmp path via that exact override (no machine path
-# committed here), so the `norm` block below leaves it as a REQUIRED override.
-#
-# Outputs land in the trainer log dir (cwd unless --trainer.default_root_dir
-# is given): config.yaml + checkpoints/ — the end-of-fit message prints the
-# exact paths. Run-dir layout is M6.
-#
-# Optional (recommended) — static field validation via the schema artifact
-# (`salt2 schema dump <file.h5> -o schema.yaml`, design §2.6):
-#   --data.modules.reader.init_args.schema /path/to/schema.yaml
+# GN2v2 at test scale for the salt dummy-file generators (16-dim, 2 layers,
+# 2 heads, 1 register). Trains on a file from
+# salt.utils.inputs.write_dummy_file with the matching parity norm dict.
 
 name: GN2v2_dummy
 
@@ -37,15 +12,11 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          # global_object flags set explicitly so the config also runs without a
-          # schema artifact (reader infers them when a schema is given)
           jets: {global_object: true}
           tracks: {global_object: false}
     features:
       class_path: salt.core.data.Features
       init_args:
-        # the ONE place column order is defined (design §5.1) — matches the
-        # parity fixture (gn2_fixture.JET_VARIABLES / TRACK_VARIABLES)
         variables:
           jets: [pt_btagJes, eta_btagJes]
           tracks:
@@ -77,27 +48,25 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # lrs: == design §5.1 OneCycleLR block (the v1 ModelWrapper 'lrs_config'
-    # kwarg, renamed to 'lrs' in M5 sub-wave D)
     lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
     optimizer: AdamW
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 16
           dense: {hidden_layers: [16], activation: ReLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks]} # registers live in the encoder in M2
+        init_args: {streams: [tracks]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
@@ -107,7 +76,7 @@ model:
           attention: {num_heads: 2, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       split:
-        class_path: salt.core.nn.Split # production task path (design §3.3)
+        class_path: salt.core.nn.Split
         init_args: {streams: [tracks]}
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
@@ -123,7 +92,7 @@ model:
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
-          stream: tracks # input defaults to encoded.tracks
+          stream: tracks
           context: pooled.global
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
@@ -134,24 +103,16 @@ model:
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
           weight: 1.5
           dense: {hidden_layers: [16], activation: ReLU}
-          # origin_weighting takes integer origin IDS in M2 (default
-          # heavy: [3, 4, 5], fake: [1] == v1 hardcoded); the design §5.1
-          # name-based form ({heavy: [FromB, ...]}) lands in M3
-          expose: [fit, val] # P2-deferred: opt vertexing head out of TEST eval (VertexIndex deferred)
+          expose: [fit, val] # VertexIndex TEST eval column is deferred
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
-      # W6c: migrated to the v2 sink path (H5OutputWriter). jet_probs (ClassProbs)
-      # is the shared ONNX+TEST conversion producer for jets_classification; it
-      # mints outputs.jets.jets_classification for both the OnnxExportSink (ONNX)
-      # and the H5OutputWriter (TEST). track_origin_probs (SeqClassProbs) is the
-      # TEST-eval probability producer for track_origin (masked softmax). The
-      # ONNX-only SeqClassIndex (track_origin_index) and VertexUnionFind
-      # (track_vertex_index) are retired: track_origin goes via SeqClassProbs in
-      # TEST, and vertexing (VertexIndex) is a deferred P2 family not yet emitted.
+        class_path: salt.core.nn.LossSum
+      # conversion producers for the pre-cutover34 sink path: jet_probs feeds
+      # both ONNX + TEST for jets_classification; track_origin_probs is the
+      # TEST-eval masked-softmax producer for track_origin.
       jet_probs:
         class_path: salt.core.outputs.ClassProbs
         init_args: { task: jets_classification, stream: jets }
@@ -161,17 +122,12 @@ model:
       track_origin_index: null
       track_vertex_index: null
 
-export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
-  model_name: GN2v2dummy # Athena name: no '_'/'-' (validated at export only);
-  # defaults to the run name with '_'/'-' stripped (v1 to_onnx.py:687)
+export: # inert during fit/test
+  model_name: GN2v2dummy # Athena name: no '_'/'-'
   inputs:
-    - { port: inputs.jets, name: jet_features } # [1, F] global
-    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
+    - { port: inputs.jets, name: jet_features }
+    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks }
 
-# W6c: v2 sink path. onnx_export keeps only the jets classification output
-# (track_origin_index and track_vertex_index retired; the H5OutputWriter is the
-# TEST persistence sink). h5_output is the live TEST sink — column order
-# (copies, probs, mask) matches the v1 WriterCallback oracle (design §4a parity).
 callbacks:
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink

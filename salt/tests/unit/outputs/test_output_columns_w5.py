@@ -1,23 +1,4 @@
-"""W5.0 unit gate — producer ``output_columns`` reproduces the legacy task schema.
-
-Plan 31 W5.0: each conversion producer self-describes its output columns as a
-field manifest (`OutputField`), resolved FROM THE TASK IT WRAPS by reusing the
-legacy ``task.output_names()`` / ``class_suffixes`` / ``output_suffixes`` /
-`VERTEX_INDEX` logic. This gate asserts, per task family, that the manifest's
-H5 names (and ONNX names) MATCH the legacy `TaskWriter`-derived schema exactly,
-so the W5.1 auto-collecting sinks reproduce the legacy column schema byte-for-byte:
-
-- **classification (global)** — `ClassProbs`: H5 + ONNX = the per-class suffixes.
-- **seq-class probs (per-token H5)** — `SeqClassProbs`: H5 = per-class suffixes,
-  no ONNX (the ONNX is the argmax index).
-- **seq-class index (per-token ONNX)** — `SeqClassIndex`: no H5, ONNX = the
-  pascal-case task name (``track_origin -> TrackOrigin``), int8 per-token.
-- **regression** — identity `TaskOutput` over a `RegressionTaskModule`: H5 +
-  ONNX = ``output_suffixes`` (``custom_output_names`` else targets; doubled for
-  gaussian), covering custom-name and multi-target cases.
-- **vertexing (ONNX)** — `VertexUnionFind`: no H5, ONNX = `VERTEX_INDEX`, int8.
-- **combination** — `Combination`: H5 + ONNX = its own name, global float.
-"""
+"""W5.0 unit gate — producer ``output_columns`` reproduces the legacy task schema."""
 
 from __future__ import annotations
 
@@ -57,9 +38,7 @@ def _legacy_h5_suffixes(task, run_name: str) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # classification — global + per-token (probs H5 + index ONNX)
-# ---------------------------------------------------------------------------
 
 
 def _class_modules() -> dict:
@@ -120,9 +99,7 @@ def test_seqclassindex_per_token_onnx_only_matches_legacy():
     assert legacy[0].name == f.resolved_onnx_name
 
 
-# ---------------------------------------------------------------------------
 # regression — identity TaskOutput; custom names + multi-target + gaussian
-# ---------------------------------------------------------------------------
 
 
 def _reg_modules() -> dict:
@@ -199,9 +176,7 @@ def test_regression_gaussian_doubles_suffixes():
     assert [f.h5_name for f in fields] == ["pt", "mass", "pt_stddev", "mass_stddev"]
 
 
-# ---------------------------------------------------------------------------
 # vertexing — ONNX union-find index (no H5 column, deferred family)
-# ---------------------------------------------------------------------------
 
 
 def test_vertex_union_find_onnx_only_matches_legacy():
@@ -226,9 +201,7 @@ def test_vertex_union_find_onnx_only_matches_legacy():
     assert mods["track_vertexing"].onnx_outputs()[0].name == VERTEX_INDEX
 
 
-# ---------------------------------------------------------------------------
 # combination — self-named global float (H5 + ONNX)
-# ---------------------------------------------------------------------------
 
 
 def test_combination_self_named():

@@ -1,17 +1,5 @@
-# GN3_baseline_loose.yaml — thin overlay on GN3_baseline.yaml (M5-CONV, GN3
-# family). The v2-native port of the 2-line legacy
-# salt/configs/GN3_dev/GN3_baseline_loose.yaml (`selections: null`).
-#
-# Removes the GN3_baseline track selections (loose tracks) by deleting the
-# reader's `selections` map. v2 config-stacking deep-merges this onto the base
-# (DeepMergeParser null-deletion, design §5.3) — exactly the v1 base+override
-# pattern (it stays as thin as the v1 overlay).
-#
-# Static validation (STACK the base first, then this overlay):
-#   python -m salt.core.main graph validate \
-#     -c salt/core/configs/GN3_baseline.yaml \
-#     -c salt/core/configs/GN3_baseline_loose.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Thin overlay on GN3_baseline.yaml: removes its track selections (loose
+# tracks) via null-deletion. Stack GN3_baseline.yaml first, then this overlay.
 
 name: GN3_baseline_loose
 

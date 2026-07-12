@@ -1,20 +1,4 @@
-"""Unit gates for the plan-29 W2 `OnnxExportSink` declare-only terminal node (design §4.2).
-
-`OnnxExportSink` is the folded ONNX counterpart of `H5OutputSink`: a terminal
-`SinkModule` for ``Mode.ONNX`` that NAMES the conversion ``outputs.*`` leaves the
-folded nodes (argmax/split/combine) mint into the flat Athena output tuple, with
-NO per-batch compute (the conversion ran in the trace). This file pins:
-
-- the SinkModule marker + executor partition (in plan.steps, not the forward loop);
-- ``declare_io(Mode.ONNX)`` requires the conversion leaves (kind=data), empty
-  produces; FIT/VAL/TEST prune it (empty declare_io -> plan_hash unchanged);
-- ``output_names``/``output_dtypes``/``dynamic_axes`` derive from the leaf table
-  in declared order (the ordering authority, design §6.3) — split_scalars expands
-  one leaf into N names, per-token int8 leaves register a dynamic axis;
-- ``named_outputs`` realises the split_scalars NAMING split on the executed
-  bundle (no math), and passes single-name leaves through;
-- config validation (name/names arity, dtypes, duplicate keys/suffixes).
-"""
+"""Unit gates for the plan-29 W2 `OnnxExportSink` declare-only terminal node (design §4.2)."""
 
 from __future__ import annotations
 
@@ -32,13 +16,7 @@ _TRK = "outputs.tracks.track_origin"
 
 
 def _sink(model_name="GN2v2"):
-    """A representative folded export sink: split_scalars + a combine + a per-token int8 leaf.
-
-    Returns
-    -------
-    OnnxExportSink
-        The configured sink (in flat Athena tuple order: globals, combine, aux).
-    """
+    """A representative folded export sink: split_scalars + a combine + a per-token int8 leaf."""
     return OnnxExportSink(
         outputs=[
             OnnxExportLeaf(key=_JET, names=["pb", "pc", "pu"]),
@@ -49,9 +27,7 @@ def _sink(model_name="GN2v2"):
     )
 
 
-# ---------------------------------------------------------------------------
 # the SinkModule marker + declare_io
-# ---------------------------------------------------------------------------
 
 
 def test_onnx_export_sink_is_a_sink_module():
@@ -82,9 +58,7 @@ def test_declare_io_empty_outside_onnx(mode):
     assert flatten_spec(io.produces) == {}
 
 
-# ---------------------------------------------------------------------------
 # generated metadata: output_names / dtypes / dynamic_axes (design §6.3)
-# ---------------------------------------------------------------------------
 
 
 def test_output_names_are_in_declared_tuple_order():
@@ -137,9 +111,7 @@ def test_model_name_required_for_names():
     assert sink.output_names() == ["Late_pb", "Late_pc", "Late_pu"]
 
 
-# ---------------------------------------------------------------------------
 # named_outputs: the split realisation (no math), pass-through (design §6.2)
-# ---------------------------------------------------------------------------
 
 
 def test_named_outputs_splits_probs_and_passes_through_singles():
@@ -176,9 +148,7 @@ def test_named_outputs_split_count_mismatch_errors_eagerly():
         sink.named_outputs(bundle)
 
 
-# ---------------------------------------------------------------------------
 # config validation
-# ---------------------------------------------------------------------------
 
 
 def test_leaf_requires_exactly_one_of_name_names():
@@ -204,13 +174,7 @@ def test_leaf_rejects_unknown_dtype():
 
 
 def test_sink_empty_outputs_defers_to_section():
-    """W34.4d: an OMITTED/empty `outputs` defers to a bound `outputs:` section (not an error).
-
-    Construction with no explicit leaves does NOT raise — the export tuple is resolved
-    later from a bound dumb section. With NEITHER explicit leaves nor a section bound, a
-    clear actionable error fires at resolve time (the auto-collect producer-discovery
-    path was removed in W34.4d).
-    """
+    """W34.4d: an OMITTED/empty `outputs` defers to a bound `outputs:` section (not an error)."""
     sink = OnnxExportSink(outputs=[], model_name="M")
     with pytest.raises(ConfigError, match="has no export leaves"):
         sink.output_names()

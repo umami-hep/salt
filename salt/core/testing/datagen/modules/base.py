@@ -7,8 +7,6 @@ contract as instance-level lists of *contract keys* (``requires`` /
 A contract key is either a GROUP key (``"tracks"``) or a FIELD key
 (``"tracks.ftagTruthParentBarcode"``) -- a naming convention over a structured
 array's ``dtype.names``, not a change in storage.
-
-See ``design/03_modular_generator.md`` §1.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ class GenModule:
 
     The ``n_samples`` / ``flags`` attributes default to ``None`` so the
     ``Pipeline`` can inject its pipeline-level values at run time unless the
-    module set an explicit override (see §2.7).
+    module set an explicit override.
     """
 
     # Contract -- populated by __init__. Defaults empty.
@@ -52,7 +50,7 @@ class GenModule:
         """Return this module's ``GroupSpec`` (parsed), or ``None`` for writers.
 
         Producer modules override this so the pipeline can collect every group's
-        spec and hand a reconstructed thin ``Schema`` to the writers (design §6
-        decided default 2). Writers return ``None``.
+        spec and hand a reconstructed thin ``Schema`` to the writers. Writers
+        return ``None``.
         """
         return None

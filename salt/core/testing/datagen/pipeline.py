@@ -2,10 +2,8 @@
 
 Wires modules using the same ``class_path`` / ``init_args`` block grammar salt
 uses for a model's module collection, but as an **ordered list** rather than
-salt's name-keyed ``dict[str, GraphModule]`` (``saltmodule.py:172``) -- because
-order is the authoring intent ("first Jets, then Tracks, then the writer"). So:
-same per-module block shape as salt; a list (not salt's dict) for the collection;
-validated by a tiny linear planner (design §1, §1.5, §1.6).
+salt's name-keyed ``dict[str, GraphModule]`` -- because order is the authoring
+intent ("first Jets, then Tracks, then the writer").
 
 The validator mirrors salt's ``planner.py`` connectivity / duplicate-producer /
 cycle / terminal-consumer checks, linearised (order is given, no topo-sort).

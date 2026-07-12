@@ -1,26 +1,4 @@
-"""PLAN 34 W34.2 FULL-PAYLOAD H5 PARITY GATE — outputs:-section + dumb sinks vs WriterCallback.
-
-The W34.2 gate (plan 34 §6): on the SAME synthetic GN2-like model + the SAME
-source H5 + the SAME trained checkpoint, run BOTH eval paths and assert the eval
-H5 files match byte-for-byte at SEMANTIC parity (ints/bools EXACT, floats <=1e-6),
-including column NAMES + ORDER + DTYPES + per-token pad re-expansion:
-
-- **(a) the M4.5 ``WriterCallback``** (the v1-parity ORACLE, ``salt/core/writers``)
-  via the proven ``salt2 test`` CLI surface (the gn2v2-dummy default), and
-- **(b) the PLAN 34 ``outputs:`` section + dumb sinks** — `RunTaskOutput` (calling
-  each task's ``get_output``) + `InputCopyWriter` + `PadMaskWriter`, dumped by the
-  DUMB `H5OutputSink`, driven by the ``gn2v2-dummy-cutover34.yaml`` config through
-  the real ``salt2 test`` CLI.
-
-The plan-34 path REPLACES the plan-29/31 standalone conversion producers with the
-get_output()-on-task fold, so the H5 columns come from ``RunTaskOutput`` reassembling
-each task's ``get_output`` fields — proven here to be byte-identical to the legacy
-``TaskWriter`` columns. Vertexing (``track_vertexing`` -> bare ``VertexIndex`` i8)
-is a DEFERRED family (W34.3); EXCLUDED from the comparison and recorded.
-
-If parity cannot be reached the assertion reports the exact column with expected
-vs got — never weaken the tolerance to pass.
-"""
+"""PLAN 34 W34.2 FULL-PAYLOAD H5 PARITY GATE — outputs:-section + dumb sinks vs WriterCallback."""
 
 from __future__ import annotations
 
@@ -168,12 +146,7 @@ def _compare_column(group: str, col: str, want: np.ndarray, got: np.ndarray) -> 
 
 @pytest.mark.cpu_always
 class TestW34SectionH5Parity:
-    """The plan-34 outputs:-section eval H5 == the legacy WriterCallback oracle.
-
-    cpu_always (W34.2 critic nit a): this keystone H5 full-payload parity gate runs
-    on CPU by default — it must not GPU-skip in the default suite (the salt2 test
-    CLI fixtures force ``trainer.accelerator=cpu``).
-    """
+    """The plan-34 outputs:-section eval H5 == the legacy WriterCallback oracle."""
 
     def test_deferred_columns_present_in_oracle(self, oracle_h5):
         """Sanity: the DEFERRED (W34.3 vertexing) columns DO exist in the oracle."""
@@ -194,12 +167,7 @@ class TestW34SectionH5Parity:
             assert f["jets"].shape[0] == N_TEST
 
     def test_full_payload_h5_parity(self, oracle_h5, section_h5):
-        """Per-column array equality + EXACT column NAMES + ORDER (deferred excluded).
-
-        This is the W34.2 full-payload gate: input-copies + classification/seq
-        columns + pad-mask, with the column NAMES + ORDER + DTYPES + per-token pad
-        re-expansion all matching the legacy WriterCallback byte schema.
-        """
+        """Per-column array equality + EXACT column NAMES + ORDER (deferred excluded)."""
         diffs: list[str] = []
         with h5py.File(oracle_h5) as a, h5py.File(section_h5) as b:
             for group in a:
@@ -245,18 +213,7 @@ class TestW34SectionH5Parity:
 
 @pytest.mark.cpu_always
 class TestW34ColumnOrderDrivenBySection:
-    """The H5 column ORDER is enforced by _merge_columns; the SECTION drives task-column order.
-
-    Plan §4 W34.2 / §7 risk 4: the copies -> tasks -> mask BLOCK order is enforced by
-    the H5 sink's ``_merge_columns`` (copies first, then output columns, then the pad
-    mask). WITHIN the task block, the section's RunTaskOutput field order (the v1
-    model-declaration order) drives the H5 task-column order — NOT the executor topo
-    order. A test that fails if either the block order or the task-column order were
-    reshuffled: the v1 contract is inputs_copy FIRST, then task columns, then the pad
-    mask LAST.
-
-    cpu_always (W34.2 critic nit a): runs on CPU by default (the parity oracle gate).
-    """
+    """The H5 column ORDER is enforced by _merge_columns; the SECTION drives task-column order."""
 
     def test_pad_mask_is_last_column_in_tracks(self, section_h5):
         """The pad-mask 'mask' column is LAST in the tracks group (section order)."""
@@ -323,11 +280,7 @@ class TestW34CutoverConfigContent:
 
 @pytest.mark.cpu_always
 class TestW34SectionWriterUnits:
-    """Unit-level checks of the section writers' declare_io + manifest + ordering.
-
-    cpu_always (W34.2 critic nit a): pure declare_io/manifest checks (no GPU), run on
-    CPU by default.
-    """
+    """Unit-level checks of the section writers' declare_io + manifest + ordering."""
 
     def _bound_run_task(self):
         from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict as _wnd  # noqa: F401
@@ -427,27 +380,17 @@ class TestW34SectionWriterUnits:
             RunTaskOutput(tasks=["a", "a"])
 
 
-# ---------------------------------------------------------------------------
 # ONNX parity: the dumb OnnxExportSink names the section's get_output leaves
 # byte-identically vs the /tmp/w4_oracle golden (classification subset — vtx is
 # W34.3). PROVES the LOCKED no-double-split decision: get_output squeezes the
 # global per-class scalars (W34.1), so the dumb sink ONLY names them.
-# ---------------------------------------------------------------------------
 
 W4_ORACLE = Path("/tmp/w4_oracle")
 
 
 @pytest.mark.cpu_always
 class TestW34SectionOnnxParity:
-    """The dumb OnnxExportSink names the section's get_output leaves vs /tmp/w4_oracle.
-
-    W34.3 scope: the FULL gn2v2 family — classification (pb/pc/pu globals +
-    TrackOrigin argmax) PLUS vertexing (VertexIndex int8, the W34.3 vtx fold). The
-    FULL /tmp/w4_oracle/gn2v2.json golden (all 5 names/dtypes/axes/ORDER) must match
-    the dumb-section export byte-for-byte. The no-double-split decision is proven:
-    the global per-class scalars are NAMED directly (no torch.split); the per-token
-    int8 leaves (TrackOrigin argmax + VertexIndex union-find) carry the dynamic axis.
-    """
+    """The dumb OnnxExportSink names the section's get_output leaves vs /tmp/w4_oracle."""
 
     def _section_export(self, tmp_path):
         from torch import nn
@@ -543,13 +486,7 @@ class TestW34SectionOnnxParity:
         reason="W4 oracle golden /tmp/w4_oracle/gn2v2.json not present",
     )
     def test_onnx_session_runs_no_double_split(self, tmp_path):
-        """The exported ONNX session runs (onnxruntime) — 5 outputs, no re-split.
-
-        Proves the LOCKED no-double-split decision end-to-end: the dumb sink names
-        the already-scalar per-class get_output values; if it had re-split a
-        pre-split scalar the trace/run would be malformed. The vertexing union-find
-        int8 leaf (W34.3) traces in-graph alongside the classification leaves.
-        """
+        """The exported ONNX session runs (onnxruntime) — 5 outputs, no re-split."""
         import torch
 
         result = self._section_export(tmp_path)
@@ -565,14 +502,7 @@ class TestW34SectionOnnxParity:
         reason="W4 oracle golden /tmp/w4_oracle/gn2v2.json not present",
     )
     def test_onnx_output_ranks_match_global_vs_per_token(self, tmp_path):
-        """The exported ONNX graph's output RANKS: globals rank-0 [], per-token rank-1.
-
-        W34.2 critic nit (b): assert the per-output tensor rank on the loaded ONNX
-        graph so a future re-split regression (which would change a scalar back to a
-        rank-1 [1] tensor, or collapse a per-token leaf) is caught. Each global
-        per-class scalar is rank-0 (shape []); the per-token int8 leaves (TrackOrigin
-        argmax + VertexIndex union-find) are rank-1 (the [L] dynamic axis).
-        """
+        """The exported ONNX graph's output RANKS: globals rank-0 [], per-token rank-1."""
         import onnx
 
         onnx_path = tmp_path / "section.onnx"

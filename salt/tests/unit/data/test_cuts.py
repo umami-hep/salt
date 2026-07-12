@@ -1,10 +1,4 @@
-"""Unit tests for `salt.core.data.cuts` (Cut + CutSpec, plan 19, Track C).
-
-These are pure in-memory tests (no sample file): `CutSpec` is reader-agnostic and
-operates on a structured jet-scalar numpy array. The reader-integration count
-parity / per-split tests live in ``test_ftag1lite_reader.py`` (which reads the
-real sample).
-"""
+"""Unit tests for `salt.core.data.cuts` (Cut + CutSpec, plan 19, Track C)."""
 
 from __future__ import annotations
 

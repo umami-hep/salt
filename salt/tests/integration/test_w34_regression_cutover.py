@@ -1,23 +1,4 @@
-"""PLAN 34 W34.3 REGRESSION cutover proof — outputs:-section get_output de-scale parity.
-
-The W34.3 regression gate (plan 34 §4/§6): on the SAME regression model + source H5
-+ trained checkpoint, run BOTH eval paths and assert the eval H5 matches at SEMANTIC
-parity (floats <=1e-6, ints/bools EXACT), including column NAMES + ORDER + DTYPES:
-
-- **(a) the W34.3 Regression (RegressionDescaleOp) PRODUCER path** — the shipped
-  ``regression.yaml`` (auto-collect H5OutputSink over the de-scale producers), the
-  ORACLE for the de-scaled physical columns; and
-- **(b) the PLAN 34 ``outputs:`` section + dumb sinks** — `RunTaskOutput` (calling
-  each RegressionTaskModule's ``get_output`` de-scale) + `InputCopyWriter` +
-  `PadMaskWriter`, dumped by the DUMB `H5OutputSink`, driven by the
-  ``regression-cutover34.yaml`` config through the real ``salt2 test`` CLI.
-
-Both paths read the RAW (scaled) preds the W34.3-flipped forward now publishes and
-de-scale ONCE — (a) in the producer, (b) in get_output — so the de-scaled physical
-columns must be byte-identical. regression.yaml is the broadest non-gaussian surface
-(norm_params scalar+vector, ratio-denominator with a FEATURE denom for ONNX, per-token
-seq), so this proves regression get_output de-scale end-to-end.
-"""
+"""PLAN 34 W34.3 REGRESSION cutover proof — outputs:-section get_output de-scale parity."""
 
 from __future__ import annotations
 
@@ -156,12 +137,7 @@ def _compare_column(group, col, want, got) -> str | None:
 
 
 def test_regression_section_h5_matches_producer_oracle(producer_h5, section_h5):
-    """The regression get_output de-scale eval H5 == the Regression producer oracle.
-
-    Full-payload parity: the de-scaled regression columns (norm_params scalar+vector,
-    ratio-denominator, per-token seq) + input copies + pad mask, NAMES + ORDER +
-    DTYPES, all matching the auto-collect-producer path byte-for-byte.
-    """
+    """The regression get_output de-scale eval H5 == the Regression producer oracle."""
     diffs: list[str] = []
     with h5py.File(producer_h5) as a, h5py.File(section_h5) as b:
         assert set(a.keys()) == set(b.keys()), f"groups differ: {set(a)} vs {set(b)}"
@@ -183,13 +159,7 @@ def test_regression_section_h5_matches_producer_oracle(producer_h5, section_h5):
 
 
 def test_regression_section_descaled_not_raw(section_h5, producer_h5):
-    """Sanity: the section columns are DE-SCALED (differ from the raw scaled preds).
-
-    norm_params reg_normed has std=1.0/mean=1.0, so the de-scale is pred+1.0 — the
-    section column must NOT equal the raw pred (proves get_output de-scaled, not
-    copied raw). Compared structurally vs the producer oracle (already asserted equal)
-    so this is a belt-and-braces non-identity check on a known-offset column.
-    """
+    """Sanity: the section columns are DE-SCALED (differ from the raw scaled preds)."""
     with h5py.File(section_h5) as f:
         jets = f["jets"][:]
     # reg_normed -> HadronConeExclTruthLabelPt (norm_params mean=1.0 std=1.0):
@@ -213,20 +183,7 @@ def test_regression_section_descaled_not_raw(section_h5, producer_h5):
 
 
 def _export_onnx(extra_cfgs, ckpt, out: Path) -> Path:
-    """Export to ONNX via the real `salt2 export` CLI (--no-check).
-
-    The base config is the fit-saved ``config.yaml`` next to the ckpt (it already
-    embeds the resolved schema + norm_dict from the fixture, so no data-free
-    overrides are needed); ``extra_cfgs`` deep-merge on top (the section export
-    stacks ``regression-cutover34.yaml``). ``--no-check`` skips the torch-vs-ONNX
-    sweep checker (its NaN-fill / forbid-zeros asserts are orthogonal to the
-    value-parity this gate proves directly via onnxruntime).
-
-    Returns
-    -------
-    Path
-        The written ``.onnx`` path.
-    """
+    """Export to ONNX via the real `salt2 export` CLI (--no-check)."""
     saved_config = Path(ckpt).parents[1] / "config.yaml"
     assert saved_config.is_file(), f"no saved run config at {saved_config}"
     argv = ["export", "--config", str(saved_config)]
@@ -240,13 +197,7 @@ def _export_onnx(extra_cfgs, ckpt, out: Path) -> Path:
 
 
 def _onnx_contract(path: Path) -> tuple[list[str], dict[str, int], dict[str, int]]:
-    """The exported graph's output names, ranks and element dtypes.
-
-    Returns
-    -------
-    tuple[list[str], dict[str, int], dict[str, int]]
-        ``(names, {name: rank}, {name: onnx_elem_type})`` for every graph output.
-    """
+    """The exported graph's output names, ranks and element dtypes."""
     model = onnx.load(str(path))
     names = [o.name for o in model.graph.output]
     ranks = {o.name: len(o.type.tensor_type.shape.dim) for o in model.graph.output}
@@ -255,16 +206,7 @@ def _onnx_contract(path: Path) -> tuple[list[str], dict[str, int], dict[str, int
 
 
 class TestW34RegressionOnnxParity:
-    """Regression ONNX: the dumb outputs:-section export == the producer-oracle export.
-
-    Mirrors `test_w34_outputs_section.py::TestW34SectionOnnxParity` for the
-    regression family — exports the explicit `RegressionDescaleOp` producer
-    (regression.yaml) as the ORACLE and the get_output outputs:-section
-    (regression.yaml + regression-cutover34.yaml) as the dumb path, and asserts
-    byte-identical ONNX contract + onnxruntime values, so a future drift in
-    get_output's ONNX squeeze / single-name leaf naming / in-graph descale fails
-    loudly (a zero-descale regression would change the values).
-    """
+    """Regression ONNX: the dumb outputs:-section export == the producer-oracle export."""
 
     @pytest.fixture(scope="class")
     def oracle_onnx(self, ckpt, tmp_path_factory) -> Path:

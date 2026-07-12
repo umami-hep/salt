@@ -1,20 +1,4 @@
-"""Toy end-to-end demo of the M1 graph kernel (plan 03 stage F, design §9.5 M1 gate 3).
-
-Drives the full static loop on the toy graph from
-``salt/tests/_fixtures/configs/toy.yaml`` (toy fixtures only — no physics):
-validate every primary mode (design §4.1), write the fit/test plan tables
-(§4.4), write the per-mode dead-output report (§4.2), render the graph
-(§4.3), then actually execute the FIT and TEST plans on random source
-tensors via the executor (§3.2) under debug read tracking.
-
-Artifacts written into ``--outdir``: ``plan_fit.txt``, ``plan_test.txt``,
-``deadcode.txt``, ``graph.dot`` (always) plus the rendered ``graph.svg`` +
-``graph.pdf``, produced via the ``dot`` binary baked into the salt container.
-
-Usage (the experiment ``do_run`` payload)::
-
-    python -m salt.tests.integration.demo_m1 --outdir /path/to/outputs [--config cfg.yaml]
-"""
+"""Toy end-to-end demo of the M1 graph kernel (plan 03 stage F, design §9.5 M1 gate 3)."""
 
 from __future__ import annotations
 
@@ -41,13 +25,7 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "_fixtures" / "configs" /
 
 
 def _run_captured(argv: list[str]) -> tuple[int, str]:
-    """Run a ``salt2`` CLI command in-process, capturing stdout.
-
-    Returns
-    -------
-    tuple[int, str]
-        The exit code and the captured stdout text.
-    """
+    """Run a ``salt2`` CLI command in-process, capturing stdout."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         code = cli_main(argv)
@@ -55,13 +33,7 @@ def _run_captured(argv: list[str]) -> tuple[int, str]:
 
 
 def _random_value(spec: TensorSpec, batch_size: int, gen: torch.Generator) -> torch.Tensor:
-    """Build one random source tensor matching a spec (symbolic dims -> batch_size).
-
-    Returns
-    -------
-    torch.Tensor
-        Random floats, small random ints, or all-False bools per the dtype.
-    """
+    """Build one random source tensor matching a spec (symbolic dims -> batch_size)."""
     shape = tuple(batch_size if isinstance(dim, str) else dim for dim in (spec.shape or ("B",)))
     dtype = getattr(torch, spec.dtype or "float32")
     if dtype == torch.bool:
@@ -72,13 +44,7 @@ def _random_value(spec: TensorSpec, batch_size: int, gen: torch.Generator) -> to
 
 
 def _random_sources(plan: Plan, batch_size: int, seed: int) -> Bundle:
-    """Seed a bundle with random tensors for every non-optional plan source.
-
-    Returns
-    -------
-    Bundle
-        The input bundle the caller hands to `Executor.run` (design §3.2).
-    """
+    """Seed a bundle with random tensors for every non-optional plan source."""
     gen = torch.Generator().manual_seed(seed)
     bundle = Bundle()
     for key, spec in plan.sources.items():
@@ -88,10 +54,7 @@ def _random_sources(plan: Plan, batch_size: int, seed: int) -> Bundle:
 
 
 def _execute(config_path: Path, batch_size: int, seed: int) -> None:
-    """Compile and execute the FIT and TEST plans on random source tensors.
-
-    `GraphError` from compilation or (debug) execution propagates to `main`.
-    """
+    """Compile and execute the FIT and TEST plans on random source tensors."""
     cfg = load_config(config_path)
     for mode in (Mode.FIT, Mode.TEST):
         plan = compile_plan(cfg.modules, mode, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
@@ -108,13 +71,7 @@ def _execute(config_path: Path, batch_size: int, seed: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the toy end-to-end demo and write its artifacts (M1 gate 3).
-
-    Returns
-    -------
-    int
-        Process exit code: 0 on success, 1 on kernel/config errors.
-    """
+    """Run the toy end-to-end demo and write its artifacts (M1 gate 3)."""
     parser = argparse.ArgumentParser(
         prog="python -m salt.tests.integration.demo_m1", description=__doc__.splitlines()[0]
     )

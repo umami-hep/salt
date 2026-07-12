@@ -1,19 +1,4 @@
-"""Tests for `InputSamples` + the datamodule data-sourcing setup pass (W3.A).
-
-Covers the plan-25 W3.A deliverables:
-
-- `InputSamples.declare_setup_io(stage)` produces ``source.<reader>.<stage>.pattern``
-  (PATH) + the whole-dict ``artifacts.<reader>.num`` (SCALAR) once;
-- `InputSamples.setup(ctx, stage)` is pure path arithmetic resolving
-  ``files[stage]`` onto the ctx;
-- the datamodule setup pass binds the reader to the ctx-resolved deepest path
-  via the existing `with_source` handoff;
-- byte-identical served bytes: a fit via `InputSamples` == via the deprecated
-  ``train_file``/``val_file`` aliases (the parity-preserving default);
-- the deprecated-alias path synthesises an implicit `InputSamples` and still
-  works;
-- a fit smoke through the resolved datamodule.
-"""
+"""Tests for `InputSamples` + the datamodule data-sourcing setup pass (W3.A)."""
 
 from __future__ import annotations
 
@@ -103,9 +88,7 @@ def build_modules_no_input_samples(data) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # InputSamples unit behaviour — declare + setup (path arithmetic only)
-# ---------------------------------------------------------------------------
 
 
 class TestInputSamplesUnit:
@@ -187,9 +170,7 @@ def _flat(nested):
     return flatten_source_spec(nested)
 
 
-# ---------------------------------------------------------------------------
 # the setup pass end-to-end (compile_setup_plan + run_setup_plan)
-# ---------------------------------------------------------------------------
 
 
 class TestSetupPassResolution:
@@ -217,9 +198,7 @@ class TestSetupPassResolution:
         assert SOURCE_REGISTRY == ("pattern", "vds_path", "staged_path")
 
 
-# ---------------------------------------------------------------------------
 # datamodule integration — binds the reader from the resolved ctx
-# ---------------------------------------------------------------------------
 
 
 class TestDatamoduleBinding:
@@ -279,9 +258,7 @@ class TestDatamoduleBinding:
             GraphDataModule(modules=modules, sinks=SINKS)
 
 
-# ---------------------------------------------------------------------------
 # deprecated-alias path (implicit InputSamples) + byte-identity parity
-# ---------------------------------------------------------------------------
 
 
 class TestAliasMigrationWindow:

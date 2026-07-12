@@ -1,15 +1,4 @@
-"""Tests for `SaltModule` (plan 05, stage B) — seeds of gates G2 and G5.
-
-End-to-end on CPU with the dummy-file generators: the A2 GN2v2 module dict
-(`gn2v2_fixture`) is trained through a real ``trainer.fit`` over the A1 data
-pipeline (`GraphDataModule`), then checkpoint round-trips, plan-hash
-verification (FIT strict / others warn, design risk 9), and the
-resume-skips-materialise semantics (design §2.3) are exercised.
-
-The fitted model/checkpoint are module-scoped fixtures: one short fit feeds
-all read-only assertions; mutation-prone paths (resume, tampered payloads)
-build their own instances.
-"""
+"""Tests for `SaltModule` (plan 05, stage B) — seeds of gates G2 and G5."""
 
 from __future__ import annotations
 
@@ -114,13 +103,7 @@ class StepRecorder(Callback):
 
 
 class StopAfterFirstEpoch(Callback):
-    """Stop a (nominally 2-epoch) fit after epoch 0, leaving room to resume.
-
-    The OneCycleLR total_steps is fixed at first compile from the trainer's
-    ``estimated_stepping_batches`` and restored verbatim from the checkpoint
-    (v1 semantics) — stopping early (rather than ``max_epochs=1``) keeps the
-    resumed run inside the schedule.
-    """
+    """Stop a (nominally 2-epoch) fit after epoch 0, leaving room to resume."""
 
     def on_train_epoch_end(self, trainer, _module) -> None:
         trainer.should_stop = True
@@ -329,12 +312,7 @@ class TestCheckpoint:
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_resume_skips_materialise(self, data, fitted):
-        """Resume continues training WITHOUT materialise overwriting loaded buffers.
-
-        The resumed model's Normaliser points at a NONEXISTENT norm dict: if
-        materialise ran on resume it would raise FileNotFoundError; instead
-        the buffers must arrive from the checkpoint (design §2.3).
-        """
+        """Resume continues training WITHOUT materialise overwriting loaded buffers."""
         model = build_model(data, norm_dict=data["dir"] / "does_not_exist.yaml")
         dm = build_datamodule(data)
         trainer = make_trainer(max_epochs=2)
@@ -371,10 +349,7 @@ class TestCheckpoint:
             model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
 
     def test_compiled_checkpoint_orig_mod_prefix_stripped(self, fitted):
-        """MFU-1: a ``--compile``-trained checkpoint carries torch.compile's
-        ``_orig_mod.`` prefix on every state_dict key. on_load_checkpoint
-        strips it in-place so the checkpoint loads into a non-compiled module.
-        """
+        """MFU-1: a ``--compile``-trained checkpoint carries torch.compile's"""
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
         prefixed = copy.deepcopy(ckpt)
         clean_keys = set(prefixed["state_dict"])
@@ -393,9 +368,7 @@ class TestCheckpoint:
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_noncompiled_checkpoint_state_dict_untouched(self, fitted):
-        """MFU-1 no-op: a normally-trained checkpoint has no ``_orig_mod.`` keys,
-        so the strip leaves the state_dict keys unchanged.
-        """
+        """MFU-1 no-op: a normally-trained checkpoint has no ``_orig_mod.`` keys,"""
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
         clean = copy.deepcopy(ckpt)
         keys_before = set(clean["state_dict"])
@@ -462,9 +435,7 @@ class TestBoundaryDemandGuards:
 
 
 class _AuxProbe(nn.Module):
-    """An aux head producing a preds key NO loss consumes — pruned in FIT/VAL
-    unless a callback declares it as a sink (the M5 MaskformerMetrics shape).
-    """
+    """An aux head producing a preds key NO loss consumes — pruned in FIT/VAL"""
 
     def __init__(self) -> None:
         super().__init__()

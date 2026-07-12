@@ -1,22 +1,4 @@
-"""Regression gates for the plan-29 W1 sink-node surface (design §4, §5, §7).
-
-W1 promotes the H5 persistence sink from a duck-typed ``lightning.Callback`` to
-a TERMINAL graph NODE (`H5OutputSink`): it declares ``outputs.*``/``meta.rows``/
-``masks.*`` requires (TEST only, empty produces), is folded into the planning
-module dict, renders its OWN card, and is partitioned OUT of the executor's
-per-batch forward loop. These behaviours are load-bearing (parity, render
-payoff, FIT/ONNX ``plan_hash`` invariance, the dead-preds safety net) but were
-otherwise covered only transitively through the cutover config. This file pins
-each one directly so a future refactor cannot silently:
-
-- re-introduce the ``<sinks>`` sentinel collapse or break the named-card render
-  (the design's exp-15 "after" assertion);
-- invoke the sink as a tensor forward (the executor partition);
-- perturb the FIT/VAL/ONNX ``plan_hash`` with the sink folded (checkpoint
-  resume safety — `saltmodule._verify_ckpt_hash` raises on a FIT mismatch);
-- drop the dead-preds hard error on the folded-sink TEST path (a computed
-  prediction silently never persisted — parity with the M4.5 `WriterCallback`).
-"""
+"""Regression gates for the plan-29 W1 sink-node surface (design §4, §5, §7)."""
 
 from __future__ import annotations
 
@@ -57,24 +39,12 @@ _TRK_OUT = "outputs.tracks.track_origin"
 
 @pytest.fixture(scope="module")
 def cutover_cfg():
-    """The live P1.5 cutover config — the H5OutputSink folded as a node (design §4.3).
-
-    Returns
-    -------
-    GraphConfig
-        The loaded cutover config (modules include the folded ``h5_output``).
-    """
+    """The live P1.5 cutover config — the H5OutputSink folded as a node (design §4.3)."""
     return load_config([_DUMMY, _CUTOVER], _OVERRIDES)
 
 
 def _compile(cfg, mode):
-    """Compile one mode from a loaded `GraphConfig` (the static CLI plan).
-
-    Returns
-    -------
-    Plan
-        The compiled plan for `mode`.
-    """
+    """Compile one mode from a loaded `GraphConfig` (the static CLI plan)."""
     return compile_plan(
         cfg.modules,
         mode,
@@ -85,9 +55,7 @@ def _compile(cfg, mode):
     )
 
 
-# ---------------------------------------------------------------------------
 # (1) the SinkModule marker — H5OutputSink is a sink node, CollectOutputs is NOT
-# ---------------------------------------------------------------------------
 
 
 def test_h5_output_sink_is_a_sink_module():
@@ -109,14 +77,7 @@ class _FakeH5:
 
 
 def test_close_if_open_closes_handle_without_full_count_assertion():
-    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent (§5.3).
-
-    If ``consume`` raises mid-test, Lightning's ``on_test_end`` may not run; the
-    bridge's ``teardown`` calls ``close_if_open`` to close the FIXED-mode handle
-    WITHOUT the full-count assertion (matching `flush`'s truncated branch), so an
-    interrupted test leaks no handle. A second call is a no-op (the handle is
-    already ``None``).
-    """
+    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent (§5.3)."""
     sink = H5OutputSink(outputs=[OutputColumn(key=_JET_OUT, suffixes=["pb", "pc", "pu"])])
     fake = _FakeH5()
     # simulate an open writer mid-test with FEWER rows written than expected
@@ -134,21 +95,13 @@ def test_close_if_open_closes_handle_without_full_count_assertion():
 
 
 def test_collect_outputs_is_not_a_sink_module():
-    """The legacy duck-typed `CollectOutputs` is NOT a `SinkModule` (legacy path preserved).
-
-    `CollectOutputs` anchors demand through ``writer_demand`` only — it is not a
-    graph node and must keep the legacy flat-``<sinks>`` folding (it has no
-    ``is_sink``/``declare_io``). Misclassifying it as a sink node would fold it
-    into the planning module dict and break the legacy path.
-    """
+    """The legacy duck-typed `CollectOutputs` is NOT a `SinkModule` (legacy path preserved)."""
     legacy = CollectOutputs(outputs=[_TRK_OUT])
     assert not isinstance(legacy, SinkModule)
     assert not hasattr(legacy, "is_sink")
 
 
-# ---------------------------------------------------------------------------
 # (2) executor partition — folded sink is in plan.steps, NOT in the forward loop
-# ---------------------------------------------------------------------------
 
 
 class _ToyProducer:
@@ -193,13 +146,7 @@ class _ExplodingSink:
 
 
 def test_executor_partitions_sink_out_of_forward_loop():
-    """A folded sink step is in ``plan.steps`` but NOT in the executor forward loop.
-
-    The sink stays IN the plan (render + demand) yet is partitioned out of the
-    per-batch ``module(view, mode)`` loop (Q5, design §4): it produces no tensor
-    and is never called. ``run`` completes, the producer runs, and the sink's
-    forward (which would raise) is never reached.
-    """
+    """A folded sink step is in ``plan.steps`` but NOT in the executor forward loop."""
     prod = _ToyProducer()
     sink = _ExplodingSink()
     modules = {prod.name: prod, sink.name: sink}
@@ -220,20 +167,12 @@ def test_executor_partitions_sink_out_of_forward_loop():
     assert out.get("outputs.x") is not None
 
 
-# ---------------------------------------------------------------------------
 # (3) plan_hash invariance — the folded sink perturbs nothing in FIT/VAL/ONNX
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL, Mode.ONNX])
 def test_folded_sink_contributes_no_step_or_edge_outside_test(cutover_cfg, mode):
-    """The sink node is ABSENT (inactive) from the FIT/VAL/ONNX plans.
-
-    Its ``declare_io`` is empty outside TEST, so the planner classifies it
-    inactive: no `PlanStep`, no `Edge`. `_plan_hash` hashes only steps/edges/
-    sources, so an inactive node cannot perturb the hash by construction
-    (design §4.1, §8 back-compat proof).
-    """
+    """The sink node is ABSENT (inactive) from the FIT/VAL/ONNX plans."""
     plan = _compile(cutover_cfg, mode)
     assert "h5_output" not in plan.module_names
     touching = [e for e in plan.edges if "h5_output" in {e.producer, e.consumer}]
@@ -242,15 +181,7 @@ def test_folded_sink_contributes_no_step_or_edge_outside_test(cutover_cfg, mode)
 
 @pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL])
 def test_fit_val_plan_hash_byte_identical_with_vs_without_sink(cutover_cfg, mode):
-    """FIT/VAL ``plan_hash`` is byte-identical with the sink folded vs absent.
-
-    The cutover config's conversion producers + H5 sink exist ONLY for the TEST
-    eval path — all three are demand-pruned/inactive in FIT/VAL. So the cutover
-    FIT/VAL plan must hash IDENTICALLY to the same config with those three nodes
-    removed entirely. A future change to the inactivity classification or the
-    fold path that perturbed the FIT hash would break checkpoint resume
-    (`saltmodule._verify_ckpt_hash` raises on a FIT mismatch) — this pins it.
-    """
+    """FIT/VAL ``plan_hash`` is byte-identical with the sink folded vs absent."""
     full = _compile(cutover_cfg, mode).plan_hash
     eval_only = {"jet_probs", "track_origin_probs", "h5_output"}
     base_modules = {k: v for k, v in cutover_cfg.modules.items() if k not in eval_only}
@@ -265,20 +196,11 @@ def test_fit_val_plan_hash_byte_identical_with_vs_without_sink(cutover_cfg, mode
     assert full == base
 
 
-# ---------------------------------------------------------------------------
 # (4) render payoff — named h5_output card, no <sinks> sentinel, ONNX prunes
-# ---------------------------------------------------------------------------
 
 
 def test_cutover_test_render_has_named_h5_sink_card(cutover_cfg):
-    """The cutover TEST DOT renders the H5 sink as its OWN named card (design §7 exp-15).
-
-    Asserts the design's exact "after" payoff vs the de59428 ``<sinks>``
-    collapse: (a) NO generic ``<sinks>`` sentinel card; (b) a ``h5_output``
-    card of subtype ``H5OutputSink`` whose in-rows are the demanded leaves
-    (``outputs.jets.jets_classification`` / ``outputs.tracks.track_origin`` /
-    ``meta.rows`` / ``masks.tracks``); (c) named-consumer edges into it.
-    """
+    """The cutover TEST DOT renders the H5 sink as its OWN named card (design §7 exp-15)."""
     test = _compile(cutover_cfg, Mode.TEST)
     dot = dot_source(test, cutover_cfg.modules)
 
@@ -300,9 +222,7 @@ def test_cutover_onnx_render_prunes_h5_sink(cutover_cfg):
     assert "h5_output" not in dot
 
 
-# ---------------------------------------------------------------------------
 # (5) dead-preds safety net on the folded-sink TEST path (parity with M4.5)
-# ---------------------------------------------------------------------------
 
 
 class _Stub:
@@ -319,26 +239,14 @@ class _Stub:
 
 
 class _StubSalt:
-    """A stand-in `self` carrying only ``_graph_modules`` for the unbound gate call.
-
-    `SaltModule._assert_no_dead_preds` reads only ``self._graph_modules``, so the
-    real production gate runs against this stub — pinning the actual code, not a
-    copy.
-    """
+    """A stand-in `self` carrying only ``_graph_modules`` for the unbound gate call."""
 
     def __init__(self, graph_modules):
         self._graph_modules = graph_modules
 
 
 def _folded_test_plan(*, include_dead):
-    """Compile a TEST plan: a converted track pred (+ optionally a DEAD jet pred).
-
-    Returns
-    -------
-    tuple
-        ``(graph_modules, plan)`` — the model-side module dict (sans the sink)
-        and the compiled folded-sink TEST plan.
-    """
+    """Compile a TEST plan: a converted track pred (+ optionally a DEAD jet pred)."""
     from salt.core.outputs import TaskOutput  # noqa: PLC0415 - test-local
 
     pred_key = "preds.tracks.track_origin"
@@ -367,26 +275,14 @@ def _folded_test_plan(*, include_dead):
 
 
 def test_folded_sink_dead_preds_gate_passes_when_all_consumed():
-    """No dead pred when every produced ``preds.*`` feeds a demanded output.
-
-    Runs the REAL `SaltModule._assert_no_dead_preds` (unbound, over a stub
-    ``self``): it must NOT raise when every prediction the model computes is
-    consumed by a surviving conversion producer.
-    """
+    """No dead pred when every produced ``preds.*`` feeds a demanded output."""
     graph_modules, plan = _folded_test_plan(include_dead=False)
     # the production gate is a no-op on a fully-consumed folded plan
     SaltModule._assert_no_dead_preds(_StubSalt(graph_modules), plan)  # noqa: SLF001 - white-box gate
 
 
 def test_folded_sink_dead_preds_gate_fires_on_unconsumed_pred():
-    """A computed-but-never-persisted ``preds.*`` is a hard error on the folded-sink path.
-
-    This is the M4.5 `WriterCallback` dead-preds safety net, restored for the
-    folded-sink TEST runtime path: a prediction the model computes every batch
-    but no producer feeds into a demanded ``outputs.*`` leaf must hard-error at
-    ``salt2 test`` (not ship silently). Runs the REAL
-    `SaltModule._assert_no_dead_preds`; the error names the dead key.
-    """
+    """A computed-but-never-persisted ``preds.*`` is a hard error on the folded-sink path."""
     graph_modules, plan = _folded_test_plan(include_dead=True)
     with pytest.raises(ConfigError) as excinfo:
         SaltModule._assert_no_dead_preds(_StubSalt(graph_modules), plan)  # noqa: SLF001 - white-box gate

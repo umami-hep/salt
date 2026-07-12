@@ -1,15 +1,4 @@
-"""PLAN 34 W34.2 dumb-sink guard gates — dup-name, zero-output, no-double-split naming.
-
-The dumb H5OutputSink / OnnxExportSink keep ONLY deterministic serialisation
-mechanics (plan §5); the guards they retain:
-
-- **dup-name** — two section fields minting the same flat H5 column / ONNX suffix
-  is a `ConfigError` at resolve (compile/open) time, before any write.
-- **zero-output** — a bound section with no serialisable field is a hard fail.
-- **no-double-split (LOCKED)** — the dumb ONNX sink NAMES the per-field scalar
-  leaves directly (one `name` per leaf, NEVER a `names` split), since
-  ``get_output`` already squeezed the global per-class values (W34.1).
-"""
+"""PLAN 34 W34.2 dumb-sink guard gates — dup-name, zero-output, no-double-split naming."""
 
 from __future__ import annotations
 
@@ -85,13 +74,7 @@ class TestDumbH5SinkSectionResolution:
 
 class TestDumbOnnxSinkNoDoubleSplit:
     def test_onnx_global_scalars_are_single_name_not_split(self, tmp_path):
-        """The dumb ONNX sink names each global per-class scalar via a SINGLE `name` (no split).
-
-        The LOCKED no-double-split decision: get_output squeezed the global per-class
-        values to 0-dim scalars (W34.1), so each ONNX leaf is a single-`name`
-        OnnxExportLeaf — NEVER a plural-`names` split (which would re-split the
-        already-scalar value).
-        """
+        """The dumb ONNX sink names each global per-class scalar via a SINGLE `name` (no split)."""
         rt = _bound_run_task(tmp_path, ["jets_classification", "track_origin"])
         sink = OnnxExportSink(model_name="GN2v2")
         sink.bind_output_section({"run_tasks": rt})

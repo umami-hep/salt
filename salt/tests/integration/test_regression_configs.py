@@ -1,22 +1,4 @@
-"""End-to-end smoke for shipped v2-native configs (plan 10/11 M5 + plan 12 M6).
-
-The four M5 sub-wave A regression-family configs (regression_gaussian,
-regression_weighted, nan_regression, regression_multi_target) each: parse +
-instantiate through the real ``salt2`` CLI, ``graph validate`` all four modes,
-and run a real ``salt2 fit --fast_dev_run`` end-to-end on a dummy file (import +
-forward-run + loss computed, rc=0). The dummy file carries every label these
-configs need (HadronConeExclTruthLabel*, R10TruthLabel_*, sample_weight, the
-NaN-injected Lxy, the ID for the MultiTarget selection) — see
-``salt.utils.inputs``.
-
-Also hosts the dedicated shipped-config CI tests: ``gn3v01`` (M5 sub-wave B
-VectorConcat flagship) and ``DL1`` (M6 sub-wave D vector-stream / MLP-only — the
-v2-native port of the v1 ``test_pipeline.py:213`` ``test_DL1`` CI fixture the
-user asked to preserve; validate-all-modes + a real fast_dev_run fit).
-
-No machine paths: the dummy H5 + norm/class dicts + schema are generated into a
-tmp dir, the configs' documented required override is the norm_dict.
-"""
+"""End-to-end smoke for shipped v2-native configs (plan 10/11 M5 + plan 12 M6)."""
 
 from __future__ import annotations
 
@@ -106,19 +88,7 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
 
 
 def test_dl1_config_validates_all_modes(data):
-    """DL1's jets-only MLP path plan-compiles in fit + test + onnx.
-
-    The v2-native port of the v1 ``test_pipeline.py:213`` ``test_DL1`` CI fixture
-    (legacy/DL1.yaml) — the MLP-only / vector-stream coverage the user asked to
-    PRESERVE (plan 12 sub-wave D non-regression invariant: "DL1's original
-    MLP-only CI fixture is preserved unchanged"). DL1 is the canonical exercise
-    of the M6-6 deliverable: the rank-2 ``[B, F]`` vector-stream embed (rank
-    inferred from the reader ``global_object: true`` boundary) -> a
-    ``sequence: false`` head, NO encoder / NO pool.
-    Validates the shipped ``DL1.yaml`` through the real ``salt2 graph validate``
-    in all default modes (fit/test/onnx); the parity norm dict (jets:
-    pt_btagJes/eta_btagJes) is the documented required override.
-    """
+    """DL1's jets-only MLP path plan-compiles in fit + test + onnx."""
     cfg = CONFIG_DIR / "DL1.yaml"
     rc = salt2_main([
         "graph",
@@ -132,16 +102,7 @@ def test_dl1_config_validates_all_modes(data):
 
 
 def test_dl1_config_fast_dev_run_fit(data, tmp_path):
-    """DL1 runs a real ``salt2 fit --fast_dev_run`` end-to-end (MLP-only path).
-
-    The behavioural half of the v1 ``test_DL1`` port: a real fit (import +
-    rank-2 ``[B, F]`` embed forward + 3-class CE loss computed, rc=0) on the
-    SAME dummy H5 the regression-family configs use — the default
-    ``write_dummy_file`` writes jets ``flavour_label`` in {0,1,2} with the
-    schema attr ``[bjets, cjets, ujets]`` (inputs.py), matching DL1's 3-class
-    head index-for-index (the check_class_names cross-check). No constituents
-    are needed: DL1's only stream is the global jets vector.
-    """
+    """DL1 runs a real ``salt2 fit --fast_dev_run`` end-to-end (MLP-only path)."""
     cfg = CONFIG_DIR / "DL1.yaml"
     rc = salt2_main([
         "fit",
@@ -170,16 +131,7 @@ def test_dl1_config_fast_dev_run_fit(data, tmp_path):
 
 
 def test_gn3v01_config_validates_all_modes(tmp_path):
-    """The GN3V01 flagship (VectorConcat + alias + norm_type:hybrid) plan-compiles.
-
-    Validates the shipped ``gn3v01.yaml`` through the real ``salt2 graph
-    validate`` in ALL four modes (FIT/VAL/TEST/ONNX) — the sub-wave-B feature
-    config (design §6.6). Uses the augmented norm dict (jets/tracks/global) for
-    the TWO Normalisers; no H5 is needed (``validate`` is data-free, design
-    §2.3/§4.1). The ONNX mode in particular exercises the ``export.inputs
-    alias:`` (``inputs.global`` cloned from ``inputs.jets``) and the
-    ``VectorConcat`` width resolution at bind.
-    """
+    """The GN3V01 flagship (VectorConcat + alias + norm_type:hybrid) plan-compiles."""
     nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
     write_vector_concat_norm_dict(nd_path, cd_path)
     rc = salt2_main([

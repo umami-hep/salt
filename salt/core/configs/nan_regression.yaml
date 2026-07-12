@@ -1,20 +1,8 @@
-# nan_regression.yaml — NaN-tolerant RegressionTaskModule in the v2 schema (M5
-# sub-wave A3). The v2-native port of legacy salt/configs/nan_regression.yaml:
-# an encoder-less DiPS body (init_nets + pool_net, NO encoder — v1
-# saltmodel.py:90-93) feeding pooled regression heads whose TARGETS may contain
-# NaN. The composed v1 nan_loss masks invalid (NaN) targets to 0 and reduces
-# with torch.nanmean (v1 task.py:412-437); a head that expects NaN targets MUST
-# use loss reduction: none so the per-element loss survives to the nanmean.
-#
-#   - reg_nan_norm   : single-target mean/std norm_params, NaN-tolerant
-#   - reg_nan_ratio  : target_denominators ratio + custom_output_names,
-#                      NaN-tolerant; pt_btagJes is a declared input Feature
-#                      (ONNX de-scaling source, FD §3.3)
-#   - reg_nan_seq    : per-token sequence regression over tracks, NaN-tolerant
-#
-# NO machine paths committed (design §5 placeholder policy). From the REPO ROOT:
-#   python -m salt.core.main graph validate -c salt/core/configs/nan_regression.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# NaN-tolerant RegressionTaskModule family: an encoder-less DiPS body feeding
+# pooled/sequence regression heads whose targets may contain NaN. NaN targets
+# are masked to 0 and reduced with nanmean, so every head needs loss
+# reduction: none. H5-only — no OnnxExportSink wired (matches v1, which never
+# exported this config); the export: block below is for validation hygiene only.
 
 name: nan_regression
 
@@ -68,14 +56,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -94,7 +82,6 @@ model:
           targets: HadronConeExclTruthLabelLxy
           custom_output_names: output_std_norm
           norm_params: {mean: 1.0, std: 1.0}
-          # reduction: none keeps the per-element loss for the NaN mask + nanmean
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       reg_nan_ratio:
@@ -118,26 +105,12 @@ model:
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired) + a PadMaskWriter re-spec. It supplies its OWN top-level
-# outputs: section + dumb sinks. The regression de-scale folds onto each task via
-# get_output (W34.3), orchestrated by the RunTaskOutput writer below; the dumb
-# sinks dump ALL active outputs.* leaves, the SECTION supplies names/dtypes/ORDER
-# (the per-head custom_output_names mint the Athena physics names). Section writers
-# in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields ->
-# PadMaskWriter (reg_nan_seq is a per-token tracks head, so a pad-mask column is
-# written). The RunTaskOutput tasks list is the v1 model-declaration order
-# (reg_nan_norm, reg_nan_ratio, reg_nan_seq). NO OnnxExportSink: v1 nan_regression
-# is NOT ONNX-exported (test_pipeline do_onnx=False) — the legacy reduce-manifest
-# regression ONNX path was retired (plan §9 line 147), so this is H5-only, matching
-# its eval-only v1 status. The export: block below stays for `salt2 export` graph
-# validation hygiene but no OnnxExportSink consumes it during fit/test.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -146,18 +119,15 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: nanRegression # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the outputs: section (plan 34 W34.4c).
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 2

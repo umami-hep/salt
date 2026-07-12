@@ -1,31 +1,4 @@
-"""Spike: jsonargparse support for the salt v2 dict-of-modules config mechanism.
-
-Design §5.3 (jsonargparse mechanics) relies on ``dict[str, BaseClass]``-typed
-parser fields populated from YAML ``{class_path, init_args}`` blocks. Design §11
-risk 4 flags this as "believed supported" and mandates this spike. The verdict
-lives in ``salt/core/SPIKE_jsonargparse.md``.
-
-Deliberately self-contained: plain ``jsonargparse.ArgumentParser`` (no
-LightningCLI), toy classes only, and NO imports from ``salt.core``.
-
-Capabilities covered (one test each; FAILing capabilities carry strict xfail
-markers so the suite stays green while documenting the gap):
-
-1. Basic ``dict[str, Base]`` instantiation from YAML class_path/init_args
-   blocks — ``test_dict_of_base_instantiation_from_yaml``.
-2. ``--print_config`` round-trip — ``test_print_config_round_trip``.
-3. Null-deletion via a second config file — ``test_null_deletion_via_second_config_file``
-   (XFAIL natively) + two passing workaround tests.
-4. Dotted CLI overrides into dict values — ``test_dotted_cli_override_into_dict_value``.
-5. Env-var overrides — ``test_env_var_override``.
-6. Deep-merge of the dict across two config files —
-   ``test_deep_merge_across_config_files`` (XFAIL natively) + passing
-   workaround/native-semantics tests.
-7. callbacks-dict assembly into ``trainer.callbacks`` —
-   ``test_callbacks_dict_assembly``.
-
-Verified against jsonargparse 4.46.0 (salt container).
-"""
+"""Spike: jsonargparse support for the salt v2 dict-of-modules config mechanism."""
 
 from __future__ import annotations
 
@@ -37,9 +10,7 @@ from jsonargparse import ActionConfigFile, ArgumentParser, Namespace
 
 MODULE = __name__
 
-# ---------------------------------------------------------------------------
 # Toy class hierarchy (stands in for NetModule / Processor / Writer, §5.3)
-# ---------------------------------------------------------------------------
 
 
 class ToyModule:
@@ -76,9 +47,7 @@ class ModelOptionalValues:
         self.modules = modules or {}
 
 
-# ---------------------------------------------------------------------------
 # Toy callback hierarchy (capability 7, §5.3 callbacks-dict assembly)
-# ---------------------------------------------------------------------------
 
 
 class Callback:
@@ -104,31 +73,14 @@ class ProgressBar(Callback):
     """Stand-in for a stock Lightning callback listed under trainer.callbacks."""
 
 
-# ---------------------------------------------------------------------------
 # Spike-validated remediation shim (referenced from SPIKE_jsonargparse.md)
-# ---------------------------------------------------------------------------
 
 
 class DeepMergeParser(ArgumentParser):
-    """ArgumentParser whose config-file merge deep-merges dict-typed values.
-
-    Native jsonargparse (4.46.0) merges config files via ``Namespace.update``,
-    which treats a ``dict[str, Base]`` leaf atomically: a later config file
-    REPLACES the whole dict. This ~10-line override restores the design §5.3
-    semantics: later files add/update keys, earlier keys survive, and a key
-    set to ``null`` is deleted. Dotted CLI overrides and per-entry init_args
-    merging are native and unaffected.
-    """
+    """ArgumentParser whose config-file merge deep-merges dict-typed values."""
 
     def merge_config(self, cfg_from: Namespace, cfg_to: Namespace) -> Namespace:
-        """Union dict leaves key-by-key before the standard namespace merge.
-
-        Returns
-        -------
-        Namespace
-            The merged configuration, with dict-typed leaves unioned and
-            None-valued entries deleted.
-        """
+        """Union dict leaves key-by-key before the standard namespace merge."""
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):
                 continue
@@ -139,9 +91,7 @@ class DeepMergeParser(ArgumentParser):
         return super().merge_config(cfg_from, cfg_to)
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 YAML_BASE = f"""
 model:
@@ -195,9 +145,7 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
-# ---------------------------------------------------------------------------
 # Capability 1: basic dict[str, Base] instantiation from YAML
-# ---------------------------------------------------------------------------
 
 
 def test_dict_of_base_instantiation_from_yaml(tmp_path):
@@ -228,9 +176,7 @@ model:
         parser.parse_args(["--config", write_yaml(tmp_path, "bad.yaml", bad)])
 
 
-# ---------------------------------------------------------------------------
 # Capability 2: --print_config round-trip
-# ---------------------------------------------------------------------------
 
 
 def test_print_config_round_trip(tmp_path, capsys):
@@ -253,9 +199,7 @@ def test_print_config_round_trip(tmp_path, capsys):
     assert parser.dump(cfg_again) == parser.dump(cfg_orig)
 
 
-# ---------------------------------------------------------------------------
 # Capability 3: null-deletion (XFAIL natively + passing workarounds)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.xfail(
@@ -309,9 +253,7 @@ def test_null_deletion_workaround_optional_values_cli(tmp_path):
     assert list(live) == ["encoder"]
 
 
-# ---------------------------------------------------------------------------
 # Capability 4: dotted CLI overrides into dict values
-# ---------------------------------------------------------------------------
 
 
 def test_dotted_cli_override_into_dict_value(tmp_path):
@@ -335,9 +277,7 @@ def test_dotted_cli_override_into_dict_value(tmp_path):
     assert list(cfg.model.modules) == ["encoder", "decoder", "head"]
 
 
-# ---------------------------------------------------------------------------
 # Capability 5: env-var overrides
-# ---------------------------------------------------------------------------
 
 
 def test_env_var_override(tmp_path, monkeypatch):
@@ -357,9 +297,7 @@ def test_env_var_override(tmp_path, monkeypatch):
     assert list(cfg.model.modules) == ["encoder", "decoder"]
 
 
-# ---------------------------------------------------------------------------
 # Capability 6: deep-merge across two config files (XFAIL natively + workarounds)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.xfail(
@@ -417,12 +355,7 @@ def test_deep_merge_workaround_updates_entry_in_place(tmp_path):
 
 
 def test_per_entry_init_args_merge_is_native(tmp_path):
-    """Documents native 4.46.0 semantics: per-entry merge works, sibling keys drop.
-
-    A second file restating a key inherits class_path and merges init_args, but
-    keys it does not mention are lost — only the dict-level union is missing.
-    This is the evidence that the gap is narrow (SPIKE_jsonargparse.md).
-    """
+    """Documents native 4.46.0 semantics: per-entry merge works, sibling keys drop."""
     parser = make_parser()
     cfg = parser.parse_args(
         [
@@ -441,9 +374,7 @@ def test_per_entry_init_args_merge_is_native(tmp_path):
     assert encoder.init_args.heads == 4  # survived from the first file
 
 
-# ---------------------------------------------------------------------------
 # Capability 7: callbacks-dict assembly (§5.3 trainer.callbacks pattern)
-# ---------------------------------------------------------------------------
 
 
 def test_callbacks_dict_assembly(tmp_path):

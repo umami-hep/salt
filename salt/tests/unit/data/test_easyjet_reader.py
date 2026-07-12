@@ -1,23 +1,4 @@
-"""Regression tests for `salt.core.data.EasyjetReader` (plan 01, v2 dataloaders).
-
-Gates the modular-Reader boundary on a brand-new file type:
-
-1. **round-trip parity** — the reader's ``raw.jets[field]`` / ``raw.event[field]``
-   match direct uproot/oracle reads elementwise; the ``valid`` mask equals the
-   true per-event jet multiplicity; padded float positions are 0.0 and padded
-   INTEGER LABEL positions are the -1 sentinel; field order = config order;
-2. **file-boundary slice** — a global slice crossing TWO fixture files returns the
-   correct global rows;
-3. **processor compatibility** — ``raw.jets`` flows through the UNMODIFIED
-   `Features` (-> ``inputs.jets`` float32 ``(B, T, F)``) and `Labels` (->
-   ``labels.jets.HadronConeExclTruthLabelID``), and a padded label position is
-   masked (folds to ``ignore_index`` territory: the pad mask is True there);
-4. **lazy import** — the reader module declares no top-level ``uproot`` / ``awkward``
-   import (``salt.core`` imports without them).
-
-All fixtures are deterministic synthetic ``AnalysisMiniTree`` files written with
-uproot at test time — no dependency on ``/data/atlas_samples``.
-"""
+"""Regression tests for `salt.core.data.EasyjetReader` (plan 01, v2 dataloaders)."""
 
 from __future__ import annotations
 
@@ -355,11 +336,7 @@ def test_no_top_level_uproot_awkward_import() -> None:
 
 
 def test_uproot_awkward_are_extras_not_base_deps() -> None:
-    """uproot/awkward must NOT appear in base [project.dependencies].
-
-    They must appear in the `root` and/or `easyjet` optional-dependency groups,
-    confirming `pip install salt` stays uproot-free.
-    """
+    """uproot/awkward must NOT appear in base [project.dependencies]."""
     import importlib.util
     import tomllib
     from pathlib import Path
@@ -398,11 +375,7 @@ def test_uproot_awkward_are_extras_not_base_deps() -> None:
 
 
 def test_missing_root_deps_raises_helpful_error(single_file: tuple[Path, dict]) -> None:
-    """EasyjetReader with blocked uproot must raise a helpful ImportError.
-
-    The error message must mention `salt[easyjet]` so the user knows exactly
-    what to install — NOT a bare ModuleNotFoundError from deep inside uproot.
-    """
+    """EasyjetReader with blocked uproot must raise a helpful ImportError."""
     import importlib
     import sys
 
@@ -474,11 +447,7 @@ def _read_all(reader: EasyjetReader, mode: Mode = Mode.FIT) -> dict:
 def test_sources_lists_every_member_of_a_multifile_reader(
     two_files: tuple[Path, list[dict]],
 ) -> None:
-    """sources() returns the FULL resolved member list — not just one file.
-
-    This is the multi-file declaration the old datamodule (single train_file) could
-    not express; restage() builds on it to stage EVERY member.
-    """
+    """sources() returns the FULL resolved member list — not just one file."""
     d, _ = two_files
     reader = EasyjetReader(groups=_groups(), filename=d)
     srcs = reader.sources()
@@ -491,14 +460,7 @@ def test_sources_lists_every_member_of_a_multifile_reader(
 def test_restage_roundtrips_a_multifile_reader(
     two_files: tuple[Path, list[dict]], tmp_path: Path
 ) -> None:
-    """restage() copies ALL members to root and reads byte-identical data.
-
-    The core M8 wave-3 capability: a MULTI-file reader (2-file easyjet directory)
-    restages every member under a fresh root, the clone's sources() point there, the
-    ORIGINALS survive, and a full read of the staged clone equals the original read
-    elementwise (jets + valid mask + scalar event fields). The old train_file/val_file
-    staging would have copied at most one file and silently dropped the rest.
-    """
+    """restage() copies ALL members to root and reads byte-identical data."""
     d, [a, b] = two_files
     t = 8
     orig = EasyjetReader(groups=_groups(truncate=t), filename=d)
@@ -530,12 +492,7 @@ def test_restage_roundtrips_a_multifile_reader(
 def test_restage_is_filelock_coordinated_and_idempotent(
     two_files: tuple[Path, list[dict]], tmp_path: Path
 ) -> None:
-    """A second restage to the same root reuses the copies (the .done markers).
-
-    Proves the reuse of the vds.py FileLock + .done-marker machinery: restaging twice
-    leaves one copy per member (no duplication, no error) — the stampede-safe path a
-    DDP run relies on.
-    """
+    """A second restage to the same root reuses the copies (the .done markers)."""
     d, _ = two_files
     reader = EasyjetReader(groups=_groups(), filename=d)
     root = tmp_path / "stage_root"
@@ -553,15 +510,7 @@ def test_restage_is_filelock_coordinated_and_idempotent(
 def test_datamodule_trigger_restages_per_stage_reader_for_vds_precreation(
     two_files: tuple[Path, list[dict]], tmp_path: Path
 ) -> None:
-    """The GraphDataModule thin trigger restages so VDS precreation sees staged paths.
-
-    Drives the collapsed datamodule path: with move_files_temp set, _resolve_stage_root
-    arms _stage_root, and _stage(reader) restages the per-stage reader. _precreate_vds_
-    rank0 calls .prepare() on exactly this restaged reader, so it resolves files UNDER
-    the staging root — the reader-owned analogue of the v1 prepare_data/setup repoint.
-    With move_files_temp=None the per-stage reader is returned UNCHANGED (byte-identical
-    read path).
-    """
+    """The GraphDataModule thin trigger restages so VDS precreation sees staged paths."""
     from salt.core.data.datamodule import GraphDataModule
 
     d, _ = two_files

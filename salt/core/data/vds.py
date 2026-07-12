@@ -1,11 +1,9 @@
-"""Virtual-dataset (VDS) creation for wildcard inputs (design §6.1).
+"""Virtual-dataset (VDS) creation for wildcard inputs.
 
-A line-for-line port of the multi-process-safe VDS machinery from v1
-``SaltDataset`` (``datasets.py:146-179, 250-365``): FileLock serialisation, a
-``.done`` completion marker, atomic tmp-file publish — plus the staleness
-check the design adds (VDS mtime vs member-file mtimes), fixing the known
-stale-VDS-after-re-dump footgun (``datasets.py`` hidden contract; design
-§6.1). The DDP rank-0 pre-creation + barrier story lives in
+Multi-process-safe VDS machinery: FileLock serialisation, a ``.done``
+completion marker, atomic tmp-file publish, plus a staleness check (VDS mtime
+vs member-file mtimes) that avoids silently serving stale data after a
+re-dump. DDP rank-0 pre-creation + barrier lives in
 `salt.core.data.datamodule.GraphDataModule`, not here.
 """
 
@@ -29,8 +27,6 @@ _LOCK_TIMEOUT_S = 1800
 def has_wildcard(path: Path | str) -> bool:
     """Check whether a path's filename contains glob-style wildcard characters.
 
-    Port of ``SaltDataset._has_wildcard`` (``datasets.py:250-266``).
-
     Returns
     -------
     bool
@@ -43,10 +39,8 @@ def has_wildcard(path: Path | str) -> bool:
 def default_vds_path(pattern: Path) -> Path:
     """Derive the default VDS output path for a wildcard pattern.
 
-    Port of the v1 default (``datasets.py:152-168``): the wildcard marker is
-    replaced by ``vds`` and a sibling folder ``<name>/vds.h5`` is created
-    next to the matched files (``removesuffix`` instead of v1's char-set
-    ``str.strip(".h5")``, which could eat trailing ``h``/``5`` characters).
+    The wildcard marker is replaced by ``vds`` and a sibling folder
+    ``<name>/vds.h5`` is created next to the matched files.
 
     Returns
     -------
@@ -71,22 +65,12 @@ def default_vds_path(pattern: Path) -> Path:
 
 
 def _done_marker(vds_out: Path) -> Path:
-    """Return the ``.done`` completion-marker path for a VDS file.
-
-    Returns
-    -------
-    Path
-        The marker file path (``datasets.py:268-282``).
-    """
+    """Return the ``.done`` completion-marker path for a VDS file."""
     return vds_out.with_suffix(vds_out.suffix + ".done")
 
 
 def _is_stale(out_fname: Path, members: list[Path]) -> bool:
     """Check whether an existing VDS predates any of its member files.
-
-    The design's staleness fix (design §6.1): v1 reused VDS + ``.done``
-    markers across runs without invalidation, silently serving stale data
-    after a re-dump.
 
     Returns
     -------
@@ -102,9 +86,7 @@ def _is_stale(out_fname: Path, members: list[Path]) -> bool:
 def create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
     """Create (or reuse) a VDS file for `pattern` in a multi-process-safe way.
 
-    Port of ``SaltDataset._create_vds_locked`` (``datasets.py:284-365``):
-
-    1. Fast path: ``.done`` marker exists AND the VDS is not stale.
+    1. Fast path: ``.done`` marker exists and the VDS is not stale.
     2. Acquire ``<out>.lock`` (FileLock, 1800 s timeout).
     3. Re-check marker + staleness under the lock.
     4. Build into a pid-suffixed temp file, atomically rename into place.
@@ -115,7 +97,7 @@ def create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
     pattern : Path
         Glob-style pattern (wildcard in the filename component).
     out_fname : Path | None, optional
-        Target VDS path; None derives the v1 default next to the data.
+        Target VDS path; None derives the default next to the data.
 
     Returns
     -------
@@ -155,12 +137,12 @@ def create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
         if done_path.exists():
             if not _is_stale(out_fname, members):
                 return out_fname
-            done_path.unlink()  # stale: invalidate and rebuild (design §6.1)
+            done_path.unlink()  # stale: invalidate and rebuild
 
         tmp_out = out_fname.with_name(out_fname.name + f".tmp.{os.getpid()}")
         created_path = Path(create_virtual_file(pattern=pattern, out_fname=tmp_out))
 
-        # Ensure atomic publish from tmp_out (datasets.py:347-355)
+        # ensure atomic publish from tmp_out
         if (
             created_path.resolve() != tmp_out.resolve()
             and created_path.exists()
@@ -179,17 +161,14 @@ def create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
 
 
 def stage_file(src: Path, dst: Path) -> Path:
-    """Copy `src` to `dst` once, multi-process-safe (the M8 file-staging primitive).
+    """Copy `src` to `dst` once, multi-process-safe (the file-staging primitive).
 
-    The on-disk twin of `create_vds`'s coordination, reusing the SAME FileLock +
-    ``.done`` marker pattern so a DDP rank / dataloader-worker stampede copies the
-    file exactly ONCE (the rest skip via the marker) — this is the lock-based
-    "rank-0 coordination" the datamodule's ``move_files_temp`` path relied on
-    (``datamodules.py`` rank-0 prepare_data; design §6.1), but it no longer needs a
-    trainer handle: the FileLock serialises every contender and the ``.done`` marker
-    short-circuits the followers. The actual byte copy delegates to
-    `salt.core.utils.file_utils.copy_file` (already a no-op when ``dst`` exists), so
-    the copy semantics are unchanged from the v1 staging port.
+    The on-disk twin of `create_vds`'s coordination, reusing the same FileLock +
+    ``.done`` marker pattern so a DDP rank / dataloader-worker stampede copies
+    the file exactly once (the rest skip via the marker), without needing a
+    trainer handle: the FileLock serialises every contender and the ``.done``
+    marker short-circuits the followers. The actual byte copy delegates to
+    `salt.core.utils.file_utils.copy_file` (a no-op when ``dst`` exists).
 
     Parameters
     ----------

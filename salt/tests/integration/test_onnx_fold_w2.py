@@ -1,22 +1,4 @@
-"""End-to-end gates for the plan-29 W2 folded ONNX path (design §6, §8 W2 row).
-
-W2 folds the global-float (split_scalars naming), the int8 argmax, and the
-combination conversions into the executor-traced forward, with a declare-only
-`OnnxExportSink` naming the conversion leaves instead of the off-graph reduce
-manifest. The HARD CONSTRAINT is that the LEGACY reduce path stays
-BITWISE-identical (the W0 oracle) and the folded path is correct + agrees with
-the legacy reduces (R8 hybrid). This file asserts:
-
-- **GO oracle identity**: the W0 golden (``/tmp/w2_oracle/*.json``) export
-  contract (ordered output_names, dtypes, dynamic_axes, tuple length) is
-  byte-identical post-W2 for the legacy fixtures (gn2v2 + two_stream) — a
-  reordered/renamed/redtyped output is a FAIL;
-- **folded export correctness**: a softmax+argmax+combine folded config traces,
-  ``check_onnx`` agrees torch-vs-ort 1e-6 incl. L=0, the int8 leaf is exact;
-- **folded == legacy reduces**: the folded int8 argmax leaf is bitwise-equal to
-  the legacy ``argmax`` reduce on the SAME weights (folding ``_bind_argmax``);
-- **the combination leaf** equals ``pb + pc`` bitwise (folding the combine loop).
-"""
+"""End-to-end gates for the plan-29 W2 folded ONNX path (design §6, §8 W2 row)."""
 
 from __future__ import annotations
 
@@ -80,15 +62,11 @@ def _export_cfg() -> ExportConfig:
     )
 
 
-# ---------------------------------------------------------------------------
 # GO: the W0 oracle export contract is byte-identical post-W2 (legacy path)
-# ---------------------------------------------------------------------------
 
 
 def _folded_gn2_export(tmp_path):
-    """A weight-matched GN2 export through the FOLDED path (W4): ClassProbs +
-    SeqClassIndex + VertexUnionFind named by an OnnxExportSink — pb/pc/pu,
-    TrackOrigin int8, VertexIndex int8 (the v1/oracle tuple)."""
+    """A weight-matched GN2 export through the FOLDED path (W4): ClassProbs +"""
     v1 = build_test_gn2(tmp_path)
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
@@ -114,15 +92,7 @@ def _folded_gn2_export(tmp_path):
     reason="W0 oracle goldens not present (run /tmp/w2_oracle/dump_onnx_meta.py)",
 )
 def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
-    """The MIGRATED folded gn2v2 export contract matches the W0 golden EXACTLY (W4).
-
-    POST-W4 the gn2v2 export is the FOLDED conversion-node path (ClassProbs +
-    SeqClassIndex + VertexUnionFind named by an OnnxExportSink) — the off-graph
-    reduce manifest is retired. The ORDERED output_names, per-output dtypes,
-    dynamic_axes map, and output-tuple length must still be byte-identical to
-    ``/tmp/w2_oracle/gn2v2.json`` (raw .onnx bytes differ — node names move when
-    the conversions fold, §6.4; the criterion is the contract-field identity).
-    """
+    """The MIGRATED folded gn2v2 export contract matches the W0 golden EXACTLY (W4)."""
     golden = json.loads((ORACLE_DIR / "gn2v2.json").read_text())
     result = _folded_gn2_export(tmp_path)
     adapter = result.adapter
@@ -140,18 +110,7 @@ def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
 
 @pytest.fixture(scope="module")
 def folded(tmp_path_factory):
-    """A weight-matched GN2 export through the FOLDED path (SeqClassIndex + Combination + sink).
-
-    Same v1 weights as the W0 oracle, but the ONNX outputs come from folded
-    conversion nodes named by an `OnnxExportSink` instead of the reduce manifest:
-    jets split_scalars (pb/pc/pu), a ``pbc`` combination, and the int8 argmax
-    ``TrackOrigin`` leaf (folding ``_bind_argmax``).
-
-    Returns
-    -------
-    SimpleNamespace
-        ``.result`` (ExportResult), ``.v1`` (the weight oracle).
-    """
+    """A weight-matched GN2 export through the FOLDED path (SeqClassIndex + Combination + sink)."""
     tmp = tmp_path_factory.mktemp("onnx_fold")
     v1 = build_test_gn2(tmp)
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
@@ -189,9 +148,7 @@ def folded(tmp_path_factory):
     return SimpleNamespace(result=result, v1=v1, modules=modules)
 
 
-# ---------------------------------------------------------------------------
 # folded export correctness
-# ---------------------------------------------------------------------------
 
 
 def test_folded_export_contract(folded):
@@ -242,21 +199,13 @@ def test_folded_combination_equals_pb_plus_pc(folded):
 
 
 
-# ---------------------------------------------------------------------------
 # folded correctness vs the v1 weight oracle + the W0 oracle contract (W4: the
 # legacy reduce path is RETIRED — folded is the SOLE path. The argmax/union-find
 # math equivalence vs v1's chains is proven in test_onnx_fold_w3.py).
-# ---------------------------------------------------------------------------
 
 
 def test_folded_pb_pc_pu_equal_single_v1_softmax(tmp_path):
-    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the v1 raw logits.
-
-    The classification task now publishes RAW logits in ONNX (P4), so the folded
-    ClassProbs node applies the SINGLE softmax inside the traced graph. The
-    exported pb/pc/pu must match a single softmax of the weight-matched v1 head's
-    raw logits within 1e-6 — proving the cutover did NOT double-softmax.
-    """
+    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the v1 raw logits."""
     result = _folded_gn2_export(tmp_path)
     v1 = build_test_gn2(tmp_path)
     v1.eval()

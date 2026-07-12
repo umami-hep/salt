@@ -1,12 +1,11 @@
 """CPU-only reader round-trip: recipe -> Pipeline.run -> H5Writer -> SaltDataset.
 
-Parametrized over the 8 confirmed recipes. Uses the REAL legacy reader
-``salt.data.SaltDataset`` (the captured API) to prove ``H5Writer``'s on-disk
-layout matches a real reader: declared variables read back with correct
+Uses the REAL legacy reader ``salt.data.SaltDataset`` to prove ``H5Writer``'s
+on-disk layout matches a real reader: declared variables read back with correct
 shapes/dtypes, constituent pad masks bool with invalid slots zeroed, global
-features finite. A second labelled block (design §4.3) asserts every label head
-round-trips as ``torch.long``, including the explicit MaskFormer
-``truth_hadrons.flavour`` (classes [-1, 4, 5], invalid_fill -1) assertion.
+features finite. A second labelled block asserts every label head round-trips
+as ``torch.long``, including the explicit MaskFormer ``truth_hadrons.flavour``
+(classes [-1, 4, 5], invalid_fill -1) assertion.
 
 No GPU, no training, no datamodule/H5StructuredReader.
 """
@@ -87,7 +86,7 @@ def test_reader_roundtrip(tmp_path, recipe_name, variables, global_object):
 
 
 # --------------------------------------------------------------------------- #
-# Labelled round-trip (design §4.3): every label head -> torch.long
+# Labelled round-trip: every label head -> torch.long
 # --------------------------------------------------------------------------- #
 LABELLED = [
     ("flavour_tagger", {"jets": ["flavour_label"]}, "jets"),
@@ -117,7 +116,7 @@ def test_label_roundtrip(tmp_path, recipe_name, labels, global_object):
         for n in names:
             assert lbls[g][n].dtype == torch.long, f"{recipe_name}: {g}.{n} not long"
 
-    # EXPLICIT maskformer object-class assertion (fix #6).
+    # EXPLICIT maskformer object-class assertion.
     if recipe_name == "maskformer_truth_hadron":
         flav = lbls["truth_hadrons"]["flavour"]  # classes [-1, 4, 5], invalid_fill -1
         assert flav.dtype == torch.long

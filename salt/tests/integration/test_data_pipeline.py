@@ -1,18 +1,4 @@
-"""Tests for salt.core.data (M2 stage A1) — including the seed of gate G1.
-
-G1 (plan 05): same dummy file, same slice -> the v2 pipeline's output tensors
-are IDENTICAL to v1 ``SaltDataset.__getitem__``. Key-convention mapping,
-asserted explicitly throughout:
-
-    v1 inputs[s]        == v2 batch["inputs"][s]
-    v1 pad_masks[s]     == v2 batch["masks"][s]      (True = padded)
-    v1 labels[s][l]     == v2 batch["labels"][s][l]
-
-Also covered: selections flowing into features+masks+labels exactly as v1,
-truncation, demand-narrowed read columns, meta.rows, FIT-only transforms,
-per-worker handle isolation (num_workers=2 smoke), VDS wildcard + staleness,
-and the static schema-validation error paths.
-"""
+"""Tests for salt.core.data (M2 stage A1) — including the seed of gate G1."""
 
 from __future__ import annotations
 
@@ -362,13 +348,7 @@ class TestLabelsUnit:
 
 
 class TestMultiTarget:
-    """M5 sub-wave A3: conditional row-wise target replacement (v1 parity).
-
-    Mirrors v1 ``apply_multi_target_replacements`` (datasets.py:695-739) +
-    ``inject_custom_target_placeholders`` (datasets.py:648-693) exactly:
-    ``np.where(op(sel, value), source, base)`` where ``base`` is the raw
-    target column (``target:`` mode) or a NaN placeholder (``custom_target:``).
-    """
+    """M5 sub-wave A3: conditional row-wise target replacement (v1 parity)."""
 
     @staticmethod
     def _bundle(sel, source, raw_target=None):
@@ -573,13 +553,7 @@ class TestMultiTarget:
         np.testing.assert_array_equal(v2, v1)
 
     def test_two_rules_one_custom_output_chain_like_v1(self):
-        """Two rules writing one custom_target chain sequentially (the shipped config).
-
-        Mirrors ``regression_multi_target.yaml``: ``ID==15 -> Pt`` then
-        ``ID!=15 -> pt`` both fill ``pt_label_handle`` over a single NaN-base
-        running array (v1 in-place mutation, datasets.py:709-739) — no NaN
-        survives because the two conditions partition the rows.
-        """
+        """Two rules writing one custom_target chain sequentially (the shipped config)."""
         mt = MultiTarget(
             replacements=[
                 {
@@ -616,13 +590,7 @@ class TestMultiTarget:
 
 
 class TestMaskFormerTargets:
-    """M5 sub-wave C: object class + truth masks + regression labels (v1 parity).
-
-    Mirrors v1's object-target construction (datasets.py:549-553,636-644;
-    FD 1090-1110): the class label remapped through ``class_map`` and the
-    per-object×constituent ``masks`` from ``build_target_masks`` — WITHOUT the v1
-    in-place id mutations.
-    """
+    """M5 sub-wave C: object class + truth masks + regression labels (v1 parity)."""
 
     CLASS_MAP = MappingProxyType({
         "b": {"raw": 5, "mapped": 0},
@@ -722,14 +690,7 @@ class TestMaskFormerTargets:
         np.testing.assert_array_equal(bundle.get("raw.truth_hadrons")["barcode"], barcode)
 
     def test_atomic_classmap_no_collision(self):
-        """A class map where a mapped value collides with an unvisited raw value.
-
-        v1's sequential ``x[x==raw]=mapped`` would double-map here; the vectorised
-        np.select from the ORIGINAL values is collision-proof. raw 0->mapped 1,
-        raw 1->mapped 0 (a swap): v1 would turn every 0 into 1, then every 1
-        (incl. the just-written ones) into 0 — corrupting both. The atomic map keeps
-        them distinct.
-        """
+        """A class map where a mapped value collides with an unvisited raw value."""
         proc = self._proc(
             class_map={
                 "a": {"raw": 0, "mapped": 1},
@@ -757,12 +718,7 @@ class TestMaskFormerTargets:
         assert out["labels.objects.pt"].dtype == np.float32
 
     def test_list_valued_raw_class_map_merge(self):
-        """MFU-2: a ``raw`` list merges several raw class ids into one mapped index.
-
-        Ports upstream ``MaskformerObjectConfig`` list-valued class merge. Both raw
-        5 (b) and raw 4 (c) collapse to mapped 0; null(-1) stays mapped LAST. A
-        single-int ``raw`` is the byte-identical special case (the rest of this class).
-        """
+        """MFU-2: a ``raw`` list merges several raw class ids into one mapped index."""
         proc = self._proc(
             class_map={
                 "heavy": {"raw": [5, 4], "mapped": 0},
@@ -793,14 +749,7 @@ class TestMaskFormerTargets:
             )
 
     def test_num_objects_max_objects_bridge(self):
-        """MFU-2 bridge + MFU-3 consistency guard.
-
-        Unlike upstream (where ``num_objects`` is a pure deprecated ALIAS for
-        ``max_objects``), v2 splits them: ``num_objects`` is the decoder query bank
-        / declared label M, ``max_objects`` is the selection truncation count. The
-        None-bridge auto-links them; setting BOTH to different values is a shape
-        mismatch (declared M != truncated M) and must raise (MFU-3 guard).
-        """
+        """MFU-2 bridge + MFU-3 consistency guard."""
         # alias only: num_objects -> max_objects
         assert self._proc(num_objects=5, max_objects=None).max_objects == 5
         # max_objects only: syncs back to num_objects
@@ -825,14 +774,7 @@ class TestMaskFormerTargets:
     # --- MFU-3 object selection ------------------------------------------------
 
     def test_selection_gate_off_is_identity(self):
-        """MFU-3 IDENTITY GATE: cuts/sort_by/max_objects/max_lxy_mm all unset ->
-        process() is BYTE-IDENTICAL to MFU-2, INCLUDING when a pv_class object is
-        present (the pv_class=0 default must NOT reorder on its own).
-
-        The default ``_proc`` sets num_objects=3 (the decoder query bank), which
-        the bridge mirrors to max_objects=3 — but the gate keys on the PRE-bridge
-        explicit value, so selection stays OFF and nothing reorders.
-        """
+        """MFU-3 IDENTITY GATE: cuts/sort_by/max_objects/max_lxy_mm all unset ->"""
         proc = self._proc()  # no cuts/sort/max_objects/max_lxy; pv_class=0 default
         # gate is OFF despite num_objects/max_objects being set by the bridge
         assert proc._should_select is False
@@ -872,12 +814,7 @@ class TestMaskFormerTargets:
         np.testing.assert_array_equal(out["labels.objects.pt"], [[1.0, 20.0, 10.0]])
 
     def test_selection_sort_descending_and_truncate(self):
-        """Non-PV survivors sort by sort_by (stable) and truncate to max_objects.
-
-        num_objects==max_objects==2 (the v2 consistency invariant: declared label M
-        == selection truncation count); the None-bridge links max_objects from
-        num_objects, and sort_by makes selection active.
-        """
+        """Non-PV survivors sort by sort_by (stable) and truncate to max_objects."""
         proc = self._proc(sort_by="pt", sort_descending=True, num_objects=2, pv_class=None)
         assert proc.max_objects == 2 and proc.num_objects == 2
         barcode = np.array([[1, 2, 3]], dtype=np.int64)

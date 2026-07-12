@@ -1,19 +1,11 @@
-"""Two-phase bind support: the resolved schema handed to ``module.bind`` (design §2.3, §2.5).
+"""Two-phase bind support: the resolved schema handed to ``module.bind``.
 
-Design §2.3: after ``compile_plans`` the framework calls ``bind(schema)`` on
-every module so width-dependent layers can be built from the *resolved*
-graph — shape inference replaces YAML-anchor arithmetic, and ``bind`` needs
-only the config (checkpoints load on data-less machines). `ResolvedSchema`
-is that argument: a static map from dotted bundle key to its feature width
-(last dim) and, where declared, its field names.
-
-`resolve_bind_schema` derives it from compiled `Plan`s: every spec observed
-for a key (source leaf, producer's produce spec, each consumer's require
-spec) is positionally unified, and symbolic dims (``"F:tracks"``) are bound
-to the concrete sizes declared elsewhere in the graph — the same union-find
-discipline as the planner's shape check (planner.py `_DimTable`), rebuilt
-here because the frozen `Plan` does not expose its dim table. Resolution is
-static: no data files, no tensors (design principle 8).
+After ``compile_plans`` the framework calls ``bind(schema)`` on every module so
+width-dependent layers can be built from the resolved graph. `ResolvedSchema` is
+a static map from dotted bundle key to its feature width (last dim) and, where
+declared, its field names — built by `resolve_bind_schema` from compiled
+`Plan`s via the same union-find discipline as the planner's shape check.
+Resolution is static: no data files, no tensors.
 """
 
 from __future__ import annotations
@@ -32,18 +24,18 @@ _SUGGESTION_CUTOFF = 0.5
 
 
 class BindError(GraphError):
-    """A width or field lookup failed during two-phase bind (design §2.3)."""
+    """A width or field lookup failed during two-phase bind."""
 
 
 @dataclass(frozen=True)
 class ResolvedSchema:
-    """Resolved per-key widths and fields for ``module.bind`` (design §2.3, §2.5).
+    """Resolved per-key widths and fields for ``module.bind``.
 
     `widths` maps dotted bundle keys to their concrete last-dim size;
-    `fields` maps keys to their declared last-dim column names (design §2.2:
-    column lookups resolve by name). Keys whose width is not statically
-    resolvable (meta leaves, scalar losses, data-dependent shapes) are simply
-    absent — `width` raises a `BindError` naming the nearest known keys.
+    `fields` maps keys to their declared last-dim column names. Keys whose
+    width is not statically resolvable (meta leaves, scalar losses,
+    data-dependent shapes) are simply absent — `width` raises a `BindError`
+    naming the nearest known keys.
     """
 
     widths: Mapping[str, int]
@@ -52,16 +44,11 @@ class ResolvedSchema:
     def width(self, key: str) -> int:
         """Return the concrete feature width (last dim) of a bundle key.
 
-        Returns
-        -------
-        int
-            The resolved last-dim size.
-
         Raises
         ------
         BindError
             If the key has no statically resolved width, with nearest-key
-            suggestions (design §4.1 quality bar).
+            suggestions.
         """
         try:
             return self.widths[key]
@@ -75,19 +62,12 @@ class ResolvedSchema:
             ) from None
 
     def fields_of(self, key: str) -> tuple[str, ...]:
-        """Return the declared last-dim field names of a bundle key.
-
-        Returns
-        -------
-        tuple[str, ...]
-            The column names, in declaration order.
+        """Return the declared last-dim field names of a bundle key, in declaration order.
 
         Raises
         ------
         BindError
-            If no spec for the key declares `fields` (design §2.2: the
-            dataset-side `Features` declaration is the one place column
-            order is defined).
+            If no spec for the key declares `fields`.
         """
         try:
             return self.fields[key]
@@ -100,29 +80,25 @@ class ResolvedSchema:
 
 
 def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
-    """Build the `ResolvedSchema` from one or more compiled plans (design §2.3).
+    """Build the `ResolvedSchema` from one or more compiled plans.
 
     Collects every spec observed per key across the given plans (sources,
     producer produces, consumer requires), unifies their shapes positionally
     (symbolic dims union-find, concrete sizes bind them), and records the
     resolved last-dim width and any declared fields per key. Widths are
-    config-fixed (design §2.3), so unifying across modes is sound; the
-    planner has already rejected genuinely conflicting declarations on
-    connected edges.
+    config-fixed, so unifying across modes is sound; the planner has already
+    rejected genuinely conflicting declarations on connected edges.
 
     Parameters
     ----------
     plans : Plan | Iterable[Plan]
         Compiled plans, e.g. the FIT and TEST plans of one model.
 
-    A `BindError` propagates from the dim table if two observations bind the
-    same symbolic dim (or the same key's last dim) to different concrete
-    sizes.
-
-    Returns
-    -------
-    ResolvedSchema
-        The resolved widths and fields.
+    Raises
+    ------
+    BindError
+        If two observations bind the same symbolic dim (or the same key's
+        last dim) to different concrete sizes.
     """
     if isinstance(plans, Plan):
         plans = (plans,)
@@ -152,13 +128,10 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
                     elif is_symbolic_dim(da) and is_symbolic_dim(db):
                         dims.union(str(da), str(db), where)
 
-    # fields define the last dim by name (design §2.2; TensorSpec enforces
-    # len(fields) == concrete last dim): bind any symbolic last dim observed
+    # fields define the last dim by name: bind any symbolic last dim observed
     # on a field-carrying key to the declared column count. This covers
-    # boundaries that declare fields WITHOUT a shape — the dataset-side
-    # Features produce (stream rank is reader-inferred, design §6.2) — and
-    # lets the width propagate to downstream keys sharing the symbol (e.g.
-    # the Normaliser's F:<name>.<stream> on normed.*).
+    # boundaries that declare fields WITHOUT a shape (rank is reader-inferred)
+    # and lets the width propagate to downstream keys sharing the symbol.
     for key, specs in observed.items():
         declared = next((s.fields for s in specs if s.fields is not None), None)
         if declared is None:
@@ -184,34 +157,24 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
                 size = dims.size_of(str(last))
                 if size is not None:
                     widths[key] = size
-        # fields define the last dim by name (design §2.2; TensorSpec enforces
-        # len(fields) == concrete last dim): when no shape observation binds a
-        # width — e.g. the dataset-side Features boundary declares shape=None
-        # because stream rank is reader-inferred (design §6.2) — the declared
-        # column count IS the width.
+        # when no shape observation binds a width (shape=None, rank is
+        # reader-inferred), the declared column count IS the width.
         if key not in widths and key in fields:
             widths[key] = len(fields[key])
 
     # Second phase: modules whose produced width is a FUNCTION of resolved input
     # widths (not a single shared symbol the dim table can unify) contribute it
     # via the optional duck-typed `derived_widths(widths) -> {key: int}` hook
-    # (design §6.6: VectorConcat's ``Dsum`` "unified at bind" — there is no
-    # concrete edge to bind ``Dsum``, so the dim table cannot resolve it; the
-    # concat module alone knows ``Dsum = sum(D_i)``). The plan steps hold live
-    # module references, so no signature change is needed. Generic: any module
-    # may derive widths; conflicting contributions raise (a derived width that
-    # disagrees with an already-resolved one is a real bug, not a silent drop).
+    # (e.g. VectorConcat's ``Dsum = sum(D_i)`` has no concrete edge to bind, so
+    # the dim table can't resolve it; the concat module alone knows the sum).
+    # Conflicting contributions raise — a derived width disagreeing with an
+    # already-resolved one is a real bug, not a silent drop.
     #
     # The derived widths and the symbol back-binding (below) run to a JOINT
-    # fixpoint: a derived width on key K (e.g. Concat's ``seq.x``) may carry a
-    # symbolic last dim SHARED with a not-yet-resolved key (e.g. the pool's
-    # ``pooled.global``, which shares the pool's ``D`` symbol with its ``seq.x``
-    # input). Binding K's symbol to its resolved width then resolves the sharers.
-    # This chain arises since `StreamEmbed` declares ``shape=None`` produces
-    # (rank inferred from the bound input, M7 W1.5 wave R): the embed width enters
-    # via `derived_widths` rather than a spec last dim, so the encoder-less
-    # ``embed -> Concat -> pool`` width path is resolved here rather than by the
-    # first-phase dim table.
+    # fixpoint: a derived width on key K may carry a symbolic last dim SHARED
+    # with a not-yet-resolved key (e.g. a pool output sharing its input's width
+    # symbol). Binding K's symbol to its resolved width then resolves the
+    # sharers, which may in turn unlock further derivations.
     while True:
         _apply_derived_widths(plans, widths)
         if not _back_bind_symbols(observed, widths, dims):
@@ -226,16 +189,11 @@ def _back_bind_symbols(
 ) -> bool:
     """Bind symbolic last dims from resolved key widths, then re-resolve sharers.
 
-    For every key with a known width whose observed specs carry a SYMBOLIC last
-    dim, bind that symbol to the width (idempotent; conflicts raise in
-    `dims.bind`). Then resolve any still-unknown key whose symbolic last dim is
-    now concrete. Returns True if any new width was resolved, so the caller can
-    re-run `derived_widths` (a newly resolved width may unlock a derivation).
-
-    Returns
-    -------
-    bool
-        Whether this pass resolved at least one new width.
+    For every key with a known width whose observed specs carry a symbolic last
+    dim, bind that symbol to the width. Then resolve any still-unknown key whose
+    symbolic last dim is now concrete. Returns True if any new width was
+    resolved, so the caller can re-run `derived_widths` (a newly resolved width
+    may unlock a derivation).
     """
     for key, width in list(widths.items()):
         for spec in observed.get(key, ()):
@@ -262,27 +220,22 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
     """Let plan-step modules contribute widths derived from resolved input widths.
 
     Each unique plan-step module exposing a callable ``derived_widths`` is asked
-    for ``{produced_key: int}`` given the widths resolved so far (design §6.6).
-    The hook returns an empty dict when its inputs are not yet resolvable (a
-    width-less mode), so this is order-insensitive across the supplied plans.
+    for ``{produced_key: int}`` given the widths resolved so far. The hook
+    returns an empty dict when its inputs are not yet resolvable, so this is
+    order-insensitive across the supplied plans.
 
     Run to a FIXPOINT (re-sweep until no width changes), so a CHAIN of derived
     widths — module B's input width is itself derived by module A — resolves
     regardless of plan order: if B is visited before A on the first sweep its
-    inputs aren't bound yet and the hook returns ``{}``, but a later sweep
-    (after A bound them) re-runs B. A single sweep would leave B's output
-    unbound, surfacing only later as a (loud) `ShapeError`; the fixpoint loop
-    removes that order-dependence. The shipped configs chain no derived widths
-    (so the loop converges after one productive sweep), but the loop keeps the
-    surface robust to future chained derivations. Termination: each productive
-    sweep binds ≥1 new width and widths are never unbound, so the loop runs at
-    most ``num modules + 1`` times.
+    inputs aren't bound yet, but a later sweep (after A bound them) re-runs B.
+    Termination: each productive sweep binds >=1 new width and widths are never
+    unbound, so the loop runs at most ``num modules + 1`` times.
 
     Raises
     ------
     BindError
         When a derived width disagrees with an already-resolved width for the
-        same key (a genuine inconsistency, surfaced loudly per design §2.2).
+        same key.
     """
     modules = _unique_derived_modules(plans)
     max_sweeps = len(modules) + 1
@@ -307,10 +260,7 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
 def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
     """The plan-step modules that expose a callable ``derived_widths``, deduped by identity.
 
-    Returns
-    -------
-    list[GraphModule]
-        First-seen order across the supplied plans (one entry per live module).
+    First-seen order across the supplied plans (one entry per live module).
     """
     seen: set[int] = set()
     derived: list[GraphModule] = []
@@ -328,8 +278,8 @@ def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
 def bind_all(modules: Mapping[str, GraphModule], schema: ResolvedSchema) -> None:
     """Call ``bind(schema)`` on every module that defines it, in dict order.
 
-    Design §2.3: bind is config-only — building the schema from compiled
-    plans (which are config-derived) keeps that property.
+    Bind is config-only — building the schema from compiled plans (which are
+    config-derived) keeps that property.
     """
     for module in modules.values():
         bind = getattr(module, "bind", None)
@@ -340,9 +290,8 @@ def bind_all(modules: Mapping[str, GraphModule], schema: ResolvedSchema) -> None
 def materialise_all(modules: Mapping[str, GraphModule]) -> None:
     """Call ``materialise()`` on every module that defines it, in dict order.
 
-    Design §2.3: file-touching value loads happen ONLY here, before a fresh
-    fit; the caller skips this on checkpoint load (values arrive via the
-    state_dict).
+    File-touching value loads happen ONLY here, before a fresh fit; the caller
+    skips this on checkpoint load (values arrive via the state_dict).
     """
     for module in modules.values():
         materialise = getattr(module, "materialise", None)

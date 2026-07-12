@@ -1,25 +1,4 @@
-"""Regression tests for `salt.core.data.MultiSampleReader` (plan 02, v2 dataloaders).
-
-Gates the reader-agnostic proportional-stratified multi-sample layer:
-
-1. **PROPORTIONAL stratification** — for sample sizes ``n_i`` and batch size B, each
-   contiguous full batch has BOUNDED discrepancy from the ideal ``B·n_i/Σn``
-   composition (documented ``±2`` per-window bound), AND the epoch-level mean is the
-   exact apportioned share. 1000:9000, 1:1, 1:3, and a small-minority (<1 per batch,
-   still appears across the epoch).
-2. **LABEL injection** — each event's injected ``process`` == its source sample's
-   label, consistent with the interleave index order, not masked away.
-3. **SCHEMA-compat** — sub-readers with mismatched produced streams/fields →
-   `SchemaError`.
-4. **READER-AGNOSTIC** — the SAME layer wraps two trivial in-memory STUB sub-Readers
-   (NOT EasyjetReader) plus (bonus) two EasyjetReaders on the synthetic ROOT fixtures.
-5. **ROUND-TRIP** — combined ``raw.<stream>`` == the per-sample sub-reader reads.
-6. **STAGE-BINDING** — train vs val bind DISTINCT per-sample sources via the
-   per-reader stage-sourcing contract.
-
-The stub readers depend on NOTHING but numpy, so the proportional/label/agnostic
-tests run without uproot/awkward (the EasyjetReader-wrapped tests skip if absent).
-"""
+"""Regression tests for `salt.core.data.MultiSampleReader` (plan 02, v2 dataloaders)."""
 
 from __future__ import annotations
 
@@ -42,14 +21,7 @@ from salt.core.schema import GroupSchema, Schema
 
 
 class StubReader(Reader):
-    """A minimal in-memory `Reader` over numpy arrays — for the agnostic gate.
-
-    Produces a SCALAR ``event`` stream (eventNumber + a per-event ``val`` scalar)
-    and a JAGGED ``jets`` stream (a ``pt`` float + a ``valid`` bool), all generated
-    deterministically from a seed. ``read(slice)`` returns the requested contiguous
-    rows — no files, no uproot — so it exercises the multi-sample layer's
-    contract on a reader the layer has never heard of.
-    """
+    """A minimal in-memory `Reader` over numpy arrays — for the agnostic gate."""
 
     def __init__(
         self,
@@ -655,15 +627,7 @@ def test_multisample_sources_is_union_over_subreaders(
 def test_multisample_restage_delegates_recursively_and_roundtrips(
     two_easyjet_files: tuple[Path, Path], tmp_path: Path
 ) -> None:
-    """restage() restages EACH sub-reader into root; combined read is byte-identical.
-
-    The multi-sample multi-file capability: each sub-reader (here a single-file easyjet
-    reader, but the override recurses for nested MultiSampleReaders / multi-file
-    easyjet too) stages its own file under the shared root, and the combined
-    proportionally-stratified read of the restaged reader equals the original read
-    exactly (jets pt + injected label + event scalars). The v1 single-train_file
-    staging could not express this at all.
-    """
+    """restage() restages EACH sub-reader into root; combined read is byte-identical."""
     sig_path, bkg_path = two_easyjet_files
     sig = EasyjetReader(groups=_ej_groups(truncate=8), filename=sig_path)
     bkg = EasyjetReader(groups=_ej_groups(truncate=8), filename=bkg_path)

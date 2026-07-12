@@ -1,31 +1,4 @@
-"""Regression tests for `salt.core.data.FTAG1LiteReader` (plan 19, Track C).
-
-Gates the modular-Reader boundary on a THIRD file type — xAOD DAOD_FTAG1LITE
-POOL (``CollectionTree`` + aux-store branches):
-
-1. **schema + structured shapes** — ``raw.jets`` is structured ``(B,)``,
-   ``raw.tracks`` structured ``(B, pad_max)`` + ``masks.tracks (B, pad_max)``;
-   ``valid`` mask == true per-jet track multiplicity (clipped to pad_max);
-   bf16 ``_bf16`` branches decode to physical float32; field order = config order.
-2. **flatten + pad/truncate/sentinel/mask** — ``[event][jet][track]`` flattens to
-   one row per jet; padded float positions 0.0, padded INTEGER LABEL positions the
-   -1 sentinel; truncation at pad_max keeps the leading constituents.
-3. **event-boundary-crossing read** — a contiguous jet-slice that spans event
-   boundaries returns the same rows as the full read sliced.
-4. **CutSpec at index-build** — count parity (raw jets = passing + failing),
-   every served jet passes the cut, global vs per-split differ, unknown field
-   raises.
-5. **labels wired** — ``raw.jets.flavour_label`` (HadronConeExclTruthLabelID),
-   ``raw.tracks.origin`` (ftagTruthOriginLabel), ``raw.tracks.vertexing``
-   (ftagTruthVertexIndex) flow through the UNMODIFIED ``Features`` / ``Labels``.
-6. **lazy import** — the reader module declares no top-level ``uproot`` /
-   ``awkward`` import.
-
-Unlike the easyjet tests (synthetic ``AnalysisMiniTree`` fixtures), an xAOD
-CollectionTree fixture is impractical (aux-store), so these read the REAL
-100-event sample directly (1.3 MB, local) — guarded with ``pytest.skip`` when
-absent, with a ``FTAG1LITE_SAMPLE`` env-var override.
-"""
+"""Regression tests for `salt.core.data.FTAG1LiteReader` (plan 19, Track C)."""
 
 from __future__ import annotations
 
@@ -590,12 +563,7 @@ def test_config_plan_compiles_all_modes(tmp_path: Path) -> None:
 
 
 def test_roundtrip_smoke_fit_finite_loss(tmp_path: Path) -> None:
-    """file -> FTAG1LiteReader -> Features/Labels -> torch -> salt2 fit --fast_dev_run.
-
-    The end-to-end gate: a real ``salt2 fit`` on the real 100-event sample runs to
-    completion (rc==0) with a FINITE loss, proving the modular Reader boundary
-    end-to-end on the xAOD FTAG1LITE format with NO model change.
-    """
+    """file -> FTAG1LiteReader -> Features/Labels -> torch -> salt2 fit --fast_dev_run."""
     import yaml
 
     from salt.core.main import main as salt2_main

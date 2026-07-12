@@ -1,23 +1,4 @@
-"""W6a — POSITIVE coverage for the H5OutputSink ``extra_groups`` seam.
-
-W6a ports ``WriterCallback._collect_extra_groups`` / ``_group_shape`` (and the
-``_merge_columns`` extra-group branch) onto `H5OutputSink` so a bound
-``outputs:``-section node can declare NON-reader output groups (the MaskFormer
-object writer's ``objects`` / ``object_masks``, design §8). The shipped configs
-all leave ``extra_groups`` empty, so the *populated* branch — the one W6b's
-MaskFormer producer port will lean on — is otherwise exercised only as a no-op.
-
-This locks the seam BEFORE W6b: a tiny stub extra-group node (duck-typing the
-narrow `_ExtraGroupCtx` surface, NOT the legacy `WriteCtx`) drives the populated
-path and asserts:
-
-- ``_collect_extra_groups`` returns the per-row trailing shapes + owner map,
-- ``_group_shape`` yields ``(total, M)`` / ``(total, M, T)`` for extra groups,
-- ``_merge_columns`` appends the extra-group dtypes/shapes after the task columns,
-- a group SHADOWING a reader stream raises `ConfigError` (callback.py:891 port),
-- two nodes claiming the SAME group raise `ConfigError` (callback.py:897 port),
-- an extra column COLLIDING with a task column raises via the shared `_add` map.
-"""
+"""W6a — POSITIVE coverage for the H5OutputSink ``extra_groups`` seam."""
 
 from __future__ import annotations
 
@@ -37,14 +18,7 @@ _T = 40  # the constituent (tracks) file token length
 
 
 class _StubExtraNode:
-    """A minimal extra-group node (MaskFormer-object-writer shaped, W6b stand-in).
-
-    Reads ONLY the narrow `_ExtraGroupCtx` surface (``seq_lengths`` for the mask
-    ``T``) — the object axis ``M`` rides the node, NOT the ctx, mirroring the W6a
-    contract that model modules arrive via ``bind_model_modules`` rather than the
-    write ctx. Carries no ``copy_spec`` / ``mask_streams``, so binding it as the
-    sole section node leaves the copy / pad-mask paths empty.
-    """
+    """A minimal extra-group node (MaskFormer-object-writer shaped, W6b stand-in)."""
 
     def __init__(
         self,

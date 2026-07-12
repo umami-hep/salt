@@ -1,28 +1,26 @@
-"""Dataset-side base classes for the salt v2 pipeline (design §2.4).
+"""Dataset-side base classes for the salt v2 pipeline.
 
-Dataset modules operate on **batches of B elements** as nested dicts of
-*numpy* arrays — preserving the batched contiguous H5 read design
-(``samplers.py:41-55``, ``datasets.py:459-462``). Two roles exist:
+Dataset modules operate on batches of B elements as nested dicts of numpy
+arrays. Two roles exist:
 
 - `Reader` — disk -> nested dict of numpy arrays for a contiguous batch
-  slice. Source node (``requires={}``). Readers OWN the read-time mutation
+  slice. Source node (``requires={}``). Readers own the read-time mutation
   stages (selections, augmentation transforms): they run inside ``read()``
-  on the structured array BEFORE any bundle key exists, so cuts flow into
-  features, masks AND labels exactly as v1 (``datasets.py:464-466`` runs
-  before ``:519-524`` and ``:546``) — the one sanctioned mutation point.
-- `Processor` — pure batch transform on the numpy bundle, returning ONLY
-  newly produced keys (write-once applies, design §2.1).
+  on the structured array before any bundle key exists, so cuts flow into
+  features, masks and labels — the one sanctioned mutation point.
+- `Processor` — pure batch transform on the numpy bundle, returning only
+  newly produced keys (write-once applies).
 
 Both are `GraphModule`s: plans are compiled by the same kernel planner used
-on the model side (design §3.1); only the call convention differs — the
-dataset runner (`salt.core.data.dataset.GraphDataset`) passes the batch row
-slice explicitly, because dataset modules are functions of *which rows* are
-being read, which model modules never are.
+on the model side; only the call convention differs — the dataset runner
+(`salt.core.data.dataset.GraphDataset`) passes the batch row slice
+explicitly, because dataset modules are functions of *which rows* are being
+read, which model modules never are.
 
-Lifecycle (design §2.3): ``__init__`` is pure config capture (reading the
-small schema YAML artifact is config I/O, sanctioned by §2.6); per-worker
-file handles and reusable buffers are created in ``bind(ctx)``; main-process
-file probing (VDS resolution, row counts) lives in `Reader.prepare`.
+Lifecycle: ``__init__`` is pure config capture (reading the small schema YAML
+artifact is config I/O); per-worker file handles and reusable buffers are
+created in ``bind(ctx)``; main-process file probing (VDS resolution, row
+counts) lives in `Reader.prepare`.
 """
 
 from __future__ import annotations
@@ -51,32 +49,29 @@ __all__ = [
     "WorkerCtx",
 ]
 
-# The SETUP-time carrier (plan-24 §3.5): the run `Bundle`'s write-once,
-# dotted-key machinery is leaf-type-agnostic, so it is reused AS-IS as the
-# setup bundle — its leaves are PATH strings / SCALAR artifacts instead of
-# tensors. `SetupBundle` is an alias (not a subclass) to keep the carrier a
-# single, shared implementation.
+# The setup-time carrier: the run `Bundle`'s write-once, dotted-key machinery
+# is leaf-type-agnostic, so it is reused as-is as the setup bundle — its
+# leaves are path strings / scalar artifacts instead of tensors. `SetupBundle`
+# is an alias (not a subclass) to keep the carrier a single implementation.
 SetupBundle = Bundle
 
 RAW_NAMESPACE = "raw"
-"""Bundle namespace for post-selection structured arrays (design §2.1)."""
+"""Bundle namespace for post-selection structured arrays."""
 
-_UNNAMED = "unnamed"  # instance names are assigned from the config dict key (design §2.2)
+_UNNAMED = "unnamed"  # instance names are assigned from the config dict key
 
 
 @dataclass(frozen=True)
 class WorkerCtx:
-    """Per-worker binding context handed to `DatasetModule.bind` (design §2.4).
+    """Per-worker binding context handed to `DatasetModule.bind`.
 
     Built by `GraphDataset` once per (worker, plan): `read_fields` is the
-    demand-narrowed per-stream read set computed **from the compiled plan**
-    (design §6.1 — strictly less I/O than v1's read-everything amplification,
-    ``datasets.py:395-396``), mapping ``stream -> {field: demanding module}``
-    in demand order. `step` is the receiving module's own plan step, so
-    wildcard producers (`Labels`) can learn their narrowed key set. `seed` is
-    the per-worker seed (torch's per-worker dataloader seed when running in a
-    worker) for read-time augmentations — fixing v1's unseeded transforms
-    (``transforms.py:58``, design §6.1).
+    demand-narrowed per-stream read set computed from the compiled plan,
+    mapping ``stream -> {field: demanding module}`` in demand order. `step` is
+    the receiving module's own plan step, so wildcard producers (`Labels`)
+    can learn their narrowed key set. `seed` is the per-worker seed (torch's
+    per-worker dataloader seed when running in a worker) for read-time
+    augmentations.
     """
 
     mode: Mode
@@ -88,25 +83,23 @@ class WorkerCtx:
 
 
 class DatasetModule(ABC):
-    """Base class for dataset-side graph participants (design §2.4).
+    """Base class for dataset-side graph participants.
 
     Subclasses implement the `GraphModule` protocol (``name`` +
     ``declare_io``). ``declare_io`` is a function of the module's own config
-    only — no data files, no tensors (design §2.2/§2.3); the schema artifact
-    consumed at construction time is config I/O (design §2.6).
+    only — no data files, no tensors; the schema artifact consumed at
+    construction time is config I/O.
     """
 
     incompatible_with: tuple[str, ...] = ()
-    """Class names of setup modules this module must NOT coexist with (plan-25 Rev-2).
+    """Class names of setup modules this module must NOT coexist with.
 
-    A reusable DECLARATIVE mutual-exclusion pattern: a module names the *class
-    names* (strings, not types — the named class may not exist yet) it is
-    structurally incompatible with, and the setup-plan compiler — the only thing
-    that sees the full module dict — enforces it (`_check_incompatibilities`).
-    Default `()` (no exclusions). E.g. `VDS` sets ``("ShmStage",)``: staging a
-    VDS would copy h5py pointers, not data (design incompatibility), so the rule
-    LIVES ON `VDS`; the mechanism is added now even though `ShmStage` lands in
-    W3.S.
+    A reusable declarative mutual-exclusion pattern: a module names the class
+    names (strings, not types — the named class may not exist yet) it is
+    structurally incompatible with, and the setup-plan compiler — the only
+    thing that sees the full module dict — enforces it
+    (`_check_incompatibilities`). Default `()` (no exclusions). E.g. `VDS` sets
+    ``("ShmStage",)``: staging a VDS would copy h5py pointers, not data.
     """
 
     def __init__(self) -> None:
@@ -120,28 +113,23 @@ class DatasetModule(ABC):
     def bind(self, ctx: WorkerCtx) -> None:  # noqa: B027 - optional hook, deliberately concrete
         """Per-worker lazy setup (open handles, allocate buffers); default no-op.
 
-        Design §2.3: this is the only place dataset modules may touch data
-        files. Called once per (worker process, plan) by `GraphDataset`.
+        This is the only place dataset modules may touch data files. Called
+        once per (worker process, plan) by `GraphDataset`.
         """
 
-    # -- SETUP-time face (plan-24 §4.1: once per stage, NOT per batch) --------
-    # All three default to no-ops, so decision 3's "one module type, two
-    # phases" is cheap: a pure-source module (InputSamples/VDS/ShmStage)
-    # overrides only declare_setup_io/setup and inherits an empty declare_io; a
-    # pure processor inherits these no-ops; a dual-face reader overrides both.
+    # -- setup-time face (once per stage, not per batch) ----------------------
+    # All three default to no-ops: a pure-source module (InputSamples/VDS/
+    # ShmStage) overrides only declare_setup_io/setup and inherits an empty
+    # declare_io; a pure processor inherits these no-ops; a dual-face reader
+    # overrides both.
 
     def declare_setup_io(self, stage: SetupStage) -> SetupIO:
-        """Return the module's SETUP-time interface for `stage`; default empty.
+        """Return the module's setup-time interface for `stage`; default empty.
 
         The setup-time analogue of `declare_io`. A function of the module's own
-        config only — no data files, no tensors (plan-24 §4.2). A non-empty
-        return for some stage is what marks a module as setup-participating; the
-        per-batch `declare_io` face is unaffected.
-
-        Returns
-        -------
-        SetupIO
-            The declared setup requires/produces (`SourceSpec` leaves).
+        config only — no data files, no tensors. A non-empty return for some
+        stage is what marks a module as setup-participating; the per-batch
+        `declare_io` face is unaffected.
         """
         del stage
         return SetupIO()
@@ -149,20 +137,15 @@ class DatasetModule(ABC):
     def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
         """Run this module's setup-time side-effect for `stage`; default identity.
 
-        Plan-24 §4.1: the sole sanctioned setup-time ctx-mutation point (the
-        setup analogue of per-batch `read`). Runs once per stage inside
+        The sole sanctioned setup-time ctx-mutation point (the setup analogue
+        of per-batch `read`). Runs once per stage inside
         ``datamodule.setup(stage)``, reads its declared setup-`requires` off
         `ctx`, may touch the filesystem (glob, build a VDS, copy to
-        ``/dev/shm``), and merges back ONLY its declared setup-`produces`
-        (write-once). Same code path on every DDP rank (plan-24 §4.6).
+        ``/dev/shm``), and merges back only its declared setup-`produces`
+        (write-once). Same code path on every DDP rank.
 
         The base default returns `ctx` unchanged — a no-op for per-batch-only
         modules (processors) whose `declare_setup_io` is empty.
-
-        Returns
-        -------
-        SetupBundle
-            The same `ctx`, with this module's produces merged in.
         """
         del stage
         return ctx
@@ -170,23 +153,18 @@ class DatasetModule(ABC):
     def teardown(self, ctx: SetupBundle, stage: SetupStage) -> None:  # noqa: B027
         """Reverse a setup-time side-effect for `stage`; default no-op.
 
-        Plan-24 §4.1: the symmetric cleanup hook (e.g. `ShmStage` rmtree-ing
-        its ``/dev/shm`` root). Called from ``datamodule.teardown(stage)``,
-        guarded so it fires only for the stage(s) the module actually set up.
+        The symmetric cleanup hook (e.g. `ShmStage` rmtree-ing its
+        ``/dev/shm`` root). Called from ``datamodule.teardown(stage)``, guarded
+        so it fires only for the stage(s) the module actually set up.
         """
         del ctx, stage
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
-        """Per-stream raw fields this module demands from the reader (design §6.1).
+        """Per-stream raw fields this module demands from the reader.
 
         Default: the ``fields`` metadata of the module's bound
         ``raw.<stream>`` requires. Wildcard producers whose demands are only
         known after narrowing (`Labels`) override this using `step.produces`.
-
-        Returns
-        -------
-        dict[str, dict[str, str]]
-            ``{stream: {field: demanding module name}}``.
         """
         out: dict[str, dict[str, str]] = {}
         for key, spec in step.requires.items():
@@ -200,32 +178,32 @@ class DatasetModule(ABC):
 
 
 class Reader(DatasetModule):
-    """Disk -> flat dotted dict of numpy arrays for a contiguous batch slice (design §2.4).
+    """Disk -> flat dotted dict of numpy arrays for a contiguous batch slice.
 
     Source node: ``requires={}``. The arrays returned by `read` may alias the
-    reader's REUSABLE per-worker buffers — that is the documented contract #9
-    aliasing boundary: exactly one mandatory copy per batch (the `Features` /
-    `Labels` materialisation) separates reader buffers from anything handed
-    to the trainer; ``raw.*`` never crosses the torch boundary (design §2.4).
+    reader's reusable per-worker buffers — exactly one mandatory copy per
+    batch (the `Features` / `Labels` materialisation) separates reader
+    buffers from anything handed to the trainer; ``raw.*`` never crosses the
+    torch boundary.
 
     Beyond ``read``, readers carry the framework-facing config surface the
     runtime builds on: the served `streams` (demand-driven producers adopt
     them), the optional `schema` artifact + `schema_group`/`label_universe`
-    views (static validation and wildcard narrowing, design §2.6), and
-    `with_source` (the datamodule's per-stage cloning, design §6.1).
+    views (static validation and wildcard narrowing), and `with_source` (the
+    datamodule's per-stage cloning).
     """
 
     schema: Schema | None = None
-    """The dataset schema artifact, when configured (design §2.6)."""
+    """The dataset schema artifact, when configured."""
 
     vds_capable: bool = False
     """Whether this reader builds an h5py virtual dataset for wildcard sources.
 
-    Plan-25 §5.1 / O-VDS-CAP: the `VDS` setup module gates build-vs-identity on
-    THIS flag (NOT an `isinstance` check). Default `False` on the `Reader` base
-    — a non-`vds_capable` reader (ROOT: `EasyjetReader`/`FTAG1LiteReader`) keeps
-    its own native glob, and the `VDS` module is an IDENTITY edge for it
-    (``vds_path == pattern``, NEVER calling `create_vds` on a ROOT glob, which
+    The `VDS` setup module gates build-vs-identity on this flag (not an
+    `isinstance` check). Default `False` on the `Reader` base — a
+    non-`vds_capable` reader (ROOT: `EasyjetReader`/`FTAG1LiteReader`) keeps
+    its own native glob, and the `VDS` module is an identity edge for it
+    (``vds_path == pattern``, never calling `create_vds` on a ROOT glob, which
     would crash). `H5StructuredReader` overrides it to `True`.
     """
 
@@ -238,7 +216,7 @@ class Reader(DatasetModule):
         """Main-process file probing (VDS resolution, row counts); default no-op.
 
         Idempotent; called lazily by ``__len__`` and eagerly by the
-        datamodule's rank-0 VDS pre-creation (design §6.1).
+        datamodule's rank-0 VDS pre-creation.
         """
 
     @abstractmethod
@@ -252,13 +230,8 @@ class Reader(DatasetModule):
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.
 
-        Used by `GraphDataset` to statically validate demanded raw fields
-        (design §2.6). Default: None (no static validation possible).
-
-        Returns
-        -------
-        GroupSchema | None
-            The stream's group schema, or None.
+        Used by `GraphDataset` to statically validate demanded raw fields.
+        Default: None (no static validation possible).
         """
         del stream
         return None
@@ -266,14 +239,9 @@ class Reader(DatasetModule):
     def label_universe(self) -> tuple[str, ...] | None:
         """The ``labels.<stream>.<field>`` universe for wildcard narrowing.
 
-        Design §2.2 rule (d): when not None, every narrowed ``labels.**`` key
-        is validated against this set at plan-compile time. Default: None
-        (no schema — narrowing is unvalidated, bind-time checks remain).
-
-        Returns
-        -------
-        tuple[str, ...] | None
-            The label-key universe, or None.
+        When not None, every narrowed ``labels.**`` key is validated against
+        this set at plan-compile time. Default: None (no schema — narrowing is
+        unvalidated, bind-time checks remain).
         """
         return None
 
@@ -287,20 +255,15 @@ class Reader(DatasetModule):
         """Clone this reader onto another source file (config-only, no file I/O).
 
         `GraphDataModule` uses this to derive the per-stage readers from the
-        single configured prototype (design §6.1).
+        single configured prototype.
 
-        `stage` (``"train"``/``"val"``/``"test"``) is the OPTIONAL per-reader
-        stage-sourcing hook (plan 02): single-source readers (`H5StructuredReader`,
-        `EasyjetReader`) IGNORE it — their one ``filename`` per stage IS the data,
-        so adding the kwarg is byte-for-byte backward compatible. Multi-source
-        readers (`MultiSampleReader`, a future cut-based reader) use it to select
-        each sub-source's per-stage data. The datamodule passes the stage it
-        already knows; readers that don't need it never look at it.
-
-        Returns
-        -------
-        Reader
-            A fresh, unbound reader instance.
+        `stage` (``"train"``/``"val"``/``"test"``) is the optional per-reader
+        stage-sourcing hook: single-source readers (`H5StructuredReader`,
+        `EasyjetReader`) ignore it — their one ``filename`` per stage is the
+        data. Multi-source readers (`MultiSampleReader`, a future cut-based
+        reader) use it to select each sub-source's per-stage data. The
+        datamodule passes the stage it already knows; readers that don't need
+        it never look at it.
 
         Raises
         ------
@@ -316,21 +279,15 @@ class Reader(DatasetModule):
         """The concrete on-disk file(s) this reader will read (the staging surface).
 
         Each reader is the file-authority: it declares which files it reads so
-        the framework can relocate them (M8 reader-owned staging — the datamodule
-        no longer special-cases ``train_file``/``val_file``, which silently missed
-        multi-file / multi-sample readers). The base default introspects a
-        ``filename`` or ``files`` attribute, returning its `Path`(s); readers whose
-        sources are not a single such attribute (`MultiSampleReader`) override.
+        the framework can relocate them. The base default introspects a
+        ``filename`` or ``files`` attribute, returning its `Path`(s); readers
+        whose sources are not a single such attribute (`MultiSampleReader`)
+        override.
 
-        Wildcard / glob filenames are returned VERBATIM (a literal pattern, not its
-        expansion) — staging a wildcard reader is the caller's responsibility (the
-        shipped staging path stages already-resolved single files). A reader with no
-        bound source returns an empty list.
-
-        Returns
-        -------
-        list[Path]
-            The file(s) backing this reader, in read order.
+        Wildcard / glob filenames are returned verbatim (a literal pattern, not
+        its expansion) — staging a wildcard reader is the caller's
+        responsibility (the shipped staging path stages already-resolved
+        single files). A reader with no bound source returns an empty list.
         """
         files = getattr(self, "files", None)
         if files is not None:
@@ -339,25 +296,20 @@ class Reader(DatasetModule):
         return [Path(filename)] if filename is not None else []
 
     def restage(self, root: str | Path) -> Reader:
-        """Return a CLONE of this reader whose `sources` point at copies under `root`.
+        """Return a clone of this reader whose `sources` point at copies under `root`.
 
-        The reader-owned twin of `with_source` (the per-stage cloning hook above):
-        rather than re-source onto a DIFFERENT file, `restage` copies THIS reader's
-        own source file(s) into ``root`` (typically a RAM disk like ``/dev/shm``) and
-        returns a clone that reads the copies. This is the M8 replacement for the
-        datamodule's fat ``move_files_temp`` ``prepare_data``/``setup`` block: the
-        datamodule's only job becomes ``reader = reader.restage(root)`` before VDS
-        precreation, so VDS + datasets build against the staged copies, and multi-file
-        / multi-sample readers stage ALL their files (the old code staged only
-        ``train_file``/``val_file``).
+        The reader-owned twin of `with_source`: rather than re-source onto a
+        different file, `restage` copies this reader's own source file(s) into
+        ``root`` (typically a RAM disk like ``/dev/shm``) and returns a clone
+        that reads the copies, so multi-file / multi-sample readers stage all
+        their files.
 
-        Base default: copy each `sources` file to ``root`` via the FileLock-coordinated
-        `salt.core.data.vds.stage_file` (reuses the existing copy + ``.done`` marker
-        machinery so a DDP / worker stampede copies each file exactly once, no trainer
-        handle needed), then clone with the new path via `with_source`. A reader with a
-        single source uses this directly; multi-source readers (`MultiSampleReader`)
-        override to restage each sub-reader recursively. A reader with NO source clones
-        unchanged (nothing to stage).
+        Base default: copy each `sources` file to ``root`` via the
+        FileLock-coordinated `salt.core.data.vds.stage_file` (a DDP / worker
+        stampede copies each file exactly once), then clone with the new path
+        via `with_source`. A reader with a single source uses this directly;
+        multi-source readers (`MultiSampleReader`) override to restage each
+        sub-reader recursively. A reader with no source clones unchanged.
 
         Parameters
         ----------
@@ -402,17 +354,17 @@ class Reader(DatasetModule):
         gschema: GroupSchema | None = None,
         labels: dict[str, object] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Cut → sort → truncate → pad jagged columns into a structured ``(B, T)`` array.
+        """Cut -> sort -> truncate -> pad jagged columns into a structured ``(B, T)`` array.
 
-        The shared `Reader`-base assembly (plan 24, Wave 2): delegates to
-        `salt.core.data.stream._cut_sort_truncate_pad`. Every jagged-stream reader
-        (easyjet, ftag1lite, the jagged-combine path of multisample, a future
-        jagged-H5 reader) calls THIS instead of re-implementing pad/sentinel logic.
+        The shared `Reader`-base assembly: delegates to
+        `salt.core.data.stream._cut_sort_truncate_pad`. Every jagged-stream
+        reader (easyjet, ftag1lite, the jagged-combine path of multisample)
+        calls this instead of re-implementing pad/sentinel logic.
 
-        **PARITY.** With ``stream_cfg`` carrying no cuts and no sort (the default)
-        this reproduces the readers' previous contiguous truncate+pad+valid path
-        byte-for-byte; the drop-then-pad / sort machinery engages only when cuts/sort
-        are configured.
+        With ``stream_cfg`` carrying no cuts and no sort (the default) this
+        reproduces the readers' contiguous truncate+pad+valid path
+        byte-for-byte; the drop-then-pad / sort machinery engages only when
+        cuts/sort are configured.
 
         Parameters
         ----------
@@ -439,27 +391,22 @@ class Reader(DatasetModule):
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable reader buffer.
 
-        Used by the ``debug`` boundary check (design §2.4: leaves surviving
-        to the torch boundary must not alias a reusable buffer). Default:
-        False (no registered buffers).
-
-        Returns
-        -------
-        bool
-            True if `array` may share memory with a reader buffer.
+        Used by the ``debug`` boundary check (leaves surviving to the torch
+        boundary must not alias a reusable buffer). Default: False (no
+        registered buffers).
         """
         del array
         return False
 
 
 class Processor(DatasetModule):
-    """Pure batch transform on the numpy bundle (design §2.4).
+    """Pure batch transform on the numpy bundle.
 
-    `process` reads its declared requires from the bundle and returns ONLY
+    `process` reads its declared requires from the bundle and returns only
     newly produced keys, as a flat dotted dict (or nested — both spellings
-    are canonicalised by the runner, design §2.5/§3.2). Processors may use
-    private scratch buffers, but any leaf that survives to the torch
-    boundary must not alias a reusable reader buffer (design §2.4).
+    are canonicalised by the runner). Processors may use private scratch
+    buffers, but any leaf that survives to the torch boundary must not alias
+    a reusable reader buffer.
     """
 
     @abstractmethod

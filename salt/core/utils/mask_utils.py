@@ -1,19 +1,11 @@
-"""salt.core.utils.mask_utils — core-local copies of the shared v1 mask helpers.
-
-M7 W2b relocation: the v1 ``salt.utils.mask_utils`` helpers that production
-``salt.core`` code depends on (the MaskFormer writer's ``indices_from_mask``, the
-MaskFormer metric callback's ``mask_from_logits`` + ``reco_metrics``, and the
-``object_index`` export reduce's ``indices_from_mask`` reached through the inlined
-``get_maskformer_outputs``) are COPIED here BYTE-FAITHFULLY (identical logic) so
-the core package no longer imports the v1 tree. The v1 original stays in place as
-the RS1 gate oracle (the gates still import v1); production imports the copy here.
+"""Core-local copies of the v1 mask helpers used by production ``salt.core`` code.
 
 Only the genuinely-shared subset is copied — ``indices_from_mask`` /
 ``mask_from_logits`` (+ its ``sigmoid_mask`` / ``argmax_mask`` / ``sanitise_mask``
 / ``mask_from_indices`` chain) / ``reco_metrics`` (+ its ``mask_effs_purs`` /
-``mask_eff_pur`` helper) — matching the v1 functions byte-for-byte (mask_utils.py
-:40-149, :152-305, :308-438). ``build_target_masks`` and the training-only
-``mask_from_indices`` callers are not core consumers and are left in v1.
+``mask_eff_pur`` helper) — matching the v1 functions byte-for-byte.
+``build_target_masks`` and the training-only ``mask_from_indices`` callers are
+not core consumers and stay in v1.
 """
 
 import torch

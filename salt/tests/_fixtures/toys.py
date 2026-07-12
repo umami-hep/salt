@@ -1,23 +1,4 @@
-"""Toy GraphModules for the M1 kernel integration tests (plan 03, stage F).
-
-No physics (M1 scope): these fixtures exercise every kernel feature on a
-five-module toy graph — symbolic dims and dtype unification (design §2.2),
-kind typing (pad_mask/label/loss), mode-gated ports, the optional-port probe
-idiom, wildcard narrowing (design §2.2 rules (a)-(d)), terminal consumers
-(writers, design §3.1), and the all-modes-dead error (design §3.1
-principle 10).
-
-The toy graph wired by ``salt/tests/_fixtures/configs/toy.yaml``::
-
-    <sources> --raw.x--> source --inputs.x,masks.x--> embed --embed.x--> head
-    <sources> --raw.x--> labels --labels.x (fit/val, narrowed)----------^
-    head --losses.total (fit/val)--> <sinks>
-    head --preds.x (test)----------> writer (terminal) / <sinks>
-
-Modules are referenced via ``class_path: salt.tests._fixtures.toys.<Class>`` (the
-M1 CLI loader, salt/core/cli.py) and by the ``salt.tests.integration.demo_m1`` demo. The
-loader assigns ``instance.name`` from the config key after construction.
-"""
+"""Toy GraphModules for the M1 kernel integration tests (plan 03, stage F)."""
 
 from __future__ import annotations
 
@@ -43,13 +24,7 @@ _UNNAMED = "unnamed"  # overwritten by the CLI loader (or the test) per design �
 
 
 class ToySource:
-    """Reader stand-in: turns the framework source leaf into inputs + pad mask.
-
-    Declares the sources-style keys ``inputs.x`` / ``masks.x`` (design §2.4
-    analogue) from the dataset-boundary leaf ``raw.x``. The produced mask is
-    all-False (nothing padded) with ``kind="pad_mask"`` so kind typing is
-    exercised end-to-end.
-    """
+    """Reader stand-in: turns the framework source leaf into inputs + pad mask."""
 
     def __init__(self, n_features: int = 8) -> None:
         self.name = _UNNAMED
@@ -79,12 +54,7 @@ class ToySource:
 
 
 class ToyEmbed(nn.Module):
-    """nn.Module embedder: the executor call lands in ``forward(b, mode)`` (design §2.5).
-
-    Optionally consumes the pad mask via the ``key in b`` probe idiom
-    (design §2.2 optional ports) — legal under debug execution even when the
-    planner dropped the port.
-    """
+    """nn.Module embedder: the executor call lands in ``forward(b, mode)`` (design §2.5)."""
 
     def __init__(self, in_dim: int = 8, out_dim: int = 16) -> None:
         super().__init__()
@@ -118,13 +88,7 @@ class ToyEmbed(nn.Module):
 
 
 class ToyWildcardLabels:
-    """Framework-style wildcard label provider (design §2.2 rules (a)-(d)).
-
-    Declares the pattern ``labels.*`` (fit/val only); the planner narrows it
-    against concrete demand and validates the narrowed keys against the
-    schema. At runtime it must return exactly the narrowed key set — here the
-    configured ``fields`` mirror what the toy dataset "has".
-    """
+    """Framework-style wildcard label provider (design §2.2 rules (a)-(d))."""
 
     allow_wildcards: ClassVar[bool] = True  # framework wildcard capability (design §2.2)
 
@@ -159,11 +123,7 @@ class ToyWildcardLabels:
 
 
 class ToyHead:
-    """Prediction head with mode-gated ports: preds always, labels->loss in fit/val.
-
-    ``embed_key`` is configurable so a typo'd config (toy_broken.yaml) can
-    exercise the §4.1-quality missing-producer error.
-    """
+    """Prediction head with mode-gated ports: preds always, labels->loss in fit/val."""
 
     def __init__(
         self, in_dim: int = 16, n_classes: int = 3, embed_key: str = "embed.x"
@@ -192,11 +152,7 @@ class ToyHead:
         )
 
     def __call__(self, b: Bundle, mode: Mode) -> dict:
-        """Produce softmax preds always, plus the cross-entropy loss in fit/val.
-
-        Returns a mixture of nested (``preds``) and dotted (``losses.total``)
-        spellings — both are canonicalised by the executor (design §2.5).
-        """
+        """Produce softmax preds always, plus the cross-entropy loss in fit/val."""
         logits = b.get(self.embed_key)[:, : self.n_classes]
         out: dict = {"preds": {"x": logits.softmax(dim=-1)}}
         if mode & Mode.TRAINING:
@@ -205,11 +161,7 @@ class ToyHead:
 
 
 class ToyWriter:
-    """Test-only sink: a terminal consumer (requires, no produces) (design §3.1).
-
-    Terminal consumers anchor demand themselves; the collected predictions
-    stand in for an output file (writers are M3).
-    """
+    """Test-only sink: a terminal consumer (requires, no produces) (design §3.1)."""
 
     def __init__(self, key: str = "preds.x") -> None:
         self.name = _UNNAMED
@@ -229,12 +181,7 @@ class ToyWriter:
 
 
 class ToyDead:
-    """Produces a key nothing consumes in any mode (design §3.1 principle 10).
-
-    Adding this module to the toy graph makes ``compile_plan`` raise
-    `AllModesDeadError` (deadness is provable: the toy config declares sinks
-    for every primary mode); ``deadcode`` instead *reports* it as pruned.
-    """
+    """Produces a key nothing consumes in any mode (design §3.1 principle 10)."""
 
     def __init__(self) -> None:
         self.name = _UNNAMED

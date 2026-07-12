@@ -1,19 +1,18 @@
 """`GraphDataset` — the map-style dataset that runs the compiled dataset plan.
 
-Design §6.1: one ``__getitem__`` call = one full batch. The plan is compiled
-once (per process) by the same kernel planner as the model side (design
-§3.1); execution walks the steps in plan order, passing the batch row slice
-explicitly (`Reader.read` / `Processor.process`, design §2.4) and merging
-returns under write-once + declaration checks (`Bundle.merge`). After the
-plan runs, every leaf under the model-visible namespaces (``inputs``,
-``masks``, ``labels``, ``meta``) crosses the numpy→torch boundary via
-``torch.from_numpy(maybe_copy(x))`` (``array_utils.py:93-109``); ``raw.*``
-never crosses (design §2.4).
+One ``__getitem__`` call = one full batch. The plan is compiled once (per
+process) by the same kernel planner as the model side; execution walks the
+steps in plan order, passing the batch row slice explicitly (`Reader.read` /
+`Processor.process`) and merging returns under write-once + declaration
+checks (`Bundle.merge`). After the plan runs, every leaf under the
+model-visible namespaces (``inputs``, ``masks``, ``labels``, ``meta``)
+crosses the numpy->torch boundary via ``torch.from_numpy(maybe_copy(x))``;
+``raw.*`` never crosses.
 
 Demand: the dataset plan's sinks are the model boundary's source
 requirements (``inputs.* / masks.* / labels.* / meta.rows``); label demand
 narrows the `Labels` wildcard per mode and is validated against the reader's
-schema artifact (design §2.2 rule (d), §3.3).
+schema artifact.
 """
 
 from __future__ import annotations
@@ -41,36 +40,35 @@ from salt.core.utils.array_utils import maybe_copy
 __all__ = ["MODEL_VISIBLE_NAMESPACES", "GraphDataset"]
 
 MODEL_VISIBLE_NAMESPACES = ("inputs", "masks", "labels", "meta")
-"""Bundle namespaces converted at the numpy→torch boundary (design §2.4)."""
+"""Bundle namespaces converted at the numpy->torch boundary."""
 
 _SUGGESTION_CUTOFF = 0.5
 
 
 class GraphDataset(Dataset):
-    """Map-style dataset executing a compiled dataset plan per batch slice (design §6.1).
+    """Map-style dataset executing a compiled dataset plan per batch slice.
 
     Parameters
     ----------
     modules : dict[str, DatasetModule]
         The dataset modules by instance name (exactly one `Reader`). Names
-        are assigned from the dict keys (design §2.2).
+        are assigned from the dict keys.
     mode : Mode
         The primary mode to compile for (FIT/VAL/TEST/ONNX).
     sinks : Sinks
         The model-boundary demand: a flat iterable of dotted keys for `mode`,
         or a ``{Mode: keys}`` mapping (enables the all-modes-dead check
-        across modes, design §3.1). Required — label narrowing is
-        demand-driven (design §3.3).
+        across modes). Required — label narrowing is demand-driven.
     seed : int, optional
         Base seed for read-time augmentations when not running in a
         dataloader worker (workers use torch's per-worker seed), default 42.
     debug : bool, optional
         Assert at the torch boundary that no leaf aliases a reusable reader
-        buffer (design §2.4), by default False.
+        buffer, by default False.
     sink_origins : Mapping[str, str] | None, optional
         Demanded-key -> demander description (the model-side module behind
         each sink, `SaltModule.sink_origins`). Used only to upgrade plan and
-        reader error messages to the §4.1 attribution bar, by default None.
+        reader error messages to a clearer attribution, by default None.
 
     Raises
     ------
@@ -99,7 +97,7 @@ class GraphDataset(Dataset):
                 "label narrowing is demand-driven (design §3.3, §6.1)"
             )
         for name, module in modules.items():
-            module.name = name  # instance names come from the config dict key (design §2.2)
+            module.name = name  # instance names come from the config dict key
         readers = [m for m in modules.values() if isinstance(m, Reader)]
         if len(readers) != 1:
             raise ConfigError(
@@ -114,7 +112,6 @@ class GraphDataset(Dataset):
         self._seed = seed
         self._debug = debug
         # framework wiring: demand-driven producers adopt the reader's streams
-        # (config-derived, static — design §3.3)
         for module in modules.values():
             if isinstance(module, Labels):
                 module.bind_streams(self._reader.streams)
@@ -130,21 +127,14 @@ class GraphDataset(Dataset):
         self._bound_pid: int | None = None
         self._build_caches()
 
-    # -- static compilation (config-only, design §3.1) ------------------------
-
     def _compile(self) -> Plan:
         """Compile the dataset plan and statically validate raw-field demands.
-
-        Returns
-        -------
-        Plan
-            The frozen plan for `self._mode`.
 
         Raises
         ------
         SchemaError
             When a step demands a raw field absent from the schema artifact
-            (nearest-name suggestions included, design §2.6).
+            (nearest-name suggestions included).
         """
         universe = self._reader.label_universe()
         plan = compile_plan(
@@ -177,11 +167,11 @@ class GraphDataset(Dataset):
         return plan
 
     def _collect_read_fields(self) -> dict[str, dict[str, str]]:
-        """Compute the demand-narrowed per-stream read set from the plan (design §6.1).
+        """Compute the demand-narrowed per-stream read set from the plan.
 
         Label fields carry their model-side demand provenance when known
         (`sink_origins`), so a reader bind error names the task module the
-        user configured, not just the `Labels` relay (§4.1 attribution).
+        user configured, not just the `Labels` relay.
 
         Returns
         -------
@@ -209,10 +199,9 @@ class GraphDataset(Dataset):
 
         The plan is static, so the step sequence (module, reader flag,
         declared key set) and the model-visible boundary keys are computed
-        once here instead of being rebuilt every ``__getitem__`` (M3
-        equal-work leftover; `Bundle.merge` enforces produced == declared,
-        so the boundary key list is exact). Rebuilt after unpickling
-        (`__setstate__` recompiles the plan).
+        once here instead of being rebuilt every ``__getitem__`` (`Bundle.merge`
+        enforces produced == declared, so the boundary key list is exact).
+        Rebuilt after unpickling (`__setstate__` recompiles the plan).
         """
         self._exec_steps = tuple(
             (step.name, step.module, isinstance(step.module, Reader), frozenset(step.produces))
@@ -227,52 +216,26 @@ class GraphDataset(Dataset):
 
     @property
     def plan(self) -> Plan:
-        """The compiled dataset plan.
-
-        Returns
-        -------
-        Plan
-            The frozen plan for this dataset's mode.
-        """
+        """The compiled dataset plan for this dataset's mode."""
         return self._plan
 
     @property
     def modules(self) -> dict[str, DatasetModule]:
-        """The configured dataset modules by instance name (read-only view).
-
-        Returns
-        -------
-        dict[str, DatasetModule]
-            A fresh dict of the modules (used by the §4.4 artifact callback
-            to render pruned modules).
-        """
+        """The configured dataset modules by instance name (read-only view)."""
         return dict(self._modules)
 
     @property
     def read_fields(self) -> dict[str, dict[str, str]]:
-        """The demand-narrowed per-stream read set with demand provenance.
-
-        Returns
-        -------
-        dict[str, dict[str, str]]
-            ``{stream: {field: demanding module}}`` (fresh copies) — the
-            §4.4 'per-group read columns' artifact content (design §6.1).
-        """
+        """The demand-narrowed per-stream read set with demand provenance (fresh copies)."""
         return {stream: dict(fields) for stream, fields in self._read_fields.items()}
 
     @property
     def reader(self) -> Reader:
-        """The dataset's single reader module.
-
-        Returns
-        -------
-        Reader
-            The reader instance.
-        """
+        """The dataset's single reader module."""
         return self._reader
 
     def boundary_specs(self) -> dict[str, TensorSpec]:
-        """The model-visible produced leaves — the model plan's ``sources`` (design §3.1).
+        """The model-visible produced leaves — the model plan's ``sources``.
 
         Returns
         -------
@@ -289,14 +252,12 @@ class GraphDataset(Dataset):
             })
         return out
 
-    # -- per-worker binding (the only file-touching hook, design §2.3) --------
-
     def _maybe_bind(self) -> None:
         """Bind all plan modules once per worker process (pid-guarded).
 
         The pid guard covers fork inheritance: a dataset forked into a
         dataloader worker re-binds there, giving each worker its own lazy H5
-        handles and reusable buffers (``datasets.py:367-381, 452-455``).
+        handles and reusable buffers.
         """
         pid = os.getpid()
         if self._bound_pid == pid:
@@ -315,16 +276,8 @@ class GraphDataset(Dataset):
                 module.bind(replace(ctx, step=step))
         self._bound_pid = pid
 
-    # -- the per-batch run (design §3.2 semantics, dataset call convention) ---
-
     def __len__(self) -> int:
-        """Return the number of rows served (delegates to the reader).
-
-        Returns
-        -------
-        int
-            The row count.
-        """
+        """Return the number of rows served (delegates to the reader)."""
         return len(self._reader)
 
     def __getitem__(self, rows: slice) -> dict[str, Any]:
@@ -334,14 +287,14 @@ class GraphDataset(Dataset):
         ----------
         rows : slice
             Contiguous row range with ``start`` and ``stop`` set (the
-            `RandomBatchSampler` contract, ``samplers.py:41-55``).
+            `RandomBatchSampler` contract).
 
         Returns
         -------
         dict[str, Any]
             The model-visible nested dict (``inputs`` / ``masks`` /
             ``labels`` / ``meta``) with torch tensors at the leaves —
-            ``raw.*`` never crosses the boundary (design §2.4).
+            ``raw.*`` never crosses the boundary.
 
         Raises
         ------
@@ -372,19 +325,14 @@ class GraphDataset(Dataset):
     def _to_torch(self, bundle: Bundle) -> dict[str, Any]:
         """Convert model-visible bundle leaves to torch (the framework boundary).
 
-        Returns
-        -------
-        dict[str, Any]
-            The nested batch dict.
-
         Raises
         ------
         MutationError
             Under ``debug=True``, when a leaf aliases a reader buffer.
         """
         out: dict[str, Any] = {}
-        # `_boundary_keys` is the plan-exact model-visible key list (merge
-        # enforces produced == declared), precomputed in `_build_caches`
+        # `_boundary_keys` is the plan-exact model-visible key list, precomputed
+        # in `_build_caches`
         for key, parts in self._boundary_keys:
             value = bundle.get(key)
             if isinstance(value, np.ndarray):
@@ -401,16 +349,11 @@ class GraphDataset(Dataset):
             node[parts[-1]] = value
         return out
 
-    # -- pickling (fork is free; spawn recompiles deterministically) ----------
-
     def __getstate__(self) -> dict[str, Any]:
         """Drop the compiled plan (holds MappingProxyType — not picklable).
 
-        Returns
-        -------
-        dict[str, Any]
-            Picklable state; the plan is recompiled in `__setstate__`
-            (deterministic: same config -> same plan and plan_hash).
+        The plan is recompiled in `__setstate__` (deterministic: same config
+        -> same plan and plan_hash).
         """
         state = self.__dict__.copy()
         state["_plan"] = None

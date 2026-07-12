@@ -1,12 +1,4 @@
-"""Unit tests for the standalone config-constructed nn modules (plan 05, stage A2).
-
-Covers, per module: construction from plain kwargs (no YAML anchors, no
-``input_size`` arithmetic — design §2.3), `declare_io` correctness (keys,
-kinds, mode gating), bind-time shape inference via `resolve_bind_schema`,
-the Normaliser materialise lifecycle, the declarative class-weight source,
-and full FIT/TEST executions through the M1 Executor in debug mode
-(read-tracking + write-once + mutation detection on).
-"""
+"""Unit tests for the standalone config-constructed nn modules (plan 05, stage A2)."""
 
 from __future__ import annotations
 
@@ -119,9 +111,7 @@ def fit_bundle(n_electrons: int = 0) -> Bundle:
     return b
 
 
-# ---------------------------------------------------------------------------
 # bind schema resolution
-# ---------------------------------------------------------------------------
 
 
 class TestResolvedSchema:
@@ -165,9 +155,7 @@ class TestResolvedSchema:
             dims.bind("F:x", 4, "there")
 
 
-# ---------------------------------------------------------------------------
 # construction + declare_io per module
-# ---------------------------------------------------------------------------
 
 
 class TestNormaliser:
@@ -238,18 +226,7 @@ class TestNormaliser:
 
 
 class TestMaskedInputNormaliser:
-    """Self-normalising MaskedInputNormaliser: online masked running stats (plan 01).
-
-    The opt-in `MaskedInputNormaliser` does not read a ``norm_dict.yaml`` — it
-    learns its statistics online over valid (non-padded) objects during
-    training and freezes them for eval/inference/ONNX. These tests cover the
-    locked requirements: padded garbage NEVER moves the stats; the running
-    buffers track the analytic EMA trajectory (fixed momentum) and converge to
-    the true masked dataset mean/std (``momentum=None`` cumulative); eval/val
-    do NOT update; the global (mask-free) stream path; and the empty-batch
-    no-op. parity_gn2 bitwise equality is deliberately broken (stats learned,
-    not from the dict) and is NOT a pass criterion here.
-    """
+    """Self-normalising MaskedInputNormaliser: online masked running stats (plan 01)."""
 
     @staticmethod
     def _bound_norm(streams, global_object=None, **kw):
@@ -324,11 +301,7 @@ class TestMaskedInputNormaliser:
         assert torch.equal(out["normed.tracks"], expected)
 
     def test_padded_garbage_does_not_move_the_stats(self):
-        """CORE REQUIREMENT: huge values in padded slots must NOT affect the stats.
-
-        Two batches with identical VALID content but wildly different PADDED
-        content must produce identical running statistics.
-        """
+        """CORE REQUIREMENT: huge values in padded slots must NOT affect the stats."""
         norm_a = self._bound_norm(["tracks"])
         norm_b = self._bound_norm(["tracks"])
         torch.manual_seed(0)
@@ -524,13 +497,7 @@ class TestStreamEmbed:
 
 
 class TestFeaturewiseAndPosenc:
-    """M7 W-FILM: v2-native FiLM + positional encoding wiring on StreamEmbed/encoder.
-
-    Covers off-by-default no-op (parity-bearing), the optional ``featurewise:`` /
-    ``pos_enc:`` blocks on `StreamEmbed`, the encoder/global FiLM on
-    `TransformerEncoder`, and the config-error rejections. Bitwise vs v1 is the
-    FILM1 gate's job; these are the wiring/structure tests.
-    """
+    """M7 W-FILM: v2-native FiLM + positional encoding wiring on StreamEmbed/encoder."""
 
     _DC = {"hidden_layers": [8], "activation": "ReLU"}
 
@@ -677,18 +644,7 @@ class TestFeaturewiseAndPosenc:
 
 
 class TestStreamEmbedVector:
-    """Rank INFERRED from the bound input (M7 W1.5 wave R; collapses the M6-6 flag).
-
-    `StreamEmbed` no longer carries a rank flag. It declares rank-AGNOSTIC specs
-    (``shape=None`` on its ``normed.<s>`` require AND its ``embed.<s>`` produce),
-    so the producer (Normaliser/reader, keyed on the single reader
-    ``global_object:`` flag) sets the input rank and the consumer sets the output
-    rank — a rank-2 ``[B, F]`` input yields a rank-2 ``[B, D]`` embed (DL1
-    jets-only MLP), a rank-3 ``[B, T, F]`` input yields a rank-3 ``[B, T, D]``
-    embed, all WITHOUT a model-side flag. The ``out_dim`` width is contributed via
-    `derived_widths`. The forward math is identity to v1's no-context
-    `InitNet`/`Dense` (initnet.py:72-89).
-    """
+    """Rank INFERRED from the bound input (M7 W1.5 wave R; collapses the M6-6 flag)."""
 
     def test_declare_io_is_rank_agnostic(self):
         embed = StreamEmbed(stream="jets", out_dim=8)
@@ -717,13 +673,7 @@ class TestStreamEmbedVector:
         assert embed.net.output_size == 16
 
     def test_forward_rank_two_bitwise_vs_independent_v1(self):
-        """[B, F] embed forward == an INDEPENDENT v1 no-context InitNet/Dense.
-
-        The v2 `StreamEmbed.forward` on a ``[B, F]`` stream is ``net(x)`` with
-        no context (the DL1 ``attach_global: false`` path, initnet.py:72-89);
-        copying the bound Dense's weights into a fresh v1 `Dense` reference and
-        running it on the SAME input must agree BITWISE (no float reordering).
-        """
+        """[B, F] embed forward == an INDEPENDENT v1 no-context InitNet/Dense."""
         torch.manual_seed(0)
         embed = StreamEmbed(stream="jets", out_dim=4, dense={"hidden_layers": [8, 8]})
         embed.name = "jet_embed"
@@ -740,13 +690,7 @@ class TestStreamEmbedVector:
 
 
 class TestStreamEmbedMup:
-    """The ``mup:`` flag on `StreamEmbed` (M6 sub-wave B, plan 12 muP arch port).
-
-    The flag threads into the composed v1 `Dense(mup=True)` at bind, applying the
-    muP weight init (``~N(0, 1/fan_out)`` weights, zeroed biases); the forward is
-    unchanged. The flag must NOT be accepted inside ``dense`` (it is a module-level
-    init_arg, not a Dense width key) — that path is the routing/config surface.
-    """
+    """The ``mup:`` flag on `StreamEmbed` (M6 sub-wave B, plan 12 muP arch port)."""
 
     def test_default_is_not_mup(self):
         embed = StreamEmbed(stream="tracks", out_dim=8)
@@ -765,12 +709,7 @@ class TestStreamEmbedMup:
             StreamEmbed(stream="tracks", out_dim=8, dense={"mup": True})
 
     def test_mup_init_matches_independent_v1_dense_mup(self):
-        """The bound mup Dense has the SAME parameter distribution as a v1 Dense(mup=True).
-
-        Both run ``Dense.__init__``'s ``_reset_parameters`` (dense.py:96-102) under
-        the same seed, so the initialised weights are BITWISE identical — the muP
-        init is genuinely active (not the default torch init).
-        """
+        """The bound mup Dense has the SAME parameter distribution as a v1 Dense(mup=True)."""
         torch.manual_seed(0)
         embed = StreamEmbed(stream="tracks", out_dim=4, dense={"hidden_layers": [8]}, mup=True)
         embed.name = "track_embed"
@@ -909,15 +848,7 @@ class TestTransformerEncoder:
 
 
 class TestTransformerEncoderMup:
-    """The ``mup:`` flag on `TransformerEncoder` (M6 sub-wave B, plan 12 muP arch port).
-
-    The flag threads into the composed v1 `Transformer(mup=True)`: the encoder
-    out-proj becomes a ``mup.MuReadout`` (weight+bias zeroed at init), and
-    ``mup.set_base_shapes(enc, enc, rescale_params=False)`` is applied so the
-    MuReadout is forward-runnable (``width_mult == 1`` — the architectural default
-    before the routing stage applies a real shape file). At export the MuReadout is
-    folded to a plain `nn.Linear` (``set_export_mode``).
-    """
+    """The ``mup:`` flag on `TransformerEncoder` (M6 sub-wave B, plan 12 muP arch port)."""
 
     def test_default_is_not_mup(self):
         enc = TransformerEncoder(dim=16, num_layers=1, out_dim=8, attention={"num_heads": 2})
@@ -957,13 +888,7 @@ class TestTransformerEncoderMup:
         assert out["encoded.seq"].shape == (B, T + 1, 8)
 
     def test_mup_forward_bitwise_vs_independent_v1(self):
-        """The v2 mup encoder forward == an INDEPENDENT v1 Transformer(mup=True).
-
-        A separately built v1 ``Transformer(mup=True)``, weight-loaded from the v2
-        encoder, run through v1 forward must agree BITWISE (same weights, same
-        torch-math math — no reordering). This is the module-level analogue of the
-        MU1 gate's forward-init parity.
-        """
+        """The v2 mup encoder forward == an INDEPENDENT v1 Transformer(mup=True)."""
         torch.manual_seed(2)
         enc = TransformerEncoder(
             dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
@@ -1002,13 +927,7 @@ class TestTransformerEncoderMup:
         assert torch.equal(v2, v1)
 
     def test_set_export_mode_folds_mu_readout_to_plain_linear(self):
-        """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged.
-
-        At the architectural default (``width_mult == 1``, ``output_mult == 1``) the
-        fold is the identity multiplier, so the pre/post-fold forward is BITWISE
-        identical. The out-proj becomes a plain ``nn.Linear`` (no MuReadout
-        multiplier op left for the tracer). Idempotent.
-        """
+        """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged."""
         torch.manual_seed(3)
         enc = TransformerEncoder(
             dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
@@ -1286,12 +1205,7 @@ class TestDerivedWidthsFixpoint:
 
     @staticmethod
     def _chained_plan(order):
-        """A duck-typed plan whose steps hold two chained derived-width modules.
-
-        Module ``a`` derives ``mid`` from a concrete ``src``; module ``b``
-        derives ``out`` from ``mid`` (b's input is a's output). ``order`` picks
-        the step order so the dependent module can be visited FIRST.
-        """
+        """A duck-typed plan whose steps hold two chained derived-width modules."""
 
         class _Mod:
             def __init__(self, name, in_key, out_key):
@@ -1358,18 +1272,11 @@ class TestSplitAndPooling:
         assert b.get("pooled.global").shape == (B, 16)
 
 
-# ---------------------------------------------------------------------------
 # encoder-less pooling (M5; DiPS/DeepSets — init_nets + pool_net, no encoder)
-# ---------------------------------------------------------------------------
 
 
 def _encoderless_modules(norm_dict):
-    """A DiPS-shaped module dict: norm -> embed -> concat -> pool -> head -> loss.
-
-    No `TransformerEncoder`, no `Split` (v1 saltmodel.py:90-93,155-156): the
-    pool reads ``seq.x`` (the `Concat` output) and there is no
-    ``masks.registers`` producer at all.
-    """
+    """A DiPS-shaped module dict: norm -> embed -> concat -> pool -> head -> loss."""
     dense = {"hidden_layers": [16], "activation": "ReLU"}
     modules = {
         "norm": Normaliser(norm_dict=norm_dict, streams=["jets", "tracks"], global_object="jets"),
@@ -1431,8 +1338,7 @@ class TestEncoderlessPooling:
         assert torch.isfinite(b.get("loss.total"))
 
     def test_encoderless_pool_equals_v1_no_registers(self, norm_paths):
-        """The pooled vector == a direct v1 GAP call with the {"seq": seq.mask}
-        pad dict (the exact encoder-less semantics: no REGISTERS row)."""
+        """The pooled vector == a direct v1 GAP call with the {"seq": seq.mask}"""
         modules = _encoderless_modules(norm_paths[0])
         plan = compile_plan(modules, Mode.FIT, sources=gn2v2_sources(), sinks=["loss.total"])
         bind_all(modules, resolve_bind_schema(plan))
@@ -1599,9 +1505,7 @@ class TestLossGLS:
         LossGLS.check_task_weights({"t": _IntWeightTask("not-a-number")})
 
 
-# ---------------------------------------------------------------------------
 # task modules
-# ---------------------------------------------------------------------------
 
 
 class TestClassificationTaskModule:
@@ -1734,10 +1638,8 @@ class TestVertexingTaskModule:
         assert torch.equal(v1_weights, v2_weights)
 
 
-# ---------------------------------------------------------------------------
 # RegressionTaskModule (M5 sub-wave A: targets/denom/norm_params/scaler,
 # custom_output_names, sequence, multi-output, mode-split de-scaling)
-# ---------------------------------------------------------------------------
 
 
 def _bind_reg_module(task: RegressionTaskModule, schema_widths: dict[str, int]) -> None:
@@ -1882,13 +1784,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_test_descale_uses_label_denominator(self, norm_paths):
-        """TEST forward = RAW scaled preds (W34.3 flip); get_h5 de-scales via the LABEL denom.
-
-        Plan 34 W34.3: the TEST forward no longer de-scales — it publishes the RAW
-        scaled preds. The ratio de-scale (with the LABEL denominator, v1 get_h5) now
-        lives in get_h5 / get_output. This asserts BOTH: the TEST plan's preds.* leaf
-        is raw, and get_h5 reproduces the v1 label-sourced de-scaling.
-        """
+        """TEST forward = RAW scaled preds (W34.3 flip); get_h5 de-scales via the LABEL denom."""
         targets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
         task = RegressionTaskModule(
             stream="jets",
@@ -1928,12 +1824,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(torch.as_tensor(h5["reg_pt"]), ref[..., 0], atol=1e-6)
 
     def test_onnx_descale_uses_input_feature_by_name(self, norm_paths):
-        """ONNX de-scales with the denominator gathered BY NAME from inputs.<stream>.
-
-        The export graph has no label group (to_onnx.py:381-398), so the ratio
-        denominator must come from the input Feature tensor — and the result
-        differs from the TEST (label-sourced) de-scaling.
-        """
+        """ONNX de-scales with the denominator gathered BY NAME from inputs.<stream>."""
         targets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
         task = RegressionTaskModule(
             stream="jets",
@@ -1988,13 +1879,7 @@ class TestRegressionTaskModule:
         assert not torch.allclose(test_field.value, onnx_field.value, atol=1e-6)
 
     def test_sequence_scaler_descale_parity_and_nan_padding(self):
-        """Per-token (sequence) regression + functional scaler: RAW forward, get_output de-scale.
-
-        Plan 34 W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale,
-        NO nan-pad). The scaler de-scale + masked-position nan-pad (v1 run_inference,
-        task.py:594-596) now live in get_output. Reproduces the MaskFormer
-        ``objects``-style query regression on the 3D ``[B, L, R]`` preds.
-        """
+        """Per-token (sequence) regression + functional scaler: RAW forward, get_output de-scale."""
         d = 16
         scaler = {"pt": {"op": "log", "op_scale": 0.2}, "mass": {"op": "linear", "op_scale": 10}}
         task = RegressionTaskModule(stream="tracks", targets=["pt", "mass"], scaler=scaler)
@@ -2104,13 +1989,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_gaussian_test_descale_one_array_means_then_stddev(self, norm_paths):
-        """TEST forward = RAW [B, 2R] (W34.3); get_output publishes means ‖ stddevs.
-
-        Plan 34 W34.3: the gaussian TEST forward publishes the RAW [B, 2R] (means ‖
-        raw variances) — NO de-scale. The de-scale + the means‖stddev one-array
-        re-concat (parity vs the v1 (means, stds) tuple) now live in get_output /
-        get_h5.
-        """
+        """TEST forward = RAW [B, 2R] (W34.3); get_output publishes means ‖ stddevs."""
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -2182,12 +2061,7 @@ class TestRegressionTaskModule:
 
     @pytest.mark.parametrize("weights", [[1.0, 0.5, 2.0, 0.0, 1.5, 0.25], "zero"])
     def test_sample_weight_loss_parity_nonuniform_and_zero(self, norm_paths, weights):
-        """Per-sample-weighted loss parity (nonuniform + all-zero) vs the v1 head.
-
-        Exercises the fragile interactions the codex plan review flagged:
-        zero/nonuniform weights, the unsqueeze+expand over two targets, and
-        the mask→0 + nanmean ordering — all owned by the composed v1 nan_loss.
-        """
+        """Per-sample-weighted loss parity (nonuniform + all-zero) vs the v1 head."""
         targets = ("R10TruthLabel_R22v1_TruthJetMass", "R10TruthLabel_R22v1_TruthJetPt")
         w = torch.zeros(B) if weights == "zero" else torch.tensor(weights)
         task = RegressionTaskModule(
@@ -2221,11 +2095,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_nan_target_masking_loss_parity(self, norm_paths):
-        """NaN targets are masked (→0) and reduced with nanmean; parity vs v1.
-
-        Requires reduction='none' so the per-element loss survives to nanmean
-        (v1 task.py:412-437, the nan_regression contract).
-        """
+        """NaN targets are masked (→0) and reduced with nanmean; parity vs v1."""
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -2274,9 +2144,7 @@ class TestRegressionTaskModule:
         _bind_reg_module(task, {"pooled.global": 16})
 
 
-# ---------------------------------------------------------------------------
 # full plan execution (FIT + TEST), debug mode on
-# ---------------------------------------------------------------------------
 
 
 class TestGn2V2Execution:
@@ -2302,14 +2170,7 @@ class TestGn2V2Execution:
         assert not torch.allclose(logits.sum(-1), torch.ones(B))  # not softmaxed
 
     def test_test_plan_classification_preds_are_raw_logits(self, gn2v2):
-        """TEST classification + vertexing preds are RAW since the flips (design §2).
-
-        The classification eval conversion (softmax) moved OUT of ``forward`` and
-        INTO the producers / ``get_h5`` (P1.5). Plan 34 W34.3 ALSO flips vertexing:
-        the TEST ``forward`` now publishes the RAW ``[E, 1]`` edge scores (the
-        union-find moved to get_output / get_h5), so the executed TEST ``preds.*``
-        for ALL three heads are raw.
-        """
+        """TEST classification + vertexing preds are RAW since the flips (design §2)."""
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.TEST)
         assert "loss" not in plan.module_names  # LossSum inactive outside TRAINING
@@ -2359,13 +2220,7 @@ class TestGn2V2Execution:
 
 
 def _origin_schema_reader(origin_label: str = "ftagTruthOriginLabel") -> SimpleNamespace:
-    """A duck-typed reader exposing the tracks origin class names (design §2.6).
-
-    Mirrors the umami-preprocessing convention the §2.6 class-names check
-    consults: the stream's group attr named after the origin label holds the
-    index-aligned class-name list (``ORIGIN_CLASSES``: Fake=1, FromB=3,
-    FromBC=4, FromC=5 — the v1 default ids).
-    """
+    """A duck-typed reader exposing the tracks origin class names (design §2.6)."""
     schema = Schema(groups={"tracks": GroupSchema(fields={}, attrs={origin_label: ORIGIN_CLASSES})})
     return SimpleNamespace(schema_group=schema.groups.get)
 
@@ -2503,13 +2358,7 @@ class TestOriginWeightingConfig:
 
 
 class TestExposeOptOut:
-    """Per-task ``expose: [fit, val]`` opt-out (design §4.2, M5 sub-wave D).
-
-    A train-only aux task gates its ``preds.*`` port to the listed modes so the
-    planner prunes it from the TEST/ONNX plans (silencing the dead-preds hard
-    error) while it keeps training. The default (no ``expose``) publishes in
-    every mode as before.
-    """
+    """Per-task ``expose: [fit, val]`` opt-out (design §4.2, M5 sub-wave D)."""
 
     def test_parse_default_is_all_modes(self):
         task = ClassificationTaskModule(
@@ -2645,13 +2494,7 @@ class TestExposeOptOut:
 
 
 class TestNoIOGuard:
-    """Design §2.3 CI guard: declare_io and bind run under a no-I/O trap.
-
-    The rule itself ("declare_io/bind touch no files") was only ever verified
-    manually; this pins it in CI over the shipped GN2v2 module set (stage-E
-    design-compliance fix). materialise() stays the ONLY file-touching hook —
-    proven by releasing the trap and pointing it at a nonexistent norm dict.
-    """
+    """Design §2.3 CI guard: declare_io and bind run under a no-I/O trap."""
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):
         # construction is config capture only — safe to build under the trap

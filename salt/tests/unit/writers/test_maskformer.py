@@ -1,13 +1,4 @@
-"""Tests for `salt.core.outputs.maskformer` — the MaskFormerObjectWriter.
-
-TEST byte-parity vs the v1 op chain + the extra-group plumbing
-(predictionwriter.py:267-308; M5 sub-wave C, plan 10): decoder-preds/truth
-requires, the objects/object_masks extra groups, v1 column naming, the
-ONNX two-object-reduce manifest, and the OBJECT_INDEX constant single-ownership.
-
-(Split out of the former monolithic ``test_writers.py``; shared fixtures /
-toy-writers / constants come from ``salt.tests._fixtures.writers_common``.)
-"""
+"""Tests for `salt.core.outputs.maskformer` — the MaskFormerObjectWriter."""
 
 from __future__ import annotations
 
@@ -29,10 +20,8 @@ from salt.tests._fixtures.writers_common import (  # noqa: F401  (data/modules a
     modules,
 )
 
-# ---------------------------------------------------------------------------
 # MaskFormerObjectWriter: TEST byte-parity vs v1 + the extra-group plumbing
 # (predictionwriter.py:267-308; M5 sub-wave C, plan 10)
-# ---------------------------------------------------------------------------
 
 
 OBJECT_CLASSES = ["b", "c", "null"]

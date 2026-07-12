@@ -1,18 +1,4 @@
-"""Per-wrapper unit tests for the GN2 forward-parity wrappers (plan 04, stage 2).
-
-Strategy: build the small v1 GN2 from the stage-1 recipe, wrap its live
-submodules via `from_v1`, compile a TEST plan over the dataset boundary
-(sources = ``inputs.*`` / ``masks.*``, sinks = the three ``preds.*`` leaves),
-execute it ONCE through the M1 Executor in debug mode (read-tracking +
-mutation detection on), and then assert — per wrapper — that the produced
-bundle leaf is BITWISE equal to the corresponding v1 intermediate computed
-manually. Per-stage checks localise wiring bugs that an end-to-end diff
-would only flag globally.
-
-PASS criterion is bitwise (``torch.equal``): both sides share the same
-nn.Module instances and the same op order (stage-1 probe confirmed CPU
-bitwise repeatability), so any tolerance would only mask wiring bugs.
-"""
+"""Per-wrapper unit tests for the GN2 forward-parity wrappers (plan 04, stage 2)."""
 
 from __future__ import annotations
 
@@ -33,9 +19,7 @@ EXPECTED_SINKS = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # fixtures (module-scoped: one v1 model, one batch, one executed v2 bundle)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -56,12 +40,7 @@ def v1_preds(v1, batch):
 
 @pytest.fixture(scope="module")
 def v1_stages(v1, batch):
-    """Manual v1 intermediates, stage by stage, on fresh clones.
-
-    Reproduces the exact v1 forward chain (modelwrapper.py:221-224,
-    saltmodel.py:128-170) so each wrapper's output has a per-stage
-    reference, not just the end-to-end preds.
-    """
+    """Manual v1 intermediates, stage by stage, on fresh clones."""
     inputs, pad_masks = batch
     with torch.no_grad():
         # norm rebinds the dict's keys (inputnorm.py:103-106) -> fresh dict
@@ -110,9 +89,7 @@ def executed(plan, batch):
     return bundle
 
 
-# ---------------------------------------------------------------------------
 # batch sanity: the data must be able to excite the bugs this gate hunts
-# ---------------------------------------------------------------------------
 
 
 def test_batch_has_real_padding(batch):
@@ -126,9 +103,7 @@ def test_batch_has_real_padding(batch):
     assert (n_valid < mask.shape[1]).any()
 
 
-# ---------------------------------------------------------------------------
 # plan structure: the v2 path demonstrably runs through the M1 kernel
-# ---------------------------------------------------------------------------
 
 
 def test_plan_modules_and_order(plan):
@@ -171,9 +146,7 @@ def test_executed_bundle_has_all_keys(executed):
     assert keys == expected
 
 
-# ---------------------------------------------------------------------------
 # instance sharing: weights identical by construction, no whole-model shortcut
-# ---------------------------------------------------------------------------
 
 
 def test_from_v1_shares_instances(v1, v2):
@@ -199,9 +172,7 @@ def test_instance_names_match_keys(v2):
         assert module.name == key
 
 
-# ---------------------------------------------------------------------------
 # per-wrapper parity vs manually computed v1 intermediates (all bitwise)
-# ---------------------------------------------------------------------------
 
 
 def test_normaliser_matches_v1(executed, v1_stages):
@@ -279,9 +250,7 @@ def test_task_track_vertexing_matches_v1(executed, v1_preds, batch):
     assert torch.equal(out, v1_preds["tracks"]["track_vertexing"])
 
 
-# ---------------------------------------------------------------------------
 # Split (off the parity task path — standalone check against seq slices)
-# ---------------------------------------------------------------------------
 
 
 def test_split_matches_seq_slices(executed):
@@ -293,17 +262,11 @@ def test_split_matches_seq_slices(executed):
     assert torch.equal(out["encoded.tracks"], executed.get("encoded.seq")[:, :N_TRACKS])
 
 
-# ---------------------------------------------------------------------------
 # sensitivity: the comparison must be able to FAIL on the hunted bug class
-# ---------------------------------------------------------------------------
 
 
 def test_mask_dict_order_is_load_bearing(v1, executed):
-    """A reordered mask dict silently selects the wrong slice (task.py:73-78).
-
-    Proves this batch can excite the dict-order bug the wrappers comment on:
-    if it could not, bitwise parity would be a mask-order coincidence.
-    """
+    """A reordered mask dict silently selects the wrong slice (task.py:73-78)."""
     task = v1.model.tasks[1]  # track_origin
     encoded = executed.get("encoded.seq")
     pooled = executed.get("pooled.global")

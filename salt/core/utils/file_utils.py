@@ -1,11 +1,8 @@
 """Utilities for temporary file handling and S3 downloads.
 
-This module provides helpers to:
-- build temporary file paths (e.g., on RAM disks),
-- copy/move/remove files safely,
-- convert various S3 path formats to canonical S3 URLs,
-- download files from S3 (optionally in parallel),
-- and patch configuration dictionaries/paths after downloading.
+Build temporary file paths (e.g. on RAM disks), copy/move/remove files safely,
+convert S3 path formats to canonical S3 URLs, download files from S3
+(optionally in parallel), and patch config dicts/paths after downloading.
 """
 
 import os
@@ -25,32 +22,14 @@ except ImportError:
 
 
 def get_temp_path(move_files_temp: str, in_path: str | Path) -> Path:
-    """Create the full temporary path for a file.
-
-    Parameters
-    ----------
-    move_files_temp : str
-        Root directory where temporary files should live (e.g. ``/dev/shm/user/tmp``).
-    in_path : str | Path
-        Original absolute or relative input file path.
-
-    Returns
-    -------
-    Path
-        Temporary path composed as ``Path(move_files_temp) / Path(in_path).name``.
-    """
+    """Create the full temporary path for a file: ``move_files_temp / in_path.name``."""
     return Path(Path(move_files_temp) / Path(in_path).name)
 
 
 def copy_file(in_path: Path, out_path: Path) -> None:
     """Copy a file to a destination unless the destination already exists.
 
-    Parameters
-    ----------
-    in_path : Path
-        Source file path.
-    out_path : Path
-        Destination file path. Parent directories are created if necessary.
+    Parent directories of ``out_path`` are created if necessary.
     """
     if in_path == out_path or out_path.is_file():
         return
@@ -59,13 +38,7 @@ def copy_file(in_path: Path, out_path: Path) -> None:
 
 
 def remove_file(path: Path) -> None:
-    """Remove a file if it exists.
-
-    Parameters
-    ----------
-    path : Path
-        Path to the file to remove.
-    """
+    """Remove a file if it exists."""
     if path.is_file():
         path.unlink()
     else:
@@ -73,15 +46,7 @@ def remove_file(path: Path) -> None:
 
 
 def remove_files_temp(train_temp_path: Path, val_temp_path: Path) -> None:
-    """Remove the temporary train/validation files and the temp directory (if empty).
-
-    Parameters
-    ----------
-    train_temp_path : Path
-        Temporary path for the training file.
-    val_temp_path : Path
-        Temporary path for the validation file.
-    """
+    """Remove the temporary train/validation files and the temp directory (if empty)."""
     remove_file(train_temp_path)
     remove_file(val_temp_path)
     # Best-effort: remove the parent directory (succeeds only if empty)
@@ -91,17 +56,8 @@ def remove_files_temp(train_temp_path: Path, val_temp_path: Path) -> None:
 def move_files_temp(move_files_temp: str, train_path: str | Path, val_path: str | Path) -> None:
     """Copy training/validation files to a temporary location before training.
 
-    This is useful when the temporary location is a RAM disk (e.g. ``/dev/shm``).
-    The original files are not deleted.
-
-    Parameters
-    ----------
-    move_files_temp : str
-        Root temporary directory (e.g. ``/dev/shm/your/path``).
-    train_path : str | Path
-        Path to the training file on disk.
-    val_path : str | Path
-        Path to the validation file on disk.
+    Useful when the temporary location is a RAM disk (e.g. ``/dev/shm``). The
+    original files are not deleted.
     """
     temp_train_path = get_temp_path(move_files_temp, train_path)
     temp_val_path = get_temp_path(move_files_temp, val_path)
@@ -115,16 +71,6 @@ def convert_path_to_S3url(path: Path | str) -> str:
 
     Accepts several forms (e.g., ``s3:/bucket/key`` or ``prefix...s3:/bucket/key``)
     and converts them into ``s3://bucket/key``.
-
-    Parameters
-    ----------
-    path : Path | str
-        Input path or URL.
-
-    Returns
-    -------
-    str
-        Canonical S3 URL starting with ``s3://``.
     """
     path = str(path)
     s3_start = "s3://"
@@ -153,19 +99,9 @@ def download_S3(
 ) -> None:
     """Download a single S3 object to a local path with a progress bar.
 
-    Parameters
-    ----------
-    session : Any
-        A ``boto3.client('s3')``-like object (duck-typed; must support ``head_object`` and
-        ``download_file``).
-    bucket : str
-        Name of the S3 bucket.
-    file_to_load : str
-        Object key inside the bucket (may start with ``/``, which is stripped).
-    store_path : Path
-        Local output path to save the object to.
-    count : int
-        Position index used by ``tqdm`` so multiple progress bars can render concurrently.
+    ``session`` is duck-typed: it must support ``head_object`` and
+    ``download_file`` (a ``boto3.client('s3')``-like object). ``count`` positions
+    the ``tqdm`` bar so multiple downloads can render concurrently.
     """
     file_to_load = file_to_load[1:] if file_to_load and file_to_load[0] == "/" else file_to_load
     meta_data = session.head_object(Bucket=bucket, Key=file_to_load)
@@ -188,32 +124,15 @@ def download_script_S3(
     file: str,
     count: int,
 ) -> tuple[str, str]:
-    """Download an S3 object if not present locally, returning the updated mapping.
+    """Download an S3 object if not present locally, returning ``(key, local_file_path)``.
 
-    The function is intended to be launched in parallel via ``multiprocessing.Pool``.
-
-    Parameters
-    ----------
-    bucket : str
-        S3 bucket name.
-    local_path : Path | str
-        Local directory to store the downloaded file.
-    key : str
-        Key name used in the configuration (returned unchanged).
-    file : str
-        Full S3 URL or object key to download.
-    count : int
-        Position for the progress bar (``tqdm``).
-
-    Returns
-    -------
-    tuple[str, str]
-        A pair ``(key, local_file_path)`` to be used to update configs.
+    Intended to be launched in parallel via ``multiprocessing.Pool``; ``key`` is
+    the configuration key name, returned unchanged for updating configs.
 
     Raises
     ------
     ValueError
-        If boto3 is not available
+        If boto3 is not available.
     """
     if _boto3:
         target_path = Path(local_path, file.rsplit("/", maxsplit=1)[-1])
@@ -231,19 +150,11 @@ def import_data_S3(config_path: str | Path) -> str:
     """Optionally download S3 data referenced in a YAML config and write a local copy.
 
     If the config contains a ``data.config_s3`` section with ``download_S3: true``,
-    all files listed under ``download_files`` are fetched to ``download_path`` in parallel,
-    and the paths in the config are updated to the downloaded local files. A local copy of the
-    (now patched) config is written next to the downloads and its path is returned.
-
-    Parameters
-    ----------
-    config_path : str | Path
-        Path to the input configuration YAML file.
-
-    Returns
-    -------
-    str
-        Path to the (possibly new) local configuration file to use going forward.
+    all files listed under ``download_files`` are fetched to ``download_path`` in
+    parallel, and the paths in the config are updated to the downloaded local
+    files. A local copy of the (now patched) config is written next to the
+    downloads. Returns the path to the (possibly new) local configuration file
+    to use going forward.
     """
     with open(Path(config_path)) as file:
         cfg = yaml.safe_load(file)
@@ -283,17 +194,7 @@ def setup_S3_CLI(sc_data: dict) -> dict:
     """Prepare environment and optionally download S3 data (CLI-friendly path).
 
     Similar to :func:`import_data_S3`, but operates directly on an in-memory
-    configuration dictionary (e.g., the ``data`` section of a larger config).
-
-    Parameters
-    ----------
-    sc_data : dict
-        The ``data`` sub-dictionary containing a ``config_s3`` section.
-
-    Returns
-    -------
-    dict
-        The (possibly updated) ``data`` dictionary with local file paths after download.
+    ``data`` configuration dictionary containing a ``config_s3`` section.
     """
     """Setting up salt to use S3."""
     config_s3 = sc_data["config_s3"]
@@ -328,18 +229,7 @@ def setup_S3_CLI(sc_data: dict) -> dict:
 def require_S3(path: Path | str) -> bool:
     """Return whether the YAML config at ``path`` requires S3 access.
 
-    The config is considered to require S3 if
-    ``data.config_s3.use_S3 == true``.
-
-    Parameters
-    ----------
-    path : Path | str
-        Path to a YAML configuration file.
-
-    Returns
-    -------
-    bool
-        ``True`` if S3 is required, ``False`` otherwise.
+    True if ``data.config_s3.use_S3 == true``.
     """
     with open(path) as file:
         print("Doign this")
@@ -352,18 +242,7 @@ def require_S3(path: Path | str) -> bool:
 
 
 def require_S3_CLI(config_s3: dict | None) -> bool:
-    """Return whether S3 is required based on a ``config_s3`` dictionary.
-
-    Parameters
-    ----------
-    config_s3 : dict | None
-        The ``config_s3`` sub-dictionary (or ``None``).
-
-    Returns
-    -------
-    bool
-        ``True`` if either ``use_S3`` or ``download_S3`` is enabled; otherwise ``False``.
-    """
+    """Return whether S3 is required: ``config_s3`` sets ``use_S3`` or ``download_S3``."""
     """Checking whether salt requires s3."""
     if config_s3 is None:
         return False
@@ -373,10 +252,8 @@ def require_S3_CLI(config_s3: dict | None) -> bool:
 
 
 def download_from_S3() -> None:
-    """Convenience entry-point: use the default base config and import data from S3.
-
-    This locates ``configs/base.yaml`` relative to this file, and delegates to
-    :func:`import_data_S3`.
+    """Convenience entry-point: locate ``configs/base.yaml`` relative to this file
+    and delegate to :func:`import_data_S3`.
     """
     config_dir = Path(__file__).parent.parent / "configs"
     config = f"{config_dir}/base.yaml"

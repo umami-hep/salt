@@ -1,30 +1,4 @@
-"""PLAN 34 W34.4 GAUSSIAN cutover proof — outputs:-section gaussian get_output parity.
-
-The W34.4 §7 gate (plan 34 §9 line 146 — the one untested corner): the gaussian
-``outputs:``-SECTION path (`RunTaskOutput` -> gaussian ``get_output``) was NOT proven
-end-to-end before W34.4 routes gaussian heads (Dipz/hitz/regression_gaussian) through
-the section. This builds that proof BEFORE migrating any gaussian config.
-
-On the SAME gaussian regression model + source H5 + trained checkpoint, run BOTH eval
-paths and assert the eval H5 matches at SEMANTIC parity (floats <=1e-6, ints/bools
-EXACT), including column NAMES + ORDER + DTYPES:
-
-- **(a) the W34.3 gaussian Regression (RegressionDescaleOp, gaussian=true) PRODUCER
-  path** — the shipped ``regression_gaussian.yaml`` (auto-collect H5OutputSink over the
-  gaussian de-scale producers), the ORACLE for the de-scaled means + ``_stddev``
-  columns; and
-- **(b) the PLAN 34 ``outputs:`` section + dumb sinks** — `RunTaskOutput` (calling each
-  gaussian RegressionTaskModule's ``get_output``: means‖softplus-stddev one-array
-  de-scale) + `InputCopyWriter` + `PadMaskWriter`, dumped by the DUMB `H5OutputSink`,
-  driven by the ``regression_gaussian-cutover34.yaml`` config through the real
-  ``salt2 test`` CLI.
-
-Both paths read the RAW (scaled) preds the W34.3-flipped forward publishes and de-scale
-ONCE — (a) in the producer, (b) in get_output — so the de-scaled gaussian columns must
-be byte-identical. regression_gaussian.yaml is the broadest gaussian surface (a GLOBAL
-gaussian head + a PER-TOKEN gaussian head), so this proves gaussian get_output de-scale
-end-to-end in BOTH H5 and ONNX.
-"""
+"""PLAN 34 W34.4 GAUSSIAN cutover proof — outputs:-section gaussian get_output parity."""
 
 from __future__ import annotations
 
@@ -154,12 +128,7 @@ def _compare_column(group, col, want, got) -> str | None:
 
 
 def test_gaussian_section_h5_matches_producer_oracle(producer_h5, section_h5):
-    """The gaussian get_output de-scale eval H5 == the gaussian Regression producer oracle.
-
-    Full-payload parity: the de-scaled gaussian columns (R means then R ``_stddev``,
-    GLOBAL head + PER-TOKEN head) + input copies + pad mask, NAMES + ORDER + DTYPES,
-    matching the auto-collect-producer path byte-for-byte.
-    """
+    """The gaussian get_output de-scale eval H5 == the gaussian Regression producer oracle."""
     diffs: list[str] = []
     with h5py.File(producer_h5) as a, h5py.File(section_h5) as b:
         assert set(a.keys()) == set(b.keys()), f"groups differ: {set(a)} vs {set(b)}"
@@ -181,13 +150,7 @@ def test_gaussian_section_h5_matches_producer_oracle(producer_h5, section_h5):
 
 
 def test_gaussian_section_has_stddev_columns(section_h5):
-    """Sanity: the section H5 carries the gaussian doubled columns (mean + _stddev).
-
-    The global head publishes ``regression_HadronConeExclTruthLabelPt`` +
-    ``regression_HadronConeExclTruthLabelPt_stddev``; the per-token head publishes
-    ``regression_dummyOutput_dPhi`` + ``regression_dummyOutput_dPhi_stddev``. Proves the
-    gaussian means‖stddev one-array split survived the section path (not just plain reg).
-    """
+    """Sanity: the section H5 carries the gaussian doubled columns (mean + _stddev)."""
     with h5py.File(section_h5) as f:
         jet_cols = set(f["jets"].dtype.names)
         track_cols = set(f["tracks"].dtype.names)
@@ -234,16 +197,7 @@ def _onnx_contract(path: Path) -> tuple[list[str], dict[str, int], dict[str, int
 
 
 class TestW34GaussianOnnxParity:
-    """Gaussian ONNX: the dumb outputs:-section export == the producer-oracle export.
-
-    Mirrors the regression-cutover ONNX gate for the gaussian family — exports the
-    explicit gaussian `Regression` producer (regression_gaussian.yaml) as the ORACLE
-    and the get_output outputs:-section (regression_gaussian.yaml +
-    regression_gaussian-cutover34.yaml) as the dumb path, and asserts byte-identical
-    ONNX contract + onnxruntime values, so a future drift in gaussian get_output's
-    ONNX squeeze / single-name leaf naming / in-graph means‖softplus-stddev concat
-    fails loudly.
-    """
+    """Gaussian ONNX: the dumb outputs:-section export == the producer-oracle export."""
 
     @pytest.fixture(scope="class")
     def oracle_onnx(self, ckpt, tmp_path_factory) -> Path:

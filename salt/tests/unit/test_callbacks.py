@@ -1,10 +1,4 @@
-"""Tests for the v2 callbacks (`salt.core.callbacks`): ConfusionMatrix + GraphArtifacts.
-
-The ConfusionMatrix value bar is W5 (plan 06): fed the same eval batches, the
-v2 bundle-native callback must accumulate exactly the values the v1
-``ConfusionMatrixCallback`` accumulates through the `bundle_as_v1_outputs`
-shim — compared here logger-free via the stashed lists/matrix.
-"""
+"""Tests for the v2 callbacks (`salt.core.callbacks`): ConfusionMatrix + GraphArtifacts."""
 
 from __future__ import annotations
 
@@ -196,9 +190,7 @@ class TestConfusionMatrixSurface:
         assert "jets_classification" in str(excinfo.value)  # candidate listed
 
 
-# ---------------------------------------------------------------------------
 # MaskformerMetrics (FD 1200-1202) — matched.objects.* FIT/VAL sink + metrics
-# ---------------------------------------------------------------------------
 
 
 def make_matched_bundle(seed: int = 5, batch: int = 6, m: int = 5, n_cls: int = 3, t: int = 10):
@@ -330,9 +322,7 @@ class TestMaskformerMetrics:
         assert logged == {}  # only_val=True -> no train logging
 
 
-# ---------------------------------------------------------------------------
 # MaskformerConfusionMatrix (v1 port) — matched.objects.* FIT/VAL sink + CM
-# ---------------------------------------------------------------------------
 
 
 class TestMaskformerConfusionMatrix:
@@ -384,9 +374,7 @@ class TestMaskformerConfusionMatrix:
         assert callback.truth_labels == [] and callback.pred_labels == []
 
 
-# ---------------------------------------------------------------------------
 # GraphArtifacts (design §4.4 run-dir artifacts)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -500,9 +488,7 @@ class TestGraphArtifacts:
         assert any(isinstance(cb, GraphArtifacts) for cb in cli.trainer.callbacks)
 
 
-# ---------------------------------------------------------------------------
 # Checkpoint (the v1 salt.callbacks.Checkpoint port — D2 slice) + ProgressBar
-# ---------------------------------------------------------------------------
 
 
 def _ckpt_trainer(log_dir: str, *, fast_dev_run: bool = False) -> SimpleNamespace:

@@ -1,27 +1,6 @@
-# regression.yaml — the RegressionTaskModule family in the v2 schema (M5
-# sub-wave A). The v2-native port of the legacy salt/configs/regression.yaml:
-# an encoder-less DiPS body (init_nets + pool_net, NO encoder — v1
-# saltmodel.py:90-93, the shape EVERY regression config shares) feeding a
-# pooled GLOBAL regression head. Three heads exercise the family surface:
-#
-#   - reg_normed     : mean/std norm_params, single target (v1 regression.yaml:23)
-#   - reg_multinorm  : vector norm_params, two targets (v1 regression.yaml:36)
-#   - reg_ratio      : target_denominators ratio + custom_output_names, with
-#                      mode-split de-scaling (FD §3.3) — pt_btagJes is a declared
-#                      input Feature, so the ONNX export graph can gather it by
-#                      name; the v1 mHH case (event_classifier.yaml:65).
-#
-# NO machine paths are committed (design §5 placeholder policy). From the REPO
-# ROOT (use `python -m salt.core.main` when the salt2 script is not installed):
-#
-#   salt2 fit --config salt/core/configs/regression.yaml \
-#     --data.train_file /path/to/pp_output_train.h5 \
-#     --data.val_file   /path/to/pp_output_train.h5 \
-#     --model.modules.norm.init_args.norm_dict /path/to/norm_dict.yaml
-#
-# Static validation (no data) supplies required init_args data-free:
-#   python -m salt.core.main graph validate -c salt/core/configs/regression.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# RegressionTaskModule family: an encoder-less DiPS body (init_nets + pool,
+# no encoder) feeding several regression head variants — plain norm_params,
+# multi-target, ratio/denominator, and a per-token sequence head.
 
 name: regression
 
@@ -75,14 +54,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -123,10 +102,6 @@ model:
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       reg_multiratio:
-        # jets head, multi-output ratio norm (v1 regression.yaml:69
-        # regression_multi_output_with_ratio_norm): two targets each divided
-        # by a declared input Feature denominator (mass, pt_btagJes — both
-        # ONNX-gatherable by name), with per-target custom_output_names.
         class_path: salt.core.nn.tasks.RegressionTaskModule
         init_args:
           stream: jets
@@ -138,36 +113,21 @@ model:
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       reg_seq_tracks:
-        # per-token sequence head on the TRACKS stream (v1 regression.yaml:87
-        # regression_multi_output_no_global_object). Encoder-less DiPS body has
-        # no encoded.seq, so the per-token input is the StreamEmbed output
-        # embed.tracks; sequence: true is set explicitly because the input is a
-        # non-default key (inference would otherwise read it as global). PER F1b:
-        # v1 has NO context_size on this head -> CONTEXT-FREE (no context key).
+        # per-token head: encoder-less body has no encoded.seq, so this reads
+        # embed.tracks directly; sequence: true is explicit since that key
+        # would otherwise be inferred as global. No context (v1 has none).
         class_path: salt.core.nn.tasks.RegressionTaskModule
         init_args:
           stream: tracks
-          input: embed.tracks # encoder-less per-token features (no pooled.global)
+          input: embed.tracks
           sequence: true
           targets: [dphi, deta]
           custom_output_names: [dummyOutput_dPhi, dummyOutput_dEta]
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4d: this config is migrated OFF the (removed) auto-collect H5OutputSink
-# onto the get_output()-on-task + outputs:-section + dumb-sinks architecture (plan 34
-# §2), self-contained (no -cutover34 overlay needed). RegressionTaskModule.forward
-# publishes RAW (scaled) preds in TEST/ONNX (W34.3 forward-flip); a single
-# RunTaskOutput([reg tasks]) calls each head's get_output() — the de-scale folds onto
-# the task (replacing the W4/W5.2 per-head Regression producer nodes). The dumb sinks
-# dump ALL active outputs.* leaves; the SECTION supplies names + dtypes + ORDER.
-#
-# The top-level outputs: section is composed AFTER the model. Section writers in EXACT
-# v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter.
-# The RunTaskOutput tasks list is the v1 model-declaration order (the regression head
-# column order), so the H5 task-column order + the ONNX Athena tuple order match v1.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
@@ -184,25 +144,17 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4d): no init args — they dump ALL active outputs.* leaves,
-# names/dtypes/order from the bound section manifest. The OnnxExportSink names the
-# de-scaled regression leaves (the Athena physics names = the task output_suffixes:
-# reg_normed -> HadronConeExclTruthLabelPt; reg_multinorm ->
-# R10TruthLabel_R22v1_TruthJetMass/_TruthJetPt; reg_ratio -> pt; reg_multiratio ->
-# truthMass/truthPt; reg_seq_tracks -> dummyOutput_dPhi/dEta) in canonical tuple order
-# (globals then per-token) — byte-identical to the previous explicit OnnxExportSink
-# tuple (proven by test_w34_regression_cutover.py).
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
-  model_name: regression # Athena name: no '_'/'-' (validated at export only)
+export:
+  model_name: regression # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 2

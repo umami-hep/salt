@@ -1,44 +1,7 @@
-r"""muP tooling for salt v2 — shape generation + coord-check (design §3.4, §9.2).
+r"""muP (maximal update parametrization) tooling: shape generation and coord-check.
 
-The ROUTING/tooling half of the muP port (M6 sub-wave B; plan 12; design §3.4
-KEEP-architecture/BREAK-routing). The architectural half lives on the modules
-(`StreamEmbed`/`TransformerEncoder` ``mup:`` flags, the `MuReadout` out-proj
-swap, the export fold — `salt/core/nn/modules.py`); the routing surface
-(``SaltModule.mup: {shape_path, apply_to}``, the `MuAdamW` swap, the
-`validate_mup_routing` validator) lives in `salt/core/saltmodule.py`. This
-module is the COMMAND-LINE tooling those two halves need:
-
-- :func:`generate_shapes` / ``salt2 mup-shapes`` (design §9.2 line 1644) —
-  builds a BASE model (narrow ``apply_to`` widths) and a DELTA model (wider),
-  then ``mup.make_base_shapes(base, delta, savefile)`` writes the infshape file
-  ``SaltModule.mup.shape_path`` consumes. Replaces v1 ``store_shapes_mup`` +
-  ``make_base_shapes`` + ``generate_base_delta_config`` (configuration_muP.py:
-  119,251,257). The v2 break: instead of v1's ``apply_to`` x ``parameter_name``
-  REGEX zip into ``cfg_out["model"]["model"]["init_args"][model_adapt]``, the v2
-  tooling mutates each ``apply_to`` module's explicit ``MUP_WIDTH_ARG`` init_arg
-  via the salt2 ``--set`` surface.
-
-- :func:`coord_check` / ``salt2 mup-coord-check`` (design §3.4 lines 690-694) —
-  trains the same plan at several widths for a few steps, records per-module
-  output coordinate L1 norms, and produces the coord-data (a pandas DataFrame)
-  + a coord-check plot. Replaces v1 ``functions_check_muP.get_coord_data`` (:311)
-  + ``plot_coord_data`` (:398); the v2 break is module SELECTION: v1 filters by
-  a substring match on ``model.named_modules()`` names (configuration_muP.py:
-  448,460), v2 traverses the ``net.<name>.*`` tree and selects the configured
-  ``apply_to`` submodules by their instance-name prefix.
-
-- :func:`setup_mup` — the casing-normalised ``setup_mup`` console entry point.
-  The v1 ``[project.scripts] setup_mup`` pointed at ``salt.utils.mup_utils.
-  main_mup:main`` (lowercase ``mup_utils``/``main_mup``) but the real v1 module
-  is ``salt/utils/muP_utils/main_muP.py`` (capital P) — a BROKEN entry point
-  (pyproject.toml:95). v2 normalises the casing: ``setup_mup`` resolves to this
-  module (``salt.core.mup:setup_mup``), a thin alias for ``salt2 mup-shapes``.
-
-Everything is data-free for shape generation (the models are built from the
-config with the documented ``--set ...norm_dict=unused.yaml`` override, exactly
-like ``salt2 graph validate``); the coord-check needs data (it trains), so it
-takes a ``--train-file``/``--norm-dict`` exactly as the gate fixtures do, or a
-synthetic-data fallback for the design-conformance smoke.
+Provides :func:`generate_shapes` (``salt2 mup-shapes``), :func:`coord_check`
+(``salt2 mup-coord-check``), and :func:`setup_mup`, a console entry point.
 """
 
 from __future__ import annotations
@@ -75,12 +38,10 @@ __all__ = [
 
 
 def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
-    """Parse a §5.1 trainer config (stack) through the real salt2 surface, run-free.
+    """Parse a trainer config stack through the real salt2 surface, run-free.
 
-    The same run-free parse `salt.core.cli` uses (deep-merge/null-deletion
-    semantics intact), returning the constructed (un-setup) `Salt2CLI` so both
-    ``cli.model`` and ``cli.datamodule`` are available (shape generation binds
-    the COMBINED data + model graph, exactly like `cli._load_fit_config`).
+    Returns the constructed (un-setup) `Salt2CLI` so both ``cli.model`` and
+    ``cli.datamodule`` are available.
 
     Returns
     -------
@@ -99,9 +60,8 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
 
     args: list[str] = []
     for cfg in configs:
-        # Disable the logger in keyless envs (no COMET_API_KEY) so run-free
-        # parsing (tests, graph tooling, coord-check) doesn't fail at
-        # instantiate_classes with "Comet.ml requires an API key"
+        # disable the logger in keyless envs (no COMET_API_KEY) so run-free
+        # parsing doesn't fail at instantiate_classes
         cfg_no_logger = disable_logger_in_config(str(cfg))
         args.extend(["--config", cfg_no_logger])
     for entry in set_overrides:
@@ -138,11 +98,9 @@ def _parse_model(configs: Sequence[str | Path], set_overrides: Sequence[str]) ->
 def _width_overrides(model: Any, width: int) -> list[str]:
     """``--set`` width overrides for every ``apply_to`` module's ``MUP_WIDTH_ARG``.
 
-    The v2 explicit-name break: each configured ``apply_to`` module declares
-    its own width init_arg (`StreamEmbed.MUP_WIDTH_ARG == "out_dim"`,
-    `TransformerEncoder.MUP_WIDTH_ARG == "dim"`); every one is set to the same
-    `width` (the v1 single ``embed_dim`` symbol applied to both
-    ``init_nets.output_size`` and ``encoder.embed_dim``, GN2_muP.yaml:12-15).
+    Each configured ``apply_to`` module declares its own width init_arg
+    (e.g. `StreamEmbed.MUP_WIDTH_ARG == "out_dim"`); every one is set to the
+    same `width`.
 
     Returns
     -------
@@ -199,13 +157,11 @@ def build_model_at_widths(
     bind: bool = True,
     materialise: bool = False,
 ) -> Any:
-    """Build a `SaltModule` with every ``apply_to`` module at `width` (design §3.4).
+    """Build a `SaltModule` with every ``apply_to`` module at `width`.
 
-    Re-parses the config with the per-``apply_to`` width overrides applied, then
-    (by default) compiles the FIT plan, binds, and — optionally — materialises
-    so the model is forward-runnable. Without ``apply_to`` MUP_WIDTH_ARG sweeps
-    the model would just be the configured one; the width override is what makes
-    base/delta/coord-check models DIFFER.
+    Re-parses the config with the per-``apply_to`` width overrides applied,
+    then (by default) compiles the FIT plan, binds, and — optionally —
+    materialises so the model is forward-runnable.
 
     Parameters
     ----------
@@ -228,33 +184,29 @@ def build_model_at_widths(
         The width-set (and, by default, bound) model.
     """
     # parse once to read the apply_to width-arg list, then re-parse with the
-    # width overrides — the second parse is the model we return
+    # width overrides applied — the second parse is the model we return
     probe = _parse_model(configs, set_overrides)
     overrides = [*set_overrides, *_width_overrides(probe, width)]
     cli = _parse_cli(configs, overrides)
     model = cli.model
     if bind:
         combined = _combined_graph(cli)
-        # the reader is the source node, so compile the COMBINED data + model
-        # graph with empty external sources (cli._load_fit_config pattern) — the
-        # reader.declare_io is data-free, so the plan + schema resolve without a
-        # file. Bind ONLY the model-side modules: the reader's bind touches the
-        # file (reader.py:491 -> prepare), which the data-free shape/coord path
-        # must not require. The model widths come from the combined-plan schema.
+        # reader.declare_io is data-free, so compile the combined data+model
+        # graph with empty sources and it resolves without touching a file.
+        # Bind only the model-side modules: the reader's bind DOES touch the
+        # file, which this data-free shape/coord path must avoid.
         fit_plan = compile_plan(combined, Mode.FIT, sources={}, sinks=["loss.total"])
         schema = resolve_bind_schema([fit_plan])
         bind_all(model._graph_modules, schema)  # noqa: SLF001 - same-package tooling
         model.schema = schema
         model._bound = True  # noqa: SLF001 - same-package tooling
         if materialise:
-            # materialise only the model side (Normaliser buffers); the dataset
-            # modules' file-touching materialise is skipped — the coord-check
-            # synthesises its own batch (_coord_batch), no reader read needed
+            # materialise only the model side; the dataset modules' file-touching
+            # materialise is skipped — the coord-check synthesises its own batch
             materialise_all(model._graph_modules)  # noqa: SLF001 - same-package tooling
             model._materialised = True  # noqa: SLF001 - same-package tooling
-        # store the combined plan (schema source) + the MODEL-ONLY coord-check
-        # plan (run data-free with a synthesised post-data boundary batch) on
-        # the model for the coord-check executor
+        # store the combined plan + the model-only coord-check plan (run
+        # data-free from a synthesised boundary batch) for the coord-check executor
         model._mup_combined = combined  # noqa: SLF001 - same-package tooling
         model._mup_fit_plan = fit_plan  # noqa: SLF001 - same-package tooling
         coord_sources = _model_boundary_sources(cli)
@@ -270,12 +222,11 @@ def build_model_at_widths(
 def _model_boundary_sources(cli: Any) -> Any:
     """Build the MODEL-side boundary sources (``inputs.*``/``masks.*``/``labels.*``).
 
-    The coord-check runs the MODEL-side plan only (the dataset modules touch a
-    file at materialise/read), so it needs the post-data boundary the model
-    consumes — exactly the keys the data modules produce and the model requires.
-    Derived data-free from the `Features` variables (field counts), the reader's
-    per-stream ``global_object`` flag (rank-2 vs rank-3), and the model's
-    FIT-mode label demand (`SaltModule.sink_demand`).
+    The coord-check runs the model-side plan only (the dataset modules touch
+    a file at materialise/read), so it needs the post-data boundary the
+    model consumes. Derived data-free from the `Features` variables (field
+    counts), the reader's per-stream ``global_object`` flag, and the
+    model's FIT-mode label demand (`SaltModule.sink_demand`).
 
     Returns
     -------
@@ -312,9 +263,8 @@ def _model_boundary_sources(cli: Any) -> Any:
                 shape=("B", t_dim, n_fields), dtype="float32", fields=tuple(names)
             )
             flat[f"masks.{stream}"] = TensorSpec(shape=("B", t_dim), dtype="bool", kind="pad_mask")
-    # label demand (FIT) — the keys the task heads need from the dataset. The
-    # key is labels.<stream>.<label>: a SEQUENCE stream's labels are per-token
-    # ([B, T:stream]); a global-object stream's are per-jet ([B]).
+    # label demand (FIT): labels.<stream>.<label> is per-token [B, T] for a
+    # sequence stream, per-jet [B] for a global-object stream
     for key in model.sink_demand().get(Mode.FIT, []):
         parts = key.split(".")
         if parts[0] != "labels" or key in flat:
@@ -327,10 +277,10 @@ def _model_boundary_sources(cli: Any) -> Any:
 
 
 def _combined_graph(cli: Any) -> dict[str, Any]:
-    """The combined data + model module dict (cli._load_fit_config pattern).
+    """The combined data + model module dict.
 
-    Binds the dataset `Labels` processors to the reader streams (so their
-    label-key universe resolves) exactly as the static graph tooling does.
+    Binds the dataset `Labels` processors to the reader streams so their
+    label-key universe resolves.
 
     Returns
     -------
@@ -349,7 +299,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# salt2 mup-shapes — base/delta infshape generation (design §9.2 line 1644)
+# salt2 mup-shapes — base/delta infshape generation
 # ---------------------------------------------------------------------------
 
 
@@ -360,20 +310,14 @@ def generate_shapes(
     delta_width: int | None = None,
     set_overrides: Sequence[str] = (),
 ) -> tuple[Path, Any]:
-    """Generate the base/delta muP infshapes for a config (replaces v1 store_shapes_mup).
+    """Generate the base/delta muP infshapes for a config.
 
     Builds a BASE model with every ``apply_to`` module at `base_width` and a
-    DELTA model at `delta_width` (which MUST differ — that is what fixes the
+    DELTA model at `delta_width` (which must differ — the two widths fix the
     infinite-width directions), then ``mup.make_base_shapes(base, delta,
-    savefile)`` writes the infshape file. The file is exactly what
-    ``SaltModule.mup.shape_path`` loads at bind (`SaltModule._apply_mup_shapes`)
-    and what `MuAdamW`/`MuReadout.width_mult()` resolve against.
-
-    The base/delta models are the bound submodule trees restricted to the
-    ``apply_to`` modules (the muP-parametrised part of the net); the shapes are
-    taken over the WHOLE `net` so every parameter gets an infshape (mup requires
-    base/delta to be the same model with two widths — which they are, since only
-    the ``apply_to`` widths changed).
+    savefile)`` writes the infshape file. This is exactly what
+    ``SaltModule.mup.shape_path`` loads at bind, and what
+    `MuAdamW`/`MuReadout.width_mult()` resolve against.
 
     Parameters
     ----------
@@ -433,12 +377,12 @@ def generate_shapes(
 
 
 # ---------------------------------------------------------------------------
-# salt2 mup-coord-check — coordinate-check data + plot (design §3.4 690-694)
+# salt2 mup-coord-check — coordinate-check data + plot
 # ---------------------------------------------------------------------------
 
 
 def _record_l1_hook(records: list[dict[str, Any]], width: int, name: str, step: int):
-    """Forward hook recording the output L1 coordinate norm (v1 FDICT['l1']).
+    """Forward hook recording the output L1 coordinate norm.
 
     Returns
     -------
@@ -478,32 +422,22 @@ def coord_check(
     shape_file: str | Path | None = None,
     set_overrides: Sequence[str] = (),
 ) -> pd.DataFrame:
-    """Run the muP coord-check at several widths (replaces v1 get_coord_data).
+    """Run the muP coord-check at several widths.
 
-    For each ``width`` build a muP model, apply a SHARED base/delta shape file
-    (so each width resolves a CORRECT ``width_mult`` — see below), then train it
-    for `nsteps` steps on a FIXED batch, recording each ``apply_to`` submodule's
-    output L1 coordinate norm via a forward hook. A muP-correct net has these
-    norms INVARIANT across widths (the "muP-flat" property MU-HUMAN judges from
-    the plot).
+    For each ``width`` build a muP model, apply a SHARED base/delta shape file,
+    then train it for `nsteps` steps on a FIXED batch, recording each
+    ``apply_to`` submodule's output L1 coordinate norm via a forward hook. A
+    muP-correct net has these norms roughly invariant across widths
+    ("muP-flat").
 
-    **Shared-base protocol (the MU-HUMAN tooling fix, M6 sub-wave E)**: the muP
-    coord-check is only meaningful when every swept width is parametrised against
-    ONE base/delta infshape file. The earlier shipped tool set base shapes from a
-    SELF-BASE at each width (``set_base_shapes(model.net, model.net)``), which
-    forces ``width_mult == 1`` at every width — so the `MuReadout` readout is
-    never damped and its coord curve slopes steeply upward (~+0.9), a misleading
-    NON-flat artifact of the tooling, not a muP bug. This function now generates a
-    base (narrowest swept width) + delta (a wider reference) infshape file ONCE,
-    or accepts an explicit `shape_file`, and applies it to ALL widths. Wider
-    models then see ``width_mult > 1`` and the readout is correctly damped — the
-    whole-model curves collapse to the muP-flat regime (readout slope ~+0.25,
-    matching v1).
-
-    The v2 module SELECTION break: v1 filters by a substring match on
-    ``model.named_modules()`` names (configuration_muP.py:448,460); v2 records
-    only the submodules under the configured ``apply_to`` instance-name prefixes
-    in the ``net.<name>.*`` tree.
+    **Shared-base protocol**: the coord-check is only meaningful when every
+    swept width is parametrised against ONE base/delta infshape file. A
+    per-width self-base (``set_base_shapes(model.net, model.net)``) forces
+    ``width_mult == 1`` at every width, so `MuReadout` is never damped and
+    produces a misleading non-flat curve. This function generates (or
+    accepts) a base (narrowest swept width) + delta (a wider reference)
+    infshape file ONCE and applies it to ALL widths, so wider models see
+    ``width_mult > 1`` and the readout is correctly damped.
 
     Parameters
     ----------
@@ -513,9 +447,8 @@ def coord_check(
         The ``apply_to`` widths to sweep (e.g. ``[16, 32, 64, 128]``).
     batch : Bundle | None, optional
         A FIXED input batch (``inputs.*``/``masks.*``/``labels.*`` keys). When
-        None a synthetic random batch is generated from the FIT plan's boundary
-        (the design-conformance smoke path; the real coord-check passes a data
-        batch), by default None.
+        None a synthetic random batch is generated from the FIT plan's
+        boundary, by default None.
     nsteps : int, optional
         Training steps per width, by default 3.
     nseeds : int, optional
@@ -523,19 +456,16 @@ def coord_check(
     lr : float, optional
         The (large) coord-check learning rate, by default 1e-2.
     shape_file : str | Path | None, optional
-        A pre-generated base/delta infshape file to apply at EVERY width (the
-        ``salt2 mup-shapes`` output, or the config's ``mup.shape_path``). When
+        A pre-generated base/delta infshape file to apply at EVERY width. When
         None, one is generated on the fly (base = min(widths), delta = a wider
-        reference) so the shared-base protocol holds without a prior
-        ``mup-shapes`` run, by default None.
+        reference), by default None.
     set_overrides : Sequence[str], optional
         Extra ``--set`` overrides, by default ().
 
     Returns
     -------
     pandas.DataFrame
-        Columns ``width, module, t, l1`` — the coord-check data (the v1
-        ``get_coord_data`` return shape).
+        Columns ``width, module, t, l1`` — the coord-check data.
     """
     import pandas as pd  # noqa: PLC0415 - heavy, tooling-only
     from mup import set_base_shapes  # noqa: PLC0415 - mup is optional
@@ -550,12 +480,9 @@ def coord_check(
                 configs, width, set_overrides, bind=True, materialise=batch is None
             )
             cfg = _require_mup_cfg(model)
-            # SHARED base shapes (NOT a per-width self-base): the model at this
-            # width is parametrised against the ONE base/delta infshape file, so
-            # MuReadout.width_mult() resolves to width/base_width (> 1 for wider
-            # models) and the readout is correctly damped — the MU-HUMAN tooling
-            # fix replacing set_base_shapes(model.net, model.net) which forced
-            # width_mult == 1 at every width (a misleading non-flat readout).
+            # shared base shapes (not a per-width self-base): resolves
+            # MuReadout.width_mult() = width/base_width so the readout is
+            # correctly damped, instead of forcing width_mult == 1 at every width
             set_base_shapes(model.net, str(shared_shapes), rescale_params=False)
             coord_plan = model._mup_coord_plan  # noqa: SLF001 - same-package tooling
             fixed = _coord_batch(coord_plan) if batch is None else batch
@@ -588,14 +515,12 @@ def _resolve_coord_shape_file(
 ) -> Path:
     """Resolve the SHARED base/delta infshape file the coord-check applies at every width.
 
-    The shared-base protocol (the MU-HUMAN tooling fix): the coord-check is only
-    meaningful when every swept width is parametrised against ONE base/delta
-    infshape file (not a per-width self-base, which forces ``width_mult == 1``).
-    When `shape_file` is given it is used as-is; otherwise base/delta infshapes
-    are generated ONCE via :func:`generate_shapes` — base = the narrowest swept
-    width, delta = a strictly-wider reference (the widest swept width, or
-    ``2 * base`` for a single-width sweep) — into a temp file. Wider models then
-    resolve ``width_mult = width / base_width > 1`` and the readout is damped.
+    When `shape_file` is given it is used as-is; otherwise base/delta
+    infshapes are generated ONCE via :func:`generate_shapes` — base = the
+    narrowest swept width, delta = a strictly-wider reference (the widest
+    swept width, or ``2 * base`` for a single-width sweep) — into a temp
+    file. Wider models then resolve ``width_mult = width / base_width > 1``
+    and the readout is damped.
 
     Parameters
     ----------
@@ -672,9 +597,9 @@ def _attach_apply_to_hooks(
 def _coord_batch(plan: Any) -> Bundle:
     """Synthesise a random FIT batch from the plan's boundary sources (smoke path).
 
-    The design-conformance smoke path (the real coord-check passes a data batch
-    via ``--train-file``). Tensors match the plan's source specs: B=4, T=5 for
-    sequence streams; ``pad_mask`` all-valid (zeros), ``label`` random class ids,
+    Used when the real coord-check data batch (via ``--train-file``) isn't
+    available. Tensors match the plan's source specs: B=4, T=5 for sequence
+    streams; ``pad_mask`` all-valid (zeros), ``label`` random class ids,
     everything else random float.
 
     Returns
@@ -701,12 +626,12 @@ def _coord_batch(plan: Any) -> Bundle:
 def _clone_batch(batch: Bundle) -> Bundle:
     """Deep-clone a bundle so a fixed batch survives in-place forward mutation.
 
+    ``copy.deepcopy`` is not enough for the nested-dict-of-tensors batch.
+
     Returns
     -------
     Bundle
-        A fresh bundle with cloned tensors (v1 fix_batch_dataloader,
-        functions_check_muP.py:34-57 — copy.deepcopy is not enough for the
-        nested-dict-of-tensors batch).
+        A fresh bundle with cloned tensors.
     """
     clone = Bundle()
     for key in batch.keys():  # noqa: SIM118 - Bundle.keys() is the public flat-key API, not a dict
@@ -716,11 +641,11 @@ def _clone_batch(batch: Bundle) -> Bundle:
 
 
 def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None = None) -> Any:
-    """Plot the coord-check data (replaces v1 plot_coord_data).
+    """Plot the coord-check data.
 
-    One log-log subplot per training step: per-module output L1 norm vs width.
-    A muP-flat net shows roughly horizontal lines (norms invariant across
-    width); a non-muP net's lines slope with width — the MU-HUMAN judgment.
+    One log-log subplot per training step: per-module output L1 norm vs
+    width. A muP-flat net shows roughly horizontal lines (norms invariant
+    across width); a non-muP net's lines slope with width.
 
     Parameters
     ----------
@@ -768,19 +693,15 @@ def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None 
 
 
 # ---------------------------------------------------------------------------
-# setup_mup — the casing-normalised console entry point (pyproject fix)
+# setup_mup — console entry point
 # ---------------------------------------------------------------------------
 
 
 def setup_mup(args: Sequence[str] | None = None) -> int:
     """The ``setup_mup`` console entry point — a thin alias for ``salt2 mup-shapes``.
 
-    The casing fix: v1's ``[project.scripts] setup_mup`` pointed at
-    ``salt.utils.mup_utils.main_mup:main`` (lowercase) but the real v1 module
-    is ``salt/utils/muP_utils/main_muP.py`` (capital P) — the entry point never
-    resolved (pyproject.toml:95). v2 points ``setup_mup`` at this function, and
-    forwards to the salt2 ``mup-shapes`` subcommand so the two surfaces share
-    one implementation.
+    Forwards to the salt2 ``mup-shapes`` subcommand so the two surfaces
+    share one implementation.
 
     Parameters
     ----------
@@ -804,7 +725,7 @@ def setup_mup(args: Sequence[str] | None = None) -> int:
 
 
 def cmd_mup_shapes(args: Any) -> int:
-    """``salt2 mup-shapes`` handler: generate base/delta infshapes (design §9.2).
+    """``salt2 mup-shapes`` handler: generate base/delta infshapes.
 
     Returns
     -------
@@ -822,7 +743,7 @@ def cmd_mup_shapes(args: Any) -> int:
 
 
 def cmd_mup_coord_check(args: Any) -> int:
-    """``salt2 mup-coord-check`` handler: coord-data + plot (design §3.4 690-694).
+    """``salt2 mup-coord-check`` handler: coord-data + plot.
 
     Returns
     -------

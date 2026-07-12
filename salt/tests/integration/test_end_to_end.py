@@ -1,13 +1,4 @@
-"""Toy end-to-end integration test for the M1 kernel (plan 03 stage F, M1 gate 3).
-
-The full loop, in-process: build modules from ``configs/toy.yaml`` via the
-CLI's loader -> validate (fit + test + onnx, design §4.1) -> compile plans
-(§3.1) -> assert the loss path is fit/val-only -> execute the FIT and TEST
-plans on random tensors (§3.2, debug read tracking on) -> deadcode report
-matches expectation (§4.2) -> plot DOT contains the expected edges (§4.3)
--> ``why`` explains fit-only keys' absence from the TEST plan (§3.1).
-``configs/toy_broken.yaml`` (typo'd key) asserts the §4.1-quality error.
-"""
+"""Toy end-to-end integration test for the M1 kernel (plan 03 stage F, M1 gate 3)."""
 
 from pathlib import Path
 
@@ -37,9 +28,7 @@ def _deadcode(cfg, mode):
     return deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
 
 
-# ---------------------------------------------------------------------------
 # validate (design §4.1)
-# ---------------------------------------------------------------------------
 
 
 class TestValidate:
@@ -57,9 +46,7 @@ class TestValidate:
         assert "cannot be checked statically" not in captured.err
 
 
-# ---------------------------------------------------------------------------
 # plan compilation (design §3.1): the loss path is fit/val-only
-# ---------------------------------------------------------------------------
 
 
 class TestPlans:
@@ -98,9 +85,7 @@ class TestPlans:
         assert _plan(first, Mode.FIT).plan_hash != _plan(first, Mode.TEST).plan_hash
 
 
-# ---------------------------------------------------------------------------
 # execution (design §3.2) — debug read tracking on
-# ---------------------------------------------------------------------------
 
 
 class TestExecution:
@@ -144,9 +129,7 @@ class TestExecution:
             Executor(plan).run(Bundle())
 
 
-# ---------------------------------------------------------------------------
 # deadcode (design §4.2) and the all-modes-dead error (design §3.1 principle 10)
-# ---------------------------------------------------------------------------
 
 
 class TestDeadcode:
@@ -180,9 +163,7 @@ class TestDeadcode:
         assert ("deadend", "*") in [(f.module, f.key) for f in findings]
 
 
-# ---------------------------------------------------------------------------
 # plot (design §4.3)
-# ---------------------------------------------------------------------------
 
 
 class TestPlot:
@@ -218,9 +199,7 @@ class TestPlot:
         assert '"writer"' not in dot
 
 
-# ---------------------------------------------------------------------------
 # why (design §3.1 debugging story)
-# ---------------------------------------------------------------------------
 
 
 class TestWhy:
@@ -249,9 +228,7 @@ class TestWhy:
         assert "head" in out  # consumer
 
 
-# ---------------------------------------------------------------------------
 # broken config: §4.1-quality error
-# ---------------------------------------------------------------------------
 
 
 class TestBrokenConfig:
@@ -268,9 +245,7 @@ class TestBrokenConfig:
         assert "fix: correct the require in module 'head'" in err
 
 
-# ---------------------------------------------------------------------------
 # demo script (M1 gate 3 artifact loop)
-# ---------------------------------------------------------------------------
 
 
 class TestDemo:

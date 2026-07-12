@@ -1,18 +1,4 @@
-"""Render gate for the plan-29 W2 folded ONNX path (design §7 render payoff, §8 W2 row).
-
-The W2 render payoff (the ONNX counterpart of W1's H5 card): a config wiring the
-folded conversions (argmax/split/combine) + the declare-only `OnnxExportSink`
-renders an ``onnx_export (OnnxExportSink)`` card in ``--mode onnx`` with the
-folded conversion nodes appearing on-graph — REPLACING the off-graph reduce
-manifest (which drew NO export card). This pins:
-
-- the folded ONNX config renders the ``onnx_export`` card + the conversion nodes
-  (jet_probs / track_origin_index / pbc) with named-consumer edges into the sink,
-  and NO ``<sinks>`` sentinel;
-- the export sink is ONNX-only — pruned from TEST (no card there);
-- the FIT plan_hash is byte-unchanged vs the same config with the folded nodes +
-  export sink removed (resume-safe — the W2 nodes exist only for ONNX).
-"""
+"""Render gate for the plan-29 W2 folded ONNX path (design §7 render payoff, §8 W2 row)."""
 
 from __future__ import annotations
 
@@ -39,24 +25,12 @@ _FOLDED_NODES = ("jet_probs", "track_origin_index", "pbc")
 
 @pytest.fixture(scope="module")
 def fold_cfg():
-    """The folded-ONNX config (gn2v2-dummy + the W2 fold override).
-
-    Returns
-    -------
-    GraphConfig
-        The loaded config (modules include the folded conversions + onnx_export).
-    """
+    """The folded-ONNX config (gn2v2-dummy + the W2 fold override)."""
     return load_config([_DUMMY, _FOLD], _OVERRIDES)
 
 
 def _compile(cfg, mode):
-    """Compile one mode from a loaded `GraphConfig` (the static CLI plan).
-
-    Returns
-    -------
-    Plan
-        The compiled plan.
-    """
+    """Compile one mode from a loaded `GraphConfig` (the static CLI plan)."""
     return compile_plan(
         cfg.modules,
         mode,
@@ -94,13 +68,7 @@ def test_export_sink_pruned_from_test_render(fold_cfg):
 
 @pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL])
 def test_fit_val_plan_hash_unchanged_by_folded_onnx_nodes(fold_cfg, mode):
-    """FIT/VAL ``plan_hash`` is byte-identical with vs without the W2 folded nodes.
-
-    The folded conversion producers + the OnnxExportSink exist ONLY for the ONNX
-    export path — all are demand-pruned/inactive in FIT/VAL. So the folded config
-    must hash IDENTICALLY in FIT/VAL to the same config with those nodes removed,
-    or checkpoint resume would break (``saltmodule._verify_ckpt_hash`` on FIT).
-    """
+    """FIT/VAL ``plan_hash`` is byte-identical with vs without the W2 folded nodes."""
     full = _compile(fold_cfg, mode).plan_hash
     fold_only = {"jet_probs", "track_origin_index", "pbc", "onnx_export"}
     base_modules = {k: v for k, v in fold_cfg.modules.items() if k not in fold_only}

@@ -1,22 +1,4 @@
-"""v1 -> v2 state-dict transfer + forward comparison (plan 05, stage A2; feeds gate G3).
-
-Strategy: build the small v1 GN2 (`gn2_fixture`), build the EQUIVALENT v2
-module dict from plain config (`gn2v2_fixture`), transfer weights via
-`map_v1_state_dict` (strict load — every parameter/buffer accounted for),
-then run both sides on the same deterministic batch WITH labels and compare
-predictions and per-task losses.
-
-PASS criterion is ``<= 1e-6`` absolute, NOT bitwise: the v2 production task
-path slices per-stream tensors via `Split` before the heads (design §3.3),
-where v1 hands the heads the full register-augmented sequence and lets
-``input_name_mask`` slice internally (task.py:201-204). The selected values
-are identical, but the slice is materialised by a different op
-(narrow/slice vs boolean advanced indexing), and downstream GEMMs run on
-separately-materialised buffers — mathematically equal, with no bitwise
-guarantee across BLAS paths. The M2 gates therefore use 1e-6/curve criteria
-on this path (plan 05 risk 3); the BITWISE guarantee remains the job of the
-plan-04 parity gate over the v1-wrapping modules.
-"""
+"""v1 -> v2 state-dict transfer + forward comparison (plan 05, stage A2; feeds gate G3)."""
 
 from __future__ import annotations
 
@@ -75,14 +57,7 @@ def v2_fit_bundle() -> Bundle:
 
 
 def v1_fit_forward(wrapper):
-    """Run the v1 training-path forward (with labels) on cloned dicts.
-
-    Returns
-    -------
-    tuple[dict, dict]
-        ``(preds, per-task loss dict)`` as `ModelWrapper.forward` returns
-        them (loss keyed by task name, each already task-weighted).
-    """
+    """Run the v1 training-path forward (with labels) on cloned dicts."""
     inputs, masks = make_gn2_batch(B, T)
     labels = make_gn2_labels(B, T)
     with torch.no_grad():

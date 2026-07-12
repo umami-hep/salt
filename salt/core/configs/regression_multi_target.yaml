@@ -1,20 +1,7 @@
-# regression_multi_target.yaml — MultiTarget processor + RegressionTaskModule in
-# the v2 schema (M5 sub-wave A3). The v2-native port of legacy
-# salt/configs/regression_multi_target.yaml: an encoder-less DiPS body (init_nets
-# + pool_net, NO encoder — v1 saltmodel.py:90-93) feeding a pooled regression
-# head whose target (`pt_label_handle`) is BUILT by the MultiTarget processor
-# (v1 datasets.py:237-248,648,695-739).
-#
-# The two MultiTarget rules write the SAME custom_target `pt_label_handle` and
-# apply SEQUENTIALLY over one NaN-base running array (v1 in-place mutation,
-# datasets.py:709-739): `ID==15 -> HadronConeExclTruthLabelPt`, then
-# `ID!=15 -> pt`. Because MultiTarget declares `labels.jets.pt_label_handle` as
-# a CONCRETE produce, it (not the Labels wildcard) owns that key — write-once is
-# preserved (planner rule (a), concrete beats wildcard).
-#
-# NO machine paths committed (design §5 placeholder policy). From the REPO ROOT:
-#   python -m salt.core.main graph validate -c salt/core/configs/regression_multi_target.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# MultiTarget processor + RegressionTaskModule: an encoder-less DiPS body
+# feeding a pooled regression head whose target (pt_label_handle) is built by
+# the MultiTarget processor from two sequential rules over one NaN-base array.
+# H5-only — not ONNX-exported.
 
 name: regression_multi_target
 
@@ -62,7 +49,6 @@ data:
       class_path: salt.core.data.MultiTarget
       init_args:
         # two rules building ONE custom_target over a NaN base, applied in order
-        # (v1 multi_target sequential mutation, datasets.py:709-739)
         replacements:
           - stream: jets
             sel_label: HadronConeExclTruthLabelID
@@ -86,14 +72,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -114,38 +100,25 @@ model:
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired) and null-deleted pad_mask. It supplies its OWN top-level
-# outputs: section + dumb H5 sink. The regression de-scale folds onto the task via
-# get_output (W34.3), orchestrated by the RunTaskOutput writer below; the dumb sink
-# dumps ALL active outputs.* leaves, the SECTION supplies names/dtypes/ORDER. The
-# only task (reg_multi_target) is on the GLOBAL jets stream (no sequence-stream
-# task), so there is NO PadMaskWriter; tracks feeds the body but has no task, so
-# only jets is copied. NO OnnxExportSink: v1 regression_multi_target is NOT
-# ONNX-exported (test_pipeline do_onnx=False) — H5-only.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets]} # all source fields (v1 default), the only tasked stream
+    init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [reg_multi_target]}
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: regressionMultiTarget # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the outputs: section. The MultiTarget label is a
-  # FIT|VAL-only training target, absent from the export graph.
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 2

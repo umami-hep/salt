@@ -1,44 +1,32 @@
-"""`H5StructuredReader` — the throughput-preserving H5 reader (design §6.1).
+"""`H5StructuredReader` — the throughput-preserving H5 reader.
 
-A port of the fast path of v1 ``SaltDataset`` (hidden contract #9, kept
-wholesale — ``datasets.py:367-405, 448-524``):
-
-- contiguous B-element slab reads from structured arrays into REUSABLE
+- Contiguous B-element slab reads from structured arrays into reusable
   per-worker numpy buffers (``ndarray.resize(refcheck=False)`` +
-  ``ds.read_direct``, ``datasets.py:459-462``);
-- lazy pid-guarded ``h5py.File(swmr=True, libver="latest")`` handles, one per
-  (worker, file), shared across groups (``datasets.py:367-381``);
+  ``ds.read_direct``).
+- Lazy pid-guarded ``h5py.File(swmr=True, libver="latest")`` handles, one per
+  (worker, file), shared across groups.
 - VDS creation for wildcard filenames (`salt.core.data.vds`, FileLock + done
-  marker + the design's staleness check);
-- per-group ``truncate`` keeping the LEADING constituents (pt-sorted dumps,
-  ``datasets.py:469-471``);
-- read-time mutation stages in v1 order: per-stream ``selections`` (ftag
-  `Cuts` via `TrackSelector` — NaN floats, -1 ints, ``valid=False`` for
-  failing constituents) immediately after the read, then ``transforms``
-  (FIT-only by mode flag, per-worker seeded — fixing ``transforms.py:58``).
-  Because they run before ``raw.*`` / ``masks.*`` exist, cuts flow into
-  features, masks AND labels exactly as v1 (design §2.4).
-  **Documented deviation — transform scope is BROADER than v1**: transforms
-  receive the FULL post-selection structured batch, so label fields are in
-  scope; v1 transformed the input-variables subset only
-  (``datasets.py:507-510``), so labels could never be augmented there. The
-  design (§2.4) sanctions the reader-stage placement; transform authors
-  must keep ``used_fields`` to input variables unless changing training
-  labels is intended;
-- demand-narrowed read columns: the per-mode read set is
-  ``(demanded union selection/transform fields) intersect schema``, computed from the
-  compiled plan and delivered via `WorkerCtx.read_fields` — strictly less
-  I/O than v1's read-all-jets-columns amplification (``datasets.py:395-396``).
-  ``get_dtype`` semantics are kept (FILE field order, on-disk ``f2``
-  preserved via ``as_half``, ``valid`` auto-appended, ``datasets.py:742-776``).
+  marker + a staleness check).
+- Per-group ``truncate`` keeping the leading constituents (pt-sorted dumps).
+- Read-time mutation order: per-stream ``selections`` (ftag `Cuts` via
+  `TrackSelector` — NaN floats, -1 ints, ``valid=False`` for failing
+  constituents) immediately after the read, then ``transforms`` (FIT-only,
+  per-worker seeded). Because they run before ``raw.*`` / ``masks.*`` exist,
+  cuts flow into features, masks and labels. Transforms receive the full
+  post-selection structured batch, so label fields are in scope — transform
+  authors must keep ``used_fields`` to input variables unless label
+  augmentation is intended.
+- Demand-narrowed read columns: the per-mode read set is ``(demanded union
+  selection/transform fields) intersect schema``, computed from the compiled
+  plan and delivered via `WorkerCtx.read_fields`. ``get_dtype`` keeps file
+  field order, preserves on-disk ``f2`` via ``as_half``, and auto-appends
+  ``valid``.
 
 Produces ``raw.<stream>`` (structured, post-selection — may alias the
 reusable buffer; never crosses the torch boundary), ``masks.<stream>``
-(``~valid``, True = padded, ``datasets.py:523``) for non-``global_object``
-streams, and ``meta.rows`` (TEST only). The v1 magic exclusion set
-``{parameters, global_object, "global"}`` becomes the explicit per-group
-``global_object: true`` config (design §6.1), inferred from the schema
-artifact's ``valid`` field when not given.
+(``~valid``, True = padded) for non-``global_object`` streams, and
+``meta.rows`` (TEST only). ``global_object: true`` per-group config is
+inferred from the schema artifact's ``valid`` field when not given.
 """
 
 from __future__ import annotations
@@ -71,17 +59,14 @@ _SUGGESTION_CUTOFF = 0.5
 
 @dataclass(frozen=True)
 class GroupConfig:
-    """Per-stream reader configuration (design §2.6 / §6.1).
+    """Per-stream reader configuration.
 
-    `dataset` is the H5 dataset name the stream maps to (v1 ``input_map``;
-    ``None`` — the default, so empty YAML group blocks parse through
-    jsonargparse (design §5.3) — resolves to the stream name in
-    `H5StructuredReader._parse_group`). `truncate` keeps the leading N
-    constituents (v1 ``num_inputs``). `global_object` declares a ``[B, F]``
-    stream carrying no pad mask (the explicit replacement for v1's magic
-    exclusion set, design §6.1; aligns with `Normaliser(global_object=...)`);
-    None infers it from the schema artifact (no ``valid`` field =>
-    global_object).
+    `dataset` is the H5 dataset name the stream maps to (``None`` — the
+    default, so empty YAML group blocks parse through jsonargparse — resolves
+    to the stream name in `H5StructuredReader._parse_group`). `truncate` keeps
+    the leading N constituents. `global_object` declares a ``[B, F]`` stream
+    carrying no pad mask; None infers it from the schema artifact (no
+    ``valid`` field => global_object).
     """
 
     dataset: str | None = None
@@ -94,41 +79,38 @@ class GroupConfig:
 
 
 class H5StructuredReader(Reader):
-    """Structured-array H5 reader with reusable per-worker buffers (design §6.1).
+    """Structured-array H5 reader with reusable per-worker buffers.
 
     Parameters
     ----------
     groups : Mapping[str, GroupConfig | Mapping | None]
         Stream name -> group config (``{dataset:, truncate:, global_object:}``).
         A None / empty value defaults the dataset name to the stream name.
-        The FIRST group defines the reader length (rows on axis 0 are aligned
+        The first group defines the reader length (rows on axis 0 are aligned
         across groups by the file format).
     schema : Schema | str | Path | None, optional
-        The dataset schema artifact (design §2.6) or its YAML path. Reading
-        it here is config I/O, not data I/O (§2.6). When given,
+        The dataset schema artifact or its YAML path. When given,
         ``global_object`` is inferred for unset groups and selection/transform
         fields are validated statically; when None (explicit opt-out) every
         group must set ``global_object`` and field typos surface at worker
-        bind (design §2.6).
+        bind.
     filename : str | Path | None, optional
         Input H5 file (wildcards trigger VDS creation in `prepare`). May be
-        omitted at construction and supplied via `with_source` — the
-        datamodule pattern (design §6.1).
+        omitted at construction and supplied via `with_source`.
     num : int, optional
-        Number of rows to serve; ``-1`` = all (v1 ``get_num`` semantics).
+        Number of rows to serve; ``-1`` = all.
     selections : Mapping[str, Sequence[str]] | None, optional
         Per-stream ftag cut lists, applied to the structured array
-        immediately after the read (v1 ``datasets.py:464-466`` semantics).
+        immediately after the read.
     transforms : Sequence[Callable] | None, optional
-        Read-time augmentations with the v1 protocol
-        ``transform(struct_array, stream) -> struct_array``, applied FIT-only
-        (design §6.1, fixing v1's every-stage application). A transform
-        accepting an ``rng`` keyword receives the per-worker seeded
+        Read-time augmentations with the protocol
+        ``transform(struct_array, stream) -> struct_array``, applied FIT-only.
+        A transform accepting an ``rng`` keyword receives the per-worker seeded
         ``np.random.Generator``; one exposing ``used_fields(stream)`` gets
-        those fields added to the read set. NOTE: the array handed over is
-        the FULL post-selection structured batch — label fields are in scope
-        (broader than v1, see the module docstring); keep ``used_fields`` to
-        input variables unless label augmentation is intended.
+        those fields added to the read set. The array handed over is the full
+        post-selection structured batch — label fields are in scope; keep
+        ``used_fields`` to input variables unless label augmentation is
+        intended.
     vds_path : str | Path | None, optional
         Explicit VDS output path for wildcard filenames.
 
@@ -143,7 +125,7 @@ class H5StructuredReader(Reader):
     """
 
     vds_capable: bool = True
-    """H5 reader builds a virtual dataset for wildcard sources (plan-25 O-VDS-CAP).
+    """H5 reader builds a virtual dataset for wildcard sources.
 
     Overrides the `Reader` base default (`False`): the `VDS` setup module builds
     a real VDS (via `create_vds`) for a wildcard source of an `H5StructuredReader`,
@@ -163,7 +145,6 @@ class H5StructuredReader(Reader):
         super().__init__()
         if not groups:
             raise ConfigError("H5StructuredReader needs at least one group (design §6.1)")
-        # config capture only (design §2.3); schema load is config I/O (§2.6)
         self.schema = load_schema(schema) if isinstance(schema, str | Path) else schema
         self.filename = Path(filename) if filename is not None else None
         self.num = num
@@ -204,16 +185,9 @@ class H5StructuredReader(Reader):
         self._buffers: dict[str, np.ndarray] = {}
         self._rng: np.random.Generator | None = None
 
-    # -- config helpers ------------------------------------------------------
-
     @staticmethod
     def _parse_group(stream: str, cfg: GroupConfig | Mapping[str, Any] | None) -> GroupConfig:
-        """Normalise one group config entry to a `GroupConfig`.
-
-        Returns
-        -------
-        GroupConfig
-            The parsed config (dataset defaults to the stream name).
+        """Normalise one group config entry to a `GroupConfig` (dataset defaults to stream name).
 
         Raises
         ------
@@ -296,41 +270,25 @@ class H5StructuredReader(Reader):
 
     @property
     def streams(self) -> tuple[str, ...]:
-        """The configured stream names, in config order.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Stream names.
-        """
+        """The configured stream names, in config order."""
         return tuple(self.groups)
 
     def sources(self) -> list[Path]:
-        """The single H5 source file (the M8 staging surface, design §6.1).
+        """The single H5 source file (the multi-file staging surface).
 
-        One configured ``filename`` per stage IS the H5 reader's data (the
-        single-source contract `with_source` and `restage` both rely on). A wildcard
-        ``filename`` is returned VERBATIM — the literal pattern, not the matched
-        members — so the base `Reader.restage` (which copies one file) is only used on
-        the resolved single-file staging path the datamodule drives; the empty list is
-        returned when no source is bound yet.
-
-        Returns
-        -------
-        list[Path]
-            ``[self.filename]`` (literal), or ``[]`` when unbound.
+        One configured ``filename`` per stage is the H5 reader's data. A
+        wildcard ``filename`` is returned verbatim — the literal pattern, not
+        the matched members — so the base `Reader.restage` (which copies one
+        file) is only used on the resolved single-file staging path. Returns
+        ``[]`` when no source is bound yet.
         """
         return [self.filename] if self.filename is not None else []
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        """The schema artifact's group for one served stream (design §2.6).
+        """The schema artifact's group for one served stream.
 
-        Returns
-        -------
-        GroupSchema | None
-            The group schema (looked up via the stream's ``dataset`` name),
-            or None when no schema artifact is configured or the stream is
-            unknown.
+        Looked up via the stream's ``dataset`` name; None when no schema
+        artifact is configured or the stream is unknown.
         """
         if self.schema is None:
             return None
@@ -340,13 +298,10 @@ class H5StructuredReader(Reader):
         return self.schema.groups.get(cfg.dataset)
 
     def label_universe(self) -> tuple[str, ...] | None:
-        """The ``labels.<stream>.<field>`` universe for wildcard narrowing (design §2.2 rule d).
+        """The ``labels.<stream>.<field>`` universe for wildcard narrowing.
 
-        Returns
-        -------
-        tuple[str, ...] | None
-            All schema-backed label keys, or None when no schema artifact is
-            configured (validation falls back to the bind-time check, §2.6).
+        None when no schema artifact is configured (validation falls back to
+        the bind-time check).
         """
         if self.schema is None:
             return None
@@ -357,29 +312,18 @@ class H5StructuredReader(Reader):
         )
 
     def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The `StreamConfig` for a sequence stream (``truncate`` → ``pad_max``), else None.
+        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None.
 
-        The shared base vocabulary (plan 24, Wave 2): the H5 reader reads dense,
-        already-padded structured arrays, so its only `StreamConfig` knob is the
-        ``truncate`` leading-keep (``pad_max``). Streams with no ``truncate`` return
-        ``None``; a configured ``truncate`` applies to the leading axis whether or
-        not the stream is ``global_object`` (mirrors the pre-Wave-2 leading slice).
-        The H5 read path has NO per-constituent cuts/sort surface, so this config
-        never carries cuts/sort — the drop-then-pad / sort machinery is never engaged
-        on the H5 path (it serves dense contiguous slabs), preserving byte-identity
-        (plan 24 §6/§7).
-
-        Returns
-        -------
-        StreamConfig | None
-            The per-stream pad config, or None for scalar / untruncated streams.
+        The H5 reader reads dense, already-padded structured arrays, so its only
+        `StreamConfig` knob is the ``truncate`` leading-keep (``pad_max``).
+        Streams with no ``truncate`` return None; a configured ``truncate``
+        applies to the leading axis whether or not the stream is
+        ``global_object``. The H5 read path has no per-constituent cuts/sort
+        surface, so this config never carries cuts/sort.
         """
         cfg = self.groups[stream]
         if cfg.truncate is None:
             return None
-        # truncate applies on the leading axis whether or not the stream is a
-        # global_object — mirrors the pre-Wave-2 `batch[:, :cfg.truncate]` exactly
-        # (byte-identical; the global+truncate combo is configurable, reader.py:91-93).
         return StreamConfig(pad_max=cfg.truncate, jagged=not cfg.global_object)
 
     def with_source(
@@ -389,17 +333,12 @@ class H5StructuredReader(Reader):
         vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> H5StructuredReader:
-        """Clone this reader for another source file (the datamodule pattern, design §6.1).
+        """Clone this reader for another source file.
 
         Config-only (no file I/O): the loaded schema artifact, group configs,
         selections and transforms are shared; only the file binding changes.
-        ``stage`` is accepted for the plan-02 stage-sourcing contract and IGNORED
-        here (a single-source reader's one ``filename`` per stage IS its data).
-
-        Returns
-        -------
-        H5StructuredReader
-            A fresh, unbound reader instance (same instance ``name``).
+        ``stage`` is accepted for the stage-sourcing contract and ignored here
+        (a single-source reader's one ``filename`` per stage is its data).
         """
         del stage  # single-source reader: the per-stage filename is the data
         clone = H5StructuredReader(
@@ -414,18 +353,11 @@ class H5StructuredReader(Reader):
         clone.name = self.name
         return clone
 
-    # -- GraphModule declaration (config-only, design §2.2/§2.3) -------------
-
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.* / masks.* / meta.rows`` produces (source node, requires={}).
 
         Sequence dims are concrete when ``truncate`` is set, else symbolic
-        ``T:<stream>``; ``meta.rows`` is TEST-only (design §2.1).
-
-        Returns
-        -------
-        IO
-            The declared interface.
+        ``T:<stream>``; ``meta.rows`` is TEST-only.
         """
         del mode
         flat: dict[str, TensorSpec] = {}
@@ -438,22 +370,18 @@ class H5StructuredReader(Reader):
         flat["meta.rows"] = TensorSpec(shape=(2,), dtype="int64", kind="meta", modes=Mode.TEST)
         return IO(produces=unflatten_spec(flat))
 
-    # -- file-touching lifecycle hooks (design §2.3) --------------------------
-
     def prepare(self) -> None:
         """Resolve the source file (VDS for wildcards) and probe row counts.
 
-        Main-process hook (called lazily by ``__len__``, eagerly by the
-        datamodule's rank-0 VDS pre-creation). Idempotent.
+        Idempotent.
 
         Raises
         ------
         ConfigError
             If no filename is bound, or ``truncate`` exceeds the file's
-            constituent dimension (v1's per-batch assert, ``datasets.py:470``,
-            moved up front).
+            constituent dimension.
         ValueError
-            If ``num`` requests more rows than available (v1 ``get_num``).
+            If ``num`` requests more rows than available.
         SchemaError
             If a configured dataset is missing or not a structured array.
         """
@@ -491,13 +419,7 @@ class H5StructuredReader(Reader):
         self._resolved = path
 
     def __len__(self) -> int:
-        """Return the number of rows served (resolving the source on first call).
-
-        Returns
-        -------
-        int
-            The row count.
-        """
+        """Return the number of rows served (resolving the source on first call)."""
         self.prepare()
         assert self._num_rows is not None
         return int(self._num_rows)
@@ -507,23 +429,14 @@ class H5StructuredReader(Reader):
         """The resolved source file (the VDS for wildcard filenames).
 
         Resolves on first access (`prepare` is idempotent). Writers re-read
-        input copies from this path by absolute rows (design §8).
-
-        Returns
-        -------
-        Path
-            The concrete H5 file backing this reader.
+        input copies from this path by absolute rows.
         """
         self.prepare()
         assert self._resolved is not None
         return self._resolved
 
     def _ensure_open(self) -> None:
-        """Open (or re-open) the per-process H5 handle, pid-guarded.
-
-        Port of ``SaltDataset._ensure_open`` (``datasets.py:367-381``): guards
-        against handle inheritance across fork.
-        """
+        """Open (or re-open) the per-process H5 handle, pid-guarded against fork."""
         pid = os.getpid()
         if self._h5 is None or self._pid != pid:
             if self._h5 is not None and self._h5.id.valid:
@@ -535,12 +448,10 @@ class H5StructuredReader(Reader):
     def bind(self, ctx: WorkerCtx) -> None:
         """Per-worker setup: open the handle, allocate demand-narrowed buffers.
 
-        Port of ``SaltDataset._setup`` (``datasets.py:383-405``) with the
-        design's read-set narrowing: each group's buffer dtype covers
-        ``demanded union selection/transform fields`` only (FILE field order,
-        ``as_half``, ``valid`` auto-appended — ``get_dtype``,
-        ``datasets.py:742-776``). Demanded fields absent from the live file
-        raise before any training step (design §2.6).
+        Each group's buffer dtype covers ``demanded union selection/transform
+        fields`` only (file field order, ``as_half``, ``valid`` auto-appended —
+        `get_dtype`). Demanded fields absent from the live file raise before any
+        training step.
 
         Raises
         ------
@@ -582,22 +493,13 @@ class H5StructuredReader(Reader):
             self._buffers[stream] = np.array(0, dtype=dtype)
         self._rng = np.random.default_rng(ctx.seed)
 
-    # -- the per-batch read (design §6.1, v1 order kept) -----------------------
-
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one contiguous batch slab (v1 ``__getitem__`` fast path order).
+        """Read one contiguous batch slab.
 
-        Per group: resize the reusable buffer + ``read_direct``
-        (``datasets.py:459-462``), apply selections (``:464-466``), truncate
-        (``:469-471``), apply transforms (FIT-only, seeded — design §6.1),
-        then derive ``masks.<stream> = ~valid`` (``:518-523``). ``raw.*``
-        values may alias the reusable buffers (contract #9); masks are fresh
-        arrays. ``meta.rows`` is produced in TEST.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            The produced keys, as a flat dotted dict.
+        Per group: resize the reusable buffer + ``read_direct``, apply
+        selections, truncate, apply transforms (FIT-only, seeded), then derive
+        ``masks.<stream> = ~valid``. ``raw.*`` values may alias the reusable
+        buffers; masks are fresh arrays. ``meta.rows`` is produced in TEST.
         """
         out: dict[str, np.ndarray] = {}
         for stream, cfg in self.groups.items():
@@ -610,8 +512,7 @@ class H5StructuredReader(Reader):
             batch = buf
             if (selector := self._selectors.get(stream)) is not None:
                 batch = selector(batch)
-            # truncate via the shared StreamConfig leading-keep (pad_max == truncate);
-            # None for scalar/untruncated streams → no-op (byte-identical, plan 24 W2)
+            # None for scalar/untruncated streams -> no-op
             stream_cfg = self._stream_config(stream)
             if stream_cfg is not None:
                 batch = batch[:, : stream_cfg.pad_max]
@@ -626,7 +527,7 @@ class H5StructuredReader(Reader):
                     )
             out[f"raw.{stream}"] = batch
             if not cfg.global_object:
-                out[f"masks.{stream}"] = ~batch["valid"]  # True = padded (datasets.py:523)
+                out[f"masks.{stream}"] = ~batch["valid"]  # True = padded
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
@@ -634,25 +535,12 @@ class H5StructuredReader(Reader):
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable read buffer.
 
-        The debug-boundary non-aliasing assertion of design §2.4.
-
-        Returns
-        -------
-        bool
-            True if `array` may share memory with any group buffer.
+        The debug-boundary non-aliasing assertion.
         """
         return any(np.may_share_memory(array, buf) for buf in self._buffers.values())
 
-    # -- pickling (fork is free; spawn re-binds in the worker) ----------------
-
     def __getstate__(self) -> dict[str, Any]:
-        """Drop live H5 state so the reader pickles under spawn contexts.
-
-        Returns
-        -------
-        dict[str, Any]
-            The picklable state (handles/buffers reset; re-created at bind).
-        """
+        """Drop live H5 state so the reader pickles under spawn contexts."""
         state = self.__dict__.copy()
         state.update({"_h5": None, "_pid": None, "_dss": {}, "_buffers": {}, "_rng": None})
         return state

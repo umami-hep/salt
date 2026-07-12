@@ -1,18 +1,4 @@
-"""Deterministic synthetic easyjet ``AnalysisMiniTree`` ROOT fixture builder.
-
-Writes a tiny ROOT file (a handful of events, jagged jets) mirroring the real
-easyjet output-tree layout the `EasyjetReader` reads: ``recojet_antikt4PFlow_*``
-jagged jet branches (float kinematics + GN2 scores + an integer
-``HadronConeExclTruthLabelID`` flavour label) and scalar event-level branches
-(``eventNumber``, ``mcChannelNumber``). Everything is generated from a fixed
-seed so the committed regression test reproduces it byte-for-byte WITHOUT
-depending on ``/data/atlas_samples`` — the plan's "≥1 reproducible fixture test"
-requirement.
-
-The numbers are deterministic NumPy arrays (the fixture IS the ground truth the
-round-trip test compares against), so the builder also returns the raw per-event
-awkward/numpy values for the test to assert against.
-"""
+"""Deterministic synthetic easyjet ``AnalysisMiniTree`` ROOT fixture builder."""
 
 from __future__ import annotations
 
@@ -28,16 +14,7 @@ TREE_NAME = "AnalysisMiniTree"
 
 
 def build_fixture_arrays(seed: int = 1234) -> dict[str, Any]:
-    """Build the deterministic per-event fixture values (ground truth).
-
-    Returns
-    -------
-    dict[str, Any]
-        ``njets`` (list[int]), ``n_events`` (int), and the per-event jagged jet
-        fields (lists of np arrays) + scalar event fields (np arrays). Branch
-        names match the real easyjet file. Used both to WRITE the ROOT file and
-        as the round-trip ORACLE.
-    """
+    """Build the deterministic per-event fixture values (ground truth)."""
     rng = np.random.default_rng(seed)
     njets = list(_NJETS)
     n = len(njets)
@@ -74,13 +51,7 @@ def build_fixture_arrays(seed: int = 1234) -> dict[str, Any]:
 
 
 def write_minitree(path: Path, arrays: dict[str, Any]) -> Path:
-    """Write the fixture arrays to a ROOT ``AnalysisMiniTree`` at ``path``.
-
-    Returns
-    -------
-    Path
-        The written file path.
-    """
+    """Write the fixture arrays to a ROOT ``AnalysisMiniTree`` at ``path``."""
     import awkward as ak
     import uproot
 

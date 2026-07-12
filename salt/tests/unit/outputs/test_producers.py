@@ -1,24 +1,4 @@
-"""P1 unit gates for the classification + regression output PRODUCERS (plan 01, P1).
-
-Each conversion op behind the generic ``TaskOutput`` (design §4b) must reproduce
-its source task's eval math BITWISE (ints exact, floats ≤1e-6) — the producer
-forward is the SAME ``run_inference`` the M4.5 task published in TEST mode
-(`salt.core.nn.tasks`), now living in an in-graph producer instead of a
-mode-branch inside ``task.forward``. These tests build a real bound task head,
-feed synthetic RAW (training-space) predictions, and assert:
-
-- `ClassProbs` (global classification) == ``ClassificationTask.run_inference``
-  softmax / sigmoid (``tasks.py:312-328``);
-- `SeqClassIndex` (sequence classification) == ``argmax`` over the masked
-  softmax (the ONNX ``TrackOrigin`` index math, ``reduces.py:_bind_argmax`` /
-  ``tasks.py:118-137``);
-- `Regression` (de-scale) == ``RegressionTask.run_inference`` de-scaling for
-  the scaler / norm_params / ratio-denominator cases (``tasks.py:522-548``).
-
-Plus the demand-gating / width-resolution contract carries over for every op
-(design §4 risk 6): the produced ``outputs.*`` width resolves in a TEST-only
-bind, with the ``argmax`` width collapsing to 1.
-"""
+"""P1 unit gates for the classification + regression output PRODUCERS (plan 01, P1)."""
 
 from __future__ import annotations
 
@@ -59,19 +39,11 @@ _STREAM_J = "jets"
 _STREAM_T = "tracks"
 
 
-# ---------------------------------------------------------------------------
 # helpers — build + bind a real task head; run its op on a synthetic bundle
-# ---------------------------------------------------------------------------
 
 
 def _bind_classification(stream, label, class_names, sequence, *, loss=None, input_key=None):
-    """Build + bind a `ClassificationTaskModule` against a hand-built schema.
-
-    Returns
-    -------
-    ClassificationTaskModule
-        The bound module (``module.task`` is the absorbed v1 head ORACLE).
-    """
+    """Build + bind a `ClassificationTaskModule` against a hand-built schema."""
     module = ClassificationTaskModule(
         stream=stream,
         label=label,
@@ -89,13 +61,7 @@ def _bind_classification(stream, label, class_names, sequence, *, loss=None, inp
 def _bind_regression(
     stream, targets, *, sequence, denoms=None, norm=None, scaler=None, gaussian=False, fields=()
 ):
-    """Build + bind a `RegressionTaskModule` against a hand-built schema.
-
-    Returns
-    -------
-    RegressionTaskModule
-        The bound module (``module.task`` is the absorbed v1 head ORACLE).
-    """
+    """Build + bind a `RegressionTaskModule` against a hand-built schema."""
     module = RegressionTaskModule(
         stream=stream,
         targets=targets,
@@ -113,21 +79,13 @@ def _bind_regression(
 
 
 def _producer(op, *, task="t", stream=_STREAM_J, name="out"):
-    """Construct a named `TaskOutput` carrying `op`.
-
-    Returns
-    -------
-    TaskOutput
-        The producer (instance name set, ready to ``forward``).
-    """
+    """Construct a named `TaskOutput` carrying `op`."""
     producer = TaskOutput(task=task, stream=stream, name=name, op=op)
     producer.name = "producer"
     return producer
 
 
-# ---------------------------------------------------------------------------
 # GATE 1: ClassProbs (global classification) == task.run_inference softmax/sigmoid
-# ---------------------------------------------------------------------------
 
 
 def test_class_probs_global_softmax_matches_task_run_inference():
@@ -150,14 +108,7 @@ def test_class_probs_global_softmax_matches_task_run_inference():
 
 
 def test_class_probs_global_matches_task_get_h5_values():
-    """``ClassProbs`` op values == the f4 columns ``task.get_h5`` would emit.
-
-    Since the P1.5 flip the task publishes RAW logits in TEST and ``get_h5``
-    run_inference-s them itself (softmax) before packing the f4 columns; the
-    producer applies the same softmax, so the producer's un-structured floats
-    must equal the floats ``get_h5`` writes from the SAME raw logits (run-name
-    prefix is sink-side). Both convert ONCE (no double-convert).
-    """
+    """``ClassProbs`` op values == the f4 columns ``task.get_h5`` would emit."""
     torch.manual_seed(1)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -215,18 +166,11 @@ def test_class_probs_subclass_forwards_like_op():
     )
 
 
-# ---------------------------------------------------------------------------
 # GATE 2: SeqClassIndex (sequence classification) == argmax over masked softmax
-# ---------------------------------------------------------------------------
 
 
 def test_seq_class_index_matches_argmax_of_masked_softmax():
-    """Sequence head: ``SeqClassIndex`` == ``argmax(masked_softmax(logits))``.
-
-    Reproduces the v1 TrackOrigin index math: the per-token masked softmax the
-    sequence ``run_inference`` applies (tasks.py:322-327) then ``argmax`` over
-    the class dim (the int index the ONNX argmax reduce emits).
-    """
+    """Sequence head: ``SeqClassIndex`` == ``argmax(masked_softmax(logits))``."""
     torch.manual_seed(4)
     b, t, c = 5, 6, 8
     logits = torch.randn(b, t, c)
@@ -251,14 +195,7 @@ def test_seq_class_index_matches_argmax_of_masked_softmax():
 
 
 def test_seq_class_index_argmax_invariant_to_softmax():
-    """``argmax`` over (masked) softmax == ``argmax`` over the raw logits on valid tokens.
-
-    The ONNX argmax reduce argmaxes RAW logits where the producer argmaxes the
-    converted probs; the two agree because argmax is invariant under the
-    monotone softmax (reduces.py:28-30). Checked on the VALID positions only
-    (padded positions are converted to a tie of zeros, whose argmax is 0 — a
-    sink-side concern, not part of this invariance claim).
-    """
+    """``argmax`` over (masked) softmax == ``argmax`` over the raw logits on valid tokens."""
     torch.manual_seed(5)
     b, t, c = 4, 5, 8
     logits = torch.randn(b, t, c)
@@ -312,32 +249,18 @@ def test_seq_class_index_subclass_forwards_like_op():
     )
 
 
-# ---------------------------------------------------------------------------
 # GATE 2b (plan-29 W2): SeqClassIndex ONNX branch == reduces._bind_argmax,
 #          and is mode-branched (TEST [B,L] int64 unchanged, ONNX [L] int8).
-# ---------------------------------------------------------------------------
 
 
 def _argmax_reduce_oracle(probs_1lc: torch.Tensor) -> torch.Tensor:
-    """The verbatim ``reduces._bind_argmax`` math on a converted ``[1, L, C]`` probs tensor.
-
-    Returns
-    -------
-    Tensor
-        The int8 ``[L]`` ONNX argmax output (the zero-row append/strip + char).
-    """
+    """The verbatim ``reduces._bind_argmax`` math on a converted ``[1, L, C]`` probs tensor."""
     scores = torch.concatenate([probs_1lc, torch.zeros((1, 1, probs_1lc.shape[-1]))], dim=1)
     return torch.argmax(scores, dim=-1)[:, :-1].squeeze(0).char()
 
 
 def test_seq_class_index_onnx_branch_matches_bind_argmax():
-    """The ONNX branch carries the v1 zero-row argmax trick VERBATIM (folds ``_bind_argmax``).
-
-    `SeqClassIndexOp.convert(mode=Mode.ONNX)` must reproduce the v1 ONNX argmax
-    reduce (``to_onnx.py:415-423`` / ``reduces._bind_argmax``): masked softmax,
-    then the zero-row append/strip trick, ``.squeeze(0).char()`` to int8 ``[L]``.
-    Asserted EXACT against the reduce-math oracle on the converted probs.
-    """
+    """The ONNX branch carries the v1 zero-row argmax trick VERBATIM (folds ``_bind_argmax``)."""
     torch.manual_seed(7)
     length, classes = 6, 8
     logits = torch.randn(1, length, classes)
@@ -357,12 +280,7 @@ def test_seq_class_index_onnx_branch_matches_bind_argmax():
 
 
 def test_seq_class_index_onnx_branch_valid_for_zero_token_jet():
-    """The zero-row trick keeps the ONNX argmax valid for a zero-token jet (L=0).
-
-    The whole point of the appended row (``to_onnx.py:418-421``): ``argmax`` over a
-    zero-length token axis would be undefined, so a constant row is appended then
-    stripped. With L=0 the output is an empty int8 vector — never an error.
-    """
+    """The zero-row trick keeps the ONNX argmax valid for a zero-token jet (L=0)."""
     op = SeqClassIndexOp()
     logits = torch.randn(1, 0, 8)  # zero tokens
     mask = torch.zeros(1, 0, dtype=torch.bool)
@@ -373,12 +291,7 @@ def test_seq_class_index_onnx_branch_valid_for_zero_token_jet():
 
 
 def test_seq_class_index_test_branch_unchanged_by_onnx_fold():
-    """The TEST branch stays ``[B, L]`` int64 — the ONNX zero-row trick is ONNX-only (R2).
-
-    Mode-branching is load-bearing: the zero-row append/strip is ONNX-shape-
-    specific and must NOT run on a TEST batch (it would corrupt the eval int64
-    column / change the width). TEST is unchanged from the pre-W2 behaviour.
-    """
+    """The TEST branch stays ``[B, L]`` int64 — the ONNX zero-row trick is ONNX-only (R2)."""
     torch.manual_seed(8)
     b_, length, classes = 5, 6, 8
     logits = torch.randn(b_, length, classes)
@@ -396,12 +309,7 @@ def test_seq_class_index_test_branch_unchanged_by_onnx_fold():
 
 
 def test_seq_class_index_onnx_int8_argmax_invariant_to_softmax():
-    """The ONNX int8 leaf == argmax of the RAW logits on valid tokens (argmax invariance).
-
-    v1 argmaxed RAW logits where the v2 conversion softmaxes first; argmax is
-    invariant under the monotone (masked) softmax, so the int8 output is
-    identical on the valid positions (reduces.py:28-30).
-    """
+    """The ONNX int8 leaf == argmax of the RAW logits on valid tokens (argmax invariance)."""
     torch.manual_seed(9)
     length, classes = 7, 8
     logits = torch.randn(1, length, classes)
@@ -417,19 +325,13 @@ def test_seq_class_index_onnx_int8_argmax_invariant_to_softmax():
     torch.testing.assert_close(got[valid], raw_argmax[valid], rtol=0, atol=0)
 
 
-# ---------------------------------------------------------------------------
 # GATE 2b: SeqClassProbs (sequence classification PROBS) == masked softmax,
 #          and == the float values the sequence ClassificationTask.get_h5 packs.
 #          This is the eval-H5 column counterpart of the SeqClassIndex argmax.
-# ---------------------------------------------------------------------------
 
 
 def test_seq_class_probs_matches_masked_softmax():
-    """Sequence head: ``SeqClassProbs`` == ``masked_softmax(logits)`` (tasks.py:322-327).
-
-    The per-token per-class probabilities the eval H5 ``{run_name}_p{origin}``
-    columns carry; padded tokens read 0.0 (the masked softmax zeroes them).
-    """
+    """Sequence head: ``SeqClassProbs`` == ``masked_softmax(logits)`` (tasks.py:322-327)."""
     torch.manual_seed(40)
     b, t, c = 5, 6, 8
     logits = torch.randn(b, t, c)
@@ -455,13 +357,7 @@ def test_seq_class_probs_matches_masked_softmax():
 
 
 def test_seq_class_probs_matches_task_run_inference_and_get_h5():
-    """``SeqClassProbs`` == the bound task's sequence ``run_inference`` AND its ``get_h5`` floats.
-
-    Builds a real bound sequence `ClassificationTaskModule`; the producer probs
-    equal both ``task.run_inference`` (the conversion) and the float values
-    ``task.get_h5`` packs into the eval columns (tasks.py:1257-1271) — the
-    end-to-end eval-H5 value the M4.5 ``TaskWriter`` writes.
-    """
+    """``SeqClassProbs`` == the bound task's sequence ``run_inference`` AND its ``get_h5`` floats."""
     torch.manual_seed(41)
     b, t = 4, 5
     class_names = ["Pileup", "Fake", "Primary", "FromB", "FromBC", "FromC", "FromTau", "Other"]
@@ -516,9 +412,7 @@ def test_seq_class_probs_subclass_forwards_like_op():
     )
 
 
-# ---------------------------------------------------------------------------
 # GATE 3: Regression de-scale == RegressionTask.run_inference
-# ---------------------------------------------------------------------------
 
 
 def test_regression_norm_params_matches_task_run_inference():
@@ -539,11 +433,7 @@ def test_regression_norm_params_matches_task_run_inference():
 
 
 def test_regression_scaler_matches_task_run_inference():
-    """Functional scaler head: ``Regression`` op == the scaler branch of run_inference.
-
-    v1's scaler branch indexes ``preds[:, :, i]`` (sequence), so this exercises
-    a per-token head (tasks.py:540-542).
-    """
+    """Functional scaler head: ``Regression`` op == the scaler branch of run_inference."""
     torch.manual_seed(8)
     scales = {"pt": {"op": "log", "x_scale": 5}, "Lxy": {"op": "linear", "x_scale": 2, "x_off": 1}}
     module = _bind_regression(_STREAM_T, ["pt", "Lxy"], sequence=True, scaler=scales)
@@ -564,12 +454,7 @@ def test_regression_scaler_matches_task_run_inference():
 
 
 def test_regression_ratio_denominator_test_mode_matches_task():
-    """Ratio-denominator head (TEST): ``Regression`` op == v1 de-scale via labels.
-
-    The denominator source in TEST is ``labels.<stream>.<denom>`` (the same
-    nesting v1 ``run_inference`` reads, tasks.py:587-589). mHH is also a
-    declared input Feature so the ONNX path has a source.
-    """
+    """Ratio-denominator head (TEST): ``Regression`` op == v1 de-scale via labels."""
     torch.manual_seed(9)
     module = _bind_regression(
         _STREAM_J, ["m_over_mHH"], sequence=False, denoms=["mHH"], fields=("mHH", "pt")
@@ -596,12 +481,7 @@ def test_regression_ratio_denominator_test_mode_matches_task():
 
 
 def test_regression_ratio_denominator_onnx_gathers_by_name():
-    """ratio-denominator head (ONNX): the denominator is gathered by NAME from inputs.<stream>.
-
-    Mirrors v1 ``get_onnx`` (tasks.py:2281-2294): the export graph has no label
-    group, so the denominator comes from the raw input Feature tensor at the
-    bound column index — must equal the TEST result fed the same denominator.
-    """
+    """ratio-denominator head (ONNX): the denominator is gathered by NAME from inputs.<stream>."""
     torch.manual_seed(10)
     fields = ("pt", "mHH", "eta")
     preds = torch.randn(5, 1)
@@ -645,34 +525,20 @@ def test_regression_subclass_forwards_like_op():
     )
 
 
-# ---------------------------------------------------------------------------
 # W34.3 critic-fix GATE: the gaussian + sequence producer branches == the task's
 # run_inference oracle (the branches test_producers.py previously left untested).
 # After the per-token axis fix (run_inference now indexes [..., i]), the producer
 # (already last-axis) and the task path agree on global AND per-token heads.
-# ---------------------------------------------------------------------------
 
 
 def _gaussian_concat(means_stds: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-    """Concat the task's ``(means, stds)`` into the producer's one ``[..., 2R]`` array.
-
-    Returns
-    -------
-    torch.Tensor
-        The ``means ‖ stds`` one-array form the gaussian producer publishes.
-    """
+    """Concat the task's ``(means, stds)`` into the producer's one ``[..., 2R]`` array."""
     means, stds = means_stds
     return torch.cat([means, stds], dim=-1)
 
 
 def test_regression_gaussian_global_producer_matches_task_run_inference():
-    """Global gaussian head: ``RegressionDescaleOp(gaussian=True)`` == means‖stds oracle.
-
-    The gaussian producer ``_convert_gaussian`` REIMPLEMENTS the v1 loop rather
-    than calling ``run_inference`` — so it is asserted directly against the task's
-    ``GaussianRegressionTask.run_inference`` (concatenated means‖stds, the FD
-    1567-1568 one-array contract). R=1 (every shipped gaussian head is R=1).
-    """
+    """Global gaussian head: ``RegressionDescaleOp(gaussian=True)`` == means‖stds oracle."""
     torch.manual_seed(20)
     norm = {"mean": [2.0], "std": [3.0]}
     module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, gaussian=True, norm=norm)
@@ -689,13 +555,7 @@ def test_regression_gaussian_global_producer_matches_task_run_inference():
 
 
 def test_regression_gaussian_per_token_producer_matches_task_run_inference():
-    """Per-token gaussian seq head: producer == task on EVERY token (W34.3 axis fix).
-
-    The shipped ``regression_gaussian.yaml gaussian_seq_out`` head is per-token
-    gaussian. Pre-fix the task indexed the first (token) axis and diverged from
-    the producer's last-axis ``_convert_gaussian``; post-fix both index the target
-    channel so means‖stds agree on every token, incl. NaN at masked positions.
-    """
+    """Per-token gaussian seq head: producer == task on EVERY token (W34.3 axis fix)."""
     torch.manual_seed(21)
     norm = {"mean": [1.0], "std": [1.0]}
     module = _bind_regression(_STREAM_T, ["dphi"], sequence=True, gaussian=True, norm=norm)
@@ -719,14 +579,7 @@ def test_regression_gaussian_per_token_producer_matches_task_run_inference():
 
 
 def test_regression_sequence_nan_fill_producer_matches_task_with_real_padding():
-    """Per-token scaled seq head: producer ``_nan_fill`` == task run_inference NaN-fill.
-
-    Uses a norm_params per-token head with a pad mask that has REAL padded rows
-    (the existing scaler test deliberately used an all-valid mask, leaving the
-    nan-fill path untested). The W34.3 axis fix makes the task's de-scale loop
-    last-axis, so producer == task on the valid rows AND both NaN-fill the padded
-    rows identically.
-    """
+    """Per-token scaled seq head: producer ``_nan_fill`` == task run_inference NaN-fill."""
     torch.manual_seed(22)
     norm = {"mean": [10.0, 20.0], "std": [2.0, 0.5]}
     module = _bind_regression(_STREAM_T, ["a", "b"], sequence=True, norm=norm)
@@ -750,9 +603,7 @@ def test_regression_sequence_nan_fill_producer_matches_task_with_real_padding():
     assert torch.isnan(got[0, 4]).all()
 
 
-# ---------------------------------------------------------------------------
 # producer config-error guards (mirror the task module's guards)
-# ---------------------------------------------------------------------------
 
 
 def test_regression_descale_rejects_multiple_scaling_methods():
@@ -785,9 +636,7 @@ def test_regression_descale_empty_targets_rejected():
         RegressionDescaleOp(stream=_STREAM_J, targets=[])
 
 
-# ---------------------------------------------------------------------------
 # write-once: the op never mutates the source preds.* leaf
-# ---------------------------------------------------------------------------
 
 
 def test_descale_does_not_mutate_source_preds_leaf():
@@ -801,20 +650,12 @@ def test_descale_does_not_mutate_source_preds_leaf():
     torch.testing.assert_close(b.get(f"preds.{_STREAM_J}.t"), torch.ones(3, 1), rtol=0, atol=0)
 
 
-# ---------------------------------------------------------------------------
 # demand-gating / width resolution carries over for the conversion ops
 # (design §4 risk 6) — the gate (b) of P0, re-asserted per op
-# ---------------------------------------------------------------------------
 
 
 def _stub_source(pred_key, width, *, modes=Mode.ALL):
-    """A minimal source module producing ``pred_key`` of last-dim `width`.
-
-    Returns
-    -------
-    object
-        A `GraphModule`-shaped stub.
-    """
+    """A minimal source module producing ``pred_key`` of last-dim `width`."""
 
     class _Stub:
         name = "src"

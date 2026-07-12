@@ -1,13 +1,4 @@
-"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI (plan 07 stage A).
-
-The full L=0..39 x 10 sweep, the v1-vs-v2 ONNX identity and the release
-gates live in the M4 gate harness (stage C); these tests keep the same
-checks at unit scale: a subset sweep at the 1e-6 bar, the v1 torch
-spot-check (the recipe spike measured 6e-8 worst-case), the two-dynamic-
-axes Split grid (design risk 7 — the in-tree de-risk), gnn_config metadata
-content, a perturbed-weights negative control, and the ``salt2 export``
-CLI from a real checkpoint.
-"""
+"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI (plan 07 stage A)."""
 
 from __future__ import annotations
 
@@ -204,10 +195,8 @@ class TestExportedModel:
         assert again.plan.plan_hash == exported.result.plan.plan_hash
 
 
-# ---------------------------------------------------------------------------
 # the two-dynamic-axes Split grid (design §7 / risk 7 — the in-tree de-risk;
 # the release-blocker version on bigger widths is gate O3)
-# ---------------------------------------------------------------------------
 
 
 def build_two_stream_modules(norm_dict) -> dict[str, GraphModule]:
@@ -362,20 +351,12 @@ class TestTwoDynamicAxes:
         assert outputs[names.index("TwoStream_ElectronOrigin")].shape == (2,)
 
 
-# ---------------------------------------------------------------------------
 # the salt2 surface: export-block parsing + the CLI from a real checkpoint
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def cli_run(tmp_path_factory):
-    """A real checkpoint + saved run config for the ``salt2 export`` CLI tests.
-
-    Zero-batch attach run: compiles + binds, then the weight-matched state
-    dict is strict-loaded (the gates_m3 ``_v2_checkpoint`` pattern); the
-    saved run config is the shipped gn2v2-dummy with the norm-dict path
-    resolved.
-    """
+    """A real checkpoint + saved run config for the ``salt2 export`` CLI tests."""
     from lightning import Trainer
 
     from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels

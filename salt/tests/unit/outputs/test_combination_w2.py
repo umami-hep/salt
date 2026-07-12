@@ -1,19 +1,4 @@
-"""Unit gates for the plan-29 W2 `Combination` conversion node (design §6.2 / Q2).
-
-A combination (e.g. ``pbc = pb + pc``) is a NEW conversion plan node that reads a
-SOURCE prob/pred bundle leaf (``outputs.<stream>.<src>``) and produces a NEW
-``outputs.<stream>.<name>`` scalar leaf as a weighted sum over the source's
-last-dim channels — bitwise-equal to v1's ``pb + pc`` computed on the renamed
-scalars, but reading the BUNDLE leaf so the name-space dependency disappears
-(user decision 2026-06-22, folding the ``adapter.py:279-280`` combine loop). This
-file pins:
-
-- the weighted-sum math (bitwise-equal to the indexed channel adds, in order);
-- the demand contract (requires the source ``outputs.*`` leaf, kind=data;
-  produces the new ``outputs.<stream>.<name>`` leaf; collapses to a scalar);
-- it runs inside the executor (per-batch in TEST, once in the ONNX trace);
-- config validation (source must be an ``outputs.*`` leaf, terms non-empty).
-"""
+"""Unit gates for the plan-29 W2 `Combination` conversion node (design §6.2 / Q2)."""
 
 from __future__ import annotations
 
@@ -31,12 +16,7 @@ _SRC = "outputs.jets.jets_classification"
 
 
 def test_combination_sum_matches_indexed_channel_adds_bitwise():
-    """``pbc = probs[..., 0] + probs[..., 1]`` bitwise-equal to the v1 renamed-scalar add.
-
-    The combination reads the SOURCE prob leaf and sums the selected channels in
-    `terms` order — the SAME float adds v1 did on the renamed ``pb``/``pc``
-    scalars (``to_onnx.py:404-412``), so the result is bit-for-bit identical.
-    """
+    """``pbc = probs[..., 0] + probs[..., 1]`` bitwise-equal to the v1 renamed-scalar add."""
     torch.manual_seed(1)
     probs = torch.rand(5, 3)  # [B, C=3] softmaxed probs (pb, pc, pu)
     node = Combination(source=_SRC, name="pbc", terms={0: 1.0, 1: 1.0})
@@ -133,9 +113,7 @@ def test_combination_runs_inside_the_executor():
     )
 
 
-# ---------------------------------------------------------------------------
 # config validation
-# ---------------------------------------------------------------------------
 
 
 def test_combination_rejects_non_outputs_source():

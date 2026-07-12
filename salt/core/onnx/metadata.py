@@ -1,17 +1,16 @@
-"""``gnn_config`` ONNX metadata, bit-compatible with v1 on equivalent config (design §7.5).
+"""``gnn_config`` ONNX metadata, bit-compatible with v1 on equivalent config.
 
-Athena parses the JSON under the single ``gnn_config`` metadata key
-(``to_onnx.py:763-855``, ``get_onnx_metadata.py:44-50``). The v1 top-level
-key ORDER is reproduced exactly — ``ckpt_path``, ``layers``, ``nodes``,
-``config.yaml``, ``metadata.yaml``, ``salt_export_hash``,
-``onnx_model_version``, ``output_names``, ``model_name``, ``inputs``,
-``input_sequences``, ``combine_outputs``, ``rename_outputs`` — with ONE
-additive key, ``plan_hash``, APPENDED after the v1 set (never interleaved),
-so the v1 keys remain a byte-ordered prefix of the envelope.
+Athena parses the JSON under the single ``gnn_config`` metadata key. The v1
+top-level key ORDER is reproduced exactly — ``ckpt_path``, ``layers``, ``nodes``,
+``config.yaml``, ``metadata.yaml``, ``salt_export_hash``, ``onnx_model_version``,
+``output_names``, ``model_name``, ``inputs``, ``input_sequences``,
+``combine_outputs``, ``rename_outputs`` — with ONE additive key, ``plan_hash``,
+APPENDED after the v1 set (never interleaved), so the v1 keys remain a
+byte-ordered prefix of the envelope.
 
 ``onnx_model_version`` stays ``"v1"``: the default GN2 export reproduces v1
 Athena-visible content exactly; the version is bumped to ``v2`` only if
-Athena-visible content changes (design §7.5).
+Athena-visible content changes.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from salt.core.onnx.config import ExportConfig, stream_of_input_port
 __all__ = ["ONNX_MODEL_VERSION", "build_gnn_config", "load_run_metadata", "write_metadata"]
 
 ONNX_MODEL_VERSION = "v1"
-"""Athena metadata version — the default export is v1-content-identical (design §7.5)."""
+"""Athena metadata version — the default export is v1-content-identical."""
 
 
 def build_gnn_config(
@@ -41,7 +40,7 @@ def build_gnn_config(
     ckpt_path: str | Path | None,
     plan_hash: str | None,
 ) -> dict[str, Any]:
-    """Build the ``gnn_config`` payload in the v1 key set/order (``to_onnx.py:806-846``).
+    """Build the ``gnn_config`` payload in the v1 key set/order.
 
     Parameters
     ----------
@@ -52,12 +51,10 @@ def build_gnn_config(
     output_names : Sequence[str]
         The exporter's flat output-name list.
     config : Mapping[str, Any]
-        The resolved run config embedded under ``config.yaml`` (v1 embeds
-        the saved training config).
+        The resolved run config embedded under ``config.yaml``.
     run_metadata : Mapping[str, Any]
-        The run-dir ``metadata.yaml`` content (``{}`` when the run has
-        none — documented fallback; v1 hard-requires the file,
-        ``to_onnx.py:808``).
+        The run-dir ``metadata.yaml`` content (``{}`` when the run has none —
+        documented fallback).
     ckpt_path : str | Path | None
         The exported checkpoint (``""`` for checkpoint-free fixture
         exports — the key is always present).
@@ -86,7 +83,7 @@ def build_gnn_config(
     metadata["input_sequences"] = []
     for entry in export.inputs:
         if entry.alias is not None:
-            continue  # alias pseudo-inputs have no Athena tensor (to_onnx.py:512-513)
+            continue  # alias pseudo-inputs have no Athena tensor
         stream = stream_of_input_port(entry.port)
         if entry.sequence:
             metadata["input_sequences"].append({
@@ -96,9 +93,8 @@ def build_gnn_config(
                 ],
             })
         else:
-            # offsets/scales are informational placeholders (normalisation
-            # lives inside the graph); '_btagJes' is stripped on GLOBAL
-            # variables only (to_onnx.py:823-832)
+            # offsets/scales are informational placeholders (normalisation lives
+            # inside the graph); '_btagJes' is stripped on GLOBAL variables only
             metadata["inputs"].append({
                 "name": entry.athena_name,
                 "variables": [
@@ -106,23 +102,20 @@ def build_gnn_config(
                     for name in variables[stream]
                 ],
             })
-    # v1 records the combine/rename post-processing verbatim
-    # (to_onnx.py:817-818): combines as (name, [(scale, suffix), ...])
-    # tuples — JSON-encoded to nested lists identically on both paths —
-    # and renames as the raw old->new dict. The v2 config surface is
-    # export.combine / export.rename (M4.5, amendment merge condition 5).
+    # combines are recorded as (name, [(scale, suffix), ...]) tuples — JSON-encoded
+    # to nested lists — and renames as the raw old->new dict
     metadata["combine_outputs"] = [
         [entry.name, [[scale, suffix] for suffix, scale in entry.inputs.items()]]
         for entry in export.combine
     ]
     metadata["rename_outputs"] = dict(export.rename)
-    # ADDITIVE v2 key, appended after the complete v1 set (module docstring)
+    # additive key, appended after the complete v1 set
     metadata["plan_hash"] = plan_hash
     return metadata
 
 
 def write_metadata(onnx_path: str | Path, gnn_config: Mapping[str, Any], model_name: str) -> None:
-    """Validate the graph and store ``gnn_config`` + the doc string (v1 ``to_onnx.py:798-855``).
+    """Validate the graph and store ``gnn_config`` + the doc string.
 
     Loads the model, runs ``onnx.checker.check_model``, JSON-encodes the
     payload under the single ``gnn_config`` metadata key, sets
@@ -142,14 +135,8 @@ def write_metadata(onnx_path: str | Path, gnn_config: Mapping[str, Any], model_n
 def load_run_metadata(config_path: str | Path | None) -> dict[str, Any]:
     """Read the run-dir ``metadata.yaml`` next to the config, ``{}`` when absent.
 
-    v1 hard-requires the file (``to_onnx.py:808``); checkpoint-free and
-    pre-M6 (no run dirs) exports legitimately have none — the documented
-    fallback is an empty mapping.
-
-    Returns
-    -------
-    dict[str, Any]
-        The parsed metadata, or ``{}``.
+    Checkpoint-free exports legitimately have none — the documented fallback is
+    an empty mapping.
     """
     if config_path is None:
         return {}
@@ -162,12 +149,11 @@ def load_run_metadata(config_path: str | Path | None) -> dict[str, Any]:
 
 
 def _export_hash() -> str | None:
-    """The salt git hash recorded as ``salt_export_hash`` (v1 ``to_onnx.py:809``).
+    """The salt git hash recorded as ``salt_export_hash``.
 
     Tolerates a missing/unreadable git context (e.g. a container binding
     only the worktree, whose ``.git`` file points outside the bind) with a
-    warning instead of failing the export — the recipe-flagged
-    environment-dependent flake.
+    warning instead of failing the export.
 
     Returns
     -------

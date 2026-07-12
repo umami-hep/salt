@@ -1,19 +1,7 @@
-# GN3_dR.yaml — thin overlay on GN3_baseline.yaml (M5-CONV, GN3 family).
-# The v2-native port of legacy salt/configs/GN3_dev/GN3_dR.yaml.
-#
-# Retargets the `tracks` stream from the ghost-associated tracks to the
-# dR-MATCHED tracks (v1 `input_map: {tracks: tracks_dr}`, GN3_dR.yaml:6) by
-# overriding the reader group's `dataset` (the v2 home of v1's input_map; the
-# served stream name `tracks` is unchanged so every downstream module/task is
-# untouched). v1 also retargets the train/val/norm_dict files — those are
-# machine paths supplied as `salt2 fit` overrides (design §5 placeholder policy),
-# not committed here.
-#
-# Static validation (STACK the base first, then this overlay):
-#   python -m salt.core.main graph validate \
-#     -c salt/core/configs/GN3_baseline.yaml \
-#     -c salt/core/configs/GN3_dR.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Thin overlay on GN3_baseline.yaml: retargets the `tracks` stream from the
+# ghost-associated tracks to the dR-matched tracks (served stream name stays
+# `tracks`, so downstream modules/tasks are untouched). Stack GN3_baseline.yaml
+# first, then this overlay.
 
 name: GN3_dR
 
@@ -23,5 +11,4 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          # dR-matched tracks (v1 input_map: tracks -> tracks_dr)
           tracks: {global_object: false, dataset: tracks_dr}

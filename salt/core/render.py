@@ -1,21 +1,9 @@
-"""Plan rendering: §4.4 plan tables and the Graphviz DOT source.
+"""Plan rendering: plan tables and the Graphviz DOT source.
 
-One shared home for the two text renderings of a compiled `Plan`, consumed by
-both the static graph tooling (``salt2 graph plan/plot``, `salt.core.cli`)
-and the run-dir artifact callback (`salt.core.callbacks.GraphArtifacts`,
-design §4.4):
-
-- `plan_table` — the ordered §4.4 step table (binding constraints + narrowed
-  wildcard results), byte-identical to the historical ``salt2 graph plan``
-  stdout so ``plan_<mode>.txt`` artifacts and the CLI agree.
-- `dot_source` — Graphviz DOT text (design §4.3 styling): the port-card
-  layout, one HTML-like signature card per module (header + consumed/produced
-  rows) and one deduped node->node arrow per producer/consumer pair. This is
-  the authoritative graph image source: ``salt2 graph plot`` shells out to the
-  ``dot`` binary (baked into the salt container) to rasterise it to PNG/PDF.
-
-This module is pure-Python text generation — no matplotlib, no heavy imports —
-so importing it stays cheap for the table/DOT paths.
+Two text renderings of a compiled `Plan`, used by the static graph tooling
+(``salt2 graph plan/plot``) and the run-dir artifact callback: `plan_table`
+(the ordered step table) and `dot_source` (Graphviz DOT text, port-card
+layout, rasterised to PNG/PDF via the ``dot`` binary).
 """
 
 from __future__ import annotations
@@ -41,44 +29,30 @@ __all__ = ["dot_source", "plan_table"]
 
 _WILDCARD_PARTS = frozenset({"*", "**"})
 
-# Symbolic dim families that are genuinely DATA-dependent (design §2.2 / §4.3):
-# ``B`` (batch), ``T`` (per-stream token/sequence length), ``L`` (encoder layer
-# sequence length), ``S`` (the merged seq sequence length). These vary batch to
-# batch and have no statically resolvable size, so they stay SYMBOLIC in the
-# rendered shapes. Every OTHER symbolic family (``E``/``F``/``D``/``P``/``R``/
-# ``M``/``Dsum``/...) is a FEATURE/embedding width: config-fixed and resolved by
-# `salt.core.nn.bind.resolve_bind_schema` (the very widths that build the
-# nn.Linear layers), so the renderer substitutes the concrete int.
+# Symbolic dim families that are genuinely data-dependent (batch, per-stream
+# token length, encoder layer length, merged seq length) and so stay symbolic
+# in rendered shapes. Every other symbolic family is a config-fixed feature
+# width resolved by `salt.core.nn.bind.resolve_bind_schema`, so the renderer
+# substitutes the concrete int instead.
 _DATA_DIM_FAMILIES = frozenset({"B", "T", "L", "S"})
 
 
 def _has_wildcard(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component (design §2.2).
-
-    Returns
-    -------
-    bool
-        True if any component is ``"*"`` or ``"**"``.
-    """
+    """Check whether a dotted key contains a wildcard component."""
     return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
 
 
 # ---------------------------------------------------------------------------
-# §4.4 plan table (the salt2 graph plan stdout == plan_<mode>.txt artifact)
+# plan table (the salt2 graph plan stdout == plan_<mode>.txt artifact)
 # ---------------------------------------------------------------------------
 
 
 def plan_table(plan: Plan) -> str:
-    """Format the ordered §4.4 plan table for one compiled plan.
+    """Format the ordered plan table for one compiled plan.
 
     Shows each step's binding constraint (the latest predecessor forced by a
     key edge) and the narrowed wildcard results — including the full label
-    list a dataset plan will load (design §3.1 debugging story, §4.4).
-
-    Returns
-    -------
-    str
-        The multi-line table (no trailing newline).
+    list a dataset plan will load.
     """
     mode = plan.mode
     lines = [f"plan [mode={mode.name}] {len(plan.steps)} steps  plan_hash={plan.plan_hash}"]
@@ -99,7 +73,7 @@ def plan_table(plan: Plan) -> str:
         needs = ", ".join(sorted(step.requires)) or "nothing"
         # a wildcard producer narrowed to nothing (e.g. Labels in TEST/ONNX)
         # runs as a no-op and reads no fields — say so, or the step looks
-        # like live label loading in a plan that provably has none (§4.2)
+        # like live label loading in a plan that provably has none
         noop = "" if step.produces else "  [narrowed to 0 keys — no-op]"
         lines.append(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs}){noop}")
     narrowed_lines = []
@@ -132,28 +106,12 @@ def _esc(text: str) -> str:
 
 
 def _quote(text: str) -> str:
-    """Quote a string as a DOT identifier.
-
-    Returns
-    -------
-    str
-        The double-quoted, escaped identifier.
-    """
+    """Quote a string as a DOT identifier."""
     return f'"{_esc(text)}"'
 
 
 def _fmt_shape(spec: TensorSpec | None) -> str:
-    """Format a spec's shape as ``"(d0, d1, ...)"`` for edge labels.
-
-    Symbolic dims (``"B"``, ``"T:tracks"``) and concrete ints are joined as-is.
-    A scalar/None-shape spec (and a missing spec) yields ``""`` so the edge
-    keeps just its key rather than an empty ``"()"``.
-
-    Returns
-    -------
-    str
-        The parenthesised shape, or ``""`` when there is none.
-    """
+    """Format a spec's shape as ``"(d0, d1, ...)"`` for edge labels."""
     # `not spec.shape` covers both None and the empty tuple () — a scalar
     # (e.g. a `losses.*` leaf) has no dims worth showing, so it keeps just its
     # key rather than a noisy "()".
@@ -163,25 +121,15 @@ def _fmt_shape(spec: TensorSpec | None) -> str:
 
 
 def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
-    """Resolve the `TensorSpec` an edge carries (mirrors `dot_source`'s lookup).
-
-    For a source edge (``producer == SOURCES``) the spec comes from
-    `plan.sources`; otherwise from the producing step's `produces`. Uses
-    ``.get`` so a missing key degrades to ``None`` rather than raising.
-
-    Returns
-    -------
-    TensorSpec | None
-        The resolved spec, or ``None`` if unavailable.
-    """
+    """Resolve the `TensorSpec` an edge carries (mirrors `dot_source`'s lookup)."""
     if producer == SOURCES:
         return plan.sources.get(key)
     return plan.step(producer).produces.get(key)
 
 
-# Kind/key -> row font colour for the signature-card rows (design §4.3): the
-# port-card layout has no per-key wires to colour, so the orange/red/blue kind
-# accents are applied to the consumed/produced row text instead.
+# Row font colour for the signature-card rows: the port-card layout has no
+# per-key wires to colour, so the orange/red/blue kind accents are applied to
+# the consumed/produced row text instead.
 _KIND_COLOURS = {"label": "#b5651d", "loss": "#c0392b", "preds": "#1f6fb2"}
 _ROW_DEFAULT_COLOUR = "#333333"
 _SHAPE_COLOUR = "#888888"
@@ -189,16 +137,10 @@ _PRUNED_FILL = "#dddddd"
 
 
 def _row_colour(key: str, spec: TensorSpec | None) -> str:
-    """Kind-based row font colour for a signature-card row (design §4.3).
+    """Kind-based row font colour for a signature-card row.
 
     Labels orange, losses red, ``preds.*`` blue; everything else the neutral
-    default. Derived from the spec's `kind` (falling back to the key's leading
-    namespace for ``preds.*``).
-
-    Returns
-    -------
-    str
-        A hex colour.
+    default.
     """
     if spec is not None and spec.kind in _KIND_COLOURS:
         return _KIND_COLOURS[spec.kind]
@@ -208,32 +150,16 @@ def _row_colour(key: str, spec: TensorSpec | None) -> str:
 
 
 def _html_esc(text: str) -> str:
-    """Escape a string for inclusion in a Graphviz HTML-like label.
-
-    Only ``&``/``<``/``>`` are special inside an HTML-like label; quotes stay
-    literal (the label is delimited by ``<...>``, not ``"..."``).
-
-    Returns
-    -------
-    str
-        The escaped text.
-    """
+    """Escape a string for inclusion in a Graphviz HTML-like label."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _is_feature_dim(dim: int | str) -> bool:
-    """Whether a shape entry is a SYMBOLIC FEATURE dim (resolvable to a width).
+    """Whether a shape entry is a symbolic feature dim (resolvable to a width).
 
-    A feature dim is a symbolic dim whose family is NOT data-dependent (design
-    §4.3): batch ``B`` and the sequence/token families ``T``/``L``/``S`` stay
-    symbolic; every other symbolic family (``E``/``F``/``D``/...) is a config-fixed
-    feature width that `resolve_bind_schema` resolves. Concrete ints are not
-    feature dims (already resolved).
-
-    Returns
-    -------
-    bool
-        True if `dim` is a symbolic feature dim.
+    Batch ``B`` and the sequence/token families ``T``/``L``/``S`` stay symbolic;
+    every other symbolic family is a config-fixed feature width that
+    `resolve_bind_schema` resolves. Concrete ints are not feature dims.
     """
     if not is_symbolic_dim(dim):
         return False
@@ -242,22 +168,12 @@ def _is_feature_dim(dim: int | str) -> bool:
 
 
 def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | None) -> str:
-    """Shape string for a card row, resolving the symbolic FEATURE dim STATICALLY.
+    """Shape string for a card row, resolving the symbolic feature dim statically.
 
-    Starts from the declared/symbolic shape (`spec`) and — when `widths` carries
-    a statically resolved last-dim size for `key` (from
-    `salt.core.nn.bind.resolve_bind_schema`, NO data, NO batch run) — substitutes
-    the concrete int for the shape's LAST dim, but only when that last dim is a
-    symbolic FEATURE dim (`_is_feature_dim`). The batch axis ``B`` and the
-    sequence/token dims (``T:``/``L:``/``S:``) are genuinely data-dependent and
-    stay symbolic; a feature dim that already declares a concrete int is left
-    unchanged (the resolved width agrees with it). So ``encoded.tracks`` renders
-    ``(B, T:tracks, 16)`` — the leading dims symbolic, the resolved width concrete.
-
-    Returns
-    -------
-    str
-        The parenthesised shape, or ``""`` when there is none.
+    Substitutes the concrete int for the shape's last dim when `widths` carries a
+    statically resolved width for `key` and that last dim is a symbolic feature
+    dim. Data-dependent dims (batch, sequence/token) stay symbolic — so
+    ``encoded.tracks`` renders ``(B, T:tracks, 16)``.
     """
     if spec is None or not spec.shape:
         return ""
@@ -272,26 +188,14 @@ def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | No
 
 
 def _card_row(key: str, shape: str, colour: str, *, bold: bool) -> str:
-    """One ``<TR>`` row of a signature card: kind-coloured key plus grey shape.
-
-    Returns
-    -------
-    str
-        The HTML-like table row.
-    """
+    """One ``<TR>`` row of a signature card: kind-coloured key plus grey shape."""
     name = f"<B>{_html_esc(key)}</B>" if bold else _html_esc(key)
     tail = f'  <FONT COLOR="{_SHAPE_COLOUR}">{_html_esc(shape)}</FONT>' if shape else ""
     return f'    <TR><TD ALIGN="LEFT"><FONT COLOR="{colour}">{name}{tail}</FONT></TD></TR>'
 
 
 def _card_section(tag: str) -> str:
-    """A faint italic ``in``/``out`` section divider row.
-
-    Returns
-    -------
-    str
-        The HTML-like table row.
-    """
+    """A faint italic ``in``/``out`` section divider row."""
     return (
         '    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa">'
         f"<I>{_html_esc(tag)}</I></FONT></TD></TR>"
@@ -311,11 +215,6 @@ def _card_node(
     `ins`/`outs` are ``(key, shape, colour)`` triples for the consumed and
     produced rows; the header carries `title` + optional `cls` over a `fill`
     background.
-
-    Returns
-    -------
-    str
-        The full ``"name" [label=<<TABLE...>>];`` DOT node line.
     """
     sub = (
         f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>'
@@ -345,46 +244,33 @@ def dot_source(
     pruned: Iterable[str] = (),
     widths: Mapping[str, int] | None = None,
 ) -> str:
-    r"""Render a compiled plan as Graphviz DOT text — port-card layout (design §4.3).
+    r"""Render a compiled plan as Graphviz DOT text — port-card layout.
 
     Each module renders as an HTML-like signature card: a colour-filled header
     (``name`` + ``ClassName``), an ``in`` section listing the keys the module
-    CONSUMES, and an ``out`` section listing the keys it PRODUCES. Each row is a
+    consumes, and an ``out`` section listing the keys it produces. Each row is a
     ``key`` plus its tensor shape, the key kind-coloured (labels orange, losses
     red, ``preds.*`` blue). The ``<sources>`` pseudo-node carries only an ``out``
-    section (the framework boundary leaves); ``<sinks>`` only an ``in`` section.
-    Edges collapse to ONE deduped ``producer -> consumer`` arrow per pair — the
-    per-key detail lives in the cards, not on floating edge labels. Demand-pruned
-    modules (looked up in `modules`) render as a grey dashed card.
+    section; ``<sinks>`` only an ``in`` section. Edges collapse to one deduped
+    ``producer -> consumer`` arrow per pair. Demand-pruned modules (looked up in
+    `modules`) render as a grey dashed card.
 
     Parameters
     ----------
-    plan : Plan
-        The compiled plan to draw.
     modules : Mapping[str, GraphModule] | None, optional
         Module instances, used only to label `pruned` cards with their class.
     pruned : Iterable[str], optional
         Names of demand-pruned modules to draw grey/dashed, by default ().
     widths : Mapping[str, int] | None, optional
         Statically resolved per-key feature widths (dotted key -> concrete
-        last-dim int), from `salt.core.nn.bind.resolve_bind_schema` — NO data,
-        NO batch run. When a key's declared shape ends in a symbolic FEATURE dim
-        (not ``B``/``T``/``L``/``S``), that dim is shown as the concrete width
-        (e.g. ``encoded.tracks (B, T:tracks, 16)``); the data-dependent
-        leading/sequence dims stay symbolic. By default None.
-
-    Returns
-    -------
-    str
-        The DOT source.
+        last-dim int), from `salt.core.nn.bind.resolve_bind_schema`. When a
+        key's declared shape ends in a symbolic feature dim, that dim is shown
+        as the concrete width; data-dependent dims stay symbolic. By default None.
     """
     modules = dict(modules or {})
-    # Graph styling (design §4.3): the validated port-card layout. plaintext
-    # nodes carry HTML-like TABLE labels (the cards), so the shape/style/fill
-    # live in the table, not the node attrs. splines=ortho draws clean right
-    # angles between cards; the per-key detail is inside the cards (no floating
-    # edge labels to detach), so ortho is safe here. Generous rank separation
-    # keeps the LR rows of cards legible.
+    # plaintext nodes carry HTML-like TABLE labels (the cards), so shape/style/
+    # fill live in the table, not the node attrs. splines=ortho is safe since
+    # there are no floating edge labels to detach.
     lines = [
         f"digraph salt_core_{plan.mode.name.lower()} {{",
         "  rankdir=LR;",
@@ -446,11 +332,10 @@ def dot_source(
 
 
 # ---------------------------------------------------------------------------
-# §4.3 module box palette (shared by the DOT card fills)
+# module box palette (shared by the DOT card fills)
 # ---------------------------------------------------------------------------
 
-# module box fill by (first matching) produced namespace — the §4.3 styling
-# (investigation plot_graph.py palette)
+# module box fill by (first matching) produced namespace
 _NS_COLOURS = {
     "raw": "#b5d99c",
     "masks": "#b5d99c",
@@ -470,13 +355,7 @@ _FALLBACK_COLOUR = "#cccccc"
 
 
 def _module_colour(step: PlanStep) -> str:
-    """Pick the box colour from the step's produced namespaces.
-
-    Returns
-    -------
-    str
-        A hex colour.
-    """
+    """Pick the box colour from the step's produced namespaces."""
     for namespace in sorted({key.split(KEY_SEP)[0] for key in step.produces}):
         if namespace in _NS_COLOURS:
             return _NS_COLOURS[namespace]

@@ -1,12 +1,4 @@
-"""Unit tests for the M4 export surface: config resolution, reduces, adapter (plan 07 stage A).
-
-Covers the static pieces — `resolve_export_config` validation/defaulting
-(incl. the export-only model-name rule, design §7 "Naming"), the reduce
-registry (design §7.3) on hand-made bundles, the `OnnxAdapter` input
-construction and alias gather, and the ONNX-plan purity guarantee (no
-labels/losses/writers, design §7). Tracing/onnxruntime agreement lives in
-``test_onnx_export.py``.
-"""
+"""Unit tests for the M4 export surface: config resolution, reduces, adapter (plan 07 stage A)."""
 
 from __future__ import annotations
 
@@ -121,9 +113,7 @@ def gn2_resolved(run_name: str = "GN2_v2", **overrides) -> ExportConfig:
     return resolve_export_config(gn2_export_cfg(**overrides), run_name)
 
 
-# ---------------------------------------------------------------------------
 # config resolution + validation (design §7 "Naming", §5.1)
-# ---------------------------------------------------------------------------
 
 
 class TestModelName:
@@ -270,24 +260,17 @@ class TestExportSinkOutputs:
             ])
 
     def test_empty_sink_defers_to_section(self):
-        """W34.4d: an omitted/empty `outputs` defers to a bound `outputs:` section.
-
-        Construction succeeds (deferred resolution from a dumb section); with NEITHER
-        explicit leaves nor a section bound, resolution raises an actionable error (the
-        auto-collect producer-discovery path was removed in W34.4d).
-        """
+        """W34.4d: an omitted/empty `outputs` defers to a bound `outputs:` section."""
         sink = OnnxExportSink(outputs=[], model_name="M")
         with pytest.raises(ConfigError, match="has no export leaves"):
             sink.output_names()
 
 
-# ---------------------------------------------------------------------------
 # plan-29 W4: the SHIPPED reduces are RETIRED — folded into conversion nodes.
 # The argmax/union_find/maskformer math is now proven BITWISE in
 # test_onnx_fold_w2.py (SeqClassIndex/Combination) and test_onnx_fold_w3.py
 # (VertexUnionFind/MaskFormerObjects) against the same v1 chains these reduces
 # composed. These tests pin the RETIREMENT (no shipped reduce registered).
-# ---------------------------------------------------------------------------
 
 
 class TestRetiredReduces:
@@ -317,19 +300,11 @@ class TestRetiredReduces:
         )
 
 
-# ---------------------------------------------------------------------------
 # the LIVE register_reduce surface (M5 D-prereq; AM 555-567)
-# ---------------------------------------------------------------------------
 
 
 def _bind_passthrough_int8(out_cfg, ctx):
-    """A toy single-output reduce: flatten the port to int8 (registration target).
-
-    Returns
-    -------
-    BoundReduce
-        The bound toy reduce.
-    """
+    """A toy single-output reduce: flatten the port to int8 (registration target)."""
     name = f"{ctx.model_name}_{out_cfg.name}"
 
     def fn(b):
@@ -342,16 +317,7 @@ def _bind_passthrough_int8(out_cfg, ctx):
 
 @pytest.fixture
 def fresh_reduce_name():
-    """Yield a never-registered reduce name and unregister it on teardown.
-
-    Keeps the global registry pristine across tests — the registration is the
-    behaviour under test, but it must not leak into the rest of the suite.
-
-    Yields
-    ------
-    str
-        A reduce name guaranteed unregistered at entry, popped on teardown.
-    """
+    """Yield a never-registered reduce name and unregister it on teardown."""
     import salt.core.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
 
     name = "test_passthrough_int8"
@@ -361,13 +327,7 @@ def fresh_reduce_name():
 
 
 class TestRegisterReduce:
-    """The public `register_reduce` live-registry surface (SURVIVES W4 — R7).
-
-    The five SHIPPED reduces are retired (folded into conversion nodes), but the
-    public `register_reduce` API stays so a downstream custom export-only writer
-    can register its own export math. These tests exercise that surviving surface
-    with a freshly-registered PROBE reduce (no shipped reduce involved).
-    """
+    """The public `register_reduce` live-registry surface (SURVIVES W4 — R7)."""
 
     def test_no_shipped_reduces_registered_at_import(self):
         # the registry starts EMPTY of the retired shipped reduces (W4)
@@ -448,9 +408,7 @@ class TestRegisterReduce:
             bind_reduce(out, ctx)
 
 
-# ---------------------------------------------------------------------------
 # the ONNX plan: purity + sources (design §7, §7.1)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -532,9 +490,7 @@ class TestOnnxPlan:
         assert "'sequence: true'" in message
 
 
-# ---------------------------------------------------------------------------
 # the adapter (design §7)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -624,20 +580,12 @@ class TestAliasGather:
             self.make_adapter(gn2_modules, ["not_a_jet_var"])
 
 
-# ---------------------------------------------------------------------------
 # the export-mode protocol: torch-math forcing + construction-time guards
 # (design §7.2; v1 modelwrapper.py:331-335, to_onnx.py:670,700)
-# ---------------------------------------------------------------------------
 
 
 def build_flash_gn2_modules(tmp_path) -> dict:
-    """A GN2-shaped module dict whose encoder is BUILT with torch-flash.
-
-    Every shipped fixture constructs torch-math, so without this the
-    `set_export_mode` forcing path — the actual Athena-agreement requirement
-    for flash-trained configs — would be dead code under the test suite
-    (M4-review fix).
-    """
+    """A GN2-shaped module dict whose encoder is BUILT with torch-flash."""
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     dense = {"hidden_layers": [16], "activation": "ReLU"}
     torch.manual_seed(0)

@@ -1,28 +1,8 @@
-# GN3_tracklabel.yaml — overlay on the GN3_baseline -> loose -> flow ->
-# LepID_SMT stack (M5-CONV, GN3 family). The v2-native port of legacy
-# salt/configs/GN3_dev/GN3_tracklabel.yaml.
-#
-# v1 REPLACES the task list with 5 heads: the GN3_baseline three
-# (jets_classification / track_origin / track_vertexing) PLUS a 10-class signed
-# `track_type` and a 7-class `track_source`. There is NO regression task in this
-# variant (matrix §2: "no regression task in this variant"). Because the base's
-# first three tasks are identical, the v2 overlay only ADDS the two new task
-# modules (deep-merge into model.modules, design §5.3) — the loss stays the
-# GN3_baseline LossGLS.
-#
-# The 10-class track_type uses a SIGNED label_map (charge-aware: NegMuon ..
-# Muon, v1 GN3_tracklabel.yaml:60); track_source is `use_class_dict` (7-class,
-# weight_source null override at fit). Both are LossGLS tasks, so weight == 1.0
-# (NO weight declared) — the GLS guard (modelwrapper.py:139-142).
-#
-# Static validation (STACK base -> loose -> flow -> LepID_SMT -> this):
-#   python -m salt.core.main graph validate \
-#     -c salt/core/configs/GN3_baseline.yaml \
-#     -c salt/core/configs/GN3_baseline_loose.yaml \
-#     -c salt/core/configs/GN3_flow.yaml \
-#     -c salt/core/configs/GN3_LepID_SMT.yaml \
-#     -c salt/core/configs/GN3_tracklabel.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Overlay on GN3_baseline -> loose -> flow -> LepID_SMT: adds a 10-class
+# signed track_type head and a 7-class track_source head (no regression task
+# in this variant). Stack with:
+#   salt2 ... -c GN3_baseline.yaml -c GN3_baseline_loose.yaml -c GN3_flow.yaml \
+#     -c GN3_LepID_SMT.yaml -c GN3_tracklabel.yaml
 
 name: GN3_tracklabel
 
@@ -30,8 +10,6 @@ model:
   class_path: salt.core.SaltModule
   init_args:
     modules:
-      # 10-class SIGNED particle-type track label (charge-aware; v1 label_map
-      # GN3_tracklabel.yaml:60). use_class_dict in v1 -> weight_source null here.
       track_type:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
@@ -41,38 +19,17 @@ model:
           label_map: {-6: 0, -5: 1, -3: 2, -2: 3, 0: 4, 1: 5, 2: 6, 3: 7, 5: 8, 6: 9}
           class_names:
             [NegMuon, NegElectron, NegKaon, NegPion, NoTruth, Other, Pion, Kaon, Electron, Muon]
-          weight_source: null # v1 use_class_dict — override at fit
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
-      # NOTE: outputs.run_tasks (below) is RE-STATED to add track_type + track_source.
-      # 7-class track source (v1 use_class_dict, GN3_tracklabel.yaml:70).
-      #
-      # COLUMN DISAMBIGUATION (plan 34 W34.4c): class_names is the OUTPUT-COLUMN
-      # naming only — it is index-aligned with the head outputs, INDEPENDENT of the
-      # label/label_map training mapping (tasks.py:1184-1208). The H5 flat column is
-      # `{run_name}_p{ClassName}` (tasks.py class_suffixes / output_names), with NO
-      # task-name in the flat column — exactly v1's `{model_name}_{px}` scheme
-      # (legacy task.py:150-151). Three heads share the `tracks` stream here
-      # (track_origin / track_type / track_source) and their RAW source labels
-      # COLLIDE: NoTruth (track_type ∩ track_source) and FromB/FromBC/FromC/FromTau
-      # (track_origin ∩ track_source). v1 NEVER hit this because base.yaml's
-      # PredictionWriter ships `write_tracks=False` (predictionwriter.py:51,261) —
-      # NO track-stream head was ever written to the eval H5, so there is NO v1
-      # column oracle for any of these. v2's outputs: section DOES persist track
-      # heads (W34.4b), so the bare-suffix collision surfaces (the dumb H5OutputSink
-      # dup-name guard fires, same ValueError v1's join_structured_arrays would have
-      # raised on the duplicate structured-dtype field). Fix: give track_source's
-      # columns a `Src` prefix so all three heads' columns are unique on `tracks`.
-      # This renames ONLY the persisted column suffixes (no training change, no v1
-      # oracle to break).
       track_source:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
           label: ftagTruthSourceLabel
-          # 7 source classes (v1 use_class_dict autodiscovered; names baked here).
-          # `Src`-prefixed to disambiguate the shared-stream column collision with
-          # track_origin (FromB/BC/C/Tau) and track_type (NoTruth) — see note above.
+          # `Src`-prefixed: track_origin/track_type/track_source share the
+          # `tracks` stream and their raw label names collide
+          # (NoTruth, FromB/BC/C/Tau) — prefixing keeps output columns unique.
           class_names:
             [
               SrcNoTruth,
@@ -83,18 +40,11 @@ model:
               SrcFromFragmentation,
               SrcFromSecondary,
             ]
-          weight_source: null # v1 use_class_dict — override at fit
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
 
-# plan 34 W34.4c: this overlay ADDS track_type + track_source to the GN3_baseline
-# stack (jets_classification, track_origin, track_vertexing). RunTaskOutput.tasks
-# is a LIST → cross-config merge REPLACES (not deep-merges), so this overlay MUST
-# re-state the FULL run_tasks list (all 5 tasks); the inherited GN3_baseline
-# inputs_copy / pad_mask / dumb sinks deep-merge unchanged. This overlay is
-# never-run-alone (always stacked base -> loose -> flow -> LepID_SMT -> this), so
-# the composed result carries the full 5-task section. NO regression task in this
-# variant (matrix §2). v1 model-declaration order: jets_classification,
-# track_origin, track_vertexing, track_type, track_source.
+# run_tasks is a list, so cross-config merge REPLACES it — this overlay must
+# restate the full 5-task list, not just the two heads it adds.
 outputs:
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput

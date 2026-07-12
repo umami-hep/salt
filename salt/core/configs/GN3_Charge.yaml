@@ -1,26 +1,7 @@
-# GN3_Charge.yaml — overlay on GN3V00.yaml that ADDS the b-jet charge task
-# (M5-CONV, GN3 family). The v2-native port of legacy
-# salt/configs/GN3v01/GN3_Charge.yaml ("to be used on top of GN3_Hybrid or
-# GN3V00", adds B-jet charge classification).
-#
-# v1 GN3_Charge re-states the GN3V00 body and appends a 6th task `jets_charge`:
-# a 3-class (bquark / antibquark / other) ClassificationTask whose label is the
-# raw `HadronGhostInitialTruthLabelPdgId` folded through a ~300-entry PdgId
-# label_map (every b/c/light hadron PDG id -> {0,1,2}). Because GN3V00.yaml
-# already declares the identical first five heads, this v2 overlay only ADDS the
-# `jets_charge` module (deep-merge into model.modules, design §5.3); everything
-# else (LossGLS, lion, the 5 base tasks, the tracks+flows body) is inherited.
-#
-# LossGLS guard: the charge head carries `weight: 1` in v1 (GN3_Charge.yaml:117)
-# — 1.0 is the ONLY weight LossGLS permits (modelwrapper.py:139-142;
-# LossGLS.check_task_weights, modules.py:1377), so it is kept explicit and equal
-# to 1.
-#
-# Static validation (STACK GN3V00 first, then this overlay):
-#   python -m salt.core.main graph validate \
-#     -c salt/core/configs/GN3V00.yaml \
-#     -c salt/core/configs/GN3_Charge.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Overlay on GN3V00.yaml: adds a 3-class b-jet charge head (raw PdgId folded
+# through a ~300-entry label_map). Stack GN3V00.yaml first, then this overlay.
+# run_tasks is a list, so cross-config merge REPLACES it — this overlay must
+# restate the full 6-task list, not just the head it adds.
 
 name: GN3_Charge
 
@@ -28,8 +9,6 @@ model:
   class_path: salt.core.SaltModule
   init_args:
     modules:
-      # B-jet charge: raw PdgId label folded to 3 classes by the ~300-entry
-      # label_map (v1 GN3_Charge.yaml:115). LossGLS -> weight 1.0.
       jets_charge:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
@@ -37,7 +16,7 @@ model:
           input: pooled.global
           label: HadronGhostInitialTruthLabelPdgId
           class_names: [bquark, antibquark, other]
-          weight: 1 # the ONLY weight LossGLS allows (== 1.0)
+          weight: 1 # the only weight LossGLS allows (== 1.0)
           label_map:
             {
               0: 2, 15: 2, -15: 2, 511: 1, -511: 0, 513: 1, -513: 0, 521: 1, -521: 0,
@@ -70,14 +49,6 @@ model:
             }
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
 
-# plan 34 W34.4c: this overlay ADDS jets_charge to the GN3V00 stack
-# (jets_classification, track_origin, track_vertexing, track_type,
-# jet_pt_regression). RunTaskOutput.tasks is a LIST → cross-config merge REPLACES
-# (not deep-merges), so this overlay MUST re-state the FULL run_tasks list (all 6
-# tasks); the inherited GN3V00 inputs_copy / pad_mask / dumb H5+ONNX sinks
-# deep-merge unchanged. This overlay is never-run-alone (always stacked on GN3V00),
-# so the composed result carries the full 6-task section + GN3V00's OnnxExportSink.
-# v1 model-declaration order: the GN3V00 five, then jets_charge.
 outputs:
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput

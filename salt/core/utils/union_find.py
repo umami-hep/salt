@@ -5,9 +5,9 @@ from torch import Tensor
 def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor) -> Tensor:
     """Make directed edge scores symmetric within each graph and squash to (0, 1).
 
-    For a batch of graphs concatenated along the edge dimension, this function
-    averages each directed edge score with its opposite-direction counterpart and
-    returns the elementwise sigmoid of the averaged scores.
+    Averages each directed edge score with its opposite-direction counterpart
+    (for a batch of graphs concatenated along the edge dimension) and returns
+    the elementwise sigmoid of the averaged scores.
 
     Parameters
     ----------
@@ -75,10 +75,6 @@ def update_node_indices(
         Tensor of shape ``(B,)`` (integer dtype) with the number of nodes in each
         graph.
 
-    Returns
-    -------
-    tuple[Tensor, Tensor]
-        Updated ``(node_indices, update_indices)``.
     """
     edge_offset = node_offset = 0
     for i, _nnodes in enumerate(node_numbers):
@@ -169,18 +165,5 @@ def get_node_assignment(output: Tensor, mask: Tensor) -> Tensor:
 
 @torch.jit.script
 def get_node_assignment_jit(output: Tensor, mask: Tensor) -> Tensor:
-    """TorchScript wrapper for :func:`get_node_assignment`.
-
-    Parameters
-    ----------
-    output : Tensor
-        Concatenated directed edge scores of shape ``(E, 1)``.
-    mask : Tensor
-        Padding mask of shape ``(B, S)`` (``True`` indicates padded).
-
-    Returns
-    -------
-    Tensor
-        Concatenated per-node component indices of shape ``(N, 1)``.
-    """
+    """TorchScript-compiled wrapper for :func:`get_node_assignment` (same shapes)."""
     return get_node_assignment(output, mask)

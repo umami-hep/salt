@@ -1,39 +1,5 @@
-# GN3V00.yaml — the GN3 v00 baseline in the v2 schema (M5-CONV, GN3 family).
-#
-# The v2-native MIGRATED fixture for the legacy salt/configs/GN3v01/GN3V00.yaml:
-# a two-stream (tracks + flows) GN3 body feeding 5 task heads, combined with the
-# GEOMETRIC-MEAN LossGLS (v1 `loss_mode: GLS`, modelwrapper.py:194-196). The
-# five tasks reproduce the v1 head list verbatim:
-#
-#   - jets_classification : 6-class split-light flavour (v1 `use_class_dict`,
-#                           output_size 6)
-#   - track_origin        : 8-class ftag track-origin
-#   - track_vertexing     : per-track vertex edges (origin-weighted)
-#   - track_type          : 6-class signed-particle track type (label_map folds
-#                           the signed PDG-type ids, v1 GN3V00.yaml:98)
-#   - jet_pt_regression   : jet-pT ratio regression (target/denominator, the M5
-#                           RegressionTaskModule; v1 GN3V00.yaml:108)
-#
-# LossGLS REQUIRES every loss-producing task to carry weight == 1.0 (the v1
-# `ModelWrapper` GLS guard, modelwrapper.py:139-142; v2 LossGLS.check_task_weights,
-# modules.py:1377). v1's GN3 heads never set a `weight:`, so the v1 default 1.0
-# is faithful — NO task here declares a weight. (This is the structural reason a
-# GN3 config differs from gn2v2-opendata.yaml's weighted LossSum.)
-#
-# NO machine paths are committed (design §5 placeholder policy). A typical
-# invocation FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2
-# script is not installed):
-#
-#   salt2 fit --config salt/core/configs/GN3V00.yaml \
-#     --data.train_file $DATA/pp_output_train.h5 \
-#     --data.val_file   $DATA/pp_output_val.h5 \
-#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml \
-#     --model.modules.jets_classification.init_args.weight_source='{"from_class_dict": "'$DATA'/class_dict.yaml"}' \
-#     --model.modules.track_origin.init_args.weight_source='{"from_class_dict": "'$DATA'/class_dict.yaml"}'
-#
-# Static validation (no data) supplies required init_args data-free:
-#   python -m salt.core.main graph validate -c salt/core/configs/GN3V00.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# GN3 v00 baseline: two-stream (tracks + flows) body feeding 5 task heads with
+# LossGLS (geometric-mean loss; requires every task weight == 1.0).
 
 name: GN3V00
 
@@ -46,7 +12,6 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          # v1 input_map: tracks -> tracks_ghost (the ghost-associated tracks)
           tracks: {global_object: false, dataset: tracks_ghost}
           flows: {global_object: false}
     features:
@@ -89,21 +54,20 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
     lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
-    optimizer: lion # v1 GN3 GLS lion optimiser
+    optimizer: lion
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks, flows]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          context: [normed.jets]
           out_dim: &embed_dim 512
           dense: {hidden_layers: [512], activation: SiLU}
       flow_embed:
@@ -115,20 +79,18 @@ model:
           dense: {hidden_layers: [512], activation: SiLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks, flows]} # v1 init_nets insertion order
+        init_args: {streams: [tracks, flows]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 256
           num_layers: 4
-          num_registers: 8 # v1 GN3V00.yaml:43 — 8 learned register tokens
-          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          num_registers: 8
+          attention: {num_heads: 8, attn_type: torch-math}
           dense: {activation: SiLU, gated: true}
       split:
-        # only tracks has per-token tasks; flows contribute to the encoder
-        # attention but feed no flow-level head, so do not split them out (an
-        # unconsumed encoded.flows would be a dead-output warning, design §4.2)
+        # only tracks has per-token tasks
         class_path: salt.core.nn.Split
         init_args: {streams: [tracks]}
       pool:
@@ -140,10 +102,9 @@ model:
           stream: jets
           input: pooled.global
           label: flavour_label
-          # v1 use_class_dict 6-class split-light flavour
           class_names: &gn3_flavour
             [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
@@ -153,14 +114,14 @@ model:
           label: ftagTruthOriginLabel
           class_names: &origin_classes
             [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_vertexing:
         class_path: salt.core.nn.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_type:
@@ -169,7 +130,6 @@ model:
           stream: tracks
           context: pooled.global
           label: ftagTruthTypeLabel
-          # v1 label_map folds the signed particle-type ids into 6 classes
           label_map: {-2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5}
           class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
@@ -179,34 +139,16 @@ model:
           stream: jets
           input: pooled.global
           targets: ptFromTruthDressedWZJet
-          target_denominators: pt_btagJes # ratio target; declared input Feature
-          # v1 L1Loss reduction:none (per-element survives to nanmean)
+          target_denominators: pt_btagJes
           loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
+        class_path: salt.core.nn.LossGLS
 
-# plan 34 W34.4b: the plan-29/31 conversion PRODUCER nodes (jet_probs/jet_pt_reg/
-# track_origin_probs/track_type_probs/track_origin_index/track_vertex_index/
-# track_type_index) are RETIRED — the 1:1 conversion math (softmax / regression
-# de-scale / union-find) folds back ONTO each task via get_output (W34.1/W34.3),
-# orchestrated by the RunTaskOutput writer in the outputs: section below. The dumb
-# sinks dump ALL active outputs.* leaves; the SECTION supplies names + dtypes +
-# ORDER. NOTE: this RESTORES the per-token VertexIndex eval H5 column (v1
-# WriterCallback parity) the superseded W5 auto-collect H5 sink deferred — vertexing
-# get_output mints it in BOTH TEST (i8) and ONNX (int8).
-# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
-# -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order
-# (jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression):
-# per-stream this yields jets = class probs then jet_pt_reg; tracks = origin probs,
-# VertexIndex, type probs. The OnnxExportSink re-orders globals-then-per-token for
-# the Athena tuple (jets_classification, jet_pt_regression globals; TrackOrigin,
-# VertexIndex, TrackType per-token).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), copy_inputs={} parity
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -215,26 +157,19 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: GN3V00 # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows} # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # default TaskWriter declares GN3V00_p{ghostbjets,...} (split_scalars),
-  # _TrackOrigin / _TrackType (argmax int8), _VertexIndex (vertex_union_find
-  # int8) and the regression_ptFromTruthDressedWZJet column (de-scaled by the
-  # declared pt_btagJes input). Inspect with `salt2 graph resolve -c <this file>`.
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
 
 trainer:
   max_epochs: 40
-  precision: 32-true # bf16-mixed on GPU clusters (M6 follow-up)
+  precision: 32-true

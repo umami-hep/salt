@@ -1,26 +1,7 @@
-# dips.yaml — DiPS / DeepSets in the v2 schema: init_nets + pool_net, NO
-# encoder (design §5.1; v1 saltmodel.py:90-93,155-156). The v2-native port of
-# the legacy CI smoke fixture salt/configs/legacy/dips.yaml (test_pipeline.py)
-# and the shape every M5 regression config shares (encoder-less pooling).
-#
-# A single track stream is embedded, concatenated to one sequence (the v2
-# analogue of v1 `flatten_tensor_dict(xs)`), then globally attention-pooled —
-# the pool's `masks.registers` require is OPTIONAL, so with no encoder
-# producing it the config plan-compiles (M5 encoder-less pooling). No `Split`
-# and no track-stream tasks: the only head is the jet classifier, exactly the
-# legacy fixture.
-#
-# NO machine paths are committed (design §5 placeholder policy). From the REPO
-# ROOT (use `python -m salt.core.main` when the salt2 script is not installed):
-#
-#   salt2 fit --config salt/core/configs/dips.yaml \
-#     --data.train_file /path/to/pp_output_train.h5 \
-#     --data.val_file   /path/to/pp_output_train.h5 \
-#     --model.modules.norm.init_args.norm_dict /path/to/norm_dict.yaml
-#
-# Static validation (no data) supplies required init_args data-free:
-#   python -m salt.core.main graph validate -c salt/core/configs/dips.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# DiPS / DeepSets: init_nets + pool, no encoder. A single track stream is
+# embedded, concatenated to one sequence, then globally attention-pooled — the
+# shape every encoder-less regression config shares. No Split, no track-stream
+# tasks: the only head is the jet classifier.
 
 name: dips
 
@@ -74,14 +55,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -101,41 +82,27 @@ model:
           class_names: [ujets, cjets, bjets]
           dense: {hidden_layers: [128, 64, 32], activation: SiLU, dropout: 0.1}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4b: the plan-29/31 ClassProbs producer (jet_probs) is RETIRED — the
-# softmax folds onto the task via get_output (W34.1), orchestrated by the
-# RunTaskOutput writer below. The dumb sinks dump ALL active outputs.* leaves; the
-# SECTION supplies names + dtypes + ORDER. DiPS has NO sequence-stream task, so the
-# section has NO PadMaskWriter (write_pad_mask was false).
-# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets]} # all jets source fields (v1 default), copy_inputs={jets: []} parity
+    init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification]}
 
-# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest. The
-# OnnxExportSink names the section's get_output ONNX leaves (dips_pu/_pc/_pb
-# split_scalars from the head's class_names) in canonical tuple order.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
-  model_name: dips # Athena name: no '_'/'-' (validated at export only)
+export:
+  model_name: dips # Athena name: no '_'/'-'
   inputs:
-    - { port: inputs.jets, name: jet_features } # [1, F] global
-    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # outputs: NONE — derived from the writers (M4.5 unified manifest): the
-  # default TaskWriter declares dips_pu/_pc/_pb (split_scalars from the head's
-  # class_names). Inspect with `salt2 graph resolve -c <this file>`.
+    - { port: inputs.jets, name: jet_features }
+    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks }
 
 trainer:
   max_epochs: 2

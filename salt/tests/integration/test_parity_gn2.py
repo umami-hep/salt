@@ -1,15 +1,4 @@
-"""End-to-end tests for the GN2 forward-parity gate (plan 04, stages 3-4).
-
-Positive: the gate passes bitwise on the small GN2 (via the real CLI entry
-point) — including the two-stream GN2e-style variant — and writes a complete
-report proving the v2 side ran through the M1 Executor. Negative controls:
-six deliberate mis-wirings — task pad-mask dict order, skipping the
-normaliser, pad-mask polarity flip, pooling pad-mask dict order, rolled
-per-variable norm constants, reversed multi-stream concat — must each make
-the gate FAIL, proving the comparison has teeth on exactly the bug class the
-gate hunts (silent wrong slice, missing norm, wrong edge count, misaligned
-pooling mask, norm-constant misordering, wrong stream layout).
-"""
+"""End-to-end tests for the GN2 forward-parity gate (plan 04, stages 3-4)."""
 
 from __future__ import annotations
 
@@ -38,9 +27,7 @@ EXPECTED_MODULES = {
 }
 
 
-# ---------------------------------------------------------------------------
 # positive: the gate passes end to end via the CLI entry point
-# ---------------------------------------------------------------------------
 
 
 def test_gate_passes_end_to_end(tmp_path, capsys):
@@ -99,13 +86,7 @@ def test_gate_passes_other_batch_shape(tmp_path):
 
 
 def test_gate_passes_two_streams(tmp_path):
-    """Two sequence streams (GN2e-style electrons): concat order is genuinely exercised.
-
-    With a single sequence stream, multi-stream concat order / per-stream
-    mask dict order are vacuous (reversing a 1-tuple is the identity —
-    stage-4 critic finding). This variant makes them load-bearing; the
-    reversed-concat negative control below proves it.
-    """
+    """Two sequence streams (GN2e-style electrons): concat order is genuinely exercised."""
     code, report = run_parity(tmp_path, with_electrons=True)
     assert code == 0
     assert report["passed"] is True
@@ -127,18 +108,11 @@ def test_gate_passes_two_streams(tmp_path):
     assert all(r["bitwise"] and r["passed"] for r in report["intermediates"])
 
 
-# ---------------------------------------------------------------------------
 # negative control 1: reordered task pad-mask dict (silent wrong slice)
-# ---------------------------------------------------------------------------
 
 
 class _RegistersFirstTask(ConstituentTask):
-    """Deliberate mis-wiring: REGISTERS first in the task pad-mask dict.
-
-    input_name_mask concatenates per-stream widths in DICT ORDER
-    (task.py:73-78) — this selects the wrong sequence slice with an
-    UNCHANGED output shape, the silent failure the gate must catch.
-    """
+    """Deliberate mis-wiring: REGISTERS first in the task pad-mask dict."""
 
     def forward(self, b, mode):
         del mode
@@ -169,18 +143,11 @@ def test_gate_fails_on_task_mask_dict_order(tmp_path):
     assert leaves["preds.tracks.track_vertexing"]["passed"] is True
 
 
-# ---------------------------------------------------------------------------
 # negative control 2: feed UN-normalised inputs to the embed (norm skipped)
-# ---------------------------------------------------------------------------
 
 
 class _RawInputEmbed(StreamEmbed):
-    """Deliberate mis-wiring: reads ``inputs.*`` instead of ``normed.*``.
-
-    The parity norm dict has DISTINCT nonzero means and non-unit stds per
-    variable (write_parity_norm_dict) — a nontrivial affine map, so skipping
-    the normaliser must change every downstream leaf.
-    """
+    """Deliberate mis-wiring: reads ``inputs.*`` instead of ``normed.*``."""
 
     def declare_io(self, mode):
         del mode
@@ -227,18 +194,11 @@ def test_gate_fails_when_norm_is_skipped(tmp_path):
     assert all(r["passed"] is False for r in report["intermediates"])
 
 
-# ---------------------------------------------------------------------------
 # negative control 3: pad-mask polarity flip (wrong edge count -> shape gate)
-# ---------------------------------------------------------------------------
 
 
 class _FlippedPolarityVertexing(ConstituentTask):
-    """Deliberate mis-wiring: inverts the stream pad masks (True = valid).
-
-    The vertexing adjacency is built from the mask VALUES (task.py:874-881),
-    so a polarity flip changes the edge count E — caught by the shape check
-    BEFORE any value comparison.
-    """
+    """Deliberate mis-wiring: inverts the stream pad masks (True = valid)."""
 
     def forward(self, b, mode):
         del mode
@@ -271,19 +231,11 @@ def test_gate_fails_on_mask_polarity_flip(tmp_path):
     assert "shape" in vert["note"].lower()
 
 
-# ---------------------------------------------------------------------------
 # negative control 4: pooling pad-mask dict order (misaligned mask, values)
-# ---------------------------------------------------------------------------
 
 
 class _RegistersFirstPooling(Pooling):
-    """Deliberate mis-wiring: REGISTERS first in the pooling pad-mask dict.
-
-    GlobalAttentionPooling concatenates mask values in dict order
-    (pooling.py:56) — REGISTERS-first shifts every mask value by one
-    position relative to the encoded sequence, so the attention weights
-    mask the WRONG tokens with an UNCHANGED output shape.
-    """
+    """Deliberate mis-wiring: REGISTERS first in the pooling pad-mask dict."""
 
     def forward(self, b, mode):
         del mode
@@ -317,21 +269,11 @@ def test_gate_fails_on_pooling_mask_dict_order(tmp_path):
     assert intermediates["encoded.seq"]["passed"] is True
 
 
-# ---------------------------------------------------------------------------
 # negative control 5: rolled per-variable norm constants (field-order bug)
-# ---------------------------------------------------------------------------
 
 
 class _RolledNormaliser(Normaliser):
-    """Deliberate mis-wiring: per-variable norm constants rolled by one.
-
-    Simulates a field-order mismatch between the norm dict and the input
-    columns — exactly the class expected in M2 phase 1, where the v2
-    Normaliser is built from config instead of sharing the v1 instance.
-    Catchable ONLY because the fixture's constants are distinct per variable:
-    under salt's uniform mean=1/std=1 dummy dict this roll is the identity
-    and the gate false-PASSed (stage-4 critic finding).
-    """
+    """Deliberate mis-wiring: per-variable norm constants rolled by one."""
 
     def forward(self, b, mode):
         del mode
@@ -357,20 +299,11 @@ def test_gate_fails_on_rolled_norm_constants(tmp_path):
     assert all(r["passed"] is False for r in report["intermediates"])
 
 
-# ---------------------------------------------------------------------------
 # negative control 6: reversed multi-stream concat (wrong sequence layout)
-# ---------------------------------------------------------------------------
 
 
 def test_gate_fails_on_reversed_concat_two_streams(tmp_path):
-    """Reversed Concat must FAIL — but only two streams make it excitable.
-
-    The tasks rebuild their pad-mask dicts in the ORIGINAL stream order, so
-    a reversed sequence layout makes ``input_name_mask`` select the wrong
-    slice (silently — output shapes are unchanged because per-stream widths
-    are fixed). With the single-stream default this control would pass
-    trivially (stage-4 critic finding), hence ``with_electrons=True``.
-    """
+    """Reversed Concat must FAIL — but only two streams make it excitable."""
 
     def hook(modules):
         modules["concat"] = Concat(tuple(reversed(modules["concat"].streams)))

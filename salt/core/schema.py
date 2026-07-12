@@ -1,19 +1,7 @@
 """The dataset schema artifact for the salt v2 kernel.
 
-Design §2.6: ``salt2 schema dump train.h5 -o schema.yaml`` writes a small YAML
-describing each H5 group — field names + dtypes, ``valid`` presence, group
-attrs (incl. class-name lists such as ``flavour_label``), and global file
-attrs. The artifact is generated once and versioned next to ``norm_dict.yaml``;
-reading it at config-parse time is config I/O, not data I/O.
-
-`dump_schema` is the only function in this module (and in ``salt.core``, M1)
-that touches a data file. Everything else operates on the in-memory `Schema`,
-which feeds the planner's wildcard narrowing (design §2.2 rule (d)) via
-`Schema.keys` / `Schema.validate_keys`.
-
-The artifact is versioned from day one (``schema_version:``) and `load_schema`
-is tolerant of additive change — unknown top-level and per-group keys are
-ignored (design §11 risk 12).
+``dump_schema`` reads an H5 file's structure into a `Schema` (field names,
+dtypes, group/file attrs); `load_schema`/`save_schema` round-trip it to YAML.
 """
 
 from __future__ import annotations
@@ -43,18 +31,17 @@ __all__ = [
 ]
 
 SCHEMA_VERSION = 1
-"""Current schema artifact version (design §11 risk 12)."""
+"""Current schema artifact version."""
 
 _SUGGESTION_CUTOFF = 0.5
 
 
 @dataclass(frozen=True)
 class GroupSchema:
-    """Schema of one H5 group: field names + dtypes and group attrs (design §2.6).
+    """Schema of one H5 group: field names + dtypes and group attrs.
 
     `fields` maps field name to a numpy dtype name (``"float32"``); `attrs`
-    holds the group attrs as plain Python values, including class-name lists
-    such as the ``flavour_label`` attr used by the §4.1 class-names check.
+    holds the group attrs as plain Python values.
     """
 
     fields: dict[str, str]
@@ -62,24 +49,18 @@ class GroupSchema:
 
     @property
     def has_valid(self) -> bool:
-        """Whether the group carries a ``valid`` field (padded-sequence marker).
-
-        Returns
-        -------
-        bool
-            True if ``"valid"`` is among the fields.
-        """
+        """Whether the group carries a ``valid`` field (padded-sequence marker)."""
         return "valid" in self.fields
 
 
 @dataclass(frozen=True)
 class KeyValidation:
-    """Report from `Schema.validate_keys` (design §2.6).
+    """Report from `Schema.validate_keys`.
 
     `present` keys exist in the schema; `missing` keys name an existing group
     but an absent field; `unknown` keys name a group not in the schema (or are
     not ``group.field``-shaped at all). `suggestions` maps each bad key to its
-    nearest schema keys, for §4.1-quality error messages.
+    nearest schema keys.
     """
 
     present: tuple[str, ...]
@@ -89,22 +70,16 @@ class KeyValidation:
 
     @property
     def ok(self) -> bool:
-        """Whether every validated key is present in the schema.
-
-        Returns
-        -------
-        bool
-            True if there are no missing or unknown keys.
-        """
+        """Whether every validated key is present in the schema."""
         return not (self.missing or self.unknown)
 
 
 @dataclass(frozen=True)
 class Schema:
-    """The dataset schema artifact (design §2.6).
+    """The dataset schema artifact.
 
     `groups` maps H5 group name to `GroupSchema`; `attrs` holds global file
-    attrs; `schema_version` versions the artifact format (design §11 risk 12).
+    attrs; `schema_version` versions the artifact format.
     """
 
     groups: dict[str, GroupSchema]
@@ -113,14 +88,6 @@ class Schema:
 
     def keys(self) -> tuple[str, ...]:
         """Flatten the schema to dotted ``group.field`` keys.
-
-        This is the flat universe handed to `compile_plan(schema=...)` so
-        wildcard narrowing is statically validated (design §2.2 rule (d)).
-
-        Returns
-        -------
-        tuple[str, ...]
-            All ``group.field`` keys, group by group in declaration order.
 
         Raises
         ------
@@ -142,13 +109,13 @@ class Schema:
         return tuple(out)
 
     def validate_keys(self, keys: Iterable[str]) -> KeyValidation:
-        """Validate demanded dotted keys against the schema (design §2.6).
+        """Validate demanded dotted keys against the schema.
 
-        Used by the planner's wildcard narrowing and the validate CLI: each
-        key is interpreted as ``group.field`` (the first component is the
-        group). Malformed string keys (``"jets..pt"``, ``""``) are classified
-        as unknown rather than raising; non-string keys are a caller bug and
-        raise TypeError. Outputs are sorted for deterministic reports.
+        Each key is interpreted as ``group.field`` (the first component is
+        the group). Malformed string keys (``"jets..pt"``, ``""``) are
+        classified as unknown rather than raising; non-string keys are a
+        caller bug and raise TypeError. Outputs are sorted for deterministic
+        reports.
 
         Parameters
         ----------
@@ -196,11 +163,11 @@ class Schema:
 
 
 def load_schema(path: str | Path) -> Schema:
-    """Load a schema artifact from YAML (design §2.6).
+    """Load a schema artifact from YAML.
 
-    Tolerant of additive change (design §11 risk 12): unknown top-level keys
-    and unknown per-group keys are ignored, and a newer `schema_version` is
-    accepted as long as the keys this reader needs are present.
+    Tolerant of additive change: unknown top-level keys and unknown
+    per-group keys are ignored, and a newer `schema_version` is accepted as
+    long as the keys this reader needs are present.
 
     Returns
     -------
@@ -274,7 +241,7 @@ def save_schema(schema: Schema, path: str | Path) -> None:
     """Write a schema artifact to YAML (inverse of `load_schema`).
 
     Field and group order is preserved so the artifact diffs cleanly under
-    version control (design §2.6: committed next to ``norm_dict.yaml``).
+    version control.
     """
     payload: dict[str, Any] = {
         "schema_version": schema.schema_version,
@@ -289,23 +256,20 @@ def save_schema(schema: Schema, path: str | Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# H5 -> Schema (the only file-touching function in salt.core, design §2.6)
+# H5 -> Schema (the only file-touching function in salt.core)
 # ---------------------------------------------------------------------------
 
 
 def dump_schema(h5_path: str | Path) -> Schema:
-    """Read a training file's structure into a `Schema` (design §2.6).
+    """Read a training file's structure into a `Schema`.
 
-    Scrapes what v1 reads ad hoc (``cli.py:425-443``, ``datasets.py:579-607``):
-    every top-level structured dataset becomes a group with its field names,
+    Every top-level structured dataset becomes a group with its field names,
     dtypes, and attrs; global file attrs are kept too. Non-structured
-    datasets and nested groups are ignored (the v1 layout is flat structured
-    datasets at the file root — see ``salt.utils.inputs.write_dummy_file``).
+    datasets and nested groups are ignored.
 
     Dataset or field names containing ``"."`` are legal in HDF5/numpy but
-    cannot be addressed as dotted bundle keys (design §2.1) — they are
-    skipped with a warning on stderr so the artifact stays consumable by
-    `Schema.keys` and the planner.
+    cannot be addressed as dotted bundle keys — they are skipped with a
+    warning on stderr so the artifact stays consumable by `Schema.keys`.
 
     Returns
     -------
@@ -355,11 +319,7 @@ def dump_schema(h5_path: str | Path) -> Schema:
 def _dtype_name(dtype: np.dtype) -> str:
     """Human-readable, reconstructible name for a structured-array field dtype.
 
-    Returns
-    -------
-    str
-        ``np.dtype(name)``-constructible name (``"float32"``); subarray
-        fields fall back to ``str(dtype)``.
+    Subarray fields fall back to ``str(dtype)``; others use ``dtype.name``.
     """
     if dtype.subdtype is not None:
         return str(dtype)
@@ -367,13 +327,7 @@ def _dtype_name(dtype: np.dtype) -> str:
 
 
 def _plain(value: Any) -> Any:
-    """Convert an h5py attr value to plain Python for YAML serialisation.
-
-    Returns
-    -------
-    Any
-        Lists/str/int/float/bool — no numpy types survive.
-    """
+    """Convert an h5py attr value to plain Python for YAML serialisation."""
     if isinstance(value, np.ndarray):
         return [_plain(item) for item in value.tolist()]
     if isinstance(value, np.generic):

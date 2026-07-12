@@ -1,22 +1,22 @@
 """Declared SETUP-time interfaces for the salt v2 setup-graph kernel.
 
-Plan-24 §3: the data-acquisition preamble (sample resolution → VDS build →
-``/dev/shm`` staging → reader probe) is wired by a *separate, parallel* graph
-that runs once per stage in ``datamodule.setup()`` — never per batch. That
-graph carries two SETUP-only port flavours, PATH and SCALAR/CONFIG, declared
-here as `SourceSpec` leaves.
+The data-acquisition preamble (sample resolution -> VDS build -> ``/dev/shm``
+staging -> reader probe) is wired by a separate, parallel graph that runs once
+per stage in ``datamodule.setup()`` — never per batch. That graph carries two
+SETUP-only port flavours, PATH and SCALAR/CONFIG, declared here as
+`SourceSpec` leaves.
 
-This module is deliberately SEPARATE from the tensor-only `spec.py`
-(plan-24 decision 1): a `SourceSpec` has NO ``shape``/``dtype``/``fields`` —
-a setup leaf is a filesystem PATH string or a resolved SCALAR/CONFIG artifact
-(a dict of str/float, or an opaque resolved object such as a ``num`` row-cap
-dict), never a tensor. Keeping the type system disjoint makes it structurally
-impossible for a path/scalar kind to leak into the per-batch tensor bundle —
-the hot loop stays tensor-only, so demand-pruning and static-shape resolution
-on the tensor side are untouched.
+This module is deliberately separate from the tensor-only `spec.py`: a
+`SourceSpec` has no ``shape``/``dtype``/``fields`` — a setup leaf is a
+filesystem PATH string or a resolved SCALAR/CONFIG artifact (a dict of
+str/float, or an opaque resolved object such as a ``num`` row-cap dict), never
+a tensor. Keeping the type system disjoint makes it structurally impossible
+for a path/scalar kind to leak into the per-batch tensor bundle — the hot loop
+stays tensor-only, so demand-pruning and static-shape resolution on the tensor
+side are untouched.
 
 The dotted-key machinery (``check_key_component`` / ``split_key`` / write-once
-`Bundle`) is REUSED from `spec.py`/`bundle.py`; only the leaf type differs.
+`Bundle`) is reused from `spec.py`/`bundle.py`; only the leaf type differs.
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ __all__ = [
 ]
 
 SetupStage: TypeAlias = Literal["train", "val", "test"]
-"""Lightning-style setup stage (plan-24 §3.3) — identical to ``CutSpec._STAGE_KEYS``.
+"""Lightning-style setup stage — identical to ``CutSpec._STAGE_KEYS``.
 
-NOT a `Mode`: ``datamodule.setup("fit")`` builds BOTH the train and val
+NOT a `Mode`: ``datamodule.setup("fit")`` builds both the train and val
 datasets in one call, so setup granularity is coarser than the per-batch
 FIT/VAL `Mode` split. `Mode.ONNX` is never a setup stage (ONNX never runs the
 setup pass).
@@ -57,7 +57,7 @@ SourceKind: TypeAlias = Literal["path", "scalar"]
 PATH = a filesystem path string (a raw sample file, a VDS path, a ``/dev/shm``
 staged path). SCALAR = a resolved CONFIG artifact: a dict of str/float, a
 float, or an opaque resolved object (e.g. a ``num`` row-cap dict). A consumer
-port may only bind a producer leaf of the same kind (plan-24 §4.2).
+port may only bind a producer leaf of the same kind.
 """
 
 SOURCE_KINDS: tuple[SourceKind, ...] = get_args(SourceKind)
@@ -66,17 +66,16 @@ SOURCE_KINDS: tuple[SourceKind, ...] = get_args(SourceKind)
 
 @dataclass(frozen=True)
 class SourceSpec:
-    """Static description of one SETUP-bundle leaf (plan-24 §3.2 — SETUP-time ONLY).
+    """Static description of one SETUP-bundle leaf (SETUP-time only).
 
     A setup leaf is a filesystem PATH (``kind="path"``) or a resolved
     CONFIG/SCALAR artifact (``kind="scalar"``: dict of str/float, a float, or
-    an opaque resolved object such as a ``num`` row-cap dict). It has NO
-    ``shape``, NO ``dtype``, NO symbolic dims, NO ``fields`` — setup leaves are
-    not tensors and never enter the per-batch bundle. That omission is the
-    tripwire keeping plan-24 decision 1 honest: a setup leaf is structurally
-    incapable of being mistaken for a `TensorSpec`, and `_unify_edge` (which
-    reads ``.shape``/``.dtype``) must therefore never run on a setup edge
-    (plan-24 §4.3).
+    an opaque resolved object such as a ``num`` row-cap dict). It has no
+    ``shape``, no ``dtype``, no symbolic dims, no ``fields`` — setup leaves are
+    not tensors and never enter the per-batch bundle. That omission keeps a
+    setup leaf structurally incapable of being mistaken for a `TensorSpec`, so
+    `_unify_edge` (which reads ``.shape``/``.dtype``) must never run on a setup
+    edge.
 
     `stages` gates the leaf per setup stage exactly as `TensorSpec.modes` gates
     per `Mode`; `optional` marks a consumed-if-present require.
@@ -106,18 +105,12 @@ class SourceSpec:
             raise TypeError(f"optional must be bool, got {type(self.optional).__name__}")
 
     def active_in(self, stage: SetupStage) -> bool:
-        """Check whether this port is active in the given setup stage.
-
-        Returns
-        -------
-        bool
-            True if `stage` is in `self.stages`.
-        """
+        """Whether this port is active in the given setup stage."""
         return stage in self.stages
 
 
 SourceNestedSpec: TypeAlias = dict[str, "SourceNestedSpec | SourceSpec"]
-"""Nested dict mirroring the setup-bundle layout, with `SourceSpec` leaves (plan-24 §3.4)."""
+"""Nested dict mirroring the setup-bundle layout, with `SourceSpec` leaves."""
 
 
 def iter_source_leaves(
@@ -126,7 +119,7 @@ def iter_source_leaves(
     """Iterate the leaves of a nested setup spec, depth-first in dict order.
 
     The setup-time twin of `iter_spec_leaves`; the shared dotted-key handling
-    (`check_key_component`) is reused, only the leaf type differs (plan-24 §3.4).
+    (`check_key_component`) is reused, only the leaf type differs.
 
     Yields
     ------
@@ -153,23 +146,12 @@ def iter_source_leaves(
 
 
 def flatten_source_spec(nested: SourceNestedSpec) -> dict[str, SourceSpec]:
-    """Flatten a nested setup spec to dotted keys (the setup-time twin of `flatten_spec`).
-
-    Returns
-    -------
-    dict[str, SourceSpec]
-        ``{dotted_key: spec}`` in depth-first dict order.
-    """
+    """Flatten a nested setup spec to dotted keys (the setup-time twin of `flatten_spec`)."""
     return dict(iter_source_leaves(nested))
 
 
 def unflatten_source_spec(flat: Mapping[str, SourceSpec]) -> SourceNestedSpec:
     """Rebuild a nested setup spec from dotted keys (inverse of `flatten_source_spec`).
-
-    Returns
-    -------
-    SourceNestedSpec
-        The nested setup spec tree.
 
     Raises
     ------
@@ -199,12 +181,12 @@ def unflatten_source_spec(flat: Mapping[str, SourceSpec]) -> SourceNestedSpec:
 
 @dataclass(frozen=True)
 class SetupIO:
-    """A `DatasetModule`'s SETUP-time interface (plan-24 decisions 2/3, §3.4).
+    """A `DatasetModule`'s SETUP-time interface.
 
     The setup-time analogue of `IO`: required and produced nested specs with
     `SourceSpec` leaves. A separate type from `IO` (whose ``__post_init__``
     would reject `SourceSpec` leaves), so a PATH/SCALAR leaf can never be
-    declared on the per-batch face and vice versa (plan-24 §4.2 hard wall).
+    declared on the per-batch face and vice versa.
     """
 
     requires: SourceNestedSpec = field(default_factory=dict)
@@ -216,11 +198,5 @@ class SetupIO:
         flatten_source_spec(self.produces)
 
     def is_empty(self) -> bool:
-        """Whether this declares no setup ports at all (the default no-op face).
-
-        Returns
-        -------
-        bool
-            True when both `requires` and `produces` are empty.
-        """
+        """Whether this declares no setup ports at all (the default no-op face)."""
         return not self.requires and not self.produces

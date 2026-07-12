@@ -16,9 +16,7 @@ from salt.core.graph.executor import Executor
 from salt.core.graph.planner import compile_plan
 from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# ---------------------------------------------------------------------------
 # toy fixtures (no physics — M1 scope)
-# ---------------------------------------------------------------------------
 
 
 def ts(**kwargs):
@@ -116,9 +114,7 @@ def input_bundle(x=None):
     return Bundle({"inputs": {"x": torch.ones(2, 4) if x is None else x}})
 
 
-# ---------------------------------------------------------------------------
 # happy path
-# ---------------------------------------------------------------------------
 
 
 class TestHappyPathDiamond:
@@ -164,9 +160,7 @@ class TestHappyPathDiamond:
             Executor(plan).run(Bundle())
 
 
-# ---------------------------------------------------------------------------
 # declaration enforcement on merge (always on, design §3.2)
-# ---------------------------------------------------------------------------
 
 
 class TestDeclarationEnforcement:
@@ -222,9 +216,7 @@ class TestDeclarationEnforcement:
             Executor(plan).run(b)
 
 
-# ---------------------------------------------------------------------------
 # debug mode: read tracking (design §4.1 quality bar)
-# ---------------------------------------------------------------------------
 
 
 class TestDebugReadTracking:
@@ -298,9 +290,7 @@ class TestDebugReadTracking:
             Executor(plan).run(input_bundle(), debug=True)
 
 
-# ---------------------------------------------------------------------------
 # debug mode: in-place mutation detection (design §2.1)
-# ---------------------------------------------------------------------------
 
 
 class TestMutationDetection:
@@ -344,9 +334,7 @@ class TestMutationDetection:
         assert torch.allclose(out.get("preds.x"), out.get("embed.x") + 1.0)
 
 
-# ---------------------------------------------------------------------------
 # optional ports (design §2.2: consumed if present, absent = omitted)
-# ---------------------------------------------------------------------------
 
 
 class TestOptionalPorts:
@@ -386,9 +374,7 @@ class TestOptionalPorts:
         assert torch.equal(out.get("preds.x"), x + 1.0)
 
 
-# ---------------------------------------------------------------------------
 # per-mode execution (design §3.1/§3.3: losses only in TRAINING plans)
-# ---------------------------------------------------------------------------
 
 
 class TestPerModeExecution:
@@ -409,9 +395,7 @@ class TestPerModeExecution:
         assert "loss.total" not in test_out
 
 
-# ---------------------------------------------------------------------------
 # determinism (design §3.1: frozen plan + seeded torch -> identical outputs)
-# ---------------------------------------------------------------------------
 
 
 class TestDeterminism:
@@ -435,9 +419,7 @@ class TestDeterminism:
         assert not torch.equal(out_a, out_b)
 
 
-# ---------------------------------------------------------------------------
 # constructor validation (design §3.2)
-# ---------------------------------------------------------------------------
 
 
 class TestExecutorConstruction:

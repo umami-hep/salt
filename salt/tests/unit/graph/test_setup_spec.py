@@ -1,13 +1,4 @@
-"""Unit tests for the setup-graph type system (`salt.core.graph.setup_spec`).
-
-Covers the W3.0 `SourceSpec` / `SetupIO` type system (plan-24 §3, plan-25
-§3.6 / W3.0): the source-kind enum, the deliberate absence of tensor
-attributes on a setup leaf, stage gating, and the flatten/unflatten round-trip.
-
-(Split out of the former ``test_setup_graph.py``: the ``compile_setup_plan`` /
-``run_setup_plan`` / namespace-split / tensor-planner-control groups live in
-``test_setup_executor.py``, which owns the shared toy DatasetModules.)
-"""
+"""Unit tests for the setup-graph type system (`salt.core.graph.setup_spec`)."""
 
 from __future__ import annotations
 
@@ -27,9 +18,7 @@ def src(kind="path", **kwargs):
     return SourceSpec(kind=kind, **kwargs)
 
 
-# ---------------------------------------------------------------------------
 # §3 type system — SourceSpec / SetupIO
-# ---------------------------------------------------------------------------
 
 
 class TestSourceSpec:

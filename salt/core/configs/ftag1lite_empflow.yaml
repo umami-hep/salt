@@ -1,34 +1,6 @@
-# ftag1lite_empflow.yaml — a small-R EMPFlow flavour tagger trained DIRECTLY on
-# xAOD DAOD_FTAG1LITE POOL files via the v2 modular FTAG1LiteReader (NO H5
-# pre-processing, NO umami/UPP resampling). Demonstrates the v2 Reader boundary
-# on a THIRD file type: a brand-new format is a NEW Reader — Features / Labels /
-# Normaliser / StreamEmbed / the encoder / the task heads / salt2 are all
-# UNCHANGED (this is the SAME model as gn2v2-opendata.yaml).
-#
-# The sample unit is the small-R jet (AntiKt4EMPFlowJets). The reader flattens
-# the file's [event][jet] std::vector scalars to one row per jet, and pads the
-# [event][jet][track] ft1l_trk_* double-jagged constituents to pad_max=40 per jet
-# (bf16 branches AUTO-decode to float32). The model: Normaliser -> track
-# StreamEmbed (context normed.jets) -> Concat -> TransformerEncoder -> Split ->
-# GlobalAttentionPooling -> jets_classification (4-class b/c/tau/light) +
-# track_origin + track_vertexing — the standard GN2/GN3 track-tagger heads, NO
-# model change.
-#
-# Index-build cuts (optional): attach a CutSpec to the reader to select eligible
-# jets at prepare() time (e.g. pt >= 20 GeV). Per-split cuts ride
-# with_source(stage=...). See salt.core.data.cuts.CutSpec.
-#
-# Data paths + norm_dict are REQUIRED overrides — NO machine paths are committed
-# (design §5 placeholder policy). uproot + awkward are runtime reader extras
-# (pip install 'salt[root]'). A typical invocation FROM THE REPO ROOT:
-#
-#   salt2 fit --config salt/core/configs/ftag1lite_empflow.yaml \
-#     --data.train_file $FILE_OR_DIR \
-#     --data.val_file   $FILE_OR_DIR \
-#     --model.modules.norm.init_args.norm_dict $NORM
-#
-# ($FILE_OR_DIR = a .pool.root file, a directory of them, or a glob;
-#  $NORM = a norm_dict.yaml with mean/std under top-level `jets:` and `tracks:`.)
+# Small-R EMPFlow flavour tagger trained directly on xAOD DAOD_FTAG1LITE POOL
+# files via FTAG1LiteReader (no H5 pre-processing). Same model as
+# gn2v2-opendata.yaml — only the reader differs. No ONNX export (fit/test only).
 
 name: ftag1lite_empflow
 
@@ -65,10 +37,9 @@ data:
               dphi: ft1l_trk_dphi_bf16
               numberOfPixelHits: ft1l_trk_numberOfPixelHits
               numberOfSCTHits: ft1l_trk_numberOfSCTHits
-              # the track-truth labels keep their v1 field names so the task
-              # heads' label-derivation contracts hold (VertexingTaskModule
-              # derives the origin key via label.replace('VertexIndex',
-              # 'OriginLabel') — task.py:937)
+              # kept under v1 field names so the task heads' label-derivation
+              # contracts hold (VertexingTaskModule derives the origin key via
+              # label.replace('VertexIndex', 'OriginLabel'))
               ftagTruthOriginLabel: ft1l_trk_ftagTruthOriginLabel
               ftagTruthVertexIndex: ft1l_trk_ftagTruthVertexIndex
     features:
@@ -103,14 +74,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header) — jets + tracks streams
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          context: [normed.jets]
           out_dim: 256
           dense: {hidden_layers: [256], activation: ReLU}
       concat:
@@ -137,8 +108,7 @@ model:
           input: pooled.global
           label: flavour_label
           class_names: [bjets, cjets, taujets, ujets]
-          # FTAG1LITE HadronConeExclTruthLabelID -> 4-class index:
-          # 5=b->0, 4=c->1, 15=tau->2, 0=light->3
+          # HadronConeExclTruthLabelID -> 4-class index: 5=b->0, 4=c->1, 15=tau->2, 0=light->3
           label_map: {5: 0, 4: 1, 15: 2, 0: 3}
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
@@ -155,27 +125,17 @@ model:
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
           weight: 1.5
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired). It supplies its OWN top-level outputs: section + dumb H5
-# sink. The 1:1 conversion math (softmax / union-find) folds onto each task via
-# get_output (W34.1/W34.3), orchestrated by the RunTaskOutput writer below; the
-# dumb sink dumps ALL active outputs.* leaves, the SECTION supplies names/dtypes/
-# ORDER. Section writers in EXACT v1 H5 column order — InputCopyWriter ->
-# RunTaskOutput task fields -> PadMaskWriter. The RunTaskOutput tasks list is the
-# v1 model-declaration order (jets_classification, track_origin, track_vertexing):
-# jets = class probs; tracks = origin probs then VertexIndex (i8 in TEST).
-# NO OnnxExportSink (no export: block — fit/test only).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -184,8 +144,6 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink

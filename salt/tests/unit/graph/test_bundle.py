@@ -7,9 +7,7 @@ import torch
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import DeclarationError, GraphError, KeyCollisionError
 
-# ---------------------------------------------------------------------------
 # construction
-# ---------------------------------------------------------------------------
 
 
 class TestConstruction:
@@ -53,9 +51,7 @@ class TestConstruction:
         assert b.get("raw.jets") is arr
 
 
-# ---------------------------------------------------------------------------
 # get / set / contains
-# ---------------------------------------------------------------------------
 
 
 class TestGetSet:
@@ -133,9 +129,7 @@ class TestGetSet:
             b.get("seq.layout.jets")
 
 
-# ---------------------------------------------------------------------------
 # write-once collisions
-# ---------------------------------------------------------------------------
 
 
 class TestWriteOnce:
@@ -171,9 +165,7 @@ class TestWriteOnce:
         assert issubclass(DeclarationError, GraphError)
 
 
-# ---------------------------------------------------------------------------
 # subtree
-# ---------------------------------------------------------------------------
 
 
 class TestSubtree:
@@ -228,9 +220,7 @@ class TestSubtree:
             b.subtree("a..b")
 
 
-# ---------------------------------------------------------------------------
 # merge (executor path: write-once + declaration check, design §2.1/§3.2)
-# ---------------------------------------------------------------------------
 
 
 class TestMerge:

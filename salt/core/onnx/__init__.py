@@ -1,27 +1,11 @@
-"""salt v2 ONNX export (design §7; M4.5): writer manifest + export block -> ``.onnx``.
+"""salt v2 ONNX export: writer manifest + export block -> ``.onnx``.
 
-Public surface:
-
-- `ExportConfig` / `ExportInput` / `ExportCombine` — the parsed ``export:``
-  block (registered on the `Salt2CLI` parser, design §5.1) — the
-  EXPORT-ONLY half since M4.5: inputs, model name, rename/combine.
-- `ExportOutput` — one output-manifest entry. Writer-declared
-  (``Writer.onnx_outputs``, amendment merge condition 2), assembled by
-  ``WriterCallback.onnx_manifest`` — never config-parsed.
-- `resolve_export_config` — export-half validation + defaulting (the ONLY
-  place ``model_name`` rules apply, design §7 "Naming"; hard-errors on a
-  config-declared ``export.outputs``).
-- `attach_manifest` / `ordered_output_names` / `manifest_table` /
-  `combine_insertion_index` — manifest resolution, the single output
-  ordering authority (combines insert before per-token aux entries, the v1
-  rule), and the human-readable rendering.
-- `compile_onnx_plan` / `export_graph` — the programmatic export core
-  (fixture/gate-friendly: bound modules + manifest in, checked ``.onnx``
-  out).
-- `OnnxAdapter` — the traceable wrapper handed to ``torch.onnx.export``.
-- `check_onnx` — the torch-vs-onnxruntime sweep checker (design §7.6).
-- ``salt2 export`` — the CLI (`salt.core.onnx.export.main`), dispatched
-  from `salt.core.main`; ``--manifest`` prints the assembled manifest.
+Public surface: `ExportConfig`/`ExportInput`/`ExportOutput`/`ExportCombine` (the
+parsed ``export:`` block + output manifest), `resolve_export_config`/
+`attach_manifest` (validation + manifest resolution), `compile_onnx_plan`/
+`export_graph` (the programmatic export core), `OnnxAdapter` (the traced
+wrapper handed to ``torch.onnx.export``), `check_onnx` (the torch-vs-onnxruntime
+sweep checker), and the ``salt2 export`` CLI (`salt.core.onnx.export.main`).
 """
 
 from salt.core.onnx.adapter import OnnxAdapter

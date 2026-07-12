@@ -1,28 +1,4 @@
-"""Tests for the ``salt2`` config surface / ``salt.core.main`` (design §5, §5.3).
-
-Everything runs through the REAL CLI classes (`Salt2CLI` / `main`), not toy
-parsers: the shipped ``gn2v2-dummy.yaml`` is parsed with its documented
-required path overrides over a tmp dummy file, ``--print_config``
-round-trips, config-file deep-merge adds a fourth task with siblings
-surviving, ``--model.modules.X=null`` deletes, dotted overrides reach
-``init_args``, `instantiate_classes` produces the `SaltModule`, the
-callbacks-dict assembly lands in ``trainer.callbacks``, and a 2-step
-``salt2 fit`` smoke runs on CPU (gate G2 surface). The ``graph``/``schema``
-subcommands keep dispatching to the M1 tooling.
-
-Parse/instantiate assertions use ``run=False`` (same parser surface, no
-trainer run); the fit smoke uses ``main([...])`` with ``run=True``.
-
-This file merges two former test modules that both exercise ``salt.core.main``:
-
-1. the ``salt2`` CLI config surface (formerly ``test_salt2_cli.py``);
-2. the Wave-1 ``--class_dict`` fan-out (formerly ``test_wave1_fanout.py``) —
-   see the "Wave-1 class_dict fan-out" section below; its helpers/fixtures are
-   ``wave1_*``-prefixed to avoid colliding with the CLI-surface ones above.
-   ``norm_dict`` is NOT fanned out: it is the `Normaliser` module's own config,
-   set on ``model.modules.norm.init_args.norm_dict`` directly — covered by the
-   ``TestNormDictOnModule`` section.
-"""
+"""Tests for the ``salt2`` config surface / ``salt.core.main`` (design §5, §5.3)."""
 
 from __future__ import annotations
 
@@ -113,11 +89,7 @@ def required_overrides(data) -> list[str]:
 
 
 def make_cli(data, extra: list[str] | None = None, config: Path = DUMMY_CFG) -> Salt2CLI:
-    """Parse + instantiate (run=False) through the real CLI surface.
-
-    The config is modified to disable trainer.logger (keyless test envs fail
-    during instantiate_classes with "Comet.ml requires an API key").
-    """
+    """Parse + instantiate (run=False) through the real CLI surface."""
     cfg = disable_logger_in_config(str(config))
     return Salt2CLI(
         args=["--config", cfg, *required_overrides(data), *(extra or [])],
@@ -131,9 +103,7 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
-# ---------------------------------------------------------------------------
 # parse + instantiate (gn2v2-dummy.yaml is the shipped worked config, §5.1)
-# ---------------------------------------------------------------------------
 
 
 class TestParseAndInstantiate:
@@ -176,9 +146,7 @@ class TestParseAndInstantiate:
         assert section["run_tasks"].is_run_task_output()
 
 
-# ---------------------------------------------------------------------------
 # --print_config round-trip (spike capability 2 at the real surface)
-# ---------------------------------------------------------------------------
 
 
 class TestPrintConfig:
@@ -201,9 +169,7 @@ class TestPrintConfig:
         assert cli_again.config.callbacks == cli_orig.config.callbacks
 
 
-# ---------------------------------------------------------------------------
 # deep-merge across config files (design §5.3, DeepMergeParser)
-# ---------------------------------------------------------------------------
 
 
 class TestDeepMerge:
@@ -236,9 +202,7 @@ class TestDeepMerge:
         assert set(cli.model.net.keys()) == GN2V2_MODULES  # siblings survive
 
 
-# ---------------------------------------------------------------------------
 # null-deletion (design §5.3: parse-to-None + assembly-time filtering)
-# ---------------------------------------------------------------------------
 
 
 class TestNullDeletion:
@@ -265,9 +229,7 @@ class TestNullDeletion:
         assert set(dm_modules) == {"reader", "features", "input_samples", "vds"}
 
 
-# ---------------------------------------------------------------------------
 # dotted CLI overrides into init_args (spike capability 4 at the real surface)
-# ---------------------------------------------------------------------------
 
 
 class TestDottedOverrides:
@@ -288,9 +250,7 @@ class TestDottedOverrides:
         assert cli.datamodule._reader_proto.num == 200  # noqa: SLF001 - prototype config
 
 
-# ---------------------------------------------------------------------------
 # callbacks: dict mechanics + assembly into trainer.callbacks (design §5.3)
-# ---------------------------------------------------------------------------
 
 
 class TestCallbacksDict:
@@ -324,12 +284,10 @@ class TestCallbacksDict:
 
 
 
-# ---------------------------------------------------------------------------
 # FIT/VAL callback-declared sinks via the STATIC graph tooling (M5 D-prereq;
 # design §3.1 454-456, §3.4 667-671) — the runtime path is covered in
 # test_saltmodule.py::TestCallbackSinks; here the static `salt2 graph` path
 # (load_config / `salt2 graph validate`) must see the SAME FIT/VAL sinks.
-# ---------------------------------------------------------------------------
 
 CONFMAT_CALLBACK_YAML = """
 callbacks:
@@ -390,9 +348,7 @@ class TestStaticFitValCallbackSinks:
         assert "ConfusionMatrix" in origins["preds.jets.jets_classification"]
 
 
-# ---------------------------------------------------------------------------
 # 2-step fit smoke through the REAL CLI (run=True path; gate G2 surface)
-# ---------------------------------------------------------------------------
 
 
 class TestFitSmoke:
@@ -435,9 +391,7 @@ class TestFitSmoke:
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
 
 
-# ---------------------------------------------------------------------------
 # graph/schema dispatch (the M1 tooling keeps working through salt2)
-# ---------------------------------------------------------------------------
 
 
 class TestGraphDispatch:
@@ -778,18 +732,7 @@ def wave1_data(tmp_path_factory) -> dict[str, Path]:
 
 
 def wave1_base_overrides(wave1_data) -> list[str]:
-    """The gn2v2-dummy.yaml required path overrides MINUS the per-task weight_source.
-
-    ``norm_dict`` IS supplied here (the module form — it is the Normaliser's own
-    REQUIRED config, no longer a fan-out flag). The per-task ``weight_source`` is
-    deliberately omitted so the ``--class_dict`` flag (or the verbose block) is
-    the ONLY source of those values.
-
-    Returns
-    -------
-    list[str]
-        The CLI args common to every case here.
-    """
+    """The gn2v2-dummy.yaml required path overrides MINUS the per-task weight_source."""
     return [
         "--config",
         str(DUMMY_CFG),
@@ -804,13 +747,7 @@ def wave1_base_overrides(wave1_data) -> list[str]:
 
 
 def wave1_verbose_block(wave1_data) -> list[str]:
-    """Today's verbose per-task weight_source override block (the form being retired).
-
-    Returns
-    -------
-    list[str]
-        The two per-task ``--model.modules.*.init_args.weight_source`` overrides.
-    """
+    """Today's verbose per-task weight_source override block (the form being retired)."""
     cd = wave1_data["cd"]
 
     def ws_override(task: str) -> str:
@@ -823,13 +760,7 @@ def wave1_verbose_block(wave1_data) -> list[str]:
 
 
 def wave1_class_dict_flag(wave1_data) -> list[str]:
-    """The Wave-1 one-flag form (``--class_dict``).
-
-    Returns
-    -------
-    list[str]
-        The ``--class_dict`` flag.
-    """
+    """The Wave-1 one-flag form (``--class_dict``)."""
     return [f"--class_dict={wave1_data['cd']}"]
 
 
@@ -838,13 +769,7 @@ def wave1_make_cli(wave1_data, extra: list[str]) -> Salt2CLI:
 
 
 def wave1_print_config(wave1_data, extra: list[str]) -> str:
-    """Capture the ``--print_config`` dump for the given override block.
-
-    Returns
-    -------
-    str
-        The dumped YAML config.
-    """
+    """Capture the ``--print_config`` dump for the given override block."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), pytest.raises(SystemExit) as excinfo:
         wave1_make_cli(wave1_data, [*extra, "--print_config"])
@@ -852,9 +777,7 @@ def wave1_print_config(wave1_data, extra: list[str]) -> str:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
 # Gate (a) — --print_config byte-equality (--class_dict == verbose two-line)
-# ---------------------------------------------------------------------------
 
 
 class TestPrintConfigByteEquality:
@@ -889,10 +812,8 @@ class TestPrintConfigByteEquality:
             assert ws(one_flag, task) == {"from_class_dict": str(wave1_data["cd"])}
 
 
-# ---------------------------------------------------------------------------
 # Gate (c) — the class_dict fan-out lands on the right tasks / leaves explicit
 # ones alone (norm_dict, the module config, is covered in TestNormDictOnModule)
-# ---------------------------------------------------------------------------
 
 
 class TestFanOutInstantiated:
@@ -948,11 +869,9 @@ class TestFanOutInstantiated:
             assert cli.model.net[task].weight_source == {"from_class_dict": str(wave1_data["cd"])}
 
 
-# ---------------------------------------------------------------------------
 # norm_dict is the Normaliser module's OWN config (its sole consumer): set on
 # model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag. These
 # replace the retired --norm_dict fan-out tests.
-# ---------------------------------------------------------------------------
 
 
 class TestNormDictOnModule:

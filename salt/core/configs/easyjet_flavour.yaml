@@ -1,28 +1,7 @@
-# easyjet_flavour.yaml — a minimal jet-flavour tagger trained DIRECTLY on easyjet
-# AnalysisMiniTree ROOT ntuples via the v2 modular EasyjetReader (NO H5
-# pre-processing). Demonstrates the v2 Reader boundary: a brand-new file format
-# is a NEW Reader — Features / Labels / Normaliser / StreamEmbed / the encoder /
-# the task heads / salt2 are all UNCHANGED.
-#
-# The jets stream is a per-event JAGGED sequence (recojet_antikt4PFlow_*),
-# padded to a fixed multiplicity by the reader; the model treats it as a token
-# sequence (Normaliser -> StreamEmbed -> Concat -> TransformerEncoder -> Split)
-# and the classification head runs PER JET on HadronConeExclTruthLabelID
-# (4-class b/c/tau/light via label_map 5->0, 4->1, 15->2, 0->3). NO tracks —
-# easyjet output has none. Branch names carry the _NOSYS suffix in config, so
-# HH4b vs flavtag is a config change, not a code change.
-#
-# Data paths are REQUIRED overrides — NO machine paths are committed. uproot +
-# awkward are runtime reader extras (pip install in salt.sif). A typical
-# invocation FROM THE REPO ROOT:
-#
-#   salt2 fit --config salt/core/configs/easyjet_flavour.yaml \
-#     --data.train_file $DIR \
-#     --data.val_file   $DIR \
-#     --model.modules.norm.init_args.norm_dict $NORM
-#
-# ($DIR = a directory of .root files or a single file; $NORM = a norm_dict.yaml
-# with mean/std for the 7 jet features under a top-level `jets:` key.)
+# Minimal jet-flavour tagger trained directly on easyjet AnalysisMiniTree ROOT
+# ntuples via EasyjetReader (no H5 pre-processing). Jets are a per-event
+# jagged sequence, treated as a token sequence; the classification head runs
+# per-jet on HadronConeExclTruthLabelID. No tracks — easyjet output has none.
 
 name: easyjet_flavour
 
@@ -65,7 +44,7 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header) — jets stream only
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets]
       jet_embed:
         class_path: salt.core.nn.StreamEmbed
@@ -93,26 +72,16 @@ model:
           stream: jets
           label: HadronConeExclTruthLabelID
           class_names: [bjets, cjets, taujets, ujets]
-          # easyjet HadronConeExclTruthLabelID -> 4-class index:
-          # 5=b->0, 4=c->1, 15=tau->2, 0=light->3
+          # HadronConeExclTruthLabelID -> 4-class index: 5=b->0, 4=c->1, 15=tau->2, 0=light->3
           label_map: {5: 0, 4: 1, 15: 2, 0: 3}
           dense: {hidden_layers: [128, 64], activation: ReLU}
       loss:
         class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired). It supplies its OWN top-level outputs: section + dumb H5
-# sink. The softmax folds onto the task via get_output (W34.1), orchestrated by
-# the RunTaskOutput writer below; the dumb sink dumps ALL active outputs.* leaves,
-# the SECTION supplies names/dtypes/ORDER. `jets` is a JAGGED sequence stream here
-# (jagged: true, per-jet classification via Split) — so it needs a PadMaskWriter.
-# Section writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput
-# task fields -> PadMaskWriter. NO OnnxExportSink (no export: block — fit/test
-# only, like event_classifier).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets]} # all source fields (v1 default), the only tasked stream
+    init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification]}
@@ -120,8 +89,6 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [jets]} # jets is a padded sequence stream here
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink

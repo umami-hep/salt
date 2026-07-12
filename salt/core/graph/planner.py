@@ -1,30 +1,27 @@
 """Plan compilation for the salt v2 graph kernel.
 
-Design §3.1: modules declare their interfaces (`declare_io`), the planner
-flattens them to dotted ports, narrows wildcard producers against concrete
-demand (design §2.2 rules (a)-(d)), builds producer→consumer edges, checks
-connectivity / kinds / symbolic shape unification, prunes per mode, and emits
-a frozen, hashed `Plan`.
+Modules declare their interfaces (`declare_io`), the planner flattens them to
+dotted ports, narrows wildcard producers against concrete demand, builds
+producer->consumer edges, checks connectivity/kinds/symbolic shape
+unification, prunes per mode, and emits a frozen, hashed `Plan`.
 
-Static only: compilation never touches data files, the network, or tensors
-(design principle 8). Topological order is fully deterministic — Kahn's
-algorithm with ties broken by *config declaration order* (the order module
-names appear in the ``modules`` dict, which YAML preserves) — so the same
-config yields the same plan (and `plan_hash`) on every machine, and
-reordering independent modules in YAML is the supported way to nudge
-execution order, e.g. for peak memory (design §3.1, documented loudly;
-risk 3 mitigation). The plan hash makes any reorder detectable.
+Static only: compilation never touches data files, the network, or tensors.
+Topological order is fully deterministic — Kahn's algorithm with ties broken
+by *config declaration order* (the order module names appear in the
+``modules`` dict, which YAML preserves) — so the same config yields the same
+plan (and `plan_hash`) on every machine, and reordering independent modules in
+YAML is the supported way to nudge execution order (e.g. peak memory). The
+plan hash makes any reorder detectable.
 
-Sinks anchor demand pruning (design §3.1): in the full framework FIT/VAL
-sinks are ``loss.total`` plus callback requires, TEST sinks are the writers,
-ONNX sinks are the export ports. The kernel takes them as an explicit
-``sinks`` argument — either a flat iterable of dotted keys for the compiled
-mode, or a ``{Mode: keys}`` mapping enabling full per-mode demand analysis
-for the all-modes-dead check (design §1 principle 10). Modules that declare
-requires but no produces in ANY mode (writers) are terminal consumers and
-anchor demand themselves; a module producing nothing only in THIS mode because
-its ports are mode-gated out (the §4.2 ``expose:`` opt-out) is a prunable
-producer, not a terminal.
+Sinks anchor demand pruning: in the full framework FIT/VAL sinks are
+``loss.total`` plus callback requires, TEST sinks are the writers, ONNX sinks
+are the export ports. The kernel takes them as an explicit ``sinks``
+argument — either a flat iterable of dotted keys for the compiled mode, or a
+``{Mode: keys}`` mapping enabling full per-mode demand analysis for the
+all-modes-dead check. Modules that declare requires but no produces in ANY
+mode (writers) are terminal consumers and anchor demand themselves; a module
+producing nothing only in THIS mode because its ports are mode-gated out (the
+``expose:`` opt-out) is a prunable producer, not a terminal.
 """
 
 from __future__ import annotations
@@ -81,13 +78,13 @@ __all__ = [
 ]
 
 SOURCES = "<sources>"
-"""Edge producer sentinel: the key is provided a priori by the framework (design §3.1)."""
+"""Edge producer sentinel: the key is provided a priori by the framework."""
 
 SINKS = "<sinks>"
 """Edge consumer sentinel: the key is demanded by a sink (writer/export/loss boundary)."""
 
 Sinks: TypeAlias = "Iterable[str] | Mapping[Mode, Iterable[str]] | None"
-"""Sink keys: flat iterable (compiled mode only) or per-mode mapping (design §3.1)."""
+"""Sink keys: flat iterable (compiled mode only) or per-mode mapping."""
 
 _WILDCARD_PARTS = frozenset({"*", "**"})
 _SUGGESTION_CUTOFF = 0.5
@@ -101,7 +98,7 @@ _MAX_SHOWN_KEYS = 12
 
 @dataclass(frozen=True, order=True)
 class Edge:
-    """One resolved graph edge: `producer` writes `key`, `consumer` reads it (design §3.1).
+    """One resolved graph edge: `producer` writes `key`, `consumer` reads it.
 
     `producer` is a module name or the `SOURCES` sentinel; `consumer` is a
     module name or the `SINKS` sentinel.
@@ -114,7 +111,7 @@ class Edge:
 
 @dataclass(frozen=True)
 class PlanStep:
-    """One executable step: a module plus its fully resolved flat IO (design §3.1).
+    """One executable step: a module plus its fully resolved flat IO.
 
     `requires`/`produces` are flattened ``{dotted_key: TensorSpec}`` mappings
     with wildcards narrowed and optional-but-absent requires dropped —
@@ -132,7 +129,7 @@ class PlanStep:
 
 @dataclass(frozen=True)
 class Plan:
-    """A compiled, frozen execution plan for one mode (design §3.1).
+    """A compiled, frozen execution plan for one mode.
 
     `steps` are in deterministic topological order; `edges` are sorted by
     ``(producer, key, consumer)``; `sources` are the mode-active framework
@@ -148,22 +145,11 @@ class Plan:
 
     @property
     def module_names(self) -> tuple[str, ...]:
-        """The ordered module names of this plan.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Module instance names in execution order.
-        """
+        """The ordered module names of this plan."""
         return tuple(step.name for step in self.steps)
 
     def step(self, name: str) -> PlanStep:
         """Look up a step by module instance name.
-
-        Returns
-        -------
-        PlanStep
-            The step for `name`.
 
         Raises
         ------
@@ -178,21 +164,20 @@ class Plan:
 
 @dataclass(frozen=True)
 class DeadOutput:
-    """One dead-output finding from `deadcode` (design §4.2).
+    """One dead-output finding from `deadcode`.
 
     `key` is the dead produced key, or ``"*"`` when the whole module was
     demand-pruned; `module` may be the `SOURCES` sentinel for unconsumed
     source leaves. `severity` classifies the finding: an unconsumed
-    ``preds.*`` port in TEST mode is an ``"error"`` by default (design §4.2 —
-    predictions silently vanishing from eval files); an unconsumed
-    ``preds.*`` port in FIT/VAL is ``"info"`` (design §3.3 — the normal case
-    of no configured metric callback; never promoted by ``--strict``), as is
-    a module pruned from the ONNX plan (M4.5: the ONNX sinks are the
-    writer-declared manifest ports, and an export surface narrower than
-    eval — ``onnx_streams``/``onnx_tasks`` — is legitimate by design, so
-    ``--strict --mode onnx`` stays usable on narrowed configs);
-    everything else is a ``"warning"``. The CLI exits non-zero on any
-    error-level finding.
+    ``preds.*`` port in TEST mode is an ``"error"`` by default (predictions
+    silently vanishing from eval files); an unconsumed ``preds.*`` port in
+    FIT/VAL is ``"info"`` (the normal case of no configured metric callback;
+    never promoted by ``--strict``), as is a module pruned from the ONNX plan
+    (the ONNX sinks are the writer-declared manifest ports, and an export
+    surface narrower than eval is legitimate by design, so
+    ``--strict --mode onnx`` stays usable on narrowed configs); everything
+    else is a ``"warning"``. The CLI exits non-zero on any error-level
+    finding.
     """
 
     module: str
@@ -214,32 +199,25 @@ def compile_plan(
     sinks: Sinks = None,
     sink_origins: Mapping[str, str] | None = None,
 ) -> Plan:
-    """Compile the execution plan for one primary mode (design §3.1).
+    """Compile the execution plan for one primary mode.
 
     `sources` is what the framework provides a priori (the dataset boundary
     for model-side plans; empty for full-pipeline plans). `schema`, when
-    given, is the universe of dotted keys wildcard patterns may narrow to
-    (design §2.2 rule (d)); `sinks` anchors demand pruning (see module
-    docstring). Only non-optional requires create wildcard demand — optional
-    ports are consumed-if-present and never force a producer to materialise
-    a key. `sink_origins` optionally maps sink keys to a human-readable
-    description of WHO demanded them (e.g. the model-side task module behind
-    a dataset-plan sink) — used purely to upgrade error messages to the
-    design §4.1 attribution bar.
+    given, is the universe of dotted keys wildcard patterns may narrow to;
+    `sinks` anchors demand pruning (see module docstring). Only non-optional
+    requires create wildcard demand — optional ports are consumed-if-present
+    and never force a producer to materialise a key. `sink_origins`
+    optionally maps sink keys to a human-readable description of WHO
+    demanded them (e.g. the model-side task module behind a dataset-plan
+    sink) — used purely to upgrade error messages.
 
     Errors (all `GraphError` subclasses): `ConfigError` for composite modes,
     instance-name mismatches, wildcard misuse, or non-concrete source/sink
     keys; `ConnectivityError` for missing/duplicate producers or
     schema-invalid wildcard narrowing; `KindError` for consumer/producer kind
     mismatches; `ShapeError` for symbolic-dim/dtype unification conflicts;
-    `CycleError` for dependency cycles including wildcard self-feed
-    (design §2.2 rule (b)); `AllModesDeadError` for a configured module dead
-    in every primary mode (design §1 principle 10).
-
-    Returns
-    -------
-    Plan
-        The frozen, hashed plan.
+    `CycleError` for dependency cycles including wildcard self-feed;
+    `AllModesDeadError` for a configured module dead in every primary mode.
     """
     _check_primary_mode(mode)
     if sinks is not None and not isinstance(sinks, Mapping):
@@ -253,32 +231,26 @@ def compile_setup_plan(
     modules: dict[str, GraphModule],
     stage: SetupStage,
 ) -> Plan:
-    """Compile the SETUP-time source plan for one stage (plan-24 §4.3).
+    """Compile the SETUP-time source plan for one stage.
 
     The setup-graph twin of `compile_plan`. It reuses the SAME deterministic
-    Kahn topo-sort (config-declaration-order tie-break), the
-    connectivity / duplicate-producer / kind / cycle checks, and `plan_hash` —
-    factored into `_compile_core` and shared with the tensor planner. It
-    DIFFERS in exactly two ways (plan-24 §4.3):
+    Kahn topo-sort, the connectivity / duplicate-producer / kind / cycle
+    checks, and `plan_hash` — factored into `_compile_core` and shared with
+    the tensor planner. It DIFFERS in exactly two ways:
 
     - the IO getter is ``module.declare_setup_io(stage)`` (returning a
       `SetupIO` of `SourceSpec` leaves), not ``module.declare_io(mode)``;
     - shape-unification (`_unify_edge`) is SKIPPED — `SourceSpec` omits
-      ``shape``/``dtype``, so only kind-matching applies. Running ``_unify_edge``
-      would `AttributeError` on the first setup edge.
+      ``shape``/``dtype``, so only kind-matching applies. Running
+      ``_unify_edge`` would `AttributeError` on the first setup edge.
 
     The setup graph has no demand pruning, no sinks, and no all-modes-dead
-    check (a setup-only module producing a key consumed downstream is alive by
-    construction; pure path producers are the graph's roots). `stage` is a
-    Lightning-style setup stage (``"train"``/``"val"``/``"test"``), NOT a `Mode`.
-    The returned `Plan`'s ``mode`` field is set to `Mode.ALL` purely so the
-    frozen dataclass is well-formed; the setup executor walks ``steps`` in topo
-    order and never reads ``mode``.
-
-    Returns
-    -------
-    Plan
-        The frozen, hashed setup plan, steps in topo order.
+    check (a setup-only module producing a key consumed downstream is alive
+    by construction; pure path producers are the graph's roots). `stage` is
+    a Lightning-style setup stage (``"train"``/``"val"``/``"test"``), NOT a
+    `Mode`. The returned `Plan`'s ``mode`` field is set to `Mode.ALL` purely
+    so the frozen dataclass is well-formed; the setup executor walks
+    ``steps`` in topo order and never reads ``mode``.
 
     Raises
     ------
@@ -297,21 +269,17 @@ def compile_setup_plan(
 
 
 def _check_incompatibilities(modules: Mapping[str, GraphModule]) -> None:
-    """Enforce declared module mutual-exclusion over the setup-module dict (plan-25 Rev-2).
+    """Enforce declared module mutual-exclusion over the setup-module dict.
 
     A generic, reusable check: for each module ``m`` in `modules`, for each
-    class-name ``N`` it lists in ``m.incompatible_with``, if any OTHER module in
-    the dict has ``type(other).__name__ == N``, raise `ConfigError` naming both.
-    The setup-plan compiler is the only thing that sees the whole module dict, so
-    it is the right place to enforce a rule a single module declares about its
-    siblings (e.g. `VDS.incompatible_with = ("ShmStage",)` — staging a VDS copies
-    h5py pointers, not data). The named class need not exist (``ShmStage`` lands
-    in W3.S): the check matches on class NAME, dormant until both are present.
-
-    Parameters
-    ----------
-    modules : Mapping[str, GraphModule]
-        The setup-module dict (instance name -> module).
+    class-name ``N`` it lists in ``m.incompatible_with``, if any OTHER
+    module in the dict has ``type(other).__name__ == N``, raise
+    `ConfigError` naming both. The setup-plan compiler is the only thing
+    that sees the whole module dict, so it is the right place to enforce a
+    rule a single module declares about its siblings (e.g.
+    `VDS.incompatible_with = ("ShmStage",)` — staging a VDS copies h5py
+    pointers, not data). The named class need not exist yet: the check
+    matches on class NAME, dormant until both are present.
 
     Raises
     ------
@@ -336,15 +304,10 @@ def _check_incompatibilities(modules: Mapping[str, GraphModule]) -> None:
 def _assemble_plan(res: _Resolution) -> Plan:
     """Topo-sort a resolved graph and freeze it into a hashed `Plan` (shared core).
 
-    The tail shared by `compile_plan` and `compile_setup_plan` (plan-24 §4.3):
-    deterministic Kahn order, immutable `PlanStep`/`Edge` views, and the
-    structural `plan_hash`. Leaf-type-agnostic — `TensorSpec` and `SourceSpec`
-    both serialise via `_spec_payload`.
-
-    Returns
-    -------
-    Plan
-        The frozen, hashed plan.
+    The tail shared by `compile_plan` and `compile_setup_plan`: deterministic
+    Kahn order, immutable `PlanStep`/`Edge` views, and the structural
+    `plan_hash`. Leaf-type-agnostic — `TensorSpec` and `SourceSpec` both
+    serialise via `_spec_payload`.
     """
     order = _topo_order(res)
     steps = tuple(
@@ -374,32 +337,32 @@ def deadcode(
     schema: Collection[str] | None = None,
     sinks: Sinks = None,
 ) -> list[DeadOutput]:
-    """Report produced-but-never-consumed keys for one mode (design §4.2).
+    """Report produced-but-never-consumed keys for one mode.
 
     Mode-aware: ports gated out of `mode` by their declarations are expected
     absences and are not reported. Findings cover (a) whole modules dropped
-    by demand pruning when `sinks` is given, (b) produced leaves of surviving
-    modules with no consumer, and (c) unconsumed source leaves. Unlike
-    `compile_plan`, a module dead in every mode is reported, not raised — but
-    graph errors (missing producers, cycles via wildcards, ...) still raise.
+    by demand pruning when `sinks` is given, (b) produced leaves of
+    surviving modules with no consumer, and (c) unconsumed source leaves.
+    Unlike `compile_plan`, a module dead in every mode is reported, not
+    raised — but graph errors (missing producers, cycles via wildcards, ...)
+    still raise.
 
-    Severity (design §4.2, §3.3): an unconsumed ``preds.*`` key in TEST mode
-    is an ``"error"`` by default — the model computed a prediction and no
-    writer will persist it. An unconsumed ``preds.*`` key in FIT/VAL is
-    ``"info"`` — the normal case of no configured metric callback (§3.3).
-    A module pruned in ONNX mode is ``"info"`` too (M4.5 unified manifest:
-    ONNX sinks are the writer-declared export-manifest ports, and narrowing
-    the Athena surface below the eval surface is legitimate — the §4.2
-    export-pruning story; never promoted by ``--strict``).
+    Severity: an unconsumed ``preds.*`` key in TEST mode is an ``"error"``
+    by default — the model computed a prediction and no writer will persist
+    it. An unconsumed ``preds.*`` key in FIT/VAL is ``"info"`` — the normal
+    case of no configured metric callback. A module pruned in ONNX mode is
+    ``"info"`` too (the unified manifest: ONNX sinks are the
+    writer-declared export-manifest ports, and narrowing the Athena surface
+    below the eval surface is legitimate; never promoted by ``--strict``).
     Everything else is a ``"warning"``.
-    The per-task ``expose:`` opt-out (design §4.2, M5 sub-wave D) gates the
-    ``preds.*`` port to the configured modes BEFORE this report runs: a
-    ``expose: [fit, val]`` task produces no prediction in TEST, so the planner
-    prunes it (a warning-level whole-module pruning, never the TEST preds
-    error) — the opt-out both silences the error and prunes the task. Once
-    configured callbacks' declared requires enter FIT/VAL sinks (§3.1/§3.4,
-    landed in M5 sub-wave C), a callback-consumed pred stops appearing here at
-    all.
+
+    The per-task ``expose:`` opt-out gates the ``preds.*`` port to the
+    configured modes BEFORE this report runs: a ``expose: [fit, val]`` task
+    produces no prediction in TEST, so the planner prunes it (a
+    warning-level whole-module pruning, never the TEST preds error) — the
+    opt-out both silences the error and prunes the task. Once configured
+    callbacks' declared requires enter FIT/VAL sinks, a callback-consumed
+    pred stops appearing here at all.
 
     Returns
     -------
@@ -413,22 +376,23 @@ def deadcode(
     consumed: dict[str, set[str]] = {}
     for edge in res.edges:
         consumed.setdefault(edge.producer, set()).add(edge.key)
-    # ONNX-mode pruning is the writer-manifest narrowing story (M4.5): the
-    # export surface is explicitly declared and may legitimately be narrower
-    # than eval — info-level, never promoted by --strict (the README/§4.2
-    # export-pruning contract). All other modes keep the warning default.
+    # ONNX-mode pruning is the writer-manifest narrowing story: the export
+    # surface is explicitly declared and may legitimately be narrower than
+    # eval — info-level, never promoted by --strict. All other modes keep
+    # the warning default.
     pruned_suffix = (
         " (narrowed out of the writer-declared export surface — legitimate, M4.5 amendment §4)"
         if mode == Mode.ONNX
         else ""
     )
-    # plan-29 W4: a CONVERSION PRODUCER (salt.core.outputs node producing an
-    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/VertexUnionFind/etc.) that
-    # prunes in a non-ONNX mode is the by-design export-pruning story: its
-    # OnnxExportSink (or an H5OutputSink) is inactive in that mode, so the node has
-    # no sink and prunes legitimately. Demote it to info (never --strict-promoted),
-    # exactly like the ONNX-narrowing case — a config carrying ONNX export nodes
-    # must still pass `salt2 graph validate --strict --mode test`.
+    # A CONVERSION PRODUCER (a salt.core.outputs node producing an
+    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/VertexUnionFind/etc.)
+    # that prunes in a non-ONNX mode is the by-design export-pruning story:
+    # its OnnxExportSink (or an H5OutputSink) is inactive in that mode, so
+    # the node has no sink and prunes legitimately. Demote it to info
+    # (never --strict-promoted), exactly like the ONNX-narrowing case — a
+    # config carrying ONNX export nodes must still pass
+    # `salt2 graph validate --strict --mode test`.
     def _is_conversion_producer(name: str) -> bool:
         return isinstance(getattr(modules.get(name), "output_key", None), str)
 
@@ -477,17 +441,17 @@ def deadcode(
 
 
 # ---------------------------------------------------------------------------
-# IO-face adapter (plan-24 §4.3: tensor vs setup graph share _compile_core)
+# IO-face adapter (tensor vs setup graph share _compile_core)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class _IOFace:
-    """The per-graph IO contract `_resolve` reads through (plan-24 §4.3).
+    """The per-graph IO contract `_resolve` reads through.
 
     Lets the tensor planner and the setup planner reuse the SAME node
-    collection / edge building / topo / hash machinery while differing in only
-    the IO getter and whether shape-unification runs:
+    collection / edge building / topo / hash machinery while differing in
+    only the IO getter and whether shape-unification runs:
 
     - tensor face: ``getter(module) = module.declare_io(mode)`` (an `IO` of
       `TensorSpec` leaves); ``flatten = flatten_spec``; ``unify = True``.
@@ -496,8 +460,8 @@ class _IOFace:
       ``unify = False`` — `SourceSpec` has no shape/dtype, so `_unify_edge`
       must NOT run (it would `AttributeError`).
 
-    Both leaf types expose ``.kind`` / ``.optional`` / ``.active_in(...)``, so
-    kind-matching, optional handling, and active-gating are leaf-agnostic.
+    Both leaf types expose ``.kind`` / ``.optional`` / ``.active_in(...)``,
+    so kind-matching, optional handling, and active-gating are leaf-agnostic.
     """
 
     getter: Callable[[GraphModule], Any]
@@ -507,7 +471,7 @@ class _IOFace:
 
 
 def _tensor_face(mode: Mode) -> _IOFace:
-    """The tensor IO face bound to `mode` (the per-batch graph, plan-24 §4.3)."""
+    """The tensor IO face bound to `mode` (the per-batch graph)."""
     return _IOFace(
         getter=lambda module: module.declare_io(mode),
         flatten=flatten_spec,
@@ -517,7 +481,7 @@ def _tensor_face(mode: Mode) -> _IOFace:
 
 
 def _setup_face(stage: SetupStage) -> _IOFace:
-    """The setup IO face bound to `stage` (the setup graph, plan-24 §4.3)."""
+    """The setup IO face bound to `stage` (the setup graph)."""
     return _IOFace(
         getter=lambda module: module.declare_setup_io(stage),
         flatten=flatten_source_spec,
@@ -536,7 +500,7 @@ class _Node:
     """Internal per-module resolution state for one mode.
 
     `rank` is the module's position in the config ``modules`` dict — the
-    topological tie-break key (design §3.1: config declaration order).
+    topological tie-break key (config declaration order).
     """
 
     name: str
@@ -549,13 +513,7 @@ class _Node:
     bound: dict[str, TensorSpec] = field(default_factory=dict)
 
     def all_produces(self) -> dict[str, TensorSpec]:
-        """Concrete plus narrowed produces, as a fresh flat dict.
-
-        Returns
-        -------
-        dict[str, TensorSpec]
-            All keys this module writes in this mode.
-        """
+        """Concrete plus narrowed produces, as a fresh flat dict."""
         return {**self.produces, **self.narrowed}
 
 
@@ -584,14 +542,9 @@ def _resolve(
 ) -> _Resolution:
     """Resolve one mode's graph: narrow wildcards, build edges, check, prune.
 
-    `face` selects the IO contract (plan-24 §4.3): the default tensor face
-    reads ``declare_io(mode)`` and unifies shapes; the setup face reads
+    `face` selects the IO contract: the default tensor face reads
+    ``declare_io(mode)`` and unifies shapes; the setup face reads
     ``declare_setup_io(stage)`` and skips unification.
-
-    Returns
-    -------
-    _Resolution
-        The resolved graph state for `mode`.
     """
     if face is None:
         face = _tensor_face(mode)
@@ -634,11 +587,6 @@ def _resolve(
 def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
     """Flatten the source boundary and keep mode-active leaves.
 
-    Returns
-    -------
-    dict[str, TensorSpec]
-        Mode-active source leaves by dotted key.
-
     Raises
     ------
     ConfigError
@@ -661,7 +609,7 @@ def _collect_nodes(
     """Build per-module nodes with mode-active flattened ports.
 
     Nodes keep the config declaration order (dict insertion order) — it is
-    the topological tie-break (design §3.1) — and record it as `_Node.rank`.
+    the topological tie-break — and record it as `_Node.rank`.
 
     Returns
     -------
@@ -671,8 +619,7 @@ def _collect_nodes(
     Raises
     ------
     ConfigError
-        Protocol/name violations, reserved names, or wildcard misuse
-        (design §2.2, §3.1).
+        Protocol/name violations, reserved names, or wildcard misuse.
     """
     nodes: dict[str, _Node] = {}
     inactive: list[str] = []
@@ -693,10 +640,10 @@ def _collect_nodes(
                 "must match their config keys (design §2.2)"
             )
         io = face.getter(module)
-        # M1 seam for §2.2 "only framework-shipped producers may declare patterns":
-        # the attribute is framework-internal, not user API. TODO(M2): bind the
-        # capability to shipped code (module-path check or a framework registry)
-        # so user classes cannot grant it to themselves.
+        # framework-internal seam for "only framework-shipped producers may
+        # declare patterns": the attribute is not user API. TODO(M2): bind
+        # the capability to shipped code (module-path check or a framework
+        # registry) so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
         requires: dict[str, Any] = {}
         produces: dict[str, Any] = {}
@@ -742,7 +689,7 @@ def _concrete_producers(
     Raises
     ------
     ConnectivityError
-        If any key has two producers (design §3.1).
+        If any key has two producers.
     """
     producer_of: dict[str, str] = dict.fromkeys(src, SOURCES)
     for name, node in nodes.items():
@@ -759,11 +706,6 @@ def _concrete_producers(
 
 def _checked_sink_keys(sink_keys: list[str] | None) -> list[str] | None:
     """Validate sink keys are well-formed concrete dotted keys.
-
-    Returns
-    -------
-    list[str] | None
-        The validated keys, or None when demand is unknown.
 
     Raises
     ------
@@ -798,14 +740,11 @@ def _collect_demand(nodes: dict[str, _Node], sink_keys: list[str]) -> dict[str, 
 
 
 def _describe_consumer(consumer: str, key: str, sink_origins: Mapping[str, str] | None) -> str:
-    """Render one demand consumer for an error message (§4.1 attribution).
+    """Render one demand consumer for an error message.
 
-    Returns
-    -------
-    str
-        The module name (repr) for module consumers; for the `SINKS`
-        sentinel, the configured origin description when one is known
-        (never the raw ``'<sinks>'`` placeholder).
+    The module name (repr) for module consumers; for the `SINKS` sentinel,
+    the configured origin description when one is known (never the raw
+    ``'<sinks>'`` placeholder).
     """
     if consumer != SINKS:
         return repr(consumer)
@@ -824,9 +763,9 @@ def _narrow_wildcards(
 ) -> None:
     """Narrow wildcard patterns against concrete demand (design §2.2 rules (a)-(d)).
 
-    Concrete producers beat wildcards (rule (a)); narrowed keys are validated
-    against `schema` when given (rule (d)); the result is written into each
-    node's `narrowed` dict and frozen into the plan (rule (c)).
+    Concrete producers beat wildcards (rule (a)); narrowed keys are
+    validated against `schema` when given (rule (d)); the result is written
+    into each node's `narrowed` dict and frozen into the plan (rule (c)).
 
     Raises
     ------
@@ -884,11 +823,12 @@ def _build_edges(
 
     Kind-matching runs for every face (both `TensorSpec` and `SourceSpec`
     expose ``.kind``). Shape unification (`_unify_edge`) runs ONLY for the
-    tensor face (``face.unify``): `SourceSpec` has no ``shape``/``dtype`` and a
-    setup leaf has no symbolic dims to reconcile (plan-24 §4.3).
+    tensor face (``face.unify``): `SourceSpec` has no ``shape``/``dtype``
+    and a setup leaf has no symbolic dims to reconcile.
 
-    Missing producers raise `ConnectivityError` (via `_raise_missing_producer`)
-    and unification conflicts raise `ShapeError` (via `_unify_edge`).
+    Missing producers raise `ConnectivityError` (via
+    `_raise_missing_producer`) and unification conflicts raise `ShapeError`
+    (via `_unify_edge`).
 
     Returns
     -------
@@ -899,7 +839,7 @@ def _build_edges(
     Raises
     ------
     KindError
-        Consumer port kind differs from producer leaf kind (design §2.2).
+        Consumer port kind differs from producer leaf kind.
     """
     unify = face.unify if face is not None else True
     dims = _DimTable(mode)
@@ -933,10 +873,10 @@ def _build_edges(
 def _drop_unconsumed_narrowed(alive: dict[str, _Node], edges: list[Edge]) -> None:
     """Drop narrowed wildcard keys whose only demand was removed by pruning.
 
-    Narrowing runs against pre-prune demand (design §2.2): once demand pruning
-    removes a consumer, a key it alone demanded must not stay in the wildcard
-    producer's plan — wildcard producers only materialise demanded keys (rule
-    (c)), and `Bundle.merge` enforces the frozen key set exactly. Keys with a
+    Narrowing runs against pre-prune demand: once demand pruning removes a
+    consumer, a key it alone demanded must not stay in the wildcard
+    producer's plan — wildcard producers only materialise demanded keys, and
+    `Bundle.merge` enforces the frozen key set exactly. Keys with a
     surviving edge (alive consumer, optional or not, or a sink) are kept.
     """
     consumed: dict[str, set[str]] = {}
@@ -953,25 +893,24 @@ def _drop_unconsumed_narrowed(alive: dict[str, _Node], edges: list[Edge]) -> Non
 def _is_terminal_consumer(module: GraphModule) -> bool:
     """Whether a no-current-produces module is a genuine terminal consumer/no-op.
 
-    A module producing nothing in THIS mode anchors demand (like a writer) ONLY
-    if it has no CONCRETE produced port active in any OTHER mode. This keeps the
-    two legitimate no-current-produces shapes alive:
+    A module producing nothing in THIS mode anchors demand (like a writer)
+    ONLY if it has no CONCRETE produced port active in any OTHER mode. This
+    keeps the two legitimate no-current-produces shapes alive:
 
     - true terminal consumers (writers): no produces in any mode at all;
     - demand-driven wildcard producers (`Labels`'s ``labels.**``): only a
-      pattern port, which narrows to nothing in a mode with no demand (the
-      module's own docstring: "the kernel keeps wildcard producers with bound
-      requires alive as terminal consumers").
+      pattern port, which narrows to nothing in a mode with no demand.
 
-    It does NOT keep an `expose: [fit, val]` task alive in test/onnx: that task
-    declares a CONCRETE ``preds.*`` port active in fit/val, so it is a prunable
-    producer here, not a sink — the opt-out the §4.2 mechanism relies on.
+    It does NOT keep an `expose: [fit, val]` task alive in test/onnx: that
+    task declares a CONCRETE ``preds.*`` port active in fit/val, so it is a
+    prunable producer here, not a sink — the opt-out mechanism relies on
+    this.
 
     Returns
     -------
     bool
-        True when `module` has no concrete (non-wildcard) produced port active
-        in any primary mode.
+        True when `module` has no concrete (non-wildcard) produced port
+        active in any primary mode.
     """
     for m in PRIMARY_MODES:
         for key, spec in flatten_spec(module.declare_io(m).produces).items():
@@ -983,14 +922,14 @@ def _is_terminal_consumer(module: GraphModule) -> bool:
 def _demand_closure(nodes: dict[str, _Node], sink_keys: list[str]) -> set[str]:
     """Reverse demand walk: modules whose outputs (transitively) reach a sink.
 
-    Terminal consumers (active requires, no produces — writers) anchor demand
-    alongside the explicit sink keys (design §3.1). A module that produces
-    nothing only because every one of its produced ports is mode-gated OUT of
-    this mode (the design §4.2 per-task ``expose: [fit, val]`` opt-out — its
-    ``preds.*``/``losses.*`` are inactive here) is NOT such a terminal: it has
-    live produces in other modes, so it is a prunable producer here, never a
-    sink. Only a module producing nothing in ANY primary mode is a genuine
-    terminal consumer (a writer-shaped node).
+    Terminal consumers (active requires, no produces — writers) anchor
+    demand alongside the explicit sink keys. A module that produces nothing
+    only because every one of its produced ports is mode-gated OUT of this
+    mode (the per-task ``expose: [fit, val]`` opt-out — its
+    ``preds.*``/``losses.*`` are inactive here) is NOT such a terminal: it
+    has live produces in other modes, so it is a prunable producer here,
+    never a sink. Only a module producing nothing in ANY primary mode is a
+    genuine terminal consumer (a writer-shaped node).
 
     Returns
     -------
@@ -1039,8 +978,8 @@ def _module_adjacency(edges: list[Edge], nodes: dict[str, _Node]) -> dict[str, d
 def _check_wildcard_self_feed(nodes: dict[str, _Node], edges: list[Edge], mode: Mode) -> None:
     """Reject narrowed wildcard outputs that transitively feed the producer's own inputs.
 
-    Design §2.2 rule (b): checked explicitly so the error explains the
-    wildcard, not just the resulting cycle.
+    Checked explicitly so the error explains the wildcard, not just the
+    resulting cycle.
 
     Raises
     ------
@@ -1098,10 +1037,10 @@ def _path_back(
 def _topo_order(res: _Resolution) -> list[str]:
     """Deterministic topological order: Kahn, tie-break = config declaration order.
 
-    Design §3.1, documented loudly: ties between independent modules are
-    broken by the order their names appear in the config ``modules`` dict
-    (`_Node.rank`), so reordering independent modules in YAML is the
-    supported way to nudge execution order (e.g. peak memory, risk 3).
+    Ties between independent modules are broken by the order their names
+    appear in the config ``modules`` dict (`_Node.rank`), so reordering
+    independent modules in YAML is the supported way to nudge execution
+    order (e.g. peak memory).
 
     Returns
     -------
@@ -1184,7 +1123,7 @@ def _find_cycle(residual: set[str], adj: dict[str, dict[str, str]]) -> str:
 
 
 class _DimTable:
-    """Union-find over symbolic dims with concrete bindings (design §2.2)."""
+    """Union-find over symbolic dims with concrete bindings."""
 
     def __init__(self, mode: Mode) -> None:
         """Create an empty table for error messages tagged with `mode`."""
@@ -1207,7 +1146,7 @@ class _DimTable:
         Raises
         ------
         ShapeError
-            Naming both endpoints and the conflicting sizes (design §4.1).
+            Naming both endpoints and the conflicting sizes.
         """
         root = self._find(dim)
         previous = self._size.get(root)
@@ -1287,7 +1226,7 @@ def _unify_edge(
 
 
 # ---------------------------------------------------------------------------
-# error-message helpers (design §4.1 quality bar)
+# error-message helpers
 # ---------------------------------------------------------------------------
 
 
@@ -1300,7 +1239,7 @@ def _raise_missing_producer(
     sources: NestedSpec,
     sink_origins: Mapping[str, str] | None = None,
 ) -> NoReturn:
-    """Raise the missing-producer error meeting the §4.1 quality bar.
+    """Raise the missing-producer error, naming the consumer, key, and a concrete fix.
 
     Names the consumer (the demanding module behind a sink, when
     `sink_origins` knows it), the key, nearest-key suggestions, the
@@ -1373,12 +1312,12 @@ def _other_mode_producers(
 
 
 # ---------------------------------------------------------------------------
-# mode/sink plumbing and the all-modes-dead check (design §1 principle 10)
+# mode/sink plumbing and the all-modes-dead check
 # ---------------------------------------------------------------------------
 
 
 def _check_primary_mode(mode: Mode) -> None:
-    """Reject composite modes — one plan is compiled per primary mode (design §3.1).
+    """Reject composite modes — one plan is compiled per primary mode.
 
     Raises
     ------
@@ -1424,7 +1363,7 @@ def _check_all_modes_dead(
     sinks: Sinks,
     res: _Resolution,
 ) -> None:
-    """Raise if any configured module is dead in every primary mode (principle 10).
+    """Raise if any configured module is dead in every primary mode.
 
     A module absent from the compiled plan (mode-inactive or demand-pruned)
     is probed in each other primary mode; modes that fail to resolve are
@@ -1433,7 +1372,7 @@ def _check_all_modes_dead(
     Raises
     ------
     AllModesDeadError
-        Naming the module, its class, and the fix (design §3.1).
+        Naming the module, its class, and the fix.
     """
     for name in sorted(set(modules) - set(res.alive)):
         alive_somewhere = any(
@@ -1480,25 +1419,14 @@ def _alive_probe(
 
 
 def _is_pattern(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component.
-
-    Returns
-    -------
-    bool
-        True if any component is ``"*"`` or ``"**"``.
-    """
+    """Check whether a dotted key contains a wildcard component."""
     return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
 
 
 def _pattern_matches(pattern: str, key: str) -> bool:
-    """Match a concrete dotted key against a wildcard pattern (design §2.2).
+    """Match a concrete dotted key against a wildcard pattern.
 
     ``"*"`` matches exactly one component; ``"**"`` matches one or more.
-
-    Returns
-    -------
-    bool
-        True if `key` matches `pattern`.
     """
     return _match_parts(tuple(pattern.split(KEY_SEP)), tuple(key.split(KEY_SEP)))
 
@@ -1519,16 +1447,11 @@ def _match_parts(pattern: tuple[str, ...], parts: tuple[str, ...]) -> bool:
 def _spec_payload(spec: TensorSpec | SourceSpec) -> dict[str, Any]:
     """Canonical JSON-able form of a leaf spec for hashing (tensor OR setup).
 
-    Both leaf types serialise through the same helper (plan-24 §4.3): a
-    `SourceSpec` has no ``shape``/``dtype``/``fields`` and gates on string
-    `stages` rather than `Mode`, so those keys are emitted as None / the stage
-    list. The setup hash is structural and stable, giving the setup graph a
-    reproducible identity for ``salt2 graph`` exactly like the tensor graph.
-
-    Returns
-    -------
-    dict[str, Any]
-        Plain-type payload, stable across runs and machines.
+    Both leaf types serialise through the same helper: a `SourceSpec` has no
+    ``shape``/``dtype``/``fields`` and gates on string `stages` rather than
+    `Mode`, so those keys are emitted as None / the stage list. The setup
+    hash is structural and stable, giving the setup graph a reproducible
+    identity for ``salt2 graph`` exactly like the tensor graph.
     """
     if isinstance(spec, SourceSpec):
         return {
@@ -1554,20 +1477,15 @@ def _plan_hash(
     edges: tuple[Edge, ...],
     sources: Mapping[str, TensorSpec],
 ) -> str:
-    """sha256 over a canonical plan serialisation (design §3.1).
+    """sha256 over a canonical plan serialisation.
 
     Step order is significant (it is the execution order); dict keys are
-    sorted by the JSON encoder, so insertion order never leaks into the hash.
-    The mode name is deliberately NOT part of the payload: the hash is purely
-    structural, so two modes with identical step/edge/source structure hash
-    equal — that makes the FIT/VAL plan-identity assertion a cheap hash
-    comparison (design §11 risk 5). The mode lives in `Plan.mode`; resume
-    comparison only uses the FIT-plan hash (design §3.1), so no collision.
-
-    Returns
-    -------
-    str
-        Hex digest, stable across runs and machines for the same config.
+    sorted by the JSON encoder, so insertion order never leaks into the
+    hash. The mode name is deliberately NOT part of the payload: the hash
+    is purely structural, so two modes with identical step/edge/source
+    structure hash equal — that makes the FIT/VAL plan-identity assertion a
+    cheap hash comparison. The mode lives in `Plan.mode`; resume comparison
+    only uses the FIT-plan hash, so no collision.
     """
     payload = {
         "steps": [

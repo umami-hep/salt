@@ -17,9 +17,7 @@ from salt.core.schema import (
     save_schema,
 )
 
-# ---------------------------------------------------------------------------
 # toy fixtures (no physics — M1 scope)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -43,9 +41,7 @@ def h5_path(tmp_path):
     return path
 
 
-# ---------------------------------------------------------------------------
 # dump_schema
-# ---------------------------------------------------------------------------
 
 
 class TestDumpSchema:
@@ -106,9 +102,7 @@ class TestDumpSchema:
         assert "skipping dataset 'weird.group'" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------
 # YAML round-trip
-# ---------------------------------------------------------------------------
 
 
 class TestRoundTrip:
@@ -128,9 +122,7 @@ class TestRoundTrip:
         assert "tracks.ftagTruthOriginLabel" in schema.keys()
 
 
-# ---------------------------------------------------------------------------
 # load tolerance (design §11 risk 12: tolerant of additive change)
-# ---------------------------------------------------------------------------
 
 
 class TestLoadTolerance:
@@ -200,9 +192,7 @@ class TestLoadTolerance:
             load_schema(self._write(tmp_path, payload))
 
 
-# ---------------------------------------------------------------------------
 # validate_keys (the planner-facing missing/unknown report)
-# ---------------------------------------------------------------------------
 
 
 class TestValidateKeys:
@@ -250,9 +240,7 @@ class TestValidateKeys:
             schema.keys()
 
 
-# ---------------------------------------------------------------------------
 # integration: schema.keys() feeds planner wildcard narrowing (§2.2 rule (d))
-# ---------------------------------------------------------------------------
 
 
 class Wild:

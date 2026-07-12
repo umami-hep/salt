@@ -1,50 +1,10 @@
-"""The export-only ``export:`` config block + the writer-derived output manifest.
+"""The ``export:`` config block (dataclasses, jsonargparse-registered as ``--export``) plus manifest
+resolution: `resolve_export_config` validates the export-only half; `attach_manifest` attaches the
+writer-derived output manifest (`export.outputs` itself is never config-declared).
 
-(design §5.1, §7; M4.5 unified-manifest amendment.)
-
-Plain dataclasses parsed by jsonargparse (registered on the `Salt2CLI`
-parser as ``--export``, so the block round-trips through saved run configs
-and the run-free parse surface), plus the two resolution steps:
-
-- `resolve_export_config` — validates/defaults the EXPORT-ONLY half
-  (``model_name``, ``inputs`` incl. ``alias:``/``dyn_axis``,
-  ``track_selection``, the ``rename:``/``combine:`` post-processing
-  declarations). Declaring ``export.outputs`` is a HARD ERROR since M4.5:
-  the output manifest derives from the writers (``writers.modules``), the
-  single output manifest for eval AND export.
-- `attach_manifest` — attaches the writer-derived `ExportOutput` list to a
-  resolved config: per-entry validation/defaulting, ``rename:``
-  application, ``combine:`` validation, and the flat-namespace uniqueness
-  backstop. (`WriterCallback.onnx_manifest` runs the richer
-  writer-attributed collision check before this.)
-
-Validation timing (design §7 "Naming"): the no-``_``/no-``-`` restriction on
-`ExportConfig.model_name` applies ONLY when the ONNX plan is compiled or
-``salt2 export`` runs — never at fit time. Run names like ``GN2_v2`` train,
-eval and write columns exactly as today; the default export name is the run
-name with ``_``/``-`` stripped, byte-reproducing v1
-(``to_onnx.py:687``: ``config['name'].replace('_','').replace('-','')``).
-
-This module's BODY is deliberately torch-free: `salt.core.main` imports
-`ExportConfig` from it at CLI startup to register the parser argument, and the
-writer base imports `ExportOutput` (amendment merge condition 2 — writers
-return M4's type directly, no parallel manifest type) — neither path needs the
-torch-importing reduce registry at parse time. (A bare ``import
-salt.core.onnx.config`` does pull torch transitively via the
-``salt.core.onnx`` package ``__init__``, which imports the torch-using
-adapter; the torch-free property here is this module's own body plus the
-deferred-import discipline below, not the whole import path.)
-
-Reduce validation is LIVE since M5: ``KNOWN_REDUCES`` / ``PER_TOKEN_REDUCES``
-are no longer frozen tuples but module attributes resolved on access from the
-live registry in `salt.core.onnx.reduces` (the M5 ``register_reduce`` surface,
-amendment 555-567). `_resolve_output` defaults + validates each manifest
-entry's dtype from the reduce's DECLARED dtype rather than hard-coding the
-per-reduce rules. The torch-free seam is preserved by a DEFERRED import: the
-torch-importing registry is loaded only inside the export-only validation path
-(`_resolve_output`, `combine_insertion_index`, the lazy attribute lookup),
-never at fit-time parse — `salt.core.main`'s CLI-startup import of this module
-touches none of it.
+This module's body stays torch-free — reduce-registry lookups (`KNOWN_REDUCES`, `PER_TOKEN_REDUCES`,
+dtype/arity checks) are deferred imports, since `salt.core.main` imports `ExportConfig` from here at
+CLI startup.
 """
 
 from __future__ import annotations
@@ -83,64 +43,28 @@ TRACK_SELECTIONS = (
     "dipsTightUpgrade",
     "dipsLooseUpgrade",
 )
-"""Track selections mirroring the Athena-side loader (v1 to_onnx.py:24-35,
-https://gitlab.cern.ch/atlas/athena/-/blob/main/PhysicsAnalysis/JetTagging/FlavorTagInference/Root/TracksLoader.cxx)."""
+"""Track selections accepted by the Athena-side loader."""
 
 
 def _live_known_reduces() -> tuple[str, ...]:
-    """The registered reduce names, queried from the live registry (deferred import).
-
-    The M5 replacement for the frozen ``KNOWN_REDUCES`` tuple: `register_reduce`
-    is the single owner of the set. Deferred so this torch-free module never
-    imports the torch-importing registry at parse time (it loads only when an
-    export block is actually resolved).
-
-    Returns
-    -------
-    tuple[str, ...]
-        Sorted registered reduce names.
-    """
+    """Registered reduce names, from the live registry (deferred import keeps this module torch-free)."""
     from salt.core.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
 
     return registered_reduces()
 
 
 def _live_per_token_reduces() -> tuple[str, ...]:
-    """The registered per-token reduce names, from the live registry (deferred import).
-
-    The M5 replacement for the frozen ``PER_TOKEN_REDUCES`` tuple; consumed by
-    `combine_insertion_index` (combines insert before the first per-token entry,
-    amendment merge condition 5).
-
-    Returns
-    -------
-    tuple[str, ...]
-        Sorted per-token reduce names.
-    """
+    """Registered per-token reduce names, from the live registry (deferred import)."""
     from salt.core.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
 
     return per_token_reduces()
 
 
 def __getattr__(name: str) -> tuple[str, ...]:
-    """Resolve the live ``KNOWN_REDUCES`` / ``PER_TOKEN_REDUCES`` attributes (PEP 562).
+    """Resolve the live ``KNOWN_REDUCES``/``PER_TOKEN_REDUCES`` attributes (PEP 562).
 
-    These were frozen tuples through M4.5; since M5 they are LIVE views of the
-    `salt.core.onnx.reduces` registry, resolved on attribute access (so
-    ``from salt.core.onnx.config import KNOWN_REDUCES`` and ``config.KNOWN_REDUCES``
-    keep working, now returning the registry's current contents). Accessing them
-    triggers the deferred registry import — i.e. only when something actually
-    reads the reduce set, never at this module's own import.
-
-    Returns
-    -------
-    tuple[str, ...]
-        The requested live tuple.
-
-    Raises
-    ------
-    AttributeError
-        For any other attribute (the normal module-attribute protocol).
+    These are live views of the `salt.core.onnx.reduces` registry, resolved on attribute access —
+    accessing them triggers the deferred registry import, never at this module's own import.
     """
     if name == "KNOWN_REDUCES":
         return _live_known_reduces()
@@ -151,7 +75,7 @@ def __getattr__(name: str) -> tuple[str, ...]:
 
 @dataclass
 class ExportInput:
-    """One ONNX graph input (or ``alias:`` pseudo-input) — design §5.1/§7.
+    """One ONNX graph input (or ``alias:`` pseudo-input).
 
     Parameters
     ----------
@@ -159,29 +83,21 @@ class ExportInput:
         The bundle port the tensor feeds, e.g. ``inputs.tracks``. Must be a
         two-component ``inputs.<stream>`` key.
     name : str | None, optional
-        The ONNX graph input name (the Athena-facing tensor name), by
-        default ``<stream minus trailing 's'>_features`` — v1's
-        ``name_athena_out`` rule (``to_onnx.py:508,518``). Forbidden on
-        ``alias:`` entries (they consume no positional input).
+        The ONNX graph input name, by default ``<stream minus trailing 's'>_features``.
+        Forbidden on ``alias:`` entries (they consume no positional input).
     sequence : bool, optional
-        Whether the tensor is a variable-length sequence fed as ``[L, F]``
-        without a batch dim (v1 contract, ``to_onnx.py:374``), by default
-        False (a global ``[1, F]`` vector).
+        Whether the tensor is a variable-length sequence fed as ``[L, F]`` without a
+        batch dim, by default False (a global ``[1, F]`` vector).
     dyn_axis : str | None, optional
-        The ONNX dynamic-axis name of the sequence dim, by default
-        ``n_<stream>`` (v1 ``athena_num_name``, ``to_onnx.py:519``).
+        The ONNX dynamic-axis name of the sequence dim, by default ``n_<stream>``.
         Sequence entries only.
     alias : str | None, optional
-        Source port for alias entries (one Athena tensor feeding multiple
-        bundle ports — the GN3 ``global`` stream, design §6.6/§7): the
-        adapter binds `port` from the alias source's tensor instead of a
-        positional input (``to_onnx.py:377-378`` semantics), by default
-        None.
+        Source port for alias entries (one Athena tensor feeding multiple bundle
+        ports): the adapter binds `port` from the alias source's tensor instead of a
+        positional input, by default None.
     athena_name : str | None, optional
-        The ``gnn_config`` metadata input name Athena maps collections
-        with (v1 ``name_athena_in``), by default derived exactly as v1's
-        ``get_default_onnx_feature_map`` (``to_onnx.py:475-553``) — see
-        `default_athena_name`.
+        The ``gnn_config`` metadata input name Athena maps collections with, by
+        default derived by `default_athena_name`.
     """
 
     port: str
@@ -194,35 +110,30 @@ class ExportInput:
 
 @dataclass
 class ExportOutput:
-    """One ONNX graph output group — design §5.1/§7.3; WRITER-declared since M4.5.
+    """One ONNX graph output group; writer-declared.
 
-    Instances are returned by `salt.core.writers.Writer.onnx_outputs`
-    (amendment merge condition 2: writers return THIS type directly) and
-    assembled into the export manifest by ``WriterCallback.onnx_manifest``
-    — they are no longer config-parsed (`resolve_export_config` hard-errors
-    on a config-declared ``export.outputs``).
+    Instances are returned by `salt.core.writers.Writer.onnx_outputs` and assembled
+    into the export manifest by ``WriterCallback.onnx_manifest`` — they are never
+    config-parsed (`resolve_export_config` hard-errors on a config-declared
+    ``export.outputs``).
 
     Parameters
     ----------
     port : str
         The bundle port the reduce consumes (an ONNX-plan sink), e.g.
-        ``preds.jets.jets_classification``. Any bundle key is legal (e.g.
-        ``objects.masks``), not only ``preds.*``.
+        ``preds.jets.jets_classification``. Any bundle key is legal, not only ``preds.*``.
     name : str | None, optional
-        Single-output suffix (``argmax``/``vertex_union_find`` reduces);
-        the full ONNX name is ``{model_name}_{name}``. Exclusive with
-        `names`.
+        Single-output suffix; the full ONNX name is ``{model_name}_{name}``.
+        Exclusive with `names`.
     names : list[str] | None, optional
         Per-class scalar suffixes for the ``split_scalars`` reduce (e.g.
         ``[pb, pc, pu]`` -> ``GN2v2_pb`` ...). Exclusive with `name`.
     dtype : str | None, optional
-        Output dtype, by default the reduce's native dtype (``float32``
-        for ``split_scalars``, ``int8`` for the aux reduces — v1
-        ``.char()``, ``to_onnx.py:422,432``).
+        Output dtype, by default the reduce's native dtype (``float32`` for
+        ``split_scalars``, ``int8`` for the aux reduces).
     reduce : str | None, optional
-        Registry key from `KNOWN_REDUCES`, by default ``split_scalars``
-        when `names` is given; REQUIRED with `name` (the aux reduces are
-        never implicit).
+        Registry key from `KNOWN_REDUCES`, by default ``split_scalars`` when `names`
+        is given; REQUIRED with `name` (the aux reduces are never implicit).
     """
 
     port: str
@@ -236,23 +147,18 @@ class ExportOutput:
 class ExportCombine:
     """One manifest post-processing combine: a NEW output from existing ones.
 
-    The v2 spelling of v1's ``--combine_outputs`` (``to_onnx.py:556-600``):
-    an Athena-presentation concern with no eval analogue, kept in the
-    ``export:`` block as manifest post-processing (amendment §7 cost 3 /
-    merge condition 5). The combined value is
-    ``sum(scale * output(suffix))`` over `inputs`, computed INSIDE the
-    traced graph from the already-reduced outputs (v1 ``to_onnx.py:
-    404-412``); the combined output is float32, global, no dynamic axis.
+    The combined value is ``sum(scale * output(suffix))`` over `inputs`, computed
+    INSIDE the traced graph from the already-reduced outputs; the combined output is
+    float32, global, no dynamic axis.
 
     Parameters
     ----------
     name : str
         The new output's suffix (full name ``{model_name}_{name}``).
     inputs : dict[str, float]
-        Source suffix -> scale, in combination order. Every source must be
-        an existing GLOBAL float manifest suffix (``split_scalars``
-        entries, after ``rename:`` — the v1 existence check,
-        ``to_onnx.py:273-279``).
+        Source suffix -> scale, in combination order. Every source must be an
+        existing GLOBAL float manifest suffix (``split_scalars`` entries, after
+        ``rename:``).
     """
 
     name: str
@@ -261,38 +167,31 @@ class ExportCombine:
 
 @dataclass
 class ExportConfig:
-    """The top-level ``export:`` block (design §5.1), consumed by ``salt2 export``.
+    """The top-level ``export:`` block, consumed by ``salt2 export``.
 
-    Since M4.5 the block carries the EXPORT-ONLY half of the contract:
-    inputs, the Athena model name, and the ``rename:``/``combine:``
-    manifest post-processing. The output manifest itself derives from the
-    writers (``writers.modules`` — the single output manifest for eval AND
-    export); `outputs` is the assembled-manifest carrier filled by
-    `attach_manifest`, and DECLARING it in a config is a hard error.
+    The block carries the EXPORT-ONLY half of the contract: inputs, the Athena model
+    name, and the ``rename:``/``combine:`` manifest post-processing. The output
+    manifest itself derives from the writers; `outputs` is the assembled-manifest
+    carrier filled by `attach_manifest`, and DECLARING it in a config is a hard error.
 
     Parameters
     ----------
     model_name : str | None, optional
         The Athena-facing model name (output prefix + ``doc_string``); no
-        ``_``/``-`` allowed (v1 ``to_onnx.py:169-170``), by default the run
-        ``name`` with ``_``/``-`` stripped (``to_onnx.py:687``).
+        ``_``/``-`` allowed, by default the run ``name`` with ``_``/``-`` stripped.
     track_selection : str, optional
-        Athena-side track selection used in the default metadata input
-        names (`default_athena_name`), by default ``r22default``.
+        Athena-side track selection used in the default metadata input names
+        (`default_athena_name`), by default ``r22default``.
     inputs : list[ExportInput], optional
         ONNX graph inputs, in positional order.
     outputs : list[ExportOutput], optional
         The ASSEMBLED writer-derived manifest (`attach_manifest`). Never
-        config-declared: `resolve_export_config` raises the M4.5 migration
-        error on a non-empty parsed value.
+        config-declared: `resolve_export_config` raises on a non-empty parsed value.
     rename : dict[str, str], optional
-        Manifest suffix renames ``old -> new``, applied BEFORE `combine`
-        (v1 ``--rename`` semantics, existence-checked —
-        ``to_onnx.py:263-270``).
+        Manifest suffix renames ``old -> new``, applied BEFORE `combine`.
     combine : list[ExportCombine], optional
-        Combined outputs, inserted after the global entries and BEFORE the
-        first per-token aux entry (`combine_insertion_index` — the v1
-        order, amendment merge condition 5).
+        Combined outputs, inserted after the global entries and BEFORE the first
+        per-token aux entry (`combine_insertion_index`).
     """
 
     model_name: str | None = None
@@ -304,28 +203,15 @@ class ExportConfig:
 
 
 def sanitised_model_name(run_name: str) -> str:
-    """The default export name: the run name with ``_``/``-`` stripped.
-
-    Byte-reproduces v1's default (``to_onnx.py:687``).
-
-    Returns
-    -------
-    str
-        The sanitised name.
-    """
+    """The default export name: the run name with ``_``/``-`` stripped."""
     return run_name.replace("_", "").replace("-", "")
 
 
 def validate_model_name(name: str) -> str:
-    """Validate the Athena-facing model name (v1 ``to_onnx.py:169-170``).
+    """Validate the Athena-facing model name.
 
-    Called ONLY when compiling the ONNX plan / running ``salt2 export`` —
-    never at fit time (design §7 "Naming").
-
-    Returns
-    -------
-    str
-        The validated name, unchanged.
+    Called ONLY when compiling the ONNX plan / running ``salt2 export`` — never at
+    fit time.
 
     Raises
     ------
@@ -346,11 +232,6 @@ def validate_model_name(name: str) -> str:
 def stream_of_input_port(port: str) -> str:
     """Extract the stream name from an ``inputs.<stream>`` export port.
 
-    Returns
-    -------
-    str
-        The stream name.
-
     Raises
     ------
     ConfigError
@@ -369,54 +250,43 @@ def stream_of_input_port(port: str) -> str:
 
 
 def default_athena_name(stream: str, sequence: bool, track_selection: str) -> str:
-    """Derive the v1 metadata input name for a stream (``to_onnx.py:475-553``).
+    """Derive the Athena ``gnn_config`` metadata input name for a stream.
 
-    Reproduces ``get_default_onnx_feature_map`` exactly: globals map to
-    ``<stream minus 's'>_var``; ``tracks``/``flows`` substreams to
-    ``<base>_<track_selection>_sd0sort``; ``electrons`` to
-    ``<stream>_r22default``; the literal ``flow`` back-compat stream to
-    ``flows_<track_selection>_sd0sort``; any other sequence to
-    ``<stream>_var``.
-
-    Returns
-    -------
-    str
-        The Athena-side input name for the ``gnn_config`` metadata.
+    Globals map to ``<stream minus 's'>_var``; ``tracks``/``flows`` substreams to
+    ``<base>_<track_selection>_sd0sort``; ``electrons`` to ``<stream>_r22default``;
+    the literal ``flow`` back-compat stream to ``flows_<track_selection>_sd0sort``;
+    any other sequence to ``<stream>_var``.
     """
     if not sequence:
-        return f"{stream.removesuffix('s')}_var"  # to_onnx.py:507
-    if stream == "flow":  # back-compat flow/flows naming (to_onnx.py:531-541)
+        return f"{stream.removesuffix('s')}_var"
+    if stream == "flow":  # back-compat flow/flows naming
         return f"flows_{track_selection}_sd0sort"
     if "tracks" in stream or "flows" in stream:
         base = stream.split("_", maxsplit=1)[0]
-        return f"{base}_{track_selection}_sd0sort"  # to_onnx.py:517
+        return f"{base}_{track_selection}_sd0sort"
     if "electrons" in stream:
-        return f"{stream}_r22default"  # to_onnx.py:525
-    return f"{stream}_var"  # to_onnx.py:546
+        return f"{stream}_r22default"
+    return f"{stream}_var"
 
 
 def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
     """Validate the EXPORT-ONLY half of the ``export:`` block and fill its defaults.
 
-    The returned config has `model_name` resolved+validated and, per input,
-    `name`/`dyn_axis`/`athena_name` filled (see the field docs for the v1
-    rules each default reproduces). `outputs` is NOT handled here — the
-    manifest derives from the writers and is attached by `attach_manifest`;
-    a non-empty parsed value is the M4.5 migration hard error. Called only
-    on the export path — fit never validates (design §7).
+    `outputs` is NOT handled here — the manifest derives from the writers and is
+    attached by `attach_manifest`; a non-empty parsed value is a hard error. Called
+    only on the export path — fit never validates.
 
     Returns
     -------
     ExportConfig
-        A resolved copy of the export-only half (``outputs == []``; the
-        input object is not mutated).
+        A resolved copy of the export-only half (``outputs == []``; the input object
+        is not mutated).
 
     Raises
     ------
     ConfigError
-        On a declared ``export.outputs`` section (removed at M4.5 — the
-        §4.1-bar pointer at ``writers:``), or any malformed entry
-        (messages name the offending entry and the rule it breaks).
+        On a declared ``export.outputs`` section, or any malformed entry (messages
+        name the offending entry and the rule it breaks).
     """
     if export.outputs:
         raise ConfigError(
@@ -468,13 +338,11 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
 def attach_manifest(export: ExportConfig, outputs: Sequence[ExportOutput]) -> ExportConfig:
     """Attach the writer-derived output manifest to a RESOLVED export config.
 
-    Per entry: validation + ``reduce``/``dtype`` defaulting (unchanged M4
-    rules). Then the post-processing declared in the export block, in v1
-    order (``to_onnx.py:243-307``): ``rename:`` applied in place
-    (existence-checked), ``combine:`` validated against the renamed GLOBAL
-    float suffixes. Uniqueness (ports + flat suffix namespace, combines
-    included) is re-checked as the backstop behind the writer-attributed
-    collision check in ``WriterCallback.onnx_manifest``.
+    Per entry: validation + ``reduce``/``dtype`` defaulting. Then the post-processing
+    declared in the export block: ``rename:`` applied in place (existence-checked),
+    ``combine:`` validated against the renamed GLOBAL float suffixes. Uniqueness
+    (ports + flat suffix namespace, combines included) is re-checked as the backstop
+    behind the writer-attributed collision check in ``WriterCallback.onnx_manifest``.
 
     Parameters
     ----------
@@ -491,9 +359,8 @@ def attach_manifest(export: ExportConfig, outputs: Sequence[ExportOutput]) -> Ex
     Raises
     ------
     ConfigError
-        On an empty manifest, a malformed entry, a ``rename:`` of a
-        missing suffix, a ``combine:`` referencing a non-global/missing
-        suffix, or a name collision.
+        On an empty manifest, a malformed entry, a ``rename:`` of a missing suffix, a
+        ``combine:`` referencing a non-global/missing suffix, or a name collision.
     """
     if export.model_name is None:
         raise ConfigError("attach_manifest needs a resolved export config (model_name set)")
@@ -512,16 +379,10 @@ def attach_manifest(export: ExportConfig, outputs: Sequence[ExportOutput]) -> Ex
 
 
 def _apply_rename(outputs: list[ExportOutput], rename: dict[str, str]) -> list[ExportOutput]:
-    """Apply ``export.rename`` suffix renames to the manifest (v1 semantics).
+    """Apply ``export.rename`` suffix renames to the manifest.
 
-    Every old suffix must exist (v1's existence assert,
-    ``to_onnx.py:268``); renames run BEFORE combines so combine inputs can
-    reference renamed suffixes (v1 order, ``to_onnx.py:263-279``).
-
-    Returns
-    -------
-    list[ExportOutput]
-        The manifest with renamed entries (input list not mutated).
+    Every old suffix must exist; renames run BEFORE combines so combine inputs can
+    reference renamed suffixes.
 
     Raises
     ------
@@ -555,11 +416,10 @@ def _apply_rename(outputs: list[ExportOutput], rename: dict[str, str]) -> list[E
 def _check_combines(outputs: list[ExportOutput], combines: list[ExportCombine]) -> None:
     """Validate ``export.combine`` entries against the (renamed) manifest.
 
-    Combine inputs must be GLOBAL float suffixes (``split_scalars``
-    entries) — the v1 contract: combined values are linear combinations of
-    the global outputs, checked before the aux entries are appended
-    (``to_onnx.py:273-279``). Combined names must not collide with the
-    manifest or each other.
+    Combine inputs must be GLOBAL float suffixes (``split_scalars`` entries) —
+    combined values are linear combinations of the global outputs, checked before
+    the aux entries are appended. Combined names must not collide with the manifest
+    or each other.
 
     Raises
     ------
@@ -587,14 +447,11 @@ def _check_combines(outputs: list[ExportOutput], combines: list[ExportCombine]) 
 
 
 def combine_insertion_index(outputs: Sequence[ExportOutput]) -> int:
-    """Where combined outputs insert into the manifest order (merge condition 5).
+    """Where combined outputs insert into the manifest order.
 
-    The v1 rule (``to_onnx.py:258-292``): combined outputs are appended
-    after the global entries (renames included) but BEFORE the sequence-aux
-    entries — i.e. immediately before the first `PER_TOKEN_REDUCES` entry,
-    or at the end when there is none. Append-at-end would diverge for any
-    model carrying both combines and aux outputs (the O2 combine+aux
-    fixture exercises exactly this).
+    Combined outputs are appended after the global entries (renames included) but
+    BEFORE the sequence-aux entries — i.e. immediately before the first
+    `PER_TOKEN_REDUCES` entry, or at the end when there is none.
 
     Returns
     -------
@@ -613,20 +470,14 @@ def ordered_output_names(export: ExportConfig) -> list[tuple[str, str, str]]:
 
     The single ordering authority shared by the adapter
     (``output_names``/``output_dtypes``/``forward``), the metadata
-    ``output_names`` list, and the `manifest_table` rendering: per-entry
-    suffixes prefixed with ``{model_name}_``, combines inserted at
-    `combine_insertion_index`.
-
-    Parameters
-    ----------
-    export : ExportConfig
-        A manifest-attached resolved config (`attach_manifest` output).
+    ``output_names`` list, and the `manifest_table` rendering: per-entry suffixes
+    prefixed with ``{model_name}_``, combines inserted at `combine_insertion_index`.
 
     Returns
     -------
     list[tuple[str, str, str]]
-        ``(full output name, dtype, source)`` triples, where source is the
-        entry's ``{reduce} {port}`` or ``combine(...)`` description.
+        ``(full output name, dtype, source)`` triples, where source is the entry's
+        ``{reduce} {port}`` or ``combine(...)`` description.
     """
     prefix = str(export.model_name)
     rows: list[tuple[str, str, str]] = []
@@ -653,17 +504,11 @@ def ordered_output_names(export: ExportConfig) -> list[tuple[str, str, str]]:
 def manifest_table(export: ExportConfig) -> str:
     """Render the assembled output manifest (``salt2 export --manifest``, plan_onnx.txt).
 
-    Parameters
-    ----------
-    export : ExportConfig
-        A manifest-attached resolved config.
-
     Returns
     -------
     str
-        One row per flat ONNX output: name, dtype, source (reduce + port,
-        or the combine expression) — the generated-artifact answer to
-        "what exactly does Athena see" (amendment §7 cost 2 mitigation).
+        One row per flat ONNX output: name, dtype, source (reduce + port, or the
+        combine expression).
     """
     rows = ordered_output_names(export)
     width = max(len(name) for name, _, _ in rows)
@@ -675,11 +520,6 @@ def manifest_table(export: ExportConfig) -> str:
 def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
     """Validate one input entry and fill its defaults.
 
-    Returns
-    -------
-    ExportInput
-        A resolved copy.
-
     Raises
     ------
     ConfigError
@@ -687,9 +527,8 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
     """
     stream = stream_of_input_port(entry.port)
     if entry.alias is not None:
-        # alias entries consume NO positional input (to_onnx.py:377-378): no
-        # graph tensor name, no dynamic axis, and — M4 scope — no sequences
-        # (the GN3 global stream is a [B, F] vector, design §6.6)
+        # alias entries consume NO positional input: no graph tensor name, no dynamic
+        # axis, no sequences (the GN3 global stream is a [B, F] vector)
         stream_of_input_port(entry.alias)
         if entry.name is not None:
             raise ConfigError(
@@ -719,11 +558,6 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
 def _resolve_output(entry: ExportOutput) -> ExportOutput:
     """Validate one output entry and fill its defaults.
 
-    Returns
-    -------
-    ExportOutput
-        A resolved copy.
-
     Raises
     ------
     ConfigError
@@ -735,9 +569,8 @@ def _resolve_output(entry: ExportOutput) -> ExportOutput:
         raise ConfigError(
             f"export output port {entry.port!r} is not a valid dotted key: {err}"
         ) from err
-    # the live registry is the single owner of the reduce set + per-reduce dtype
-    # rules (M5 register_reduce surface); deferred import keeps this module
-    # torch-free at parse time (only export-block resolution loads it)
+    # the live registry owns the reduce set + per-reduce dtype rules; deferred import
+    # keeps this module torch-free at parse time (only export-block resolution loads it)
     from salt.core.onnx.reduces import reduce_spec, registered_reduces  # noqa: PLC0415 - torch seam
 
     if (entry.name is None) == (entry.names is None):
@@ -750,9 +583,8 @@ def _resolve_output(entry: ExportOutput) -> ExportOutput:
             f"export output {entry.port!r}: 'names' must be a non-empty list without "
             f"duplicates, got {entry.names!r}"
         )
-    # resolve the reduce key: plural-names entries default to split_scalars (the
-    # only names-consuming reduce); single-name entries must name one explicitly
-    # (aux reduces are never implicit, design §7.3)
+    # plural-names entries default to split_scalars (the only names-consuming reduce);
+    # single-name entries must name a reduce explicitly (aux reduces are never implicit)
     if entry.names is not None:
         reduce = entry.reduce or "split_scalars"
     else:
@@ -782,9 +614,8 @@ def _resolve_output(entry: ExportOutput) -> ExportOutput:
             f"export output {entry.port!r}: {reduce} emits per-class scalars — use "
             "'names' (design §5.1)"
         )
-    # default + validate the dtype from the reduce's DECLARED dtype (the live
-    # registry owns the per-reduce rule — v1 .char() int8 for aux reduces,
-    # to_onnx.py:422,432; float32 per-class probabilities for split_scalars)
+    # default + validate dtype from the reduce's declared dtype (int8 for aux
+    # reduces, float32 for split_scalars per-class probabilities)
     dtype = entry.dtype or spec.dtype
     if dtype != spec.dtype:
         raise ConfigError(

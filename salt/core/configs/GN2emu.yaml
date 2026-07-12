@@ -1,45 +1,7 @@
-# GN2emu.yaml — the GN2emu lepton-enhanced tagger in the v2 schema (M5-CONV,
-# CONCAT/GLOBAL family). The v2-native MIGRATED fixture for legacy
-# salt/configs/GN2/GN2emu.yaml.
-#
-# GN2 with TWO embedded streams (tracks + electrons), a 6-layer encoder
-# (out_dim 128), and the GN2emu signature: a 14-var soft-muon `global` vector
-# fed PAST the encoder and concatenated onto the pooled representation, giving
-# the `&pooled_dim 142` (= 128 + 14, v1 GN2emu.yaml:49) every task consumes.
-# That post-pooling concat is the M5 `VectorConcat` (design §6.6; v1
-# saltmodel.py:175-177) — the v2 replacement for v1's `global` magic key.
-#
-# FIT/TEST-ONLY (no `export:` block). Unlike GN3V01/GN3EPCLV01 (identity-case
-# `global`==`jets`), GN2emu's `global` is a distinct 14-var soft-muon vector with
-# NO valid ONNX representation: v1 only ever clones `global` from the
-# global_object (= jets, 2 vars; to_onnx.py:377-378), which is width-incoherent
-# for the 14-wide soft-muon slot — v1 never produced a valid GN2emu ONNX. See the
-# note above the trainer block; the gate carries `onnx: na` (like
-# event_classifier).
-#
-# v1 head list (GN2emu.yaml:41-112) reproduced verbatim — 5 heads:
-#   - jets_classification : 3-class flavour (ujets/cjets/bjets)
-#   - track_origin        : 8-class ftag track-origin (weight 0.5)
-#   - track_vertexing     : per-track vertex edges (weight 1.5, origin-weighted)
-#   - electron_origin     : 8-class ftag origin on the electron stream (0.5)
-#   - electron_vertexing  : per-electron vertex edges (weight 1.5)
-#
-# This config uses a WEIGHTED LossSum (v1 default loss_mode; the GN2 family is
-# NOT GLS — only the GN3 family uses LossGLS). The non-1.0 task weights (0.5,
-# 1.5) are exactly why this is LossSum, not LossGLS (which forbids weight!=1.0).
-#
-# `non_finite_to_num: true` (v1 GN2emu.yaml:192) -> Features.non_finite_to_num.
-#
-# Two embedded streams demand TWO vertexing heads, so two declared origin
-# dependencies (track_origin for tracks, electron_origin for electrons).
-#
-# NO machine paths committed (design §5 placeholder policy). Static validation
-# FROM THE REPO ROOT (the M5-CONV command, no --strict — the data-less no-schema
-# warning is --strict-promotable, so plan-compile is measured without it):
-#   python -m salt.core.main graph validate --mode fit \
-#     -c salt/core/configs/GN2emu.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml \
-#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml
+# GN2emu: GN2 with two embedded streams (tracks + electrons) plus a 14-var
+# soft-muon 'global' vector fed past the encoder and concatenated onto the
+# pooled representation. FIT/TEST-only — no valid ONNX representation exists
+# for the soft-muon global vector (see note above trainer: below).
 
 name: GN2emu
 
@@ -54,17 +16,14 @@ data:
           jets: {global_object: true}
           tracks: {global_object: false}
           electrons: {global_object: false}
-          # the soft-muon `global` stream: an ordinary [B, F] vector (no pad
-          # mask, design §6.6 1393-1396; v1 datasets.py mask-excludes 'global')
+          # soft-muon vector stream: an ordinary [B, F] vector, no pad mask
           global: {global_object: true}
     features:
       class_path: salt.core.data.Features
       init_args:
-        non_finite_to_num: true # v1 GN2emu.yaml:192
+        non_finite_to_num: true
         variables:
           jets: [pt_btagJes, eta_btagJes]
-          # the 14 soft-muon global variables (v1 GN2emu.yaml:116-130) ->
-          # pooled_dim 142 = encoder out_dim 128 + 14
           global:
             [
               softMuon_pt,
@@ -145,26 +104,24 @@ model:
     lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
     optimizer: AdamW
     modules:
-      # encoder-stream normaliser (jets is the global context object)
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks, electrons]
           global_object: jets
-      # a SECOND normaliser for the post-pooling soft-muon `global` vector
-      # (one Normaliser has a single global_object slot; jets already fills it)
+      # second normaliser: 'global' needs its own global_object slot (jets
+      # already fills the one on `norm` above)
       norm_global:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
           streams: [global]
           global_object: global
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          context: [normed.jets]
           out_dim: &embed_dim 192
           dense: {hidden_layers: [256], activation: SiLU}
       electron_embed:
@@ -176,14 +133,14 @@ model:
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks, electrons]} # v1 init_nets insertion order
+        init_args: {streams: [tracks, electrons]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
           num_layers: 6
-          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          attention: {num_heads: 8, attn_type: torch-math}
           dense: {activation: SiLU, gated: false}
       split:
         # both tracks and electrons carry per-token tasks (origin + vertexing)
@@ -192,10 +149,8 @@ model:
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
-      # design §6.6: pooled rep (128) concatenated with the 14 soft-muon global
-      # features. ORDER is the list — pooled FIRST, global features LAST
-      # (1390-1391), matching v1 cat([global_rep, global_feats]); vconcat.global
-      # is the v1 'global_rep' slot every GN2emu task consumes (&pooled_dim 142).
+      # order matters: pooled rep first, global features last — every task
+      # below reads this augmented vconcat.global.
       vconcat:
         class_path: salt.core.nn.VectorConcat
         init_args:
@@ -205,10 +160,8 @@ model:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: jets
-          input: vconcat.global # the augmented &pooled_dim 142 (design §6.6)
+          input: vconcat.global
           label: flavour_label
-          # v1 flavour_label ordering (inputs.py:672 [bjets, cjets, ujets]); v1
-          # GN2emu sets no class_names so the data order is authoritative
           class_names: [bjets, cjets, ujets]
           dense: {hidden_layers: [128, 64, 32], activation: SiLU, dropout: 0.1}
       track_origin:
@@ -226,7 +179,7 @@ model:
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: vconcat.global
           weight: 1.5
           dense: {hidden_layers: [128, 64, 32], activation: SiLU, dropout: 0.1}
@@ -244,31 +197,17 @@ model:
         init_args:
           stream: electrons
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: vconcat.global
           weight: 1.5
           dense: {hidden_layers: [128, 64, 32], activation: SiLU, dropout: 0.1}
       loss:
-        class_path: salt.core.nn.LossSum # v1 default loss_mode (weighted; NOT GLS)
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously relied on the base2 WriterCallback
-# default (now retired) with a narrowed-ONNX TaskWriter. It supplies its OWN
-# top-level outputs: section + dumb H5 sink. The 1:1 conversion math (softmax /
-# union-find) folds onto each task via get_output (W34.1/W34.3), orchestrated by
-# the RunTaskOutput writer below; the dumb sink dumps ALL active outputs.* leaves,
-# the SECTION supplies names/dtypes/ORDER. GN2emu has TWO sequence streams with
-# tasks (tracks: origin+vertexing, electrons: origin+vertexing), so BOTH get a
-# pad-mask column (distinct H5 groups; in a hypothetical flat ONNX namespace the
-# two VertexIndex heads would collide, but GN2emu is NOT exportable — no export:
-# block, no OnnxExportSink — so the old onnx_tasks narrowing is moot). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task
-# fields -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration
-# order (jets_classification, track_origin, track_vertexing, electron_origin,
-# electron_vertexing). NO OnnxExportSink (fit/test only — see the note below).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks, electrons]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks, electrons]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -277,24 +216,14 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks, electrons]}
 
-# The DUMB H5 sink (plan 34 W34.4c): no init args — it dumps ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
 
-# NO `export:` block — GN2emu is FIT/TEST-only (no ONNX representation), exactly
-# like event_classifier. The GN2emu `global` is its OWN 14-var soft-muon vector
-# (softMuon_*), but v1's ONNX export only ever CLONES `global` from the
-# global_object (= jets, the 2-var [pt_btagJes, eta_btagJes] tensor —
-# to_onnx.py:377-378 `input_dict["global"] = input_dict[global_object].clone()`).
-# That clone is width-incoherent for GN2emu: it feeds a 2-wide jets tensor into
-# the model's 14-wide soft-muon `global` slot (pooled_dim 142 = 128 + 14), so v1
-# never produced a valid GN2emu ONNX. The v2 alias mechanism resolves by NAME
-# (OnnxAdapter._resolve_alias_gather, adapter.py:336-347): `alias: inputs.jets`
-# lacks all 14 softMuon columns and raises ConfigError "lacks columns" at export.
-# There is no same-width Athena source for the soft-muon `global`, so GN2emu is
-# honestly not export-representable (gates_m5 `onnx: na`).
+# no export: block — the soft-muon 'global' has no same-width Athena source
+# to alias from (v1's clone-from-global_object trick only works when global
+# matches jets' width, which it doesn't here), so GN2emu is not
+# export-representable.
 
 trainer:
   max_epochs: 40

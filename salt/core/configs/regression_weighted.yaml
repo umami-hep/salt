@@ -1,28 +1,8 @@
-# regression_weighted.yaml — per-sample-weighted RegressionTaskModule in the v2
-# schema (M5 sub-wave A3). The v2-native port of legacy
-# salt/configs/regression_weighted.yaml: an encoder-less DiPS body (init_nets +
-# pool_net, NO encoder — v1 saltmodel.py:90-93) feeding pooled regression heads,
-# each with a `sample_weight:` label that multiplies the per-element loss inside
-# the composed v1 nan_loss (unsqueeze + multi-target expand; v1
-# task.py:379-382,429-435). Every weighted head MUST use loss reduction: none
-# (the per-element loss must survive to the weight multiply + nanmean).
-#
-#   - reg_weighted              : single-target, mean/std norm_params, weighted
-#   - reg_weighted_multi        : two targets, vector norm_params, weighted (the
-#                                 weight is expanded across targets, task.py:433-434)
-#   - reg_weighted_ratio        : target_denominators ratio + custom_output_names,
-#                                 weighted; pt_btagJes is a declared input Feature so
-#                                 ONNX de-scaling gathers it by name (FD §3.3)
-#   - reg_weighted_multi_ratio  : two targets, two target_denominators [mass,
-#                                 pt_btagJes] + custom_output_names, weighted; both
-#                                 denominators are declared input Features
-#   - reg_weighted_no_global_object : per-track SEQUENCE head off embed.tracks (no
-#                                 pool, no global_object context — F1b). v1 applies
-#                                 NO sample_weight here, so plain MSELoss (mean).
-#
-# NO machine paths committed (design §5 placeholder policy). From the REPO ROOT:
-#   python -m salt.core.main graph validate -c salt/core/configs/regression_weighted.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Per-sample-weighted RegressionTaskModule family: an encoder-less DiPS body
+# feeding pooled regression heads, each with a `sample_weight:` label that
+# multiplies the per-element loss (so every weighted head needs loss
+# reduction: none). One head (no_global_object) is a per-track sequence head
+# with no weighting or pooling.
 
 name: regression_weighted
 
@@ -76,14 +56,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -112,7 +92,7 @@ model:
           targets:
             [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
           norm_params: {mean: [1.0, 2.0], std: [3.0, 4.0]}
-          sample_weight: sample_weight # expanded across targets (task.py:433-434)
+          sample_weight: sample_weight # expanded across targets
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       reg_weighted_ratio:
@@ -135,64 +115,44 @@ model:
             [R10TruthLabel_R22v1_TruthJetMass, R10TruthLabel_R22v1_TruthJetPt]
           target_denominators: [mass, pt_btagJes] # both declared input Features (ONNX sources)
           custom_output_names: [truthMass, truthPt]
-          sample_weight: sample_weight # expanded across targets (task.py:433-434)
+          sample_weight: sample_weight # expanded across targets
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       reg_weighted_no_global_object:
         class_path: salt.core.nn.tasks.RegressionTaskModule
         init_args:
-          # per-track sequence head: reads embed.tracks directly (no pool), so it
-          # needs no global_object context (F1b). v1 has NO sample_weight here, so
-          # the plain MSELoss (default reduction: mean) is correct — no per-element
-          # weight multiply to survive.
+          # per-track sequence head, reads embed.tracks directly (no pool), so
+          # no global_object context; unweighted, so plain MSELoss (mean) is correct.
           stream: tracks
-          input: embed.tracks # StreamEmbed output (wrappers.py:220), not pooled
+          input: embed.tracks
           sequence: true
           targets: [dphi, deta]
           custom_output_names: [dummyOutput_dPhi, dummyOutput_dEta]
           loss: torch.nn.MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4c: this config previously inherited the base2 WriterCallback
-# default (now retired) and null-deleted pad_mask. It supplies its OWN top-level
-# outputs: section + dumb sinks. The regression de-scale folds onto each task via
-# get_output (W34.3), orchestrated by the RunTaskOutput writer below; the dumb
-# sinks dump ALL active outputs.* leaves, the SECTION supplies names/dtypes/ORDER
-# (the per-head custom_output_names mint the Athena physics names). Section writers
-# in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields. The
-# RunTaskOutput tasks list is the v1 model-declaration order (reg_weighted,
-# reg_weighted_multi, reg_weighted_ratio, reg_weighted_multi_ratio,
-# reg_weighted_no_global_object). NO PadMaskWriter: reg_weighted_no_global_object
-# is a per-track sequence head but reads embed.tracks directly (no encoded.seq pad
-# mask flows to a writer), matching the v1 pad_mask: null. v1 regression_weighted
-# IS ONNX-exported (test_pipeline do_onnx=True), so the dumb OnnxExportSink is wired
-# (matching the proven regression-cutover34.yaml section template / W34.3 regression
-# ONNX get_output path) — it names the de-scaled leaves in canonical tuple order.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
       tasks: [reg_weighted, reg_weighted_multi, reg_weighted_ratio, reg_weighted_multi_ratio, reg_weighted_no_global_object]
 
-# The DUMB sinks (plan 34 W34.4c): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: regressionWeighted # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — derived from the outputs: section (plan 34 W34.4c). The
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
   # sample_weight is a FIT|VAL-only label, absent from the export graph.
 
 trainer:

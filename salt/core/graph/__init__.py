@@ -1,4 +1,4 @@
-"""salt.core.graph — the pure graph kernel (design §2, §3).
+"""salt.core.graph — the pure graph kernel.
 
 Public API: bundle, declared interfaces, planner, executor, and the
 exception hierarchy.

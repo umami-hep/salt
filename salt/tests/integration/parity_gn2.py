@@ -1,49 +1,4 @@
-"""GN2 v1 <-> v2 forward-parity gate (plan 04, stage 3).
-
-Instantiates the small v1 GN2 `ModelWrapper` from the stage-1 recipe
-(`salt.tests._fixtures.gn2_fixture` — deterministic dummy data with a zero-track
-jet, plus a parity norm dict with DISTINCT per-variable constants so
-norm-constant order/scale wiring is excitable), builds the v2 module graph
-by WRAPPING the same live
-``nn.Module`` instances (`salt.core.nn.from_v1` — weights identical by
-construction, zero copies), compiles a TEST plan with the M1 planner,
-executes it through the M1 `Executor` in debug mode (undeclared bundle reads
-and in-place tensor mutations raise), and compares EVERY
-``preds.<stream>.<task>`` leaf of the executed bundle against the v1
-``ModelWrapper.forward`` output on an identically cloned batch — plus the
-bonus intermediates ``encoded.seq`` <-> ``embed_xs`` and ``pooled.global``
-<-> ``global_rep``.
-
-Because the two sides share instances and op order, the PASS criterion is
-BITWISE equality (``torch.equal``; the stage-1 probe confirmed CPU bitwise
-repeatability with ``attn_type="torch-math"``). Any difference is a WIRING
-bug — concat order, context prepend, pad-mask polarity / dict order,
-padded-position handling, task-input assembly — exactly the failure class
-this gate exists to catch before M2 training. Multi-stream concat order and
-per-stream mask dict order are only genuinely exercised by the two-stream
-run (``--with-electrons``, GN2e-style second sequence stream); the default
-GN2 fixture has a single sequence stream, where any concat order is
-trivially the identity. A non-bitwise leaf can pass
-ONLY with a written justification registered in `JUSTIFIED_NONBITWISE`
-(printed in the report) AND a max abs diff <= 1e-6; the criterion is never
-silently downgraded. No leaf currently needs (or has) a justification.
-
-Shapes are compared FIRST: for the vertexing edge output an ``E`` mismatch
-means a pad-mask wiring bug, and a value diff on mismatched shapes would be
-meaningless.
-
-Artifacts written into ``--outdir``: ``parity_report.json`` (machine-readable
-report including the executed plan steps and the plan hash — proof the v2
-side ran through the Executor) plus the dummy ``norm_dict.yaml`` /
-``class_dict.yaml`` the v1 model was built from.
-
-Usage (the experiment ``do_run`` payload)::
-
-    python -m salt.tests.integration.parity_gn2 --outdir /path/to/outputs \
-        [--batch-size N] [--n-tracks T] [--seed S] [--model-seed S]
-
-Exit code 0 only if every compared leaf passes.
-"""
+"""GN2 v1 <-> v2 forward-parity gate (plan 04, stage 3)."""
 
 from __future__ import annotations
 
@@ -109,29 +64,7 @@ class LeafComparison:
 
 
 def compare_leaf(key: str, v1_ref: str, ref: Tensor, got: Tensor) -> LeafComparison:
-    """Compare one v2 bundle leaf against its v1 reference tensor.
-
-    Shape is checked first (an ``E`` mismatch on the vertexing edge output is
-    a pad-mask wiring bug and makes a value diff meaningless), then dtype,
-    then bitwise equality. A non-bitwise leaf passes only with a registered
-    `JUSTIFIED_NONBITWISE` entry and a diff <= `BITWISE_FALLBACK_ATOL`.
-
-    Parameters
-    ----------
-    key : str
-        The v2 bundle key (report row identifier).
-    v1_ref : str
-        Human-readable name of the v1 preds entry compared against.
-    ref : Tensor
-        The v1 reference tensor.
-    got : Tensor
-        The executed v2 bundle tensor.
-
-    Returns
-    -------
-    LeafComparison
-        The comparison record for the report.
-    """
+    """Compare one v2 bundle leaf against its v1 reference tensor."""
     base: dict[str, Any] = {
         "key": key,
         "v1_ref": v1_ref,
@@ -181,48 +114,7 @@ def run_parity(
     with_electrons: bool = False,
     modules_hook: Callable[[dict[str, GraphModule]], dict[str, GraphModule]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Run the full parity gate: build, execute both sides, compare, report.
-
-    Parameters
-    ----------
-    outdir : Path | str
-        Output directory for ``parity_report.json`` and the dummy norm dict.
-    batch_size : int, optional
-        Jets per batch, by default 6.
-    n_tracks : int, optional
-        Track positions per jet (>= 2 so padded positions exist and
-        mask-polarity bugs are excitable), by default 10.
-    p_valid : float, optional
-        Probability a track position is valid, by default 0.6.
-    seed : int, optional
-        Batch seed (local generator), by default 123.
-    model_seed : int, optional
-        ``torch.manual_seed`` for v1 parameter init, by default 42.
-    with_electrons : bool, optional
-        Add a GN2e-style second sequence stream (`_N_ELECTRONS` positions per
-        jet), by default False. Only this variant genuinely exercises
-        multi-stream concat order and per-stream mask dict order.
-    modules_hook : Callable, optional
-        TEST-ONLY hook: receives the `from_v1` module dict and may replace
-        entries with deliberately mis-wired variants (the negative controls
-        in ``test_parity_gn2.py`` prove the gate FAILS on them). Instance
-        names are re-asserted to the dict keys after the hook. Never used by
-        the CLI.
-
-    Returns
-    -------
-    tuple[int, dict[str, Any]]
-        ``(exit_code, report)`` — exit code 0 only if every compared leaf
-        passed; the report is what was written to ``parity_report.json``.
-
-    Raises
-    ------
-    ValueError
-        If `batch_size` < 1 or `n_tracks` < 2.
-    RuntimeError
-        If the fixture batch lacks a zero-track jet (``batch_size >= 2`` is
-        expected to dedicate jet 1 to the all-padded production edge case).
-    """
+    """Run the full parity gate: build, execute both sides, compare, report."""
     if batch_size < 1:
         raise ValueError("run_parity: batch_size must be >= 1")
     if n_tracks < 2:
@@ -346,13 +238,7 @@ def run_parity(
 
 
 def _fmt_row(record: dict[str, Any]) -> str:
-    """Format one comparison record as a fixed-width table row.
-
-    Returns
-    -------
-    str
-        The formatted row.
-    """
+    """Format one comparison record as a fixed-width table row."""
     if record["ref_shape"] == record["got_shape"]:
         shape = str(tuple(record["got_shape"]))
     else:
@@ -409,13 +295,7 @@ def _print_report(report: dict[str, Any], report_path: Path) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the GN2 forward-parity gate from the command line.
-
-    Returns
-    -------
-    int
-        0 if every compared leaf passed, 1 otherwise.
-    """
+    """Run the GN2 forward-parity gate from the command line."""
     parser = argparse.ArgumentParser(
         prog="python -m salt.tests.integration.parity_gn2", description=__doc__.splitlines()[0]
     )

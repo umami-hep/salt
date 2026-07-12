@@ -1,72 +1,8 @@
-r"""``salt2 graph``/``salt2 schema`` — static graph tooling CLI (design §4).
+r"""``salt2 graph``/``salt2 schema`` — static graph tooling CLI.
 
-The ``salt2`` console script lives in `salt.core.main` (M2): trainer
-subcommands (``fit``/``test``) run through `Salt2CLI` there, and ``graph``/
-``schema`` invocations are dispatched unchanged to this module's `main`.
-
-Subcommands (design §4.1-§4.4, §2.6):
-
-- ``salt2 graph validate -c cfg.yaml [--mode fit|val|test|onnx] [--strict]``
-- ``salt2 graph deadcode -c cfg.yaml [--mode ...]``
-- ``salt2 graph plan     -c cfg.yaml --mode fit``
-- ``salt2 graph plot     -c cfg.yaml --mode fit -o graph.svg``
-- ``salt2 graph why      -c cfg.yaml --mode test --key labels.tracks.origin``
-- ``salt2 graph resolve  -c cfg.yaml [--annotate]`` — the writer-derived
-  output manifest (eval columns + ONNX outputs, M4.5 unified manifest);
-  ``--annotate`` refreshes the §4.4 comment block inside the config
-- ``salt2 schema dump <file.h5> -o schema.yaml``
-
-``-c/--config`` is REPEATABLE on every graph subcommand: trainer configs
-deep-merge left-to-right exactly as on ``salt2 fit``/``salt2 export`` (the
-base + override pattern is statically inspectable without a prior fit;
-M1 toy graphs still take exactly one config). With ``--annotate`` and
-multiple configs, the comment block is written into the LAST (most
-specific) config file.
-
-All graph tooling operates on declarations only: instantiate the config,
-compile plans per mode, analyse — no data, no GPU (design §4). Errors are
-always fatal; warnings are promotable with ``--strict`` (the CI default).
-
-**Two config formats are accepted** (auto-detected by `load_config`):
-
-1. **§5.1 trainer configs** (the ``salt2 fit`` YAML surface, top-level
-   ``model:``/``data:`` blocks): parsed through the REAL `Salt2CLI` in
-   run-free mode (``base2.yaml`` auto-loaded, deep-merge semantics intact),
-   then adapted into one full-pipeline graph — dataset modules + model
-   modules, per-mode sinks from the model's declared anchors, the label-key
-   universe from the reader's schema artifact. Init args that the YAML
-   leaves as required overrides (e.g. ``norm_dict``) can be supplied
-   data-free with repeated ``--set KEY=VALUE`` flags::
-
-       salt2 graph validate -c salt/core/configs/gn2v2-dummy.yaml \\
-         --set model.modules.norm.init_args.norm_dict=unused.yaml
-
-   ``validate`` additionally runs the default-on §2.6 class-names ↔
-   schema-attrs cross-check when the reader has a schema artifact.
-2. **M1 toy configs** (top-level ``modules:``/``sources:``/``sinks:``) — a
-   small instantiate-from-``class_path`` helper using `importlib` (see
-   `instantiate`); kept for unit/toy graphs.
-
-M1 config format (YAML)::
-
-    modules:                    # name -> module; names become instance names
-      embed:
-        class_path: my_pkg.toys.Embed
-        init_args: {out_dim: 16}        # optional ctor kwargs
-    sources:                    # framework-provided boundary (design §3.1)
-      inputs.x: {}                      # dotted key -> TensorSpec kwargs
-      masks.x: {kind: pad_mask, modes: [fit, val]}
-    sinks:                      # demand anchors per mode (design §3.1)
-      fit: [losses.total]               # mapping mode -> keys ...
-      test: [preds.x]
-    # sinks: [preds.x]                  # ... or a flat list (compiled mode only)
-    schema: schema.yaml         # optional: path (relative to this file) or
-                                # a flat list of dotted group.field keys
-
-``sources`` entries map dotted keys to `TensorSpec` keyword dicts
-(``shape``/``dtype``/``kind``/``modes``/``optional``/``fields``; ``modes`` is
-a name or list of names among fit/val/test/onnx/training/all). A list of bare
-keys (or single-pair mappings) is also accepted.
+Validates, plans, and renders module graphs from either trainer configs
+(``model:``/``data:``) or toy configs (``modules:``/``sources:``/``sinks:``);
+see `load_config` and `instantiate` for the two formats.
 """
 
 from __future__ import annotations
@@ -115,7 +51,7 @@ _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"}
 
 
 # ---------------------------------------------------------------------------
-# config loading (M1-minimal; jsonargparse lands in M2, design §5.3)
+# config loading
 # ---------------------------------------------------------------------------
 
 
@@ -123,24 +59,22 @@ _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"}
 class GraphConfig:
     """A loaded graph config: live modules plus planner boundary inputs.
 
-    `reader` is set only for §5.1 trainer configs (the adapter path) — it
-    carries the schema artifact for the validate-time class-names check.
+    `reader` is set only for trainer configs (the adapter path) — it carries
+    the schema artifact for the validate-time class-names check.
     `mode_errors` carries per-mode config errors found while deriving sinks
-    (the TEST dead-preds errors, the ONNX export-block resolution errors —
-    bad ``model_name``, malformed entries — M4-review fix):
+    (TEST dead-preds errors, ONNX export-block resolution errors):
     ``validate``/``deadcode`` report them as error-level findings for that
     mode, ``plan``/``plot``/``why`` raise them when the broken mode is
     requested — the affected mode's sinks fall back to anchor-on-all-preds
     so the other modes stay inspectable. `mode_warnings` carries per-mode
     warnings (a trainer config without an ``export:`` block leaves the ONNX
-    contract unchecked — design §4.1); ``validate`` reports them
-    (promotable with ``--strict``). `sink_origins` enriches missing-sink
-    planner errors with the demanding config address (e.g.
-    ``export.outputs``), per mode. `writers` is always ``None`` after W6c
-    (the ``writers:`` block and `WriterCallback` were removed; the
-    ``outputs:``/``callbacks:`` sink path drives TEST sinks instead).
-    `model_modules` is the model-side subdict kept separate from the
-    combined `modules` exactly as the runtime path passes
+    contract unchecked); ``validate`` reports them (promotable with
+    ``--strict``). `sink_origins` enriches missing-sink planner errors with
+    the demanding config address (e.g. ``export.outputs``), per mode.
+    `writers` is always ``None`` (the ``writers:`` block and `WriterCallback`
+    were removed; the ``outputs:``/``callbacks:`` sink path drives TEST sinks
+    instead). `model_modules` is the model-side subdict kept separate from
+    the combined `modules` exactly as the runtime path passes
     `SaltModule._graph_modules`.
     """
 
@@ -159,8 +93,6 @@ class GraphConfig:
 
 def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
     """Instantiate ``pkg.mod.Class(**init_args)`` from a dotted class path.
-
-    The M1 stand-in for jsonargparse instantiation (design §5.3).
 
     Returns
     -------
@@ -194,13 +126,13 @@ def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> 
 
 
 def _is_trainer_format(raw: Mapping[str, Any]) -> bool:
-    """Check whether a parsed YAML mapping is a §5.1 trainer config.
+    """Check whether a parsed YAML mapping is a trainer config.
 
     Returns
     -------
     bool
-        True for a top-level ``model:``/``data:`` mapping without the M1
-        toy ``modules:`` key.
+        True for a top-level ``model:``/``data:`` mapping without the toy
+        ``modules:`` key.
     """
     return "modules" not in raw and ("model" in raw or "data" in raw)
 
@@ -210,19 +142,18 @@ def load_config(
 ) -> GraphConfig:
     """Load and instantiate a graph config (both formats — module docstring).
 
-    A top-level ``model:``/``data:`` mapping is a §5.1 trainer config and is
+    A top-level ``model:``/``data:`` mapping is a trainer config and is
     adapted through `Salt2CLI` (`_load_fit_config`); a top-level ``modules:``
-    mapping is the M1 toy format. Instance names are assigned from the
-    module-dict keys (design §2.2 — names must match config keys; the
-    planner re-checks this invariant).
+    mapping is the toy format. Instance names are assigned from the
+    module-dict keys (names must match config keys; the planner re-checks
+    this invariant).
 
     Parameters
     ----------
     path : str | Path | Sequence[str | Path]
-        The config YAML, or a STACK of trainer configs (deep-merged
+        The config YAML, or a stack of trainer configs (deep-merged
         left-to-right through the real `Salt2CLI` surface — the repeatable
-        ``-c`` flag; the salt2 fit/export stacking semantics). M1 toy
-        graphs take exactly one config.
+        ``-c`` flag). Toy graphs take exactly one config.
     set_overrides : Sequence[str] | None, optional
         ``KEY=VALUE`` entries forwarded to the trainer parser (the ``--set``
         CLI flag) — trainer configs only, by default None.
@@ -252,9 +183,8 @@ def load_config(
             raise ConfigError(f"config file {one} must contain a mapping")
         raws.append(raw)
     if len(paths) > 1:
-        # config stacking is a trainer-surface feature (the salt2 fit /
-        # salt2 export deep-merge); override files may carry any subset of
-        # keys, but at least one stacked file must be trainer-format
+        # override files may carry any subset of keys, but at least one
+        # stacked file must be trainer-format
         if not any(_is_trainer_format(raw) for raw in raws):
             raise ConfigError(
                 f"repeated -c is supported for salt2 trainer configs only (deep-merged "
@@ -301,23 +231,21 @@ def load_config(
 
 
 def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
-    """Adapt a §5.1 trainer config (stack) into one full-pipeline `GraphConfig` (design §4).
+    """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`.
 
-    Parses the config(s) through the REAL `Salt2CLI` surface in run-free mode
-    (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics intact —
-    repeated configs stack left-to-right exactly as on ``salt2 fit``),
-    then builds the combined dataset + model graph: ``data.modules`` and
-    ``model.modules`` form one module dict (the reader is the source node,
-    so ``sources`` is empty), the per-mode sinks are the model's declared
-    anchors (``loss.total`` / ``preds.*`` + TEST ``meta.rows``), and the
-    wildcard-narrowing universe comes from the reader's schema artifact.
-    Everything stays config-only — no data file is touched (design §2.3).
+    Parses the config(s) through the real `Salt2CLI` surface in run-free
+    mode (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics
+    intact), then builds the combined dataset + model graph: ``data.modules``
+    and ``model.modules`` form one module dict (the reader is the source
+    node, so ``sources`` is empty), the per-mode sinks are the model's
+    declared anchors (``loss.total`` / ``preds.*`` + TEST ``meta.rows``), and
+    the wildcard-narrowing universe comes from the reader's schema artifact.
+    Everything stays config-only — no data file is touched.
 
     The TEST sinks are driven by the callbacks-level sink path
-    (``_static_writer_sink_callback`` / ``_as_sink_node``) — the W6c sink
-    path that replaced the ``writers:`` block (design §4.2, §8).
-    The resulting per-mode errors are carried in `GraphConfig.mode_errors`
-    (see its docstring).
+    (``_static_writer_sink_callback`` / ``_as_sink_node``), which replaced the
+    ``writers:`` block. The resulting per-mode errors are carried in
+    `GraphConfig.mode_errors` (see its docstring).
 
     Returns
     -------
@@ -338,11 +266,10 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
-    # PER-BATCH namespace only (plan-25 §3.6): setup-only modules
-    # (InputSamples/VDS/ShmStage) are partitioned out of the tensor compile, so
-    # the combined full-pipeline graph here uses `batch_modules`, NOT the union
-    # `dm.modules` (a setup-only module in `compile_plan` trips AllModesDeadError).
-    # The setup graph is a distinct topology rendered separately.
+    # setup-only modules (InputSamples/VDS/ShmStage) are partitioned out of the
+    # tensor compile, so the combined full-pipeline graph here uses `batch_modules`,
+    # not the union `dm.modules` (a setup-only module in `compile_plan` trips
+    # AllModesDeadError). The setup graph is a distinct topology rendered separately.
     data_modules = dm.batch_modules
     reader = dm.reader
     for module in data_modules.values():
@@ -355,23 +282,22 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             "across the pipeline graph (design §2.2)"
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
-    writer_cb = None  # W6c: writers: block removed; WriterCallback no longer assembled
+    writer_cb = None  # writers: block removed; WriterCallback no longer assembled
     writer_sink_cb = _static_writer_sink_callback(cli)
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
-    # plan 29 W1/W2: FOLD every callbacks-level renderable sink NODE into the
-    # planning module dict so each renders its OWN card and anchors demand via its
-    # declared requires (NOT the flat <sinks> sentinel). The H5OutputSink (W1) is
-    # active in TEST only (outputs.*/meta.rows/masks.*); the OnnxExportSink (W2) is
-    # active in ONNX only (the folded conversion leaves). In the other modes a
-    # sink node's declare_io is empty so the planner collects it as inactive (no
-    # card, no plan_hash perturbation).
+    # fold every callbacks-level renderable sink NODE into the planning module dict
+    # so each renders its own card and anchors demand via its declared requires
+    # (not the flat <sinks> sentinel). The H5OutputSink is active in TEST only
+    # (outputs.*/meta.rows/masks.*); the OnnxExportSink is active in ONNX only (the
+    # folded conversion leaves). In other modes a sink node's declare_io is empty
+    # so the planner collects it as inactive (no card, no plan_hash perturbation).
     sink_node = _as_sink_node(writer_sink_cb)
     onnx_sink_node = _static_onnx_export_sink(cli)
     if onnx_sink_node is not None and onnx_sink_node.model_name is None:
         # the static render needs a model_name to derive the Athena output names;
         # default it from the export block / sanitised run name exactly as
-        # `salt2 export` does (design §6.3)
+        # `salt2 export` does
         onnx_sink_node.model_name = _static_export_model_name(export_cfg, run_name)
     for node in (sink_node, onnx_sink_node):
         if node is None:
@@ -389,26 +315,25 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     sink_origins: dict[Mode, dict[str, str]] = {}
     for mode in PRIMARY_MODES:
         if mode is Mode.TEST and writer_sink_cb is not None:
-            # W6c: writer_cb (WriterCallback) path removed; only the callbacks-level
-            # sink path (writer_sink_cb / sink_node) drives TEST sinks now.
+            # only the callbacks-level sink path (writer_sink_cb / sink_node)
+            # drives TEST sinks now.
             try:
                 if sink_node is not None:
-                    # a renderable sink NODE (plan 29 W1) anchors ALL its demand via
-                    # its declared requires (folded into `modules` above) — no flat
-                    # sinks needed; its terminal-consumer demand keeps the producers
-                    # (and transitively their preds.*) alive (design §4.1).
+                    # a renderable sink NODE anchors ALL its demand via its declared
+                    # requires (folded into `modules` above) — no flat sinks needed;
+                    # its terminal-consumer demand keeps the producers (and
+                    # transitively their preds.*) alive.
                     keys = []
                 else:
                     keys = list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
                 if writer_sink_cb is not None and sink_node is None:
-                    # P1.5 cutover with a NON-node persistence sink (duck-typed
-                    # writer_demand only, e.g. CollectOutputs): fold its
-                    # writer_demand into the flat sinks exactly as
-                    # SaltModule._boundary_demand does at salt2 test, so the
-                    # in-graph conversion producers (outputs.*) stay alive in the
-                    # render instead of pruning dead. A renderable sink NODE
-                    # (sink_node is not None, plan 29 W1) is instead folded into
-                    # `modules` above and anchors its own demand — no flat sink.
+                    # a non-node persistence sink (duck-typed writer_demand only,
+                    # e.g. CollectOutputs): fold its writer_demand into the flat
+                    # sinks exactly as SaltModule._boundary_demand does at salt2
+                    # test, so the in-graph conversion producers (outputs.*) stay
+                    # alive in the render instead of pruning dead. A renderable
+                    # sink NODE is instead folded into `modules` above and anchors
+                    # its own demand — no flat sink.
                     sink_demand = writer_sink_cb.writer_demand(
                         model._graph_modules,  # noqa: SLF001 - same-package adapter
                         reader,
@@ -418,14 +343,13 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
         elif mode is Mode.ONNX and onnx_sink_node is not None:
-            # plan 29 W4 folded ONNX path (the SOLE ONNX-output authority): the
-            # OnnxExportSink node (folded into `modules` above) anchors ALL its
-            # conversion-leaf demand via its declared requires — a terminal
-            # consumer the planner keeps alive, pulling the folded conversion nodes
-            # (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/
-            # Combination) into the ONNX plan. No flat manifest ports needed (it
-            # renders its own card). The export-only half (model_name/inputs) is
-            # validated below if an export: block is present.
+            # folded ONNX path (the sole ONNX-output authority): the OnnxExportSink
+            # node (folded into `modules` above) anchors ALL its conversion-leaf
+            # demand via its declared requires — a terminal consumer the planner
+            # keeps alive, pulling the folded conversion nodes into the ONNX plan.
+            # No flat manifest ports needed (it renders its own card). The
+            # export-only half (model_name/inputs) is validated below if an
+            # export: block is present.
             keys = []
             if export_cfg is not None:
                 try:
@@ -440,12 +364,10 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                     "everything `salt2 export` will trace"
                 )
         elif mode & Mode.TRAINING and fitval_callbacks:
-            # the static half of the design §3.1/§3.4 FIT/VAL-sink contract
-            # (D-prereq): configured metrics callbacks DECLARE plan sinks the
-            # same way writers do for TEST, so `salt2 graph validate --mode
-            # fit` sees the same sinks (and the same boundary demand) a real
-            # `salt2 fit` does — the prereq for the M5 MaskformerMetrics
-            # callback to enter graph validation. Mirror of the TEST branch.
+            # the static half of the FIT/VAL-sink contract: configured metrics
+            # callbacks declare plan sinks the same way writers do for TEST, so
+            # `salt2 graph validate --mode fit` sees the same sinks (and the same
+            # boundary demand) a real `salt2 fit` does. Mirror of the TEST branch.
             try:
                 keys = list(
                     model._model_sinks(mode, callbacks=fitval_callbacks)  # noqa: SLF001 - same-package adapter
@@ -468,9 +390,9 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                     "gates what `salt2 export` will trace"
                 )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
-        # writer row alignment (design §8): a flat meta.rows sink — UNLESS a sink
-        # NODE was folded (plan 29 W1), which demands meta.rows itself via a named
-        # edge (a flat sink would re-introduce the <sinks> sentinel card).
+        # writer row alignment: a flat meta.rows sink — unless a sink NODE was
+        # folded, which demands meta.rows itself via a named edge (a flat sink
+        # would re-introduce the <sinks> sentinel card).
         if mode is Mode.TEST and sink_node is None and "meta.rows" not in keys:
             keys.append("meta.rows")
         sinks[mode] = tuple(keys)
@@ -483,14 +405,14 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         mode_errors=mode_errors,
         mode_warnings=mode_warnings,
         sink_origins=sink_origins,
-        writers=None,  # W6c: WriterCallback removed
+        writers=None,  # WriterCallback removed
         model_modules=dict(model._graph_modules),  # noqa: SLF001 - same-package adapter
         mup_cfg=getattr(model, "mup_cfg", None),
     )
 
 
 def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> Any:
-    """Parse a §5.1 trainer config (stack) through the REAL salt2 surface, run-free.
+    """Parse a trainer config (stack) through the real salt2 surface, run-free.
 
     Repeated configs deep-merge left-to-right (the ``salt2 fit`` /
     ``salt2 export`` stacking semantics) — the static tooling accepts the
@@ -552,15 +474,14 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
 
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
-    """The configured callbacks-level TEST persistence sink, if any (P1.5 cutover).
+    """The configured callbacks-level TEST persistence sink, if any.
 
-    The `_static_writer_callback` sibling for the design §2-layer-2 sink wired at
-    the ``callbacks:`` level instead of the ``writers:`` block — an
-    `H5OutputWriter` (or any callback exposing the duck-typed ``writer_demand``
-    surface). At runtime `SaltModule._attached_writer`/`_writer_demand` fold its
-    demand into the TEST sinks (saltmodule.py §8); this static half lets
-    ``salt2 graph`` resolve the SAME TEST sinks so the in-graph conversion
-    producers (``outputs.*``) stay alive in the render instead of pruning dead.
+    Wired at the ``callbacks:`` level — an `H5OutputWriter` (or any callback
+    exposing the duck-typed ``writer_demand`` surface). At runtime
+    `SaltModule._attached_writer`/`_writer_demand` fold its demand into the
+    TEST sinks; this static half lets ``salt2 graph`` resolve the same TEST
+    sinks so the in-graph conversion producers (``outputs.*``) stay alive in
+    the render instead of pruning dead.
 
     Returns
     -------
@@ -571,10 +492,9 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
 
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-    # the OnnxExportSink (plan 29 W2) ALSO exposes writer_demand, but it is an
-    # ONNX-only sink — never the TEST persistence sink; skip it here so a config
-    # wiring both finds the H5 sink for TEST (the export sink is handled by
-    # `_static_onnx_export_sink`).
+    # OnnxExportSink also exposes writer_demand, but it is an ONNX-only sink —
+    # never the TEST persistence sink; skip it here so a config wiring both
+    # finds the H5 sink for TEST (handled separately by `_static_onnx_export_sink`).
     return next(
         (
             cb
@@ -586,14 +506,14 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
 
 
 def _static_onnx_export_sink(cli: Any) -> Any | None:
-    """The configured callbacks-level `OnnxExportSink`, if any (plan 29 W2 folded path).
+    """The configured callbacks-level `OnnxExportSink`, if any.
 
     The folded ONNX counterpart to `_static_writer_sink_callback`: an
     `OnnxExportSink` wired at the ``callbacks:`` level names the conversion
-    ``outputs.*`` leaves the folded nodes (argmax/split/combine) mint. Folding it
-    into the planning module dict lets ``salt2 graph plot --mode onnx`` render its
-    OWN ``onnx_export`` card and keep the folded conversion nodes alive (the W2
-    render payoff, replacing the off-graph manifest).
+    ``outputs.*`` leaves the folded nodes (argmax/split/combine) mint. Folding
+    it into the planning module dict lets ``salt2 graph plot --mode onnx``
+    render its own ``onnx_export`` card and keep the folded conversion nodes
+    alive.
 
     Returns
     -------
@@ -608,12 +528,12 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
 
 
 def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
-    """The Athena output prefix for the static folded ONNX render (design §6.3).
+    """The Athena output prefix for the static folded ONNX render.
 
     Defaults exactly as `salt2 export`: the export block's ``model_name`` when
-    set, else the sanitised run name (``_``/``-`` stripped, v1
-    ``to_onnx.py:687``). Used only to NAME the folded export sink's outputs in the
-    static render (the runtime export re-derives it from the resolved config).
+    set, else the sanitised run name (``_``/``-`` stripped). Used only to name
+    the folded export sink's outputs in the static render (the runtime export
+    re-derives it from the resolved config).
 
     Returns
     -------
@@ -627,13 +547,13 @@ def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
 
 
 def _as_sink_node(callback: Any) -> Any | None:
-    """The callback as a renderable sink NODE, if it is one (plan 29 W1).
+    """The callback as a renderable sink NODE, if it is one.
 
-    A sink node is a `GraphModule` (``name`` + ``declare_io``) that marks itself
-    a terminal sink via ``is_sink() -> True`` (the `SinkModule` marker — e.g.
-    `H5OutputSink`). Folding it into the planning module dict makes it render its
-    OWN card and anchor demand via its declared requires. A non-node persistence
-    sink (duck-typed ``writer_demand`` only, e.g. `CollectOutputs`) returns None
+    A sink node is a `GraphModule` (``name`` + ``declare_io``) that marks
+    itself a terminal sink via ``is_sink() -> True`` (e.g. `H5OutputSink`).
+    Folding it into the planning module dict makes it render its own card
+    and anchor demand via its declared requires. A non-node persistence sink
+    (duck-typed ``writer_demand`` only, e.g. `CollectOutputs`) returns None
     and keeps the legacy flat-``<sinks>`` folding.
 
     Returns
@@ -651,16 +571,15 @@ def _as_sink_node(callback: Any) -> Any | None:
 
 
 def _static_fitval_callbacks(cli: Any) -> list[Any]:
-    """The configured FIT/VAL-sink callbacks from the run-free CLI (design §3.1).
+    """The configured FIT/VAL-sink callbacks from the run-free CLI.
 
-    The static-tooling half of the §3.1/§3.4 FIT/VAL-sink contract
-    (D-prereq, the `_static_writer_callback` sibling): any assembled
+    The static-tooling half of the FIT/VAL-sink contract: any assembled
     ``trainer.callbacks`` entry exposing a callable ``fit_val_demand`` (the
-    metrics family — `ConfusionMatrix`, the M5 `MaskformerMetrics`) is fed
-    into `SaltModule._model_sinks` so FIT/VAL sink derivation matches the
-    runtime path. Config-only: the callbacks are instantiated by the parse
-    but never ``setup``, and `fit_val_demand` resolves from the model module
-    dict, not from `setup` state.
+    metrics family, e.g. `ConfusionMatrix`) is fed into
+    `SaltModule._model_sinks` so FIT/VAL sink derivation matches the runtime
+    path. Config-only: the callbacks are instantiated by the parse but never
+    ``setup``, and `fit_val_demand` resolves from the model module dict, not
+    from `setup` state.
 
     Returns
     -------
@@ -723,7 +642,7 @@ def _parse_spec(key: str, node: Mapping[str, Any] | None) -> TensorSpec:
 
 
 def _parse_sources(raw: Any, path: Path) -> NestedSpec:
-    """Parse the ``sources:`` section to a `NestedSpec` (design §3.1 boundary).
+    """Parse the ``sources:`` section to a `NestedSpec`.
 
     Returns
     -------
@@ -765,7 +684,7 @@ def _parse_sources(raw: Any, path: Path) -> NestedSpec:
 
 
 def _parse_sinks(raw: Any, path: Path) -> Sinks:
-    """Parse the ``sinks:`` section to the planner `Sinks` type (design §3.1).
+    """Parse the ``sinks:`` section to the planner `Sinks` type.
 
     Returns
     -------
@@ -797,7 +716,7 @@ def _parse_sinks(raw: Any, path: Path) -> Sinks:
 
 
 def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
-    """Parse the ``schema:`` section to a flat key universe (design §2.2 rule (d)).
+    """Parse the ``schema:`` section to a flat key universe.
 
     Returns
     -------
@@ -829,7 +748,7 @@ def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
 
 
 def _has_wildcard(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component (design §2.2).
+    """Check whether a dotted key contains a wildcard component.
 
     Returns
     -------
@@ -840,7 +759,7 @@ def _has_wildcard(key: str) -> bool:
 
 
 def _pattern_matches(pattern: str, key: str) -> bool:
-    """Match a concrete key against a wildcard pattern (design §2.2 semantics).
+    """Match a concrete key against a wildcard pattern.
 
     ``"*"`` matches exactly one component, ``"**"`` one or more — mirrors the
     planner's matcher for `why` explanations.
@@ -892,7 +811,7 @@ def _fail(message: str) -> int:
 
 
 def _format_graph_error(err: GraphError) -> str:
-    """Format a kernel error with its class, §4.1-style.
+    """Format a kernel error with its class prefixed.
 
     Returns
     -------
@@ -903,7 +822,7 @@ def _format_graph_error(err: GraphError) -> str:
 
 
 # ---------------------------------------------------------------------------
-# graph validate (design §4.1)
+# graph validate
 # ---------------------------------------------------------------------------
 
 
@@ -911,17 +830,16 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     """``salt2 graph validate``: compile every requested mode; report findings.
 
     Graph errors are always fatal, as are error-level deadcode findings (an
-    unconsumed ``preds.*`` port in TEST, design §4.2) and stored per-mode
-    sink errors (`GraphConfig.mode_errors`); warnings (no schema configured,
-    warning-level dead outputs) are promoted to errors under ``--strict``
-    (design §4). Info-level findings (unconsumed FIT/VAL preds — the normal
-    no-metric-callback case, design §3.3) are report-only and NEVER promoted,
-    so ``--strict`` stays usable as the CI default on standard tagger
-    configs.
+    unconsumed ``preds.*`` port in TEST) and stored per-mode sink errors
+    (`GraphConfig.mode_errors`); warnings (no schema configured,
+    warning-level dead outputs) are promoted to errors under ``--strict``.
+    Info-level findings (unconsumed FIT/VAL preds — the normal
+    no-metric-callback case) are report-only and never promoted, so
+    ``--strict`` stays usable as the CI default on standard tagger configs.
 
     For TEST, the sink-path callbacks (``outputs:``/``callbacks:`` H5 sink)
     drive the TEST sinks — the former ``writers:`` block and `WriterCallback`
-    were removed in W6c.
+    were removed.
 
     Returns
     -------
@@ -938,20 +856,20 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             "a misspelled key will fail at the first batch (design §2.6)"
         )
     if cfg.reader is not None:
-        # default-on §2.6 class-names ↔ schema-attrs cross-check (set AND
-        # order); raises ConfigError -> formatted by main()
+        # default-on class-names <-> schema-attrs cross-check (set AND order);
+        # raises ConfigError -> formatted by main()
         from salt.core.saltmodule import check_class_names  # noqa: PLC0415 - heavy/circular
 
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
             print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order (§2.6)")
     if cfg.model_modules is not None:
-        # muP routing validator (design §3.4 line 695): apply_to naming a module
-        # without a mup init_arg ERRORS; a mup:true module outside apply_to WARNS.
-        # The same `validate_mup_routing` SaltModule construction runs, surfaced
-        # here as `salt2 graph validate` findings (warnings promotable under
-        # --strict). The hard errors would already abort the parse above; this is
-        # the first-class CI check + the warning capture.
+        # muP routing validator: apply_to naming a module without a mup init_arg
+        # errors; a mup:true module outside apply_to warns. The same
+        # `validate_mup_routing` SaltModule construction runs, surfaced here as
+        # `salt2 graph validate` findings (warnings promotable under --strict).
+        # The hard errors would already abort the parse above; this is the
+        # first-class CI check + the warning capture.
         from salt.core.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
@@ -967,11 +885,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
                 "init_arg, no mup:true module left out (§3.4)"
             )
-        # edge bind-time validators (FD §6.7 1425-1431): edge-stream-first +
-        # EdgeAttention-backend forcing. The same `validate_edge_port` SaltModule
-        # construction runs; surfaced here as a first-class CI check (these are
-        # HARD errors — they would already abort the parse above; this captures
-        # the OK line / the error message for the validate report).
+        # edge bind-time validators: edge-stream-first + EdgeAttention-backend
+        # forcing. The same `validate_edge_port` SaltModule construction runs;
+        # surfaced here as a first-class CI check (these are hard errors — they
+        # would already abort the parse above; this captures the OK line / the
+        # error message for the validate report).
         from salt.core.saltmodule import validate_edge_port  # noqa: PLC0415 - heavy/circular
 
         try:
@@ -984,12 +902,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
                 "the attention backend is edge-compatible (no silent flash bypass; §6.7)"
             )
-    # data-free module preflights (design §2.3): duck-typed `preflight()`
-    # checks file-backed materialise sources (e.g. the Normaliser norm dict).
-    # WARNING-level here — `validate` must stay runnable on data-less machines
-    # where the documented `--set ...norm_dict=unused.yaml` override is in
-    # play; an actual `salt2 fit`/`test` run promotes these to hard errors
-    # (SaltModule.setup).
+    # data-free module preflights: duck-typed `preflight()` checks file-backed
+    # materialise sources (e.g. the Normaliser norm dict). Warning-level here —
+    # `validate` must stay runnable on data-less machines where the documented
+    # `--set ...norm_dict=unused.yaml` override is in play; an actual
+    # `salt2 fit`/`test` run promotes these to hard errors (SaltModule.setup).
     for name, module in cfg.modules.items():
         preflight = getattr(module, "preflight", None)
         if not callable(preflight):
@@ -1022,7 +939,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
             bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
             bucket.append(line)
-        # W6c: cfg.writers is always None (WriterCallback removed); the
+        # cfg.writers is always None (WriterCallback removed); the
         # validate_specs block that used it is removed here.
     for info in infos:
         print(f"info: {info}")
@@ -1038,22 +955,21 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# graph deadcode (design §4.2)
+# graph deadcode
 # ---------------------------------------------------------------------------
 
 
 def _cmd_deadcode(args: argparse.Namespace) -> int:
-    """``salt2 graph deadcode``: mode-aware dead-output report (design §4.2).
+    """``salt2 graph deadcode``: mode-aware dead-output report.
 
     Findings carry severity levels: an unconsumed ``preds.*`` port in TEST is
-    an error by default and makes the command exit 1 (design §4.2), as does a
-    stored per-mode sink error (the writers-block dead-preds error,
-    `GraphConfig.mode_errors`); unconsumed FIT/VAL preds are info (the normal
-    no-metric-callback case, design §3.3); the rest are warnings
-    (report-only). A per-task ``expose: [fit, val]`` opt-out (design §4.2, M5
-    sub-wave D) gates the prediction port out of TEST before this runs, so an
-    opted-out task surfaces here as a (warning-level) whole-module pruning
-    rather than a TEST preds error.
+    an error by default and makes the command exit 1, as does a stored
+    per-mode sink error (the writers-block dead-preds error,
+    `GraphConfig.mode_errors`); unconsumed FIT/VAL preds are info (the
+    normal no-metric-callback case); the rest are warnings (report-only). A
+    per-task ``expose: [fit, val]`` opt-out gates the prediction port out of
+    TEST before this runs, so an opted-out task surfaces here as a
+    (warning-level) whole-module pruning rather than a TEST preds error.
 
     Returns
     -------
@@ -1086,15 +1002,15 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# graph plan (design §3.1 debugging story, §4.4 plan_<mode> table)
+# graph plan
 # ---------------------------------------------------------------------------
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
-    """``salt2 graph plan``: print the ordered §4.4 plan table for one mode.
+    """``salt2 graph plan``: print the ordered plan table for one mode.
 
     Shows each step's binding constraint (the latest predecessor forced by a
-    key edge) and the narrowed wildcard results (design §3.1).
+    key edge) and the narrowed wildcard results.
 
     Returns
     -------
@@ -1138,8 +1054,8 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
     modules and anchors on dataset sources; the graph `salt2 export`
     actually traces has positional export inputs, no dataset modules, and
     in-graph reduces — its authoritative rendering is the `plan_onnx.txt`
-    written next to ``network.onnx`` at export time (design §4.4; the two
-    plan hashes legitimately differ).
+    written next to ``network.onnx`` at export time (the two plan hashes
+    legitimately differ).
     """
     if mode is Mode.ONNX and cfg.reader is not None:
         print(
@@ -1150,15 +1066,15 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
 
 
 # ---------------------------------------------------------------------------
-# graph plot (design §4.3)
+# graph plot
 # ---------------------------------------------------------------------------
 
 
 def _cmd_plot(args: argparse.Namespace) -> int:
-    """``salt2 graph plot``: render the mode graph (design §4.3).
+    """``salt2 graph plot``: render the mode graph.
 
-    Emits the §4.3 Graphviz DOT (port-card layout, one signature card per
-    module) next to the requested output, then shells out to the ``dot``
+    Emits Graphviz DOT (port-card layout, one signature card per module)
+    next to the requested output, then shells out to the ``dot``
     binary — baked into the salt container — to rasterise it: a PNG at the
     requested output path and a sibling PDF. This is the authoritative graph
     image; there is no matplotlib path. When ``dot`` is absent, raises a clear
@@ -1200,13 +1116,13 @@ def _cmd_plot(args: argparse.Namespace) -> int:
 
 
 def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
-    """Resolve concrete feature widths STATICALLY for the plot (design §2.3, §4.3).
+    """Resolve concrete feature widths statically for the plot.
 
     Compiles every inspectable primary-mode plan and feeds them to
     `resolve_bind_schema` — the same static resolution that builds the
-    width-dependent nn.Linear layers, with NO data file and NO batch run. The
+    width-dependent nn.Linear layers, with no data file and no batch run. The
     resulting per-key last-dim widths let `dot_source` show the concrete
-    FEATURE/embedding dim on each port-card row (``encoded.tracks (B, T:tracks,
+    feature/embedding dim on each port-card row (``encoded.tracks (B, T:tracks,
     16)``) while the data-dependent batch/sequence dims stay symbolic.
 
     All compilable modes are unified (widths are config-fixed, so resolving
@@ -1286,17 +1202,17 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# graph why (design §3.1 debugging story, §4.1 quality bar)
+# graph why
 # ---------------------------------------------------------------------------
 
 
 def _cmd_why(args: argparse.Namespace) -> int:
-    """``salt2 graph why``: explain one key's producer/consumers (design §3.1).
+    """``salt2 graph why``: explain one key's producer/consumers.
 
     For a key in the plan: prints producer, spec, and consumers. For a key
     absent from the plan: explains *why* (demand-pruned producer, mode-gated
-    port, or an undemanded wildcard match) at the §4.1 quality bar. Unknown
-    keys exit 1 with nearest-key suggestions.
+    port, or an undemanded wildcard match). Unknown keys exit 1 with
+    nearest-key suggestions.
 
     Returns
     -------
@@ -1365,7 +1281,7 @@ def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
 
 
 def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
-    """Explain why `key` is absent from the mode's plan (design §4.1 quality).
+    """Explain why `key` is absent from the mode's plan.
 
     Returns
     -------
@@ -1449,7 +1365,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 
 
 # ---------------------------------------------------------------------------
-# graph resolve [--annotate] (design §4.4; M4.5 amendment merge condition 8)
+# graph resolve [--annotate]
 # ---------------------------------------------------------------------------
 
 MANIFEST_BEGIN = "# === salt2 output manifest"
@@ -1462,14 +1378,12 @@ MANIFEST_END = "# === end salt2 output manifest ==="
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """``salt2 graph resolve``: the writer-derived output manifest, eval + ONNX.
 
-    Prints the assembled manifest (the §4.4-style answer to "what columns
-    does eval write / what does Athena see" for the unified-writer config);
-    with ``--annotate``, additionally writes it into the config file as a
-    refreshable comment block (replaced in place when already present) —
-    the amendment merge condition 8 mitigation for the discoverability
-    shift from a hand-typed ``export.outputs`` to derived declarations.
+    Prints the assembled manifest (the answer to "what columns does eval
+    write / what does Athena see" for the unified-writer config); with
+    ``--annotate``, additionally writes it into the config file as a
+    refreshable comment block (replaced in place when already present).
     With repeated ``-c`` the configs deep-merge left-to-right and the
-    annotation goes into the LAST (most specific) file.
+    annotation goes into the last (most specific) file.
 
     Returns
     -------
@@ -1487,7 +1401,7 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
             "salt2 graph resolve needs a salt2 trainer config (top-level model:/data: "
             "blocks) — toy graph configs have no writers block (M4.5 unified manifest)"
         )
-    # W6c: the WriterCallback-based manifest (writers.modules) was removed.
+    # the WriterCallback-based manifest (writers.modules) was removed.
     # `salt2 graph resolve` no longer has a manifest to derive.
     return _fail(
         "salt2 graph resolve is no longer supported (W6c removal): the writers.modules "
@@ -1502,11 +1416,10 @@ def _manifest_block(
 ) -> str:
     """Render the eval + ONNX manifest as a config comment block.
 
-    The embedded refresh hint reproduces the FULL generating command —
+    The embedded refresh hint reproduces the full generating command —
     every ``-c`` file and every ``--set`` override — so the printed
     command re-runs verbatim on configs whose required init_args (e.g.
-    ``norm_dict``) are supplied data-free (the merge-condition-8
-    self-documenting staleness contract).
+    ``norm_dict``) are supplied data-free.
 
     Returns
     -------
@@ -1538,8 +1451,8 @@ def _manifest_block(
         lines.extend(
             f"#   [{wname}] {stream}: {' '.join(columns)}" for stream, columns in streams.items()
         )
-    # plan-29 W4: the ONNX-output annotation derives from the folded OnnxExportSink
-    # (the off-graph writer manifest is retired), not from writer_cb.onnx_manifest.
+    # the ONNX-output annotation derives from the folded OnnxExportSink (the
+    # off-graph writer manifest is retired), not from writer_cb.onnx_manifest.
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         lines.extend((
@@ -1576,7 +1489,7 @@ def _write_annotation(path: Path, block: str) -> None:
     A previous generated block (between `MANIFEST_BEGIN` and
     `MANIFEST_END`) is replaced in place; otherwise the block is appended
     at the end of the file — comments are inert YAML, so the config parses
-    identically (the §4.4 converter-emitted comment-block contract).
+    identically.
     """
     text = path.read_text()
     new_lines: list[str] = []
@@ -1601,12 +1514,12 @@ def _write_annotation(path: Path, block: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# schema dump (design §2.6)
+# schema dump
 # ---------------------------------------------------------------------------
 
 
 def _cmd_schema_dump(args: argparse.Namespace) -> int:
-    """``salt2 schema dump``: scrape an H5 file into a schema artifact (design §2.6).
+    """``salt2 schema dump``: scrape an H5 file into a schema artifact.
 
     Returns
     -------
@@ -1662,7 +1575,7 @@ def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``salt2`` argument parser (design §4).
+    """Build the ``salt2`` argument parser.
 
     Returns
     -------
@@ -1732,11 +1645,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_mup_parsers(sub: Any) -> None:
-    """Add the ``mup-shapes`` / ``mup-coord-check`` subcommands (design §3.4, §9.2).
+    """Add the ``mup-shapes`` / ``mup-coord-check`` subcommands.
 
     Deferred to `salt.core.mup` handlers (heavy mup/pandas imports stay out of
-    the graph-tooling startup path). The casing-fixed ``setup_mup`` console
-    entry forwards to ``mup-shapes`` (pyproject.toml).
+    the graph-tooling startup path). The ``setup_mup`` console entry forwards
+    to ``mup-shapes`` (pyproject.toml).
     """
     from salt.core.mup import cmd_mup_coord_check, cmd_mup_shapes  # noqa: PLC0415
 

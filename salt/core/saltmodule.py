@@ -1,42 +1,8 @@
-"""`SaltModule` — the LightningModule that replaces v1 `ModelWrapper` (design §3.4).
+"""`SaltModule` — the LightningModule owning the configured graph-module dict.
 
-The module owns the configured graph-module dict, compiles per-mode plans at
-``setup`` against the `GraphDataModule`'s config-derived dataset boundary,
-runs the two-phase bind (design §2.3 — config-only, NO file I/O), and drives
-the executor from the Lightning step hooks. Checkpoints carry the resolved
-schema and per-mode plan hashes — never `Plan` objects, which hold
-``MappingProxyType`` views and are not picklable by design (§2.3, risk 9).
-
-Lifecycle (design §2.3, §3.4), in trainer order:
-
-1. ``__init__`` — pure config capture: instance names assigned from the dict
-   keys, the ``losses.**`` framework wildcard narrowed (`LossSum.narrow`),
-   modules registered in an ``nn.ModuleDict`` (checkpoint keys
-   ``net.<name>.*`` — independent of topo order).
-2. ``setup(stage)`` — compile the stage's plans (FIT+VAL for fit, TEST for
-   test) with sources from the datamodule's ``boundary_specs()``, then
-   ``bind(schema)`` over all compiled plans — EXACTLY ONCE, and always
-   before any state-dict load (Lightning restores checkpoints after the
-   setup hook; rebinding would re-initialise bound layers).
-3. checkpoint restore (when resuming/loading) — `on_load_checkpoint` runs
-   before the state-dict load: plan hashes are verified (FIT strict, other
-   modes warn — design risk 9) and, on the data-less
-   ``load_from_checkpoint`` path where ``setup`` never ran, the modules are
-   bound from the schema stored in the checkpoint (§2.3: checkpoints load
-   on data-less machines).
-4. ``on_fit_start`` — `materialise_all` on FRESH fits only (Normaliser
-   buffers, ``weight_source`` class weights). Skipped when a checkpoint was
-   loaded: the values arrive via the state_dict, reproducing v1's
-   bake-on-resume semantics (cli.py:253-267) without re-reading files.
-5. steps — assemble a `Bundle` from the batch, run the mode's executor, log
-   ``{stage}/loss`` + ``{stage}/{task}_loss`` (v1 monitor convention,
-   modelwrapper.py:256-270), return ``{"loss": ..., "bundle": ...}``
-   (design §3.4 — the conscious break of hidden contract #8).
-
-M2 scope notes: muP (design §3.4 routing/shape halves) and the
-``validate``/``predict`` trainer entry points are M5/M6; compiled plans make
-the instance non-picklable, so DDP must use fork-based workers (spawn
-strategies are revisited with the M6 cluster work).
+Compiles per-mode execution plans against the datamodule's dataset boundary,
+binds modules to the resolved schema exactly once, and drives the executor
+from the Lightning step hooks.
 """
 
 from __future__ import annotations
@@ -91,93 +57,63 @@ __all__ = [
     "validate_mup_routing",
 ]
 
-# the attention backends an EdgeAttention encoder MAY declare without it being a
-# silent bypass: only the deterministic raw-torch backend. v1's EncoderLayer
-# skips backend assignment entirely when edge_embed_dim>0 (transformer.py:
-# 599-601,616-620), so any flash/varlen/efficient backend declared ALONGSIDE an
-# edge port was silently ignored in v1 — ED2 makes that a NAMED error.
+# the only attention backend an EdgeAttention encoder may declare — other
+# backends would silently bypass the edge computation.
 _EDGE_OK_BACKENDS = frozenset({"torch-math"})
 
 CKPT_KEY = "salt_core"
-"""Checkpoint dict key for the schema + plan-hash payload (design §2.3, §2.6)."""
+"""Checkpoint dict key for the schema + plan-hash payload."""
 
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "HybridMuonAdamW")
 _MUP_KEYS = frozenset({"apply_to", "shape_path"})
 _WILDCARD_PARTS = frozenset({"*", "**"})
 # dataset-boundary demand is declared for the three runtime modes; ONNX
-# export feeds the model directly (design §7) and has no dataset plan.
+# export feeds the model directly and has no dataset plan.
 _DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
 
 
 def _is_test_persistence_sink(callback: Any) -> bool:
-    """Whether a ``writer_demand``-exposing callback is the TEST persistence sink (W2 B2).
+    """Whether a ``writer_demand``-exposing callback is the TEST persistence sink.
 
-    The ORDER-INDEPENDENT discriminator that keeps an ONNX-only sink
-    (`OnnxExportSink`, whose ``declare_io(Mode.TEST)`` is empty) from being chosen
-    as the TEST writer/sink-node. A `_SinkCallback` advertises ``is_test_sink()``
-    (True for `H5OutputSink`, False for `OnnxExportSink`); a plain duck-typed sink
-    without that method (e.g. `CollectOutputs`) is treated as a TEST sink so the
-    legacy flat-``<sinks>`` path is unchanged.
-
-    Returns
-    -------
-    bool
-        True when the callback should be selected as the TEST persistence sink.
+    Discriminates a real persistence sink (e.g. `H5OutputSink`) from an
+    ONNX-only sink (`OnnxExportSink`), which must never be chosen as the TEST
+    sink since its TEST-mode declare_io is empty.
     """
     is_test_sink = getattr(callback, "is_test_sink", None)
     return True if not callable(is_test_sink) else bool(is_test_sink())
 
 
 class SaltModule(lightning.LightningModule):
-    """Lightning wrapper around a configured graph-module dict (design §3.4).
+    """Lightning wrapper around a configured graph-module dict.
 
     Parameters
     ----------
     modules : dict[str, GraphModule | None]
-        Model-side graph modules by instance name (the config dict key —
-        assigned to ``module.name`` here, before any ``declare_io``).
-        Every module must be an ``nn.Module`` implementing the
-        `GraphModule` protocol. ``None`` entries are dropped — the
-        assembly-time half of the design §5.3 null-deletion semantics
-        (``--model.modules.X=null`` parses to None and is filtered here).
-        An un-narrowed `LossSum` is narrowed via `LossSum.collect_loss_keys`
-        (the ``losses.**`` framework wildcard, design §3.3).
+        Model-side graph modules by instance name. ``None`` entries are
+        dropped (deletion via ``--model.modules.X=null``).
     lrs : Mapping[str, float]
-        OneCycleLR schedule config (design §5.1; the v1 ``lrs_config`` kwarg
-        renamed to ``lrs`` — M3 cleanup, M5 sub-wave D): required keys
-        ``initial``, ``max``, ``end``, ``pct_start``; optional ``weight_decay``
-        (default 1e-5) and ``last_epoch`` (default -1).
+        OneCycleLR schedule config: required keys ``initial``, ``max``,
+        ``end``, ``pct_start``; optional ``weight_decay`` (default 1e-5) and
+        ``last_epoch`` (default -1).
     optimizer : str, optional
         One of ``"AdamW"`` (default), ``"lion"``, ``"HybridMuonAdamW"``. When
         `mup` is configured the optimizer is swapped to ``mup.optim.MuAdamW``
-        regardless of this name (the muP routing half — design §3.4; v1
-        ``MuAdamW`` swap, modelwrapper.py muP path). Other names raise.
+        regardless of this name.
     mup : Mapping[str, Any], optional
-        The muP ROUTING config (M6 sub-wave B; design §3.4 line 685 —
-        KEEP-architecture/BREAK-routing). ``None`` (default) = no muP.
-        Keys:
+        The muP routing config. ``None`` (default) = no muP. Keys:
 
-        - ``apply_to`` (required): an EXPLICIT list of module instance names
-          (NOT a regex — the design break from v1's ``apply_to``/
-          ``parameter_name`` regex zip, configuration_muP.py:98-115) that
-          carry ``mup: true``. Each name must exist in `modules` AND its
-          module must accept a ``mup`` init_arg (carry a ``mup`` attribute);
-          else a `ConfigError`. A module with ``mup`` truthy that is NOT in
-          ``apply_to`` is a WARNING (silent muP-off would change training
-          dynamics).
-        - ``shape_path`` (optional): the base-shapes file produced by
-          ``salt2 mup-shapes`` / ``setup_mup``. Applied with
-          ``mup.set_base_shapes`` over the ``apply_to`` submodules at bind so
-          `MuReadout.width_mult()` resolves against the real base widths (the
-          routing-stage shape application). When absent, the architectural
-          default (``width_mult == 1.0``, set on each module at construction)
-          stands — a width-1 model that still trains correctly under muP.
+        - ``apply_to`` (required): explicit list of module instance names
+          that carry ``mup: true``. Each must exist in `modules` and accept
+          a ``mup`` init_arg, else `ConfigError`.
+        - ``shape_path`` (optional): base-shapes file produced by
+          ``salt2 mup-shapes`` / ``setup_mup``, applied at bind time so
+          `MuReadout.width_mult()` resolves against real base widths.
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
     debug : bool, optional
         Run the executor in debug mode (read tracking + in-place mutation
-        detection, design §3.2), by default False. Slow — tests only.
+        detection), by default False. Slow — tests only.
 
     Raises
     ------
@@ -197,8 +133,7 @@ class SaltModule(lightning.LightningModule):
         outputs: dict[str, GraphModule | None] | None = None,
     ) -> None:
         super().__init__()
-        # assembly-time None filtering (design §5.3): a null entry — from a
-        # config-file or CLI override — deletes the module.
+        # a null entry — from a config-file or CLI override — deletes the module.
         modules = {key: module for key, module in modules.items() if module is not None}
         if not modules:
             raise ConfigError("SaltModule needs a non-empty module dict (design §3.4)")
@@ -208,16 +143,13 @@ class SaltModule(lightning.LightningModule):
                     f"module {key!r} ({type(module).__name__}) is not an nn.Module — "
                     "model-side graph modules carry parameters/buffers (design §2.5)"
                 )
-            # instance names come from the config dict key, BEFORE any
-            # declare_io/compile (design §2.2)
+            # instance names come from the config dict key, before any declare_io/compile
             module.name = key
-        # narrow the losses.** framework wildcard before any declare_io —
-        # the M1 kernel rejects wildcard requires (design §3.3)
+        # narrow the losses.** wildcard before any declare_io — wildcard requires are rejected
         for module in modules.values():
             if isinstance(module, LossSum) and not module.narrowed:
                 module.narrow(LossSum.collect_loss_keys(modules, Mode.FIT))
-            # GLS does not utilise task weights: the v2 home of v1's ctor guard
-            # (modelwrapper.py:139-142) — fail loudly here, before declare_io
+            # GLS does not utilise task weights — fail loudly here, before declare_io
             if isinstance(module, LossGLS):
                 LossGLS.check_task_weights(modules)
         if missing := [k for k in _LRS_REQUIRED if k not in lrs]:
@@ -229,17 +161,14 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"optimizer {optimizer!r} is not supported — choose from {list(_OPTIMIZERS)}"
             )
-        # the muP ROUTING half (design §3.4): validate apply_to against the
-        # module dict (each name exists + carries a `mup` init_arg) and warn
-        # on a mup-on module left out of apply_to — see _validate_mup.
+        # validates apply_to against the module dict and warns on a mup-on module
+        # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
-        # the edge bind-time validators (FD §6.7 1425-1431, M6 sub-wave C):
-        # edge-stream-first + EdgeAttention-backend forcing — the named-error
-        # replacements for v1's silent sort-first hack (saltmodel.py:66-73) and
-        # flash bypass (transformer.py:599-601). No-op without an edge encoder.
+        # edge-stream-first + EdgeAttention-backend forcing bind-time validators.
+        # No-op without an edge encoder.
         _validate_edge_port(modules)
         # resolved config only — the module dict is NOT pickled into hparams
-        # (design §3.4; load_from_checkpoint takes modules= explicitly)
+        # (load_from_checkpoint takes modules= explicitly)
         self.save_hyperparameters(logger=False, ignore=["modules"])
         self.name = name
         self.lrs = dict(lrs)
@@ -247,9 +176,8 @@ class SaltModule(lightning.LightningModule):
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
         self._graph_modules: dict[str, GraphModule] = dict(modules)
-        # plan 34 W34.2: the top-level outputs: section, composed AFTER the model
-        # (empty until `compose_output_section` runs — either here from the
-        # `outputs=` ctor arg, or from Salt2CLI.instantiate_classes on the CLI path).
+        # the top-level outputs: section, composed AFTER the model (empty until
+        # compose_output_section runs — either here or from the CLI path).
         self._output_section: dict[str, GraphModule] = {}
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
@@ -266,15 +194,12 @@ class SaltModule(lightning.LightningModule):
             )
 
     def compose_output_section(self, section: Mapping[str, GraphModule]) -> None:
-        """Compose the plan-34 top-level ``outputs:`` section onto the model (W34.2).
+        """Compose the top-level ``outputs:`` section onto the model.
 
-        The new plan-34 fold site: the section writers (`RunTaskOutput` /
-        `InputCopyWriter` / `PadMaskWriter`) are folded into the planning module
-        dict (and `net`, so they ride the ModuleDict — they carry no params, so the
-        state_dict is unchanged and resume is safe). Their ``outputs.*`` leaves reach
-        a sink only in TEST/ONNX, so FIT/VAL demand-prune them (FIT/VAL plan_hash
-        byte-unchanged, plan §6 gate 4). `RunTaskOutput` gets the model module dict
-        so it can resolve the tasks it orchestrates before any ``declare_io``.
+        Section writers (`RunTaskOutput` / `InputCopyWriter` / `PadMaskWriter`) are
+        folded into the planning module dict (and `net`, params-free so the
+        state_dict is unchanged). Their ``outputs.*`` leaves reach a sink only in
+        TEST/ONNX, so FIT/VAL demand-prune them.
 
         MANIFEST-ONLY writers (`InputCopyWriter` — input copies are re-read from the
         source H5 by the SINK, never flowing through the graph) are NOT folded into
@@ -303,8 +228,8 @@ class SaltModule(lightning.LightningModule):
                     "names are unique across the pipeline graph (plan 34 W34.2)"
                 )
             w.name = key
-        # the model-side modules (everything already in the graph BEFORE the
-        # section folds in) — RunTaskOutput resolves its tasks against these.
+        # the model-side modules before the section folds in — RunTaskOutput
+        # resolves its tasks against these.
         model_modules = dict(self._graph_modules)
         graph_writers = {
             key: w
@@ -323,73 +248,42 @@ class SaltModule(lightning.LightningModule):
 
     @property
     def bound(self) -> bool:
-        """Whether the two-phase bind has run (design §2.3 — exactly once).
-
-        Returns
-        -------
-        bool
-            True after `setup`/`on_load_checkpoint` bound the modules.
-        """
+        """Whether the two-phase bind has run (exactly once)."""
         return self._bound
 
     @property
     def materialised(self) -> bool:
-        """Whether this instance ran `materialise_all` (fresh fits only).
-
-        Returns
-        -------
-        bool
-            True after a fresh-fit ``on_fit_start``; stays False on
-            checkpoint loads (values arrive via the state_dict).
-        """
+        """Whether this instance ran `materialise_all` (fresh fits only)."""
         return self._materialised
 
     @property
     def loaded_from_checkpoint(self) -> bool:
-        """Whether any checkpoint was loaded into this instance.
-
-        Returns
-        -------
-        bool
-            True once `on_load_checkpoint` ran (resume or
-            ``load_from_checkpoint``) — disables `materialise`.
-        """
+        """Whether any checkpoint was loaded into this instance."""
         return self._loaded_from_checkpoint
 
-    # -- static declarations (config-only, design §3.1/§3.3) -------------------
+    # -- static declarations -----------------------------------------------------
 
     def sink_demand(self) -> dict[Mode, list[str]]:
         """The per-mode dataset-boundary demand, derived from module declarations.
 
         For each runtime mode, every non-optional required key that no
-        sibling module produces must come from the dataset — these keys are
-        the `GraphDataset` sinks that drive demand-narrowed reads and label
-        narrowing (design §3.3, §6.1). ``meta.rows`` is added in TEST for
-        writer row alignment (design §8). `GraphDataModule.setup` adopts
-        this automatically when no explicit sinks were configured.
+        sibling module produces must come from the dataset. ``meta.rows`` is
+        added in TEST for writer row alignment. `GraphDataModule.setup`
+        adopts this automatically when no explicit sinks were configured.
 
         Returns
         -------
         dict[Mode, list[str]]
             ``{mode: [dotted keys]}`` for FIT/VAL/TEST, in declaration order.
-            A `ConfigError` propagates from `_boundary_demand` on wildcard
-            demand keys or keys the dataset boundary cannot serve (a
-            deleted/missing model-side producer).
         """
         return {mode: demand for mode, (demand, _) in self._boundary_demand().items()}
 
     def sink_origins(self) -> dict[Mode, dict[str, str]]:
         """Per-mode demanded-key -> demanding-module description.
 
-        `GraphDataModule` threads the matching mode's map into each stage
-        dataset plan so dataset-side errors (schema-invalid label narrowing,
-        missing sink producers) and the ``plan_<mode>.txt`` artifacts name
-        the demander the user actually configured instead of the planner's
-        ``'<sinks>'`` placeholder (design §4.1 attribution). The map is
-        deliberately PER MODE (M3-review fix): in TEST a label can be
-        demanded by a *writer* while the same key is task-demanded in FIT —
-        a merged map would attribute TEST artifacts/errors to the inactive
-        FIT demander.
+        The map is PER MODE: in TEST a label can be demanded by a *writer*
+        while the same key is task-demanded in FIT — a merged map would
+        misattribute TEST artifacts/errors to the inactive FIT demander.
 
         Returns
         -------
@@ -404,9 +298,8 @@ class SaltModule(lightning.LightningModule):
         """Compute per-mode boundary demand plus per-key demander descriptions.
 
         In TEST, an attached `WriterCallback`'s declared requires extend the
-        demand (design §8): writer-demanded dataset-namespace keys (labels,
-        masks, ``meta.rows``) keep their demand-gated producers alive — the
-        TEST-mode `Labels` narrowing serves exactly what writers demand.
+        demand: writer-demanded dataset-namespace keys (labels, masks,
+        ``meta.rows``) keep their demand-gated producers alive.
 
         Returns
         -------
@@ -419,10 +312,7 @@ class SaltModule(lightning.LightningModule):
             On wildcard demand keys, or when an unproduced require lies
             outside the dataset-served namespaces (``inputs``/``masks``/
             ``labels``/``meta``) — that means a model-side producer is
-            missing (e.g. deleted by a ``null`` override), and the error
-            names the consuming modules and their config addresses rather
-            than letting the dataset plan fail with a confusing
-            missing-sink error (design §4.1).
+            missing (e.g. deleted by a ``null`` override).
         """
         out: dict[Mode, tuple[list[str], dict[str, str]]] = {}
         for mode in _DEMAND_MODES:
@@ -479,12 +369,11 @@ class SaltModule(lightning.LightningModule):
                     origins[key] = who
                 demand.append("meta.rows")
             elif mode & Mode.TRAINING:
-                # FIT/VAL callback demand (design §3.1 454-456, §3.4 667-671 —
-                # the TRAINING mirror of the TEST writer block above): a metrics
-                # callback's dataset-namespace requires (labels/masks/meta) that
-                # no task already demands extend the boundary so their producers
-                # survive. Model-produced (preds.*) callback keys are anchored by
-                # `_model_sinks`, not here (they are already `in produced`).
+                # FIT/VAL callback demand (mirrors the TEST writer block above): a
+                # metrics callback's dataset-namespace requires (labels/masks/meta)
+                # that no task already demands extend the boundary so their
+                # producers survive. Model-produced (preds.*) callback keys are
+                # anchored by `_model_sinks`, not here (already `in produced`).
                 for key, who in self._callback_demand(mode).items():
                     if key in produced or key in required:
                         continue  # a model-plan sink / already task-demanded
@@ -510,20 +399,16 @@ class SaltModule(lightning.LightningModule):
         """The attached TEST writer/sink callback + reader, if both exist.
 
         Duck-typed (a callback exposing ``writer_demand``) so the model side
-        stays free of a writers import — the `sink_demand` symmetry
-        precedent (design §3.4, §8).
+        stays free of a writers import.
 
-        ORDER-INDEPENDENT TEST-sink selection (plan 29 W2 B2): an ONNX-only sink
-        (`OnnxExportSink`) ALSO exposes ``writer_demand`` but its
-        ``declare_io(Mode.TEST)`` is EMPTY — it must NEVER be chosen as the TEST
-        persistence sink (choosing it would empty the TEST sinks and trip
-        ``_assert_no_dead_preds`` on EVERY ``preds.*``, an order-dependent
-        ``salt2 test`` crash with ``callbacks: [onnx_export, h5_output]``). The
-        ``is_test_sink()`` discriminator (`_SinkCallback`; True for `H5OutputSink`,
-        False for `OnnxExportSink`) skips it regardless of callback order —
-        symmetric to the static ``cli.py`` ``_static_writer_sink_callback``
-        hardening. A plain duck-typed sink without ``is_test_sink`` (e.g.
-        `CollectOutputs`) is treated as a TEST sink (legacy behaviour preserved).
+        Order-independent TEST-sink selection: an ONNX-only sink
+        (`OnnxExportSink`) also exposes ``writer_demand`` but its
+        ``declare_io(Mode.TEST)`` is empty — it must never be chosen as the
+        TEST persistence sink (choosing it would empty the TEST sinks and
+        trip ``_assert_no_dead_preds`` on every ``preds.*``). The
+        ``is_test_sink()`` discriminator skips it regardless of callback
+        order. A plain duck-typed sink without ``is_test_sink`` (e.g.
+        `CollectOutputs`) is treated as a TEST sink.
 
         Returns
         -------
@@ -549,17 +434,12 @@ class SaltModule(lightning.LightningModule):
         return callback, reader
 
     def _attached_sink_node(self) -> GraphModule | None:
-        """The attached TEST sink NODE (plan 29 W1), if one is wired as a callback.
+        """The attached TEST sink NODE, if one is wired as a callback.
 
-        A sink node is a `GraphModule` (``name`` + ``declare_io``) that also marks
-        itself a terminal sink via ``is_sink() -> True`` (the `SinkModule` marker,
-        e.g. `H5OutputSink`). When wired at ``callbacks:`` (the cutover config),
-        `_attached_writer` already finds it by its ``writer_demand`` surface; this
-        sibling additionally checks it is a renderable node so `compile_mode` can
-        FOLD it into the planning module dict (it then renders its OWN card and
-        anchors demand via its declared requires, not the flat ``<sinks>``
-        sentinel). The duck-typed ``writer_demand`` discovery keeps working in
-        parallel.
+        A sink node is a `GraphModule` that also marks itself a terminal sink
+        via ``is_sink() -> True`` (e.g. `H5OutputSink`). `compile_mode` folds
+        it into the planning module dict so it renders its own card and
+        anchors demand via its declared requires.
 
         Returns
         -------
@@ -576,14 +456,13 @@ class SaltModule(lightning.LightningModule):
         return None
 
     def _bind_output_section_to_sink(self) -> None:
-        """Bind the outputs: section to every attached sink callback (plan 34 W34.2).
+        """Bind the outputs: section to every attached sink callback.
 
-        The dumb sinks resolve their column schema + copy spec + mask streams from
-        the SECTION manifest, so the section must be bound before any
-        declare_io/writer_demand resolution. Binds the section to EVERY attached
-        callback exposing ``bind_output_section`` (the H5 persistence sink AND the
-        ONNX export sink), so both dump the section's outputs.* leaves. No-op when
-        no outputs: section is configured.
+        Sinks resolve their column schema + copy spec + mask streams from the
+        section manifest, so the section must be bound before any
+        declare_io/writer_demand resolution. Binds to every attached callback
+        exposing ``bind_output_section`` (H5 persistence + ONNX export).
+        No-op when no outputs: section is configured.
         """
         if not self._output_section:
             return
@@ -597,12 +476,11 @@ class SaltModule(lightning.LightningModule):
     def _fold_sink_node(
         modules: dict[str, GraphModule], sink_node: GraphModule
     ) -> dict[str, GraphModule]:
-        """Add a sink NODE to a planning module dict under its instance name (plan 29 W1).
+        """Add a sink NODE to a planning module dict under its instance name.
 
-        The planner requires ``module.name == config_key``; the sink's ``name``
-        (the config dict key when wired at ``callbacks:``, else its class default)
-        is used as the key. A name collision with a model module is a config error
-        (instance names are unique across the pipeline graph).
+        The planner requires ``module.name == config_key``; the sink's
+        ``name`` is used as the key. A name collision with a model module is
+        a config error (instance names are unique across the pipeline graph).
 
         Returns
         -------
@@ -625,25 +503,15 @@ class SaltModule(lightning.LightningModule):
         return folded
 
     def _assert_no_dead_preds(self, plan: Plan) -> None:
-        """Restore the TEST dead-preds hard error on the folded-sink path (plan 29 W1).
+        """Hard-error on a produced ``preds.*`` key consumed by no plan edge.
 
-        With a sink NODE folded (`compile_mode`), the flat `_model_sinks` writer
-        dead-preds gate (`saltmodule.py` TEST branch) is bypassed — the sink
-        demands ``outputs.*``, not ``preds.*``. Under the locked design the
-        conversion PRODUCERS consume each persisted prediction's ``preds.*``, so
-        a genuinely-dead ``preds.*`` (one the model computes every TEST batch but
-        NO producer feeds into a demanded ``outputs.*`` leaf) would otherwise
-        ship silently — a regression vs the M4.5 `WriterCallback` hard error and
-        the eval-safety bug the gate exists to catch (a computed prediction that
-        is never persisted).
-
-        This re-establishes that net on the runtime path at `salt2 test` parity
-        with M4.5: every ``preds.*`` the model produces (active in TEST) must be
-        CONSUMED by some edge in the compiled plan (i.e. by a surviving
-        conversion producer that reaches the sink). A produced ``preds.*`` absent
-        from the plan's consumed keys is dead -> the existing
-        `_dead_preds_message` hard error (the `salt2 graph validate --strict`
-        finding, raised here so the eval flow keeps parity with M4.5).
+        With a sink NODE folded (`compile_mode`), the sink demands
+        ``outputs.*``, not ``preds.*``, so a genuinely-dead ``preds.*`` (one
+        the model computes every TEST batch but no producer feeds into a
+        demanded ``outputs.*`` leaf) would otherwise ship silently — a
+        computed prediction that is never persisted. Every ``preds.*`` the
+        model produces (active in TEST) must be consumed by some edge in the
+        compiled plan; an unconsumed one raises `_dead_preds_message`.
 
         Parameters
         ----------
@@ -670,7 +538,7 @@ class SaltModule(lightning.LightningModule):
         """Merged writer-declared TEST demand from an attached `WriterCallback`.
 
         Returns None when no writer callback (or no datamodule boundary) is
-        attached: programmatic ``Trainer.test`` without writers keeps the M2
+        attached: programmatic ``Trainer.test`` without writers keeps the
         anchor-on-all-preds behaviour.
 
         Returns
@@ -684,16 +552,14 @@ class SaltModule(lightning.LightningModule):
         return callback.writer_demand(self._graph_modules, reader)
 
     def _attached_callbacks(self) -> list[Any]:
-        """Attached callbacks declaring FIT/VAL plan sinks (design §3.1, §3.4).
+        """Attached callbacks declaring FIT/VAL plan sinks.
 
         Duck-typed (any callback exposing a callable ``fit_val_demand``) so
-        the model side stays free of a callbacks import — the SAME demand
-        symmetry the writer surface uses (`_attached_writer`), now for the
-        TRAINING-mode metrics family (e.g. `ConfusionMatrix`, the M5
-        `MaskformerMetrics`). The surface is STATIC (config-only, taking the
-        model-module dict): it does not depend on the callback's ``setup``
-        having run, so the static `salt2 graph` tooling sees the same FIT/VAL
-        sinks a real ``trainer.fit`` does.
+        the model side stays free of a callbacks import, for the
+        TRAINING-mode metrics family (e.g. `ConfusionMatrix`). The surface is
+        static (config-only, taking the model-module dict): it does not
+        depend on the callback's ``setup`` having run, so ``salt2 graph``
+        sees the same FIT/VAL sinks a real ``trainer.fit`` does.
 
         Returns
         -------
@@ -706,14 +572,12 @@ class SaltModule(lightning.LightningModule):
         return [cb for cb in callbacks or [] if callable(getattr(cb, "fit_val_demand", None))]
 
     def _callback_demand(self, mode: Mode, callbacks: Any = None) -> dict[str, str]:
-        """Merged callback-declared FIT/VAL demand (design §3.1 454-456, §3.4 667-671).
+        """Merged callback-declared FIT/VAL demand.
 
         The TRAINING-mode mirror of `_writer_demand` (TEST): configured
-        metrics-family callbacks DECLARE the bundle keys they read each VAL
-        epoch (e.g. a `preds.<stream>.<task>` no loss anchors), and those
-        keys become FIT/VAL plan sinks so their producers survive demand
-        pruning. Empty outside TRAINING modes (callbacks declare FIT/VAL
-        requires only; TEST/ONNX sinks are the writer manifest).
+        metrics-family callbacks declare the bundle keys they read each VAL
+        epoch, and those keys become FIT/VAL plan sinks so their producers
+        survive demand pruning. Empty outside TRAINING modes.
 
         Parameters
         ----------
@@ -721,17 +585,16 @@ class SaltModule(lightning.LightningModule):
             A primary mode. Non-TRAINING modes return ``{}``.
         callbacks : Any, optional
             An explicit iterable of FIT/VAL-sink callbacks (the static
-            `salt.core.cli` path passes the callbacks it parses from the
-            ``trainer.callbacks`` block so ``salt2 graph`` sees the same
-            FIT/VAL sinks as a real ``salt2 fit`` run — the writer
-            ``writers=`` precedent). None → discovered from the attached
-            trainer.
+            `salt.core.cli` path passes what it parses from the
+            ``trainer.callbacks`` block, so ``salt2 graph`` sees the same
+            sinks a real ``salt2 fit`` run would). None → discovered from
+            the attached trainer.
 
         Returns
         -------
         dict[str, str]
             ``{demanded key: demander description}`` in callback (config)
-            order, the values §4.1-grade attributions.
+            order.
         """
         if not (mode & Mode.TRAINING):
             return {}
@@ -747,21 +610,16 @@ class SaltModule(lightning.LightningModule):
     def _model_sinks(
         self, mode: Mode, writers: Any = None, reader: Any = None, callbacks: Any = None
     ) -> list[str]:
-        """The model-plan sink anchors for one mode (design §3.1, §8).
+        """The model-plan sink anchors for one mode.
 
-        FIT/VAL sinks (M5, D-prereq): ``loss.total`` PLUS the declared
-        requires of any configured training callback (design §3.1 454-456,
-        §3.4 667-671) — the TRAINING-mode mirror of the TEST writer-demand
-        mechanism. A metrics-family callback DECLARES the bundle keys it
-        reads each VAL epoch (`_callback_demand`); those keys anchor the
-        FIT/VAL plan so a callback-consumed ``preds.*`` key NO loss keeps
-        alive (the M5 `MaskformerMetrics` shape) survives demand pruning.
-        The shipped `ConfusionMatrix` already worked because tasks publish
-        ``preds.*`` in all modes and stay alive via their losses; this
-        wiring extends sink coverage to callbacks demanding a key no task
-        anchors. Unlike TEST, an unconsumed ``preds.*`` in FIT/VAL is NOT a
-        dead-preds error (the normal no-metric-callback case, design §3.3):
-        callback demand only ADDS sinks, never narrows.
+        FIT/VAL sinks: ``loss.total`` plus the declared requires of any
+        configured training callback — the TRAINING-mode mirror of the TEST
+        writer-demand mechanism. A metrics-family callback declares the
+        bundle keys it reads each VAL epoch (`_callback_demand`); those keys
+        anchor the FIT/VAL plan so a callback-consumed ``preds.*`` key with
+        no loss survives demand pruning. Unlike TEST, an unconsumed
+        ``preds.*`` in FIT/VAL is not a dead-preds error: callback demand
+        only adds sinks, never narrows.
 
         Parameters
         ----------
@@ -773,39 +631,33 @@ class SaltModule(lightning.LightningModule):
             discovered from the attached trainer. The static tooling
             (`salt.core.cli`) passes the callback it builds from the parsed
             ``writers:`` block so ``salt2 graph`` sees the same TEST sinks
-            and dead-preds errors as a real ``salt2 test`` run (M3-review
-            fix; design §4.2, §8).
+            and dead-preds errors as a real ``salt2 test`` run.
         reader : Any, optional
             The reader prototype matching `writers` (static path only), by
             default None — the attached datamodule's reader.
         callbacks : Any, optional
             An explicit iterable of FIT/VAL-sink callbacks (the static
-            `salt.core.cli` path passes the callbacks it parses from the
-            ``trainer.callbacks`` block — the ``writers=`` precedent), by
-            default None — discovered from the attached trainer. Consulted
-            in TRAINING modes only.
+            `salt.core.cli` path passes what it parses from the
+            ``trainer.callbacks`` block), by default None — discovered from
+            the attached trainer. Consulted in TRAINING modes only.
 
         Returns
         -------
         list[str]
             ``["loss.total"]`` plus the callback-declared FIT/VAL demand
-            keys in FIT/VAL. In TEST with a writer callback
-            (attached or passed), the writer-demanded model-produced keys —
-            demand-gating proper (design §8). In ONNX the manifest is NO
-            LONGER writer-derived (plan-29 W4): the folded `OnnxExportSink`
-            terminal node anchors its own conversion-leaf demand once folded
-            into the planning module dict (`cli.py` / `export.py`), so this
-            method has no ONNX writer branch — it falls through to every
-            declared ``preds.*`` key in declaration order (the M2 fallback)
-            when no export-sink demand is present.
+            keys in FIT/VAL. In TEST with a writer callback, the
+            writer-demanded model-produced keys. In ONNX, the folded
+            `OnnxExportSink` terminal node anchors its own conversion-leaf
+            demand once folded into the planning module dict, so this
+            falls through to every declared ``preds.*`` key in declaration
+            order when no export-sink demand is present.
 
         Raises
         ------
         ConfigError
             When no module produces the mode's anchor keys, or — TEST with
             writers — when a produced ``preds.*`` key is consumed by no
-            writer (the design §4.2/§8 dead-preds hard error: a computed
-            prediction would never be persisted).
+            writer (a computed prediction would never be persisted).
         """
         produced: dict[str, str] = {}
         for name, module in self._graph_modules.items():
@@ -838,12 +690,9 @@ class SaltModule(lightning.LightningModule):
                         "produces — check writers.modules (design §8)"
                     )
                 return consumed
-        # plan-29 W4: the ONNX output manifest is no longer writer-derived — the
-        # folded OnnxExportSink (a terminal node in `_graph_modules` once folded in
-        # by `cli.py` / `export.py`) anchors its conversion-leaf demand itself, so
-        # `_model_sinks(Mode.ONNX)` has no writer-manifest branch any more. When no
-        # export sink demand is present it falls back to every preds.* key (the M2
-        # all-preds render fallback below).
+        # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
+        # anchors its conversion-leaf demand itself. When no export sink demand is
+        # present it falls back to every preds.* key below.
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "
@@ -851,7 +700,7 @@ class SaltModule(lightning.LightningModule):
             )
         return preds
 
-    # -- compile + two-phase bind (design §2.3, §3.4) ---------------------------
+    # -- compile + two-phase bind -------------------------------------------------
 
     def compile_mode(self, mode: Mode, boundary: Mapping[str, TensorSpec]) -> Plan:
         """Compile the model-side plan for one mode against a dataset boundary.
@@ -877,20 +726,15 @@ class SaltModule(lightning.LightningModule):
             module config drifted mid-run), or the checkpoint's FIT hash
             mismatches.
         """
-        # plan 29 W1: fold the discovered TEST sink NODE into the planning module
-        # dict so it renders its OWN card and anchors demand via its declared
-        # requires (outputs.*/meta.rows/masks.*) instead of the flat <sinks>
-        # sentinel. In FIT/VAL/ONNX the sink's declare_io is empty -> the planner
-        # collects it as inactive (no PlanStep/edge) -> plan_hash byte-UNCHANGED
-        # (the trained checkpoint loads unperturbed, design §8 back-compat proof).
-        # When a sink node is folded, the flat model sinks for TEST are empty: the
-        # node's terminal-consumer demand keeps the producers (and transitively
-        # their preds.*) alive (design §4.1).
+        # fold the discovered TEST sink NODE into the planning module dict so it
+        # renders its own card and anchors demand via its declared requires
+        # instead of the flat <sinks> sentinel. In FIT/VAL/ONNX the sink's
+        # declare_io is empty, so the planner collects it as inactive and
+        # plan_hash is unchanged (the trained checkpoint loads unperturbed).
         modules = dict(self._graph_modules)
         sink_node = self._attached_sink_node()
-        # plan 34 W34.2: bind the outputs: section to the sink so it dumps the
-        # section's outputs.* leaves (column schema + copy spec + mask streams from
-        # the section manifest in declaration order, not producer discovery).
+        # bind the outputs: section to the sink so it dumps the section's
+        # outputs.* leaves in declaration order, not producer discovery.
         if (
             self._output_section
             and sink_node is not None
@@ -899,14 +743,11 @@ class SaltModule(lightning.LightningModule):
             sink_node.bind_output_section(self._output_section)
         folded_sink = sink_node is not None and mode is Mode.TEST
         if folded_sink:
-            # the sink node anchors ALL its demand via its declared requires
-            # (folded below) — flat model sinks are empty. The OLD flat
-            # `_model_sinks` writer dead-preds gate does not run on this path
-            # (the sink demands outputs.*, not preds.*); the equivalent runtime
-            # safety net is restored AFTER compile via `_assert_no_dead_preds`
-            # below — a `preds.*` the model computes but no producer feeds into a
-            # demanded output is still a hard error at `salt2 test` (design §4.1,
-            # parity with the M4.5 WriterCallback dead-preds error).
+            # the sink node anchors ALL its demand via its declared requires —
+            # flat model sinks are empty. The dead-preds safety net is restored
+            # AFTER compile via `_assert_no_dead_preds` below: a `preds.*` the
+            # model computes but no producer feeds into a demanded output is
+            # still a hard error at `salt2 test`.
             modules = self._fold_sink_node(modules, sink_node)
             sinks: Any = []
         else:
@@ -934,7 +775,7 @@ class SaltModule(lightning.LightningModule):
         return plan
 
     def setup(self, stage: str) -> None:
-        """Compile the stage's plans and run the two-phase bind (design §3.4).
+        """Compile the stage's plans and run the two-phase bind.
 
         Lightning calls the datamodule's ``setup`` first, so the per-stage
         `GraphDataset` instances (and their config-derived boundary specs)
@@ -945,17 +786,17 @@ class SaltModule(lightning.LightningModule):
         Raises
         ------
         ConfigError
-            For unsupported stages (``validate``/``predict`` are M5+), a
-            missing/foreign datamodule, or any compile/bind error.
+            For unsupported stages, a missing/foreign datamodule, or any
+            compile/bind error.
         """
         if stage not in {"fit", "test"}:
             raise ConfigError(
                 f"stage {stage!r} is not supported by SaltModule in M2 — use trainer.fit or "
                 "trainer.test (validate/predict entry points are M5+, design §9.5)"
             )
-        # plan 34 W34.2: bind the outputs: section to the attached sink BEFORE any
-        # boundary/demand resolution (the sink's declare_io/writer_demand resolves
-        # its columns from the section manifest — it must be bound first).
+        # bind the outputs: section to the attached sink BEFORE any boundary/demand
+        # resolution — the sink's declare_io/writer_demand resolves its columns
+        # from the section manifest, so it must be bound first.
         self._bind_output_section_to_sink()
         dm = self._graph_datamodule()
         if stage == "fit":
@@ -972,16 +813,14 @@ class SaltModule(lightning.LightningModule):
         self._ensure_bound()
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
-        """Static writer-input validation on the TEST path (design §2.7/§8).
+        """Static writer-input validation on the TEST path.
 
         Hands the attached `WriterCallback` (if any) the union of the model
         modules' TEST-active produced ports and the test dataset's served
         boundary leaves, so it can prove each writer-declared require exists
-        AND kind/dtype-unifies against its producer before the first batch
-        (`WriterCallback.validate_specs`). Model-produced ports take precedence
-        over a same-named boundary key (they are the executed leaf). No writer
-        callback (programmatic ``Trainer.test`` without writers) → no-op, as the
-        M2 anchor-on-all-preds path carries no writer requires to check.
+        and kind/dtype-unifies against its producer before the first batch.
+        Model-produced ports take precedence over a same-named boundary key
+        (they are the executed leaf). No writer callback → no-op.
         """
         writers, reader = self._attached_writer()
         if writers is None or not callable(getattr(writers, "validate_specs", None)):
@@ -996,13 +835,11 @@ class SaltModule(lightning.LightningModule):
         Duck-typed: every graph module exposing a callable ``preflight()``
         (e.g. `Normaliser` — norm-dict existence/streams/values) is checked
         BEFORE any `materialise` writes buffers, so a wrong path/content
-        fails with one §4.1-quality `ConfigError` covering all modules
-        instead of a per-module mid-materialise crash (M3 leftover; design
-        §2.3 — preflights do config I/O only, never bind/data I/O). Called
-        from ``on_fit_start`` on fresh fits only — on resume the values
-        arrive via the state_dict and the files are never read (the
-        `materialise_all` contract). A failing module preflight propagates
-        as `ConfigError`.
+        fails with one `ConfigError` covering all modules instead of a
+        per-module mid-materialise crash. Called from ``on_fit_start`` on
+        fresh fits only — on resume the values arrive via the state_dict and
+        the files are never read. A failing module preflight propagates as
+        `ConfigError`.
         """
         for module in self._graph_modules.values():
             preflight = getattr(module, "preflight", None)
@@ -1010,13 +847,11 @@ class SaltModule(lightning.LightningModule):
                 preflight()
 
     def _assert_fit_val_identical(self) -> None:
-        """Assert the VAL plan is structurally identical to the FIT plan (design §3.4).
+        """Assert the VAL plan is structurally identical to the FIT plan.
 
-        The plan hash is deliberately mode-independent (`_plan_hash`), so
-        the §3.4 'default-identical plan, asserted' contract is a cheap hash
-        comparison. Modules that genuinely declare VAL-divergent ports
-        (parameterised training) are an M6 feature — until a named exemption
-        mechanism exists, divergence is a config error.
+        The plan hash is deliberately mode-independent, so this is a cheap
+        hash comparison. Modules that genuinely declare VAL-divergent ports
+        are not yet supported — divergence is a config error.
 
         Raises
         ------
@@ -1091,7 +926,7 @@ class SaltModule(lightning.LightningModule):
         self._bind(resolve_bind_schema(self.plans.values()))
 
     def _bind(self, schema: ResolvedSchema) -> None:
-        """Bind all modules to a resolved schema — exactly once (design §2.3).
+        """Bind all modules to a resolved schema — exactly once.
 
         Raises
         ------
@@ -1110,23 +945,18 @@ class SaltModule(lightning.LightningModule):
         self._bound = True
 
     def _apply_mup_shapes(self) -> None:
-        """Apply the muP base shapes over the whole ``net`` tree (design §3.4).
+        """Apply the muP base shapes over the whole ``net`` tree.
 
-        The routing-stage shape application: after `bind_all` builds the
-        width-dependent layers (incl. the `MuReadout` out-proj), set the base
-        shapes from ``mup.shape_path`` over the WHOLE ``net`` so
-        `MuReadout.width_mult()` resolves against the REAL base widths and
-        `MuAdamW` sees per-parameter infshapes. The shape file is generated by
-        ``salt2 mup-shapes`` over ``base_model.net`` / ``delta_model.net`` (only
-        the ``apply_to`` widths differ — every other parameter has a FIXED, i.e.
-        non-infinite, dim), so the parameter names match the live ``net`` exactly.
-        ``rescale_params=False`` because the parameters already carry their muP
-        init from the architectural port (the `Dense`/`MuReadout` resets); this
-        call only attaches the infshapes used by `MuReadout.forward`/`MuAdamW`.
+        After `bind_all` builds the width-dependent layers (incl. the
+        `MuReadout` out-proj), sets the base shapes from ``mup.shape_path``
+        over the whole ``net`` so `MuReadout.width_mult()` resolves against
+        the real base widths and `MuAdamW` sees per-parameter infshapes.
+        ``rescale_params=False`` because the parameters already carry their
+        muP init from the architectural port; this call only attaches the
+        infshapes used by `MuReadout.forward`/`MuAdamW`.
 
-        No-op when no muP is configured or no ``shape_path`` was supplied (the
-        per-module width-1 base shapes set at construction stand — a self-base
-        model that still trains correctly under muP).
+        No-op when no muP is configured or no ``shape_path`` was supplied
+        (the per-module width-1 base shapes set at construction stand).
 
         Raises
         ------
@@ -1150,7 +980,7 @@ class SaltModule(lightning.LightningModule):
         # base/delta infshapes; non-apply_to params have fixed dims in the file
         set_base_shapes(self.net, str(shape_path), rescale_params=False)
 
-    # -- materialise (fresh fits only, design §2.3) -----------------------------
+    # -- materialise (fresh fits only) --------------------------------------------
 
     def on_fit_start(self) -> None:
         """Materialise file-backed values before the first step of a FRESH fit.
@@ -1158,7 +988,7 @@ class SaltModule(lightning.LightningModule):
         Runs after checkpoint restore: when any checkpoint was loaded
         (resume or `load_from_checkpoint`) materialise is skipped and the
         values come from the state_dict — `Normaliser.forward` raises if a
-        checkpoint lacked them (required-present-on-resume, design §2.3).
+        checkpoint lacked them.
         """
         if self._materialised or self._loaded_from_checkpoint:
             return
@@ -1166,7 +996,7 @@ class SaltModule(lightning.LightningModule):
         materialise_all(self._graph_modules)
         self._materialised = True
 
-    # -- steps (design §3.4) ----------------------------------------------------
+    # -- steps ---------------------------------------------------------------------
 
     def forward(self, batch: Mapping[str, Any] | Bundle, mode: Mode = Mode.TEST) -> Bundle:
         """Run the compiled plan for `mode` over a batch.
@@ -1202,14 +1032,12 @@ class SaltModule(lightning.LightningModule):
         Returns
         -------
         dict[str, Any]
-            ``{"loss": total, "bundle": Bundle}`` (design §3.4 — v2
-            callbacks read the bundle; hidden contract #8 is broken
-            consciously).
+            ``{"loss": total, "bundle": Bundle}`` — callbacks read the bundle.
 
         Raises
         ------
         RuntimeError
-            If the total loss is NaN (v1 guard, modelwrapper.py:291-295).
+            If the total loss is NaN.
         """
         del batch_idx
         bundle = self(batch, Mode.FIT)
@@ -1241,36 +1069,33 @@ class SaltModule(lightning.LightningModule):
         Returns
         -------
         Bundle
-            The executed bundle (``preds.*`` + ``meta.rows`` for writers,
-            design §8).
+            The executed bundle (``preds.*`` + ``meta.rows`` for writers).
         """
         del batch_idx
         return self(batch, Mode.TEST)
 
     def _log_losses(self, bundle: Bundle, stage: str) -> None:
-        """Log ``{stage}/loss`` and ``{stage}/{task}_loss`` (v1 monitor names).
+        """Log ``{stage}/loss`` and ``{stage}/{task}_loss``.
 
-        ``prog_bar=True`` (v1 parity): without it a fit with the default
-        ``logger: false`` shows NO loss feedback at all — an added aux task
-        would train invisibly (stage-E ergonomics finding).
+        ``prog_bar=True``: without it a fit with the default
+        ``logger: false`` shows no loss feedback at all — an added aux task
+        would train invisibly.
         """
         sync_dist = self._trainer is not None and len(self.trainer.device_ids) > 1
         self.log(f"{stage}/loss", bundle.get("loss.total"), sync_dist=sync_dist, prog_bar=True)
         for task, value in bundle.subtree("losses").items():
             self.log(f"{stage}/{task}_loss", value, sync_dist=sync_dist, prog_bar=True)
 
-    # -- optimizer (v1 port, modelwrapper.py:340-381) ----------------------------
+    # -- optimizer -----------------------------------------------------------------
 
     def _get_optimizer_class(self) -> type[Optimizer]:
-        """Resolve the optimizer class (v1 surface + the muP ``MuAdamW`` swap, design §3.4).
+        """Resolve the optimizer class (with the muP ``MuAdamW`` swap).
 
         When `mup` is configured the optimizer is ``mup.optim.MuAdamW``
         regardless of the ``optimizer`` name — muP's per-parameter learning
-        rates require the muP-aware AdamW (the v1 swap, the
-        `_get_optimizer_class` muP branch the M6 TODO named). MuAdamW needs
-        the base shapes set on the parameters (done at bind via
-        `_apply_mup_shapes`), so the swap and the shape application are
-        coupled.
+        rates require the muP-aware AdamW. MuAdamW needs the base shapes set
+        on the parameters (done at bind via `_apply_mup_shapes`), so the
+        swap and the shape application are coupled.
 
         Returns
         -------
@@ -1302,13 +1127,12 @@ class SaltModule(lightning.LightningModule):
         raise ConfigError(f"Optimizer '{self.optimizer}' is not supported.")
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
-        """Build the optimizer + OneCycleLR scheduler (v1 kept wholesale).
+        """Build the optimizer + OneCycleLR scheduler.
 
         Returns
         -------
         tuple[list[Optimizer], list[dict]]
-            One optimizer and one step-interval scheduler config
-            (modelwrapper.py:340-381).
+            One optimizer and one step-interval scheduler config.
         """
         optimizer_class = self._get_optimizer_class()
         optimizer_kwargs = {
@@ -1331,20 +1155,17 @@ class SaltModule(lightning.LightningModule):
         )
         return [opt], [{"scheduler": scheduler, "interval": "step"}]
 
-    # -- checkpoints: schema + plan hashes, never Plan objects (design §2.3) -----
+    # -- checkpoints: schema + plan hashes, never Plan objects --------------------
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Serialise the resolved schema and per-mode plan hashes (design §2.3).
+        """Serialise the resolved schema and per-mode plan hashes.
 
         Plans hold ``MappingProxyType`` views and live module references —
         they are deliberately NOT picklable; the hash is the integrity
         check, and the schema alone suffices to bind on a data-less machine.
-
-        Design-deviation note: §2.3 says "serialised into checkpoint
-        hparams"; the payload lives under the TOP-LEVEL checkpoint key
-        `CKPT_KEY` (``'salt_core'``) instead, keeping
-        ``checkpoint['hyper_parameters']`` purely user config. Functionally
-        equivalent — round-trip covered by ``test_saltmodule.py``.
+        The payload lives under the top-level checkpoint key `CKPT_KEY`
+        (``'salt_core'``), keeping ``checkpoint['hyper_parameters']``
+        purely user config.
         """
         if self.schema is None:
             warnings.warn(
@@ -1364,21 +1185,20 @@ class SaltModule(lightning.LightningModule):
         """Verify plan hashes and (if needed) bind from the stored schema.
 
         Runs BEFORE the state-dict load on both restore paths (trainer
-        ``ckpt_path`` and ``load_from_checkpoint``). Hash policy per design
-        risk 9: FIT mismatches are fatal, other modes warn. When the modules
-        are not yet bound (the data-less ``load_from_checkpoint`` path,
-        where ``setup`` never ran) they are bound from the checkpoint's
-        schema so the subsequent strict load finds every key (design §2.3).
-        Also marks the instance as checkpoint-loaded, which disables
-        `materialise` (values arrive via the state_dict). A FIT plan-hash
-        mismatch propagates as `ConfigError` from `_verify_ckpt_hash`.
+        ``ckpt_path`` and ``load_from_checkpoint``). FIT hash mismatches are
+        fatal, other modes warn. When the modules are not yet bound (the
+        data-less ``load_from_checkpoint`` path, where ``setup`` never ran)
+        they are bound from the checkpoint's schema so the subsequent strict
+        load finds every key. Also marks the instance as checkpoint-loaded,
+        which disables `materialise`. A FIT plan-hash mismatch propagates as
+        `ConfigError` from `_verify_ckpt_hash`.
 
-        MFU-1 (upstream modelwrapper.on_load_checkpoint): training with
-        ``--compile`` wraps the model in ``torch._dynamo.OptimizedModule``, which
-        prepends ``_orig_mod.`` to every state_dict key. Strip that prefix in-place
-        before Lightning's strict ``load_state_dict`` so a compile-trained
-        checkpoint loads into a non-compiled eval module. No-op on checkpoints
-        written without ``--compile`` (no key contains the prefix).
+        Training with ``--compile`` wraps the model in
+        ``torch._dynamo.OptimizedModule``, which prepends ``_orig_mod.`` to
+        every state_dict key. Strip that prefix in-place before Lightning's
+        strict ``load_state_dict`` so a compile-trained checkpoint loads
+        into a non-compiled eval module. No-op on checkpoints written
+        without ``--compile``.
         """
         state_dict = checkpoint.get("state_dict")
         if state_dict and any("_orig_mod." in k for k in state_dict):
@@ -1413,8 +1233,7 @@ class SaltModule(lightning.LightningModule):
         Raises
         ------
         ConfigError
-            On a FIT mismatch (design risk 9); other modes warn and
-            continue.
+            On a FIT mismatch; other modes warn and continue.
         """
         stored = self._ckpt_plan_hashes.get(mode.name)
         if stored is None or stored == plan.plan_hash:
@@ -1430,15 +1249,15 @@ class SaltModule(lightning.LightningModule):
 
 
 def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: Any) -> str:
-    """Build the TEST dead-preds hard error at the design §4.2 quality bar.
+    """Build the TEST dead-preds hard error.
 
     Names, per dead key, the producing task module and its config address;
     attributes the culprit when a configured writer's explicit ``tasks``
-    list excludes the dead tasks (the §4.2 worked-example attribution,
-    M3-review fix); and offers the real per-task ``expose: [fit, val]`` opt-out
-    (design §4.2 — keeps the task training while pruning its prediction from
-    the TEST/ONNX plans) as the FIRST fix for train-only aux tasks, with the
-    heavier ``--model.modules.X=null`` deletion as the alternative.
+    list excludes the dead tasks; and offers the per-task
+    ``expose: [fit, val]`` opt-out (keeps the task training while pruning
+    its prediction from the TEST/ONNX plans) as the first fix for
+    train-only aux tasks, with the heavier ``--model.modules.X=null``
+    deletion as the alternative.
 
     Parameters
     ----------
@@ -1484,10 +1303,9 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
             f"--model.modules.{name}.init_args.expose=[fit,val]" for name in targets
         )
         null_form = " / ".join(f"--model.modules.{name}=null" for name in targets)
-        # the real opt-out: expose: [fit, val] keeps the task training while
-        # pruning its prediction from the TEST/ONNX plans (design §4.2). Listed
-        # FIRST; --model.modules.X=null (delete the task entirely) is the
-        # heavier alternative.
+        # expose: [fit, val] keeps the task training while pruning its prediction
+        # from the TEST/ONNX plans — listed first; --model.modules.X=null (delete
+        # the task entirely) is the heavier alternative.
         fix += (
             f", or opt the task out of eval with expose: [fit, val] ({expose_form}), "
             f"or remove the task module entirely ({null_form})"
@@ -1501,10 +1319,9 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
 def module_supports_mup(module: Any) -> bool:
     """Whether `module` accepts a ``mup`` init_arg (the routing apply_to target test).
 
-    The v2 muP arch port gives `StreamEmbed`/`TransformerEncoder` a ``mup``
-    init_arg stored as a ``mup`` attribute (design §3.4 architectural half).
-    A module is an eligible ``apply_to`` target iff it carries that attribute.
-    Duck-typed so user modules that add a ``mup`` flag participate too.
+    `StreamEmbed`/`TransformerEncoder` carry a ``mup`` init_arg stored as a
+    ``mup`` attribute; a module is an eligible ``apply_to`` target iff it
+    carries that attribute. Duck-typed so user modules participate too.
 
     Parameters
     ----------
@@ -1533,23 +1350,20 @@ def module_mup_enabled(module: Any) -> bool:
 def validate_mup_routing(
     mup: Mapping[str, Any] | None, modules: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    """Validate the muP routing config against the module dict (design §3.4 line 685).
+    """Validate the muP routing config against the module dict.
 
     The single validator behind both `SaltModule.__init__` and
-    ``salt2 graph validate`` (cli.py) so the same rules fire data-free in CI
-    and at run construction. ``apply_to`` is an EXPLICIT instance-name list,
-    NOT a regex (the design break from v1's ``apply_to`` x ``parameter_name``
-    zip, configuration_muP.py:98-115).
+    ``salt2 graph validate`` so the same rules fire data-free in CI and at
+    run construction. ``apply_to`` is an explicit instance-name list, not a
+    regex.
 
-    Rules (FD §3.4 line 695):
+    Rules:
 
     - ``apply_to`` naming a module that does NOT exist → `ConfigError`.
     - ``apply_to`` naming a module that lacks a ``mup`` init_arg
-      (`module_supports_mup` False) → `ConfigError` (the routing would
-      configure a module that can't be parametrised).
-    - a module with ``mup`` TRUTHY that is NOT in ``apply_to`` → WARNING
-      (the arch flag is on but routing skips it — its base shapes / MuAdamW
-      grouping would be silently inconsistent).
+      (`module_supports_mup` False) → `ConfigError`.
+    - a module with ``mup`` truthy that is NOT in ``apply_to`` → warning
+      (its base shapes / MuAdamW grouping would be silently inconsistent).
     - unknown top-level keys / a non-list ``apply_to`` / a missing
       ``apply_to`` → `ConfigError`.
 
@@ -1641,8 +1455,7 @@ def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
     """The encoder modules that declare an edge port (duck-typed on ``edges_key``).
 
     A `TransformerEncoder` with ``edges:`` configured carries a non-None
-    ``edges_key`` attribute (modules.py); duck-typed so user encoder modules
-    that add an edge port participate too.
+    ``edges_key`` attribute; duck-typed so user encoder modules participate too.
 
     Returns
     -------
@@ -1659,14 +1472,13 @@ def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
 def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
     """The `Concat`'s first stream (the edge-stream-first reference).
 
-    Identifies the `Concat` PRECISELY by its produced ``seq.x`` key (the concat
-    signature, modules.py Concat.declare_io) rather than by an attribute name —
-    `Normaliser`/`Split` also carry a ``streams`` attr, so an attribute test would
-    be ambiguous. Returns the concat's ``(instance name, streams[0])`` — the edge
-    tensor's stream must equal this so the ``[B, T, T, D_e]`` edge matrix aligns
-    with the LEADING ``T`` rows/cols of the concatenated ``[B, S, D]`` sequence
-    the encoder receives (the v1 sort-first hack put the edge stream first for
-    exactly this reason, saltmodel.py:66-73).
+    Identifies the `Concat` precisely by its produced ``seq.x`` key rather
+    than by an attribute name — `Normaliser`/`Split` also carry a
+    ``streams`` attr, so an attribute test would be ambiguous. Returns the
+    concat's ``(instance name, streams[0])`` — the edge tensor's stream must
+    equal this so the ``[B, T, T, D_e]`` edge matrix aligns with the
+    leading ``T`` rows/cols of the concatenated ``[B, S, D]`` sequence the
+    encoder receives.
 
     Returns
     -------
@@ -1680,9 +1492,8 @@ def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
         declare = getattr(module, "declare_io", None)
         if not callable(declare):
             continue
-        # the Concat is the module producing seq.x (its declare_io produces
-        # seq.x/seq.mask/seq.layout); declare_io is config-only/static (design
-        # §2.2), so calling it here is cheap and side-effect-free.
+        # the Concat is the module producing seq.x; declare_io is config-only/static,
+        # so calling it here is cheap and side-effect-free.
         produces = flatten_spec(declare(Mode.FIT).produces)
         if "seq.x" in produces:
             return name, streams[0]
@@ -1690,30 +1501,25 @@ def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
 
 
 def validate_edge_port(modules: Mapping[str, Any]) -> int:
-    """Validate the encoder edge-port bind-time constraints (FD §6.7 1425-1431).
+    """Validate the encoder edge-port bind-time constraints.
 
-    The two HIDDEN v1 edge mechanisms made into NAMED constraints (ED2; the
-    "land in M1 validation" rules). Runs at `SaltModule.__init__` (every
-    fit/test) and in ``salt2 graph validate`` so the same rules fire data-free
-    in CI and at run construction — the edge analogue of `validate_mup_routing`.
-    No-op when no encoder declares an edge port.
+    Runs at `SaltModule.__init__` (every fit/test) and in
+    ``salt2 graph validate`` so the same rules fire data-free in CI and at
+    run construction — the edge analogue of `validate_mup_routing`. No-op
+    when no encoder declares an edge port.
 
     Rules:
 
-    - **edge-stream-first** (rule a): the edge tensor's stream MUST be the FIRST
-      stream of the `Concat` (``Concat.streams[0]``). v1 SILENTLY re-sorted the
-      init_nets so the edge stream landed first (saltmodel.py:66-73) — required
-      because the encoder zero-pads the ``[B, T, T, D_e]`` edge matrix to the
-      register-augmented sequence length assuming the edge stream's ``T`` rows are
-      the LEADING rows of the concatenated sequence (transformer.py:689-719). v2
-      makes the ordering an EXPLICIT config constraint instead of a runtime sort:
-      a mis-ordered concat is a named `ConfigError`.
-    - **EdgeAttention-backend forcing** (rule b): an encoder with an edge port may
-      NOT declare a non-edge attention backend (``flash-varlen`` / any backend
-      outside ``{"torch-math"}``). v1 SILENTLY ignored ``attn_type`` whenever
-      ``edge_embed_dim>0`` — it skipped the backend assignment
-      (transformer.py:599-601,616-620), so a user who set ``flash-varlen`` got
-      raw attention with no warning. v2 makes the silent bypass a named error.
+    - **edge-stream-first** (rule a): the edge tensor's stream must be the
+      first stream of the `Concat` (``Concat.streams[0]``) — required
+      because the encoder zero-pads the ``[B, T, T, D_e]`` edge matrix to
+      the register-augmented sequence length assuming the edge stream's
+      ``T`` rows are the leading rows of the concatenated sequence. A
+      mis-ordered concat is a `ConfigError`.
+    - **EdgeAttention-backend forcing** (rule b): an encoder with an edge
+      port may not declare a non-edge attention backend (any backend
+      outside ``{"torch-math"}``), since EdgeAttention only supports raw
+      torch attention.
 
     Parameters
     ----------
@@ -1759,10 +1565,8 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 "FD §6.7 1425-1431 rule a)"
             )
         # -- rule (b): no non-edge attention backend alongside an edge port -----
-        # the v2 encoder stores attn_type on its composed v1 Transformer; an
-        # EdgeAttention encoder always runs raw torch attention (the v1 silent
-        # bypass, transformer.py:599-601), so any other declared backend is a
-        # NAMED error instead of a no-op.
+        # EdgeAttention encoders always run raw torch attention, so any other
+        # declared backend is an error rather than a silent no-op.
         attn_type = getattr(getattr(module, "encoder", None), "attn_type", "torch-math")
         if attn_type not in _EDGE_OK_BACKENDS:
             raise ConfigError(
@@ -1789,20 +1593,17 @@ def _validate_edge_port(modules: Mapping[str, Any]) -> int:
 
 
 def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
-    """Cross-check configured ``class_names`` against schema label attrs (design §2.6, §4.1).
+    """Cross-check configured ``class_names`` against schema label attrs.
 
     Default-on whenever both sides exist: for every module declaring
-    ``class_names`` + ``stream`` + ``label`` (the `ClassificationTaskModule`
-    surface, duck-typed so user task modules participate too), the reader's
-    schema artifact is consulted — if the stream's group carries an attr
-    named like the label whose value is a list of strings (the
-    umami-preprocessing convention, e.g. the ``flavour_label`` attr on
-    ``jets``), the configured list must match in SET **and ORDER**. A
-    reordered ``class_names`` is a silent physics mislabeling no shape check
-    can catch — v1 made it impossible by construction (cli.py:418-443), v2
-    by this validation. Runs at `SaltModule.setup` (every fit/test) and in
-    ``salt2 graph validate`` over §5.1 configs. No-op without a schema
-    artifact (the §2.6 opt-out warning already covers that case).
+    ``class_names`` + ``stream`` + ``label`` (duck-typed so user task
+    modules participate too), the reader's schema artifact is consulted —
+    if the stream's group carries an attr named like the label whose value
+    is a list of strings (e.g. the ``flavour_label`` attr on ``jets``), the
+    configured list must match in set **and order**. A reordered
+    ``class_names`` is a silent physics mislabeling no shape check can
+    catch. Runs at `SaltModule.setup` (every fit/test) and in
+    ``salt2 graph validate``. No-op without a schema artifact.
 
     Parameters
     ----------
@@ -1864,18 +1665,16 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
 
 
 def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) -> int:
-    """Resolve name-based ``origin_weighting`` to ids before bind (design §5.1, §2.6).
+    """Resolve name-based ``origin_weighting`` to ids before bind.
 
-    For every module exposing a callable ``resolve_origin_names`` (the
-    `VertexingTaskModule` surface, duck-typed so user vertexing modules
-    participate too), the names are mapped to integer origin ids against the
-    schema artifact — the same ``schema_group(stream).attrs`` source the §2.6
-    class-names check consults. Runs at `SaltModule.setup` (fit/test) right after
-    `check_class_names`, BEFORE the two-phase bind, so the resolved ids are in
-    place when `VertexingTaskModule.bind` builds the composed head. Integer-id
-    weighting and readers without a schema are no-ops here; a name-based config
-    that resolves nothing then fails loudly at bind (the names can't be turned
-    into ids without the class-name attr).
+    For every module exposing a callable ``resolve_origin_names`` (duck-typed
+    so user vertexing modules participate too), the names are mapped to
+    integer origin ids against the schema artifact. Runs at `SaltModule.setup`
+    (fit/test) right after `check_class_names`, before the two-phase bind, so
+    the resolved ids are in place when `VertexingTaskModule.bind` builds the
+    composed head. Integer-id weighting and readers without a schema are
+    no-ops here; a name-based config that resolves nothing then fails loudly
+    at bind.
 
     A `ConfigError` from a module's `resolve_origin_names` (an unknown class
     name, or a missing origin class-name attr for a name-based config)
@@ -1904,11 +1703,10 @@ def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) ->
 def bundle_as_v1_outputs(bundle: Bundle) -> dict[str, Any]:
     """Migration shim: expose a bundle as the v1 ``{preds, labels, pad_masks}`` view.
 
-    Grafted from ordered-pipeline (design §3.4) so unported v1 callbacks
-    keep working during migration; deprecated, removed at M7. ``preds`` and
-    ``labels`` keep their nested ``{stream: {name: tensor}}`` shape;
-    ``pad_masks`` maps each masked stream (``masks.*`` minus the encoder's
-    ``registers`` entry) to its True-is-padded mask.
+    Deprecated. ``preds`` and ``labels`` keep their nested
+    ``{stream: {name: tensor}}`` shape; ``pad_masks`` maps each masked
+    stream (``masks.*`` minus the encoder's ``registers`` entry) to its
+    True-is-padded mask.
 
     Returns
     -------

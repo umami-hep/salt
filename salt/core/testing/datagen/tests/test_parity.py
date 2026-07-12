@@ -44,9 +44,8 @@ def _patch_dummy_writers(monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Core parity: the configs that read class_dict directly (CrossEntropyLoss
-# weight-size constraint). These are the tests the design doc calls out:
-# test_GN2 / test_GN2_muP / test_param_concat / test_param_featurewise /
-# test_truncate_inputs (track_subset).
+# weight-size constraint): test_GN2 / test_GN2_muP / test_param_concat /
+# test_param_featurewise / test_truncate_inputs (track_subset).
 # --------------------------------------------------------------------------- #
 @pytest.mark.filterwarnings(tp.w)
 def test_parity_GN2(tmp_path):

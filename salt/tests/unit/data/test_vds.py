@@ -1,18 +1,4 @@
-"""Tests for the `VDS` setup module + its datamodule auto-injection (W3.B).
-
-Covers the plan-25 W3.B gates:
-
-- **H5 wildcard → VDS build** (`vds_capable=True`): `VDS.setup` calls
-  `create_vds` and writes ``source.<reader>.<stage>.vds_path``;
-- **non-wildcard identity**: ``vds_path == pattern`` verbatim, no `create_vds`;
-- **ROOT identity edge** (R-VDSROOT, HARD): a `vds_capable=False` reader with a
-  GLOB value passes through verbatim and `create_vds` is NEVER called (spied);
-- `VDS.declare_setup_io` requires ``pattern`` / produces ``vds_path``;
-- `compile_setup_plan` topo-orders `VDS` AFTER `InputSamples`;
-- `_check_incompatibilities` raises on {VDS + stub `ShmStage`}, passes on {VDS};
-- datamodule auto-injection wires `_reader`/`_vds_capable` and a single
-  non-wildcard fit serves a byte-identical first batch (vs the W3.A trunk path).
-"""
+"""Tests for the `VDS` setup module + its datamodule auto-injection (W3.B)."""
 
 from __future__ import annotations
 
@@ -86,10 +72,8 @@ def _wired_vds(*, reader="reader", vds_capable=True, out=None) -> VDS:
     return vds
 
 
-# ---------------------------------------------------------------------------
 # a stub ShmStage-named setup module for the incompatibility check (W3.S
 # doesn't exist yet — the rule matches on class NAME, not type).
-# ---------------------------------------------------------------------------
 
 
 class ShmStage(DatasetModule):
@@ -109,9 +93,7 @@ class ShmStage(DatasetModule):
         return ctx
 
 
-# ---------------------------------------------------------------------------
 # VDS unit behaviour: declare + setup (build / identity / ROOT identity)
-# ---------------------------------------------------------------------------
 
 
 class TestVdsUnit:
@@ -237,9 +219,7 @@ class TestVdsUnit:
         assert ctx.get("source.reader.train.vds_path") == glob_value
 
 
-# ---------------------------------------------------------------------------
 # topo order: VDS requires `pattern` → orders AFTER InputSamples
-# ---------------------------------------------------------------------------
 
 
 class TestSetupPlanOrdering:
@@ -267,9 +247,7 @@ class TestSetupPlanOrdering:
         assert ctx.get("source.reader.train.vds_path") == "/data/train.h5"
 
 
-# ---------------------------------------------------------------------------
 # incompatibility enforcement (plan-25 Rev-2)
-# ---------------------------------------------------------------------------
 
 
 class TestIncompatibility:
@@ -317,9 +295,7 @@ class TestIncompatibility:
             _check_incompatibilities({"a": a, "b": b})
 
 
-# ---------------------------------------------------------------------------
 # datamodule auto-injection + byte-identity served bytes
-# ---------------------------------------------------------------------------
 
 
 def build_modules(data) -> dict:

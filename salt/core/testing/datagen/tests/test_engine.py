@@ -468,18 +468,11 @@ def test_load_schema_yaml(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# required_match=True / select_over coverage (previously untested code paths)
+# required_match=True / select_over coverage
 # --------------------------------------------------------------------------- #
 def _required_match_schema(n_samples=2000, seed=11):
-    """A schema where the referenced constituent group would OTHERWISE have 0
-    valid items in many samples (valid_fraction=0.05, min_valid:0), and a source
-    group whose link is required_match:true.
-
-    On the OLD code (promote slot 0 to valid) this produces "valid" referents
-    with id == fill (-1) and valid links resolving to -1. On the FIXED code the
-    schema raises the referent group's effective min_valid to >=1 in phase 1, so
-    every sample has a genuine valid referent and every valid link resolves to a
-    real id.
+    """A schema where the referenced group would otherwise have 0 valid items in
+    many samples (valid_fraction=0.05, min_valid=0), with a required_match link.
     """
     return {
         "n_samples": n_samples,
@@ -534,12 +527,9 @@ def _required_match_schema(n_samples=2000, seed=11):
 
 
 def test_required_match_propagates_min_valid_and_never_links_fill():
-    """required_match=True must guarantee a genuine referent (real id, real
-    payload) in every sample, and every valid source link must resolve to a real
-    valid referent id -- never the int fill sentinel.
-
-    This FAILS on the old promote-slot-0 code (valid referents with barcode==-1
-    and valid links resolving to -1) and PASSES on the fix.
+    """required_match=True guarantees a genuine referent in every sample, and
+    every valid source link resolves to a real referent id, never the fill
+    sentinel.
     """
     schema = _required_match_schema()
     fill_int = -1
@@ -585,7 +575,7 @@ def test_required_match_propagates_min_valid_and_never_links_fill():
 def test_select_over_all_slots_vs_valid_ids():
     """select_over:all_slots may draw from ANY referenced slot (including invalid
     pool members carrying the -1 fill), while the default valid_ids never points
-    a valid link at an invalid slot. Pins the design-doc §3.5 semantics."""
+    a valid link at an invalid slot."""
     fill_int = -1
 
     def _schema(select_over):

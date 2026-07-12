@@ -1,46 +1,6 @@
-# MaskFormer.yaml — the MaskFormer vertexing tagger in the v2 schema (M5-CONV,
-# the flagship MaskFormer M5 config). The v2-native MIGRATED fixture for the
-# legacy top-level salt/configs/MaskFormer.yaml.
-#
-# Queries -> truth hadrons: a single `tracks` constituent stream is embedded,
-# run through a `TransformerEncoder` with `drop_registers: true` (registers
-# visible to attention, stripped from `encoded.seq`; v1 MaskFormer.yaml:31), and
-# decoded by a `MaskDecoder` (5 learnable object queries -> b/c/null class +
-# per-track mask). The matched bundle:
-#   - MaskDecoder           -> objects.{embed,class_logits,class_probs,masks}
-#   - regression            -> preds.objects.regression (5-target, scaled by
-#                              RegressionTargetScaler) + (FIT|VAL) the scaled
-#                              targets.objects.regression for matching (FD §5.2)
-#   - MaskFormerMatchedLoss -> matched.objects.* + losses.{object_class_ce,
-#                              mask_dice, mask_ce, regression} (FIT|VAL only;
-#                              the SINGLE owner of the object-class CE + mask +
-#                              matched-regression losses, FD 1139,1158-1171)
-#   - MaskFormerTargets     -> labels.objects.{object_class,masks} + raw
-#                              regression labels (demand-gated, all modes; the
-#                              object writer keeps it alive in TEST)
-#   - MaskFormerObjectWriter-> TEST class probs + MaskIndex + object_masks group;
-#                              ONNX preds.objects.regression -> leading_object (5
-#                              suffixes) + objects.masks -> object_index (int8
-#                              HadronIndex). MaskformerMetrics consumes matched.*
-#
-# `aux_loss: false` (v1 MaskFormer.yaml:39) — the §10 deep-supervision parking
-# does NOT block this config.
-#
-# NOTE — the v1 architecture pools encoded.seq + objects.embed jointly
-# (NodeQueryGAP, FD 1172-1174) for the jets_classification head; that joint pool
-# is an M6 module (NodeQueryGAP is not in salt.core today), so this config pools
-# encoded.seq alone for the jet head. The MaskFormer M5 deliverable is the
-# decoder + matched loss + targets + object writer + metrics bundle, all of which
-# this config exercises.
-#
-# NO machine paths committed (design §5 placeholder policy). Static validation
-# (no data) FROM THE REPO ROOT (use `python -m salt.core.main`):
-#   python -m salt.core.main graph validate --mode fit  -c salt/core/configs/MaskFormer.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
-#   python -m salt.core.main graph validate --mode test -c salt/core/configs/MaskFormer.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
-#   python -m salt.core.main graph validate --mode onnx -c salt/core/configs/MaskFormer.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# MaskFormer vertexing tagger: a single `tracks` stream is embedded, encoded,
+# and decoded by a `MaskDecoder` (5 learnable object queries -> b/c/null class
+# + per-track mask), matched against truth hadrons via MaskFormerMatchedLoss.
 
 name: MaskFormer
 
@@ -54,8 +14,8 @@ data:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false}
-          # the truth-hadron object group (v1 mf_config.object.name) the
-          # MaskFormerTargets processor reads to build object_class + masks
+          # truth-hadron object group read by MaskFormerTargets to build
+          # object_class + masks
           truth_hadrons: {global_object: false}
     features:
       class_path: salt.core.data.Features
@@ -87,59 +47,46 @@ data:
     labels:
       class_path: salt.core.data.Labels
       init_args: {dtype_policy: int64-for-int}
-    # the MaskFormer object targets (v1 mf_config, MaskFormer.yaml:164-181):
-    # truth_hadrons -> labels.objects.{object_class,masks} + raw regression
-    # labels; demand-gated (the object writer keeps it alive in TEST, FD 1090)
     mf_targets:
       class_path: salt.core.data.MaskFormerTargets
       init_args:
-        object_stream: truth_hadrons # v1 object.name
-        object_class: flavour # v1 object.class_label
-        object_id: barcode # v1 object.id_label
-        constituent_stream: tracks # v1 constituent.name
-        constituent_id: ftagTruthParentBarcode # v1 constituent.id_label
+        object_stream: truth_hadrons
+        object_class: flavour
+        object_id: barcode
+        constituent_stream: tracks
+        constituent_id: ftagTruthParentBarcode
         num_objects: 5 # == the decoder query bank (declared label M dim)
-        # FINDING-1 selection opt-in (MFU-6). Upstream's CLI auto-links
-        # max_objects <- model.mask_decoder.num_objects (MFU-7, SKIPPED in v2), so
-        # the shipped config opts in EXPLICITLY: max_objects flips _should_select on
-        # so _select_objects engages (PV-pin + truncate-to-5), reproducing upstream's
-        # default. max_objects == num_objects == 5 (no MFU-5 num_objects/max_objects
-        # guard error); pv_class: 0 is the b-class mapped index = the PV pin. The
-        # truth_hadrons reader group is left UNTRUNCATED (above) so _select_objects
-        # owns the truncation — no double-truncate (MFU-3 reader-truncate fires only
-        # when selection is INACTIVE).
+        # opts in to object selection (PV-pin + truncate-to-5); the
+        # truth_hadrons reader group is left untruncated above so this
+        # selection owns the truncation, avoiding a double-truncate.
         max_objects: 5
         pv_class: 0 # b-class mapped index (the PV pin)
-        # v1 object.object_classes -> {name: {raw, mapped}}, null LAST. The
-        # null class key is quoted "null" (an unquoted YAML null: would parse to
-        # a Python None key — MaskFormerTargets accepts both, but the string is
-        # explicit; v1 MaskFormer.yaml:176)
+        # null class key is quoted "null" — an unquoted `null:` would parse
+        # to a Python None key; MaskFormerTargets accepts both but this is
+        # explicit. null must be LAST.
         class_map:
           b: {raw: 5, mapped: 0}
           c: {raw: 4, mapped: 1}
           "null": {raw: -1, mapped: 2}
-        # the per-object regression labels the object_regression head stacks +
-        # scales (v1 RegressionTask reads labels["objects"][target])
         regression_targets: [pt, Lxy, deta, dphi, mass]
 
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
     lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: &embed_dim 256
           dense: {hidden_layers: [256], activation: ReLU}
       concat:
@@ -150,97 +97,63 @@ model:
         init_args:
           dim: *embed_dim
           out_dim: *embed_dim
-          num_layers: 4 # v1 MaskFormer.yaml:25
-          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          num_layers: 4
+          attention: {num_heads: 8, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
-          # registers visible to encoder attention, stripped from encoded.seq
-          # (v1 MaskFormer.yaml:31 drop_registers: true; FD 1121-1125)
-          num_registers: 1 # v1 MaskFormer sets none -> TransformerEncoder default 1 (transformer.py:559)
-          drop_registers: true
+          num_registers: 1
+          drop_registers: true # registers visible to attention, stripped from encoded.seq
       mask_decoder:
         class_path: salt.core.nn.MaskDecoder
         init_args:
           input: encoded.seq # register-free encoder output
           embed_dim: *embed_dim
-          num_objects: 5 # v1 MaskFormer.yaml:36
-          num_layers: 3 # v1 MaskFormer.yaml:38
-          # v1 md_config (MaskFormer.yaml:40-43)
+          num_objects: 5
+          num_layers: 3
           md: {n_heads: 8, mask_attention: true, bidirectional_ca: true}
-          class_net: {output_size: 3} # b, c, null — null LAST (v1 :49)
-          mask_net: {} # Dense(embed_dim, embed_dim) (v1 :51-55)
-      # the object-regression head — INSTANCE NAME `regression` so its port is
-      # `preds.objects.regression` (v1 RegressionTask name: regression,
-      # MaskFormer.yaml:88), the exact key the matched loss + object writer read.
+          class_net: {output_size: 3} # b, c, null — null LAST
+          mask_net: {}
+      # instance name `regression` so its port is `preds.objects.regression` —
+      # the key the matched loss + object writer read.
       regression:
         class_path: salt.core.nn.tasks.RegressionTaskModule
         init_args:
           stream: objects
-          input: objects.embed # the decoder query embeddings (per-object)
+          input: objects.embed # decoder query embeddings (per-object)
           sequence: true # per-object (M queries) regression
-          targets: [pt, Lxy, deta, dphi, mass] # v1 MaskFormer.yaml:89
-          # the RegressionTargetScaler per-target functional scaling (v1
-          # MaskFormer.yaml:92-112; design §5.2 scaler)
+          targets: [pt, Lxy, deta, dphi, mass]
           scaler:
             pt: {op: log, op_scale: 0.2}
             Lxy: {op: log, x_off: 1}
             deta: {op: linear, x_off: 1, op_scale: 10}
             dphi: {op: linear, x_off: 1, op_scale: 10}
             mass: {op: log, op_scale: 0.1}
-          weight: 0.5 # v1 MaskFormer.yaml:90
-          # v1 L1Loss reduction:none (MaskFormer.yaml:113-116); the matched loss
-          # owns the object-regression loss component, but the head still
-          # publishes preds.objects.regression + the scaled targets for matching
+          weight: 0.5
           loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
-          # publish targets.objects.regression (the SCALED targets) in FIT|VAL so
-          # the matched loss matcher uses them as a cost term (v1 stores
-          # task.get_targets(labels) in labels["objects"][name],
-          # maskformer_loss.py:329-332)
+          # scaled targets published in FIT|VAL as a matcher cost term
           publish_targets: true
-          # expose preds.objects.regression in FIT|VAL (matched loss) + ONNX (the
-          # object writer's leading_object reduce) but NOT TEST. NB: v1 DOES write
-          # per-object regression columns into the eval H5 when write_objects=True —
-          # predictionwriter.py:241 skips objects-stream tasks ONLY when
-          # `not self.write_objects`, and the shipped MaskFormer config sets
-          # write_objects=True (the upstream_6570e85 fixture's truth_hadrons group
-          # carries MaskFormer_pt/_Lxy/_deta/_dphi/_mass). v2 DELIBERATELY scopes the
-          # MFU object writer to class_probs/MaskIndex/object_masks only and defers
-          # the per-object regression eval columns (no v2 writer emits per-object
-          # regression in TEST yet); exposing this pred in TEST would therefore be an
-          # unconsumed dead-pred. Writer-parity is asserted on the writer-owned
-          # objects/object_masks/MaskIndex groups, not the deferred regression cols.
+          # exposed for the matched loss (FIT|VAL) and the ONNX leading_object
+          # reduce, but NOT TEST — no v2 writer emits per-object regression in
+          # TEST yet, so exposing it there would be an unconsumed dead-pred.
           expose: [fit, val, onnx]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       mf_matched_loss:
         class_path: salt.core.nn.MaskFormerMatchedLoss # FIT|VAL only
         init_args:
-          num_classes: 2 # non-null classes (b, c); v1 loss_config.num_classes
+          num_classes: 2 # non-null classes (b, c)
           num_objects: 5 # == the decoder query bank M
           null_class_weight: 0.5
-          # v1 loss_config.loss_weights (MaskFormer.yaml:58-63): the shipped v1
-          # config uses mask_ce (binary cross-entropy, mask_ce_loss,
-          # maskformer_loss.py:42,225-226), NOT mask_focal (sigmoid_focal_loss,
-          # :67,223-224) — they are different loss functions; mask_ce is faithful
+          # mask_ce (binary cross-entropy) is deliberately used, not mask_focal
           loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
-      # W6b ONNX FOLD — the MaskFormer object RECONSTRUCTION node (producers.py
-      # MaskFormerObjects): runs get_maskformer_outputs ONCE in the ONNX trace and
-      # mints the two object export leaves the OnnxExportSink names —
-      #   outputs.objects.leading_object  (global float32, the leading-object R
-      #     regression scalars; folds the legacy leading_object reduce), and
-      #   outputs.tracks.object_index     (int8 per-token, the per-constituent
-      #     owning-object index; folds the legacy object_index reduce -> HadronIndex).
-      # ONNX-only by construction: demand-gated, so TEST/FIT/VAL prune it (the eval-H5
-      # objects/object_masks/MaskIndex columns come from the outputs: section's
-      # maskformer_objects sink node, NOT this node). n_reg == the 5 object-regression
-      # targets (preds.objects.regression width).
+      # mints the ONNX-only object export leaves: outputs.objects.leading_object
+      # (leading-object regression scalars) and outputs.tracks.object_index
+      # (per-constituent owning-object index). Demand-gated so FIT/VAL/TEST prune it.
       maskformer_objects_onnx:
         class_path: salt.core.outputs.MaskFormerObjects
         init_args:
-          n_reg: 5 # == len(regression.targets) — the leading-object regression width
-          regression_task: regression # the leading_object ONNX source (preds.objects.regression)
+          n_reg: 5 # == len(regression.targets)
+          regression_task: regression
           stream: objects
           constituent_stream: tracks
-      # split the (register-free) encoded.seq back into per-stream tensors so the
-      # track_origin head reads encoded.tracks (design §3.3 production split path)
       split:
         class_path: salt.core.nn.Split
         init_args: {streams: [tracks]}
@@ -253,7 +166,7 @@ model:
           stream: jets
           input: pooled.global
           label: flavour_label
-          class_names: [bjets, cjets, ujets] # v1 output_size 3
+          class_names: [bjets, cjets, ujets]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
@@ -262,35 +175,15 @@ model:
           context: pooled.global
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight: 0.5 # v1 MaskFormer.yaml:127
+          weight: 0.5
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# W6b — MaskFormer is now FULLY off the legacy `writers:` (WriterCallback) path:
-# the eval H5 + ONNX export are produced by the v2-native outputs: section + the
-# dumb H5OutputSink / OnnxExportSink callbacks (the gn2v2-opendata pattern). The
-# object groups fold onto the H5OutputSink `extra_groups` seam (W6a): the
-# maskformer_objects section node (MaskFormerObjectsSink) emits the v2-native
-# `objects` group (class probs + class_label) + the `object_masks` group
-# (truth_mask + mask_logits) + the MaskIndex column on tracks — BYTE-IDENTICAL to
-# the MFU-6 MaskFormerObjectWriter. The object preds stay in the v2-native
-# `objects` group (named by object_stream), NOT merged into the truth_hadrons
-# stream group (the full upstream truth_hadrons eval-H5 merge is DEFERRED; USER
-# DECISION 2026-06-30). The per-object regression EVAL columns stay DEFERRED too
-# (see the regression head's :197-211 note). Parity is gated in
-# test_maskformer_fold_w6b.py on the writer-owned objects/object_masks/MaskIndex
-# columns + the recorded objects-vs-truth_hadrons / deferred-regression allowlist.
-#
-# Section writers in v1 H5 column order — InputCopyWriter -> RunTaskOutput task
-# fields (the 1:1 jet + track heads) -> PadMaskWriter -> maskformer_objects (the
-# extra-group object columns, appended last). The `regression` (object-regression)
-# head is NOT in the RunTaskOutput list: its preds.objects.regression is owned by
-# the matched loss (FIT|VAL) + the maskformer_objects_onnx node (ONNX) alone.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), copy_inputs={} parity
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -298,57 +191,41 @@ outputs:
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-  # the W6b sink-hosted MaskFormer object writer — relocates MaskFormerObjectWriter
-  # onto the H5OutputSink extra_groups seam (manifest-only; the sink folds its demand
-  # + calls its write). Emits objects [B, M] (MaskFormer_pb/_pc/_pnull + class_label)
-  # + object_masks [B, M, T] (truth_mask + mask_logits) + tracks MaskFormer_MaskIndex.
+  # object writer: emits objects [B, M] (class probs + class_label) +
+  # object_masks [B, M, T] (truth_mask + mask_logits) + tracks MaskIndex.
   maskformer_objects:
     class_path: salt.core.outputs.MaskFormerObjectsSink
     init_args:
-      object_classes: [b, c, "null"] # null LAST (v1 object.class_names; quoted string)
+      object_classes: [b, c, "null"] # null LAST
       object_stream: objects
       constituent_stream: tracks
       regression_task: regression
 
-# The DUMB sinks: H5OutputSink dumps ALL active outputs.* leaves (names/dtypes/order
-# from the bound outputs: section manifest) AND hosts the maskformer_objects
-# extra-group node (extra_groups: [maskformer_objects]). The OnnxExportSink names the
-# two MaskFormer object export leaves the maskformer_objects_onnx node mints —
-# leading_object (5 leading-object regression scalars, split_scalars) + object_index
-# (HadronIndex int8 per-token) — plus the section's get_output ONNX leaves
-# (MFv2_pb/_pc/_pu jet flavour + _TrackOrigin) in canonical Athena tuple order.
 callbacks:
-  # MaskformerMetrics consumes matched.objects.* -> a FIT/VAL graph sink (FD
-  # 1200-1202; keeps the matched loss alive under pruning)
+  # consumes matched.objects.* -> keeps the matched loss alive under pruning
   maskformer_metrics:
     class_path: salt.core.callbacks.MaskformerMetrics
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
     init_args:
-      extra_groups: [maskformer_objects] # the W6a non-stream object-group fold
+      extra_groups: [maskformer_objects]
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:
-      # the two MaskFormer object reduces (maskformer_objects_onnx leaves), in v1
-      # emission order — leading-object scalars then the per-constituent index.
       outputs:
-        - key: outputs.objects.leading_object # global float32 leading-object regression
+        - key: outputs.objects.leading_object
           names: [leading_objects_pt, leading_objects_Lxy, leading_objects_deta,
                   leading_objects_dphi, leading_objects_mass]
-        - key: outputs.tracks.object_index # int8 per-token owning-object index
-          name: HadronIndex # OBJECT_INDEX.onnx (the PINNED test/onnx suffix divergence)
+        - key: outputs.tracks.object_index
+          name: HadronIndex # test/onnx suffix diverges deliberately
           dtype: int8
           per_token: true
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: MFv2 # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-  # outputs: NONE — the OnnxExportSink names the conversion leaves (above): the
-  # section's get_output leaves (MFv2_pb/_pc/_pu jet flavour + _TrackOrigin) and the
-  # maskformer_objects_onnx leading_object (5 leading-object regression scalars) +
-  # object_index (HadronIndex int8). Inspect with `salt2 graph resolve -c <this file>`.
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 40

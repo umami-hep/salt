@@ -1,14 +1,4 @@
-"""Unit gates for the plan-29 W3 hard-reduce conversion nodes (declare_io / widths / forward).
-
-Pure-CPU contract tests for ``VertexUnionFind`` + ``MaskFormerObject`` (the W3
-folds of ``reduces._bind_vertex_union_find`` and
-``_bind_leading_object``/``_bind_object_index``): the cross-node requires the
-demand-closure needs (R4), the derived-width collapse for the per-token index
-(R6), the clone discipline (R4, no in-place mutation of the bundle), and the
-forward producing the bitwise-equal tensors of the legacy reduces. These are
-node-level checks (no ONNX trace), complementing the end-to-end fold gates in
-``tests/integration/test_onnx_fold_w3.py``.
-"""
+"""Unit gates for the plan-29 W3 hard-reduce conversion nodes (declare_io / widths / forward)."""
 
 from __future__ import annotations
 
@@ -36,19 +26,11 @@ from salt.core.outputs import (
 pytestmark = pytest.mark.cpu_always
 
 
-# ---------------------------------------------------------------------------
 # VertexUnionFind (folds reduces._bind_vertex_union_find)
-# ---------------------------------------------------------------------------
 
 
 def test_vertex_union_find_declares_raw_preds_and_mask_requires():
-    """The node declares the SAME raw preds.* port the reduce reads + the pad mask (R8/R1).
-
-    Rerouting demand through ``outputs.*`` would change which task node the
-    demand-closure keeps alive (a trace-bitwise break); the fold MUST demand the
-    raw ``preds.<stream>.<task>`` edge-score port the legacy reduce reads, plus the
-    stream's ``masks.<stream>`` (the union-find pad mask).
-    """
+    """The node declares the SAME raw preds.* port the reduce reads + the pad mask (R8/R1)."""
     node = VertexUnionFind(task="track_vertexing", stream="tracks")
     node.name = "vertex_uf"
     io = node.declare_io(Mode.ONNX)
@@ -74,13 +56,7 @@ def test_vertex_union_find_derived_width_collapses_to_one():
 
 
 def test_vertex_union_find_forward_matches_inlined_chain():
-    """The forward runs the @torch.jit.script chain VERBATIM (folds the reduce, R1).
-
-    The node's ``forward`` must produce exactly ``get_node_assignment_jit`` ->
-    ``mask_fill_flattened`` -> ``.reshape(-1).char()`` — the IDENTICAL chain
-    ``reduces._bind_vertex_union_find`` runs. Driving both on the same edge scores +
-    pad mask must give the bitwise-identical int8 leaf.
-    """
+    """The forward runs the @torch.jit.script chain VERBATIM (folds the reduce, R1)."""
     node = VertexUnionFind(task="track_vertexing", stream="tracks")
     node.name = "vertex_uf"
     gen = torch.Generator().manual_seed(3)
@@ -116,19 +92,11 @@ def test_vertex_union_find_forward_does_not_mutate_bundle_leaves():
     torch.testing.assert_close(b.get("masks.tracks"), before_mask, rtol=0, atol=0)
 
 
-# ---------------------------------------------------------------------------
 # MaskFormerObject (folds _bind_leading_object + _bind_object_index — ONE node)
-# ---------------------------------------------------------------------------
 
 
 def test_maskformer_object_declares_all_cross_node_requires():
-    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive (R4).
-
-    The folded node must DECLARE ``objects.class_probs`` / ``objects.masks`` /
-    ``preds.<stream>.<reg_task>`` as requires — else ``_ReadTrackedBundle`` raises
-    ``UndeclaredAccessError`` and the demand-closure may drop the MaskDecoder /
-    object-regression task from the ONNX plan.
-    """
+    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive (R4)."""
     node = MaskFormerObject(n_reg=3, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     io = node.declare_io(Mode.ONNX)
@@ -179,13 +147,7 @@ def test_maskformer_object_rejects_bad_n_reg():
 
 
 def test_maskformer_object_forward_matches_inlined_reduces():
-    """ONE forward reproduces BOTH legacy reduces' tensors (folds the two calls, design §6.2).
-
-    The single ``get_maskformer_outputs`` call must yield the leading-regression
-    ``[:, :n_reg]`` slice (the ``leading_object`` reduce) AND the
-    ``indices.reshape(-1).char()`` per-constituent index (the ``object_index``
-    reduce) — bitwise-equal to driving ``get_maskformer_outputs`` directly.
-    """
+    """ONE forward reproduces BOTH legacy reduces' tensors (folds the two calls, design §6.2)."""
     n_reg, n_obj, n_tracks, n_classes = 3, 5, 7, 3
     gen = torch.Generator().manual_seed(13)
     class_probs = torch.randn(1, n_obj, n_classes, generator=gen).softmax(-1)
@@ -243,13 +205,7 @@ def test_maskformer_object_forward_does_not_mutate_bundle_leaves():
 
 
 def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
-    """The reconstruction node EXPOSES the reordered per-vertex class_probs + regression.
-
-    The two-node split (2026-06-22) requires Node 1a ("the writer") to expose the
-    null-suppressed + pT-reordered per-vertex ``class_probs [B, M, C]`` /
-    ``regression [B, M, R]`` (``get_maskformer_outputs``'s 3rd / 4th returns) as
-    ``outputs.*`` leaves for the decorator to read — bitwise-equal to a direct call.
-    """
+    """The reconstruction node EXPOSES the reordered per-vertex class_probs + regression."""
     n_reg, n_obj, n_tracks, n_classes = 3, 5, 7, 3
     gen = torch.Generator().manual_seed(23)
     class_probs = torch.randn(1, n_obj, n_classes, generator=gen).softmax(-1)
@@ -274,9 +230,7 @@ def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
     )
 
 
-# ---------------------------------------------------------------------------
 # MFLeadVertexDecorator (NEW jet-level capability — NO legacy oracle; GO3 unit gate)
-# ---------------------------------------------------------------------------
 
 _CP = "outputs.objects.vertices_class_probs"
 _REG = "outputs.objects.vertices_regression"
@@ -319,13 +273,7 @@ def test_lead_vertex_decorator_declares_vertex_sources_and_jet_outputs():
 
 
 def test_lead_vertex_decorator_selects_highest_pt_non_pv_non_null():
-    """LEAD = highest-pt vertex with pnull<thr AND argmax-class != pv_class_index.
-
-    3 vertices (class layout [pv, sv, null], null_index defaults to LAST=2):
-    - v0: PV (argmax class 0) — EXCLUDED by PV cut even though it has high pt.
-    - v1: SV (argmax class 1), pnull low, pt 5.0 — QUALIFIES, highest qualifying pt.
-    - v2: SV (argmax class 1), pnull low, pt 9.0 ... but null? no — make v2 null.
-    """
+    """LEAD = highest-pt vertex with pnull<thr AND argmax-class != pv_class_index."""
     # class_probs [1, 3, 3]: v0 PV-dominant, v1 SV-dominant low-null, v2 NULL-dominant
     class_probs = torch.tensor([[
         [0.8, 0.1, 0.1],  # v0: argmax 0 = PV -> excluded
@@ -361,12 +309,7 @@ def test_lead_vertex_decorator_pnull_cut_excludes_high_pt_null_vertex():
 
 
 def test_lead_vertex_decorator_argmax_null_below_pnull_thr_excluded():
-    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (3rd cut, user 2026-06-22).
-
-    The discriminating case the pnull cut alone misses: with >=3 classes a vertex can
-    have its MOST-LIKELY class be null yet pnull < threshold. Under the old 2-condition
-    rule (pnull<thr AND argmax!=PV) it would have QUALIFIED; the argmax!=null cut excludes it.
-    """
+    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (3rd cut, user 2026-06-22)."""
     class_probs = torch.tensor([[
         [0.1, 0.8, 0.1],   # v0: SV (argmax 1), pnull 0.1 < 0.5 -> qualifies, pt 3
         [0.3, 0.3, 0.4],   # v1: argmax 2 = NULL but pnull 0.4 < 0.5 -> EXCLUDED by the argmax!=null cut
@@ -437,17 +380,7 @@ def test_lead_vertex_decorator_empty_object_axis_fills_nan():
 
 
 def test_lead_vertex_decorator_nan_class_vertex_excluded():
-    """DEFENSIVE: a NaN class-probs row is excluded (NaN cmp = False) — belt-and-braces.
-
-    NOTE: this is an input the real two-node chain does NOT produce — Node 1a's
-    ``get_maskformer_outputs`` NaN-suppresses ``regression``/``masks`` for null
-    vertices but NEVER ``class_probs`` (it only reorders class_probs). Real null
-    vertices are excluded by the ``pnull < threshold`` cut (tested in
-    ``..._pnull_cut_excludes_high_pt_null_vertex`` / ``..._all_null_fills_nan``),
-    not by NaN class probs. This test pins the decorator's defensive behaviour on a
-    NaN-class row (``NaN < threshold`` is False, so the vertex is excluded) so a
-    future change can't silently start SELECTING a NaN-class vertex.
-    """
+    """DEFENSIVE: a NaN class-probs row is excluded (NaN cmp = False) — belt-and-braces."""
     # v0 has NaN class probs (a row Node 1a never mints — defensive coverage); v1 is a real SV
     class_probs = torch.tensor([[
         [float("nan"), float("nan"), float("nan")],  # NaN-class row -> excluded (NaN cmp False)
@@ -463,17 +396,7 @@ def test_lead_vertex_decorator_nan_class_vertex_excluded():
 
 
 def test_lead_vertex_decorator_dummy_path_through_node1a_fills_nan():
-    """Node 1a's ``not null_preds.any()`` dummy path -> decorator emits NaN lead-vertex scalars.
-
-    When NO object exceeds the null threshold (every object "looks real"),
-    ``get_maskformer_outputs`` returns an ALL-NaN ``vertices_regression`` while
-    ``vertices_class_probs`` flows through real (low-pnull). The decorator's qualify
-    mask passes those vertices (low pnull, argmax != PV), so ``any_qualify`` is True
-    and the NaN-fill guard does NOT fire — yet it gathers NaN regression, so the
-    jet-level scalars are NaN. This pins the documented dummy-path behaviour (matches
-    v1 dummy semantics; surprising because qualifying vertices have undefined
-    regression) end-to-end through the REAL Node 1a, not a hand-built NaN input.
-    """
+    """Node 1a's ``not null_preds.any()`` dummy path -> decorator emits NaN lead-vertex scalars."""
     n_reg, n_obj, n_tracks = 3, 4, 6
     # all class_probs have LOW null prob (last class), so null_preds = (p_null > 0.5)
     # is all-False -> get_maskformer_outputs takes the `not null_preds.any()` dummy path
@@ -576,15 +499,7 @@ def test_lead_vertex_decorator_rejects_bad_config():
 
 
 def test_lead_vertex_decorator_leaf_packs_into_h5_output_column():
-    """The decorator's jet-level scalar is a NORMAL outputs.* leaf the H5OutputSink serialises.
-
-    Bullet 3: the decorator outputs flow through the H5OutputSink so
-    ``jet.lead_vertex_pt``/``mass`` land in the TEST H5 too — it is a normal
-    ``outputs.*`` global float leaf. This drives the sink's ``_output_fragments``
-    packing on a decorator-shaped ``[B]`` global leaf directly (no reader fixture):
-    a single-suffix global column packs through ``u2s`` into the run-name-prefixed
-    H5 field, with NaN preserved (the no-qualifying-vertex fill round-trips).
-    """
+    """The decorator's jet-level scalar is a NORMAL outputs.* leaf the H5OutputSink serialises."""
     sink = H5OutputSink(
         outputs=[OutputColumn(key="outputs.jets.lead_vertex_pt", suffixes=["lead_vertex_pt"])]
     )

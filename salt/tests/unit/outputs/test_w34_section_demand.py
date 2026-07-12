@@ -1,15 +1,4 @@
-"""PLAN 34 W34.2 unit gates — demand-pruning + FIT/VAL plan_hash stability + guards.
-
-The W34.2 demand keystone (plan §6 gate 4): the outputs: section (RunTaskOutput +
-InputCopyWriter + PadMaskWriter) is ``modes=ALL`` but DEMAND-pruned — in FIT/VAL
-nothing demands ``outputs.*`` (losses read ``preds.*``), so the planner's demand
-closure drops the whole section and the FIT/VAL plan is byte-identical to a model
-WITHOUT the section. In TEST a sink demands the section's leaves, pulling them in.
-
-Also covers the dumb-sink guards: dup-name H5 column, the section column-order
-authority (section field order, NOT executor topo order), and the dead-preds guard
-intactness.
-"""
+"""PLAN 34 W34.2 unit gates — demand-pruning + FIT/VAL plan_hash stability + guards."""
 
 from __future__ import annotations
 

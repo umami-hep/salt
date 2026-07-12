@@ -1,33 +1,27 @@
-"""Reusable index-build-time selections for v2 `Reader`s (plan 19, Track C).
+"""Reusable index-build-time selections for v2 `Reader`s.
 
-A `CutSpec` is a small, frozen, reader-AGNOSTIC description of which jet-level
-(global-object) rows are *eligible* to be served. It is evaluated ONCE at the
-reader's index-build stage (`prepare`) — NOT as a per-batch processor and NOT as
-a `Dataset` wrapper.
+A `CutSpec` is a small, frozen, reader-agnostic description of which jet-level
+(global-object) rows are eligible to be served. It is evaluated once at the
+reader's index-build stage (`prepare`) — not as a per-batch processor and not
+as a `Dataset` wrapper.
 
-Why index-build, not a post-read wrapper
-----------------------------------------
-Row-dropping cuts in a per-batch wrapper break the ``(B, …)`` batch contract
-(every reader read is a CONTIGUOUS slice, ``dataset.py:353`` rejects fancy
-indices) and downstream length-coherence. Event/jet selections decide *which rows
-are eligible*, so they belong at the reader's index-build stage: each batch then
-stays a contiguous slice of the *filtered* row index, ``__len__`` is the filtered
-count, and `Features` / `Labels` / the sampler all see a clean dense stream. This
-mirrors v1 semantics, where selections run inside the read on the structured array
-BEFORE any bundle key exists (``base.py`` Reader docstring).
+Row-dropping cuts in a per-batch wrapper would break the ``(B, ...)`` batch
+contract (every reader read is a contiguous slice; fancy indices are
+rejected) and downstream length-coherence. Event/jet selections decide which
+rows are eligible, so they belong at the reader's index-build stage: each
+batch then stays a contiguous slice of the filtered row index, ``__len__`` is
+the filtered count, and `Features` / `Labels` / the sampler all see a clean
+dense stream.
 
-Per-split selection
--------------------
 ``CutSpec`` carries a ``global_cuts`` tuple applied to every split, plus an
 optional ``per_split`` map (``{"train": (...), "val": (...), "test": (...)}``).
-The reader's ``with_source(stage=...)`` clone passes the bound stage through, and
-``for_split(stage)`` returns ``global + this split's`` cuts. A train/val split by
-``eventNumber`` parity, or a per-split ``pt`` floor, is therefore a config change
-with no reader-code change.
+The reader's ``with_source(stage=...)`` clone passes the bound stage through,
+and ``for_split(stage)`` returns ``global + this split's`` cuts. A train/val
+split by ``eventNumber`` parity, or a per-split ``pt`` floor, is therefore a
+config change with no reader-code change.
 
-The comparison operators reuse ``processors._OPERATORS`` (the v1
-``datasets.py:29-36`` comparator table) so a cut's ``op`` is exactly the v1
-conditional-replacement operator set: ``==  !=  >=  <=  >  <``.
+The comparison operators reuse ``processors._OPERATORS`` so a cut's ``op`` is
+one of ``==  !=  >=  <=  >  <``.
 """
 
 from __future__ import annotations
@@ -45,14 +39,14 @@ __all__ = ["Cut", "CutSpec"]
 
 @dataclass(frozen=True)
 class Cut:
-    """One scalar comparison on a jet-level (global-object) field (plan 19).
+    """One scalar comparison on a jet-level (global-object) field.
 
     Parameters
     ----------
     field : str
-        The jet-level field name to cut on. A *bare* field name (``"pt"``,
+        The jet-level field name to cut on. A bare field name (``"pt"``,
         ``"flavour_label"``) addresses the jets stream's structured field; a
-        DOTTED name (``"jets.pt"``) is accepted too and the leading ``jets.``
+        dotted name (``"jets.pt"``) is accepted too and the leading ``jets.``
         (or any ``<stream>.``) prefix is stripped — the cut is evaluated against
         the jet-level scalar record the reader builds in `prepare`.
     op : str
@@ -84,13 +78,7 @@ class Cut:
 
     @property
     def bare_field(self) -> str:
-        """The field name with any leading ``<stream>.`` prefix stripped.
-
-        Returns
-        -------
-        str
-            The bare structured-field name to look up on the jet record.
-        """
+        """The field name with any leading ``<stream>.`` prefix stripped."""
         return self.field.rsplit(".", 1)[-1]
 
     def mask(self, jet_scalars: np.ndarray) -> np.ndarray:
@@ -124,7 +112,7 @@ class Cut:
 
 @dataclass(frozen=True)
 class CutSpec:
-    """Global + per-split jet eligibility, applied at index-build (plan 19).
+    """Global + per-split jet eligibility, applied at index-build.
 
     Parameters
     ----------
@@ -180,7 +168,7 @@ class CutSpec:
         return (*self.global_cuts, *extra)
 
     def eligible(self, jet_scalars: np.ndarray, split: str | None) -> np.ndarray:
-        """Bool mask over jets: True where ALL effective cuts pass (plan 19).
+        """Bool mask over jets: True where all effective cuts pass.
 
         Parameters
         ----------
@@ -208,7 +196,7 @@ class CutSpec:
         return keep
 
     def fields(self, split: str | None = None) -> tuple[str, ...]:
-        """The bare jet-field names referenced by the effective cuts (plan 19).
+        """The bare jet-field names referenced by the effective cuts.
 
         Used by the reader to guarantee the cut variables are read at
         index-build even when not otherwise demanded.

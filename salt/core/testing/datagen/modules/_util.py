@@ -53,18 +53,14 @@ def field_dicts_from_array(arr: np.ndarray) -> list[dict]:
 
     Used by ``TruthHadronInserter`` to rebuild the existing ``tracks`` group's
     field list so it can append the link field and re-parse the whole group via
-    ``parse_schema``. The reconstructed specs preserve each column's name +
-    dtype. ``valid`` is excluded (the engine re-appends it for constituent
-    groups). Integer columns (labels/ids already drawn) are reconstructed as
-    ``distribution`` specs purely to carry the right dtype through
-    ``_build_group_array`` would be wrong -- but the inserter does NOT re-run the
-    group build for ``tracks``; it widens the existing array directly. The
-    reconstructed schema's ``tracks`` group is used ONLY for ``_resolve_link``
-    (which reads ``g.name`` and the LinkField), so the non-link field specs only
-    need to reproduce the right dtype and not be re-drawn. We therefore emit each
-    existing column as a ``distribution`` spec with its exact dtype; the engine
-    never redraws them because the inserter passes the already-built widened
-    array into ``_resolve_link`` directly.
+    ``parse_schema``. Preserves each column's name + dtype; ``valid`` is excluded
+    (the engine re-appends it for constituent groups).
+
+    Every existing column (including labels/ids already drawn) is emitted as a
+    ``distribution`` spec purely to carry the right dtype -- the reconstructed
+    schema's ``tracks`` group is used ONLY for ``_resolve_link`` (which reads
+    ``g.name`` and the LinkField), never to redraw values: the inserter passes
+    the already-built widened array into ``_resolve_link`` directly.
     """
     specs: list[dict] = []
     for fname in arr.dtype.names:

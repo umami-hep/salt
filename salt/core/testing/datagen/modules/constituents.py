@@ -3,8 +3,7 @@
 Reuses ``engine._build_valid_mask`` (random per-row count, sort-to-front,
 min_valid floor), ``_build_group_array`` (constituent path), and
 ``_apply_invalid_fill``. Holds a dict-form group spec parsed via
-``schema.parse_schema`` at call time -- NEVER hand-builds GroupSpec / FieldSpec
-(design §2.2 / fix #2).
+``schema.parse_schema`` at call time -- NEVER hand-builds GroupSpec / FieldSpec.
 """
 
 from __future__ import annotations

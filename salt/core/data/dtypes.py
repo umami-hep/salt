@@ -1,10 +1,8 @@
-"""Core-local copy of the v1 dtype helpers (M7 W2a relocation).
+"""Dtype helpers for H5 structured-array reads.
 
-``get_dtype`` (v1 ``salt.data.datasets.get_dtype``) builds a structured numpy
-dtype for a requested variable subset, casting float16-like fields to half via
-``as_half`` (v1 ``salt.utils.inputs.as_half``, pulled transitively). Both are
-copied BYTE-FAITHFULLY (identical logic); the v1 originals stay in place as the
-RS1 gate oracle. ``salt.core.data.reader`` imports ``get_dtype`` from here.
+``get_dtype`` builds a structured numpy dtype for a requested variable
+subset, casting float16-like fields to half via ``as_half``.
+``salt.core.data.reader`` imports ``get_dtype`` from here.
 """
 
 from collections.abc import Iterable

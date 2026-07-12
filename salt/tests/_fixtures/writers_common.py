@@ -1,17 +1,4 @@
-"""Shared fixtures/helpers/toy-writers for the salt/core/writers unit + integration tests.
-
-Extracted from the former monolithic ``test_writers.py`` so the per-writer
-unit files (``tests/unit/writers/test_base.py`` / ``test_modules.py`` /
-``test_callback.py`` / ``test_maskformer.py``) and the end-to-end integration
-file (``tests/integration/test_writers_end_to_end.py``) can all import the
-same constants, the GN2v2 fixture module dict + dummy-file ``data`` fixture,
-the ``WriteCtx``/``WriterDeclareCtx`` builders, the prediction-bundle factory,
-and the design §8 custom-writer toys.
-
-The ``data`` and ``modules`` symbols are ``@pytest.fixture``s — a test module
-that does ``from salt.tests._fixtures.writers_common import data, modules``
-re-exposes them in its own namespace and pytest discovers them there.
-"""
+"""Shared fixtures/helpers/toy-writers for the salt/core/writers unit + integration tests."""
 
 from __future__ import annotations
 
@@ -85,14 +72,7 @@ class NamedFeatureWriter(Writer):
 
 
 class WrongDtypeMaskWriter(Writer):
-    """A writer that DECLARES the wrong dtype for a consumed key (negative control).
-
-    Demands ``masks.tracks`` as ``float32`` though the dataset boundary serves
-    a ``bool`` pad mask — `WriterCallback.validate_specs` must reject this at
-    ``salt2 test`` setup, before the first batch (design §2.7/§8). The
-    ``columns``/``write`` halves are deliberately runnable so a BROKEN validator
-    would let the run reach the first batch (the genuine must-fail control).
-    """
+    """A writer that DECLARES the wrong dtype for a consumed key (negative control)."""
 
     DTYPE = np.dtype([("wrong_dtype_probe", "i4")])
 

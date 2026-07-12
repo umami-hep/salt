@@ -1,64 +1,37 @@
-# base2.yaml — salt v2 shared defaults (design §5, §5.3).
-#
-# Auto-loaded as a default config for every `salt2 fit` / `salt2 test`
-# invocation (the v1 base.yaml mechanism, salt/core/main.py). Stacked user
-# configs deep-merge on top: dict-typed sections (model.init_args.modules,
-# data.modules, callbacks, writers) merge key-by-key, an entry set to null is
-# deleted (DeepMergeParser + assembly-time filtering, design §5.3).
+# Shared defaults auto-loaded for every `salt2 fit` / `salt2 test` invocation.
+# Stacked user configs deep-merge on top: dict-typed sections merge key-by-key,
+# an entry set to null is deleted. Ships trainer/callbacks only — no
+# persistence layer; every model config must define its own `outputs:` section
+# + H5OutputSink/OnnxExportSink callbacks.
 
 seed_everything: 42
 
 trainer:
   accelerator: auto
   devices: 1
-  # Default-ON CometLogger (v1 parity; plan-24 Wave 0). The M6 CometLogger wiring
-  # (sub-wave E, gate CM1/CM2; FD §6.5) lives in salt/core/main.py
-  # Salt2CLI.before_instantiate_classes: --name drives experiment_name +
-  # dict_kwargs:{name}; online is auto-set false without COMET_API_KEY / under
-  # fast_dev_run; the offline dir is the trainer log dir (v1 cli.py:281-294). The
-  # comet-before-lightning import order is held at the top of salt/core/main.py
-  # (v1 main.py:5). To turn tracking OFF (local runs, CI/smoke/gate fixtures),
-  # set `--trainer.logger false`; a logger-less trainer also drops the stock
-  # lr_monitor (see callbacks.lr_monitor below). salt2 test always forces
-  # logger=False (no tracking on eval; cli.py:317).
+  # to disable tracking (local runs, CI/smoke fixtures), set
+  # --trainer.logger false; `salt2 test` always forces logger=False.
   logger:
     class_path: lightning.pytorch.loggers.comet.CometLogger
     init_args: {project: salt}
   log_every_n_steps: 50
-  # The raw trainer.callbacks list is reserved for STOCK Lightning callbacks
-  # only; salt callbacks belong in the top-level callbacks: dict below, whose
-  # entries deep-merge across config files (design §5.3).
+  # trainer.callbacks is reserved for stock Lightning callbacks only; salt
+  # callbacks belong in the callbacks: dict below.
 
-# Dict-keyed, deep-mergeable callback defaults (design §5.3): override one key
-# (--callbacks.checkpoint.init_args.monitor_loss=...), add an entry from any
-# config file, or delete one with `checkpoint: null`. Assembled into
-# trainer.callbacks ahead of any stock list entries. The
-# salt.core.callbacks.Checkpoint port (M5 sub-wave D) writes a checkpoint per
-# epoch into <log_dir>/ckpts/ with the 'loss=' filename stem the salt2-test
-# best-epoch glob keys on (per-task monitor via monitor_loss, design §5.3). The
-# salt.core.callbacks.ProgressBar port (M5) is the stock TQDMProgressBar under
-# a salt-owned name. lr_monitor wires the stock LearningRateMonitor (M6
-# sub-wave E, FD §13 E3): the stock LearningRateMonitor HARD-RAISES on a
-# logger-less trainer, so Salt2CLI.instantiate_trainer DROPS this entry when no
-# logger is attached and KEEPS it whenever a logger is present. Since the flip
-# (plan-24 Wave 0) the default trainer.logger is a CometLogger, so lr_monitor is
-# KEPT by default — it then logs the OneCycleLR schedule each step. On a
-# `--trainer.logger false` run (CI/smoke/gate fixtures) it is dropped again
-# (delete entirely with `lr_monitor: null`).
 callbacks:
   checkpoint:
     class_path: salt.core.callbacks.Checkpoint
     init_args:
-      # monitor_loss is BOTH the monitored metric and the filename loss tag;
-      # the resulting stem 'epoch=NNN-loss=<val/loss>.ckpt' under ckpts/ is the
-      # salt2-test no-ckpt_path fallback contract (salt/core/main.py
-      # _best_checkpoint; v1 utils/cli.py:55-79) — keep the Checkpoint default
-      # fname_string ('loss') and that glob in sync.
+      # also the filename loss tag ('epoch=NNN-loss=<val/loss>.ckpt') that the
+      # salt2-test no-ckpt_path fallback globs on — keep in sync with any
+      # fname_string override.
       monitor_loss: val/loss
   progress:
     class_path: salt.core.callbacks.ProgressBar
     init_args:
       refresh_rate: 50
+  # dropped automatically when no logger is attached (LearningRateMonitor
+  # hard-raises on a logger-less trainer); delete explicitly with `lr_monitor: null`.
   lr_monitor:
     class_path: lightning.pytorch.callbacks.LearningRateMonitor
     init_args:
@@ -67,21 +40,7 @@ callbacks:
     class_path: lightning.pytorch.callbacks.ModelSummary
     init_args:
       max_depth: 2
-  # design §4.4 run-dir artifacts: plan_<mode>.txt + graph_<stage>.{dot,svg}
-  # written into the trainer log dir at fit/test start. Default-on; delete
-  # with `artifacts: null`.
+  # writes plan_<mode>.txt + graph_<stage>.{dot,svg} into the trainer log dir
+  # at fit/test start. Delete with `artifacts: null`.
   artifacts:
     class_path: salt.core.callbacks.GraphArtifacts
-
-# plan 34 W34.4c — the base2 persistence default is RETIRED. base2 no longer
-# ships a `writers:` (WriterCallback) block: after the get_output()-on-task +
-# outputs:-section + dumb-sink cutover, base2 cannot carry a derive-from-all-
-# tasks default (RunTaskOutput hard-raises on an empty/unknown task list, and
-# InputCopyWriter/PadMaskWriter need explicit stream names base2 can't know;
-# plan §4 corrected). EVERY config now enumerates its OWN top-level `outputs:`
-# section (InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter, in v1
-# H5 column order) + dumb `H5OutputSink`/`OnnxExportSink` callbacks. base2 ships
-# seed_everything / trainer / callbacks ONLY — NO persistence layer. (The legacy
-# `--writers.modules`/`--writers.output`/`--writers.half_precision` CLI arg
-# surface is RETAINED for the producer-oracle configs that still null-merge it;
-# its removal is W34.4d/W6.)

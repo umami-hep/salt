@@ -1,7 +1,4 @@
-"""Concrete generation modules for the modular test-data pipeline.
-
-See ``design/03_modular_generator.md`` §2.
-"""
+"""Concrete generation modules for the modular test-data pipeline."""
 
 from .base import GenModule
 from .constituents import (

@@ -1,37 +1,36 @@
 """Plan execution for the salt v2 graph kernel.
 
-Design §3.2: the executor is the entire runtime — it walks a compiled
-`Plan`'s steps in order, invokes each module, and merges the returned keys
-into the run `Bundle` under write-once + declaration checks. No reflection,
-no dispatch tables, no dict-order dependence; ONNX tracing sees a plain
-sequence of module invocations.
+The executor is the entire runtime — it walks a compiled `Plan`'s steps in
+order, invokes each module, and merges the returned keys into the run
+`Bundle` under write-once + declaration checks. No reflection, no dispatch
+tables, no dict-order dependence; ONNX tracing sees a plain sequence of
+module invocations.
 
-Module call convention (design §2.5, §3.2)
-------------------------------------------
+Module call convention
+-----------------------
 Each step's module is invoked as ``produced = module(b, mode)``:
 
 - ``b`` is the run `Bundle` itself (or, under ``run(debug=True)``, a
-  read-tracking view of it — design §4.1). Modules read their declared
-  requires via ``b.get(...)`` / ``b.subtree(...)``; for ``nn.Module``
-  subclasses the call lands in ``forward(b, mode)``.
+  read-tracking view of it). Modules read their declared requires via
+  ``b.get(...)`` / ``b.subtree(...)``; for ``nn.Module`` subclasses the call
+  lands in ``forward(b, mode)``.
 - ``mode`` is the plan's primary `Mode` — a plan property resolved before
-  tracing, never a tensor input (design §2.5).
-- The return value is the module's newly produced keys ONLY. Both spellings
-  used in the design are accepted and canonicalised before the merge: nested
-  dicts (``{"preds": {"x": y}}``), flat dotted keys (``{"preds.x": y}``), or
-  any mixture. A dict value whose dotted path is itself a declared key (e.g.
-  the ``seq.layout`` meta leaf) is kept whole as a dict-valued leaf.
+  tracing, never a tensor input.
+- The return value is the module's newly produced keys ONLY. Both nested
+  dicts (``{"preds": {"x": y}}``) and flat dotted keys (``{"preds.x": y}``),
+  or any mixture, are accepted and canonicalised before the merge. A dict
+  value whose dotted path is itself a declared key (e.g. the ``seq.layout``
+  meta leaf) is kept whole as a dict-valued leaf.
 - The executor merges via
   ``Bundle.merge(produced, who=step.name, expected=set(step.produces))`` —
   extra, missing, or colliding keys raise with the module name in the
   message, on every merge, independent of debug mode.
 
-Optional ports (design §2.2): an optional require with no producer in the
-plan's mode is dropped from `PlanStep.requires` at compile time; at runtime
-the key is simply *absent* from the bundle — absent optional inputs are
-omitted, not passed as ``None`` (the bundle-passing convention has no
-argument to thread ``None`` through). Modules probe with ``key in b``; the
-debug view permits this for every declared require, bound or not.
+Optional ports: an optional require with no producer in the plan's mode is
+dropped from `PlanStep.requires` at compile time; at runtime the key is
+simply *absent* from the bundle — absent optional inputs are omitted, not
+passed as ``None``. Modules probe with ``key in b``; the debug view permits
+this for every declared require, bound or not.
 """
 
 from __future__ import annotations
@@ -55,27 +54,22 @@ __all__ = ["Executor", "canonical_produced"]
 
 
 def _is_sink(module: GraphModule) -> bool:
-    """Whether a plan-step module is a terminal SINK (excluded from the forward loop, Q5).
+    """Whether a plan-step module is a terminal SINK (excluded from the forward loop).
 
-    Duck-typed on the `SinkModule` Protocol marker ``is_sink() -> True`` (design
-    §4, the inverse of `datamodule._is_setup_only`). A sink stays IN ``plan.steps``
-    (so it renders its own card and anchors demand) but is never invoked as a
-    tensor forward — it produces no tensor and need not be callable.
-
-    Returns
-    -------
-    bool
-        True when `module` declares itself a sink node.
+    Duck-typed on the `SinkModule` Protocol marker ``is_sink() -> True``. A
+    sink stays IN ``plan.steps`` (so it renders its own card and anchors
+    demand) but is never invoked as a tensor forward — it produces no tensor
+    and need not be callable.
     """
     is_sink = getattr(module, "is_sink", None)
     return isinstance(module, SinkModule) and callable(is_sink) and bool(is_sink())
 
 
 class Executor:
-    """Runs a compiled `Plan` over a `Bundle` (design §3.2).
+    """Runs a compiled `Plan` over a `Bundle`.
 
-    The plan is frozen: steps execute in plan order, each module is called as
-    ``module(bundle, mode)`` (see the module docstring for the full call
+    The plan is frozen: steps execute in plan order, each module is called
+    as ``module(bundle, mode)`` (see the module docstring for the full call
     convention), and the returned keys are merged write-once with the
     declared key set enforced on every merge.
     """
@@ -83,9 +77,10 @@ class Executor:
     def __init__(self, plan: Plan, modules: Mapping[str, GraphModule] | None = None) -> None:
         """Bind a plan to the live module instances that will execute it.
 
-        `modules` (e.g. the config's full instance dict) may be a superset of
-        the plan's modules — pruned or mode-inactive entries are ignored.
-        When omitted, the live instances frozen into the plan steps are used.
+        `modules` (e.g. the config's full instance dict) may be a superset
+        of the plan's modules — pruned or mode-inactive entries are
+        ignored. When omitted, the live instances frozen into the plan
+        steps are used.
 
         Raises
         ------
@@ -97,9 +92,9 @@ class Executor:
         self.plan = plan
         self._modules: dict[str, GraphModule] = {}
         self._allowed: dict[str, frozenset[str]] = {}
-        # sink steps stay IN plan.steps (render + demand) but are partitioned OUT
-        # of the per-batch forward loop — the inverse of the setup-only partition
-        # (Q5, design §4): a sink produces no tensor and is never called.
+        # sink steps stay IN plan.steps (render + demand) but are partitioned
+        # OUT of the per-batch forward loop — the inverse of the setup-only
+        # partition: a sink produces no tensor and is never called.
         self._forward_steps: list[PlanStep] = []
         for step in plan.steps:
             module = step.module if modules is None else modules.get(step.name)
@@ -132,24 +127,18 @@ class Executor:
             self._forward_steps.append(step)
 
     def run(self, bundle: Bundle, debug: bool = False) -> Bundle:
-        """Execute the plan's steps in order over `bundle` and return it (design §3.2).
+        """Execute the plan's steps in order over `bundle` and return it.
 
-        The caller provides every non-optional plan source leaf in `bundle`.
-        With ``debug=True`` each module receives a read-tracking bundle view:
-        any access outside its declared requires raises
+        The caller provides every non-optional plan source leaf in
+        `bundle`. With ``debug=True`` each module receives a read-tracking
+        bundle view: any access outside its declared requires raises
         `UndeclaredAccessError` naming the module, the key, and the
-        declaration to amend (design §4.1 quality bar), and in-place mutation
-        of existing bundle tensors is detected via ``torch.Tensor._version``
-        snapshots around each step and raises `MutationError` (design §2.1;
-        non-tensor leaves such as numpy arrays are not covered). The
-        returned-keys-vs-declaration check is always on, debug or not;
-        write-once collisions propagate from `Bundle.merge` as
-        `KeyCollisionError` (design §2.1).
-
-        Returns
-        -------
-        Bundle
-            The same bundle instance, with every step's produces merged in.
+        declaration to amend, and in-place mutation of existing bundle
+        tensors is detected via ``torch.Tensor._version`` snapshots around
+        each step and raises `MutationError` (non-tensor leaves such as
+        numpy arrays are not covered). The returned-keys-vs-declaration
+        check is always on, debug or not; write-once collisions propagate
+        from `Bundle.merge` as `KeyCollisionError`.
 
         Raises
         ------
@@ -209,11 +198,6 @@ def _tensor_versions(bundle: Bundle) -> dict[str, int]:
     ``torch.Tensor._version`` is torch's autograd in-place version counter —
     private but stable, and the cheapest torch-native mutation detector
     (integer reads, no data copies).
-
-    Returns
-    -------
-    dict[str, int]
-        ``{dotted_key: version}`` for tensor-valued leaves.
     """
     return {
         key: value._version  # noqa: SLF001 - torch's in-place version counter
@@ -223,13 +207,7 @@ def _tensor_versions(bundle: Bundle) -> dict[str, int]:
 
 
 def _first_mutated(bundle: Bundle, versions: dict[str, int]) -> str | None:
-    """Find the first pre-step tensor leaf whose version counter bumped.
-
-    Returns
-    -------
-    str | None
-        The mutated dotted key, or None when nothing was mutated in place.
-    """
+    """Find the first pre-step tensor leaf whose version counter bumped."""
     for key, version in versions.items():
         if bundle.get(key)._version != version:  # noqa: SLF001
             return key
@@ -243,11 +221,6 @@ def _declared_reads(module: GraphModule, step: PlanStep, mode: Mode) -> frozense
     require — including optional ports the planner dropped for lack of a
     producer, so a module probing them with ``in`` sees a normal absence
     instead of an `UndeclaredAccessError`.
-
-    Returns
-    -------
-    frozenset[str]
-        Dotted keys the module may access under ``run(debug=True)``.
     """
     io = module.declare_io(mode)
     declared = {key for key, spec in flatten_spec(io.requires).items() if spec.active_in(mode)}
@@ -257,13 +230,12 @@ def _declared_reads(module: GraphModule, step: PlanStep, mode: Mode) -> frozense
 class _ReadTrackedBundle:
     """Read-tracking bundle view handed to modules under ``run(debug=True)``.
 
-    Design §3.2/§4.1: duck-types the read surface of `Bundle` (``get`` /
-    ``subtree`` / ``keys`` / ``in`` / ``len``). Any access outside the
-    module's declared requires raises `UndeclaredAccessError` naming the
-    module, the key, and the declaration to amend; declared-but-absent
-    optional keys behave exactly as on the plain bundle. Mutation and raw
-    payload access are blocked — modules return their produces; only the
-    executor merges.
+    Duck-types the read surface of `Bundle` (``get`` / ``subtree`` /
+    ``keys`` / ``in`` / ``len``). Any access outside the module's declared
+    requires raises `UndeclaredAccessError` naming the module, the key, and
+    the declaration to amend; declared-but-absent optional keys behave
+    exactly as on the plain bundle. Mutation and raw payload access are
+    blocked — modules return their produces; only the executor merges.
     """
 
     __slots__ = ("_allowed", "_bundle", "_mode", "_who")
@@ -296,11 +268,6 @@ class _ReadTrackedBundle:
         An undeclared `key` raises `UndeclaredAccessError`; a declared but
         absent key (e.g. an optional port not produced in this mode) raises
         `KeyError` exactly like the plain bundle.
-
-        Returns
-        -------
-        Any
-            The leaf value.
         """
         if key not in self._allowed:
             self._undeclared(key)
@@ -330,26 +297,15 @@ class _ReadTrackedBundle:
         return out
 
     def keys(self) -> list[str]:
-        """Return the declared dotted leaf keys currently present in the bundle.
-
-        Returns
-        -------
-        list[str]
-            Declared-and-present keys, in bundle insertion order.
-        """
+        """Return the declared dotted leaf keys currently present in the bundle."""
         present = self._bundle.keys()
         return [key for key in present if key in self._allowed]
 
     def __contains__(self, key: str) -> bool:
-        """Probe a declared key's presence (the optional-port idiom, design §2.2).
+        """Probe a declared key's presence (the optional-port idiom).
 
-        Probing an undeclared key raises `UndeclaredAccessError` — branching
-        on an undeclared key is itself an undeclared dependence.
-
-        Returns
-        -------
-        bool
-            True if the declared key is present in the bundle.
+        Probing an undeclared key raises `UndeclaredAccessError` —
+        branching on an undeclared key is itself an undeclared dependence.
         """
         if key not in self._allowed:
             self._undeclared(key, verb="probed")
@@ -377,7 +333,7 @@ class _ReadTrackedBundle:
         )
 
     def merge(self, produced: dict[str, Any], who: str = "", expected: Any = None) -> NoReturn:
-        """Blocked: merging is executor-only (design §2.1).
+        """Blocked: merging is executor-only.
 
         Raises
         ------
@@ -391,7 +347,7 @@ class _ReadTrackedBundle:
         )
 
     def _undeclared(self, key: str, verb: str = "read") -> NoReturn:
-        """Raise the undeclared-access error for `key` (design §4.1 quality bar).
+        """Raise the undeclared-access error for `key`.
 
         Raises
         ------
@@ -408,25 +364,20 @@ class _ReadTrackedBundle:
 
 
 # ---------------------------------------------------------------------------
-# returned-keys canonicalisation (nested and flat dotted spellings, §2.5/§3.3)
+# returned-keys canonicalisation (nested and flat dotted spellings)
 # ---------------------------------------------------------------------------
 
 
 def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -> dict[str, Any]:
     """Canonicalise a module's returned dict to nested single-component form.
 
-    Modules may return nested dicts, flat dotted keys, or any mixture (the
-    design writes both spellings, §2.5/§3.3); `Bundle.merge` expects nested
-    dicts with single-component keys. A dict value whose dotted path is in
-    `expected` is a declared dict-valued leaf and is kept whole; empty
-    undeclared dicts are kept as leaves so they surface as unexpected keys.
-    Public because the dataset-side runner (`salt.core.data.dataset`) merges
-    module returns under the same convention (design §2.4).
-
-    Returns
-    -------
-    dict[str, Any]
-        The nested produced dict, iteration order preserved.
+    Modules may return nested dicts, flat dotted keys, or any mixture;
+    `Bundle.merge` expects nested dicts with single-component keys. A dict
+    value whose dotted path is in `expected` is a declared dict-valued leaf
+    and is kept whole; empty undeclared dicts are kept as leaves so they
+    surface as unexpected keys. Public because the dataset-side runner
+    (`salt.core.data.dataset`) merges module returns under the same
+    convention.
 
     Raises
     ------

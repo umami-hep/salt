@@ -1,77 +1,27 @@
-# gn2v2-dummy-cutover34.yaml — the PLAN 34 W34.2 LIVE cutover of the gn2v2-dummy
-# classification eval path to the get_output()-on-task + outputs:-section + dumb
-# sinks architecture (plan 34 §2):
-#
-#   model.modules (raw preds + loss)  ->  outputs: section  ->  dumb sinks  -> H5/ONNX
-#       (forward = loss-space)            (RunTaskOutput          (dump ALL
-#                                          + InputCopyWriter       outputs.*
-#                                          + PadMaskWriter)        leaves)
-#
-# This REPLACES the plan-29/31 standalone conversion PRODUCER nodes (ClassProbs /
-# SeqClassProbs in model.modules) with a single RunTaskOutput([tasks]) writer that
-# calls each task's get_output() (W34.1). The dumb sinks dump ALL active outputs.*
-# leaves; the SECTION supplies the names + dtypes + ORDER. Proven byte-for-byte
-# against the legacy WriterCallback oracle in test_w34_outputs_section.py.
-#
-# Layered ON TOP of gn2v2-dummy.yaml (which still ships the M4.5 default via
-# base2.yaml so every OTHER config / test keeps the unflipped writer path):
-#
-#   salt2 test --config salt/core/configs/gn2v2-dummy.yaml \
-#     --config salt/core/configs/gn2v2-dummy-cutover34.yaml \
-#     --ckpt_path <ckpt> --data.test_file <file.h5> ...
-#
-# What this override does (plan 34 W34.2):
-#  - DROPS the plan-29/31 conversion producers + ONNX nodes from model.modules
-#    (the get_output fold replaces them): track_origin_index/track_vertex_index
-#    (base gn2v2-dummy) + jet_probs/track_origin_probs are NOT used here.
-#  - opts track_vertexing OUT of TEST eval (expose: [fit, val]): its eval column
-#    (VertexIndex) is a vertexing-family DEFERRED to W34.3 — no get_output here,
-#    so without this its raw TEST preds.* would be a dead pred. FIT/VAL keep the
-#    head (the checkpoint is intact).
-#  - deletes the M4.5 writers (inputs_copy/tasks/pad_mask -> null).
-#  - composes the NEW top-level outputs: section in EXACT v1 H5 column order:
-#      inputs_copy (InputCopyWriter)  -> RunTaskOutput task fields -> pad_mask
-#      (PadMaskWriter). The section FIELD ORDER drives the H5 column order.
-#  - wires the DUMB H5OutputSink + OnnxExportSink (no init args): they dump ALL
-#    active outputs.* leaves, names/dtypes/order from the bound section manifest.
+# Overlay on gn2v2-dummy.yaml: switches its eval path from the standalone
+# conversion-producer nodes to the get_output()-on-task + outputs:-section +
+# dumb-sink architecture. Stack as:
+#   salt2 test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover34.yaml ...
 
 model:
   modules:
-    # plan 34 W34.3: track_vertexing is now FULLY exposed (no expose opt-out) — its
-    # eval column (VertexIndex i8) + ONNX leaf (VertexIndex int8) are minted by
-    # get_output on the task (the W34.3 vtx fold), proven byte-for-byte against the
-    # legacy WriterCallback (H5) and the /tmp/w4_oracle golden (ONNX VertexIndex).
-    # drop the plan-29/31 conversion producers: get_output on the task replaces them
+    # drop the old conversion producers — get_output on each task replaces them
     track_origin_index: null
     track_vertex_index: null
     jet_probs: null
     track_origin_probs: null
 
-# The PLAN 34 W34.2 top-level outputs: section (composed AFTER the model). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields
-# -> PadMaskWriter. The section field order is the H5 column-order authority (NOT
-# executor topo order).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default)
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
-    # plan 34 W34.3: track_vertexing JOINS the orchestrated tasks — its get_output
-    # mints the VertexIndex i8 H5 column (TEST) + the VertexIndex int8 ONNX leaf.
     init_args: {tasks: [jets_classification, track_origin, track_vertexing]}
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.2/W34.3): no init args — they dump ALL active
-# outputs.* leaves, with names/dtypes/order from the bound outputs: section
-# manifest. The H5OutputSink keeps the FIXED-mode serialisation mechanics (u2s
-# pack, per-token pad re-expansion, input-copy file re-read, v1 group naming/path).
-# The DUMB OnnxExportSink (re-enabled at W34.3) names the section's get_output ONNX
-# leaves (pb/pc/pu globals + TrackOrigin + VertexIndex per-token int8) in the
-# canonical Athena tuple order — proven against the full /tmp/w4_oracle gn2v2.json
-# golden (incl VertexIndex).
 callbacks:
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink

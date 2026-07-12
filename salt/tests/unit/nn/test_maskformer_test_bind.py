@@ -1,36 +1,4 @@
-"""Regression guard: the MaskFormer TEST-mode two-phase bind must not require the
-FIT-only object-regression prediction width.
-
-Bug (exp-21 smoke #3, job 2642): ``salt2 test`` on the shipped ``MaskFormer.yaml``
-crashed at the TEST-stage two-phase bind with::
-
-    salt.core.graph.BindError: no statically resolved width for bundle key
-    'preds.objects.regression'
-
-Root cause: ``MaskFormerMatchedLoss.bind`` (`salt/core/nn/maskformer_loss.py`)
-unconditionally looked up ``schema.width('preds.objects.regression')``. The matched
-loss is FIT|VAL-only (its ``declare_io`` is empty in TEST), and the object-regression
-head opts out of TEST via ``expose: [fit, val, onnx]`` — so that key is pruned from a
-TEST-only bind schema. But ``bind_all`` runs ``bind`` on EVERY configured module
-regardless of the compiled mode, and ``SaltModule.setup('test')`` builds the schema
-from the TEST plan ALONE (`saltmodule.py` — FIT stage compiles FIT+VAL, TEST stage
-compiles TEST only), so the width never resolves and the lookup raised.
-
-Why the pre-existing suites missed it: FIT-stage binds compile FIT+VAL together (the
-regression head is exposed there), and the render/plot ``_resolve_widths`` unifies
-ALL modes, so both always supply the width. The TEST-alone bind was the untested
-combination — first exercised by a real ``salt2 test`` on MaskFormer.
-
-Fix: `MaskFormerMatchedLoss.bind` guards the lookup on schema presence — it validates
-the pred/target width agreement only when both keys are in the schema (the FIT-stage
-bind), and skips otherwise. A genuinely missing regression producer in a training
-plan still fails earlier as a planner ``ConnectivityError``, so the guard cannot mask
-a real training-mode wiring bug.
-
-These tests are data-free static plan compiles (CPU, no data files, no GPU) — the
-``norm_dict=unused.yaml`` override matches the shipped config's static-validation
-recipe (MaskFormer.yaml header).
-"""
+"""Regression guard: the MaskFormer TEST-mode two-phase bind must not require the"""
 
 from __future__ import annotations
 
@@ -54,13 +22,7 @@ _REG_TGT_KEY = "targets.objects.regression"
 
 
 def _compile(mode: Mode):
-    """Load MaskFormer.yaml and compile one mode's plan (static, no data).
-
-    Returns
-    -------
-    tuple[GraphConfig, Plan]
-        The freshly loaded config (live modules) and the compiled plan.
-    """
+    """Load MaskFormer.yaml and compile one mode's plan (static, no data)."""
     cfg = load_config(_MASKFORMER, _OVERRIDES)
     plan = compile_plan(
         cfg.modules,
@@ -77,11 +39,7 @@ class TestMaskFormerTestModeBind:
     """The exp-21 TEST-mode bind defect (job 2642) and its FIT-mode counterpart."""
 
     def test_test_mode_bind_succeeds_without_regression_width(self):
-        """``SaltModule.setup('test')`` shape: TEST plan alone -> bind_all must not raise.
-
-        This is the exact failing path — the regression pred key is pruned from the
-        TEST schema, and the matched loss's ``bind`` must tolerate its absence.
-        """
+        """``SaltModule.setup('test')`` shape: TEST plan alone -> bind_all must not raise."""
         cfg, test_plan = _compile(Mode.TEST)
         schema = resolve_bind_schema([test_plan])
         # the key is genuinely absent in TEST (the regression head opts out of TEST)
@@ -90,12 +48,7 @@ class TestMaskFormerTestModeBind:
         bind_all(cfg.model_modules, schema)
 
     def test_fit_mode_binds_regression_width(self):
-        """``SaltModule.setup('fit')`` shape: FIT+VAL -> the width resolves and binds.
-
-        Guards against the fix accidentally suppressing the real training-mode
-        validation — the width must still resolve (5 targets: pt/Lxy/deta/dphi/mass)
-        and ``bind_all`` must run clean.
-        """
+        """``SaltModule.setup('fit')`` shape: FIT+VAL -> the width resolves and binds."""
         cfg_fit, fit_plan = _compile(Mode.FIT)
         _, val_plan = _compile(Mode.VAL)
         schema = resolve_bind_schema([fit_plan, val_plan])

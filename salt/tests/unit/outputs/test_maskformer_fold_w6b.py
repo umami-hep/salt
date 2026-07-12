@@ -1,31 +1,4 @@
-"""W6b — the MaskFormer object writer FOLD onto the H5OutputSink ``extra_groups`` seam.
-
-W6b relocates the legacy `salt.core.writers.MaskFormerObjectWriter` TEST role onto
-`salt.core.outputs.MaskFormerObjectsSink` — a manifest-only ``outputs:``-section
-node hosted by `H5OutputSink` via ``extra_groups`` (the W6a seam). The
-object-prediction group is emitted as the v2-native **``objects``** group (named by
-``object_stream``), NOT merged into the ``truth_hadrons`` stream group (USER
-DECISION 2026-06-30); the per-object regression eval columns stay DEFERRED.
-
-This is the AUTOMATED parity gate. Two halves:
-
-1. **schema parity vs the upstream 6570e85 fixture** — the migrated sink's emitted
-   columns (the v2-owned ones) match the fixture's field NAMES + DTYPES:
-   - ``objects`` group: ``MaskFormer_pb/_pc/_pnull`` (f4) + ``class_label`` (i8),
-     compared against the fixture's ``truth_hadrons`` object-class fields;
-   - ``object_masks`` group: ``truth_mask`` (i8) + ``mask_logits`` (f4) — an exact
-     name/dtype match of the fixture's ``object_masks`` group;
-   - ``MaskFormer_MaskIndex`` (i8) on the ``tracks`` reader stream.
-   The gate RECORDS, as assert-as-known divergences (so it is honest, not vacuous):
-   (a) the v2 group name ``objects`` diverges from the fixture's ``truth_hadrons``
-   (intentional, the user decision), and (b) the deferred ``MaskFormer_<regression>``
-   columns (``MaskFormer_pt/_Lxy/_deta/_dphi/_mass``) are known-ABSENT from the v2
-   ``objects`` group.
-
-2. **byte parity vs MFU-6's writer** — the sink node's ``write`` is byte-identical
-   to `MaskFormerObjectWriter.write` on the SAME bundle (drift-proof: the sink node
-   delegates to an internal writer instance, so this pins that delegation).
-"""
+"""W6b — the MaskFormer object writer FOLD onto the H5OutputSink ``extra_groups`` seam."""
 
 from __future__ import annotations
 
@@ -102,19 +75,12 @@ def _ctx(precision: str = "full") -> _ExtraGroupCtx:
     )
 
 
-# ---------------------------------------------------------------------------
 # 1. schema parity vs the upstream 6570e85 fixture (the v2-owned columns)
-# ---------------------------------------------------------------------------
 
 
 class TestSchemaParityVsFixture:
     def test_objects_group_class_columns_match_fixture(self, data):
-        """objects: MaskFormer_pb/_pc/_pnull (f4) + class_label (i8) == fixture object-class fields.
-
-        RECORDED divergence (a): v2 emits these under "objects", the fixture under
-        "truth_hadrons" — intentional (USER DECISION 2026-06-30). The gate compares
-        the COLUMN names/dtypes the writer owns, NOT the group name.
-        """
+        """objects: MaskFormer_pb/_pc/_pnull (f4) + class_label (i8) == fixture object-class fields."""
         cols = _sink(data).columns(_ctx())
         objects = cols["objects"]
         assert list(objects.names) == ["MaskFormer_pb", "MaskFormer_pc", "MaskFormer_pnull",
@@ -171,13 +137,7 @@ class TestRecordedDivergences:
         assert UPSTREAM_OBJECT_GROUP in _fixture()["groups"]
 
     def test_deferred_regression_columns_known_absent(self, data):
-        """(b) the per-object regression eval columns are KNOWN-ABSENT from v2 objects.
-
-        Upstream's truth_hadrons group carries MaskFormer_pt/_Lxy/_deta/_dphi/_mass;
-        v2 DELIBERATELY defers per-object regression eval columns (MaskFormer.yaml
-        :197-211). The gate asserts they are absent from v2 AND present upstream, so
-        the deferral is recorded, not silently lost.
-        """
+        """(b) the per-object regression eval columns are KNOWN-ABSENT from v2 objects."""
         objects = _sink(data).columns(_ctx())["objects"]
         fx = _fixture()["groups"][UPSTREAM_OBJECT_GROUP]["fields"]
         for col in DEFERRED_REGRESSION_COLUMNS:
@@ -185,9 +145,7 @@ class TestRecordedDivergences:
             assert col in fx, f"{col} not in upstream fixture — stale deferral allowlist"
 
 
-# ---------------------------------------------------------------------------
 # 2. byte parity vs MFU-6's MaskFormerObjectWriter (drift-proof delegation)
-# ---------------------------------------------------------------------------
 
 
 def _bundle(batch_size=6, n_tracks=10):
@@ -237,9 +195,7 @@ class TestByteParityVsLegacyWriter:
             assert sink[group] == legacy[group]
 
 
-# ---------------------------------------------------------------------------
 # T1 — W6b ONNX tuple order: explicit object leaves AFTER the section block
-# ---------------------------------------------------------------------------
 
 # The MaskFormer explicit leaves (the two object reduces that the
 # outputs: section cannot mint). In MaskFormer.yaml emission order:
@@ -275,14 +231,7 @@ EXPECTED_MFV2_OUTPUT_NAMES = [
 
 
 class TestW6bOnnxTupleOrder:
-    """T1 — explicit MaskFormer object leaves appear AFTER the section block.
-
-    Pins the full ordered output_names list for the MaskFormer OnnxExportSink:
-    the section's 1:1 head leaves (globals then per-token) come first, then the
-    explicit object-reduce leaves (globals then per-token). Before the fix, the
-    leading_object globals were merged INTO the section's globals block and
-    hoisted AHEAD of the section's per-token TrackOrigin, breaking the v1 order.
-    """
+    """T1 — explicit MaskFormer object leaves appear AFTER the section block."""
 
     def _onnx_sink(self, tmp_path: Path):
         from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
@@ -312,22 +261,12 @@ class TestW6bOnnxTupleOrder:
         return sink
 
     def test_output_names_full_ordered_list(self, tmp_path):
-        """The full flat output_names list equals EXPECTED_MFV2_OUTPUT_NAMES exactly.
-
-        Pins ORDER: pb/pc/pu (section globals), TrackOrigin (section per-token),
-        then leading_objects_* (explicit globals), then HadronIndex (explicit per-token).
-        This is the v1 manifest/writer order the OnnxExportSink must reproduce.
-        """
+        """The full flat output_names list equals EXPECTED_MFV2_OUTPUT_NAMES exactly."""
         sink = self._onnx_sink(tmp_path)
         assert sink.output_names() == EXPECTED_MFV2_OUTPUT_NAMES
 
     def test_trackorigin_before_leading_object_globals(self, tmp_path):
-        """TrackOrigin (section per-token) comes BEFORE leading_objects_* (explicit globals).
-
-        The pre-fix code merged explicit globals into the section's globals block,
-        hoisting them ahead of TrackOrigin. After the fix, the entire section block
-        (globals then per-token) precedes the explicit block.
-        """
+        """TrackOrigin (section per-token) comes BEFORE leading_objects_* (explicit globals)."""
         names = self._onnx_sink(tmp_path).output_names()
         to_idx = names.index("MFv2_TrackOrigin")
         lo_idx = names.index("MFv2_leading_objects_pt")
@@ -341,20 +280,11 @@ class TestW6bOnnxTupleOrder:
         assert names[-1] == "MFv2_HadronIndex"
 
 
-# ---------------------------------------------------------------------------
 # T2 — object_masks shape guard: mismatch raises ConfigError loudly
-# ---------------------------------------------------------------------------
 
 
 class TestObjectMasksShapeGuard:
-    """T2 — _extra_group_fragments rejects a fragment with wrong per-row shape.
-
-    The MaskFormer object sink declares object_masks as (M, T_file) = (5, 40).
-    Under a tracks `truncate: N` (N < 40) the sink's write() returns
-    object_masks with shape (B, M, N) — a mismatch the H5 write would silently
-    crash on with an h5py broadcast error. The shape guard must raise ConfigError
-    loudly instead, naming the group and explaining the cause.
-    """
+    """T2 — _extra_group_fragments rejects a fragment with wrong per-row shape."""
 
     _M = 5    # num objects
     _T = 40   # T_file (full file constituent width)
@@ -412,11 +342,7 @@ class TestObjectMasksShapeGuard:
         assert f"({self._M}, {T_model})" in msg, f"actual shape not in: {msg}"
 
     def test_shipped_maskformer_yaml_width_does_not_raise(self):
-        """The shipped MaskFormer.yaml case (T_model == T_file == 40) does NOT raise.
-
-        This is the critical non-regression: the guard must NOT fire on correctly
-        sized object_masks (the common case where truncate is not set).
-        """
+        """The shipped MaskFormer.yaml case (T_model == T_file == 40) does NOT raise."""
         B = 4
         sink = self._sink_and_node(arr_shape=(B, self._M, self._T))  # T_model == T_file
         bundle = Bundle()

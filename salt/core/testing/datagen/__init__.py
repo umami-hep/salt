@@ -7,8 +7,6 @@ Public API
 * ``compute_norm_dict(data, schema=None)``
 * ``compute_class_dict(data, schema=None, flags=None)``
 * ``load_schema(path)``
-
-See ``design/01_schema_spec.md`` for the binding specification.
 """
 
 from .engine import generate_data

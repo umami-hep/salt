@@ -1,29 +1,27 @@
-"""Shared `Reader`-base stream-assembly helpers (plan 24, Wave 2).
+"""Shared `Reader`-base stream-assembly helpers.
 
-This module folds the per-reader jagged pad / file-offset / dtype-sentinel code
-that the easyjet, ftag1lite, multisample and (potential) jagged-H5 readers each
-re-implemented into ONE shared base surface:
+Folds the per-reader jagged pad / file-offset / dtype-sentinel code that the
+easyjet, ftag1lite, and multisample readers each need into one shared surface:
 
-- `StreamConfig` — a per-stream description of the cut → sort → truncate → pad
-  pipeline (``pad_max``, ``sort``, ``cuts``, ``jagged``). Lives on the `Reader`
-  base so every reader speaks the same vocabulary.
-- `_cut_sort_truncate_pad` — the shared assembly: cut (per-constituent keep-mask,
-  **drop-then-pad**: a cut constituent is REMOVED before padding, never wasting a
-  ``pad_max`` slot) → sort (argsort by ``sort.var`` + permute ALL fields) →
-  truncate to the leading ``pad_max`` → pad + ``valid`` with dtype-aware sentinels
-  (float ``0.0``, signed-int label ``-1``, unsigned ``0``, bool ``False``).
-- `OffsetIndex` — cumulative row offsets across a deterministic file list plus the
-  covering-range mapping a contiguous global slice needs (the easyjet ``start``/``n``
-  table and the ftag1lite event→jet covering-event search, unified).
+- `StreamConfig` — a per-stream description of the cut -> sort -> truncate ->
+  pad pipeline (``pad_max``, ``sort``, ``cuts``, ``jagged``). Lives on the
+  `Reader` base so every reader speaks the same vocabulary.
+- `_cut_sort_truncate_pad` — the shared assembly: cut (per-constituent
+  keep-mask, drop-then-pad: a cut constituent is removed before padding,
+  never wasting a ``pad_max`` slot) -> sort (argsort by ``sort.var`` + permute
+  all fields) -> truncate to the leading ``pad_max`` -> pad + ``valid`` with
+  dtype-aware sentinels (float ``0.0``, signed-int label ``-1``, unsigned
+  ``0``, bool ``False``).
+- `OffsetIndex` — cumulative row offsets across a deterministic file list plus
+  the covering-range mapping a contiguous global slice needs.
 
-**HARD INVARIANT (plan 24 §6/§7, protects exp-08/12 parity).** With NO cuts and
-NO sort configured (the default), `_cut_sort_truncate_pad` produces a result that
-is byte-for-byte identical to the readers' pre-Wave-2 contiguous truncate+pad+valid
-path: ``valid`` is computed FIRST from the per-row counts, each field is truncated
-to the LEADING ``pad_max`` (``arr[:, :pad_max]``), padded with ``ak.pad_none`` +
-``ak.fill_none`` per dtype, cast to the schema dtype, and assembled into a
-structured ``(B, T)`` array with a trailing ``valid`` bool field. The cut/sort
-machinery is skipped entirely on the default path — it engages ONLY when a
+**Hard invariant.** With no cuts and no sort configured (the default),
+`_cut_sort_truncate_pad` produces a result that is byte-for-byte identical to
+the readers' contiguous truncate+pad+valid path: ``valid`` is computed first
+from the per-row counts, each field is truncated to the leading ``pad_max``,
+padded per dtype, cast to the schema dtype, and assembled into a structured
+``(B, T)`` array with a trailing ``valid`` bool field. The cut/sort machinery
+is skipped entirely on the default path — it engages only when a
 `StreamConfig` carries a non-empty ``cuts`` tuple or a ``sort`` spec.
 """
 
@@ -52,9 +50,9 @@ _SORT_MODES = ("ascending", "descending")
 
 @dataclass(frozen=True)
 class StreamConfig:
-    """Per-stream cut → sort → truncate → pad pipeline description (plan 24, Wave 2).
+    """Per-stream cut -> sort -> truncate -> pad pipeline description.
 
-    A `StreamConfig` is the shared vocabulary the `Reader` base uses to drive
+    The shared vocabulary the `Reader` base uses to drive
     `_cut_sort_truncate_pad`. The per-reader group configs (`GroupConfig`,
     `EasyjetGroupConfig`, `FTAG1LiteGroupConfig`) map onto it.
 
@@ -67,13 +65,13 @@ class StreamConfig:
     sort : Mapping[str, str] | None, optional
         Constituent sort spec ``{"var": <field>, "mode": "ascending"|"descending"}``.
         ``None`` (default) keeps the file order — the parity-preserving path. The
-        permutation is applied to EVERY field of the stream (and any aligned labels)
+        permutation is applied to every field of the stream (and any aligned labels)
         so a sort never desynchronises features from labels.
     cuts : tuple[Cut, ...], optional
-        Per-CONSTITUENT keep cuts (drop-then-pad). ``()`` (default) keeps every
-        constituent — the parity-preserving path. A constituent failing ANY cut is
-        REMOVED before padding (never wastes a ``pad_max`` slot, plan-24 R1.7).
-        Reuses `salt.core.data.cuts.Cut`.
+        Per-constituent keep cuts (drop-then-pad). ``()`` (default) keeps every
+        constituent — the parity-preserving path. A constituent failing any cut is
+        removed before padding (never wastes a ``pad_max`` slot). Reuses
+        `salt.core.data.cuts.Cut`.
     jagged : bool, optional
         Whether this is a variable-length sequence stream (padded to ``pad_max``
         with a ``valid`` field + pad mask). ``False`` is a scalar / global-object
@@ -122,17 +120,12 @@ class StreamConfig:
         The parity-protecting predicate: ``False`` means `_cut_sort_truncate_pad`
         runs the byte-identical contiguous truncate+pad+valid path; ``True`` means
         the drop-then-pad / sort machinery engages.
-
-        Returns
-        -------
-        bool
-            True if any cut or a sort spec is configured.
         """
         return bool(self.cuts) or self.sort is not None
 
 
 def pad_fill(dt: np.dtype | None, arr: Any = None) -> Any:
-    """The pad fill value for a field, by dtype kind (plan 24 / plan 19 sentinel rule).
+    """The pad fill value for a field, by dtype kind.
 
     float -> 0.0 (zeroed again after masking downstream); SIGNED int (labels) ->
     ``-1`` sentinel (never a real class; folded to ``ignore_index=-1``); unsigned
@@ -146,11 +139,6 @@ def pad_fill(dt: np.dtype | None, arr: Any = None) -> Any:
     arr : Any, optional
         An awkward array whose ``layout.content`` dtype kind is used when ``dt`` is
         ``None``.
-
-    Returns
-    -------
-    Any
-        The scalar fill value.
     """
     kind = dt.kind if dt is not None else np.asarray(arr.layout.content).dtype.kind
     if kind == "f":
@@ -170,30 +158,29 @@ def _cut_sort_truncate_pad(
     gschema: GroupSchema | None = None,
     labels: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Cut → sort → truncate → pad a jagged stream into a structured ``(B, T)`` array.
+    """Cut -> sort -> truncate -> pad a jagged stream into a structured ``(B, T)`` array.
 
-    The shared assembly factored out of the per-reader ``_assemble_jagged`` methods
-    (plan 24, Wave 2). The pipeline, in order:
+    The shared assembly factored out of the per-reader ``_assemble_jagged``
+    methods. The pipeline, in order:
 
     1. **cut (drop-then-pad).** When ``stream_cfg.cuts`` is non-empty, a
-       per-constituent keep mask is built (AND of every `Cut` evaluated against the
-       jagged columns) and applied to ALL fields + labels — a failing constituent is
-       REMOVED (not masked in place), so it never wastes a ``pad_max`` slot
-       (plan-24 R1.7). With no cuts this step is a no-op.
-    2. **sort.** When ``stream_cfg.sort`` is set, an argsort of the sort field per
-       row gives a permutation applied to EVERY field + label (so features and
-       labels stay aligned). With no sort the file order is kept.
-    3. **truncate.** Keep the LEADING ``pad_max`` constituents (``arr[:, :T]``) — the
-       same leading-keep the readers' ``truncate`` / ``pad_max`` did.
-    4. **pad + valid.** ``valid`` is computed FIRST from the post-cut/sort per-row
-       counts (clipped to ``T``); each field is ``ak.pad_none`` + ``ak.fill_none``
-       per dtype (`pad_fill`), densified, cast to the schema dtype, and assembled
-       into a structured ``(B, T)`` array with a trailing ``valid`` bool field.
+       per-constituent keep mask is built (AND of every `Cut` evaluated against
+       the jagged columns) and applied to all fields + labels — a failing
+       constituent is removed (not masked in place), so it never wastes a
+       ``pad_max`` slot. With no cuts this step is a no-op.
+    2. **sort.** When ``stream_cfg.sort`` is set, an argsort of the sort field
+       per row gives a permutation applied to every field + label (so features
+       and labels stay aligned). With no sort the file order is kept.
+    3. **truncate.** Keep the leading ``pad_max`` constituents (``arr[:, :T]``).
+    4. **pad + valid.** ``valid`` is computed first from the post-cut/sort
+       per-row counts (clipped to ``T``); each field is ``ak.pad_none`` +
+       ``ak.fill_none`` per dtype (`pad_fill`), densified, cast to the schema
+       dtype, and assembled into a structured ``(B, T)`` array with a trailing
+       ``valid`` bool field.
 
-    **PARITY.** With ``stream_cfg.engages_pipeline`` False (no cuts/sort — the
-    default) steps 1-2 are skipped and steps 3-4 reproduce the readers' previous
-    contiguous path byte-for-byte (``valid`` first, leading truncate, per-dtype
-    fill, schema-cast, structured assembly).
+    With ``stream_cfg.engages_pipeline`` False (no cuts/sort — the default)
+    steps 1-2 are skipped and steps 3-4 reproduce the readers' previous
+    contiguous path byte-for-byte.
 
     Parameters
     ----------
@@ -319,18 +306,19 @@ def _apply_cut_and_sort(
 
 @dataclass
 class OffsetIndex:
-    """Cumulative row offsets across a file list + covering-range mapping (plan 24, W2).
+    """Cumulative row offsets across a file list + covering-range mapping.
 
-    Factored from the readers' file-table offset bookkeeping: the easyjet/H5 simple
-    cumulative ``(start, n)`` table AND the ftag1lite event→jet covering search live
-    here as one helper.
+    Factored from the readers' file-table offset bookkeeping: the easyjet/H5
+    simple cumulative ``(start, n)`` table and the ftag1lite event->jet
+    covering search live here as one helper.
 
-    The simple flavour (``offsets`` only) maps a contiguous GLOBAL row slice to the
-    ``(file_index, local_start, local_stop)`` runs that cover it — the per-file
-    ``entry_start``/``entry_stop`` reads the easyjet reader stitches. The covering
-    flavour (a per-entry cumulative array) maps a contiguous slice over a FILTERED /
-    derived index back to a covering range over an underlying coarser index (the
-    ftag1lite kept-jet → covering-event search).
+    The simple flavour (``offsets`` only) maps a contiguous global row slice to
+    the ``(file_index, local_start, local_stop)`` runs that cover it — the
+    per-file ``entry_start``/``entry_stop`` reads the easyjet reader stitches.
+    The covering flavour (a per-entry cumulative array) maps a contiguous
+    slice over a filtered / derived index back to a covering range over an
+    underlying coarser index (the ftag1lite kept-jet -> covering-event
+    search).
 
     Parameters
     ----------
@@ -356,37 +344,21 @@ class OffsetIndex:
 
     @property
     def total(self) -> int:
-        """The total served row count = sum of per-file counts.
-
-        Returns
-        -------
-        int
-            The total.
-        """
+        """The total served row count = sum of per-file counts."""
         return self.offsets[-1]
 
     def file_starts(self) -> list[int]:
-        """The global start offset of each file (``offsets[:-1]``).
-
-        Returns
-        -------
-        list[int]
-            One global start per file.
-        """
+        """The global start offset of each file (``offsets[:-1]``)."""
         return self.offsets[:-1]
 
     def runs(self, rows: slice) -> list[tuple[int, int, int]]:
         """Decompose a global row slice into per-file ``(file_index, lo, hi)`` runs.
 
-        Each run is the local ``[lo, hi)`` row range within file ``file_index`` that
-        the global slice ``[rows.start, rows.stop)`` covers — exactly the
-        ``entry_start``/``entry_stop`` per-file reads a multi-file reader stitches.
-        Files with no overlap are skipped; the runs are returned in file order.
-
-        Parameters
-        ----------
-        rows : slice
-            A contiguous global row slice.
+        Each run is the local ``[lo, hi)`` row range within file ``file_index``
+        that the global slice ``[rows.start, rows.stop)`` covers — exactly the
+        ``entry_start``/``entry_stop`` per-file reads a multi-file reader
+        stitches. Files with no overlap are skipped; the runs are returned in
+        file order.
 
         Returns
         -------
@@ -409,11 +381,11 @@ class OffsetIndex:
         """Map a derived-index range ``[lo, hi)`` to a covering coarse range.
 
         Given a cumulative-count array ``cum`` (length ``n_coarse + 1``, where
-        ``cum[k]`` is the number of derived rows in the first ``k`` coarse units —
-        e.g. the per-event cumulative KEPT-jet counts), return the smallest coarse
-        range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus the offset
-        of ``lo`` within ``c0``'s first derived row. This is the ftag1lite kept-jet
-        → covering-event search, generalised.
+        ``cum[k]`` is the number of derived rows in the first ``k`` coarse units
+        — e.g. the per-event cumulative kept-jet counts), return the smallest
+        coarse range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus
+        the offset of ``lo`` within ``c0``'s first derived row. This is the
+        ftag1lite kept-jet -> covering-event search, generalised.
 
         Parameters
         ----------

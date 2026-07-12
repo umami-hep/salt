@@ -1,15 +1,12 @@
-"""Self-validating CONFIG->RECIPE integration test (CPU-only).
+"""CONFIG->RECIPE integration test (CPU-only): validates against the REAL config.
 
-This is the proof that closes the prior over-broad-coverage refutation: it does
-NOT trust a recipe-internal variable list. For every (salt config, recipe) pair
-in ``config_recipes.yaml`` it
-
-  1. generates the mapped recipe via the modular ``Pipeline`` -> ``H5Writer``,
-  2. parses the SALT CONFIG ITSELF (the real ``data:`` block: ``variables``,
-     ``input_map``, ``parameters``, ``global_object``, resolving base.yaml
-     inheritance) and the real per-task ``label`` declarations, and
-  3. constructs the REAL ``salt.data.SaltDataset`` with those exact
-     variables/labels/global_object/input_map and reads a slice.
+It does NOT trust a recipe-internal variable list. For every (salt config,
+recipe) pair in ``config_recipes.yaml`` it generates the mapped recipe via the
+modular ``Pipeline`` -> ``H5Writer``, parses the SALT CONFIG ITSELF (the real
+``data:`` block: ``variables``, ``input_map``, ``parameters``,
+``global_object``, resolving base.yaml inheritance) and the real per-task
+``label`` declarations, and constructs the REAL ``salt.data.SaltDataset`` with
+those exact variables/labels/global_object/input_map and reads a slice.
 
 ``SaltDataset.check_file`` KeyErrors if any declared variable/group is absent
 from the generated H5; ``process_labels`` KeyErrors if a declared label column is

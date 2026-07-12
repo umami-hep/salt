@@ -1,12 +1,4 @@
-"""Tests for the muP routing surface + tooling (`salt.core.mup`, plan 12 sub-wave B).
-
-Covers the ROUTING half (design §3.4 KEEP-architecture/BREAK-routing): the
-``SaltModule.mup`` validator + MuAdamW swap + shape application, and the
-command-line tooling (``salt2 mup-shapes`` / ``salt2 mup-coord-check`` /
-``setup_mup``). The gate MU2 (`gates_m6.run_mu2`) is the design-conformance
-gate; these tests pin the units directly. All data-free (the dummy config +
-the parity norm dict).
-"""
+"""Tests for the muP routing surface + tooling (`salt.core.mup`, plan 12 sub-wave B)."""
 
 from __future__ import annotations
 

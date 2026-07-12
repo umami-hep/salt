@@ -20,9 +20,7 @@ from salt.core.graph.planner import (
 )
 from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# ---------------------------------------------------------------------------
 # toy fixtures (no physics — M1 scope)
-# ---------------------------------------------------------------------------
 
 
 class Toy:
@@ -63,9 +61,7 @@ def chain_ab():
     return a, b
 
 
-# ---------------------------------------------------------------------------
 # basic topologies
-# ---------------------------------------------------------------------------
 
 
 class TestLinearChain:
@@ -120,9 +116,7 @@ class TestDisconnectedSubgraphs:
         assert plan.module_names == ("c", "d", "a", "b")
 
 
-# ---------------------------------------------------------------------------
 # connectivity errors (§4.1 quality bar)
-# ---------------------------------------------------------------------------
 
 
 class TestMissingProducer:
@@ -199,9 +193,7 @@ class TestDuplicateProducers:
         assert "'w2'" in msg
 
 
-# ---------------------------------------------------------------------------
 # kind typing (§2.2)
-# ---------------------------------------------------------------------------
 
 
 class TestKindChecking:
@@ -223,9 +215,7 @@ class TestKindChecking:
         assert plan.module_names == ("lab", "pool")
 
 
-# ---------------------------------------------------------------------------
 # symbolic-dim unification (§2.2)
-# ---------------------------------------------------------------------------
 
 
 class TestShapeUnification:
@@ -285,9 +275,7 @@ class TestShapeUnification:
             compile_plan(mods(a, b, c1, c2), Mode.FIT, {})
 
 
-# ---------------------------------------------------------------------------
 # cycles (§3.1)
-# ---------------------------------------------------------------------------
 
 
 class TestCycles:
@@ -316,9 +304,7 @@ class TestCycles:
             compile_plan(mods(a, b, c), Mode.FIT, {})
 
 
-# ---------------------------------------------------------------------------
 # optional ports (consumed-if-present, §2.2)
-# ---------------------------------------------------------------------------
 
 
 class TestOptionalPorts:
@@ -357,9 +343,7 @@ class TestOptionalPorts:
         assert set(plan.step("c").requires) == set()
 
 
-# ---------------------------------------------------------------------------
 # per-mode and demand pruning (§3.1)
-# ---------------------------------------------------------------------------
 
 
 class TestModePruning:
@@ -434,9 +418,7 @@ class TestAllModesDead:
             compile_plan(mods(a, b, noop), Mode.FIT, SRC_X)
 
 
-# ---------------------------------------------------------------------------
 # wildcard narrowing (§2.2 rules (a)-(d))
-# ---------------------------------------------------------------------------
 
 
 class TestWildcardNarrowing:
@@ -559,9 +541,7 @@ class TestWildcardNarrowing:
         assert set(plan.step("t1").requires) == {"labels.a", "labels.b"}
 
 
-# ---------------------------------------------------------------------------
 # determinism and plan hashing (§3.1)
-# ---------------------------------------------------------------------------
 
 
 class TestDeterminism:
@@ -661,9 +641,7 @@ class TestHashSensitivity:
         assert hash1 != hash2
 
 
-# ---------------------------------------------------------------------------
 # config validation
-# ---------------------------------------------------------------------------
 
 
 class TestConfigValidation:
@@ -701,9 +679,7 @@ class TestConfigValidation:
             compile_plan(mods(weird, consumer), Mode.FIT, SRC_X)
 
 
-# ---------------------------------------------------------------------------
 # dead-output analysis (§4.2)
-# ---------------------------------------------------------------------------
 
 
 class TestDeadcode:
@@ -796,9 +772,7 @@ class TestDeadcode:
         assert fit_finding.severity == "warning"
 
 
-# ---------------------------------------------------------------------------
 # plan immutability (frozen plan, design §3.1)
-# ---------------------------------------------------------------------------
 
 
 class TestPlanImmutability:

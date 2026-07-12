@@ -1,13 +1,8 @@
-"""Shipped dataset processors: `Features`, `Labels`, `MultiTarget`,
-`MaskFormerTargets` (design §6.2).
+"""Shipped dataset processors: `Features`, `Labels`, `MultiTarget`, `MaskFormerTargets`.
 
-Each replaces an if-branch of the v1 ``SaltDataset.__getitem__`` god-loop
-(``datasets.py:417-559``). `MultiTarget` (M5 sub-wave A3) ports v1's
-conditional target replacement (``datasets.py:237-248,648,695-739``).
-`MaskFormerTargets` (M5 sub-wave C) ports v1's object-target construction
-(``datasets.py:549-553,636-644``, FD 1090-1110). Further v1 branches
-(``Parameters``) land with their workloads (TODO(M6) per design §9.5) — the
-structure here is the template.
+Each replaces an if-branch of the v1 ``SaltDataset.__getitem__`` god-loop.
+`MultiTarget` ports v1's conditional target replacement; `MaskFormerTargets`
+ports v1's object-target construction.
 """
 
 from __future__ import annotations
@@ -29,8 +24,8 @@ from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, sym_dim, unflatt
 
 __all__ = ["Features", "FtagLabeller", "Labels", "MaskFormerTargets", "MultiTarget"]
 
-# v1 OPERATORS (datasets.py:29-36) — the conditional-replacement comparators,
-# applied to the selection label against the configured value.
+# v1 operators — the conditional-replacement comparators, applied to the
+# selection label against the configured value.
 _OPERATORS: dict[str, Callable[[Any, Any], Any]] = {
     "==": operator.eq,
     "!=": operator.ne,
@@ -42,29 +37,28 @@ _OPERATORS: dict[str, Callable[[Any, Any], Any]] = {
 
 
 class Features(Processor):
-    """``raw.* -> inputs.*`` float32 materialisation (design §6.2).
+    """``raw.* -> inputs.*`` float32 materialisation.
 
-    THE documented one-copy-per-batch aliasing boundary (design §2.4): the
+    THE documented one-copy-per-batch aliasing boundary: the
     ``structured_to_unstructured`` conversion is the mandatory copy that
     separates reusable reader buffers from anything handed to the trainer —
     enforced here with an explicit ``may_share_memory`` guard instead of
-    v1's implicit-and-undocumented reliance on ``s2u``+``maybe_copy``
-    (``datasets.py:511,515``, pain point in the data-pipeline map).
+    v1's implicit reliance on ``s2u``+``maybe_copy``.
 
     Column order = the configured list order — the ONE place column order is
-    defined (design §5.1); the produced specs carry ``fields`` metadata so
-    downstream column lookups resolve by name (design §2.2). v1 semantics
-    kept in order: ``s2u`` -> ``nan_to_num`` (optional) -> zero padded rows
-    via the pad mask -> finite check (``datasets.py:504-537``).
+    defined; the produced specs carry ``fields`` metadata so downstream
+    column lookups resolve by name. v1 semantics kept in order: ``s2u`` ->
+    ``nan_to_num`` (optional) -> zero padded rows via the pad mask -> finite
+    check.
 
     Parameters
     ----------
     variables : Mapping[str, Sequence[str]]
         Stream name -> ordered input variable list.
     non_finite_to_num : bool, optional
-        Convert NaN/inf to zero before masking (``datasets.py:513-514``).
+        Convert NaN/inf to zero before masking.
     ignore_finite_checks : bool, optional
-        Warn instead of raising on non-finite inputs (``datasets.py:527-537``).
+        Warn instead of raising on non-finite inputs.
 
     Raises
     ------
@@ -95,13 +89,8 @@ class Features(Processor):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<s> (+ optional masks.<s>) -> inputs.<s>`` per stream.
 
-        The mask require is optional: ``global_object`` streams have no mask
-        producer and the planner drops the port (design §2.2).
-
-        Returns
-        -------
-        IO
-            The declared interface.
+        The mask require is optional: ``global_object`` streams have no
+        mask producer and the planner drops the port.
         """
         del mode
         requires: dict[str, TensorSpec] = {}
@@ -125,25 +114,23 @@ class Features(Processor):
         Raises
         ------
         ValueError
-            On non-finite inputs (unless ``ignore_finite_checks``), exactly
-            as v1 (``datasets.py:535-537``).
+            On non-finite inputs (unless ``ignore_finite_checks``).
         """
         del rows, mode
         out: dict[str, np.ndarray] = {}
         for stream, names in self.variables.items():
             raw = batch.get(f"raw.{stream}")
-            # column order = config list order (structured multi-field
-            # indexing reorders, datasets.py:506-511)
+            # column order = config list order (structured multi-field indexing reorders)
             flat = s2u(raw[names], dtype=np.float32)
             if np.may_share_memory(flat, raw):
-                # the mandatory copy (contract #9): s2u may return a view for
-                # uniform layouts — never hand a buffer alias downstream
+                # the mandatory copy: s2u may return a view for uniform
+                # layouts — never hand a buffer alias downstream
                 flat = flat.copy()
             if self.non_finite_to_num:
                 flat = np.nan_to_num(flat, posinf=0, neginf=0)
             mask_key = f"masks.{stream}"
             if mask_key in batch:
-                flat[batch.get(mask_key)] = 0.0  # zero padded rows (datasets.py:524)
+                flat[batch.get(mask_key)] = 0.0  # zero padded rows
             if not np.isfinite(flat).all():
                 if self.ignore_finite_checks:
                     warnings.warn(
@@ -158,34 +145,34 @@ class Features(Processor):
 
 
 class Labels(Processor):
-    """Demand-driven label producer over ``labels.**`` (design §3.3, §6.2).
+    """Demand-driven label producer over ``labels.**``.
 
     Declares the wildcard pattern ``labels.**`` (framework producer); the
-    planner narrows it to the keys concretely demanded per mode and validates
-    every narrowed key against the dataset schema (design §2.2 rules (a)-(d))
-    — this keeps "tasks are the source of truth for which labels get loaded"
-    (``cli.py:337-392``) without the CLI mutation hook (design §6.5). The
-    narrowed key set is learned at bind time from the module's own plan step.
+    planner narrows it to the keys concretely demanded per mode and
+    validates every narrowed key against the dataset schema — this keeps
+    "tasks are the source of truth for which labels get loaded" without a
+    CLI mutation hook. The narrowed key set is learned at bind time from the
+    module's own plan step.
 
-    v1 dtype semantics kept (``datasets.py:629-634``): integer labels become
-    int64 (``dtype_policy: int64-for-int``), everything else keeps the file
+    v1 dtype semantics kept: integer labels become int64
+    (``dtype_policy: int64-for-int``), everything else keeps the file
     dtype; sentinel values (-1 padding, -2/-3 type codes) pass through
-    untouched. The v1 ``ftagTruthOriginLabel`` malformed-recovery becomes the
-    opt-in ``valid_ranges`` config with explicit ranges — no longer
-    heuristically triggered (``datasets.py:631-632, 779-836``; design §6.2).
+    untouched. The v1 ``ftagTruthOriginLabel`` malformed-recovery becomes
+    the opt-in ``valid_ranges`` config with explicit ranges — no longer
+    heuristically triggered.
 
     In a mode where no label is demanded the module narrows to nothing and
-    runs as a no-op (the kernel keeps wildcard producers with bound requires
-    alive as terminal consumers); it contributes no read fields, so no I/O
-    is wasted.
+    runs as a no-op (the kernel keeps wildcard producers with bound
+    requires alive as terminal consumers); it contributes no read fields,
+    so no I/O is wasted.
 
-    On-the-fly ftag relabelling is NOT this module's job (M8 sub-wave 1): the
-    ftag ``Labeller`` derived-label producer lives in the standalone
+    On-the-fly ftag relabelling is NOT this module's job: the ftag
+    ``Labeller`` derived-label producer lives in the standalone
     `FtagLabeller` processor, wired as its own ``data.modules`` key. Its
     concrete ``labels.<stream>.<label>`` produce beats this module's
-    ``labels.**`` wildcard (planner concrete-beats-wildcard rule), so `Labels`
-    serves every OTHER demanded label from disk and `FtagLabeller` owns the
-    relabelled one. `Labels` is pure disk-label extraction.
+    ``labels.**`` wildcard (planner concrete-beats-wildcard rule), so
+    `Labels` serves every OTHER demanded label from disk and `FtagLabeller`
+    owns the relabelled one. `Labels` is pure disk-label extraction.
 
     Parameters
     ----------
@@ -211,7 +198,7 @@ class Labels(Processor):
         On an unknown ``dtype_policy`` or malformed ``valid_ranges``.
     """
 
-    allow_wildcards: ClassVar[bool] = True  # framework wildcard capability (design §2.2)
+    allow_wildcards: ClassVar[bool] = True  # framework wildcard capability
 
     def __init__(
         self,
@@ -251,11 +238,6 @@ class Labels(Processor):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<s>`` requires plus the ``labels.**`` wildcard produce.
 
-        Returns
-        -------
-        IO
-            The declared interface.
-
         Raises
         ------
         ConfigError
@@ -274,11 +256,6 @@ class Labels(Processor):
 
     def _parse_targets(self, step: PlanStep) -> tuple[tuple[str, str, str], ...]:
         """Parse the narrowed produces into ``(key, stream, label)`` triples.
-
-        Returns
-        -------
-        tuple[tuple[str, str, str], ...]
-            One triple per narrowed ``labels.<stream>.<label>`` key.
 
         Raises
         ------
@@ -309,7 +286,7 @@ class Labels(Processor):
         self._targets = self._parse_targets(ctx.step)
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
-        """Demand exactly the narrowed label fields from the reader (design §6.1).
+        """Demand exactly the narrowed label fields from the reader.
 
         The demanded field IS the label name — each narrowed
         ``labels.<stream>.<label>`` maps to a ``raw.<stream>.<label>`` read.
@@ -339,7 +316,7 @@ class Labels(Processor):
         ------
         ValueError
             On out-of-range values for a ``valid_ranges`` label when
-            ``recover_malformed`` is off (v1 ``datasets.py:832-836``).
+            ``recover_malformed`` is off.
         """
         del rows, mode
         assert self._targets is not None, "Labels.process called before bind()"
@@ -363,7 +340,7 @@ class Labels(Processor):
                     )
                     values = np.where(bad, -1, values)
             if self.dtype_policy == "int64-for-int" and np.issubdtype(values.dtype, np.integer):
-                out[key] = values.astype(np.int64)  # always copies (datasets.py:633-634)
+                out[key] = values.astype(np.int64)  # always copies
             else:
                 out[key] = np.array(values, copy=True)  # keep file dtype (possibly f2)
         return out
@@ -372,75 +349,77 @@ class Labels(Processor):
 class FtagLabeller(Processor):
     """On-the-fly ftag flavour relabelling: ``raw.<stream> -> labels.<stream>.<label>``.
 
-    The standalone counterpart of v1's implicitly-triggered labeller (M8 sub-wave 1;
-    design §6.2, FD 1303-1304). v1 gated the ftag ``Labeller`` (NOT v1-salt —
-    ``ftag/labeller.py``) implicitly on ``input_name == global_object and
-    label == 'flavour_label'`` (``datasets.py:609-626``); v2 makes it an explicit,
-    pluggable `Processor` wired as its own ``data.modules`` key — a behaviour is
-    added by adding a module to YAML, not by flipping ``use_labeller=True`` on the
-    `Labels` monolith. The GN3X boosted-Higgs classes are NOT a precomputed
-    ``flavour_label`` column — they are derived from R10TruthLabel_R22v1 + the
-    ghost-hadron counts at read time.
+    The standalone counterpart of v1's implicitly-triggered labeller. v1
+    gated the ftag ``Labeller`` (NOT v1-salt — ``ftag/labeller.py``)
+    implicitly on ``input_name == global_object and label ==
+    'flavour_label'``; v2 makes it an explicit, pluggable `Processor` wired
+    as its own ``data.modules`` key — a behaviour is added by adding a
+    module to YAML, not by flipping ``use_labeller=True`` on the `Labels`
+    monolith. The GN3X boosted-Higgs classes are NOT a precomputed
+    ``flavour_label`` column — they are derived from R10TruthLabel_R22v1 +
+    the ghost-hadron counts at read time.
 
-    The derived label is produced CONCRETELY (``labels.<stream>.<label>``, never a
-    wildcard); a concrete produce beats the `Labels` ``labels.**`` wildcard via the
-    planner's concrete-beats-wildcard rule — the SAME mechanism ``MultiTarget.target``
-    relies on (planner rule (a)). Write-once is preserved: this module becomes the
-    SOLE producer of that key, and `Labels` no longer serves it.
+    The derived label is produced CONCRETELY (``labels.<stream>.<label>``,
+    never a wildcard); a concrete produce beats the `Labels` ``labels.**``
+    wildcard via the planner's concrete-beats-wildcard rule — the SAME
+    mechanism ``MultiTarget.target`` relies on. Write-once is preserved:
+    this module becomes the SOLE producer of that key, and `Labels` no
+    longer serves it.
 
-    The labeller's cut variables (``Labeller.variables``, deduped) are declared as
-    the read fields for the produced key (FD §6.1 1280-1282) so they enter the
-    per-mode demand-narrowed read set; the derived label field itself is NOT read
-    from disk (it has no on-disk producer). Derivation runs post-`Reader.read`,
-    pre-torch (FD §2.4): int -> int64 under ``dtype_policy``.
+    The labeller's cut variables (``Labeller.variables``, deduped) are
+    declared as the read fields for the produced key so they enter the
+    per-mode demand-narrowed read set; the derived label field itself is
+    NOT read from disk (it has no on-disk producer). Derivation runs
+    post-`Reader.read`, pre-torch: int -> int64 under ``dtype_policy``.
 
-    With ``require_labels: true`` (v1 GN3X) the labeller RAISES (ftag
-    ``labeller.py:70``) on any object that matches no class; with
-    ``require_labels: false`` (v1 GN2X_qcdsplit) unmatched objects are dropped
-    (``labeller.py:73``), so the derived label array may be SHORTER than the batch —
-    exactly v1's ``self.labeller.get_labels(batch)`` behaviour (``datasets.py:626``).
-    This is faithful v1 parity AT THE LABEL-DERIVATION LEVEL (LB1's scope): v1
-    likewise does NOT row-filter the inputs/other-label columns to the dropped
-    subset (``datasets.py`` ``process_labels`` has no such filter), so the v1 bundle
+    With ``require_labels: true`` (v1 GN3X) the labeller RAISES on any
+    object that matches no class; with ``require_labels: false`` (v1
+    GN2X_qcdsplit) unmatched objects are dropped, so the derived label
+    array may be SHORTER than the batch — exactly v1's
+    ``self.labeller.get_labels(batch)`` behaviour. This is faithful v1
+    parity AT THE LABEL-DERIVATION LEVEL: v1 likewise does NOT row-filter
+    the inputs/other-label columns to the dropped subset, so the v1 bundle
     is itself length-mismatched (inputs vs flavour_label) under
-    ``require_labels=False``. The full-batch length-coherence reconciliation is NOT
-    settled by this split (it is a deferred M7 data-path question, independent of
-    this extraction) — a data-bearing GN2X_qcdsplit forward/integration test must
-    decide whether to row-filter the whole bundle or to confirm v1's length-mismatch
-    is handled identically, and record it as a Key Decision.
+    ``require_labels=False``. The full-batch length-coherence
+    reconciliation is NOT settled by this split — a data-bearing
+    GN2X_qcdsplit forward/integration test must decide whether to
+    row-filter the whole bundle or to confirm v1's length-mismatch is
+    handled identically.
 
     Parameters
     ----------
     stream : str, optional
-        The stream the labeller relabels (v1's implicit ``global_object``; default
-        ``"jets"``). The labeller's cut variables are demanded from ``raw.<stream>``.
+        The stream the labeller relabels (v1's implicit ``global_object``;
+        default ``"jets"``). The labeller's cut variables are demanded from
+        ``raw.<stream>``.
     label : str, optional
-        The label key this module produces (v1's implicit ``"flavour_label"``;
-        default ``"flavour_label"``). Only ``labels.<stream>.<label>`` is derived;
-        every other label is read from the file by `Labels`.
+        The label key this module produces (v1's implicit
+        ``"flavour_label"``; default ``"flavour_label"``). Only
+        ``labels.<stream>.<label>`` is derived; every other label is read
+        from the file by `Labels`.
     class_names : Sequence[str] | None, optional
         Target ftag flavour class names, in label-index order (v1
-        ``LabellerConfig.class_names``; GN3X 9-class, GN2X_qcdsplit 7-class).
-        REQUIRED (the empty-class guard fires when empty).
+        ``LabellerConfig.class_names``; GN3X 9-class, GN2X_qcdsplit
+        7-class). REQUIRED (the empty-class guard fires when empty).
     require_labels : bool, optional
         Whether every object must be labelled (v1
-        ``LabellerConfig.require_labels``): True raises on an unlabelled object,
-        False drops it. By default True.
+        ``LabellerConfig.require_labels``): True raises on an unlabelled
+        object, False drops it. By default True.
     dtype_policy : Literal["int64-for-int", "file"], optional
-        ``int64-for-int`` (v1, default) casts integer labels to int64; ``file``
-        keeps the on-disk dtype.
+        ``int64-for-int`` (v1, default) casts integer labels to int64;
+        ``file`` keeps the on-disk dtype.
 
     Raises
     ------
     ConfigError
-        On an unknown ``dtype_policy``, or ``class_names`` empty (the empty-class
-        guard, v1 ``configs.py:189``). NOTE the deliberate exception-TYPE promotion:
-        v1's empty-class guard raises a bare ``ValueError`` (``configs.py:189``); v2
-        standardises structural config-validation failures on ``ConfigError`` (the
-        framework's named config-error type, NOT a ``ValueError`` subclass — see
-        ``graph/errors.py``), as every M1-M5 processor does. The other two labeller
-        guards (missing-field, require_labels-on-unlabelled) keep v1's ``ValueError``
-        (raised at ``process`` time, not construction).
+        On an unknown ``dtype_policy``, or ``class_names`` empty (the
+        empty-class guard). NOTE the deliberate exception-TYPE promotion:
+        v1's empty-class guard raises a bare ``ValueError``; v2
+        standardises structural config-validation failures on
+        ``ConfigError`` (the framework's named config-error type, NOT a
+        ``ValueError`` subclass), as every processor does. The other two
+        labeller guards (missing-field, require_labels-on-unlabelled) keep
+        v1's ``ValueError`` (raised at ``process`` time, not construction).
     """
 
     def __init__(
@@ -460,8 +439,8 @@ class FtagLabeller(Processor):
         self.label = str(label)
         self.dtype_policy = dtype_policy
         self.require_labels = bool(require_labels)
-        # mirror v1 LabellerConfig (configs.py:154-197): the empty-class guard
-        # (v1 configs.py:189) MUST fire when class_names is empty.
+        # mirror v1 LabellerConfig: the empty-class guard MUST fire when
+        # class_names is empty.
         if not class_names:
             raise ConfigError(
                 f"FtagLabeller module {self.name!r}: class_names is empty — specify the "
@@ -469,35 +448,25 @@ class FtagLabeller(Processor):
                 "configs.py:189)"
             )
         self.class_names = tuple(class_names)
-        # the ftag Labeller IS the parity reference (ftag/labeller.py); v1 builds it
-        # identically (Labeller(class_names, require_labels), datasets.py:205)
+        # the ftag Labeller IS the parity reference (ftag/labeller.py); v1
+        # builds it identically (Labeller(class_names, require_labels))
         self.labeller = Labeller(list(self.class_names), self.require_labels)
 
     def _labeller_variables(self) -> tuple[str, ...]:
         """The labeller's cut variables, de-duplicated, in first-seen order.
 
-        ``Labeller.variables`` (``labeller.py:45``) is a flat sum over the
-        per-class cut variables, so it carries duplicates — dedupe before
-        declaring them as read fields.
-
-        Returns
-        -------
-        tuple[str, ...]
-            The unique cut variables the labeller reads from the raw stream.
+        ``Labeller.variables`` is a flat sum over the per-class cut
+        variables, so it carries duplicates — dedupe before declaring them
+        as read fields.
         """
         return tuple(dict.fromkeys(self.labeller.variables))
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<stream>`` require -> CONCRETE ``labels.<stream>.<label>`` produce.
 
-        The produce is concrete (never a wildcard, never schema-narrowed) so it
-        beats the `Labels` ``labels.**`` wildcard via the planner's
+        The produce is concrete (never a wildcard, never schema-narrowed)
+        so it beats the `Labels` ``labels.**`` wildcard via the planner's
         concrete-beats-wildcard rule.
-
-        Returns
-        -------
-        IO
-            The declared interface.
         """
         del mode
         requires = {f"raw.{self.stream}": TensorSpec(kind="data")}
@@ -505,18 +474,12 @@ class FtagLabeller(Processor):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
-        """Demand the labeller's cut variables from ``raw.<stream>`` (design §6.1).
+        """Demand the labeller's cut variables from ``raw.<stream>``.
 
-        The derived label is NOT on disk (it has no on-disk producer), so instead
-        the labeller's cut variables (``Labeller.variables``, deduped) are demanded
-        from ``raw.<stream>`` — the explicit "declare the extra read fields" rule
-        (FD §6.1 1280-1282) that lets them enter the per-mode demand-narrowed read
-        set.
-
-        Returns
-        -------
-        dict[str, dict[str, str]]
-            ``{stream: {var: this module}}`` for every deduped labeller cut variable.
+        The derived label is NOT on disk (it has no on-disk producer), so
+        instead the labeller's cut variables (``Labeller.variables``,
+        deduped) are demanded from ``raw.<stream>`` so they enter the
+        per-mode demand-narrowed read set.
         """
         del step
         out: dict[str, dict[str, str]] = {}
@@ -527,27 +490,25 @@ class FtagLabeller(Processor):
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Derive the on-the-fly labeller labels from the raw structured array.
 
-        Mirrors v1 ``process_labels`` (``datasets.py:619-626``): the missing-field
-        guard (every ``Labeller.variables`` cut variable must be present,
-        ``datasets.py:622-624``) then ``Labeller.get_labels`` on the WHOLE structured
-        array, cast to int64 under ``dtype_policy``. The ``get_labels`` output is a
-        fresh array (``labeller.py:66-73``), so it never aliases the reader buffer.
+        Mirrors v1 ``process_labels``: the missing-field guard (every
+        ``Labeller.variables`` cut variable must be present) then
+        ``Labeller.get_labels`` on the WHOLE structured array, cast to
+        int64 under ``dtype_policy``. The ``get_labels`` output is a fresh
+        array, so it never aliases the reader buffer.
 
         Returns
         -------
         dict[str, np.ndarray]
-            ``{labels.<stream>.<label>: derived array}`` — int64 (or file dtype
-            under ``dtype_policy='file'``). With ``require_labels=False`` unmatched
-            objects are dropped, so the array may be shorter than the batch (ftag
-            ``labeller.py:73``; v1 parity).
+            ``{labels.<stream>.<label>: derived array}`` — int64 (or file
+            dtype under ``dtype_policy='file'``). With
+            ``require_labels=False`` unmatched objects are dropped, so the
+            array may be shorter than the batch (v1 parity).
 
         Raises
         ------
         ValueError
-            If a labeller cut variable is absent from the raw stream (the v1
-            field-subset check, ``datasets.py:622-624``), or — under
-            ``require_labels`` — if any object matches no class (ftag
-            ``labeller.py:70``).
+            If a labeller cut variable is absent from the raw stream, or —
+            under ``require_labels`` — if any object matches no class.
         """
         del rows, mode
         raw = batch.get(f"raw.{self.stream}")
@@ -559,8 +520,8 @@ class FtagLabeller(Processor):
                 f"stream {self.stream!r} — missing labeller variables {missing} (v1 field-subset "
                 "check, datasets.py:622-624)"
             )
-        # get_labels raises under require_labels on an unlabelled object
-        # (labeller.py:70) and otherwise drops it (labeller.py:73) — v1 parity.
+        # get_labels raises under require_labels on an unlabelled object and
+        # otherwise drops it — v1 parity.
         derived = self.labeller.get_labels(raw)
         if self.dtype_policy == "int64-for-int" and np.issubdtype(derived.dtype, np.integer):
             out = derived.astype(np.int64)
@@ -570,38 +531,37 @@ class FtagLabeller(Processor):
 
 
 class MultiTarget(Processor):
-    """Conditional row-wise target replacement (design §6.2; M5 sub-wave A3).
+    """Conditional row-wise target replacement.
 
-    Ports v1's ``multi_target`` feature (``datasets.py:237-248,648,695-739``):
-    for each configured rule, the per-row value of an output label is replaced
-    by a ``source`` label wherever a ``sel_label`` satisfies an operator
-    comparison against a literal ``value`` — ``np.where(op(sel, value), source,
-    running)`` (v1's ``torch.where``, ``datasets.py:733-739``). Two output modes,
-    exactly as v1 (``datasets.py:237-248``):
+    Ports v1's ``multi_target`` feature: for each configured rule, the
+    per-row value of an output label is replaced by a ``source`` label
+    wherever a ``sel_label`` satisfies an operator comparison against a
+    literal ``value`` — ``np.where(op(sel, value), source, running)`` (v1's
+    ``torch.where``). Two output modes, exactly as v1:
 
-    - ``target:`` — REPLACE an existing label. The base (pre-replacement) values
-      are read from the raw stream (the column the task would otherwise consume
-      directly), so this processor becomes the SOLE producer of
-      ``labels.<stream>.<target>`` (a concrete produce beats the `Labels`
-      wildcard, planner rule (a)) — write-once is preserved with no two-producer
-      conflict.
-    - ``custom_target:`` — CREATE a NEW label initialised to a NaN placeholder
-      (v1 ``inject_custom_target_placeholders``, ``datasets.py:648-693``), then
-      fill it where the condition holds.
+    - ``target:`` — REPLACE an existing label. The base (pre-replacement)
+      values are read from the raw stream (the column the task would
+      otherwise consume directly), so this processor becomes the SOLE
+      producer of ``labels.<stream>.<target>`` (a concrete produce beats
+      the `Labels` wildcard) — write-once is preserved with no
+      two-producer conflict.
+    - ``custom_target:`` — CREATE a NEW label initialised to a NaN
+      placeholder, then fill it where the condition holds.
 
-    Multiple rules MAY name the same output — they apply SEQUENTIALLY over a
-    running array, exactly as v1 mutates the labels dict in place
-    (``datasets.py:709-739``). The shipped ``regression_multi_target.yaml`` uses
-    this: two rules both write ``pt_label_handle`` (one ``ID==15``, one
-    ``ID!=15``). All rules for one output must agree on the mode (all
-    ``custom_target`` or all ``target``) — the base is established once (NaN
-    placeholder or the raw column) and each rule layers a ``np.where`` on top.
+    Multiple rules MAY name the same output — they apply SEQUENTIALLY over
+    a running array, exactly as v1 mutates the labels dict in place. The
+    shipped ``regression_multi_target.yaml`` uses this: two rules both
+    write ``pt_label_handle`` (one ``ID==15``, one ``ID!=15``). All rules
+    for one output must agree on the mode (all ``custom_target`` or all
+    ``target``) — the base is established once (NaN placeholder or the raw
+    column) and each rule layers a ``np.where`` on top.
 
     Each rule declares its own ``labels.<stream>.<sel_label>`` and
     ``labels.<stream>.<source>`` dependencies (produced by `Labels`, so the
     sel/source casting policy stays in ONE place). A ``sel_label``/``source``
-    may not be a MultiTarget output (no producer→producer chaining — v1 reads
-    sel/source from the file-loaded labels, never from a replaced target).
+    may not be a MultiTarget output (no producer->producer chaining — v1
+    reads sel/source from the file-loaded labels, never from a replaced
+    target).
 
     Parameters
     ----------
@@ -610,7 +570,7 @@ class MultiTarget(Processor):
 
         - ``stream`` (v1 ``input_name``) — the labelled stream;
         - ``sel_label`` — the selection label compared against ``value``;
-        - ``op`` — one of ``== != >= <= > <`` (v1 ``opp``, ``datasets.py:29-36``);
+        - ``op`` — one of ``== != >= <= > <``;
         - ``value`` — the literal compared against ``sel_label``;
         - ``source`` — the label whose value is written where the condition holds;
         - exactly one of ``target`` (replace existing) or ``custom_target``
@@ -658,16 +618,11 @@ class MultiTarget(Processor):
     def _checked_rule(rule: dict[str, Any]) -> dict[str, Any]:
         """Validate one replacement rule and normalise it to a flat dict.
 
-        Returns
-        -------
-        dict[str, Any]
-            ``{stream, sel_label, op, value, source, output, is_custom}``.
-
         Raises
         ------
         ConfigError
             On a missing field, unknown operator, or a both/neither
-            target/custom_target mistake (v1 datasets.py:237-248).
+            target/custom_target mistake.
         """
         has_target = "target" in rule and rule["target"] is not None
         has_custom = "custom_target" in rule and rule["custom_target"] is not None
@@ -706,15 +661,11 @@ class MultiTarget(Processor):
         """Declare ``labels.<s>.{sel,source}`` (+ raw target) -> ``labels.<s>.<out>``.
 
         ``target:`` outputs also require the raw target column (the
-        pre-replacement base values), declared via ``raw.<stream>`` fields so
-        the reader narrows to it; ``custom_target:`` outputs need no base column
-        (the placeholder is NaN). Every produced output is a TRAINING-gated
-        label leaf — the conditional targets feed only the loss.
-
-        Returns
-        -------
-        IO
-            The declared interface.
+        pre-replacement base values), declared via ``raw.<stream>`` fields
+        so the reader narrows to it; ``custom_target:`` outputs need no
+        base column (the placeholder is NaN). Every produced output is a
+        TRAINING-gated label leaf — the conditional targets feed only the
+        loss.
         """
         del mode
         requires: dict[str, TensorSpec] = {}
@@ -743,11 +694,11 @@ class MultiTarget(Processor):
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Apply each conditional replacement over a per-output running array.
 
-        ``np.where`` is the v1 ``torch.where`` (datasets.py:735-739): keep
-        ``source`` where ``op(sel, value)`` holds, else the running value. The
-        base is established once per output (raw target column, or a NaN
-        placeholder for ``custom_target``); rules layer in declaration order
-        (v1 in-place mutation, datasets.py:709-739).
+        ``np.where`` is the v1 ``torch.where``: keep ``source`` where
+        ``op(sel, value)`` holds, else the running value. The base is
+        established once per output (raw target column, or a NaN
+        placeholder for ``custom_target``); rules layer in declaration
+        order (v1 in-place mutation semantics).
 
         Returns
         -------
@@ -758,8 +709,8 @@ class MultiTarget(Processor):
         running: dict[tuple[str, str], np.ndarray] = {}
         for (stream, output), is_custom in self._outputs.items():
             if is_custom:
-                # v1 inject_custom_target_placeholders (datasets.py:686-690):
-                # a NaN-filled column shaped/typed like the first rule's source.
+                # v1 inject_custom_target_placeholders: a NaN-filled column
+                # shaped/typed like the first rule's source.
                 # DEVIATION from v1: v1 uses dtype=batch[source].dtype verbatim;
                 # v2 promotes any sub-float32 source (e.g. f2) to >=float32 via
                 # np.result_type so a NaN-filled regression placeholder always has
@@ -767,7 +718,7 @@ class MultiTarget(Processor):
                 # agree byte-for-byte (the only dtypes any shipped
                 # regression_multi_target.yaml source uses — HadronConeExclTruthLabelPt
                 # and pt are both f4); the divergence is reachable only with an f2
-                # source, which no shipped config has. R4 gates the f4 path bitwise.
+                # source, which no shipped config has.
                 src0 = next(
                     r["source"]
                     for r in self.rules
@@ -788,21 +739,18 @@ class MultiTarget(Processor):
         return {f"labels.{stream}.{output}": arr for (stream, output), arr in running.items()}
 
 
-# the v2 bundle stream name for the reconstructed objects (FD uses labels.objects.*,
-# independent of the file group name the raw object features live in, e.g. truth_hadrons)
+# the v2 bundle stream name for the reconstructed objects (independent of the
+# file group name the raw object features live in, e.g. truth_hadrons)
 _OBJECT_STREAM = "objects"
 
 
 @dataclass(frozen=True)
 class _ObjectCut:
-    """A single field-bound cut on MaskFormer truth objects (MFU-2 config surface).
+    """A single field-bound cut on MaskFormer truth objects: ``min <= batch[field] <= max``.
 
-    Lightweight v2 port of v1 ``salt.utils.configs.ObjectCut`` (configs.py) — a
-    keep-rule ``min <= batch[field] <= max``. It is CARRIED on the processor for
-    MFU-3 (object selection lands inside ``process()`` there); MFU-2 only parses
-    and validates it. Defined locally rather than importing the orphaned v1
-    dataclass (plan 39, Decision 5). NaN handling / PV exemption / drop semantics
-    are MFU-3 concerns and not encoded here.
+    Lightweight v2 port of v1 ``salt.utils.configs.ObjectCut``. Carried on
+    the processor for object selection (below); NaN handling / PV exemption
+    / drop semantics live in `MaskFormerTargets._select_objects`.
 
     Parameters
     ----------
@@ -816,7 +764,7 @@ class _ObjectCut:
     Raises
     ------
     ConfigError
-        When both ``min`` and ``max`` are ``None`` (v1 ObjectCut.__post_init__).
+        When both ``min`` and ``max`` are ``None``.
     """
 
     field: str
@@ -832,122 +780,125 @@ class _ObjectCut:
 
 
 class MaskFormerTargets(Processor):
-    """MaskFormer object targets: ``object_class`` + per-constituent ``masks`` (design §6.2).
+    """MaskFormer object targets: ``object_class`` + per-constituent ``masks``.
 
-    Ports the v1 object-target construction (``datasets.py:549-553,636-644``;
-    FD 1090-1110) into a single demand-gated processor. From the truth-object
-    group it produces, under the ``objects`` bundle stream:
+    Ports the v1 object-target construction into a single demand-gated
+    processor. From the truth-object group it produces, under the
+    ``objects`` bundle stream:
 
-    - ``labels.objects.object_class`` ``[B, M]`` int64 — the raw object class
-      label remapped through ``class_map`` (the v1 ``x[x == k] = v`` loop,
-      ``datasets.py:641-643``), with the **null class validated LAST** (FD 1108;
-      v1 ``MaskformerObjectConfig`` ``__post_init__``, configs.py:39-42).
-    - ``labels.objects.masks`` ``[B, M, T]`` bool — the per-object-by-constituent
-      truth mask: ``constituent_id == object_id`` (the v1 `build_target_masks`
-      equality, mask_utils.py:36-37) over the truncated constituent stream.
-    - ``labels.objects.<target>`` ``[B, M]`` float32 per ``regression_targets``
-      entry — the raw per-object regression labels the object-regression task
-      stacks + scales (v1 reads ``labels["objects"][target]``, task.py:458-460).
+    - ``labels.objects.object_class`` ``[B, M]`` int64 — the raw object
+      class label remapped through ``class_map`` (the v1 ``x[x == k] = v``
+      loop), with the **null class validated LAST** (v1
+      ``MaskformerObjectConfig`` ``__post_init__``).
+    - ``labels.objects.masks`` ``[B, M, T]`` bool — the per-object-by-
+      constituent truth mask: ``constituent_id == object_id`` (the v1
+      `build_target_masks` equality) over the truncated constituent stream.
+    - ``labels.objects.<target>`` ``[B, M]`` float32 per
+      ``regression_targets`` entry — the raw per-object regression labels
+      the object-regression task stacks + scales.
 
-    Two v1 IN-PLACE id mutations are eliminated (FD 1095, "NO in-place id
-    mutation"):
+    Two v1 IN-PLACE id mutations are eliminated:
 
-    - v1's class remap mutates the loaded tensor sequentially (``x[x == k] = v``,
-      ``datasets.py:642``) — order-dependent and silently corrupting whenever a
-      ``mapped`` value collides with a not-yet-visited ``raw`` value. v2 builds
-      the mapped column from the ORIGINAL raw values via a single vectorised
-      ``np.select`` against a copy, so the mapping is atomic and collision-proof.
+    - v1's class remap mutates the loaded tensor sequentially
+      (``x[x == k] = v``) — order-dependent and silently corrupting
+      whenever a ``mapped`` value collides with a not-yet-visited ``raw``
+      value. v2 builds the mapped column from the ORIGINAL raw values via a
+      single vectorised ``np.select`` against a copy, so the mapping is
+      atomic and collision-proof.
     - v1's `build_target_masks` mutates the object-id tensor in place
-      (``object_ids[object_ids == -1] = -999``, mask_utils.py:36) before the
-      equality, leaking a sentinel back into the caller's labels dict. v2
-      computes the equality on a private sentinel-substituted COPY, so the
+      (``object_ids[object_ids == -1] = -999``) before the equality,
+      leaking a sentinel back into the caller's labels dict. v2 computes
+      the equality on a private sentinel-substituted COPY, so the
       published ``object_class`` / id columns are never touched.
 
-    DEMAND-gated, not mode-gated (FD 1090-1095): all three product families are
-    declared in ALL modes; ordinary sink pruning removes the module from a plan
-    only when nothing demands its outputs. The `MaskFormerObjectWriter` demands
-    ``labels.objects.{object_class,masks}`` in TEST (truth columns), so this
-    module IS in the test plan — matching v1, where the object labels are built
-    stage-independently (``datasets.py:549``, ``process_labels`` has no stage
-    gate). It is pruned from ONNX (nothing demands truth there).
+    DEMAND-gated, not mode-gated: all three product families are declared
+    in ALL modes; ordinary sink pruning removes the module from a plan only
+    when nothing demands its outputs. The `MaskFormerObjectWriter` demands
+    ``labels.objects.{object_class,masks}`` in TEST (truth columns), so
+    this module IS in the test plan — matching v1, where the object labels
+    are built stage-independently. It is pruned from ONNX (nothing demands
+    truth there).
 
     Parameters
     ----------
     object_class : str
-        Object class label field in the object group (v1 ``object.class_label``;
-        e.g. ``flavour``). Remapped through ``class_map`` to ``object_class``.
+        Object class label field in the object group (v1
+        ``object.class_label``; e.g. ``flavour``). Remapped through
+        ``class_map`` to ``object_class``.
     object_id : str
-        Object identity field used to build masks (v1 ``object.id_label``; e.g.
-        ``barcode``).
+        Object identity field used to build masks (v1 ``object.id_label``;
+        e.g. ``barcode``).
     constituent_id : str
-        Constituent identity field tested against ``object_id`` to build masks
-        (v1 ``constituent.id_label``; e.g. ``ftagTruthParentBarcode``).
+        Constituent identity field tested against ``object_id`` to build
+        masks (v1 ``constituent.id_label``; e.g. ``ftagTruthParentBarcode``).
     class_map : Mapping[str, Mapping[str, Any]]
         ``{name: {raw: int | list[int], mapped: int, weight?: float}}`` (v1
-        ``object.object_classes``). MUST contain a ``null`` entry mapped LAST
-        (``mapped == len(class_map) - 1``), and the ``mapped`` values MUST be
-        exactly ``range(len(class_map))`` (v1 configs.py:39-42). jsonargparse may
-        parse the YAML ``null:`` key as a Python ``None`` — both spellings are
-        accepted, normalised to ``"null"``. ``raw`` may be a single int (the
-        common case) or a list/tuple of ints that all map to the same ``mapped``
-        index — a class *merge* (v1 ``class_map`` tuple keys). An optional scalar
-        ``weight`` per class feeds :attr:`object_weights` (v1, default ``1.0``).
+        ``object.object_classes``). MUST contain a ``null`` entry mapped
+        LAST (``mapped == len(class_map) - 1``), and the ``mapped`` values
+        MUST be exactly ``range(len(class_map))``. jsonargparse may parse
+        the YAML ``null:`` key as a Python ``None`` — both spellings are
+        accepted, normalised to ``"null"``. ``raw`` may be a single int
+        (the common case) or a list/tuple of ints that all map to the same
+        ``mapped`` index — a class *merge* (v1 ``class_map`` tuple keys).
+        An optional scalar ``weight`` per class feeds
+        :attr:`object_weights` (v1, default ``1.0``).
     object_stream : str
         File group holding the object features (v1 ``object.name``; e.g.
         ``truth_hadrons``). The reader serves it as ``raw.<object_stream>``.
     constituent_stream : str
-        File group holding the constituent features (v1 ``constituent.name``;
-        e.g. ``tracks``). The mask's last dim aligns with this stream's token
-        count.
+        File group holding the constituent features (v1
+        ``constituent.name``; e.g. ``tracks``). The mask's last dim aligns
+        with this stream's token count.
     regression_targets : Sequence[str] | None, optional
         Per-object regression label fields published under
-        ``labels.objects.<target>`` (v1 reads them via the object-regression
-        task's ``get_targets``), by default None (no regression labels).
+        ``labels.objects.<target>`` (v1 reads them via the
+        object-regression task's ``get_targets``), by default None (no
+        regression labels).
     num_objects : int | None, optional
         The number of object queries ``M`` (v1 ``num_objects``,
         MaskFormer.yaml:36). When set, the produced shapes carry it as a
-        concrete dim (a static check that the file's object count matches the
-        decoder's query bank); None leaves ``M`` symbolic. Doubles as the legacy
-        alias bridged to ``max_objects`` (see below).
+        concrete dim (a static check that the file's object count matches
+        the decoder's query bank); None leaves ``M`` symbolic. Doubles as
+        the legacy alias bridged to ``max_objects`` (see below).
     cuts : Sequence[_ObjectCut | Mapping[str, Any]] | None, optional
-        Per-jet field cuts for MFU-3 object selection (v1 ``object.cuts``).
-        STORED, not consumed in MFU-2 — ``process()`` data behaviour is unchanged.
+        Per-jet field cuts for object selection (v1 ``object.cuts``).
         dicts are coerced to :class:`_ObjectCut`. Default None.
     sort_by : str | None, optional
         Object-group field to sort survivors by before truncation (v1
-        ``object.sort_by``). STORED for MFU-3. Default None (file slot order).
+        ``object.sort_by``). Default None (file slot order).
     sort_descending : bool, optional
-        Sort direction for ``sort_by`` (v1 ``object.sort_descending``). STORED for
-        MFU-3. Default True.
+        Sort direction for ``sort_by`` (v1 ``object.sort_descending``).
+        Default True.
     pv_class : int | None, optional
-        Mapped class index identifying the primary vertex pinned at slot 0 (v1
-        ``object.pv_class``). STORED for MFU-3. Validated to a non-null mapped
-        index. ``None`` disables PV pinning. Default 0.
+        Mapped class index identifying the primary vertex pinned at slot 0
+        (v1 ``object.pv_class``). Validated to a non-null mapped index.
+        ``None`` disables PV pinning. Default 0.
     max_objects : int | None, optional
-        Max object slots retained per jet after MFU-3 selection (v1
-        ``object.max_objects``). STORED for MFU-3. ``None`` auto-links to
-        ``num_objects`` (the decoder query bank) via the legacy bridge.
+        Max object slots retained per jet after selection (v1
+        ``object.max_objects``). ``None`` auto-links to ``num_objects``
+        (the decoder query bank) via the legacy bridge.
     max_lxy_mm : float | None, optional
-        |Lxy| threshold (mm) above which a vertex is re-labelled to null in MFU-3
-        (v1 ``object.max_lxy_mm``). STORED for MFU-3. Default None (disabled).
+        |Lxy| threshold (mm) above which a vertex is re-labelled to null
+        (v1 ``object.max_lxy_mm``). Default None (disabled).
     lxy_field : str, optional
-        Name of the Lxy field used by ``max_lxy_mm`` (v1 ``object.lxy_field``).
-        STORED for MFU-3. Default ``"Lxy"``.
+        Name of the Lxy field used by ``max_lxy_mm`` (v1
+        ``object.lxy_field``). Default ``"Lxy"``.
 
     Attributes
     ----------
     object_weights : list[float]
-        Per-class loss weights ordered by mapped index, derived from each class's
-        optional ``weight`` (v1 ``object_weights``). Carried for the MFU-5 loss.
+        Per-class loss weights ordered by mapped index, derived from each
+        class's optional ``weight`` (v1 ``object_weights``).
 
     Raises
     ------
     ConfigError
-        On a missing ``null`` class, a null not mapped last, ``mapped`` values
-        that are not ``range(len(class_map))``, a raw value shared across mapped
-        indices, a non-scalar class weight, a duplicate regression target, a
-        non-positive ``num_objects`` / ``max_objects``, an out-of-range
-        ``pv_class``, or an ``_ObjectCut`` with neither min nor max.
+        On a missing ``null`` class, a null not mapped last, ``mapped``
+        values that are not ``range(len(class_map))``, a raw value shared
+        across mapped indices, a non-scalar class weight, a duplicate
+        regression target, a non-positive ``num_objects`` / ``max_objects``,
+        an out-of-range ``pv_class``, or an ``_ObjectCut`` with neither min
+        nor max.
     """
 
     def __init__(
@@ -976,8 +927,7 @@ class MaskFormerTargets(Processor):
         self.constituent_stream = str(constituent_stream)
         self._raw_to_mapped = self._checked_class_map(class_map)
         # per-class loss weights, ordered by mapped index (v1 derived property
-        # MaskformerObjectConfig.object_weights, configs.py). Carried for the MFU-5
-        # loss; unused in MFU-2/MFU-3. Defaults to 1.0 per class.
+        # MaskformerObjectConfig.object_weights). Defaults to 1.0 per class.
         self.object_weights: list[float] = self._class_weights(class_map)
         self.regression_targets: tuple[str, ...] = tuple(regression_targets or ())
         if len(set(self.regression_targets)) != len(self.regression_targets):
@@ -985,9 +935,9 @@ class MaskFormerTargets(Processor):
                 f"MaskFormerTargets: duplicate regression targets in {self.regression_targets}"
             )
 
-        # --- object-selection config surface (MFU-2: stored, NOT consumed) -------
-        # Generic per-jet field cuts. jsonargparse may hand dicts → coerce to
-        # _ObjectCut (v1 MaskformerObjectConfig.__post_init__ dict→ObjectCut).
+        # --- object-selection config surface -------------------------------
+        # Generic per-jet field cuts. jsonargparse may hand dicts -> coerce to
+        # _ObjectCut (v1 MaskformerObjectConfig.__post_init__ dict->ObjectCut).
         self.cuts: tuple[_ObjectCut, ...] = tuple(
             c if isinstance(c, _ObjectCut) else _ObjectCut(**dict(c)) for c in (cuts or ())
         )
@@ -996,29 +946,27 @@ class MaskFormerTargets(Processor):
         self.max_lxy_mm = max_lxy_mm
         self.lxy_field = str(lxy_field)
 
-        # MFU-3 IDENTITY GATE (plan 39, risk #1). Object selection — and crucially
-        # the pv_class PV-pin REORDER — runs ONLY when the user EXPLICITLY configured
-        # cuts / sort_by / max_objects. It MUST key on the PRE-bridge `max_objects`
-        # argument: the num_objects -> max_objects bridge below sets self.max_objects
-        # from the decoder query bank for EVERY MaskFormer config, so gating on
-        # self.max_objects would fire selection unconditionally and break byte-
-        # identity with MFU-2 (pv_class defaults to 0, so the PV-pin would silently
-        # reorder slot 0). Upstream's _needs_object_selection (datasets.py:562) gates
-        # on max_objects too, but upstream's CLI populates max_objects from the
-        # decoder so it always selects; v2 deliberately keeps the unconfigured path a
-        # no-op. max_lxy relabel is a SEPARATE gate (self.max_lxy_mm is not None).
+        # Object selection — and crucially the pv_class PV-pin REORDER — runs
+        # ONLY when the user EXPLICITLY configured cuts / sort_by / max_objects.
+        # It MUST key on the PRE-bridge `max_objects` argument: the
+        # num_objects -> max_objects bridge below sets self.max_objects from
+        # the decoder query bank for EVERY MaskFormer config, so gating on
+        # self.max_objects would fire selection unconditionally and break
+        # byte-identity (pv_class defaults to 0, so the PV-pin would silently
+        # reorder slot 0). max_lxy relabel is a SEPARATE gate
+        # (self.max_lxy_mm is not None).
         self._should_select: bool = (
             bool(self.cuts) or sort_by is not None or max_objects is not None
         )
 
-        # In v2 num_objects is the decoder query bank (the declared label M dim,
-        # set from mask_decoder.num_objects in convert.py) and max_objects is the
-        # MFU-3 selection truncation count. They MUST agree: declare_io produces
-        # object_class with M == num_objects while _select_objects truncates to
-        # max_objects, so a config that sets BOTH to different values would emit a
-        # [B, max_objects] array against a declared [B, num_objects] shape. The
-        # bridge below only equalises them when one is None, so guard the both-set
-        # case explicitly (v1 had a single alias, so this is newly reachable in v2).
+        # In v2 num_objects is the decoder query bank (the declared label M
+        # dim, set from mask_decoder.num_objects in convert.py) and
+        # max_objects is the selection truncation count. They MUST agree:
+        # declare_io produces object_class with M == num_objects while
+        # _select_objects truncates to max_objects, so a config that sets BOTH
+        # to different values would emit a [B, max_objects] array against a
+        # declared [B, num_objects] shape. The bridge below only equalises
+        # them when one is None, so guard the both-set case explicitly.
         if (
             num_objects is not None
             and max_objects is not None
@@ -1032,11 +980,9 @@ class MaskFormerTargets(Processor):
             )
 
         # legacy num_objects <-> max_objects bridge (v1 MaskformerObjectConfig
-        # __post_init__). In v2 num_objects is ALSO the decoder query bank (M, set
-        # from mask_decoder.num_objects in convert.py); this bridge therefore
-        # auto-links the MFU-3 truncation count (max_objects) to that query bank
-        # when the config leaves it unset — exactly v1's "max_objects auto-linked
-        # from model.mask_decoder.num_objects". max_objects wins when both are set.
+        # __post_init__): num_objects is ALSO the decoder query bank, so this
+        # auto-links the selection truncation count (max_objects) to it when
+        # the config leaves it unset. max_objects wins when both are set.
         if max_objects is None and num_objects is not None:
             max_objects = num_objects
         if num_objects is None and max_objects is not None:
@@ -1048,8 +994,8 @@ class MaskFormerTargets(Processor):
         self.num_objects = num_objects
         self.max_objects = max_objects
 
-        # PV class must be a valid non-null mapped index (v1 MaskformerObjectConfig
-        # __post_init__ pv_class validation, configs.py). null_index == n_non_null.
+        # PV class must be a valid non-null mapped index (v1
+        # MaskformerObjectConfig __post_init__). null_index == n_non_null.
         self.pv_class = pv_class
         if pv_class is not None:
             n_non_null = self.null_index
@@ -1059,12 +1005,11 @@ class MaskFormerTargets(Processor):
                     "(non-null mapped indices; v1 configs.py)"
                 )
 
-        # MFU-3 derived raw-id sets (mapped-index world -> raw-id world). PV raws:
-        # every raw whose mapped == pv_class (upstream pv_raw_values, configs.py:275)
-        # — these classes get pinned at slot 0, exempt from cuts/sorts. null raw: the
-        # raw whose mapped == null_index (upstream null_raw_value, configs.py:297) —
-        # the sentinel written to pad slots' class field so the np.select class-map
-        # maps them cleanly back to null_index.
+        # Derived raw-id sets (mapped-index world -> raw-id world). PV raws:
+        # every raw whose mapped == pv_class — these classes get pinned at
+        # slot 0, exempt from cuts/sorts. null raw: the raw whose mapped ==
+        # null_index — the sentinel written to pad slots' class field so the
+        # np.select class-map maps them cleanly back to null_index.
         self._pv_raw_values: tuple[int, ...] = (
             tuple(r for r, m in self._raw_to_mapped.items() if m == self.pv_class)
             if self.pv_class is not None
@@ -1078,31 +1023,28 @@ class MaskFormerTargets(Processor):
     def _checked_class_map(class_map: Mapping[str, Mapping[str, Any]]) -> dict[int, int]:
         """Validate the class map (null LAST, mapped == range) and return raw->mapped.
 
-        Reproduces the v1 ``MaskformerObjectConfig`` invariants (configs.py:36-42)
-        WITHOUT mutating the loaded ids: ``null`` present (``None`` or the string
-        ``"null"`` accepted, jsonargparse may cast the YAML ``null:`` key to
-        ``None``), null mapped LAST, and the ``mapped`` set exactly
+        Reproduces the v1 ``MaskformerObjectConfig`` invariants WITHOUT
+        mutating the loaded ids: ``null`` present (``None`` or the string
+        ``"null"`` accepted, jsonargparse may cast the YAML ``null:`` key
+        to ``None``), null mapped LAST, and the ``mapped`` set exactly
         ``range(len(class_map))``.
 
-        A class entry's ``raw`` may be a single int OR a list/tuple of ints that
-        all map to the SAME ``mapped`` index — a class *merge* (v1
-        ``MaskformerObjectConfig.class_map`` property, configs.py, which keys the
-        map by a tuple of raws). The returned flat ``{raw: mapped}`` dict expands
-        each merged raw to its shared mapped index, so ``process()``'s
-        ``np.select`` over the dict keys handles merges with NO logic change. A
-        single-int ``raw`` produces the IDENTICAL dict as before. Merged raw
-        values MUST be disjoint across classes (no raw maps to two mapped indices).
-
-        Returns
-        -------
-        dict[int, int]
-            ``{raw: mapped}`` for every class, one key per (expanded) raw value.
+        A class entry's ``raw`` may be a single int OR a list/tuple of ints
+        that all map to the SAME ``mapped`` index — a class *merge* (v1
+        ``MaskformerObjectConfig.class_map`` property, which keys the map
+        by a tuple of raws). The returned flat ``{raw: mapped}`` dict
+        expands each merged raw to its shared mapped index, so
+        ``process()``'s ``np.select`` over the dict keys handles merges
+        with NO logic change. A single-int ``raw`` produces the IDENTICAL
+        dict as before. Merged raw values MUST be disjoint across classes
+        (no raw maps to two mapped indices).
 
         Raises
         ------
         ConfigError
-            On a missing null, a null not mapped last, a malformed mapped set, an
-            empty raw list, or a raw value shared across two mapped indices.
+            On a missing null, a null not mapped last, a malformed mapped
+            set, an empty raw list, or a raw value shared across two
+            mapped indices.
         """
         if not class_map:
             raise ConfigError("MaskFormerTargets: class_map must not be empty (FD 1108)")
@@ -1163,16 +1105,11 @@ class MaskFormerTargets(Processor):
     def _class_weights(class_map: Mapping[str, Mapping[str, Any]]) -> list[float]:
         """Per-class loss weights ordered by mapped index (v1 object_weights).
 
-        Ports v1 ``MaskformerObjectConfig.object_weights`` (configs.py): each class
-        carries an optional scalar ``weight`` (default ``1.0``). v1 returns them in
-        dict-iteration order; v2 orders explicitly by ``mapped`` index so the list
-        index aligns with the class index the MFU-5 loss expects. Stored, not
-        consumed, in MFU-2.
-
-        Returns
-        -------
-        list[float]
-            One weight per class, index ``i`` == the weight of mapped class ``i``.
+        Ports v1 ``MaskformerObjectConfig.object_weights``: each class
+        carries an optional scalar ``weight`` (default ``1.0``). v1
+        returns them in dict-iteration order; v2 orders explicitly by
+        ``mapped`` index so the list index aligns with the class index the
+        loss expects.
 
         Raises
         ------
@@ -1197,12 +1134,8 @@ class MaskFormerTargets(Processor):
     def null_index(self) -> int:
         """The mapped index of the null/no-object class (== num_classes).
 
-        Returns
-        -------
-        int
-            ``max(mapped values)`` == ``num_classes - 1`` — the matcher's
-            ``num_classes`` sentinel. Uses the max mapped value (not the count of
-            raw keys) so it stays correct when classes merge multiple raws.
+        Uses the max mapped value (not the count of raw keys) so it stays
+        correct when classes merge multiple raws.
         """
         return max(self._raw_to_mapped.values())
 
@@ -1211,23 +1144,20 @@ class MaskFormerTargets(Processor):
 
         Requires the object class + id + regression fields from
         ``raw.<object_stream>`` and the constituent id from
-        ``raw.<constituent_stream>``; produces ``labels.objects.object_class``
-        ``[B, M]``, ``labels.objects.masks`` ``[B, M, T]`` and one
+        ``raw.<constituent_stream>``; produces
+        ``labels.objects.object_class`` ``[B, M]``,
+        ``labels.objects.masks`` ``[B, M, T]`` and one
         ``labels.objects.<target>`` ``[B, M]`` per regression target. Every
-        product is declared in ALL modes — the gate is DEMAND, not mode (FD
-        1090-1095); the planner prunes the module from a plan that demands none.
-
-        Returns
-        -------
-        IO
-            The declared interface.
+        product is declared in ALL modes — the gate is DEMAND, not mode;
+        the planner prunes the module from a plan that demands none.
         """
         del mode
-        # base fields always read (MFU-2). When selection is active, the cut/sort
-        # fields must also be read so _select_objects can evaluate them; when the
-        # Lxy relabel is active, lxy_field too. Both are added ONLY under their gate,
-        # so the unconfigured path declares the IDENTICAL requires as MFU-2 (byte-
-        # identity). dict.fromkeys dedupes while preserving first-seen order.
+        # base fields always read. When selection is active, the cut/sort
+        # fields must also be read so _select_objects can evaluate them; when
+        # the Lxy relabel is active, lxy_field too. Both are added ONLY under
+        # their gate, so the unconfigured path declares the IDENTICAL
+        # requires as the no-selection case (byte-identity). dict.fromkeys
+        # dedupes while preserving first-seen order.
         obj_field_list = [self.object_class, self.object_id, *self.regression_targets]
         if self._should_select:
             obj_field_list += [c.field for c in self.cuts]
@@ -1261,32 +1191,33 @@ class MaskFormerTargets(Processor):
     def _select_objects(self, obj: np.ndarray) -> np.ndarray:
         """Per-jet cuts -> PV-pin -> sort -> truncate (faithful port of v1 _select_objects).
 
-        Ports ``salt/data/datasets.py::_select_objects`` (upstream 39-165) into the
-        mapped-index world. Four per-jet phases:
+        Four per-jet phases:
 
         1. **CUTS** — drop vertices failing any :class:`_ObjectCut`
-           (``min <= field <= max``); NaN (float) FAILS the cut (strict); AND across
-           cuts. PV is exempt.
-        2. **PV-PIN** — vertices whose raw class is in :attr:`_pv_raw_values` (raws
-           mapping to ``pv_class``) go to slot 0 in input order, EXEMPT from
-           cuts/sorts.
+           (``min <= field <= max``); NaN (float) FAILS the cut (strict);
+           AND across cuts. PV is exempt.
+        2. **PV-PIN** — vertices whose raw class is in
+           :attr:`_pv_raw_values` (raws mapping to ``pv_class``) go to slot
+           0 in input order, EXEMPT from cuts/sorts.
         3. **SORT** — surviving non-PV vertices sorted by :attr:`sort_by`
-           (``np.argsort`` ``kind="stable"``; reversed if :attr:`sort_descending`).
+           (``np.argsort`` ``kind="stable"``; reversed if
+           :attr:`sort_descending`).
         4. **TRUNCATE** — keep ``concat([pv, non_pv])[:n_out]``,
            ``n_out = max_objects``.
 
-        **Pad convention (risk #2).** The production v2 reader appends an
-        authoritative ``valid`` bool field to every assembled stream
-        (``stream.py:251-255``), keyed exactly as upstream's ``valid``; it is used
-        directly when present (upstream-faithful). The hand-built unit fixtures omit
-        ``valid``, so the code falls back to the v2 pad sentinel: signed-int label
-        fields — INCLUDING ``object_id`` — are padded with ``INT_PAD_SENTINEL = -1``
-        (``stream.py``), so ``object_id == -1`` <=> ``~valid``. Either source feeds
-        cut-candidate masking and the PV partition uniformly. A NEW ``[B, n_out]``
-        structured array is built (pad slots default to 0/False), then pad slots are
-        sentinel-filled: ``id -> -1`` (so ``build_target_masks`` treats them as
-        invalid) and the class field ``-> _null_raw_value`` (so the np.select
-        class-map maps them to ``null_index``).
+        **Pad convention.** The production v2 reader appends an
+        authoritative ``valid`` bool field to every assembled stream, keyed
+        exactly as upstream's ``valid``; it is used directly when present.
+        The hand-built unit fixtures omit ``valid``, so the code falls back
+        to the v2 pad sentinel: signed-int label fields — INCLUDING
+        ``object_id`` — are padded with ``INT_PAD_SENTINEL = -1``, so
+        ``object_id == -1`` <=> ``~valid``. Either source feeds
+        cut-candidate masking and the PV partition uniformly. A NEW
+        ``[B, n_out]`` structured array is built (pad slots default to
+        0/False), then pad slots are sentinel-filled: ``id -> -1`` (so
+        ``build_target_masks`` treats them as invalid) and the class field
+        ``-> _null_raw_value`` (so the np.select class-map maps them to
+        ``null_index``).
 
         Parameters
         ----------
@@ -1296,20 +1227,21 @@ class MaskFormerTargets(Processor):
         Returns
         -------
         np.ndarray
-            A NEW structured ``[B, n_out]`` array of the same dtype, with all fields
-            permuted/truncated in lockstep and pad slots sentinel-filled.
+            A NEW structured ``[B, n_out]`` array of the same dtype, with
+            all fields permuted/truncated in lockstep and pad slots
+            sentinel-filled.
 
         Raises
         ------
         SchemaError
-            If a configured cut/sort field (or the class field needed for PV) is
-            absent from the object dtype.
+            If a configured cut/sort field (or the class field needed for
+            PV) is absent from the object dtype.
         """
         n_jets, n_in = obj.shape
         n_out = self.max_objects if self.max_objects is not None else n_in
 
-        # required fields must be present in the structured dtype (declare_io adds
-        # them to the read set; this guards a schema-less / mis-wired read).
+        # required fields must be present in the structured dtype (declare_io
+        # adds them to the read set; this guards a schema-less / mis-wired read).
         needed: set[str] = {c.field for c in self.cuts}
         if self.sort_by is not None:
             needed.add(self.sort_by)
@@ -1324,11 +1256,11 @@ class MaskFormerTargets(Processor):
             )
 
         # candidate (non-pad) slots. The production v2 reader appends an
-        # authoritative `valid` bool field to every assembled stream
-        # (stream.py:251-255), keyed exactly as upstream's `valid`; prefer it so a
-        # legitimate object with object_id == -1 is NOT silently dropped. The
-        # hand-built unit fixtures omit `valid`, so fall back to the v2 pad sentinel
-        # object_id == -1 (INT_PAD_SENTINEL, stream.py) == ~valid.
+        # authoritative `valid` bool field to every assembled stream, keyed
+        # exactly as upstream's `valid`; prefer it so a legitimate object
+        # with object_id == -1 is NOT silently dropped. The hand-built unit
+        # fixtures omit `valid`, so fall back to the v2 pad sentinel
+        # object_id == -1 (INT_PAD_SENTINEL) == ~valid.
         if "valid" in (obj.dtype.names or ()):
             valid = np.asarray(obj["valid"]).astype(bool)
         else:
@@ -1347,8 +1279,8 @@ class MaskFormerTargets(Processor):
                 ok &= vals <= cut.max
             keep &= ok
 
-        # PV identification (vectorised). PV is pinned at slot 0 and exempt from
-        # cuts/sorts. Restricted to non-pad slots.
+        # PV identification (vectorised). PV is pinned at slot 0 and exempt
+        # from cuts/sorts. Restricted to non-pad slots.
         if self._pv_raw_values:
             pv_mask = np.isin(np.asarray(obj[self.object_class]), self._pv_raw_values) & valid
         else:
@@ -1382,11 +1314,11 @@ class MaskFormerTargets(Processor):
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Build the object class, the truth masks, and the raw regression labels.
 
-        ``object_class`` is mapped from the ORIGINAL raw values via a single
-        vectorised ``np.select`` (no sequential in-place remap); ``masks`` is the
-        ``constituent_id == object_id`` broadcast over a private sentinel-
-        substituted COPY of the ids (no in-place id mutation). Regression labels
-        are copied out verbatim as float32.
+        ``object_class`` is mapped from the ORIGINAL raw values via a
+        single vectorised ``np.select`` (no sequential in-place remap);
+        ``masks`` is the ``constituent_id == object_id`` broadcast over a
+        private sentinel-substituted COPY of the ids (no in-place id
+        mutation). Regression labels are copied out verbatim as float32.
 
         Returns
         -------
@@ -1400,28 +1332,30 @@ class MaskFormerTargets(Processor):
         con = batch.get(f"raw.{self.constituent_stream}")
         out: dict[str, np.ndarray] = {}
 
-        # MFU-3 object selection (cuts -> PV-pin -> sort -> truncate). GATED: only
-        # when the user explicitly configured cuts/sort_by/max_objects. When OFF,
-        # `obj` is the raw stream untouched -> the blocks below are byte-identical to
-        # MFU-2. The selection rebuilds a NEW [B, n_out] structured array so EVERY
-        # field (class, id, regression, lxy) is permuted/truncated IN LOCKSTEP.
+        # Object selection (cuts -> PV-pin -> sort -> truncate). GATED: only
+        # when the user explicitly configured cuts/sort_by/max_objects. When
+        # OFF, `obj` is the raw stream untouched -> the blocks below are
+        # byte-identical to the no-selection case. The selection rebuilds a
+        # NEW [B, n_out] structured array so EVERY field (class, id,
+        # regression, lxy) is permuted/truncated IN LOCKSTEP.
         if self._should_select:
             obj = self._select_objects(obj)
 
         # object_class: map raw -> mapped from the ORIGINAL values (atomic, no
         # sequential x[x==k]=v mutation; v1 datasets.py:641-643). Unmapped raw
-        # values fall through to the null index (v1 reads only configured classes,
-        # and any object whose raw class is not in the map is a no-object slot).
+        # values fall through to the null index (v1 reads only configured
+        # classes, and any object whose raw class is not in the map is a
+        # no-object slot).
         raw_class = np.asarray(obj[self.object_class])
         conds = [raw_class == raw for raw in self._raw_to_mapped]
         choices = [self._raw_to_mapped[raw] for raw in self._raw_to_mapped]
         object_class = np.select(conds, choices, default=self.null_index).astype(np.int64)
 
-        # MFU-3 Lxy relabel (SEPARATE gate, self.max_lxy_mm is not None; v1
-        # datasets.py:814-820). AFTER the class-map: vertices with |Lxy| > max_lxy_mm
-        # cannot be reconstructed by the tracker -> re-label to null. NaN-safe:
-        # np.abs(nan) > thr is always False, so null/pad slots (NaN or 0 Lxy) are
-        # never accidentally relabelled.
+        # Lxy relabel (SEPARATE gate, self.max_lxy_mm is not None; v1
+        # datasets.py:814-820). AFTER the class-map: vertices with
+        # |Lxy| > max_lxy_mm cannot be reconstructed by the tracker -> re-label
+        # to null. NaN-safe: np.abs(nan) > thr is always False, so null/pad
+        # slots (NaN or 0 Lxy) are never accidentally relabelled.
         if self.max_lxy_mm is not None:
             lxy = np.asarray(obj[self.lxy_field])
             object_class[np.abs(lxy) > self.max_lxy_mm] = self.null_index
@@ -1429,9 +1363,9 @@ class MaskFormerTargets(Processor):
 
         # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T]. v1
         # build_target_masks substitutes -1 ids with -999 IN PLACE before the
-        # equality (mask_utils.py:36); we do it on a private COPY so the published
-        # object_class / ids are untouched. The substitution makes invalid (-1)
-        # objects never match a constituent (constituent ids are non-negative).
+        # equality; we do it on a private COPY so the published object_class /
+        # ids are untouched. The substitution makes invalid (-1) objects never
+        # match a constituent (constituent ids are non-negative).
         object_ids = np.array(obj[self.object_id], copy=True)
         object_ids[object_ids == -1] = -999
         constituent_ids = np.asarray(con[self.constituent_id])

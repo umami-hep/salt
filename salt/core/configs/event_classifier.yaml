@@ -1,40 +1,8 @@
-# event_classifier.yaml — the HH ggF-vs-VBF event classifier + truth-mHH
-# regression in the v2 schema (M5-CONV, event-level family). The v2-native
-# MIGRATED fixture for the legacy top-level salt/configs/event_classifier.yaml.
-#
-# An EVENT-level model: the per-event reconstructed objects (`objects` — jets,
-# leptons, ...) are embedded (init_nets, attach_global:false in v1 since the
-# global object is `events`), run through a `TransformerEncoder` (v1
-# event_classifier.yaml:22-36), globally attention-pooled, and fed to TWO heads
-# on the `events` global stream:
-#
-#   - events_classification : ggF-vs-VBF 2-class flavour head (signalType label)
-#   - mHH_regression        : truth-mHH ratio regression (truthMHH / mHH)
-#
-# THE M5 HEADLINE FEATURE — TEST de-scaling from a NON-feature label (design
-# §3.3 fallback; matrix event_classifier row). The ratio denominator `mHH` is
-# NOT a declared input Feature (the events stream carries [mBB] only,
-# event_classifier.yaml:82-83), so:
-#   - FIT|VAL : the head trains in ratio space (truthMHH / labels.events.mHH).
-#   - TEST    : `run_inference` de-scales by reading labels.events.mHH (v1
-#               get_h5 reads labels[input_name][denom], task.py:587-589) — the
-#               §3.3 non-feature fallback this config is the canonical example of.
-#   - ONNX    : a ratio denominator MUST be a declared input Feature (the export
-#               graph has no label source; to_onnx.py:381-398). `mHH` is NOT a
-#               feature here, so this head has NO ONNX export representation — v1
-#               likewise never exported event_classifier to ONNX (it is an
-#               event-level analysis model, not an Athena tagger). The config is
-#               therefore validated fit + test ONLY; there is no `export:` block
-#               (no Athena model_name, no positional inputs) — `salt2 graph
-#               validate --mode onnx` would have nothing to trace and the
-#               non-feature denominator would (correctly) fail an onnx bind.
-#
-# NO machine paths committed (design §5 placeholder policy). Static validation
-# (no data) FROM THE REPO ROOT (use `python -m salt.core.main`):
-#   python -m salt.core.main graph validate --mode fit -c salt/core/configs/event_classifier.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
-#   python -m salt.core.main graph validate --mode test -c salt/core/configs/event_classifier.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# HH ggF-vs-VBF event classifier + truth-mHH regression. Event-level model:
+# per-event reconstructed objects are embedded, encoded, pooled, and fed to
+# two heads on the `events` global stream. No ONNX export — the mHH_regression
+# ratio denominator (mHH) is not a declared input Feature, only a label, so it
+# has no export-time source (fit/test only).
 
 name: event_classifier
 
@@ -46,17 +14,14 @@ data:
       class_path: salt.core.data.H5StructuredReader
       init_args:
         groups:
-          # the global object is `events` (v1 global_object: events); the
-          # reconstructed `objects` are the constituent sequence (v1 input_map:
-          # events -> event_vars, objects -> objects_vars)
           events: {global_object: true, dataset: event_vars}
           objects: {global_object: false, dataset: objects_vars}
     features:
       class_path: salt.core.data.Features
       init_args:
         variables:
-          # NB: `mHH` is deliberately NOT here — it is the ratio denominator the
-          # mHH_regression head sources from labels.events.mHH in TEST (§3.3)
+          # mHH is deliberately absent — mHH_regression sources it from
+          # labels.events.mHH in TEST instead (see header).
           events: [mBB]
           objects: [type, pt, eta, phi, mass, btag, tauId]
     labels:
@@ -66,35 +31,31 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
     lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [events, objects]
           global_object: events
       object_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: objects # requires normed.objects
-          # v1 attach_global: false -> NO global context attached (the global
-          # object is `events`, which is the regression/classification stream,
-          # not a context for the object embedding; event_classifier.yaml:16)
+          stream: objects
           out_dim: &embed_dim 64
           dense: {hidden_layers: [256, 128, 64], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask
+        class_path: salt.core.nn.Concat
         init_args: {streams: [objects]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
-          num_layers: 6 # v1 event_classifier.yaml:25
-          attention: {num_heads: 4, attn_type: torch-math} # flash-varlen: M6
+          num_layers: 6
+          attention: {num_heads: 4, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
@@ -105,7 +66,7 @@ model:
           stream: events
           input: pooled.global
           label: signalType
-          class_names: [ggF, VBF] # v1 event_classifier.yaml:51
+          class_names: [ggF, VBF]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
       mHH_regression:
         class_path: salt.core.nn.tasks.RegressionTaskModule
@@ -113,40 +74,20 @@ model:
           stream: events
           input: pooled.global
           targets: truthMHH
-          # the §3.3 fallback denominator: mHH is NOT an input Feature, so TEST
-          # de-scaling reads labels.events.mHH (v1 task.py:587-589)
-          target_denominators: mHH
-          # v1 MSELoss reduction:none (event_classifier.yaml:67-68)
+          target_denominators: mHH # label, not a Feature — see header
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4b: the plan-29/31 conversion PRODUCER nodes (events_probs ClassProbs
-# + mHH_reg_out Regression) are RETIRED — the softmax / regression de-scale folds
-# back ONTO each task via get_output (W34.1/W34.3), orchestrated by the RunTaskOutput
-# writer below. The dumb H5OutputSink dumps ALL active outputs.* leaves; the SECTION
-# supplies names + dtypes + ORDER (events_classification probs then mHH_regression).
-# The mHH ratio denominator is a LABEL (not an input Feature) so TEST de-scaling
-# reads labels.events.mHH (v1 task.py:587-589); event_classifier has NO ONNX export.
-# Both heads are on the GLOBAL `events` stream (no sequence-stream task), so the
-# section has NO PadMaskWriter.
-# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [events]} # all events source fields (v1 default), copy_inputs={events: []} parity
+    init_args: {streams: [events]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [events_classification, mHH_regression]}
 
-# The DUMB H5OutputSink (plan 34 W34.4b): no init args — it dumps ALL active
-# outputs.* leaves, names/dtypes/order from the bound outputs: section manifest.
-#
-# NO export: block + NO OnnxExportSink — event_classifier is an event-level analysis
-# model with a NON-feature ratio denominator (mHH), so it has no ONNX/Athena export
-# representation (see the §3.3 ONNX note in the header). Validated fit + test only.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink

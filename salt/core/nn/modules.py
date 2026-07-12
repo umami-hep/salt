@@ -1,40 +1,9 @@
-"""Standalone, config-constructed GraphModules for the GN2v2 surface (design §5.1, §9.2).
-
-M2 porting policy (plan 05): these modules are constructed from plain config
-kwargs — no live v1 instances, no ``input_size`` arithmetic in YAML — but may
-COMPOSE fresh v1 layer classes internally where that is faithful (full code
-absorption is M7). What is new here is the lifecycle (design §2.3):
-
-``__init__`` captures config only; ``declare_io`` is static; ``bind(schema)``
-builds width-dependent layers from the `ResolvedSchema`; ``materialise()`` is
-the only place file I/O happens (Normaliser values). Forward passes read
-declared bundle keys and return ONLY newly produced keys — bundle values are
-never mutated (write-once, design §2.1; the executor's debug mode enforces
-it).
-
-Key vocabulary follows design §5.1: ``inputs.<stream>`` -> ``normed.<stream>``
--> ``embed.<stream>`` -> ``seq.x``/``seq.mask``/``seq.layout`` ->
-``encoded.seq`` (+ ``masks.registers``) -> ``encoded.<stream>`` (`Split`) /
-``pooled.global``; task modules live in `salt.core.nn.tasks`.
-
-Documented M2 deviations from design §5.1 (both honest, both encoder-driven):
-
-- **Registers stay inside `TransformerEncoder`** (its composed v1
-  `Transformer` appends them, transformer.py:679-681, and *requires*
-  ``num_registers >= 1``). `Concat` accepts the design's ``registers:`` arg
-  but rejects nonzero values until M7 absorbs the encoder.
-- **`Normaliser` takes an explicit ``streams:`` list** instead of
-  demand-driven ``normed.*`` narrowing: the M1 kernel supports wildcard
-  *produces* for framework modules, but the matching ``inputs.<s>``
-  *requires* cannot be narrowed (planner.py rejects wildcard requires).
-  TODO(M3+): demand-driven narrowing once the kernel grows consumer-side
-  framework wildcards (same gap as `LossSum.collect_loss_keys`).
-
-Symbolic-dim convention: token-count dims are stream-scoped and shared
-(``"T:tracks"``); feature-width dims are *instance-scoped*
-(``"D:<instance>"``) so two modules' unknown widths never falsely unify —
-`resolve_bind_schema` still resolves them through the specs observed on the
-same key (bind.py).
+"""Config-constructed GraphModules for the salt graph execution model
+(encoder/pooling/loss pipeline), plus absorbed v1 Dense/Transformer/pooling
+layers. Key vocabulary: ``inputs.<stream>`` -> ``normed.<stream>`` ->
+``embed.<stream>`` -> ``seq.x``/``seq.mask`` -> ``encoded.seq`` ->
+``encoded.<stream>`` / ``pooled.global``; task modules live in
+`salt.core.nn.tasks`.
 """
 
 from __future__ import annotations
@@ -67,22 +36,8 @@ from salt.core.graph.spec import (
 )
 from salt.core.nn.bind import ResolvedSchema
 
-# v2-NATIVE absorption of the v1 layer/Dense/pooling family (M7 W2c-2). The
-# v1 ``Dense`` (dense.py), the v1 ``Transformer`` stack + its transitive deps
-# (transformer.py / attention.py / layernorm.py) and the v1
-# ``GlobalAttentionPooling`` (pooling.py) are COPIED VERBATIM below as
-# self-contained v2-native classes (``Dense``, ``Transformer`` &c.,
-# ``_GlobalAttentionPoolingV1``) — the v1 originals stay UNTOUCHED in
-# salt/models/* as the bitwise gate ORACLE (parity_gn2 / gates_m6 MU1/MU2/ED1/ED2
-# weight-load a fresh v1 instance from these absorbed modules' state_dicts and
-# compare forwards bitwise, so the absorbed structure + math are byte-faithful by
-# construction). The small pure math helpers (``attach_context`` +
-# ``calculate_edge_features`` / ``check_edge_config``) were inlined at M7 W2b
-# BYTE-FAITHFULLY from v1 ``salt.utils.tensor_utils`` (tensor_utils.py:168-268)
-# and v1 ``salt.utils.edge_features`` (edge_features.py:10-146); the four
-# tensor-dict / varlen helpers the absorbed Transformer + pooling need
-# (``masked_softmax`` / ``flatten_tensor_dict`` / ``undo_padding`` /
-# ``redo_padding``) are inlined likewise from tensor_utils.py:30-165.
+# Absorbed v1 Dense/Transformer/pooling layer family — copied here as
+# self-contained classes so the v1 originals in salt/models/* stay untouched.
 
 __all__ = [
     "Concat",
@@ -103,41 +58,23 @@ __all__ = [
 ]
 
 _UNNAMED = "unnamed"
-"""Placeholder instance name — the config dict key is assigned before compile (design §2.2)."""
+"""Placeholder instance name — the config dict key is assigned before compile."""
 
 _SEQ_LEN = sym_dim("S", "seq")
 _ENC_LEN = sym_dim("L", "enc")
 
 _EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
-"""The recognised edge-feature vocabulary (v1 `check_edge_config`,
-edge_features.py:30-43; design §6.7). EdgeFeatures rejects anything outside this
-set at config time; the per-feature required input variables (e.g. ``dR`` needs
-``eta``/``phi``) are validated at `bind` against the resolved schema fields."""
+"""Recognised edge-feature names. EdgeFeatures rejects anything outside this
+set at config time."""
 
 
 # ---------------------------------------------------------------------------
-# inlined v1 math helpers (M7 W2b) — byte-faithful copies, v1 originals untouched
+# inlined v1 math helpers (byte-faithful copies; v1 originals untouched)
 # ---------------------------------------------------------------------------
 
 
 def add_dims(x: Tensor, ndim: int) -> Tensor:
-    """Add singleton dimensions to reach a target rank.
-
-    M7 W2b inline of v1 ``salt.utils.tensor_utils.add_dims`` (tensor_utils.py:168-197),
-    byte-faithful. The new singleton dimensions are inserted after the batch
-    dimension (i.e., at position 1 repeatedly) until ``x.ndim == ndim``.
-
-    Parameters
-    ----------
-    x : Tensor
-        Input tensor.
-    ndim : int
-        Target number of dimensions.
-
-    Returns
-    -------
-    Tensor
-        Tensor reshaped with added singleton dimensions.
+    """Add singleton dimensions (after the batch dim) to reach a target rank.
 
     Raises
     ------
@@ -154,26 +91,9 @@ def add_dims(x: Tensor, ndim: int) -> Tensor:
 
 
 def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
-    """Concatenate a context tensor to a single tensor with broadcasting.
+    """Broadcast ``context`` to match ``x`` and concatenate along the last dim.
 
-    M7 W2b inline of v1 ``salt.utils.tensor_utils.attach_context_single``
-    (tensor_utils.py:200-240), byte-faithful. The ``context`` tensor is expanded
-    (via :func:`add_dims` and broadcast) so its rank matches ``x``; it is then
-    concatenated with ``x`` along the last dimension.
-
-    Parameters
-    ----------
-    x : Tensor
-        Input tensor of shape ``(B, ..., F)``.
-    context : Tensor
-        Context tensor of shape ``(B, F_ctx)`` or broadcastable to
-        ``(B, ..., F_ctx)``.
-
-    Returns
-    -------
-    Tensor
-        Concatenation of ``context`` and ``x`` along the feature dimension,
-        with shape ``(B, ..., F_ctx + F)``.
+    Returns ``cat([context, x], dim=-1)`` — context is PREPENDED.
 
     Raises
     ------
@@ -198,29 +118,7 @@ def attach_context_single(x: Tensor, context: Tensor) -> Tensor:
 
 
 def attach_context(x: Tensor | dict[str, Tensor], context: Tensor) -> Tensor | dict[str, Tensor]:
-    """Concatenate a context tensor to inputs (tensor or dict of tensors).
-
-    M7 W2b inline of v1 ``salt.utils.tensor_utils.attach_context``
-    (tensor_utils.py:243-268), byte-faithful. A convenience wrapper over
-    :func:`attach_context_single` that applies the operation to either a single
-    tensor or every tensor in a dictionary.
-
-    Parameters
-    ----------
-    x : Tensor | dict[str, Tensor]
-        Input tensor or dictionary of tensors to which the context will be
-        concatenated along the last dimension.
-    context : Tensor
-        Context tensor of shape ``(B, F_ctx)`` (or broadcastable to each
-        input).
-
-    Returns
-    -------
-    Tensor | dict[str, Tensor]
-        If ``x`` is a tensor, returns a tensor with context concatenated.
-        If ``x`` is a dict, returns a dict with each value concatenated
-        with the context.
-    """
+    """Concatenate a context tensor to inputs (tensor or dict of tensors)."""
     if isinstance(x, dict):
         return {key: attach_context_single(val, context) for key, val in x.items()}
     return attach_context_single(x, context)
@@ -230,17 +128,7 @@ def check_edge_config(
     edge_features: list[str],
     available_vars: list[str],
 ) -> None:
-    """Check the provided edge feature configuration for validity.
-
-    M7 W2b inline of v1 ``salt.utils.edge_features.check_edge_config``
-    (edge_features.py:10-49), byte-faithful.
-
-    Parameters
-    ----------
-    edge_features : list[str]
-        List of edge features to compute.
-    available_vars : list[str]
-        List of available variables.
+    """Check the requested edge features are recognized and have the required input variables.
 
     Raises
     ------
@@ -276,25 +164,12 @@ def calculate_edge_features(
     indices_map: dict[str, int],
     variables: list[str],
 ) -> Tensor:
-    """Calculate edge features for a given batch of graphs.
-
-    M7 W2b inline of v1 ``salt.utils.edge_features.calculate_edge_features``
-    (edge_features.py:52-146), byte-faithful — the pairwise dR/kt/z/subjetIndex/
-    isSelfLoop/mass math, ``torch.zeros`` accumulator + final ``nan_to_num``.
-
-    Parameters
-    ----------
-    batch : Tensor
-        Input batch of node features of shape ``[B, N, D]``.
-    indices_map : dict[str, int]
-        Mapping variable names to indices in the node feature tensor.
-    variables : list[str]
-        List of edge features to compute.
+    """Compute pairwise dR/kt/z/subjetIndex/isSelfLoop/mass edge features.
 
     Returns
     -------
     Tensor
-        Computed edge features tensor of shape ``[B, N, N, num_edge_features]``.
+        Edge features of shape ``[B, N, N, num_edge_features]``.
     """
     ebatch = torch.zeros(
         (batch.shape[0], batch.shape[1], batch.shape[1], len(variables)),
@@ -377,16 +252,7 @@ def flatten_tensor_dict(
     include: list[str] | None = None,
     exclude: list[str] | None = None,
 ) -> Tensor:
-    """Flatten (concatenate) a dictionary of tensors into one tensor.
-
-    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.flatten_tensor_dict``
-    (tensor_utils.py:30-71), byte-faithful. All tensors are concatenated along
-    ``dim=1``; ``include``/``exclude`` are mutually exclusive subset selectors.
-
-    Returns
-    -------
-    Tensor
-        Single tensor formed by concatenating the selected tensors along ``dim=1``.
+    """Concatenate a dict of tensors along ``dim=1`` (``include``/``exclude`` are exclusive).
 
     Raises
     ------
@@ -403,17 +269,8 @@ def flatten_tensor_dict(
 
 
 def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
-    """Apply softmax while ignoring (masking) padded elements.
-
-    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.masked_softmax``
-    (tensor_utils.py:74-105), byte-faithful. Elements where ``mask`` is ``True``
-    are set to ``-inf`` before the softmax and zeroed after.
-
-    Returns
-    -------
-    Tensor
-        Tensor after masked softmax.
-    """
+    """Softmax that ignores padded elements: masked (``True``) entries are set to
+    ``-inf`` before the softmax and zeroed after."""
     if mask is not None:
         mask = add_dims(mask, x.dim())
         x = x.masked_fill(mask, -torch.inf)
@@ -427,11 +284,9 @@ def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
 
 
 def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple[Tensor, Tensor, int]:
-    """Remove padded elements and return packed sequence info.
+    """Remove padded elements; return the packed sequence + flash-varlen metadata.
 
-    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.undo_padding``
-    (tensor_utils.py:108-141), byte-faithful — the flash-varlen packer. Convention
-    ``mask == True`` -> padded element; the mask is flipped internally.
+    ``mask == True`` means padded (the mask is flipped internally).
 
     Returns
     -------
@@ -447,16 +302,7 @@ def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple[Tensor, Tensor, int]:
 
 
 def redo_padding(unpadded_seq: Tensor, mask: BoolTensor) -> Tensor:
-    """Re-apply padding to an unpadded sequence.
-
-    M7 W2c-2 inline of v1 ``salt.utils.tensor_utils.redo_padding``
-    (tensor_utils.py:144-165), byte-faithful.
-
-    Returns
-    -------
-    Tensor
-        Padded tensor (zeros at padded positions, values at valid positions).
-    """
+    """Re-apply padding to an unpadded sequence (zeros at padded positions)."""
     mask = ~mask  # convert mask: True -> valid token
     shape = (*mask.shape, unpadded_seq.shape[-1])
     out = torch.zeros(shape, dtype=unpadded_seq.dtype, device=unpadded_seq.device)
@@ -465,25 +311,15 @@ def redo_padding(unpadded_seq: Tensor, mask: BoolTensor) -> Tensor:
 
 
 # ===========================================================================
-# v2-native absorption of the v1 Dense / Transformer / pooling family (M7 W2c-2)
+# Absorbed v1 Dense / Transformer / pooling layer family
 # ---------------------------------------------------------------------------
-# The classes below are COPIED VERBATIM (math + attribute layout + parameter
-# registration order) from the v1 originals so a fresh v1 instance can
-# ``load_state_dict`` a v2-native module's composed sub-net (the gates_m6
-# MU1/MU2/ED1/ED2 oracle pattern) and the forwards agree BITWISE. The v1
-# originals (salt/models/dense.py, transformer.py, attention.py, layernorm.py,
-# pooling.py) stay UNTOUCHED as the gate oracle.
+# Copied verbatim (math + attribute layout + parameter registration order)
+# from the v1 originals in salt/models/*, which stay untouched.
 # ===========================================================================
 
 
 class Dense(nn.Module):
     """A fully connected feed forward neural network, with optional context.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.Dense`` (dense.py:6-103),
-    COPIED VERBATIM — same layer list (``net``), same muP init
-    (``_reset_parameters``), same ``attach_context`` forward. The v1 original is
-    UNTOUCHED as the gate oracle (gates_m6 VS1/ED1 weight-load a fresh v1 Dense
-    from this absorbed Dense's ``state_dict()`` and compare bitwise).
 
     Parameters
     ----------
@@ -532,16 +368,13 @@ class Dense(nn.Module):
         if hidden_layers is None:
             hidden_layers = [input_size * hidden_dim_scale]
 
-        # Save the networks input and output sizes
         self.input_size = input_size
         self.output_size = output_size
         self.context_size = context_size
         self.mup = mup
 
-        # build nodelist
         self.node_list = [input_size + context_size, *hidden_layers, output_size]
 
-        # input and hidden layers
         layers = []
 
         num_layers = len(self.node_list) - 1
@@ -549,18 +382,13 @@ class Dense(nn.Module):
             if dropout:
                 layers.append(nn.Dropout(dropout))
 
-            # linear projection
             layers.append(nn.Linear(self.node_list[i], self.node_list[i + 1], bias=bias))
 
-            # activation for all but the final layer
             if i != num_layers - 1:
                 layers.append(getattr(nn, activation)())
-
-            # final layer: return logits by default, or activation if specified
             elif final_activation:
                 layers.append(getattr(nn, final_activation)())
 
-        # build the net
         self.net = nn.Sequential(*layers)
 
         if self.mup:
@@ -586,22 +414,14 @@ class Dense(nn.Module):
 
 
 class LayerNorm(nn.LayerNorm):
-    """Faster LayerNorm by setting elementwise_affine=False.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.layernorm.LayerNorm``
-    (layernorm.py:5-9), VERBATIM.
-    """
+    """Faster LayerNorm by setting elementwise_affine=False."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, elementwise_affine=False)
 
 
 class RMSNorm(torch.nn.Module):
-    """RMSNorm from https://arxiv.org/abs/1910.07467.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.layernorm.RMSNorm``
-    (layernorm.py:12-27), VERBATIM — follows the LLaMA implementation.
-    """
+    """RMSNorm from https://arxiv.org/abs/1910.07467 (LLaMA implementation)."""
 
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
@@ -617,13 +437,7 @@ class RMSNorm(torch.nn.Module):
 
 
 class _Layernorms:
-    """Namespace mirroring v1 ``import salt.models.layernorm as layernorms``.
-
-    The v1 EncoderLayer / Transformer resolve the norm class by NAME
-    (``getattr(layernorms, norm)``, transformer.py:223,355,371). This namespace
-    exposes the absorbed `LayerNorm` / `RMSNorm` under the same attribute names so
-    the verbatim ``getattr(_LAYERNORMS, norm)`` lookups below are byte-faithful.
-    """
+    """Namespace exposing `LayerNorm`/`RMSNorm` by name for ``getattr(_LAYERNORMS, norm)``."""
 
     LayerNorm = LayerNorm
     RMSNorm = RMSNorm
@@ -633,74 +447,45 @@ _LAYERNORMS = _Layernorms()
 
 
 # ---------------------------------------------------------------------------
-# featurewise.py + posenc.py absorption (M7 W-FILM) — v2-native FiLM + posenc
+# featurewise.py + posenc.py absorption — FiLM + positional encoding
 # ---------------------------------------------------------------------------
 
 _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
-"""The v1 FiLM ``layer`` placements (featurewise.py:44). ``input`` applies the
-scale/bias BEFORE a `StreamEmbed`'s projection (initnet.py:85-86); ``encoder``
-applies it at the START of every encoder layer (transformer.py:727-728);
-``global`` applies it to the pooled/encoded representation before pooling
-(saltmodel.py:165-166). All three are wired as OPTIONAL config blocks (off by
-default)."""
+"""Valid FiLM ``layer`` placements: ``input`` applies scale/bias before a
+`StreamEmbed`'s projection; ``encoder`` at the start of every encoder layer;
+``global`` to the pooled/encoded representation before pooling."""
 
 _POSENC_SYM_VARS: frozenset[str] = frozenset({"phi"})
-"""v1 `PositionalEncoder` ``SYM_VARS`` (posenc.py:4) — the variables whose
-encoding is symmetric (a sin/cos of the sin/cos), faithful to v1."""
+"""Variables whose positional encoding is symmetric (sin/cos of the sin/cos)."""
 
 
 class FeaturewiseTransformation(nn.Module):
-    """Feature-wise (FiLM) scale/bias from per-event ``parameters`` (M7 W-FILM).
-
-    v2-native absorption of v1 ``salt.models.FeaturewiseTransformation``
-    (featurewise.py:8-81), COPIED VERBATIM (the v1 original stays UNTOUCHED as the
-    FILM1 gate oracle). The internal scale/bias nets are `salt.core.nn.Dense` (the
-    v2-native absorbed Dense, byte-identical to v1's so a weight-transfer between
-    them is exact) — NOT v1's ``salt.models.Dense``. The conditioning signal is
-    the per-event ``parameters`` tensor ``[B, n_params]`` read from the bundle
-    (``inputs.parameters``, the raw — NOT normalised — parameters, faithful to v1
-    where ``parameters`` is in ``InputNorm.NO_NORM``, inputnorm.py:45).
-
-    Forward (featurewise.py:71-81, verbatim math):
-    ``features = scale_net(p).unsqueeze(1) * features`` then
-    ``features = features + bias_net(p).unsqueeze(1)`` then optional `LayerNorm`.
-    The ``unsqueeze(1)`` broadcasts the per-event ``[B, num_features]`` scale/bias
-    over the token axis of a ``[B, T, num_features]`` feature tensor.
+    """Feature-wise (FiLM) scale/bias from per-event ``parameters``.
 
     https://distill.pub/2018/feature-wise-transformations/.
 
     Parameters
     ----------
     layer : str
-        Which pipeline stage to scale/bias — one of ``{"input", "encoder",
-        "global"}`` (featurewise.py:44; see ``_FEATUREWISE_LAYERS``).
+        Which pipeline stage to scale/bias — one of ``{"input", "encoder", "global"}``.
     num_params : int
-        Number of per-event conditioning parameters (the FiLM net input width;
-        v1 inferred it from ``len(variables["parameters"])``, featurewise.py:55).
+        Number of per-event conditioning parameters (the FiLM net input width).
     num_features : int
-        Output width of the FiLM scale/bias nets — the feature width the
-        transformation is applied to (the embed/encoder width). Threaded in at
-        bind from the resolved schema (v1 read it off the Dense ``output_size``,
-        featurewise.py:57,61).
+        Output width of the FiLM scale/bias nets (the embed/encoder width).
     dense_config_scale : dict | None, optional
-        Extra `salt.core.nn.Dense` kwargs for the scaling net (``hidden_layers``,
-        ``activation``, ...); must not set width keys. When None (and
-        ``dense_config_bias`` is set) the FiLM applies a bias-only transform. By
-        default None.
+        Extra `salt.core.nn.Dense` kwargs for the scaling net; must not set
+        width keys. When None (and ``dense_config_bias`` is set), bias-only.
     dense_config_bias : dict | None, optional
         Extra `salt.core.nn.Dense` kwargs for the biasing net. When None (and
-        ``dense_config_scale`` is set) the FiLM applies a scale-only transform. By
-        default None.
+        ``dense_config_scale`` is set), scale-only.
     apply_norm : bool, optional
-        Apply a `torch.nn.LayerNorm` to the transformed features, by default
-        False.
+        Apply a `torch.nn.LayerNorm` to the transformed features, by default False.
 
     Raises
     ------
     ConfigError
-        If `layer` is not one of ``{"input", "encoder", "global"}``, if a
-        dense config sets width keys (inferred at bind), or if neither scale
-        nor bias net is configured.
+        If `layer` is invalid, a dense config sets width keys, or neither
+        scale nor bias net is configured.
     """
 
     def __init__(
@@ -733,9 +518,7 @@ class FeaturewiseTransformation(nn.Module):
             _reject_width_keys(
                 "FeaturewiseTransformation", cfg, ("input_size", "output_size", "context_size")
             )
-        # v1 builds a net iff the corresponding dense config is TRUTHY
-        # (featurewise.py:54 ``if dense_config_scale:`` / :58) — so a None or an
-        # empty {} config builds nothing. Mirror v1 exactly.
+        # a net is built iff its dense config is truthy — None or {} builds nothing
         build_scale = bool(dense_config_scale)
         build_bias = bool(dense_config_bias)
         if not build_scale and not build_bias:
@@ -757,14 +540,7 @@ class FeaturewiseTransformation(nn.Module):
         self._built = False
 
     def build(self) -> None:
-        """Construct the scale/bias `Dense` nets + optional norm (idempotent).
-
-        Mirrors v1 ``FeaturewiseTransformation.__init__`` (featurewise.py:54-69)
-        verbatim, but ``input_size``/``output_size`` come from the captured
-        ``num_params``/``num_features`` (resolved at bind) instead of from
-        ``variables``. Called once at bind; a second call no-ops so the parity
-        gate can rebuild idempotently.
-        """
+        """Construct the scale/bias `Dense` nets + optional norm (idempotent)."""
         if self._built:
             return
         if self._build_scale:
@@ -780,22 +556,15 @@ class FeaturewiseTransformation(nn.Module):
         self._built = True
 
     def forward(self, params: Tensor, features: Tensor) -> Tensor:
-        """Apply the FiLM scale/bias to ``features`` (featurewise.py:71-81 verbatim).
+        """Apply the FiLM scale/bias (and optional norm) to ``features``.
 
         Parameters
         ----------
         params : Tensor
-            The per-event conditioning parameters ``[B, n_params]`` (the bundle's
-            ``inputs.parameters`` — v1 ``inputs["parameters"]``).
+            Per-event conditioning parameters ``[B, n_params]``.
         features : Tensor
-            The features to transform ``[B, T, num_features]`` (or ``[B,
-            num_features]`` for the global layer).
-
-        Returns
-        -------
-        Tensor
-            The scaled/biased (and optionally normed) features — a FRESH tensor
-            (the multiply/add allocate new tensors), never aliasing ``features``.
+            Features to transform ``[B, T, num_features]`` (or ``[B, num_features]``
+            for the global layer).
         """
         assert self._built, "FeaturewiseTransformation.forward before build()"
         if self.scale_net is not None:
@@ -808,36 +577,27 @@ class FeaturewiseTransformation(nn.Module):
 
 
 class PositionalEncoder(nn.Module):
-    """Sin/cos positional encoding over coordinate variables (M7 W-FILM).
-
-    v2-native absorption of v1 ``salt.models.posenc.PositionalEncoder``
-    (posenc.py:7-85), COPIED VERBATIM MINUS the v1 ``print()`` debug lines
-    (posenc.py:30,33,56) — the encoding math is the parity-bearing part and is
-    byte-faithful. The v1 original stays UNTOUCHED as the FILM1 gate oracle.
+    """Sin/cos positional encoding over coordinate variables.
 
     Evenly shares the embedding space between the encoded variables; any
-    remaining dimensions are left as zeros. The ``@torch.no_grad`` forward and the
-    sin/cos order are faithful to v1 (the encoding is a fixed, parameter-free
-    function of the coordinates).
+    remaining dimensions are left as zeros. Parameter-free (``@torch.no_grad``).
 
     Parameters
     ----------
     variables : Sequence[str]
-        Variable names to encode (the coordinate columns). Symmetric variables
-        (``phi``, ``_POSENC_SYM_VARS``) get the sin-of-sin / sin-of-cos symmetric
-        encoding (posenc.py:79-81).
+        Variable names to encode. Symmetric variables (``phi``) get the
+        sin-of-sin / sin-of-cos symmetric encoding.
     dim : int
-        Total positional-encoding width. Split evenly: ``per_input_dim = dim //
-        (2 * len(variables))`` per variable, with ``dim % (2 * len(variables))``
-        trailing zeros (posenc.py:31-32).
+        Total positional-encoding width, split evenly across variables
+        (``per_input_dim = dim // (2 * len(variables))``, remainder zero-padded).
     alpha : int, optional
-        Frequency scaling factor, by default 100 (posenc.py:25).
+        Frequency scaling factor, by default 100.
 
     Raises
     ------
     ConfigError
         If `variables` is empty or `dim` is too small to give each variable at
-        least one frequency band (``per_input_dim < 1``).
+        least one frequency band.
     """
 
     def __init__(self, variables: Sequence[str], dim: int, alpha: int = 100) -> None:
@@ -858,13 +618,7 @@ class PositionalEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, inputs: Tensor) -> Tensor:
-        """Encode each coordinate column; concat along the last dim (posenc.py:36-57).
-
-        Parameters
-        ----------
-        inputs : Tensor
-            Coordinate tensor ``[..., len(variables)]`` (the selected columns, in
-            ``variables`` order).
+        """Encode each coordinate column (in ``variables`` order); concat along the last dim.
 
         Returns
         -------
@@ -880,16 +634,7 @@ class PositionalEncoder(nn.Module):
         return torch.cat(encodings, dim=-1)
 
     def pos_enc(self, xs: Tensor, dim: int, symmetric: bool = False) -> Tensor:
-        """One variable's sin/cos encoding (posenc.py:59-85, verbatim).
-
-        Parameters
-        ----------
-        xs : Tensor
-            One coordinate column ``[...]``.
-        dim : int
-            Per-variable half-width (``per_input_dim``).
-        symmetric : bool, optional
-            Symmetric (phi-style) encoding, by default False.
+        """One variable's sin/cos encoding.
 
         Returns
         -------
@@ -921,21 +666,16 @@ except ImportError:
 def check_flash_attn() -> str:
     """Check if Flash Attention is available and compatible.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.check_flash_attn``
-    (attention.py:29-59), VERBATIM.
-
     Returns
     -------
     str
         Empty string if Flash Attention is available, otherwise a reason why not.
     """
-    # 1. Check CUDA Availability
     if not torch.cuda.is_available():
         return "No GPU available."
 
-    # 2. Get CUDA & GPU Info
     gpu_name = torch.cuda.get_device_name(0)
-    # Compute capability is a tuple (major, minor), e.g., (8, 0)
+    # (major, minor), e.g. (8, 0)
     compute_capability = torch.cuda.get_device_capability(0)
     major, minor = compute_capability
     sm_version = float(f"{major}.{minor}")
@@ -964,9 +704,8 @@ def merge_masks(
 ) -> BoolTensor | None:
     """Create a full attention mask which incorporates padding information.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.merge_masks``
-    (attention.py:65-112), VERBATIM. Padded tokens can't **send** information but
-    can **receive** it (prevents softmax NaNs).
+    Padded tokens can't **send** information but can **receive** it (prevents
+    softmax NaNs).
 
     Returns
     -------
@@ -975,27 +714,21 @@ def merge_masks(
     """
     mask = None
 
-    # If the kv_mask exists, ensure padded tokens never send information
     if kv_mask is not None:
         mask = kv_mask.unsqueeze(-2).expand(-1, q_shape[-2], -1)
-        mask = ~mask  # convert the mask so that True indicates a valid token
+        mask = ~mask  # flip: True now means "valid token" (not padded)
 
-    # Combine with the explicit attention mask if present
     if attn_mask is not None:
         mask = attn_mask if mask is None else attn_mask & mask
 
-    # Unsqueeze for head broadcasting
     if mask is not None:
-        mask = mask.unsqueeze(1)
+        mask = mask.unsqueeze(1)  # broadcast over heads
 
     return mask
 
 
 def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
     """Repeat keys and values along a dimension.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.repeat_kv``
-    (attention.py:115-136), VERBATIM.
 
     Returns
     -------
@@ -1014,9 +747,6 @@ def projection_packed(
     bias: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Efficient input projection for MHA using a single packed linear layer.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.projection_packed``
-    (attention.py:139-176), VERBATIM — uses ``chunk`` (faster than ``unflatten``).
 
     Returns
     -------
@@ -1046,15 +776,12 @@ def torch_attn(
 ) -> Tensor:
     """Scaled dot-product attention with a switchable torch backend.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.torch_attn``
-    (attention.py:179-220), VERBATIM.
-
     Returns
     -------
     Tensor
         Attention output of shape ``[B, H, L_q, D_h]``.
     """
-    backends = [SDPBackend.MATH]  # Default backend
+    backends = [SDPBackend.MATH]
     if backend == "torch-flash":
         backends += [SDPBackend.FLASH_ATTENTION]
     elif backend == "torch-meff":
@@ -1067,10 +794,6 @@ def torch_attn(
 
 class Attention(nn.Module):
     """Multihead attention module with optional differential attention and norms.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.Attention``
-    (attention.py:223-462), COPIED VERBATIM (same packed in-proj parameters,
-    muP init, RMSNorm q/k/v norms, backend dispatch).
 
     Parameters
     ----------
@@ -1110,7 +833,6 @@ class Attention(nn.Module):
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
         assert attn_type in ATTN_TYPES, "Invalid attention type!"
 
-        # Attributes
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -1129,7 +851,7 @@ class Attention(nn.Module):
         if self.do_v_norm:
             self.v_norm = RMSNorm(self.head_dim)
 
-        # Better parallelism for self-attention when using parameters directly
+        # packed QKV projection: better parallelism for self-attention than 3 separate Linears
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
         self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -1144,7 +866,6 @@ class Attention(nn.Module):
         str
             Effective backend set (may fall back to ``"torch-math"``).
         """
-        # Check the attention backend
         self.attn_type = attn_type
         if self.attn_type == "flash-varlen":
             why_not_flash = check_flash_attn()
@@ -1170,7 +891,6 @@ class Attention(nn.Module):
                 nn.init.constant_(self.out_proj.bias, 0.0)
             return
 
-        # Standard init
         nn.init.xavier_uniform_(self.in_proj_weight)
         self.out_proj.reset_parameters()
         if self.bias:
@@ -1184,7 +904,6 @@ class Attention(nn.Module):
         Tensor
             Output of shape ``[N_total, D]``.
         """
-        # Perform the packed input projection
         qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
@@ -1198,12 +917,10 @@ class Attention(nn.Module):
                 v = self.v_norm(v)
             qkv = torch.stack([q, k, v], dim=1).to(dtype)
 
-        # Run the flash-varlen backend
         dropout = self.dropout if self.training else 0.0
         a_out = self._flash_attn(qkv, culens, maxlen, dropout, softmax_scale=self.scale)
         a_out = a_out.reshape(-1, self.embed_dim)
 
-        # Mix with final linear layer
         return self.out_proj(a_out)
 
     def _torch_forward(
@@ -1269,11 +986,6 @@ class Attention(nn.Module):
 class EdgeAttention(nn.Module):
     """Multihead attention module with optional norms, including edge features.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.attention.EdgeAttention``
-    (attention.py:465-658), COPIED VERBATIM — the edge-bias / edge-gate / optional
-    edge-update math (consumes the W2b-inlined edge features). The v1 original is
-    the bitwise oracle for gates_m6 ED1/ED2.
-
     Parameters
     ----------
     embed_dim : int
@@ -1313,7 +1025,6 @@ class EdgeAttention(nn.Module):
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
 
-        # Attributes
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -1334,12 +1045,11 @@ class EdgeAttention(nn.Module):
         if self.do_v_norm:
             self.v_norm = RMSNorm(self.head_dim)
 
-        # Better parallelism for self-attention when using parameters directly
+        # packed QKV projection: better parallelism for self-attention than 3 separate Linears
         self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
         self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        # Edge feature projections
         self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
         self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
         if self.update_edges:
@@ -1375,12 +1085,10 @@ class EdgeAttention(nn.Module):
                     nn.init.constant_(layer.bias, 0.0)
             return
 
-        # Standard init
         nn.init.xavier_uniform_(self.in_proj_weight)
         if self.bias:
             nn.init.constant_(self.in_proj_bias, 0.0)
 
-        # Linear layers
         layers = [self.linear_e, self.linear_g, self.out_proj]
         if self.update_edges:
             layers.append(self.linear_e_out)
@@ -1398,7 +1106,7 @@ class EdgeAttention(nn.Module):
         kv_mask: BoolTensor | None = None,
         attn_mask: BoolTensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Attention using PyTorch SDPA backends.
+        """Attention with edge features biasing the scores and gating the output.
 
         Returns
         -------
@@ -1418,7 +1126,7 @@ class EdgeAttention(nn.Module):
         if self.do_v_norm:
             v = self.v_norm(v)
 
-        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
+        s_mask = mask if kv is None else kv_mask  # who is sending, x or kv
         mask = merge_masks(s_mask, attn_mask, q.shape)
         e = self.linear_e(edge_x)  # (B, L_q, L_kv, num_heads)
         g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
@@ -1429,7 +1137,6 @@ class EdgeAttention(nn.Module):
         if self.dropout > 0.0 and self.training:
             attn_scores = functional.dropout(attn_scores, p=self.dropout)
 
-        # Prepare edge output
         edge_out = edge_x
         if self.update_edges:
             edge_out = self.linear_e_out(
@@ -1464,10 +1171,7 @@ except ImportError:
 
 
 class GLU(nn.Module):
-    """Dense update with a (gated) linear unit.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.GLU``
-    (transformer.py:53-125), VERBATIM. See https://arxiv.org/abs/2002.05202.
+    """Dense update with a (gated) linear unit. See https://arxiv.org/abs/2002.05202.
 
     Parameters
     ----------
@@ -1537,8 +1241,7 @@ class GLU(nn.Module):
 class LayerScale(nn.Module):
     """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.LayerScale``
-    (transformer.py:128-151), VERBATIM. Reference: https://arxiv.org/abs/2103.17239
+    Reference: https://arxiv.org/abs/2103.17239
     """
 
     def __init__(self, dim: int, init_value: float = 1e-3) -> None:
@@ -1557,11 +1260,7 @@ class LayerScale(nn.Module):
 
 
 class DropPath(nn.Module):
-    """Stochastic depth / drop-path regularization.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.DropPath``
-    (transformer.py:154-180), VERBATIM.
-    """
+    """Stochastic depth / drop-path regularization."""
 
     def __init__(self, drop_prob: float = 0.0):
         super().__init__()
@@ -1587,9 +1286,8 @@ class DropPath(nn.Module):
 class NormResidual(nn.Module):
     """Residual wrapper with normalization, LayerScale, and DropPath.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.NormResidual``
-    (transformer.py:183-283), VERBATIM. Represents PostNorm/PreNorm/NoNorm
-    patterns and forwards edge features for `EdgeAttention`.
+    Represents PostNorm/PreNorm/NoNorm patterns and forwards edge features
+    for `EdgeAttention`.
 
     Parameters
     ----------
@@ -1669,10 +1367,6 @@ class NormResidual(nn.Module):
 class EncoderLayer(nn.Module):
     """Transformer encoder layer: self-attention + feed-forward.
 
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.EncoderLayer``
-    (transformer.py:286-425), VERBATIM — the hybrid-norm placement logic, the
-    Attention/EdgeAttention selection, and the residual submodule layout.
-
     Parameters
     ----------
     embed_dim : int
@@ -1723,13 +1417,11 @@ class EncoderLayer(nn.Module):
         assert num_dense >= 1, "num_dense must be at least 1"
         self.update_edges = update_edges
 
-        # Safe defaults
         if attn_kwargs is None:
             attn_kwargs = {}
         if dense_kwargs is None:
             dense_kwargs = {}
 
-        # Attributes
         self.embed_dim = embed_dim
         self.norm_type = norm_type
         if norm_type == "hybrid":
@@ -1746,7 +1438,6 @@ class EncoderLayer(nn.Module):
             attn_kwargs["mup"] = True
             dense_kwargs["mup"] = True
 
-        # Choose attention type
         attn_class: type[Attention | EdgeAttention]
         if edge_embed_dim > 0:
             attn_class = EdgeAttention
@@ -1759,7 +1450,6 @@ class EncoderLayer(nn.Module):
         else:
             attn_class = Attention
 
-        # Submodules
         residual = partial(
             NormResidual,
             norm=norm,
@@ -1802,13 +1492,6 @@ class EncoderLayer(nn.Module):
 @final
 class Transformer(nn.Module):
     """Transformer encoder stack with optional registers and output projection.
-
-    M7 W2c-2 v2-native absorption of v1 ``salt.models.transformer.Transformer``
-    (transformer.py:511-789), COPIED VERBATIM — the register tokens, the muP
-    ``MuReadout`` out-proj swap (the M6 coord-check canonical slope), the
-    featurewise ``ModuleList`` hook, and the register/edge zero-pad forward. The
-    v1 original is the bitwise oracle for gates_m6 MU1/ED1 (weight-loaded from
-    this absorbed encoder's ``state_dict()``).
 
     Parameters
     ----------
@@ -1860,7 +1543,6 @@ class Transformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        # Check the inputs
         if num_registers < 1:
             raise ValueError(
                 "Some global objects (graphs) might have no constituents (nodes), "
@@ -1868,7 +1550,6 @@ class Transformer(nn.Module):
                 "To avoid this, set num_registers to at least 1",
             )
 
-        # Attributes
         self.num_layers = num_layers
         self.embed_dim = embed_dim
         self.out_dim = out_dim or embed_dim
@@ -1891,11 +1572,11 @@ class Transformer(nn.Module):
                 as this is the last layer of the muP-part of the model"
             )
 
-        # Set the attention type if no edge features are used
+        # attn_type is meaningless for EdgeAttention (edge_embed_dim > 0): it has no
+        # pluggable backend, so only set it when the plain Attention path is used
         if edge_embed_dim == 0:
             kwargs["attn_kwargs"]["attn_type"] = self.attn_type
 
-        # Submodules
         self.layers = torch.nn.ModuleList([
             EncoderLayer(
                 embed_dim=embed_dim,
@@ -1908,13 +1589,10 @@ class Transformer(nn.Module):
             for depth in range(num_layers)
         ])
 
-        # Only set the attention type if no edge features are used
         if self.edge_embed_dim == 0:
-            # Check and set the attention type
             assert self.attn_type in ATTN_TYPES, "Invalid attention type!"
             self.set_backend(self.attn_type)
 
-        # Optional submodules
         if self.do_out_proj:
             self.out_proj = nn.Linear(self.embed_dim, self.out_dim)
             if self.mup and _MuReadout is not None:
@@ -1951,16 +1629,15 @@ class Transformer(nn.Module):
         tuple[Tensor, BoolTensor | dict[str, BoolTensor]]
             Tuple of ``(encoded, pad_mask)`` where ``encoded`` has shape ``[B, L, D_out]``.
         """
-        # Add the registers to the sequence and the mask
         if self.num_registers:
             x, pad_mask = self._add_registers(x, pad_mask)
 
-        # Combine the input sequences if they are dictionaries (don't overwrite pad_mask)
         if isinstance(x, dict):
             x = torch.cat(list(x.values()), dim=1)
         mask = torch.cat(list(pad_mask.values()), dim=1) if isinstance(pad_mask, dict) else pad_mask
 
-        # Pad edges by num_registers if using edge features
+        # zero-pad edges to the register-augmented sequence length (registers attend
+        # to each other/tokens with no edge features, so they contribute zero bias)
         if edge_x is not None:
             edge_x = torch.cat(
                 [
@@ -1993,11 +1670,9 @@ class Transformer(nn.Module):
                 dim=2,
             )
 
-        # If using the varlen backend, pack the sequence and store the cumulative lengths
         if self.attn_type == "flash-varlen":
             x, kwargs["culens"], kwargs["maxlen"] = undo_padding(x, mask)
 
-        # Run through the main transformer encoder layers
         for i, layer in enumerate(self.layers):
             if len(self.featurewise) > 0:
                 x = self.featurewise[i](inputs, x)
@@ -2006,17 +1681,14 @@ class Transformer(nn.Module):
             else:
                 x = layer(x, mask=mask, **kwargs)
 
-        # Run through the optional layers
         if self.do_out_proj:
             x = self.out_proj(x)
         if self.do_final_norm:
             x = self.out_norm(x)
 
-        # If using the varlen backend, unpack the sequence
         if self.attn_type == "flash-varlen":
             x = redo_padding(x, mask)
 
-        # Optionally drop the registers from the output
         if self.drop_registers:
             x = x[:, : -self.num_registers]
             if isinstance(pad_mask, dict):
@@ -2036,17 +1708,14 @@ class Transformer(nn.Module):
         tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]
             Updated ``(x, pad_mask)`` including appended registers.
         """
-        # Get the batch size and expand the registers to match
         batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
 
-        # Add as a key or concatenate at the end
         reg = self.registers.expand(batch_size, -1, -1)
         if isinstance(x, dict):
             x["REGISTERS"] = reg
         else:
             x = torch.cat([x, reg], dim=1)
 
-        # Also include a mask for the registers
         if pad_mask is not None:
             reg_mask = self.register_mask.expand(batch_size, -1)
             if isinstance(pad_mask, dict):
@@ -2066,13 +1735,9 @@ class Transformer(nn.Module):
 class _GlobalAttentionPoolingV1(nn.Module):
     """Global attention pooling over concatenated node embeddings.
 
-    M7 W2c-2 v2-native absorption of v1
-    ``salt.models.pooling.GlobalAttentionPooling`` (pooling.py:12-65), COPIED
-    VERBATIM — the dict-order mask concatenation (numerics-critical, pooling.py:56)
-    and the zero-token ONNX pad. Named with the ``V1`` suffix because the
-    config-facing v2 GraphModule below is also called `GlobalAttentionPooling`;
-    this is the inner ``nn.Module`` it composes (the same composition the M2 port
-    used, now self-contained). The v1 original is the bitwise pooling oracle.
+    Named with the ``V1`` suffix because the config-facing `GraphModule` below
+    is also called `GlobalAttentionPooling`; this is the inner ``nn.Module`` it
+    composes.
 
     Parameters
     ----------
@@ -2112,39 +1777,22 @@ class _GlobalAttentionPoolingV1(nn.Module):
 
 
 def _stream_len(stream: str) -> str:
-    """Return the shared symbolic token-count dim for a sequence stream.
-
-    Returns
-    -------
-    str
-        The symbolic dim, e.g. ``"T:tracks"``.
-    """
+    """Return the shared symbolic token-count dim for a sequence stream, e.g. ``"T:tracks"``."""
     return sym_dim("T", stream)
 
 
 class Normaliser(nn.Module):
-    """Config-constructed input normalisation (design §6.3, replaces v1 `InputNorm`).
+    """Config-constructed input normalisation, replacing v1 `InputNorm`.
 
-    This is the DEFAULT input normaliser: it loads a precomputed
-    ``norm_dict.yaml`` (fixed per-stream, per-variable ``{mean, std}``) and
-    preserves v1 forward parity. For an opt-in self-normalising variant that
-    learns its statistics online (no norm dict), select
+    The DEFAULT input normaliser: loads a precomputed ``norm_dict.yaml``
+    (fixed per-stream, per-variable ``{mean, std}``). For a self-normalising
+    variant that learns statistics online (no norm dict), use
     ``class_path: salt.core.nn.MaskedInputNormaliser`` instead.
 
-    Lifecycle (design §2.3): ``__init__`` records the ``norm_dict`` *path*
-    and the stream list — no file I/O. ``bind(schema)`` allocates per-stream
-    buffers (``means_<stream>`` / ``stds_<stream>``, the design §6.3 names)
-    sized from the resolved ``inputs.<stream>`` widths, and captures the
-    declared variable names. ``materialise()`` is the ONLY file-touching
-    hook: it loads the norm dict and fills the buffers — skipped on
-    checkpoint load, where values arrive via the state_dict (the
-    ``materialised`` flag buffer travels with them).
-
-    Unlike v1's ``InputNorm.forward`` (which rebinds its input dict's keys
-    in place, inputnorm.py:103-106), this module produces NEW
-    ``normed.<stream>`` keys and never mutates ``inputs.*`` (design §2.1).
-    Because ``normed.*`` and ``inputs.*`` are distinct keys, consumers of
-    raw inputs (edge features) need no ordering hack (design §6.3).
+    ``materialise()`` is the only file-touching hook (loads the norm dict and
+    fills the buffers) — skipped on checkpoint load, where values arrive via
+    the state_dict. Produces NEW ``normed.<stream>`` keys; never mutates
+    ``inputs.*``.
     """
 
     def __init__(
@@ -2153,16 +1801,14 @@ class Normaliser(nn.Module):
         streams: Sequence[str],
         global_object: str | None = None,
     ) -> None:
-        """Capture config only (design §2.3 — no file I/O here).
+        """Capture config only (no file I/O here).
 
         Parameters
         ----------
         norm_dict : str | Path
-            Path to the normalisation dictionary YAML; read at
-            `materialise`, never here.
+            Path to the normalisation dictionary YAML; read at `materialise`, never here.
         streams : Sequence[str]
-            Streams to normalise (explicit M2 surface — see the module
-            docstring for the demand-driven TODO).
+            Streams to normalise.
         global_object : str | None, optional
             The stream that is a per-object vector (``[B, F]``) rather than
             a padded sequence (``[B, T, F]``), by default None.
@@ -2192,10 +1838,6 @@ class Normaliser(nn.Module):
     def _spec(self, stream: str) -> TensorSpec:
         """Build the shared spec for ``inputs.<stream>`` / ``normed.<stream>``.
 
-        The last dim is the instance-scoped symbol ``F:<name>.<stream>`` on
-        BOTH sides, so the concrete width declared by the dataset boundary
-        propagates to ``normed.<stream>`` through unification (bind.py).
-
         Returns
         -------
         TensorSpec
@@ -2209,13 +1851,7 @@ class Normaliser(nn.Module):
         return TensorSpec(shape=shape, dtype="float32")
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``inputs.<stream>`` -> ``normed.<stream>`` for every stream.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
-        """
+        """Declare ``inputs.<stream>`` -> ``normed.<stream>`` for every stream."""
         del mode
         return IO(
             requires=unflatten_spec({f"inputs.{s}": self._spec(s) for s in self.streams}),
@@ -2223,15 +1859,10 @@ class Normaliser(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Allocate normalisation buffers from the resolved schema (config-only).
+        """Allocate normalisation buffers (means/stds per stream) from the resolved schema.
 
-        Buffers are named ``means_<stream>`` / ``stds_<stream>`` (design
-        §6.3 checkpoint layout) and initialised to identity (0/1); the
-        boolean ``materialised`` buffer guards against silently training on
-        un-normalised values. Field names are captured here for
-        `materialise`'s per-variable lookup; a `BindError` propagates from
-        the schema if a stream's width or fields are not statically
-        resolved.
+        The boolean ``materialised`` buffer guards against silently training
+        on un-normalised values.
 
         Raises
         ------
@@ -2250,17 +1881,12 @@ class Normaliser(nn.Module):
         self._bound = True
 
     def preflight(self) -> None:
-        """Fail-fast, data-free norm-dict validation (M3 leftover, design §2.3).
+        """Fail-fast, data-free norm-dict validation.
 
-        Without this check a wrong ``norm_dict`` path/content only surfaces
-        at `materialise` — after dataset setup and plan compilation. The
-        preflight reads ONLY the norm-dict YAML (config I/O in the design
-        §2.6 sense — no H5/bind I/O): the file must exist, parse, and carry
-        every configured stream; when the module is already bound (the
-        `SaltModule.setup` call site) the per-variable mean/std entries are
-        checked too, mirroring `materialise`'s validation. Called by
-        `SaltModule.setup` on fresh fits (hard error) and by ``salt2 graph
-        validate`` (warning — data-less machines stay supported).
+        Reads ONLY the norm-dict YAML: the file must exist, parse, and carry
+        every configured stream; when already bound, per-variable mean/std
+        entries are checked too. Called by `SaltModule.setup` on fresh fits
+        (hard error) and by ``salt2 graph validate`` (warning).
 
         Raises
         ------
@@ -2322,10 +1948,9 @@ class Normaliser(nn.Module):
                     )
 
     def materialise(self) -> None:
-        """Fill the buffers from the norm dict (the ONLY file I/O, design §2.3).
+        """Fill the buffers from the norm dict (the only file I/O this module does).
 
-        Mirrors v1 `InputNorm`'s validation (inputnorm.py:56-88): missing
-        streams/variables, non-finite values, and zero stds are errors.
+        Missing streams/variables, non-finite values, and zero stds are errors.
 
         Raises
         ------
@@ -2376,18 +2001,11 @@ class Normaliser(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Produce ``normed.<stream> = (inputs.<stream> - means) / stds``.
 
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only (design §2.5); inputs are never
-            mutated.
-
         Raises
         ------
         RuntimeError
             If the buffers were never materialised (fresh fit without
-            `materialise`) — identity values would silently train
-            un-normalised.
+            `materialise`) — identity values would silently train un-normalised.
         """
         del mode
         # skip under tracing: the tensor->bool read would emit a spurious
@@ -2410,67 +2028,19 @@ class Normaliser(nn.Module):
 class MaskedInputNormaliser(nn.Module):
     """Self-normalising input layer with online masked running statistics.
 
-    OPT-IN alternative to the default fixed-norm-dict `Normaliser` (select
-    via ``class_path: salt.core.nn.MaskedInputNormaliser``). The default
-    `Normaliser` loads a precomputed ``norm_dict.yaml`` and preserves v1
-    parity; THIS module instead learns its own statistics online.
+    OPT-IN alternative to the default fixed-norm-dict `Normaliser`: learns its
+    own mean/var online from the valid (non-padded) objects of every training
+    batch, instead of reading a precomputed ``norm_dict.yaml``. No file I/O.
 
-    A ``BatchNorm``-style replacement for the v1 ``InputNorm``: instead of
-    reading a pre-computed ``norm_dict.yaml`` (per-stream, per-variable
-    ``{mean, std}``), this module **learns its own normalisation statistics
-    online during training**, accumulating running mean/var over the
-    *valid, non-padded* objects of every training batch. There is therefore
-    no norm-dict dependency, no preprocessing pass, and no file I/O.
+    Unlike ``nn.BatchNorm``, this layer ALWAYS applies the running buffers, even
+    in train mode (``normed = (x - running_mean) / sqrt(running_var + eps)``);
+    the running stats are updated from masked batch moments separately, only
+    when training and off tracing. In eval/inference/ONNX this reduces to a
+    frozen affine transform with no mask dependency. Produces NEW
+    ``normed.<stream>`` keys; never mutates ``inputs.*``.
 
-    Apply-with-running-stats (NOT batch stats)
-    -----------------------------------------
-    Unlike true ``nn.BatchNorm``, which normalises with *batch* statistics
-    in train mode, this layer ALWAYS applies the **running** buffers:
-    ``normed = (x - running_mean) / sqrt(running_var + eps)``. For input
-    normalisation that keeps the rescaling stable within and across batches
-    (batch-stat normalisation would make the input mapping batch-composition
-    dependent and noisy). The running buffers are updated *separately* from
-    the masked batch statistics during training only — closer to a "norm
-    dict that adapts" than to classic BatchNorm. Init is identity (mean 0,
-    var 1), so a fresh model is a near-passthrough that warms up.
-
-    Masked online update (train only)
-    ---------------------------------
-    On a *training* forward (``self.training`` True, à la BatchNorm), for
-    each stream the per-feature batch ``sum``, ``sumsq`` and ``count`` are
-    computed over VALID objects only — sequence streams gather ``x[~mask]``
-    (``masks.<stream>`` with ``True == padded``); the ``global_object`` has
-    no mask (all rows valid). Under DDP these three quantities are
-    all-reduced across ranks (never the per-rank mean/var, which cannot be
-    averaged correctly when counts/means differ across ranks) before the
-    global batch mean/var are derived. The EMA update is then
-    ``running = (1 - momentum) * running + momentum * batch`` with
-    ``num_batches_tracked += 1``. Empty (all-padded) streams skip the update.
-
-    Eval / inference / ONNX (frozen)
-    --------------------------------
-    In eval mode (``self.training`` False) and under tracing the update
-    branch and the mask read are both skipped: ``forward`` reduces to
-    ``(x - running_mean) / sqrt(running_var + eps)``. The ``masks.<stream>``
-    requirement is therefore declared **training-only** (``Mode.TRAINING``),
-    so TEST/ONNX graphs do not demand a mask input and the export op is a
-    pure affine transform with constant buffers.
-
-    Lifecycle
-    ---------
-    ``__init__`` records config only (no I/O). ``bind(schema)`` allocates
-    per-stream buffers ``running_mean_<stream>`` (zeros) /
-    ``running_var_<stream>`` (ones) / ``num_batches_tracked_<stream>``
-    (long 0) sized from the resolved ``inputs.<stream>`` widths. There is no
-    ``materialise``/``preflight`` file hook — the buffers self-populate
-    during training and ride in the checkpoint state_dict; on checkpoint
-    load the stored buffers are restored verbatim and no warmup is needed.
-    The legacy ``norm_dict`` constructor arg is kept for config
-    compatibility but is **ignored** (no file is ever read).
-
-    Unlike v1's ``InputNorm.forward`` (which rebinds its input dict's keys
-    in place, inputnorm.py:103-106), this module produces NEW
-    ``normed.<stream>`` keys and never mutates ``inputs.*`` (design §2.1).
+    The legacy ``norm_dict`` constructor arg is accepted for config
+    compatibility but ignored (no file is ever read).
     """
 
     def __init__(
@@ -2481,29 +2051,23 @@ class MaskedInputNormaliser(nn.Module):
         momentum: float | None = 0.1,
         eps: float = 1e-5,
     ) -> None:
-        """Capture config only (design §2.3 — no file I/O here).
+        """Capture config only (no file I/O here).
 
         Parameters
         ----------
         streams : Sequence[str]
-            Streams to normalise (explicit M2 surface).
+            Streams to normalise.
         global_object : str | None, optional
             The stream that is a per-object vector (``[B, F]``) rather than
             a padded sequence (``[B, T, F]``), by default None. The global
             object has no pad mask — every row is valid.
         norm_dict : str | Path | None, optional
-            DEPRECATED / IGNORED. Kept only for config compatibility — the
-            statistics are now learned online, never read from a file. No
-            I/O is performed regardless of this value, by default None.
+            DEPRECATED / IGNORED. Kept only for config compatibility, by default None.
         momentum : float | None, optional
-            EMA momentum for the running-stat update (BatchNorm default
-            ``0.1``): ``running = (1 - momentum) * running + momentum *
-            batch``. A fixed momentum tracks an exponentially-weighted
-            trajectory and does NOT converge to the exact finite-dataset
-            aggregate. Pass ``None`` for cumulative moving average
-            (``momentum = 1 / num_batches_tracked``, like BatchNorm) which
-            DOES converge to the true masked dataset mean/var, by default
-            0.1.
+            EMA momentum for the running-stat update (BatchNorm default ``0.1``):
+            ``running = (1 - momentum) * running + momentum * batch``. Pass
+            ``None`` for a cumulative moving average that converges to the true
+            masked dataset mean/var, by default 0.1.
         eps : float, optional
             Added under the sqrt for numerical stability, by default 1e-5.
 
@@ -2561,23 +2125,12 @@ class MaskedInputNormaliser(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``inputs.<stream>`` (+ training ``masks.<stream>``) -> ``normed.<stream>``.
 
-        Every stream requires ``inputs.<stream>`` and produces
-        ``normed.<stream>`` in all modes. Sequence streams ALSO require
-        ``masks.<stream>`` (the pad mask, ``True == padded``) but ONLY in
-        training modes (``Mode.TRAINING == FIT | VAL``) and as an OPTIONAL
-        port: the mask is read only when updating the running statistics
-        (under ``self.training``), and a stream without a pad-mask producer
-        (e.g. a rank-2/rank-3 stream that is all-valid) simply has every
-        object treated as valid. Gating the require to ``Mode.TRAINING``
-        (rather than ``FIT`` alone) keeps the FIT and VAL plans structurally
-        identical (``SaltModule._assert_fit_val_identical``) while leaving
-        TEST/ONNX free of any mask dependency — so the exported graph is a
-        pure affine transform. The ``global_object`` declares no mask at all.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        Sequence streams also require ``masks.<stream>`` (``True == padded``),
+        but only as an OPTIONAL, training-mode port — the mask is read only
+        when updating the running statistics, and a stream without a
+        pad-mask producer treats every object as valid. Gating to
+        ``Mode.TRAINING`` (rather than FIT alone) keeps TEST/ONNX free of any
+        mask dependency, so the exported graph is a pure affine transform.
         """
         del mode
         requires: dict[str, TensorSpec] = {f"inputs.{s}": self._spec(s) for s in self.streams}
@@ -2597,15 +2150,7 @@ class MaskedInputNormaliser(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Allocate the running-statistic buffers from the resolved schema.
-
-        Per stream, registers ``running_mean_<stream>`` (zeros),
-        ``running_var_<stream>`` (ones) and ``num_batches_tracked_<stream>``
-        (long 0), sized from the resolved ``inputs.<stream>`` width. Init is
-        identity normalisation (mean 0 / var 1) so a fresh model is a
-        near-passthrough that warms up as the running stats accumulate. A
-        `BindError` propagates from the schema if a stream's width is not
-        statically resolved.
+        """Allocate the running-statistic buffers (identity init: mean 0 / var 1) from the schema.
 
         Raises
         ------
@@ -2631,12 +2176,9 @@ class MaskedInputNormaliser(nn.Module):
     def _masked_moments(x: Tensor, valid: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
         """Compute per-feature ``(sum, sumsq, count)`` over valid objects.
 
-        `x` is ``[B, T, F]`` (sequence) or ``[B, F]`` (global); for a
-        sequence stream `valid` is the boolean keep-mask ``[B, T]`` (the
-        complement of the pad mask, ``True == valid``); for the global
-        object `valid` is None (all rows kept). Reduction collapses every
-        non-feature axis so the three returned tensors are ``[F]``; `count`
-        is a scalar tensor (number of valid objects, summed over the batch).
+        `x` is ``[B, T, F]`` (sequence) or ``[B, F]`` (global); `valid` is the
+        ``[B, T]`` keep-mask (``True == valid``), or None for the global
+        object (all rows kept).
 
         Returns
         -------
@@ -2653,14 +2195,10 @@ class MaskedInputNormaliser(nn.Module):
     def _update_running_stats(self, stream: str, x: Tensor, valid: Tensor | None) -> None:
         """EMA-update the running stats for one stream from masked batch moments.
 
-        Computes per-feature ``(sum, sumsq, count)`` over valid objects,
-        all-reduces those three quantities across DDP ranks (so the running
-        buffers reflect the GLOBAL batch, not a single rank's shard — never
-        averaging per-rank mean/var, which is wrong when counts/means
-        differ), derives the global batch mean/var, and applies the EMA
-        ``running = (1 - momentum) * running + momentum * batch``. An
-        all-padded stream (global count 0) is skipped. ``num_batches_tracked``
-        increments only when an update actually happens.
+        All-reduces the per-feature sum/sumsq/count across DDP ranks before
+        deriving the batch mean/var (never averaging per-rank mean/var
+        directly, which is wrong when counts differ across ranks). Skips an
+        all-padded (global count 0) stream.
         """
         s_sum, s_sumsq, count = self._masked_moments(x, valid)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -2678,17 +2216,13 @@ class MaskedInputNormaliser(nn.Module):
         running_mean = getattr(self, f"running_mean_{stream}")
         running_var = getattr(self, f"running_var_{stream}")
         if self.momentum is None:
-            # Cumulative (BatchNorm momentum=None): OBJECT-count-weighted pooling
-            # via the parallel/chunked moment combination (Chan et al.), so the
-            # buffers equal the EXACT pooled masked dataset mean/var regardless
-            # of per-batch valid counts (converges to the true aggregate).
+            # cumulative moving average: object-count-weighted parallel moment
+            # combination (Chan et al.) — converges to the exact pooled mean/var
             seen = getattr(self, f"num_objects_seen_{stream}")
             n_old = seen.to(batch_mean.dtype)
             n_new = n_old + count
             delta = batch_mean - running_mean
-            # combined mean
             new_mean = running_mean + delta * (count / n_new)
-            # combined population variance (M2 accumulation form)
             m_old = running_var * n_old
             m_new = batch_var * count
             new_var = (m_old + m_new + delta * delta * (n_old * count / n_new)) / n_new
@@ -2703,19 +2237,11 @@ class MaskedInputNormaliser(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Apply running-stat normalisation; update the stats in train mode.
 
-        Always applies the frozen running buffers,
-        ``normed.<stream> = (inputs.<stream> - running_mean)
-        / sqrt(running_var + eps)``, producing NEW keys and never mutating
-        ``inputs.*`` (design §2.1/§2.5). The running statistics are updated
-        from the masked batch moments (valid objects only) iff ALL of:
-        ``self.training`` is True (BatchNorm-style gate — Lightning calls
-        ``.train()`` for fit, ``.eval()`` for val/test), the plan ``mode`` is
-        a training mode (``Mode.TRAINING``), and the graph is not being
-        traced. Conjoining the mode keeps the update (and the mask read) in
-        lockstep with the training-only ``masks.<stream>`` requirement, so a
-        TEST/ONNX plan never reads a mask even on a module left in the
-        default ``training=True`` state. In eval/inference/ONNX the op
-        reduces to a pure affine transform with constant buffers.
+        Always applies the frozen running buffers:
+        ``normed.<stream> = (inputs.<stream> - running_mean) / sqrt(running_var + eps)``.
+        The running stats update only when ``self.training``, the plan mode is
+        training, and the graph is not being traced — so a TEST/ONNX plan
+        never reads a mask even if the module is left in ``training=True``.
 
         Returns
         -------
@@ -2747,93 +2273,34 @@ class MaskedInputNormaliser(nn.Module):
 
 
 class StreamEmbed(nn.Module):
-    """Config-constructed per-stream initial embedding (design §9.2, replaces v1 `InitNet`).
+    """Config-constructed per-stream initial embedding, replacing v1 `InitNet`.
 
-    Composes a fresh v1 `Dense` built at `bind` — the dense input width is
-    inferred from the resolved input and context widths, never configured
-    (design §2.3 kills ``input_size`` YAML arithmetic, initnet.py:54-59).
+    Composes a fresh v1 `Dense` built at `bind`, with input width inferred
+    from the resolved input and context widths. Context entries are
+    PREPENDED in list order (``cat([context, x])``), so the feature layout is
+    ``[ctx[-1], ..., ctx[0], stream]``.
 
-    Context entries are attached with v1's ``attach_context`` semantics
-    (tensor_utils.py:240: ``cat([context, x])`` — context PREPENDED), applied
-    in list order; the final feature layout is therefore
-    ``[ctx[-1], ..., ctx[0], stream]``. With the single GN2 entry
-    ``context: [normed.jets]`` this reproduces v1's ``[global, stream]``
-    column order exactly (checkpoint layout, design §5.1).
+    Stream rank is INFERRED from the bound input, not configured: a
+    padded-sequence input ``[B, T, F]`` -> ``embed.<s> [B, T, D]``; a per-jet
+    global input ``[B, F]`` -> ``embed.<s> [B, D]`` with no token axis. This is
+    what makes DL1 a jets-only MLP (no encoder, no pooling).
 
-    Stream rank — INFERRED from the bound input (M7 W1.5 wave R; supersedes the
-    M6-6 ``vector:`` flag): StreamEmbed no longer carries a rank flag of its own.
-    Its rank is whatever its BOUND INPUT carries, and the embed simply preserves
-    it: a padded-sequence input ``inputs.<s> [B, T, F]`` -> ``embed.<s> [B, T, D]``,
-    a per-jet GLOBAL input ``inputs.<s> [B, F]`` -> ``embed.<s> [B, D]`` with NO
-    token axis. The rank originates at ONE place — the reader's per-group
-    ``global_object:`` flag (reader.py GroupConfig), which drives the
-    reader/``Features`` boundary rank and the matching `Normaliser`
-    ``global_object`` rank-2 handling (modules.py `Normaliser._spec`). The embed
-    declares rank-AGNOSTIC specs (``shape=None`` on both its ``normed.<s>``
-    require and its ``embed.<s>`` produce), so the producer (Normaliser/reader)
-    sets the input rank and the consumer (Concat / a ``sequence:`` task head)
-    sets the output rank — they are consistent BY CONSTRUCTION because both come
-    from the single reader flag. The embed's ``out_dim`` width is contributed via
-    the `derived_widths` bind hook (design §6.6), since a ``shape=None`` produce
-    declares no last dim. This is what makes DL1 a jets-only MLP: a ``[B, F]``
-    embed consumed straight by a (``sequence: false``) task head, with no encoder
-    and no pooling — exactly v1's no-encoder/no-pool `InitNet`/`SaltModel` path
-    (saltmodel.py:90-92 guard, :155-156 embed_xs, :170-172 global_rep = embed_xs).
-    The internal v1 `Dense`/``attach_context`` are rank-agnostic (``nn.Linear``
-    over ``[..., F]``, tensor_utils.py:236-240 expands a lower-rank context), so
-    the forward math is identical — only the rank flowing through the spec changes.
-    ONNX: a rank-2 embed is a plain `nn.Linear`-stack with no T axis, trivially
-    traceable (B the sole dynamic axis), exactly as `Normaliser`'s ``[B, F]``
-    global-object path traces today (no special-casing).
+    ``mup: true`` builds the internal `Dense` with ``mup=True`` at `bind`,
+    applying the muP weight init; the forward math is otherwise unchanged.
 
-    muP — the ``mup:`` flag (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/
-    BREAK-routing): the model-side embed is the first stage of the muP-parametrised
-    forward (v1 ``InitNet(mup=True)`` -> ``Dense(mup=True)``, initnet.py:67-68,
-    dense.py:48,88-89). When ``mup: true`` the composed v1 `Dense` is built with
-    ``mup=True`` at `bind`, which runs the muP weight init in ``Dense.__init__``
-    (``_reset_parameters``: every linear weight ``~N(0, 1/fan_out)``, bias zeroed,
-    dense.py:96-102) instead of the default torch init. NOTHING else about the
-    embed changes — the forward math (``net(attach_context(x))``) is byte-identical
-    to the non-muP path; muP affects ONLY the initial parameter distribution
-    (training dynamics), not the frozen forward. (Note: v1 ``InitNet(mup=True)``
-    re-runs the reset via the misnamed ``self.net.reset_parameters()`` call,
-    initnet.py:69 — but `Dense` exposes only ``_reset_parameters`` (with the
-    underscore, dense.py:96) and ``nn.Module`` has no ``reset_parameters``, so this
-    call RAISES ``AttributeError: 'Dense' object has no attribute 'reset_parameters'``
-    at InitNet construction. v1's ``InitNet(mup=True)`` path is therefore BROKEN at
-    construction — not merely a redundant no-op. v2 relies on ``Dense(mup=True)``'s
-    own ``__init__`` reset (dense.py:88-89,96-102), which IS the intended muP init,
-    so the v2 single-reset-in-``__init__`` is byte-faithful to v1's intended muP
-    embed distribution, not a behaviour drop.) The ``apply_to`` ROUTING half
-    (which named modules carry ``mup: true``, the shape-path/MuAdamW wiring) is a
-    SEPARATE later stage — this is the architectural port only.
+    Optional, both OFF by default (unset => today's behaviour):
 
-    Optional FiLM + positional encoding (M7 W-FILM, design §6.4 — input-layer
-    half of v1 `InitNet`). Two OPTIONAL config blocks, both OFF by default (unset
-    => byte-identical to today):
-
-    - ``featurewise:`` — an INPUT-layer `FeaturewiseTransformation` (FiLM). When
-      set, the embed reads the per-event ``inputs.parameters`` ``[B, n_params]``
-      and applies ``scale * x + bias`` to the embed INPUT (before the `Dense`
-      projection), exactly as v1 `InitNet.forward` (initnet.py:85-86: featurewise
-      is applied to ``x`` BEFORE ``self.net(x)``). Faithful to v1, when featurewise
-      is active the ``parameters`` are NOT also concatenated as context
-      (initnet.py:81 ``not self.featurewise``) — the FiLM IS the conditioning path.
-    - ``pos_enc:`` — a `PositionalEncoder` added to the embed OUTPUT. When set, the
-      sin/cos encoding of the configured coordinate variables (selected by NAME
-      from the input's fields) is ADDED to the projected embedding, exactly as v1
-      `InitNet.forward` (initnet.py:92-95: ``x += pos_enc(inputs[input][...,
-      idx])`` AFTER the projection). The pos_enc reads the RAW embed input columns
-      (the same key the `Dense` consumes) at the variable indices.
-
-    Both are NO-OP when unset.
+    - ``featurewise:`` — an input-layer `FeaturewiseTransformation` (FiLM):
+      reads ``inputs.parameters`` and applies ``scale * x + bias`` to the
+      embed INPUT before the `Dense` projection. When active, ``parameters``
+      is NOT also concatenated as context.
+    - ``pos_enc:`` — a `PositionalEncoder` ADDED to the embed OUTPUT (after
+      projection), over the configured coordinate variables.
     """
 
     MUP_WIDTH_ARG = "out_dim"
-    """The init_arg the muP shape-generation tooling sweeps for this module
-    (design §3.4; v1 ``parameter_name: output_size`` for ``init_nets``,
-    GN2_muP.yaml:12-15). ``salt2 mup-shapes`` mutates ``init_args.out_dim`` to
-    the base/delta widths to produce the infshapes."""
+    """The init_arg the muP shape-generation tooling (``salt2 mup-shapes``)
+    sweeps for this module to produce the infshapes."""
 
     def __init__(
         self,
@@ -2841,12 +2308,12 @@ class StreamEmbed(nn.Module):
         out_dim: int,
         dense: dict[str, Any] | None = None,
         context: Sequence[str] = (),
-        input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
+        input: str | None = None,  # noqa: A002 - YAML surface name
         mup: bool = False,
         featurewise: dict[str, Any] | None = None,
         pos_enc: dict[str, Any] | None = None,
     ) -> None:
-        """Capture config only (design §2.3).
+        """Capture config only.
 
         Parameters
         ----------
@@ -2855,41 +2322,27 @@ class StreamEmbed(nn.Module):
         out_dim : int
             Output embedding width (concrete, config-fixed).
         dense : dict[str, Any] | None, optional
-            Extra kwargs for the internal v1 `Dense` (``hidden_layers``,
-            ``activation``, ...); must not contain width keys, by default
-            None.
+            Extra kwargs for the internal v1 `Dense`; must not contain width keys.
         context : Sequence[str], optional
-            Dotted bundle keys attached as context, in v1 prepend order (see
+            Dotted bundle keys attached as context, in prepend order (see
             class docstring), by default ``()``.
         input : str | None, optional
             Input key override, by default ``normed.<stream>``. The embed's
-            rank is INFERRED from this bound input — no rank flag (M7 W1.5
-            wave R; see the class docstring).
+            rank is INFERRED from this bound input.
         mup : bool, optional
             Whether to use the muP parametrisation for the embed's internal
-            `Dense` (M6 sub-wave B), by default False. When True the composed v1
-            `Dense` is built with ``mup=True`` at `bind`, applying the muP weight
-            init (``~N(0, 1/fan_out)`` weights, zeroed biases, dense.py:96-102);
-            the forward is unchanged (muP affects init only). The v1 surface is
-            ``init_net.dense_config.mup: True`` (GN2_muP.yaml:35).
+            `Dense`, by default False.
         featurewise : dict[str, Any] | None, optional
-            OPTIONAL input-layer FiLM config (M7 W-FILM; see class docstring). The
-            kwargs for `FeaturewiseTransformation` MINUS the width args (``layer``
-            is forced to ``"input"``; ``num_params``/``num_features`` are inferred
-            at bind). May carry an explicit ``parameters`` key naming the bundle
-            key of the per-event conditioning tensor (default ``inputs.parameters``).
-            By default None (no FiLM — byte-identical to today).
+            Optional input-layer FiLM config (see class docstring): kwargs for
+            `FeaturewiseTransformation` minus the width args. By default None.
         pos_enc : dict[str, Any] | None, optional
-            OPTIONAL positional-encoding config (M7 W-FILM; see class docstring).
-            The kwargs for `PositionalEncoder` (``variables``, ``dim``, ``alpha``)
-            — ``dim`` defaults to ``out_dim`` (the embed width the encoding is added
-            to). By default None (no positional encoding — byte-identical to today).
+            Optional positional-encoding config (see class docstring): kwargs
+            for `PositionalEncoder`. By default None.
 
         Raises
         ------
         ConfigError
-            If `dense` configures widths (``input_size`` etc. — inferred at
-            bind, design §2.3) or `out_dim` is not positive.
+            If `dense` configures widths (inferred at bind) or `out_dim` is not positive.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -2909,7 +2362,7 @@ class StreamEmbed(nn.Module):
         self.input_key = input if input is not None else f"normed.{stream}"
         self.mup = bool(mup)
         self.net: nn.Module | None = None
-        # -- optional input-layer FiLM (M7 W-FILM) ---------------------------
+        # -- optional input-layer FiLM ---------------------------------------
         self.featurewise_cfg = dict(featurewise) if featurewise is not None else None
         self.params_key = "inputs.parameters"
         self.featurewise: FeaturewiseTransformation | None = None
@@ -2921,7 +2374,7 @@ class StreamEmbed(nn.Module):
                     "FiLM site; use TransformerEncoder for encoder/global layers)"
                 )
             self.featurewise_cfg["layer"] = "input"
-        # -- optional positional encoding (M7 W-FILM) ------------------------
+        # -- optional positional encoding ------------------------------------
         self.pos_enc_cfg = dict(pos_enc) if pos_enc is not None else None
         self.pos_enc: PositionalEncoder | None = None
         self.pos_enc_indices: tuple[int, ...] = ()
@@ -2929,31 +2382,20 @@ class StreamEmbed(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + context keys -> ``embed.<stream>``.
 
-        Rank-AGNOSTIC (M7 W1.5 wave R): the input require and the ``embed.<s>``
-        produce both declare ``shape=None``, so the embed inherits its rank from
-        the bound input — the producer (Normaliser/reader, keyed on the single
-        reader ``global_object:`` flag) sets the input rank, and the consumer
-        (Concat / a ``sequence:`` task head) sets the output rank; both come from
-        that one flag so they agree by construction. The ``out_dim`` width of the
-        ``embed.<s>`` produce is contributed at bind via `derived_widths` (a
-        ``shape=None`` spec declares no last dim, design §6.6).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        Rank-AGNOSTIC: the input require and the ``embed.<s>`` produce both
+        declare ``shape=None``, so the embed inherits its rank from the bound
+        input. The ``out_dim`` width is contributed at bind via `derived_widths`.
         """
         del mode
         requires: dict[str, TensorSpec] = {
             self.input_key: TensorSpec(shape=None, dtype="float32"),
         }
         for key in self.context:
-            # rank/width unconstrained here: context may be a [B, F] global
-            # vector or broadcastable — widths resolve from the producer side
+            # rank/width unconstrained: context may be a [B, F] global vector
+            # or broadcastable — widths resolve from the producer side
             requires[key] = TensorSpec(shape=None, dtype="float32")
         if self.featurewise_cfg is not None:
-            # the per-event conditioning parameters: a rank-2 [B, n_params]
-            # global stream (M7 W-FILM). Width resolves from the producer side.
+            # the per-event conditioning parameters: a rank-2 [B, n_params] global stream
             requires[self.params_key] = TensorSpec(shape=("B", sym_dim("P", self.name)), dtype="float32")
         return IO(
             requires=unflatten_spec(requires),
@@ -2963,37 +2405,16 @@ class StreamEmbed(nn.Module):
         )
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Contribute the ``embed.<stream>`` last-dim width (design §6.6).
-
-        The produce declares ``shape=None`` (rank inferred from the bound input,
-        see `declare_io`), so the ``out_dim`` width is supplied here instead of
-        via a spec last dim. `out_dim` is a config constant, so this is
-        unconditional (no dependence on resolved input widths).
-
-        Returns
-        -------
-        dict[str, int]
-            ``{"embed.<stream>": out_dim}``.
-        """
+        """Contribute the ``embed.<stream>`` last-dim width (``out_dim``, a config constant)."""
         del widths
         return {f"embed.{self.stream}": self.out_dim}
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the internal `Dense` with the inferred input width (design §2.3).
+        """Build the internal `Dense` (``input_size = width(input) + sum(width(ctx))``).
 
-        ``input_size = width(input) + sum(width(ctx))`` — exactly v1's
-        inference (initnet.py:54-59) driven by the resolved schema instead
-        of CLI variable injection. When ``self.mup`` the `Dense` is built with
-        ``mup=True`` so its ``__init__`` applies the muP weight init
-        (``_reset_parameters``, dense.py:88-89,96-102); the forward is unchanged.
-
-        The optional input-layer FiLM (M7 W-FILM) is built here too: the FiLM
-        nets are sized ``num_params = width(parameters)`` (input) /
-        ``num_features = input_size`` (output, the embed INPUT width the FiLM is
-        applied to BEFORE the projection, faithful to v1 initnet.py:85-86). The
-        optional positional encoder resolves its variable column indices from the
-        input's declared fields (initnet.py:93-94) and defaults ``dim`` to
-        ``out_dim`` (the embed OUTPUT width it is added to).
+        Also builds the optional input-layer FiLM (sized from ``parameters``
+        width and the embed input width) and resolves the optional positional
+        encoder's variable column indices from the input's declared fields.
         """
         input_size = schema.width(self.input_key) + sum(schema.width(key) for key in self.context)
         self.net = Dense(
@@ -3013,7 +2434,6 @@ class StreamEmbed(nn.Module):
             self.pos_enc = PositionalEncoder(**cfg)
             self.pos_enc.name = self.name
             # resolve the coordinate column indices by NAME from the input fields
-            # (v1 initnet.py:93-94 ``[this_vars.index(v) for v in pos_enc.variables]``)
             fields = schema.fields_of(self.input_key)
             try:
                 self.pos_enc_indices = tuple(fields.index(v) for v in self.pos_enc.variables)
@@ -3024,59 +2444,44 @@ class StreamEmbed(nn.Module):
                 ) from None
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Attach context (prepended, v1 order) and project.
-
-        With the optional FiLM (M7 W-FILM) the per-event ``parameters`` scale/bias
-        is applied to the embed INPUT before the projection (v1 initnet.py:85-86);
-        with the optional positional encoder the sin/cos encoding of the configured
-        coordinate columns is ADDED to the embed OUTPUT (v1 initnet.py:92-95). Both
-        are NO-OP when unset (byte-identical to the no-FiLM path).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only (design §2.5).
-        """
+        """Attach context (prepended) and project; optional FiLM/pos-enc are no-ops when unset."""
         del mode
         x = b.get(self.input_key)
         raw = x  # the raw input columns (pos_enc reads these at the variable idx)
         for key in self.context:
-            x = attach_context(x, b.get(key))  # cat([context, x]) — tensor_utils.py:240
+            x = attach_context(x, b.get(key))  # cat([context, x])
         if self.featurewise is not None:
-            # FiLM on the embed INPUT, before the projection (v1 initnet.py:85-86)
+            # FiLM on the embed INPUT, before the projection
             x = self.featurewise(b.get(self.params_key), x)
         assert self.net is not None, "forward before bind()"
         out = self.net(x)
         if self.pos_enc is not None:
-            # ADD the positional encoding to the embed OUTPUT (v1 initnet.py:92-95)
+            # ADD the positional encoding to the embed OUTPUT
             out = out + self.pos_enc(raw[..., self.pos_enc_indices])
         return {f"embed.{self.stream}": out}
 
 
 class Concat(nn.Module):
-    """Concatenate embedded streams into one sequence (design §5.1).
+    """Concatenate embedded streams into one sequence.
 
     Produces ``seq.x`` / ``seq.mask`` / ``seq.layout``; the concat ORDER is
-    the configured list and nothing else (v1 relied on init_nets dict
-    insertion order, saltmodel.py:128-129 / transformer.py:684-686).
-    ``seq.layout`` is a dict-valued meta leaf ``{stream: (start, stop)}``
-    over the pre-register sequence, consumed by `Split`.
+    the configured list and nothing else. ``seq.layout`` is a dict-valued
+    meta leaf ``{stream: (start, stop)}`` over the pre-register sequence,
+    consumed by `Split`.
 
-    M2 deviation (documented in the module docstring): the design's
-    ``registers:`` belong here, but the composed v1 `Transformer` appends
-    its own register tokens internally and requires ``num_registers >= 1``
-    — so nonzero ``registers`` is rejected until M7 absorbs the encoder.
+    Registers live in `TransformerEncoder`, not here (the composed v1
+    `Transformer` appends its own register tokens internally and requires
+    ``num_registers >= 1``), so nonzero ``registers`` is rejected.
     """
 
     def __init__(self, streams: Sequence[str], registers: int = 0) -> None:
-        """Capture the explicit stream order (design §5.1).
+        """Capture the explicit stream order.
 
         Raises
         ------
         ConfigError
             If `streams` is empty or contains duplicates, or if `registers`
-            is nonzero (M2: registers live in `TransformerEncoder`, see
-            class docstring).
+            is nonzero (registers live in `TransformerEncoder`, see class docstring).
         """
         super().__init__()
         self.name = _UNNAMED
@@ -3099,12 +2504,7 @@ class Concat(nn.Module):
         All streams share one instance-scoped embed-width symbol — equal
         widths are a genuine concat constraint. In ONNX mode an additional
         ``seq.offsets`` int64 tensor is produced (the trace-safe stream
-        boundary table consumed by `Split`'s export branch, design §7).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        boundary table consumed by `Split`'s export branch).
         """
         del mode
         embed_dim = sym_dim("E", self.name)
@@ -3131,19 +2531,12 @@ class Concat(nn.Module):
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Contribute the ``seq.x`` last-dim width from the per-stream embed widths.
 
-        Concat shares one ``embed_dim`` symbol between its ``embed.<stream>``
-        requires and its ``seq.x`` produce (equal embed widths are a genuine
-        concat constraint). Since `StreamEmbed` now produces ``embed.<stream>``
-        with ``shape=None`` (rank inferred from the bound input, M7 W1.5 wave R),
-        its width arrives via `StreamEmbed.derived_widths` rather than a spec last
-        dim — so there is no longer a concrete ``embed.<stream>`` shape for the
-        dim table to bind ``embed_dim`` from. When an ENCODER follows, the
-        encoder's concrete ``seq.x`` require width still binds it; the
-        ENCODERLESS-pool path (regression DiPS body) has no such anchor, so this
-        hook forwards the resolved embed width to ``seq.x`` directly (design §6.6,
-        the same mechanism as `VectorConcat`'s ``Dsum``). The per-stream embeds
-        share one width (the concat constraint), so the FIRST resolved input
-        width is the ``seq.x`` width.
+        `StreamEmbed` produces ``embed.<stream>`` with ``shape=None`` (rank
+        inferred from the bound input), so there is no concrete shape for the
+        dim table to bind ``embed_dim`` from directly — this hook forwards the
+        resolved embed width to ``seq.x`` (needed on the encoderless-pool path,
+        which has no encoder require to bind it otherwise). The per-stream
+        embeds share one width, so the FIRST resolved input width is used.
 
         Returns
         -------
@@ -3162,18 +2555,8 @@ class Concat(nn.Module):
 
         In ONNX mode the per-stream token counts are ALSO published as the
         ``seq.offsets`` cumulative-boundary tensor, built with
-        ``torch.onnx.operators.shape_as_tensor`` on the per-stream pad masks
-        so the boundaries trace to Shape/Concat/CumSum nodes that stay
-        symbolic under ``dynamo=False`` tracing (design §7 multi-stream
-        trace-safety; the mode branch itself is static Python). Eager
-        FIT/VAL/TEST numerics are untouched.
-
-        Returns
-        -------
-        dict[str, Any]
-            The newly produced keys only (design §2.5). ``torch.cat``
-            allocates fresh tensors even for one input, so the seq leaves
-            never alias the per-stream leaves.
+        ``torch.onnx.operators.shape_as_tensor`` so the boundaries trace to
+        Shape/Concat/CumSum nodes that stay symbolic under tracing.
         """
         xs = [b.get(f"embed.{stream}") for stream in self.streams]
         masks = [b.get(f"masks.{stream}") for stream in self.streams]
@@ -3195,54 +2578,27 @@ class Concat(nn.Module):
 
 
 class VectorConcat(nn.Module):
-    """Ordered concatenation of ``[B, D_i]`` vectors into one ``[B, Dsum]`` key (design §6.6).
+    """Ordered concatenation of ``[B, D_i]`` vectors into one ``[B, Dsum]`` key.
 
-    The v2 spelling of v1's post-pooling ``'global'`` magic key
-    (saltmodel.py:175-177): ``global_rep = cat([global_rep, global_feats],
-    dim=-1)``. v1 fed GN3's 2-feature ``global`` stream PAST the encoder and
-    concatenated it onto the pooled representation, producing the
-    ``&pooled_dim 258`` (256 + 2) every GN3 task consumes. The synthesis killed
-    ``'global'`` as a magic key without a replacement — a silent feature-drop
-    hazard (both design critics rated HIGH: all widths still unify after the
-    drop, so no ``ShapeError`` fires). This module is the explicit replacement.
-
-    There is **no v1 class** for this — v1 inlined the cat in
-    ``SaltModel.forward``. The nearest v1 primitives are the ``merge_dict``
-    stream merge (saltmodel.py:135-147, sequence-level, code-only) and
-    ``InitNet.attach_global`` (initnet.py:77-82, context prepend); neither is a
-    standalone post-pooling vector concat. The correctness anchors are therefore
-    design-conformance, not v1-byte-parity (plan 10 sub-wave B, L3):
-
-    1. **Concat ORDER is the config list.** For converted GN3 checkpoints the
-       converter emits ``inputs: [pooled.global, normed.global]`` (pooled first,
-       global features last) so the task first-layer weight layouts line up with
-       v1's ``cat([global_rep, global_feats])`` (design §6.6 1390-1391). The
-       order is the configured list and nothing else.
-    2. **Output width ``Dsum = sum(D_i)``.** Resolved at bind via
-       `derived_widths` (there is no concrete edge for the dim table to bind
-       ``Dsum`` to — only the concat knows the sum; design §6.6 "Dsum unified at
-       bind", bind.py second pass).
-    3. **ONNX is the ``alias:`` mechanism, not this module.** Athena feeds ONE
-       jet tensor that v1 clones into ``global`` (to_onnx.py:377-378); v2
-       reproduces that with ``export.inputs`` ``alias:`` (`OnnxAdapter`,
-       onnx/adapter.py, design §6.6/§7) — a name-resolved column gather binding
-       the aliased port from the source tensor. VectorConcat itself is
-       mode-agnostic: ``torch.cat`` over ``[B, D]`` vectors has no dynamic
-       feature axis, so the forward is identical in every mode (unlike
-       sequence-level `Concat`/`Split`, which need ``seq.offsets`` trace-safety).
-
-    4 configs depend on it: GN2emu, GN3V01, GN3_SoftE, GN3EPCLV01.
+    Replaces v1's post-pooling ``'global'`` magic key: GN3's 2-feature
+    ``global`` stream is fed past the encoder and concatenated onto the pooled
+    representation (``pooled_dim = 256 + 2``, the width every GN3 task
+    consumes). Concat ORDER is the config list — for converted GN3
+    checkpoints, ``inputs: [pooled.global, normed.global]`` (pooled first)
+    matches v1's task first-layer weight layout. Output width ``Dsum =
+    sum(D_i)`` is resolved at bind via `derived_widths`. ONNX uses the
+    ``export.inputs`` ``alias:`` mechanism (`OnnxAdapter`), not this module;
+    VectorConcat itself is mode-agnostic.
     """
 
     def __init__(self, inputs: Sequence[str], out: str = "pooled.global") -> None:
-        """Capture the explicit ordered input list and the output key (design §6.6).
+        """Capture the explicit ordered input list and the output key.
 
         Parameters
         ----------
         inputs : Sequence[str]
             Dotted bundle keys to concatenate, in the EXACT order they appear
-            in the output (pooled first for converted GN3 checkpoints, design
-            §6.6 1390-1391). Must be non-empty with no duplicates.
+            in the output. Must be non-empty with no duplicates.
         out : str, optional
             The produced concatenated key, by default ``"pooled.global"`` (the
             v1 ``global_rep`` slot every GN3 task reads).
@@ -3268,19 +2624,11 @@ class VectorConcat(nn.Module):
         self.out_key = out
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare each ``[B, D_i]`` input -> the ``[B, Dsum]`` output (design §6.6).
+        """Declare each ``[B, D_i]`` input -> the ``[B, Dsum]`` output.
 
-        Each input gets its OWN instance-scoped width symbol (the inputs are
-        genuinely different widths — pooled 256 vs global 2 — so they must NOT
-        share a symbol). The output's ``Dsum`` symbol is resolved at bind from
-        the sum of the resolved input widths (`derived_widths`); the dim table
-        alone cannot bind it (no concrete edge), which is exactly why the
-        bind-time second pass exists (design §6.6 "Dsum unified at bind").
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        Each input gets its OWN instance-scoped width symbol (inputs are
+        genuinely different widths, so they must NOT share a symbol); the
+        output's ``Dsum`` is resolved at bind via `derived_widths`.
         """
         del mode
         requires: dict[str, TensorSpec] = {
@@ -3295,13 +2643,7 @@ class VectorConcat(nn.Module):
         )
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Contribute ``Dsum = sum(D_i)`` once every input width is resolved (design §6.6).
-
-        Called by `resolve_bind_schema`'s second pass with the widths resolved
-        so far. Returns the output width when ALL inputs are known, else an
-        empty dict (a mode where some input is absent — the hook is
-        order-insensitive across plans). This is the ONLY place the concat sum
-        is known; the union-find dim table cannot infer it from edges alone.
+        """Contribute ``Dsum = sum(D_i)`` once every input width is resolved.
 
         Returns
         -------
@@ -3314,71 +2656,27 @@ class VectorConcat(nn.Module):
         return {}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Concatenate the inputs along the feature dim, in the configured order.
-
-        Mode-agnostic: ``[B, D]`` vectors have no dynamic feature axis, so the
-        same ``torch.cat`` traces correctly for ONNX (design §6.6). ``torch.cat``
-        allocates a fresh tensor, so the output never aliases an input leaf
-        (design §2.1 write-once).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced key only (design §2.5).
-        """
+        """Concatenate the inputs along the feature dim, in the configured order."""
         del mode
         return {self.out_key: torch.cat([b.get(key) for key in self.inputs], dim=-1)}
 
 
 class EdgeFeatures(nn.Module):
-    """Config-constructed pairwise edge-feature builder (design §6.7, M6 sub-wave C).
+    """Config-constructed pairwise edge-feature builder.
 
-    The v2 replacement for v1's ``EdgeConstructor`` (edge_constructor.py:7) +
-    ``calculate_edge_features`` (edge_features.py:52). A NetModule: it requires
-    the **raw** ``inputs.<stream>`` ``[B, T, F]`` (design §6.3 — edges are built
-    on UN-normalised values, which is exactly why ``inputs.*`` and ``normed.*``
-    are distinct keys and no ordering hack is needed) plus ``masks.<stream>``,
-    and produces ``edges.<stream>`` ``[B, T, T, E]`` where ``E = len(features)``.
+    Requires the RAW (un-normalised) ``inputs.<stream>`` ``[B, T, F]`` plus
+    ``masks.<stream>``, and produces ``edges.<stream>`` ``[B, T, T, E]`` where
+    ``E = len(features)``. Produces a NEW key; never mutates ``inputs.*``.
 
-    v1 wired this as in-place mutation: ``EdgeConstructor.forward`` wrote
-    ``inputs[f"_edge_features_{name}"]`` back into the input dict
-    (edge_constructor.py:41-44) and the SaltModel sorted init_nets so the edge
-    stream landed first (saltmodel.py:69-80). v2 makes it an ordinary graph
-    edge: a NEW ``edges.<stream>`` key, never mutating ``inputs.*`` (design
-    §2.1 write-once); the edge-stream-first / EdgeAttention-backend constraints
-    become bind-time validator rules on the ENCODER port (design §6.7
-    1425-1431), authored when the encoder gains its ``edges:`` arg (a later M6
-    sub-wave C stage — NOT here).
+    The per-element math (dR/kt/z/subjetIndex/isSelfLoop/mass) is byte-faithful
+    to v1's inlined `calculate_edge_features`/`check_edge_config`. The
+    ``indices_map`` (variable name -> column index) is resolved at `bind` from
+    the resolved schema's declared fields — column lookups resolve by NAME,
+    never by YAML list position.
 
-    Faithfulness: the per-element math is the v1 functions
-    (`calculate_edge_features`, `check_edge_config`) — INLINED into this module
-    BYTE-FAITHFULLY at M7 W2b (modules.py, copied from v1 edge_features.py:10-146,
-    v1 original untouched) so the dR/kt/z/subjetIndex/isSelfLoop/mass values are
-    byte-identical to v1. The ``indices_map`` (variable name -> column index)
-    is resolved at `bind` from the resolved schema's declared ``inputs.<stream>``
-    fields (the dataset-side `Features` declaration, design §2.2 — column
-    lookups resolve by NAME, never by YAML list position), exactly v1's
-    ``EdgeConstructor`` ``indices_map`` built from ``variables[input_name]``
-    (edge_constructor.py:34-36). ``masks.<stream>`` is a declared dependency
-    (design §6.7 1418) — the v1 math does not consume it (it relies on
-    ``nan_to_num`` to zero the inf/nan from zero-padded rows, edge_features.py:146,
-    and the upstream `Features` processor already zeroes padded rows,
-    processors.py:145), so the v2 forward composes the v1 function verbatim and
-    keeps the mask as the contract dependency that ties this module to its
-    stream's pad mask.
-
-    ONNX (load-bearing, design §6.7 ONNX note / plan 12 sub-wave C): the
-    produced ``edges.<stream>`` carries the SAME ``T:<stream>`` symbol on BOTH
-    token axes, so a downstream export marks both as dynamic; the v1 math is all
-    ``unsqueeze``/``expand``/elementwise ops driven by ``batch.shape[1]`` (the
-    dynamic token count), tracing to shape-derived nodes — no baked track count.
-    The encoder-side register zero-pad is a SEPARATE later stage; this module's
-    forward is itself trace-safe (no Python-int shape bakes).
-
-    M7 W2b: the v1 ``calculate_edge_features`` / ``check_edge_config`` math is now
-    INLINED into this module (byte-faithful, above), so the edge builder no longer
-    imports the v1 ``salt.utils.edge_features`` tree — the composed-function
-    dependency is dropped.
+    ONNX: the produced tensor carries the SAME ``T:<stream>`` symbol on both
+    token axes, so both trace as dynamic; the math is all
+    unsqueeze/expand/elementwise ops driven by the dynamic token count.
     """
 
     def __init__(
@@ -3386,9 +2684,9 @@ class EdgeFeatures(nn.Module):
         stream: str,
         features: Sequence[str],
         out: str | None = None,
-        input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
+        input: str | None = None,  # noqa: A002 - YAML surface name
     ) -> None:
-        """Capture config only (design §2.3 — no schema/data access here).
+        """Capture config only (no schema/data access here).
 
         Parameters
         ----------
@@ -3396,10 +2694,9 @@ class EdgeFeatures(nn.Module):
             The stream whose pairwise edges are built (``inputs.<stream>``).
         features : Sequence[str]
             Edge feature names, in produced column order — any of
-            ``{"dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass"}`` (the v1
-            `check_edge_config` vocabulary, edge_features.py:30-43). Validated
-            against the recognised set here; required input variables are
-            checked at `bind` against the resolved fields.
+            ``{"dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass"}``.
+            Required input variables are checked at `bind` against the
+            resolved fields.
         out : str | None, optional
             Produced edge key, by default ``edges.<stream>``.
         input : str | None, optional
@@ -3432,16 +2729,8 @@ class EdgeFeatures(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare raw ``inputs.<stream>`` + ``masks.<stream>`` -> ``edges.<stream>``.
 
-        The input is the RAW (un-normalised) stream (design §6.3); the produced
-        edge tensor is ``[B, T, T, E]`` with the SAME ``T:<stream>`` symbol on
-        both token axes (a square per-stream pairwise matrix) and a concrete
-        last dim ``E = len(features)``. ``masks.<stream>`` is a declared
-        ``pad_mask`` dependency (design §6.7 1418).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        The produced edge tensor is ``[B, T, T, E]`` with the SAME
+        ``T:<stream>`` symbol on both token axes (a square pairwise matrix).
         """
         del mode
         tlen = _stream_len(self.stream)
@@ -3463,28 +2752,17 @@ class EdgeFeatures(nn.Module):
     def bind(self, schema: ResolvedSchema) -> None:
         """Resolve the variable-name -> column-index map and validate features.
 
-        Mirrors v1 ``EdgeConstructor.__init__`` (edge_constructor.py:32-36):
-        the ``indices_map`` is built from the declared ``inputs.<stream>``
-        fields (the dataset-side `Features` variable list, design §2.2 — column
-        lookups by NAME), then `check_edge_config` validates that every feature's
-        required variables are present (e.g. ``dR`` needs ``eta``/``phi``).
+        ``check_edge_config`` validates that every feature's required
+        variables are present (e.g. ``dR`` needs ``eta``/``phi``).
         """
         fields = schema.fields_of(self.input_key)
         check_edge_config(list(self.features), list(fields))
         self.indices_map = {name: i for i, name in enumerate(fields)}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Compute the pairwise edge features on the RAW input (design §6.7).
+        """Compute the pairwise edge features on the RAW input.
 
-        Composes the v1 `calculate_edge_features` verbatim (byte-faithful), so
-        the dR/kt/z/... values match v1 exactly. Returns a FRESH tensor
-        (``torch.zeros`` + ``nan_to_num`` inside the v1 function), never
-        mutating ``inputs.*`` (design §2.1 write-once).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced ``edges.<stream>`` key only (design §2.5).
+        Returns a FRESH tensor; never mutates ``inputs.*``.
         """
         del mode
         assert self.indices_map is not None, "forward before bind()"
@@ -3494,42 +2772,19 @@ class EdgeFeatures(nn.Module):
 
 
 class EdgeEmbed(nn.Module):
-    """Config-constructed edge-feature embedding (design §6.7 1420-1421, M6 sub-wave C).
+    """Config-constructed edge-feature embedding.
 
-    An edge-typed `StreamEmbed`: it maps ``edges.<stream>`` ``[B, T, T, E]`` ->
-    ``edges.<stream>_emb`` ``[B, T, T, D_e]`` with an internal v1 `Dense`. The
-    v2 replacement for v1's ``edge_init_nets`` (saltmodel.py:69-80) — but
-    WITHOUT v1's sort-first hack (the ``assert len(edge_init_nets) == 1`` and
-    the init_nets re-sort so the edge stream is first): in v2 the edge stream's
-    leading position in the concat is a bind-time VALIDATOR rule on the encoder
-    port (design §6.7 1425-1431), not a silent runtime sort.
-
-    Lifecycle (design §2.3): ``__init__`` captures config; ``bind`` builds the
-    `Dense` with ``input_size = width(edges.<stream>) = E`` (the edge-feature
-    count, resolved from the schema — design §2.3 kills ``input_size`` YAML
-    arithmetic, exactly as `StreamEmbed`); ``forward`` projects. The internal v1
-    `Dense` is an ``nn.Linear`` stack over the LAST dim (dense.py:91-94), so it
-    applies cleanly to a rank-4 ``[B, T, T, E]`` tensor (it embeds each
-    pairwise edge independently) — the v1 ``edge_init_nets[0]`` `InitNet` does
-    the same (it is a `Dense` over the ``[B, L, L, E]`` edge matrix,
-    saltmodel.py:132). No context, no muP, no per-stream rank inference — edges
+    An edge-typed `StreamEmbed`: maps ``edges.<stream>`` ``[B, T, T, E]`` ->
+    ``edges.<stream>_emb`` ``[B, T, T, D_e]`` with an internal v1 `Dense` (an
+    ``nn.Linear`` stack over the last dim, so it embeds each pairwise edge
+    independently). No context, no muP, no per-stream rank inference — edges
     are always the rank-4 pairwise matrix.
 
-    ONNX: a plain ``nn.Linear``-stack over the last dim has no dynamic feature
-    axis; the two ``T:<stream>`` token axes flow through unchanged, so the
-    embed traces with both token axes dynamic (the dynamic-T contract is
-    enforced on the export side, plan 12 sub-wave C).
+    ONNX: both ``T:<stream>`` token axes flow through unchanged (dynamic).
 
-    FiLM / positional encoding (M7 W-FILM): the edge embed carries NEITHER — and
-    this is FAITHFUL to v1, not a drop. v1's ``init_featurewise`` (saltmodel.py:
-    262-279) attaches `FeaturewiseTransformation` ONLY to the constituent
-    ``init_nets``, NEVER to the ``edge_init_nets``; and v1 builds the edge
-    `InitNet` with ``featurewise=None`` / ``pos_enc=None`` (saltmodel.py:75-77 —
-    the edge init nets get no featurewise/pos_enc kwargs). So an edge embed is a
-    PLAIN projection of the pairwise edge-feature matrix with no per-event
-    conditioning and no coordinate encoding (the FiLM/posenc input-layer port
-    lives on `StreamEmbed` for the constituent streams; the encoder/global FiLM
-    lives on `TransformerEncoder`). Nothing to wire here.
+    Carries no FiLM/positional-encoding, faithfully to v1: those live on
+    `StreamEmbed` for the constituent streams and on `TransformerEncoder` for
+    the encoder/global FiLM.
     """
 
     def __init__(
@@ -3537,21 +2792,19 @@ class EdgeEmbed(nn.Module):
         stream: str,
         out_dim: int,
         dense: dict[str, Any] | None = None,
-        input: str | None = None,  # noqa: A002 - design §5.1 YAML surface name
+        input: str | None = None,  # noqa: A002 - YAML surface name
         out: str | None = None,
     ) -> None:
-        """Capture config only (design §2.3).
+        """Capture config only.
 
         Parameters
         ----------
         stream : str
             The stream whose edge tensor is embedded.
         out_dim : int
-            Output edge-embedding width ``D_e`` (concrete, config-fixed; v1
-            ``edge_init_nets[0].dense_config.output_size``, GN2XE.yaml:70).
+            Output edge-embedding width ``D_e`` (concrete, config-fixed).
         dense : dict[str, Any] | None, optional
-            Extra kwargs for the internal v1 `Dense` (``hidden_layers``,
-            ``activation``, ...); must not contain width keys, by default None.
+            Extra kwargs for the internal v1 `Dense`; must not contain width keys.
         input : str | None, optional
             Edge input key override, by default ``edges.<stream>``.
         out : str | None, optional
@@ -3560,8 +2813,7 @@ class EdgeEmbed(nn.Module):
         Raises
         ------
         ConfigError
-            If `dense` configures widths (inferred at bind, design §2.3) or
-            `out_dim` is not positive.
+            If `dense` configures widths (inferred at bind) or `out_dim` is not positive.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -3576,17 +2828,7 @@ class EdgeEmbed(nn.Module):
         self.net: nn.Module | None = None
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``edges.<stream>`` ``[B, T, T, E]`` -> ``edges.<stream>_emb`` ``[B, T, T, D_e]``.
-
-        Both token axes share the stream's ``T:<stream>`` symbol; the input
-        last dim is a require symbol (resolved at bind), the produced last dim
-        is the concrete ``out_dim``.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
-        """
+        """Declare ``edges.<stream>`` -> ``edges.<stream>_emb`` (``[B,T,T,E] -> [B,T,T,D_e]``)."""
         del mode
         tlen = _stream_len(self.stream)
         return IO(
@@ -3601,169 +2843,63 @@ class EdgeEmbed(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the internal `Dense` with the inferred edge-feature width (design §2.3).
-
-        ``input_size = width(edges.<stream>) = E`` — the edge-feature count,
-        resolved from the schema (v1 inferred it from the edge tensor's last
-        dim, saltmodel.py:132). No context (edges carry no context entries).
-        """
+        """Build the internal `Dense` with ``input_size = width(edges.<stream>) = E``."""
         self.net = Dense(
             input_size=schema.width(self.input_key), output_size=self.out_dim, **self.dense_cfg
         )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Project the rank-4 edge tensor through the internal `Dense`.
-
-        The `Dense` embeds the last (edge-feature) dim, leaving both token axes
-        intact: ``[B, T, T, E] -> [B, T, T, D_e]`` (v1 edge_init_nets,
-        saltmodel.py:132).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced ``edges.<stream>_emb`` key only (design §2.5).
-        """
+        """Project the edge tensor through the internal `Dense` ([B,T,T,E] -> [B,T,T,D_e])."""
         del mode
         assert self.net is not None, "forward before bind()"
         return {self.out_key: self.net(b.get(self.input_key))}
 
 
 class TransformerEncoder(nn.Module):
-    """Config-constructed transformer encoder (design §9.2, composes a fresh v1 `Transformer`).
+    """Config-constructed transformer encoder, composing a fresh v1 `Transformer`.
 
-    Everything width-relevant is config (``dim``, ``out_dim``), so the
-    composed v1 instance is built in ``__init__`` (design §2.3 permits
-    config-only layer construction there; `bind` is for schema-derived
-    widths). Registers, packing, and the out projection stay INTERNAL
-    (design §2.5 composite modules); the register pad mask is published as
-    the NEW key ``masks.registers`` — the caller's mask dict is never
-    mutated (v1's ``_add_registers`` inserts ``"REGISTERS"`` into it,
-    transformer.py:777,785).
+    Registers, packing, and the out projection stay INTERNAL; the register
+    pad mask is published as the NEW key ``masks.registers`` — the caller's
+    mask dict is never mutated.
 
-    ``drop_registers`` (the MaskFormer encoder passthrough, M5 sub-wave C;
-    v1 transformer.py:560,584,745-750) makes the composed v1 `Transformer`
-    strip the register rows from its output AFTER the layer stack runs: the
-    registers are still appended internally and visible to every attention
-    layer (they exist so a constituent-less jet has SOMETHING to attend to,
-    transformer.py:569-574), but the returned ``encoded.seq`` is sliced back
-    to the stream tokens only (``x[:, :-num_registers]``) and v1 drops the
-    ``"REGISTERS"`` pad entry (``del pad_mask["REGISTERS"]``,
-    transformer.py:745-750). So with ``drop_registers=True`` this module
-    produces NO ``masks.registers`` key — there are no register rows left in
-    ``encoded.seq`` for a downstream consumer to mask — exactly the v1
-    MaskFormer encoder shape its `MaskDecoder` reads (``embed_xs`` with the
-    registers already gone, maskformer.py:151-156,172). The shipped
-    MaskFormer.yaml sets ``drop_registers: true`` (MaskFormer.yaml:31). The
-    design's longer-term home for this is a `Concat`-owned ``registers:`` +
-    ``drop_registers_after:`` (FD 1121-1125); in the M2 architecture
-    registers live INSIDE this encoder (the composed v1 `Transformer`
-    appends them and requires ``num_registers >= 1``), so the M5 passthrough
-    is the faithful, byte-for-byte v1 mechanism — the Concat-owned form lands
-    when M7 absorbs the encoder.
+    ``drop_registers`` (the MaskFormer encoder passthrough) strips the
+    register rows from the output AFTER the layer stack runs — registers are
+    still appended internally and visible to every attention layer (so a
+    constituent-less jet has something to attend to), but the returned
+    ``encoded.seq`` is sliced back to the stream tokens and no
+    ``masks.registers`` key is produced.
 
     ``norm_type`` (``"pre"`` default, or ``"post"`` / ``"hybrid"``) is
-    forwarded verbatim to every composed v1 ``EncoderLayer`` (M5 sub-wave B;
-    the GN3V01 flagship + GN3_Hybrid / GN3EPCLV01 are ``"hybrid"``). The
-    placement logic — hybrid forcing ``do_qk_norm``/``do_v_norm``, the
-    depth-0 residual-norm special case, and the pre-FFN norm — all lives in
-    the composed v1 layer (transformer.py:350-356,421); the wrapper only
-    threads the flag through the `Transformer` ``**kwargs`` passthrough.
+    forwarded verbatim to every composed v1 ``EncoderLayer``.
 
-    muP — the ``mup:`` flag (M6 sub-wave B; plan 12; design §3.4 KEEP-architecture/
-    BREAK-routing). When ``mup: true`` the composed v1 `Transformer` is built with
-    ``mup=True``. **IMPORTANT — what this flag actually does is NARROWER than the
-    name suggests, and this is a faithful port of v1's behaviour.** v1
-    ``Transformer.__init__`` takes ``mup`` as a *named* parameter
-    (transformer.py:563), so it is consumed by `Transformer` and does NOT flow into
-    its ``**kwargs``; when it builds its ``EncoderLayer`` list (transformer.py:604-614)
-    it does NOT pass ``mup`` down. ``EncoderLayer`` therefore defaults to
-    ``mup=False`` and never sets ``attn_kwargs["mup"]/dense_kwargs["mup"]``
-    (transformer.py:362-364). The ONLY thing ``mup=True`` wires from the encoder flag
-    is the **out-proj swap**: ``nn.Linear`` -> ``mup.MuReadout`` with weight AND bias
-    zeroed (transformer.py:623-628), an output-scaling Linear subclass.
+    muP — the ``mup: true`` flag builds the composed v1 `Transformer` with
+    ``mup=True``. This is NARROWER than the name suggests: v1's
+    ``Transformer(mup=True)`` does NOT propagate ``mup`` down to its
+    EncoderLayers, so the ONLY effect is the out-proj swap to
+    ``mup.MuReadout`` (weight+bias zeroed). The attention softmax scale, the
+    attention muP init, and the GLU/dense muP init are all NOT engaged by
+    this flag — those live on ``Attention(mup=True)``/``Dense(mup=True)``
+    directly (see `StreamEmbed`). This is a faithful port of v1's actual
+    (narrower) encoder-mup behaviour, not a bug.
 
-    Consequently, for THIS code path (the production GN2_muP encoder, built via
-    ``class_path: salt.models.Transformer`` with ``mup: true``):
+    At export (`set_export_mode`), a `MuReadout` out-proj is FOLDED into a
+    plain `nn.Linear` with the output multiplier baked into the weights —
+    numerically equal to the MuReadout forward — so the exported graph is a
+    plain transformer.
 
-    - the attention softmax scale STAYS ``1/sqrt(head_dim)`` — the muP ``1/head_dim``
-      scale (attention.py:275) is **NOT** active;
-    - the attention muP init (Q-projection zeroed + K/V scaled, attention.py:319-326)
-      is **NOT** run — the Q-rows of ``in_proj_weight`` are non-zero;
-    - the GLU/dense-linear muP init (transformer.py:99-103, dense.py:96-102) is
-      **NOT** engaged inside the encoder.
-
-    Those attention/dense-level muP behaviours live in ``Attention(mup=True)`` /
-    ``Dense(mup=True)``, which v1 only constructs when ``mup`` is threaded all the
-    way down — something v1's ``Transformer(mup=True)`` does not do. So they were
-    inactive in v1's production GN2_muP encoder too, and the v2 port is byte-faithful
-    to v1's ACTUAL encoder-mup behaviour (MU1's bitwise ``torch.equal`` vs an
-    independent v1 ``Transformer(mup=True)`` passes; the dense/embed muP init that IS
-    active lives on the embed's ``Dense(mup=True)``, see `StreamEmbed`). This matches
-    the MU1 gate's faithfulness_note verbatim. (If full attention-level muP were
-    desired for correct attention HP-transfer, that would be a v1 *behaviour change*,
-    out of scope for a parity-faithful port — raise it explicitly; do not assume the
-    encoder's attention is muP-parametrised.)
-
-    The flag is the ONLY init_arg taken here — the M7 ``featurewise:`` / ``edges:``
-    ports stay out (their TODO line is below). The ``apply_to`` ROUTING half (which
-    named modules carry ``mup: true``, ``mup-shapes``, the MuAdamW swap) is a
-    SEPARATE later stage — this is the architectural port only.
-
-    MuReadout needs ``infshape`` (set via ``mup.set_base_shapes``) before its
-    ``forward`` / ``width_mult()`` work. The ROUTING stage applies a real shape
-    file; here, the architectural default sets the base shapes from the module
-    onto ITSELF with ``rescale_params=False`` — ``width_mult() == 1.0`` and the
-    zeroed weights are untouched — so a ``mup: true`` encoder is forward-runnable
-    and traceable standalone (a non-unit ``width_mult`` only enters once a wider
-    model is set against a narrower base by the routing stage).
-
-    ONNX export contract (load-bearing; plan 12 sub-wave B). ``MuReadout`` is a
-    NON-``nn.Linear`` subclass whose forward applies an output multiplier
-    (``output_mult * x / width_mult``) before the linear — tracing it as-is risks
-    an unsupported/incorrect graph. At export (`set_export_mode`, the §7.2 protocol
-    the `OnnxAdapter` invokes on every submodule) the multiplier is FOLDED into the
-    weight/bias and the out-proj is swapped for a plain ``nn.Linear`` in the traced
-    graph: ``W_folded = (output_mult / width_mult) * W`` and ``bias_folded = bias``
-    (the multiplier scales only the ``x @ Wᵀ`` term, NOT the bias — see the
-    MuReadout forward). The folded Linear's forward is numerically EQUAL to the
-    MuReadout forward (bitwise when ``output_mult/width_mult == 1.0``, the
-    architectural default; ``<=1e-6`` otherwise — the float32 multiply-order is the
-    only difference). Inference math is then identity to a standard Linear (muP
-    affects training, not the frozen forward), so the exported graph is a plain
-    transformer.
-
-    Optional FiLM (M7 W-FILM, design §6.4 — the encoder + global halves of v1
-    featurewise). The ``featurewise:`` config is a LIST of
-    `FeaturewiseTransformation` configs, each with a ``layer`` of ``"encoder"`` or
-    ``"global"`` (an ``"input"`` entry belongs on `StreamEmbed`, rejected here):
-
-    - ``layer: encoder`` — one `FeaturewiseTransformation` per encoder layer,
-      applied to ``x`` at the START of every layer (v1 transformer.py:727-728).
-      The per-layer FiLMs are populated into the absorbed `Transformer`'s
-      ``featurewise`` ``ModuleList`` (the verbatim v1 forward already applies
-      them, modules.py:2001-2003), driven by the per-event ``inputs.parameters``
-      ``[B, n_params]`` tensor threaded through the encoder forward.
-    - ``layer: global`` — a single `FeaturewiseTransformation` applied to the
-      ENCODER OUTPUT (``encoded.seq``) before it is published, faithful to v1
-      where the global FiLM scales ``preds["embed_xs"]`` (the encoder output)
-      right before pooling (saltmodel.py:165-166).
-
-    OFF by default (no ``featurewise:`` => byte-identical to today; the absorbed
-    Transformer's ``featurewise`` ModuleList stays empty and the verbatim forward
-    skips the FiLM application). The ``edges:`` port was wired in M6 sub-wave C
-    (FD §6.7) — only the featurewise port lands here.
+    Optional FiLM: the ``featurewise:`` config is a LIST of
+    `FeaturewiseTransformation` configs, each with ``layer: encoder`` (one per
+    encoder layer, applied at the start of each layer) or ``layer: global``
+    (applied to the encoder output before it's published). OFF by default.
     """
 
     _NORM_TYPES = ("pre", "post", "hybrid")
-    """The encoder-layer norm placements the wrapper forwards (v1 EncoderLayer,
-    transformer.py:307-308,350-356). ``"none"`` is a residual-only v1 mode with
-    no shipped v2 config — rejected loudly here rather than silently passed."""
+    """The encoder-layer norm placements the wrapper forwards. ``"none"`` is a
+    residual-only v1 mode with no shipped v2 config — rejected loudly here."""
 
     MUP_WIDTH_ARG = "dim"
-    """The init_arg the muP shape-generation tooling sweeps for this module
-    (design §3.4; v1 ``parameter_name: embed_dim`` for ``encoder``,
-    GN2_muP.yaml:12-15). ``salt2 mup-shapes`` mutates ``init_args.dim`` to the
-    base/delta widths to produce the infshapes."""
+    """The init_arg the muP shape-generation tooling (``salt2 mup-shapes``)
+    sweeps for this module to produce the infshapes."""
 
     def __init__(
         self,
@@ -3792,82 +2928,46 @@ class TransformerEncoder(nn.Module):
             Number of encoder layers.
         attention : dict[str, Any]
             Attention config; MUST contain ``num_heads``. ``attn_type``
-            (default ``"torch-math"``) selects the backend; the remaining
-            keys are v1 ``attn_kwargs`` (REQUIRED by v1: transformer.py
-            writes ``attn_type`` into them, transformer.py:600-601).
+            (default ``"torch-math"``) selects the backend.
         out_dim : int | None, optional
-            Output projection width, by default None (= `dim`, no
-            projection).
+            Output projection width, by default None (= `dim`, no projection).
         dense : dict[str, Any] | None, optional
-            v1 ``dense_kwargs`` (``activation``, ``gated``, ...), by
-            default None.
+            v1 ``dense_kwargs`` (``activation``, ``gated``, ...), by default None.
         norm : str, optional
             Normalisation layer name, by default ``"LayerNorm"``.
         num_registers : int, optional
-            Learned register tokens appended INSIDE the encoder, by default
-            1 (v1 minimum — transformer.py:558-559).
+            Learned register tokens appended INSIDE the encoder, by default 1 (v1 minimum).
         norm_type : str, optional
-            Per-layer norm placement, one of ``{"pre", "post", "hybrid"}``,
-            by default ``"pre"``. Forwarded verbatim to every v1
-            ``EncoderLayer`` via the `Transformer` ``**kwargs`` passthrough
-            (transformer.py:611). ``"hybrid"`` (the GN3V01 flagship) makes the
-            EncoderLayer force ``do_qk_norm``/``do_v_norm`` on its `Attention`,
-            use a residual ``norm_type`` of ``"pre"`` at depth 0 / ``"none"``
-            after, and apply a pre-FFN norm in ``forward`` (transformer.py:
-            350-356,421). The wrapper only passes the flag through — all that
-            placement logic lives in the composed v1 layer.
+            Per-layer norm placement, one of ``{"pre", "post", "hybrid"}``, by
+            default ``"pre"``. ``"hybrid"`` forces ``do_qk_norm``/``do_v_norm``
+            and applies a pre-FFN norm; the placement logic lives in the
+            composed v1 layer.
         drop_registers : bool, optional
             Strip the register rows from ``encoded.seq`` after the layer stack
-            (the MaskFormer encoder passthrough; v1 transformer.py:745-750), by
-            default False. Registers stay visible to every attention layer; only
-            the OUTPUT sequence is sliced back to the stream tokens, and no
-            ``masks.registers`` key is produced (see the class docstring).
+            (see the class docstring), by default False.
         mup : bool, optional
-            Whether to use the muP parametrisation (M6 sub-wave B), by default
-            False. When True the composed v1 `Transformer` is built with
-            ``mup=True``, which (faithfully to v1) wires ONLY the `MuReadout`
-            out-proj swap — v1's ``Transformer(mup=True)`` does NOT pass ``mup``
-            down to its EncoderLayers, so the 1/d attention scale and the
-            attention/dense muP init are NOT active in this encoder path (see the
-            class docstring for the full explanation). v1 surface is the encoder's
-            ``mup: True`` (GN2_muP.yaml:51). Requires an out projection (``out_dim``
-            set) — `MuReadout` is the last muP layer (v1 transformer.py:594-597).
-            The export-time fold to a plain `nn.Linear` happens in `set_export_mode`.
+            Whether to use the muP parametrisation (see the class docstring
+            for the narrower-than-expected scope), by default False. Requires
+            an out projection (``out_dim`` set).
         edges : str | None, optional
-            The EDGE-EMBED bundle key the encoder consumes (M6 sub-wave C; FD
-            §6.7 1422-1424). When set (e.g. ``"edges.tracks_emb"``) every
-            composed v1 ``EncoderLayer`` swaps its `Attention` for an
-            `EdgeAttention` (transformer.py:365-373): the edge tensor biases the
-            attention scores and gates the softmax output (attention.py:630-654).
-            The edge-stream-first / EdgeAttention-backend-forcing constraints are
-            BIND-TIME validators on this port (FD 1425-1431; `validate_edge_port`
-            in saltmodule.py) — the named-error replacements for v1's silent
-            sort-first hack (saltmodel.py:69-80) and flash bypass
-            (transformer.py:599-601). By default None (no edge path).
+            The edge-embed bundle key the encoder consumes (e.g.
+            ``"edges.tracks_emb"``). When set, every composed v1
+            ``EncoderLayer`` swaps its `Attention` for an `EdgeAttention`. By
+            default None (no edge path).
         edge_embed_dim : int, optional
-            The edge-embed width ``D_e`` (v1 ``edge_embed_dim``, GN2XE.yaml:79).
-            REQUIRED (positive) when `edges` is set — the composed v1
-            `Transformer` builds its `EdgeAttention` projections from it at
-            ``__init__`` (transformer.py:368), so it cannot be deferred to bind;
-            cross-checked against the resolved ``edges.<stream>_emb`` width at
-            bind (so a mismatch is a named error, not a silent shape bug). Must
-            be 0 when `edges` is None. By default 0.
+            The edge-embed width ``D_e``. REQUIRED (positive) when `edges` is
+            set (cross-checked against the resolved edge-embed width at
+            bind); must be 0 when `edges` is None. By default 0.
         update_edges : bool, optional
-            Whether the encoder UPDATES the edge tensor each layer (v1
-            ``update_edges``, GN2XE.yaml:80; EdgeAttention edge-out projection
-            attention.py:641-644, EncoderLayer edge post-norm
-            transformer.py:416-417). Requires `edges` set. The updated edges
-            stay INTERNAL to the encoder (v2 produces only ``encoded.seq`` — the
-            edge update is a per-layer refinement, not a published output, exactly
-            as v1 keeps ``edge_x`` inside `Transformer.forward`,
-            transformer.py:729-733). By default False.
+            Whether the encoder updates the edge tensor each layer. Requires
+            `edges` set. The updated edges stay INTERNAL to the encoder — only
+            ``encoded.seq`` is published. By default False.
 
         Raises
         ------
         ConfigError
             If `attention` is missing ``num_heads``, `norm_type` is not one of
-            ``{"pre", "post", "hybrid"}``, `mup` is set without an `out_dim`
-            (MuReadout has no layer to live on — v1 transformer.py:594-597),
+            ``{"pre", "post", "hybrid"}``, `mup` is set without an `out_dim`,
             `edges` is set without a positive `edge_embed_dim` (or vice versa),
             or `update_edges` is set without `edges`.
         """
@@ -3889,11 +2989,9 @@ class TransformerEncoder(nn.Module):
                 "muP layer of the model and has no layer to live on without one "
                 "(v1 transformer.py:594-597)"
             )
-        # edge-port consistency (FD §6.7 1422-1424): edges <-> edge_embed_dim are
-        # paired — the v1 EncoderLayer picks EdgeAttention iff edge_embed_dim > 0
-        # (transformer.py:366), and update_edges needs an edge tensor to update
-        # (transformer.py:589-590). Reject the inconsistent combinations loudly
-        # at config time rather than building a half-wired encoder.
+        # edges <-> edge_embed_dim must be set together: EncoderLayer picks
+        # EdgeAttention iff edge_embed_dim > 0, and update_edges needs an edge
+        # tensor to update. Reject inconsistent combinations at config time.
         if (edges is None) != (edge_embed_dim <= 0):
             raise ConfigError(
                 "TransformerEncoder: 'edges' and 'edge_embed_dim' must be set together — "
@@ -3932,21 +3030,15 @@ class TransformerEncoder(nn.Module):
             mup=self.mup,
         )
         if self.mup:
-            # MuReadout.forward/width_mult() assert ``infshape`` is set (via
-            # mup.set_base_shapes). The ROUTING stage supplies a real shape file;
-            # the architectural default sets the base shapes from the module onto
-            # ITSELF with rescale_params=False — width_mult()==1.0, the zeroed
-            # MuReadout weights untouched — so a standalone mup encoder is
-            # forward-runnable and traceable (a non-unit width_mult enters only
-            # when a wider model is set against a narrower base by the routing
-            # stage). Import locally to keep the module import surface lean and to
-            # avoid a hard mup dependency for non-mup encoders.
+            # MuReadout.forward/width_mult() assert infshape is set. Set base shapes
+            # from the module onto itself (rescale_params=False) so a standalone mup
+            # encoder is forward-runnable/traceable without a real shape file; import
+            # locally to avoid a hard mup dependency for non-mup encoders.
             from mup import set_base_shapes  # noqa: PLC0415
 
             set_base_shapes(self.encoder, self.encoder, rescale_params=False)
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
-        # -- optional encoder/global FiLM (M7 W-FILM) ------------------------
         self.num_layers = int(num_layers)
         self.params_key = "inputs.parameters"
         self._encoder_film_cfg: dict[str, Any] | None = None
@@ -3955,8 +3047,7 @@ class TransformerEncoder(nn.Module):
         for fw in featurewise or ():
             fw = dict(fw)
             layer = fw.get("layer")
-            # one params key is shared by all FiLM entries (v1 reads the single
-            # inputs["parameters"], featurewise.py:74); take it from any entry.
+            # one params key is shared by all FiLM entries; take it from any entry
             pk = fw.pop("parameters", None)
             if pk is not None:
                 self.params_key = pk
@@ -3988,46 +3079,27 @@ class TransformerEncoder(nn.Module):
     def edge_stream(self) -> str | None:
         """The stream the edge port belongs to, or None when no edge path.
 
-        ``"edges.tracks_emb"`` -> ``"tracks"`` (the second dotted component is
-        the stream + the ``_emb`` suffix). Used by the bind-time
-        edge-stream-first validator (FD §6.7 1425-1431) to check the edge
-        stream is `Concat.streams[0]`.
-
-        Returns
-        -------
-        str | None
-            The edge stream name, or None.
+        ``"edges.tracks_emb"`` -> ``"tracks"``. Used by the bind-time
+        edge-stream-first validator to check the edge stream is
+        `Concat.streams[0]`.
         """
         if self.edges_key is None:
             return None
-        # "edges.<stream>_emb" -> "<stream>" (the EdgeEmbed out-key convention,
-        # modules.py EdgeEmbed.out_key); strip the namespace + the _emb suffix.
+        # "edges.<stream>_emb" -> "<stream>": strip the namespace + _emb suffix
         leaf = self.edges_key.split(KEY_SEP, 1)[1] if KEY_SEP in self.edges_key else self.edges_key
         return leaf.removesuffix("_emb")
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``seq.x``/``seq.mask`` (+ ``edges.<stream>_emb``) -> ``encoded.seq``.
 
-        ``masks.registers`` is produced ONLY when ``drop_registers`` is False:
-        with the registers dropped from ``encoded.seq`` there are no register
-        rows left to mask (the v1 ``del pad_mask["REGISTERS"]`` shape,
-        transformer.py:745-750), and a downstream `GlobalAttentionPooling`
-        treats ``masks.registers`` as OPTIONAL — so a drop-registers config
-        plan-compiles exactly like the encoder-less path (modules.py:1065-1070).
+        ``masks.registers`` is produced ONLY when ``drop_registers`` is False —
+        with registers dropped there are no register rows left to mask, and
+        `GlobalAttentionPooling` treats ``masks.registers`` as OPTIONAL.
 
-        When an `edges` port is configured (M6 sub-wave C; FD §6.7 1422-1424)
-        the encoder additionally REQUIRES the edge-embed tensor
-        ``edges.<stream>_emb`` ``[B, T, T, D_e]`` — a rank-4 pairwise tensor
-        whose BOTH token axes share the stream's ``T:<stream>`` symbol (the
-        square pairwise matrix `EdgeEmbed` produces, modules.py EdgeEmbed). The
-        updated edges stay INTERNAL (v1 keeps ``edge_x`` inside the forward,
-        transformer.py:729-733), so this module still produces only
-        ``encoded.seq`` (+ the optional register mask) — no edge output key.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces (widths concrete from config).
+        When an `edges` port is configured, the encoder additionally REQUIRES
+        the edge-embed tensor ``[B, T, T, D_e]`` whose BOTH token axes share
+        the stream's ``T:<stream>`` symbol. Updated edges stay INTERNAL — this
+        module still produces only ``encoded.seq`` (+ optional register mask).
         """
         del mode
         produces: dict[str, TensorSpec] = {
@@ -4046,13 +3118,11 @@ class TransformerEncoder(nn.Module):
             assert stream is not None  # edges_key implies edge_stream (config invariant)
             tlen = _stream_len(stream)
             # both token axes share T:<stream> — the dynamic-T export prerequisite
-            # (FD §6.7 ONNX note); last dim is the concrete edge-embed width.
             requires[self.edges_key] = TensorSpec(
                 shape=("B", tlen, tlen, self.edge_embed_dim), dtype="float32"
             )
         if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
-            # the per-event conditioning parameters: a rank-2 [B, n_params] global
-            # stream feeding the encoder/global FiLM (M7 W-FILM)
+            # per-event conditioning parameters feeding the encoder/global FiLM
             requires[self.params_key] = TensorSpec(
                 shape=("B", sym_dim("P", self.name)), dtype="float32"
             )
@@ -4065,20 +3135,15 @@ class TransformerEncoder(nn.Module):
         """Cross-check the edge-embed width against the configured ``edge_embed_dim``.
 
         The composed v1 `Transformer` already built its `EdgeAttention`
-        projections from ``edge_embed_dim`` at ``__init__`` (transformer.py:368),
-        so this `bind` only VALIDATES that the resolved ``edges.<stream>_emb``
-        width matches — a mismatch (the EdgeEmbed ``out_dim`` was changed without
-        updating the encoder, or vice versa) is a named `ConfigError` here rather
-        than a silent runtime shape error inside the v1 ``linear_e``
-        (attention.py:535). No-op when no edge port is configured.
+        projections from ``edge_embed_dim`` at ``__init__``, so this only
+        VALIDATES that the resolved edge-embed width matches — a mismatch is a
+        named `ConfigError` here rather than a silent runtime shape error.
+        No-op when no edge port is configured.
 
-        Also builds the optional encoder/global FiLM (M7 W-FILM): the per-layer
-        encoder FiLMs are sized ``num_features = dim`` (the encoder embed width
-        the FiLM scales at the start of each layer, v1 transformer.py:727-728) and
-        populated into the absorbed `Transformer`'s ``featurewise`` ModuleList; the
-        global FiLM is sized ``num_features = out_dim`` (the encoder output width
-        it scales before pooling, v1 saltmodel.py:165-166). ``num_params`` is the
-        resolved ``parameters`` width on both.
+        Also builds the optional encoder/global FiLM: per-layer encoder FiLMs
+        are sized to the encoder embed width and populated into the absorbed
+        `Transformer`'s ``featurewise`` ModuleList; the global FiLM is sized to
+        the encoder output width.
 
         Raises
         ------
@@ -4088,10 +3153,7 @@ class TransformerEncoder(nn.Module):
         if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
             num_params = schema.width(self.params_key)
             if self._encoder_film_cfg is not None:
-                # one FiLM per encoder layer — v1 replicates the SAME config across
-                # all num_layers layers (saltmodel.py:268-269). Populate the
-                # absorbed Transformer's featurewise ModuleList (its verbatim
-                # forward applies featurewise[i](params, x) per layer).
+                # one FiLM per encoder layer, replicating the same config across all layers
                 for _ in range(self.num_layers):
                     film = FeaturewiseTransformation(
                         num_params=num_params, num_features=self.dim, **self._encoder_film_cfg
@@ -4119,30 +3181,15 @@ class TransformerEncoder(nn.Module):
     def set_export_mode(self) -> None:
         """Prepare the encoder for tracing: torch-math backend + MuReadout fold.
 
-        Two export-time transformations (design §2.5/§7.2; the `OnnxAdapter`
-        invokes this on every submodule, adapter.py:285-295):
-
-        1. Force the deterministic torch-math attention backend (test/ONNX
-           semantics, the v1 ``change_attn_backends`` replacement).
-        2. **muP MuReadout -> plain nn.Linear fold** (plan 12 sub-wave B export
-           contract). When ``self.mup`` the v1 out projection is a
-           ``mup.MuReadout`` whose forward applies an output multiplier
-           (``output_mult * x / width_mult``) before the linear — a
-           NON-``nn.Linear`` op that traces to an unsupported/incorrect graph.
-           `_fold_mu_readout` swaps it for a plain ``nn.Linear`` with the
-           multiplier baked into the weights: ``W_folded = (output_mult /
-           width_mult) * W``, ``bias_folded = bias`` (the multiplier scales only
-           the ``x @ Wᵀ`` term, NOT the bias). The folded forward is numerically
-           equal to the MuReadout forward (bitwise when
-           ``output_mult/width_mult == 1.0``, the architectural default; ``<=1e-6``
-           otherwise). Idempotent — a second call no-ops once the swap has
-           happened (the out-proj is then already a plain `nn.Linear`).
+        `MuReadout`'s forward applies an output multiplier before the linear —
+        a non-``nn.Linear`` op that traces to an unsupported/incorrect graph.
+        `_fold_mu_readout` swaps it for a plain `nn.Linear` with the
+        multiplier baked into the weights (numerically equal to the MuReadout
+        forward). Idempotent — a second call no-ops.
         """
         # EdgeAttention has no pluggable backend — it is ALWAYS raw torch
-        # attention (set_backend just warns, attention.py:544-549) and is
-        # already trace-safe; only switch the backend for the non-edge encoder
-        # (the v1 EncoderLayer skips the backend assignment when edge_embed_dim>0,
-        # transformer.py:599-601,616-620 — the now-NAMED constraint ED2 enforces).
+        # attention (set_backend just warns) and already trace-safe; only
+        # switch the backend for the non-edge encoder
         if self.edges_key is None:
             self.encoder.set_backend("torch-math")
         if self.mup:
@@ -4151,10 +3198,8 @@ class TransformerEncoder(nn.Module):
     def _fold_mu_readout(self) -> None:
         """Fold the composed v1 `MuReadout` out-proj into a plain `nn.Linear` for export.
 
-        Deterministic and numerically equal to the `MuReadout` forward within
-        parity tolerance (plan 12 sub-wave B). No-op unless the encoder has a
-        `MuReadout` out projection (a non-mup encoder, or an already-folded one,
-        is left untouched — idempotent).
+        No-op unless the encoder has a `MuReadout` out projection (a non-mup
+        or already-folded encoder is left untouched — idempotent).
         """
         from mup import MuReadout  # noqa: PLC0415
 
@@ -4177,49 +3222,30 @@ class TransformerEncoder(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Encode the sequence; publish the register mask as a NEW key.
 
-        With ``drop_registers`` the composed v1 `Transformer` strips the
-        register rows from its output and deletes the ``"REGISTERS"`` pad entry
-        (transformer.py:745-750), so only ``encoded.seq`` is produced — no
-        ``masks.registers`` (the produce is gated out in `declare_io`).
-
-        When an `edges` port is configured (M6 sub-wave C; FD §6.7 1422-1424)
-        the edge-embed tensor ``edges.<stream>_emb`` ``[B, T, T, D_e]`` is passed
-        as the v1 ``edge_x`` kwarg. The register zero-pad to the
-        register-augmented sequence length stays INSIDE the composed v1
-        `Transformer` (transformer.py:689-719) — it builds the pad from the
-        DYNAMIC ``x.shape[1]``, the SHAPE-DERIVED pad the ONNX trace needs (FD
-        §6.7 ONNX note; ED1 ONNX-trace assertion). The per-layer edge update is
-        internal (transformer.py:729-733), so this module still publishes only
-        ``encoded.seq`` (+ the optional register mask) — no edge output key.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only (design §2.5).
+        With ``drop_registers`` only ``encoded.seq`` is produced (no
+        ``masks.registers``, gated out in `declare_io`). When an `edges` port
+        is configured, the edge-embed tensor is passed as the ``edge_x``
+        kwarg; the per-layer edge update stays internal — only ``encoded.seq``
+        (+ optional register mask) is published.
         """
         del mode
-        # FRESH dicts: v1's _add_registers INSERTS a "REGISTERS" key into
-        # both (transformer.py:777,785) — never hand it bundle-owned dicts.
+        # FRESH dicts: _add_registers INSERTS a "REGISTERS" key into both —
+        # never hand it bundle-owned dicts.
         xs: dict[str, Tensor] = {"seq": b.get("seq.x")}
         pad: dict[str, Tensor] = {"seq": b.get("seq.mask")}
         kwargs: dict[str, Tensor] = {}
         if self.edges_key is not None:
             kwargs["edge_x"] = b.get(self.edges_key)
         if len(self.encoder.featurewise) > 0:
-            # encoder-layer FiLM (M7 W-FILM): thread the per-event parameters into
-            # the absorbed Transformer forward; its verbatim loop applies
-            # featurewise[i](params, x) at the start of each layer (v1
-            # transformer.py:727-728). The v2 FiLM signature is forward(params, x),
-            # so `inputs` IS the [B, n_params] parameters tensor here.
+            # encoder-layer FiLM: thread the per-event parameters into the absorbed
+            # Transformer forward, which applies featurewise[i](params, x) per layer
             kwargs["inputs"] = b.get(self.params_key)
         encoded, out_pad = self.encoder(xs, pad_mask=pad, **kwargs)
         if self.featurewise_global is not None:
-            # global-layer FiLM (M7 W-FILM): scale/bias the encoder OUTPUT before
-            # it is pooled, exactly as v1 saltmodel.py:165-166
+            # global-layer FiLM: scale/bias the encoder OUTPUT before it is pooled
             encoded = self.featurewise_global(b.get(self.params_key), encoded)
         if self.drop_registers:
-            # registers stripped from encoded.seq; v1 also removed "REGISTERS"
-            # from the pad dict, so there is no register mask to publish
+            # registers stripped from encoded.seq; no register mask to publish
             return {"encoded.seq": encoded}
         return {"encoded.seq": encoded, "masks.registers": out_pad["REGISTERS"]}
 
@@ -4227,28 +3253,15 @@ class TransformerEncoder(nn.Module):
 class Split(nn.Module):
     """Per-stream slices of ``encoded.seq`` via the ``seq.layout`` meta leaf.
 
-    The PRODUCTION task path (design §3.3): tasks consume per-stream
-    ``encoded.<stream>`` tensors instead of reconstructing slices from
-    pad-mask dict order (v1 ``input_name_mask``, task.py:58-78). Register
-    rows sit AFTER every stream in the encoder output, so the pre-register
-    layout offsets remain valid slices of ``encoded.seq``.
+    Register rows sit AFTER every stream in the encoder output, so the
+    pre-register layout offsets remain valid slices of ``encoded.seq``.
 
-    Export-mode implementation (design §7 / risk 7, adjudicated empirically
-    in the M4 recipe spike, 2026-06-12): the eager branch slices with
-    Python-int ``seq.layout`` offsets, which ``dynamo=False`` tracing bakes
-    as constants. A single-stream probe (L=0..60) showed the JIT tracer
-    keeps ``size()``-derived ints symbolic through single-stream slicing —
-    silently CORRECT for one dynamic sequence axis — but a two-stream probe
-    mis-sliced at ALL 15 (L_trk, L_el) grid points: with >=2 dynamic axes
-    the baked offsets are provably wrong. The ONNX branch therefore slices
-    with ``index_select`` over an index range built from the `Concat`
-    ``seq.offsets`` tensor (``shape_as_tensor``-derived, design §7
-    mechanism (A)) — proven correct on the full two-axis grid including
-    zero-length streams in the same spike; the design's fallback
-    (per-stream encoder outputs) was NOT needed. The mode branch is static
-    Python; eager FIT/VAL/TEST numerics are bit-identical to the M2 port,
-    and ``index_select`` over a contiguous range equals the eager narrow
-    slicing exactly.
+    ONNX export uses dynamic ``index_select`` slicing (via `Concat`'s
+    ``seq.offsets`` tensor) rather than the eager branch's Python-int
+    ``seq.layout`` offsets: with >=2 dynamic sequence axes, tracing bakes
+    Python-int offsets as constants, which is silently WRONG once a second
+    stream is present (verified empirically with >=2 dynamic axes producing
+    mis-sliced output at every probed grid point).
     """
 
     def __init__(self, streams: Sequence[str]) -> None:
@@ -4271,14 +3284,7 @@ class Split(nn.Module):
         """Declare ``encoded.seq`` + ``seq.layout`` -> ``encoded.<stream>`` per stream.
 
         In ONNX mode the `Concat` ``seq.offsets`` boundary tensor is
-        additionally required (the trace-safe slicing path, see the class
-        docstring).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces (one shared instance-scoped
-            width symbol — slicing preserves the feature dim).
+        additionally required (the trace-safe slicing path, see class docstring).
         """
         del mode
         width = sym_dim("D", self.name)
@@ -4300,16 +3306,9 @@ class Split(nn.Module):
         """Slice each configured stream out of the encoded sequence.
 
         ONNX mode uses dynamic ``index_select`` slicing driven by
-        ``seq.offsets`` (see the class docstring for the risk-7 evidence);
-        the stream's position in the offsets table is its position in the
-        ``seq.layout`` dict (static Python — `Concat` insertion order), so
-        a `Split` over a stream SUBSET stays correct without knowing the
-        full concat list.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only (design §2.5).
+        ``seq.offsets`` (see class docstring); the stream's position in the
+        offsets table is its position in the ``seq.layout`` dict, so a
+        `Split` over a stream SUBSET stays correct without the full concat list.
         """
         encoded = b.get("encoded.seq")
         layout = b.get("seq.layout")
@@ -4329,39 +3328,23 @@ class Split(nn.Module):
 
 
 class GlobalAttentionPooling(nn.Module):
-    """Config-constructed global attention pooling (design §5.1, explicit input/out ports).
+    """Config-constructed global attention pooling, with explicit input/out ports.
 
-    Composes a fresh v1 `GlobalAttentionPooling` built at `bind` (gate width
-    inferred from the resolved input). Pools the register-augmented
-    sequence with the post-register mask order streams-then-REGISTERS —
-    exactly where v1's ``_add_registers`` leaves the dict
-    (transformer.py:777,785; pooling cats mask values in dict order,
-    pooling.py:56). The zero-token ONNX pad stays inside the composed v1
-    class (pooling.py:59-63).
+    Composes a fresh v1 `GlobalAttentionPooling` built at `bind`. Pools the
+    register-augmented sequence with the post-register mask order
+    streams-then-REGISTERS. Two wirings, one class:
 
-    Two wirings, one class (design §5.1; v1 saltmodel.py:90-93,155-156,
-    169-170):
-
-    - **With an encoder** (the GN2 path): ``input`` is ``encoded.seq`` and
-      `TransformerEncoder` publishes ``masks.registers`` — the register rows
-      sit after every stream, so the pad dict is streams-then-REGISTERS.
-    - **Encoder-less** (M5; the DiPS/DeepSets family, every regression
-      config + ``legacy/dips.yaml``): ``init_nets`` + ``pool_net`` with NO
-      ``encoder:`` block, so nothing produces ``masks.registers`` (v1
-      saltmodel.py:155-156 pools ``flatten_tensor_dict(xs)`` directly). The
-      config points ``input`` at ``seq.x`` (the `Concat` output) and
-      ``masks.registers`` is declared OPTIONAL — absent from the plan when no
-      producer exists (planner `_collect_demand` skips optional requires,
-      `_build_edges` binds no edge), so the config plan-compiles and the pad
-      dict is just ``{"seq": seq.mask}``. v1's pooling cats mask values in
-      dict order, so dropping the REGISTERS entry is the exact v1
-      encoder-less semantics — NOT an approximation. The WITH-encoder path is
-      untouched: when the encoder produces ``masks.registers`` the optional
-      require still binds and the REGISTERS pad row is still consumed.
+    - **With an encoder**: ``input`` is ``encoded.seq`` and `TransformerEncoder`
+      publishes ``masks.registers`` (register rows sit after every stream).
+    - **Encoder-less** (DiPS/DeepSets family, every regression config): no
+      ``encoder:`` block, so nothing produces ``masks.registers``. ``input``
+      points at ``seq.x`` and ``masks.registers`` is declared OPTIONAL — absent
+      from the plan when no producer exists, so the pad dict is just
+      ``{"seq": seq.mask}``.
     """
 
-    def __init__(self, input: str = "encoded.seq", out: str = "pooled.global") -> None:  # noqa: A002 - design §5.1 YAML surface name
-        """Capture the explicit input/output ports (design §5.1)."""
+    def __init__(self, input: str = "encoded.seq", out: str = "pooled.global") -> None:  # noqa: A002
+        """Capture the explicit input/output ports."""
         super().__init__()
         self.name = _UNNAMED
         self.input_key = input
@@ -4373,11 +3356,6 @@ class GlobalAttentionPooling(nn.Module):
 
         The input's width symbol is shared with the produced key, so the
         pooled width resolves from the producing module's declaration.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
         """
         del mode
         width = sym_dim("D", self.name)
@@ -4387,11 +3365,9 @@ class GlobalAttentionPooling(nn.Module):
                     shape=("B", sym_dim("L", self.name), width), dtype="float32"
                 ),
                 "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
-                # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder
-                # path, ABSENT on the encoder-less path (init_nets+pool_net, no
-                # encoder — v1 saltmodel.py:90-93,155-156). Optional means the
-                # planner drops it when no module produces it, so encoder-less
-                # configs plan-compile (design §2.2; M5 encoder-less pooling).
+                # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder path,
+                # ABSENT on the encoder-less path — the planner drops it when no
+                # module produces it, so encoder-less configs still plan-compile.
                 "masks.registers": TensorSpec(
                     shape=("B", sym_dim("R", "registers")),
                     dtype="bool",
@@ -4405,26 +3381,17 @@ class GlobalAttentionPooling(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the composed v1 pooling with the inferred gate width (design §2.3)."""
+        """Build the composed v1 pooling with the inferred gate width."""
         self.pool_net = _GlobalAttentionPoolingV1(input_size=schema.width(self.input_key))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Pool the sequence with the (optionally register-augmented) mask dict.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only (design §2.5).
-        """
+        """Pool the sequence with the (optionally register-augmented) mask dict."""
         del mode
         assert self.pool_net is not None, "forward before bind()"
         x = {"seq": b.get(self.input_key)}
-        # streams-then-REGISTERS dict order is numerics-critical: pooling
-        # cats mask values in dict order (pooling.py:56). The encoder-less
-        # path has no register row (no encoder produced one), so the pad dict
-        # is just {"seq": seq.mask} — the exact v1 saltmodel.py:155-156,170
-        # encoder-less semantics; absent optional ports are probed, not read
-        # (executor optional-port contract).
+        # streams-then-REGISTERS dict order is numerics-critical: pooling cats
+        # mask values in dict order. The encoder-less path has no register row,
+        # so the pad dict is just {"seq": seq.mask}.
         pad = {"seq": b.get("seq.mask")}
         if "masks.registers" in b:
             pad["REGISTERS"] = b.get("masks.registers")
@@ -4432,19 +3399,16 @@ class GlobalAttentionPooling(nn.Module):
 
 
 class LossSum(nn.Module):
-    """Weighted sum of per-task losses -> ``loss.total`` (design §3.3).
+    """Weighted sum of per-task losses -> ``loss.total``.
 
-    Owns loss combination outright, replacing the smeared v1 ownership
-    (``ModelWrapper.total_loss`` wsum branch, modelwrapper.py:195-197 —
-    per-task weights are applied INSIDE the tasks, as in v1, so the default
-    here is a plain sum; `weights` is an extra per-loss-key multiplier).
+    Per-task weights are applied INSIDE the tasks, so the default here is a
+    plain sum; `weights` is an extra per-loss-key multiplier.
 
-    The ``losses.**`` auto-collection is a FRAMEWORK wildcard (design §3.3):
-    the M1 kernel rejects wildcard *requires* (planner.py), so the
-    narrowing happens framework-side — `collect_loss_keys` scans sibling
-    modules' declared produces and `narrow` fixes the concrete key list
-    before plan compilation (`SaltModule` calls both; tests may too). An
-    explicit ``losses:`` config list skips collection entirely.
+    The ``losses.**`` auto-collection is a framework wildcard: since the
+    kernel rejects wildcard *requires*, narrowing happens framework-side —
+    `collect_loss_keys` scans sibling modules' declared produces and `narrow`
+    fixes the concrete key list before plan compilation. An explicit
+    ``losses:`` config list skips collection entirely.
     """
 
     def __init__(
@@ -4488,29 +3452,14 @@ class LossSum(nn.Module):
 
     @property
     def narrowed(self) -> bool:
-        """Whether the loss-key list is fixed (explicit config or `narrow`).
-
-        Returns
-        -------
-        bool
-            True once the concrete loss keys are known — the framework
-            (`SaltModule`) narrows un-fixed instances before compile
-            (design §3.3).
-        """
+        """Whether the loss-key list is fixed (explicit config or `narrow`)."""
         return self._loss_keys is not None
 
     @staticmethod
     def collect_loss_keys(
         modules: Mapping[str, GraphModule], mode: Mode = Mode.FIT
     ) -> tuple[str, ...]:
-        """Scan sibling modules for declared ``losses.*`` produces (framework narrowing).
-
-        Parameters
-        ----------
-        modules : Mapping[str, GraphModule]
-            The full module dict (LossSum instances are skipped).
-        mode : Mode, optional
-            The mode whose declarations are scanned, by default `Mode.FIT`.
+        """Scan sibling modules (LossSum instances skipped) for declared ``losses.*`` produces.
 
         Returns
         -------
@@ -4549,12 +3498,7 @@ class LossSum(nn.Module):
         self._check_weight_keys()
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only).
-
-        Returns
-        -------
-        IO
-            Empty in TEST/ONNX (the module is mode-inactive there).
+        """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only, empty in TEST/ONNX).
 
         Raises
         ------
@@ -4577,13 +3521,7 @@ class LossSum(nn.Module):
         )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Sum the (optionally weighted) loss leaves.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            ``{"loss.total": scalar}``.
-        """
+        """Sum the (optionally weighted) loss leaves -> ``{"loss.total": scalar}``."""
         del mode
         assert self._loss_keys is not None, "forward before declare_io narrowing"
         total = sum(self.weights.get(key, 1.0) * b.get(key) for key in self._loss_keys)
@@ -4591,35 +3529,21 @@ class LossSum(nn.Module):
 
 
 class LossGLS(LossSum):
-    """Geometric-mean (GLS) combination of per-task losses -> ``loss.total`` (design §3.3).
+    """Geometric-mean (GLS) combination of per-task losses -> ``loss.total``.
 
-    A NetModule SIBLING of `LossSum` (it subclasses it to share the
-    ``losses.**`` framework wildcard, `declare_io`, and the
-    `collect_loss_keys`/`narrow` integration — `SaltModule`'s narrow loop
-    already keys off ``isinstance(_, LossSum)``, so a `LossGLS` is narrowed
-    for free, saltmodule.py:157-158). The ONLY behavioural change is the
-    combination rule (`forward`): the n-task GEOMETRIC MEAN
-    ``(∏ losses)^(1/n)`` (GLS = geometric loss strategy), reproducing the v1
-    ``loss_mode == "GLS"`` branch (modelwrapper.py:194-196) which `LossSum`'s
-    weighted sum replaced for the default ``wsum`` mode.
+    Subclasses `LossSum` to share the ``losses.**`` framework wildcard,
+    `declare_io`, and the `collect_loss_keys`/`narrow` integration. The ONLY
+    behavioural change is the combination rule (`forward`): the n-task
+    geometric mean ``(∏ losses)^(1/n)``.
 
-    GLS does NOT utilise loss weights. v1 enforces this with a loud
-    construction-time guard — ``assert all(task.weight == 1.0 for task in
-    self.model.tasks)`` (modelwrapper.py:139-142) — because the geometric mean
-    of per-task losses is only meaningful when no task is pre-scaled (a
-    weighted task loss ``w*L`` contributes ``w^(1/n)`` to the product, an
-    arbitrary rescale of the mean — silent divergence, plan 10 risk
-    "LossGLS gates 14 configs"). v2 has TWO weight surfaces, both guarded to
-    1.0:
-
-    - This module's per-loss ``weights`` multiplier (the `LossSum` extra) —
-      rejected in ``__init__`` so a GLS config can never carry one.
-    - The task-side ``weight: float`` applied INSIDE each composed v1 head
-      before it publishes ``losses.<task>`` (tasks.py:88, task.py:243) — the
-      EXACT v1 ``task.weight`` surface. This is sibling state the loss module
-      cannot see at construction, so the framework calls
-      `check_task_weights(modules)` from `SaltModule.__init__`'s narrow loop
-      (the v1 ctor guard's v2 home), failing loudly before any plan compiles.
+    GLS does NOT utilise loss weights — the geometric mean of per-task losses
+    is only meaningful when no task is pre-scaled (a weighted task loss
+    ``w*L`` would contribute ``w^(1/n)`` to the product, an arbitrary rescale
+    of the mean). Two weight surfaces are both guarded to 1.0: this module's
+    per-loss ``weights`` (rejected in ``__init__``), and the task-side
+    ``weight`` applied inside each task head (checked via
+    `check_task_weights`, called by `SaltModule.__init__` before any plan
+    compiles, since this module can't see sibling task state at construction).
     """
 
     def __init__(
@@ -4633,12 +3557,10 @@ class LossGLS(LossSum):
         ----------
         losses : Sequence[str] | None, optional
             Explicit loss keys (``"losses.<task>"`` or bare task names), by
-            default None (auto-collected via `collect_loss_keys`/`narrow`,
-            as for `LossSum`).
+            default None (auto-collected, as for `LossSum`).
         weights : Mapping[str, float] | None, optional
-            Accepted only for parity with the `LossSum` signature: GLS does
-            NOT utilise weights, so any entry != 1.0 is rejected (v1
-            modelwrapper.py:139-142).
+            Accepted only for parity with the `LossSum` signature: any entry
+            != 1.0 is rejected.
 
         Raises
         ------
@@ -4647,8 +3569,8 @@ class LossGLS(LossSum):
             them to 1, or use `LossSum` for a weighted sum).
         """
         super().__init__(losses=losses, weights=weights)
-        # exact == 1.0 is the faithful v1 semantic (modelwrapper.py:140 asserts
-        # task.weight == 1.0); weights are config literals, never computed values
+        # exact == 1.0 is the faithful semantic; weights are config literals,
+        # never computed values
         if bad := {k: v for k, v in self.weights.items() if v != 1.0}:  # noqa: RUF069
             raise ConfigError(
                 f"LossGLS: per-loss weights are not utilised by the geometric mean — got "
@@ -4658,24 +3580,13 @@ class LossGLS(LossSum):
 
     @staticmethod
     def check_task_weights(modules: Mapping[str, GraphModule]) -> None:
-        """Assert every loss-producing task carries ``weight == 1.0`` (the v1 guard).
+        """Assert every loss-producing task carries ``weight == 1.0``.
 
-        The v2 home of v1's ``ModelWrapper.__init__`` GLS assertion
-        (``all(task.weight == 1.0 for task in self.model.tasks)``,
-        modelwrapper.py:139-142). Called by `SaltModule.__init__` when a
-        `LossGLS` is present, BEFORE any `declare_io`/compile, so a weighted
-        task under GLS fails loudly at assembly rather than silently
-        rescaling the geometric mean (plan 10 risk). Inspects the public
-        numeric ``weight`` every task module exposes (tasks.py:88 coerces it
-        to ``float``; the guard accepts ``int`` too so a future un-coerced
-        weight is still caught); modules without a numeric ``weight`` attribute
-        (`Normaliser`, `Concat`, `LossSum`/`LossGLS`, ...) are ignored — only
-        the loss producers carry it.
-
-        Parameters
-        ----------
-        modules : Mapping[str, GraphModule]
-            The full configured module dict.
+        Called by `SaltModule.__init__` when a `LossGLS` is present, BEFORE
+        any `declare_io`/compile, so a weighted task under GLS fails loudly at
+        assembly rather than silently rescaling the geometric mean. Modules
+        without a numeric ``weight`` attribute (`Normaliser`, `Concat`,
+        `LossSum`/`LossGLS`, ...) are ignored — only the loss producers carry it.
 
         Raises
         ------
@@ -4686,12 +3597,8 @@ class LossGLS(LossSum):
             name: float(module.weight)
             for name, module in modules.items()
             if not isinstance(module, LossSum)
-            # duck-typed numeric check (int OR float): the v2 task base coerces
-            # ``self.weight = float(weight)`` (tasks.py:88) so a YAML ``weight: 2``
-            # already arrives as 2.0 and is caught, but guarding ``(int, float)``
-            # keeps a future task module that stored an un-coerced int weight from
-            # silently slipping past the GLS guard. (LossSum carries ``weights`` —
-            # a dict — not ``weight``, and is excluded above regardless.)
+            # duck-typed numeric check: LossSum carries `weights` (a dict), not
+            # `weight`, and is excluded above regardless
             and isinstance(getattr(module, "weight", None), (int, float))
             and float(module.weight) != 1.0  # noqa: RUF069 - exact, the v1 semantic
         }
@@ -4702,19 +3609,7 @@ class LossGLS(LossSum):
             )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Combine the loss leaves by their geometric mean.
-
-        ``(∏_k losses[k])^(1/n)`` over the narrowed loss keys — the v1
-        ``loss_mode == "GLS"`` reduction (``math.prod`` then ``pow(·, 1/n)``,
-        modelwrapper.py:194-196). Weights are guaranteed 1.0 by ``__init__``
-        and `check_task_weights`, so none appear here (a weighted product
-        would be the divergence v1's guard forbids).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            ``{"loss.total": (∏ losses)^(1/n)}``.
-        """
+        """Combine the loss leaves by their geometric mean: ``(∏ losses)^(1/n)``."""
         del mode
         assert self._loss_keys is not None, "forward before declare_io narrowing"
         product = math.prod(b.get(key) for key in self._loss_keys)
@@ -4722,18 +3617,12 @@ class LossGLS(LossSum):
 
 
 def _loss_key(key: str) -> str:
-    """Normalise a configured loss reference to a dotted ``losses.`` key.
-
-    Returns
-    -------
-    str
-        ``"losses.<name>"`` for bare task names; dotted keys unchanged.
-    """
+    """Normalise a configured loss reference to a dotted ``losses.`` key."""
     return key if key.startswith("losses.") else f"losses.{key}"
 
 
 def _reject_width_keys(who: str, cfg: Mapping[str, Any] | None, banned: tuple[str, ...]) -> None:
-    """Reject configured width keys — widths are inferred at bind (design §2.3).
+    """Reject configured width keys — widths are inferred at bind.
 
     Raises
     ------

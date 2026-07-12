@@ -1,48 +1,7 @@
-# gn3v01.yaml — the GN3V01 FLAGSHIP in the v2 schema (M5; design §6.6; matrix
-# §4 GN3-flagship forward-parity representative).
-#
-# Faithful v2-native port of legacy salt/configs/GN3v01/GN3V01.yaml. Exercises
-# ALL FOUR flagship features at once (matrix §4: "VectorConcat, GLS, regression,
-# norm_type at once"):
-#   1. LossGLS                — geometric-mean loss (v1 `loss_mode: GLS`), every
-#                               loss-producing task weight == 1.0
-#   2. norm_type: hybrid      — encoder pre/post placement (design §9.2; v1
-#                               transformer.py:350-356)
-#   3. VectorConcat + alias   — the GN3 `global` stream fed PAST the encoder and
-#                               concatenated onto the pooled rep (design §6.6; v1
-#                               saltmodel.py:175-177 cat([global_rep,
-#                               global_feats]) -> the `&pooled_dim 258` every GN3
-#                               task consumes) + the ONNX `export.inputs alias:`
-#                               that clones one Athena jet tensor into the global
-#                               port (design §6.6/§7; v1 to_onnx.py:377-378).
-#                               Identity case: `global`==`jets` cols.
-#   4. RegressionTaskModule   — jet_pt_regression (ratio target/denominator)
-#
-# v1 GN3V01 head list (GN3V01.yaml:58-141) reproduced — 6 heads:
-#   - jets_classification : 6-class split-light flavour (v1 use_class_dict)
-#   - track_origin        : 8-class ftag track-origin (v1 use_class_dict)
-#   - track_vertexing     : per-track vertex edges
-#   - track_type          : 6-class signed-particle track type (label_map)
-#   - jet_pt_regression   : jet-pT ratio regression (RegressionTaskModule)
-#   - jets_charge         : 3-class b-jet charge (~300-entry PdgId label_map)
-#
-# LossGLS REQUIRES every loss-producing task weight == 1.0 (v1 GLS guard,
-# modelwrapper.py:139-142; LossGLS.check_task_weights, modules.py:1377). v1
-# GN3V01's heads all default to 1.0 (jets_charge sets `weight: 1` explicitly) —
-# so NO head deviates from 1.0.
-#
-# This is the v2-native MIGRATED fixture for GN3V01 (the M7 converter later
-# proves the automated legacy->v2 path matches it). Shrunk encoder widths (16-dim
-# 2-layer) for fast static validation — widths are config values, irrelevant to
-# the graph wiring this gates; the 6-head architecture + all four features ARE
-# faithful.
-#
-# NO machine paths are committed (design §5 placeholder policy). Static
-# validation (no data) from the REPO ROOT:
-#
-#   python -m salt.core.main graph validate -c salt/core/configs/gn3v01.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml \
-#     --set model.modules.norm_global.init_args.norm_dict=unused.yaml
+# GN3V01 flagship: exercises LossGLS (geometric-mean loss), hybrid norm
+# placement, VectorConcat (a 'global' vector stream fed past the encoder and
+# concatenated onto the pooled rep), and RegressionTaskModule, together.
+# LossGLS requires every loss-producing task weight == 1.0.
 
 name: GN3V01
 
@@ -56,20 +15,17 @@ data:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false}
-          # constituent streams (v1 GN3V01.yaml:148-149 flows + electrons) —
-          # padded sequences like tracks, so global_object:false (design §6.6)
           flows: {global_object: false}
           electrons: {global_object: false}
-          # the GN3 'global' stream: an ordinary [B, F] vector (no pad mask,
-          # design §6.6 1393-1396; v1 datasets.py:519-524 mask-excludes 'global')
+          # an ordinary [B, F] vector stream, no pad mask
           global: {global_object: true}
     features:
       class_path: salt.core.data.Features
       init_args:
         variables:
           jets: [pt_btagJes, eta_btagJes]
-          # GN3V01's identity case: 'global' declares the SAME columns as jets
-          # (design §6.6 1400-1401) -> the ONNX alias is an identity clone
+          # identity case: 'global' declares the same columns as jets, so the
+          # ONNX alias below is an identity clone
           global: [pt_btagJes, eta_btagJes]
           tracks:
             [
@@ -93,9 +49,7 @@ data:
               numberOfPixelSplitHits,
               numberOfSCTSharedHits,
             ]
-          # flows stream — exact v1 GN3V01.yaml:186-191 (5 vars)
           flows: [pt, energy, deta, dphi, isCharged]
-          # electrons stream — exact v1 GN3V01.yaml:192-220 (29 vars)
           electrons:
             [
               pt,
@@ -135,21 +89,19 @@ model:
   class_path: salt.core.SaltModule
   init_args:
     lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
-    optimizer: lion # v1 GN3V01 GLS lion optimiser
+    optimizer: lion
     modules:
-      # the encoder-stream normaliser (jets is the global context object)
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks, flows, electrons]
           global_object: jets
-      # a SECOND normaliser for the 'global' vector stream fed past the encoder
-      # (one Normaliser has a single global_object slot; jets already fills it)
+      # second normaliser: 'global' needs its own global_object slot (jets
+      # already fills the one on `norm` above)
       norm_global:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
           streams: [global]
           global_object: global
       track_embed:
@@ -159,8 +111,6 @@ model:
           context: [normed.jets]
           out_dim: 16
           dense: {hidden_layers: [16], activation: SiLU}
-      # flows StreamEmbed (v1 init_nets flows, GN3V01.yaml:25-27) — same dense
-      # config as tracks (v1 &init anchor), jets as embed context
       flow_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
@@ -168,7 +118,6 @@ model:
           context: [normed.jets]
           out_dim: 16
           dense: {hidden_layers: [16], activation: SiLU}
-      # electrons StreamEmbed (v1 init_nets electrons, GN3V01.yaml:29-31)
       electron_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
@@ -185,61 +134,50 @@ model:
           dim: 16
           out_dim: 16
           num_layers: 2
-          num_registers: 8 # v1 GN3v01/GN3V01.yaml:48 — 8 register tokens
-          # the GN3V01 flagship: hybrid norm placement (design §9.2; sub-wave B)
-          norm: RMSNorm # v1 GN3v01/GN3V01.yaml:41 — RMSNorm (not the LayerNorm default)
+          num_registers: 8
+          norm: RMSNorm
           norm_type: hybrid
           attention: {num_heads: 2, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       split:
-        class_path: salt.core.nn.Split # production task path (design §3.3)
+        class_path: salt.core.nn.Split
         init_args: {streams: [tracks]}
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
-      # design §6.6: the pooled rep (256 in prod) concatenated with the global
-      # features (2). ORDER is the list — pooled FIRST, global features LAST
-      # (1390-1391), matching v1 cat([global_rep, global_feats]); the output
-      # vconcat.global is the v1 'global_rep' slot every GN3 task consumes.
+      # order matters: pooled rep first, global features last — every GN3
+      # task reads this augmented vconcat.global.
       vconcat:
         class_path: salt.core.nn.VectorConcat
         init_args:
           inputs: [pooled.global, normed.global]
           out: vconcat.global
-      # head 1/6: 6-class split-light flavour (v1 use_class_dict, GN3V01.yaml:58)
       jets_classification:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
           stream: jets
-          input: vconcat.global # the augmented &pooled_dim 258 (design §6.6)
+          input: vconcat.global
           label: flavour_label
           class_names: [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [16], activation: SiLU}
-      # head 2/6: 8-class ftag track-origin (v1 use_class_dict, GN3V01.yaml:71).
-      # Consumes `encoded.tracks` (via Split) with the augmented `vconcat.global`
-      # as context — the GN3 pattern where every task sees the global features.
-      # NO weight override: LossGLS requires every loss weight == 1.0 (v1 GN3V01
-      # track_origin defaults to 1.0).
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
-          stream: tracks # input defaults to encoded.tracks
+          stream: tracks
           context: vconcat.global
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [16], activation: SiLU}
-      # head 3/6: per-track vertex edges (v1 VertexingTask, GN3V01.yaml:84)
       track_vertexing:
         class_path: salt.core.nn.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: vconcat.global
           dense: {hidden_layers: [16], activation: SiLU}
-      # head 4/6: 6-class signed-particle track type (v1 label_map, GN3V01.yaml:99)
       track_type:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
@@ -249,10 +187,8 @@ model:
           label_map: {-2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5}
           class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
           dense: {hidden_layers: [16], activation: SiLU}
-      # head 5/6: jet-pT ratio regression — the RegressionTaskModule flagship
-      # feature (v1 RegressionTask jet_pt_regression, GN3V01.yaml:115). Ratio
-      # target/denominator: pt_btagJes is a declared input Feature (ONNX
-      # denominator-in-Features rule, FD §3.3).
+      # ratio target/denominator: pt_btagJes is a declared input Feature
+      # (ONNX requires denominators to be declared inputs).
       jet_pt_regression:
         class_path: salt.core.nn.tasks.RegressionTaskModule
         init_args:
@@ -262,8 +198,7 @@ model:
           target_denominators: pt_btagJes
           loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
           dense: {hidden_layers: [16], activation: SiLU}
-      # head 6/6: 3-class b-jet charge folded from raw PdgId (v1 jets_charge,
-      # GN3V01.yaml:129; the ~300-entry label_map -> {bquark, antibquark, other})
+      # 3-class b-jet charge folded from raw PdgId via a ~300-entry label_map
       jets_charge:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
         init_args:
@@ -271,7 +206,7 @@ model:
           input: vconcat.global
           label: HadronGhostInitialTruthLabelPdgId
           class_names: [bquark, antibquark, other]
-          weight: 1 # the ONLY weight LossGLS allows (== 1.0)
+          weight: 1 # the only weight LossGLS allows (== 1.0)
           label_map:
             {
               0: 2, 15: 2, -15: 2, 511: 1, -511: 0, 513: 1, -513: 0, 521: 1, -521: 0,
@@ -304,25 +239,12 @@ model:
             }
           dense: {hidden_layers: [16], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossGLS # v1 loss_mode: GLS (geometric mean)
+        class_path: salt.core.nn.LossGLS
 
-# plan 34 W34.4c: this config previously relied on the base2 WriterCallback
-# default (`writers: modules: {}`, now retired). It supplies its OWN top-level
-# outputs: section + dumb sinks. The 1:1 conversion math (softmax / regression
-# de-scale / union-find) folds onto each task via get_output (W34.1/W34.3),
-# orchestrated by the RunTaskOutput writer below; the dumb sinks dump ALL active
-# outputs.* leaves, the SECTION supplies names/dtypes/ORDER. Section writers in
-# EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields ->
-# PadMaskWriter. The RunTaskOutput tasks list is the v1 model-declaration order
-# (jets_classification, track_origin, track_vertexing, track_type,
-# jet_pt_regression, jets_charge): jets = flavour probs, jet_pt_reg, charge probs;
-# tracks = origin probs, VertexIndex, type probs. flows/electrons/global have no
-# task, so they are NOT in inputs_copy/pad_mask. (TOY dims untouched — only the
-# output layer is added, per the CLAUDE.md gn3v01 gotcha.)
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), every tasked stream
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -331,24 +253,21 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4c): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: GN3V01 # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
-    # constituent stream ports (v1 to_onnx exposes flows + electrons)
-    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows} # [L, F]
-    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons} # [L, F]
-    # the GN3 alias: ONE Athena jet tensor cloned into the global port (design
-    # §6.6/§7; v1 to_onnx.py:377-378). Identity gather here (global==jets cols).
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
+    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
+    # clones one Athena jet tensor into the global port (identity here, since
+    # global==jets cols)
     - {port: inputs.global, alias: inputs.jets}
 
 trainer:

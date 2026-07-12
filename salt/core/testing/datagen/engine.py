@@ -233,11 +233,10 @@ def _resolve_link(
             pool = np.array([single]) if single != schema.fill_int else np.array([])
 
         # required_match invariant: phase 1 guarantees >=1 valid referent per
-        # sample for a constituent reference (see
-        # _propagate_required_match_min_valid in schema.py, which raises the
-        # referenced group's min_valid to >=1). If the pool is still empty here
-        # something upstream is inconsistent -- fail loudly rather than promoting
-        # an invalid-filled slot (whose id is the fill sentinel) to "valid".
+        # sample for a constituent reference (see _propagate_required_match_min_valid
+        # in schema.py). If the pool is still empty here something upstream is
+        # inconsistent -- fail loudly rather than promoting an invalid-filled slot
+        # (whose id is the fill sentinel) to "valid".
         if f.required_match and pool.size == 0 and ref_group.kind == "constituent":
             raise RuntimeError(
                 f"required_match link {g.name}.{f.name} -> {f.ref_group}.{f.ref_field}: "

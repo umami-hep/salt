@@ -1,30 +1,4 @@
-"""P0 gates for the ``outputs.*`` output-writing redesign (plan 01, P0).
-
-Proves the demand-gating keystone the whole two-layer architecture rests on
-(design §2, §4 risks 4/5/6): an in-graph ``outputs.*`` producer is
-
-- **GATE (a)** demand-pruned from the FIT and VAL plans (training path
-  unperturbed: the FIT plan is byte-identical to the no-producer FIT plan and
-  ``parity_gn2`` stays bitwise) while genuinely present in the config;
-- **GATE (b)** present in the TEST plan, with a CONCRETE width resolved for its
-  ``outputs.*`` leaf in a TEST-ONLY bind (no FIT plan to unify against —
-  design §4 risk 6);
-- **GATE (c)** rejected DETERMINISTICALLY when its source task is
-  ``expose: [fit, val]`` (no concrete ``preds.*`` in TEST) — a loud
-  `ConnectivityError`, the documented preferred behaviour (design §4 risk 5).
-
-GATES (a)/(b) reuse the GN2 forward-parity fixture
-(`salt.tests.integration.parity_gn2`): the producer is wired onto a real task's
-``preds.*`` leaf, so the proof runs against the production GN2 topology, not a
-toy. GATE (c) and a kernel-level pruning control use minimal stub `GraphModule`s
-for a focused contract test.
-
-The bulk of this file is pure plan-compilation logic (unit). The one
-``run_parity`` test runs a real GN2 forward, so it carries the
-``@pytest.mark.integration`` marker and imports the integration harness lazily
-(mirroring ``tests/unit/test_preflight.py``); it is GPU-only/opt-in via the
-conftest guard.
-"""
+"""P0 gates for the ``outputs.*`` output-writing redesign (plan 01, P0)."""
 
 from __future__ import annotations
 
@@ -59,14 +33,7 @@ _NUM_HEADS = 2
 
 
 def _gn2_modules(tmp_path):
-    """Build the real GN2 wrapper module dict (shared instances, design §2.2).
-
-    Returns
-    -------
-    tuple
-        ``(modules, sources, pred_sinks)`` — the `from_v1` module dict, its
-        plan sources, and the list of ``preds.*`` sinks.
-    """
+    """Build the real GN2 wrapper module dict (shared instances, design §2.2)."""
     v1 = build_test_gn2(
         tmp_path,
         embed_dim=_EMBED_DIM,
@@ -80,13 +47,7 @@ def _gn2_modules(tmp_path):
 
 
 def _with_producer(modules):
-    """Add the `TaskOutput` producer to a copy of `modules` (instance name set).
-
-    Returns
-    -------
-    dict
-        A fresh module dict with the producer appended (config-present).
-    """
+    """Add the `TaskOutput` producer to a copy of `modules` (instance name set)."""
     out = dict(modules)
     producer = TaskOutput(task=_SOURCE_TASK, stream=_SOURCE_STREAM)
     producer.name = _PRODUCER_NAME
@@ -95,15 +56,7 @@ def _with_producer(modules):
 
 
 def _per_mode_sinks(pred_sinks):
-    """Per-mode sink map: TEST also demands the producer's output leaf.
-
-    Returns
-    -------
-    dict[Mode, list[str]]
-        FIT/VAL demand only the preds sinks; TEST also demands ``outputs.*``
-        (the sink), so the producer is alive somewhere (avoids the
-        all-modes-dead check) yet pruned in FIT/VAL.
-    """
+    """Per-mode sink map: TEST also demands the producer's output leaf."""
     return {
         Mode.FIT: list(pred_sinks),
         Mode.VAL: list(pred_sinks),
@@ -111,9 +64,7 @@ def _per_mode_sinks(pred_sinks):
     }
 
 
-# ---------------------------------------------------------------------------
 # GATE (a): TRAINING UNPERTURBED — producer demand-pruned from FIT/VAL
-# ---------------------------------------------------------------------------
 
 
 def test_gate_a_producer_pruned_from_fit_and_val(tmp_path):
@@ -156,13 +107,7 @@ def test_gate_a_fit_plan_byte_identical_to_no_producer(tmp_path):
 
 @pytest.mark.integration  # runs a real GN2 forward via the parity harness
 def test_gate_a_parity_gn2_stays_bitwise_with_producer_configured(tmp_path):
-    """parity_gn2 stays bitwise when the producer is added to the model.
-
-    The parity gate compiles the TEST plan with preds.* sinks only (no
-    outputs.* demand), so the configured producer is demand-pruned and the
-    forward is unchanged — the training/eval path the gate measures is
-    bitwise-unperturbed by the producer's mere presence.
-    """
+    """parity_gn2 stays bitwise when the producer is added to the model."""
     from salt.tests.integration.parity_gn2 import run_parity  # noqa: PLC0415 - integration-only
 
     def hook(modules):
@@ -178,9 +123,7 @@ def test_gate_a_parity_gn2_stays_bitwise_with_producer_configured(tmp_path):
     assert all(r["bitwise"] and r["passed"] for r in report["intermediates"])
 
 
-# ---------------------------------------------------------------------------
 # GATE (b): TEST PATH GETS IT — present in TEST + width resolves TEST-only
-# ---------------------------------------------------------------------------
 
 
 def test_gate_b_producer_present_in_test_plan(tmp_path):
@@ -200,13 +143,7 @@ def test_gate_b_producer_present_in_test_plan(tmp_path):
 
 
 def test_gate_b_width_resolves_in_test_only_bind(tmp_path):
-    """ResolvedSchema resolves a CONCRETE width for the output leaf, TEST-only.
-
-    The bind sees ONLY the TEST plan (no FIT plan to unify symbolic dims
-    against — design §4 risk 6). The producer re-emits the source task's width
-    via `derived_widths`, so the output last dim resolves from the TEST plan
-    alone.
-    """
+    """ResolvedSchema resolves a CONCRETE width for the output leaf, TEST-only."""
     modules, sources, pred_sinks = _gn2_modules(tmp_path)
     with_producer = _with_producer(modules)
     sinks = _per_mode_sinks(pred_sinks)
@@ -224,18 +161,11 @@ def test_gate_b_width_resolves_in_test_only_bind(tmp_path):
     assert output_width > 0
 
 
-# ---------------------------------------------------------------------------
 # GATE (c): EXPOSE INTERACTION — expose:[fit,val] source -> deterministic reject
-# ---------------------------------------------------------------------------
 
 
 class _StubModule:
-    """A minimal `GraphModule` for the focused expose / pruning controls.
-
-    Declares the given requires/produces verbatim; ``forward`` is never called
-    (these tests only compile). Implements the `GraphModule` protocol
-    (``name`` + ``declare_io``).
-    """
+    """A minimal `GraphModule` for the focused expose / pruning controls."""
 
     def __init__(self, name, requires=None, produces=None):
         self.name = name
@@ -251,17 +181,7 @@ class _StubModule:
 
 
 def _stub_graph(*, expose_modes):
-    """Stub graph: an expose-gated task -> TaskOutput producer -> sink demand.
-
-    `expose_modes` gates the task's ``preds.*`` produce port. With FIT|VAL the
-    port is absent in TEST, so a TEST-demanded producer reading it has no
-    producer for its require.
-
-    Returns
-    -------
-    tuple
-        ``(modules, sources, test_sinks)``.
-    """
+    """Stub graph: an expose-gated task -> TaskOutput producer -> sink demand."""
     pred = TensorSpec(shape=("B", 5), dtype="float32", modes=expose_modes)
     task = _StubModule("aux_task", produces={_PRED_KEY: pred})
     producer = TaskOutput(task=_SOURCE_TASK, stream=_SOURCE_STREAM)
@@ -271,13 +191,7 @@ def _stub_graph(*, expose_modes):
 
 
 def test_gate_c_expose_fit_val_source_rejected_in_test(tmp_path):
-    """A producer on an expose:[fit,val] task is rejected DETERMINISTICALLY in TEST.
-
-    The source task publishes ``preds.*`` only in FIT/VAL, so in TEST the
-    producer's require has no producer — a loud `ConnectivityError`, the
-    documented preferred behaviour (design §4 risk 5). The error names the
-    missing key, so the failure is actionable.
-    """
+    """A producer on an expose:[fit,val] task is rejected DETERMINISTICALLY in TEST."""
     del tmp_path
     modules, sources, test_sinks = _stub_graph(expose_modes=Mode.FIT | Mode.VAL)
 
@@ -287,11 +201,7 @@ def test_gate_c_expose_fit_val_source_rejected_in_test(tmp_path):
 
 
 def test_gate_c_unexposed_source_compiles_in_test(tmp_path):
-    """Control: a normally-exposed (modes=ALL) source task compiles fine in TEST.
-
-    Proves the GATE (c) rejection is specific to the expose gating, not a
-    blanket failure of the stub wiring.
-    """
+    """Control: a normally-exposed (modes=ALL) source task compiles fine in TEST."""
     del tmp_path
     modules, sources, test_sinks = _stub_graph(expose_modes=Mode.ALL)
 
@@ -300,17 +210,11 @@ def test_gate_c_unexposed_source_compiles_in_test(tmp_path):
     assert "aux_task" in test.module_names
 
 
-# ---------------------------------------------------------------------------
 # kernel-level demand-pruning control (focused on the pruning mechanism)
-# ---------------------------------------------------------------------------
 
 
 def test_producer_demand_pruned_when_output_reaches_no_sink(tmp_path):
-    """Pure-kernel control: the producer is pruned exactly when no sink demands it.
-
-    Mirrors the parity_gn2 norm-prune precedent at the kernel level — same
-    config, the only difference is whether the outputs.* sink is demanded.
-    """
+    """Pure-kernel control: the producer is pruned exactly when no sink demands it."""
     del tmp_path
     pred = TensorSpec(shape=("B", 5), dtype="float32")
     task = _StubModule("aux_task", produces={_PRED_KEY: pred})
@@ -327,20 +231,11 @@ def test_producer_demand_pruned_when_output_reaches_no_sink(tmp_path):
     assert _PRODUCER_NAME in test.module_names  # demanded by the TEST sink
 
 
-# ---------------------------------------------------------------------------
 # outputs.* namespace acceptance + the CollectOutputs sink demand surface
-# ---------------------------------------------------------------------------
 
 
 def test_outputs_namespace_accepted_by_kernel(tmp_path):
-    """The kernel accepts the open ``outputs.*`` namespace (no enum gate).
-
-    Bundle keys are an open namespace (the only enumerated constant,
-    ``MODEL_VISIBLE_NAMESPACES``, gates DATASET-served keys — outputs.* are
-    model-PRODUCED, design §2.4 / risk 7, so they must NOT be added there).
-    Compiling a plan that produces and sinks an ``outputs.*`` leaf proves the
-    namespace is accepted end to end.
-    """
+    """The kernel accepts the open ``outputs.*`` namespace (no enum gate)."""
     del tmp_path
     pred = TensorSpec(shape=("B", sym_dim("C", "x")), dtype="float32")
     task = _StubModule("aux_task", produces={_PRED_KEY: pred})
@@ -354,11 +249,7 @@ def test_outputs_namespace_accepted_by_kernel(tmp_path):
 
 
 def test_collect_outputs_sink_demand_surface():
-    """`CollectOutputs.writer_demand` returns the configured outputs.* keys.
-
-    This is the duck-typed surface SaltModule folds into the TEST plan sinks
-    (design §8); the demand map keys are the producer leaves it anchors.
-    """
+    """`CollectOutputs.writer_demand` returns the configured outputs.* keys."""
     sink = CollectOutputs(outputs=[_OUTPUT_KEY])
     demand = sink.writer_demand(model_modules={}, reader=None)
     assert set(demand) == {_OUTPUT_KEY}

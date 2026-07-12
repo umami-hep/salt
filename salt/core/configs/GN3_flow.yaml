@@ -1,25 +1,9 @@
-# GN3_flow.yaml — overlay on GN3_baseline.yaml (+ GN3_baseline_loose.yaml) that
-# ADDS a pflow stream (M5-CONV, GN3 family). The v2-native port of legacy
-# salt/configs/GN3_dev/GN3_flow.yaml (v1 name: GN3_flows).
-#
-# v1 adds a second `init_net` (input_name: flow) and a `flow` data stream on top
-# of the single-track GN3_baseline. In v2 that means: a second StreamEmbed
-# (`flow_embed`), the `flow` stream wired into the Normaliser + Concat lists, and
-# the flow group/variables on the reader+features. List-valued init_args
-# (Normaliser/Concat `streams`) REPLACE rather than deep-merge (design §5.3 list
-# semantics), so this overlay re-states the full [tracks, flow] lists.
-#
-# v1 maps `flow -> flows` (input_map, GN3_flow.yaml:25) — the served stream is
-# `flow`, the H5 dataset is `flows`. The newly-added flow stream feeds the
-# encoder attention but has no flow-level task, so it is NOT split out (only
-# `tracks` keeps a per-token head — the GN3_baseline split list is unchanged).
-#
-# Static validation (STACK base -> loose -> this):
-#   python -m salt.core.main graph validate \
-#     -c salt/core/configs/GN3_baseline.yaml \
-#     -c salt/core/configs/GN3_baseline_loose.yaml \
-#     -c salt/core/configs/GN3_flow.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Overlay on GN3_baseline.yaml (+ GN3_baseline_loose.yaml): adds a pflow
+# stream. Note the served stream is `flow`, mapped from the `flows` H5
+# dataset. Feeds the encoder attention but has no task, so it is not split
+# out. List-valued init_args (Normaliser/Concat streams) replace rather than
+# merge across configs, so the full lists are re-stated here. Stack as:
+#   salt2 ... -c GN3_baseline.yaml -c GN3_baseline_loose.yaml -c GN3_flow.yaml
 
 name: GN3_flow
 
@@ -31,7 +15,6 @@ data:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false, dataset: tracks_ghost}
-          # the added pflow stream (v1 input_map: flow -> flows)
           flow: {global_object: false, dataset: flows}
     features:
       class_path: salt.core.data.Features
@@ -46,10 +29,8 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          streams: [jets, tracks, flow] # re-stated: list REPLACES (design §5.3)
+          streams: [jets, tracks, flow]
           global_object: jets
-      # the second init_net (v1 input_name: flow); equal embed width is a
-      # Concat constraint, so it matches GN3_baseline's track embed (256)
       flow_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
@@ -59,4 +40,4 @@ model:
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks, flow]} # re-stated full list
+        init_args: {streams: [tracks, flow]}

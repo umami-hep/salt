@@ -1,10 +1,4 @@
-"""Tests for the salt2 CLI (salt.core.cli — design §4.1-§4.4, §2.6).
-
-Calls ``main([...])`` directly (no subprocess, no installed script) with toy
-modules defined in this module and tmp YAML configs. The toys are referenced
-by ``class_path: salt.tests.unit.test_cli.<Class>`` — the M1 loader imports
-them via importlib.
-"""
+"""Tests for the salt2 CLI (salt.core.cli — design §4.1-§4.4, §2.6)."""
 
 import shutil
 import textwrap
@@ -24,9 +18,7 @@ from salt.core.schema import load_schema
 # static width-resolution plot path needs a real trainer config but no data file
 _DUMMY_CFG = str(Path(__file__).parent.parent.parent / "core" / "configs" / "gn2v2-dummy.yaml")
 
-# ---------------------------------------------------------------------------
 # toy modules (no physics — M1 scope); instance names assigned by the CLI
-# ---------------------------------------------------------------------------
 
 
 def _spec(cfg):
@@ -62,9 +54,7 @@ class WildToy(Toy):
     allow_wildcards = True
 
 
-# ---------------------------------------------------------------------------
 # config fixtures
-# ---------------------------------------------------------------------------
 
 TOY = "salt.tests.unit.test_cli.Toy"
 
@@ -173,9 +163,7 @@ def cfg(tmp_path):
     return write
 
 
-# ---------------------------------------------------------------------------
 # graph validate (design §4.1)
-# ---------------------------------------------------------------------------
 
 
 class TestValidate:
@@ -230,9 +218,7 @@ class TestValidate:
         assert "cannot import" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------
 # graph deadcode (design §4.2)
-# ---------------------------------------------------------------------------
 
 
 class TestDeadcode:
@@ -273,9 +259,7 @@ class TestDeadcode:
         assert "error-level deadcode" in err
 
 
-# ---------------------------------------------------------------------------
 # graph plan (design §4.4 table)
-# ---------------------------------------------------------------------------
 
 
 class TestPlan:
@@ -320,9 +304,7 @@ class TestPlan:
         assert "reader: inputs.x" in out
 
 
-# ---------------------------------------------------------------------------
 # graph plot (design §4.3)
-# ---------------------------------------------------------------------------
 
 
 class TestPlot:
@@ -404,9 +386,7 @@ class TestPlot:
         assert "not labelled" not in dot
 
 
-# ---------------------------------------------------------------------------
 # graph why (design §3.1 debugging story)
-# ---------------------------------------------------------------------------
 
 
 class TestWhy:
@@ -447,9 +427,7 @@ class TestWhy:
         assert "embed.x" in err  # did-you-mean
 
 
-# ---------------------------------------------------------------------------
 # schema dump (design §2.6)
-# ---------------------------------------------------------------------------
 
 
 class TestSchemaDump:

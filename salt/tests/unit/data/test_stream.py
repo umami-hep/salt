@@ -1,22 +1,4 @@
-"""Unit tests for the shared `Reader`-base stream helpers (plan 24, Wave 2).
-
-Gates the StreamConfig reader-base unification:
-
-1. **StreamConfig validation** — pad_max >= 1, sort spec normalisation, Cut-only
-   cuts, cuts/sort rejected on non-jagged streams.
-2. **`_cut_sort_truncate_pad` PARITY** — with NO cuts/sort the structured ``(B, T)``
-   array is byte-for-byte identical to a hand-rolled contiguous truncate+pad+valid
-   build (the locked exp-08/12 parity invariant, plan 24 §6/§7).
-3. **drop-then-pad CUTS + dtype-aware sentinels** — a cut constituent is REMOVED
-   before padding (never wastes a pad_max slot); padded float==0.0, signed-int
-   label==-1, unsigned==0, bool==False.
-4. **sort** — argsort by sort.var permutes ALL fields + labels in lockstep.
-5. **OffsetIndex** — cumulative offsets, per-file ``runs`` decomposition, and the
-   ``covering_range`` derived→coarse search.
-
-These are pure in-memory tests over awkward arrays (no sample files) — they import
-awkward, skipping when the optional extra is absent.
-"""
+"""Unit tests for the shared `Reader`-base stream helpers (plan 24, Wave 2)."""
 
 from __future__ import annotations
 
@@ -114,13 +96,7 @@ def _explicit_fill(dt: np.dtype) -> object:
 def _manual_contiguous(
     cols: dict, fields: list[str], t: int, gschema: GroupSchema, b: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """A hand-rolled contiguous truncate+pad+valid build (the pre-Wave-2 path).
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        ``(structured (B, T) array, valid (B, T) bool)`` built without the helper.
-    """
+    """A hand-rolled contiguous truncate+pad+valid build (the pre-Wave-2 path)."""
     first = cols[fields[0]]
     counts = np.asarray(ak.num(first, axis=1)) if b > 0 else np.zeros(0, dtype=np.int64)
     valid = np.arange(t)[None, :] < np.minimum(counts, t)[:, None]

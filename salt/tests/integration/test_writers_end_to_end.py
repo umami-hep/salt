@@ -1,17 +1,4 @@
-"""End-to-end writer test: ``salt2 fit`` -> ``salt2 test`` on the dummy config.
-
-Runs the REAL ``salt2 fit`` -> ``salt2 test`` surface on a tmp dummy file and
-checks the v1 output-file shape (one H5 next to the checkpoint, input copies +
-prob columns + VertexIndex + mask, padded-position encodings); negative tests
-cover the TEST dead-preds hard error, the writer-less eval refusal, the
-wrong-dtype-at-compile rejection, and the no-ckpt single-config contract
-(design §9.5 M3).
-
-This is an INTEGRATION test (it builds + fits + evaluates a real model on CPU).
-Split out of the former monolithic ``test_writers.py``; the per-writer unit
-tests live under ``tests/unit/writers/``. Shared fixtures / toy-writers /
-constants come from ``salt.tests._fixtures.writers_common``.
-"""
+"""End-to-end writer test: ``salt2 fit`` -> ``salt2 test`` on the dummy config."""
 
 from __future__ import annotations
 
@@ -31,9 +18,7 @@ from salt.tests._fixtures.writers_common import (  # noqa: F401  (data is a fixt
     data,
 )
 
-# ---------------------------------------------------------------------------
 # end to end: salt2 fit -> salt2 test on the dummy config (design §9.5 M3)
-# ---------------------------------------------------------------------------
 
 
 def overrides(data) -> list[str]:

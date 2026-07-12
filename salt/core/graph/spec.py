@@ -1,13 +1,13 @@
 """Declared tensor interfaces for the salt v2 graph kernel.
 
-Design §2.2: graph participants declare what they consume and produce as
-nested dicts mirroring the bundle layout, with `TensorSpec` leaves. A `Mode`
-flag gates ports, and `kind` typing makes mask-polarity and label/feature
-mix-ups static type errors. Declarations are static — building them must not
-touch data files, the network, or tensors.
+Graph participants declare what they consume and produce as nested dicts
+mirroring the bundle layout, with `TensorSpec` leaves. A `Mode` flag gates
+ports, and `kind` typing makes mask-polarity and label/feature mix-ups
+static type errors. Declarations are static — building them must not touch
+data files, the network, or tensors.
 
-Symbolic dims (``"B"``, ``"T:tracks"``, ``"F:tracks"``) are preserved as plain
-strings here; unification across the graph happens in the planner (design §3.1).
+Symbolic dims (``"B"``, ``"T:tracks"``, ``"F:tracks"``) are preserved as
+plain strings here; unification across the graph happens in the planner.
 """
 
 from __future__ import annotations
@@ -40,11 +40,11 @@ __all__ = [
 ]
 
 KEY_SEP = "."
-"""Separator for dotted bundle keys (design §2.1)."""
+"""Separator for dotted bundle keys."""
 
 
 class Mode(Flag):
-    """Execution modes gating graph ports (design §2.2)."""
+    """Execution modes gating graph ports."""
 
     FIT = auto()
     VAL = auto()
@@ -58,7 +58,7 @@ PRIMARY_MODES: tuple[Mode, ...] = (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX)
 """The four atomic modes, in canonical order (composites excluded)."""
 
 Kind: TypeAlias = Literal["data", "pad_mask", "label", "loss", "meta"]
-"""Port kinds: a consumer port can only bind a producer leaf of the same kind (design §2.2)."""
+"""Port kinds: a consumer port can only bind a producer leaf of the same kind."""
 
 KINDS: tuple[Kind, ...] = get_args(Kind)
 """All valid `Kind` values, for runtime validation."""
@@ -143,7 +143,7 @@ def join_key(parts: tuple[str, ...] | list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# symbolic-dim vocabulary (design §2.2 — strings only, unification in planner)
+# symbolic-dim vocabulary — strings only, unification happens in the planner
 # ---------------------------------------------------------------------------
 
 _SYM_SEP = ":"
@@ -217,7 +217,7 @@ def split_symbolic_dim(dim: str) -> tuple[str, str | None]:
 
 @dataclass(frozen=True)
 class TensorSpec:
-    """Static description of one bundle leaf (design §2.2).
+    """Static description of one bundle leaf.
 
     `shape` mixes concrete ints and symbolic dim strings (``("B", "T:tracks", 23)``);
     None means unconstrained. `fields` carries last-dim column names so column
@@ -287,7 +287,7 @@ class TensorSpec:
 
 
 NestedSpec: TypeAlias = dict[str, "NestedSpec | TensorSpec"]
-"""Nested dict mirroring the bundle layout, with `TensorSpec` leaves (design §2.2)."""
+"""Nested dict mirroring the bundle layout, with `TensorSpec` leaves."""
 
 
 def iter_spec_leaves(nested: NestedSpec, prefix: str = "") -> Iterator[tuple[str, TensorSpec]]:
@@ -320,7 +320,7 @@ def iter_spec_leaves(nested: NestedSpec, prefix: str = "") -> Iterator[tuple[str
 
 
 def flatten_spec(nested: NestedSpec) -> dict[str, TensorSpec]:
-    """Flatten a nested spec to dotted keys (design §3.1, port resolution).
+    """Flatten a nested spec to dotted keys.
 
     Returns
     -------
@@ -367,7 +367,7 @@ def unflatten_spec(flat: Mapping[str, TensorSpec]) -> NestedSpec:
 
 @dataclass(frozen=True)
 class IO:
-    """A module's declared interface: required and produced nested specs (design §2.2)."""
+    """A module's declared interface: required and produced nested specs."""
 
     requires: NestedSpec = field(default_factory=dict)
     produces: NestedSpec = field(default_factory=dict)
@@ -380,11 +380,11 @@ class IO:
 
 @runtime_checkable
 class GraphModule(Protocol):
-    """Protocol every graph participant implements (design §2.2).
+    """Protocol every graph participant implements.
 
-    `declare_io` is a function of the module's own config only — it must not
-    touch data files, the network, or tensors. `name` is the instance name
-    (the config dict key).
+    `declare_io` is a function of the module's own config only — it must
+    not touch data files, the network, or tensors. `name` is the instance
+    name (the config dict key).
     """
 
     name: str
@@ -396,23 +396,24 @@ class GraphModule(Protocol):
 
 @runtime_checkable
 class SinkModule(Protocol):
-    """A terminal sink node: in `plan.steps` for render/demand, not a forward (design §4, Q5).
+    """A terminal sink node: stays in `plan.steps` for render/demand, but is not a forward.
 
     A sink is a `GraphModule` (it carries `name` + `declare_io`) whose
-    ``declare_io`` produces nothing — it is a terminal CONSUMER of ``outputs.*``
-    that finalises a side effect (an H5 file, the ONNX output tuple), not a per-
-    batch tensor producer. The planner keeps it in the plan (so it renders its
-    own card and anchors demand via `_demand_closure`/`_is_terminal_consumer`),
-    but `Executor` must EXCLUDE it from the per-batch ``module(view, mode)``
-    forward + write-once merge loop (executor.py): a sink produces no tensor and
-    is not invoked as a callable. This is the INVERSE of the setup-only
-    partition (`salt.core.data.datamodule._is_setup_only`), which removes setup
-    modules from the per-batch plan ENTIRELY — a sink stays IN the plan.
+    ``declare_io`` produces nothing — it is a terminal CONSUMER of
+    ``outputs.*`` that finalises a side effect (an H5 file, the ONNX output
+    tuple), not a per-batch tensor producer. The planner keeps it in the
+    plan (so it renders its own card and anchors demand), but `Executor`
+    excludes it from the per-batch forward + write-once merge loop: a sink
+    produces no tensor and is not invoked as a callable. This is the
+    inverse of the setup-only partition
+    (`salt.core.data.datamodule._is_setup_only`), which removes setup
+    modules from the per-batch plan entirely — a sink stays IN the plan.
 
     The marker is the ``is_sink()`` method returning ``True`` (duck-typed,
-    runtime-checkable): `Executor.__init__` partitions plan steps into forward
-    steps vs sink steps by it. The lifecycle (``consume``/``flush``) is driven
-    by the generated Lightning bridge, not by the executor.
+    runtime-checkable): `Executor.__init__` partitions plan steps into
+    forward steps vs sink steps by it. The lifecycle
+    (``consume``/``flush``) is driven by the generated Lightning bridge,
+    not by the executor.
     """
 
     name: str

@@ -1,33 +1,7 @@
-# gn2v2-dummy-cutover.yaml — the P1.5 LIVE cutover of the gn2v2-dummy
-# classification eval path to the two-layer output-writing system (design §2):
-# in-graph conversion PRODUCERS -> outputs.* -> the H5OutputWriter SINK,
-# REPLACING the M4.5 WriterCallback (salt/core/writers/) FOR THIS CONFIG ONLY.
-#
-# Layered ON TOP of gn2v2-dummy.yaml (which still ships the M4.5 default via
-# base2.yaml so every OTHER config / test keeps the unflipped writer path):
-#
-#   salt2 test --config salt/core/configs/gn2v2-dummy.yaml \
-#     --config salt/core/configs/gn2v2-dummy-cutover.yaml \
-#     --ckpt_path <ckpt> --data.test_file <file.h5> ...
-#
-# What this override does (design §2, P1.5):
-#  - adds the classification conversion producers to model.modules:
-#      jet_probs    (ClassProbs,    jets_classification -> outputs.jets.jets_classification)
-#      track_origin_probs (SeqClassProbs, track_origin -> outputs.tracks.track_origin)
-#    Each reads the RAW logits the P1.5-flipped task forward now publishes and
-#    softmaxes ONCE (the conversion the M4.5 task forward used to do in TEST).
-#    Demand-pruned from FIT/VAL (design §4 risk 4) so the trained checkpoint —
-#    which never saw them — loads unchanged.
-#  - opts track_vertexing OUT of the TEST eval plan (expose: [fit, val]): its
-#    eval column (VertexIndex) is a DEFERRED family (P2, vertexing), with no
-#    producer here, so without this its raw TEST preds.* would be a dead pred
-#    (design §4.2/§4 risk 5). FIT/VAL keep the head — the checkpoint is intact.
-#  - deletes the M4.5 writers (inputs_copy/tasks/pad_mask -> null) so the
-#    WriterCallback is NOT assembled for this config.
-#  - wires H5OutputWriter as the live TEST sink (callbacks.h5_output): outputs =
-#    the producer leaves; copy_inputs (all source fields, the v1 default);
-#    write_pad_mask: true (the boolean tracks mask). SaltModule._attached_writer
-#    duck-types its writer_demand (same surface as WriterCallback).
+# Overlay on gn2v2-dummy.yaml: switches its TEST eval sink to the two-layer
+# output-writing system (in-graph conversion producers -> outputs.* ->
+# H5OutputWriter). Stack as:
+#   salt2 test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml ...
 
 model:
   modules:
@@ -40,15 +14,11 @@ model:
         context: pooled.global
         weight: 1.5
         dense: {hidden_layers: [16], activation: ReLU}
-        expose: [fit, val] # opt the deferred (P2) vertexing head out of TEST eval
-    # drop the base gn2v2-dummy ONNX conversion nodes that this TEST cutover does
-    # not use: track_origin_index (this cutover writes the full SeqClassProbs
-    # columns, not the argmax index) and track_vertex_index (vertexing is opted out
-    # of TEST here). jet_probs (ClassProbs) is shared, so it is re-declared below.
+        expose: [fit, val] # vertexing eval column is deferred, not produced here
+    # drop the base's ONNX conversion nodes this cutover does not use
     track_origin_index: null
     track_vertex_index: null
-    # classification conversion producers (design §2 layer 1): read the RAW
-    # logits the flipped task forward publishes and softmax once.
+    # classification conversion producers: read raw logits, softmax once
     jet_probs:
       class_path: salt.core.outputs.ClassProbs
       init_args: {task: jets_classification, stream: jets}
@@ -56,15 +26,9 @@ model:
       class_path: salt.core.outputs.SeqClassProbs
       init_args: {task: track_origin, stream: tracks}
 
-# The live TEST sink (design §2 layer 2): H5OutputWriter is a plain Lightning
-# callback (dict-keyed, deep-mergeable). Its writer_demand anchors the TEST plan
-# (SaltModule._attached_writer duck-types it). copy_inputs={} per stream -> all
-# source fields (v1 InputCopyWriter default); write_pad_mask -> boolean tracks
-# mask. Column order (copies, probs, mask) matches the v1 group layout.
 callbacks:
-  # this TEST cutover does no ONNX export — drop the base gn2v2-dummy OnnxExportSink
-  # (else its ONNX-mode demand for outputs.tracks.track_vertexing has no producer,
-  # the vertexing head being opted out here)
+  # no ONNX export in this TEST cutover — drop the base's OnnxExportSink,
+  # since vertexing (opted out above) would otherwise leave a dead ONNX demand
   onnx_export: null
   h5_output:
     class_path: salt.core.outputs.H5OutputWriter
@@ -87,10 +51,4 @@ callbacks:
           }
       copy_inputs: {jets: [], tracks: []}
       write_pad_mask: [tracks]
-      # W6a: exercise the extra_groups sink mechanism with an EMPTY list — the
-      # no-op path. The sink builds its extra-group ctx and runs the (ported)
-      # _collect_extra_groups, which returns ({}, {}) for [], so the H5 schema is
-      # byte-identical to the pre-W6a sink (proven by this config's CLI parity gate
-      # in test_outputs_h5_parity.py). MaskFormer's real object groups populate
-      # extra_groups in W6b.
       extra_groups: []

@@ -1,6 +1,6 @@
-"""salt.core.data — the v2 dataset pipeline (design §2.4, §6).
+"""salt.core.data — the v2 dataset pipeline.
 
-Reader -> processors -> numpy→torch boundary, compiled and executed by the
+Reader -> processors -> numpy->torch boundary, compiled and executed by the
 same graph kernel as the model side. Public surface:
 
 - base classes: `DatasetModule`, `Reader`, `Processor`, `WorkerCtx`

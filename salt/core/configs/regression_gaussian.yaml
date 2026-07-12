@@ -1,24 +1,7 @@
-# regression_gaussian.yaml — the gaussian RegressionTaskModule in the v2 schema
-# (M5 sub-wave A3). The v2-native port of legacy salt/configs/regression_gaussian.yaml:
-# an encoder-less DiPS body (init_nets + pool_net, NO encoder — v1
-# saltmodel.py:90-93) feeding pooled GAUSSIAN regression heads (mu/sigma,
-# output == 2 x targets, softplus variance, Gaussian NLL; v1 task.py:645). Two
-# heads exercise the family surface:
-#
-#   - gaussian_regression                   : global head, mean/std norm_params
-#                                             (v1 regression_gaussian.yaml:23)
-#   - gaussian_regression_no_global_object  : per-token sequence head over tracks,
-#                                             custom_output_names (v1 :37)
-#
-# Each head publishes ONE [B, 2R] (or [B, L, 2R]) array: the R means then the R
-# stddevs (FD 1567-1568 one-array contract); the TaskWriter owns the `_stddev`
-# suffix split. The ONNX stddev representation is the M4.5 deferral-(b)
-# design-conformance (stddev = sqrt(softplus(var)) traced in-graph) — there is
-# NO v1 ONNX golden (v1 onnx/to_onnx.py has zero gaussian handling).
-#
-# NO machine paths committed (design §5 placeholder policy). From the REPO ROOT:
-#   python -m salt.core.main graph validate -c salt/core/configs/regression_gaussian.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Gaussian RegressionTaskModule family: an encoder-less DiPS body feeding two
+# Gaussian regression heads (mu/sigma, softplus variance, Gaussian NLL) — one
+# pooled global head, one per-token sequence head over tracks. Each publishes
+# one [B, 2R] (or [B, L, 2R]) array: R means then R stddevs.
 
 name: regression_gaussian
 
@@ -72,14 +55,14 @@ model:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: tracks # requires normed.tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          stream: tracks
+          context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
@@ -95,7 +78,7 @@ model:
         init_args:
           stream: jets
           input: pooled.global
-          gaussian: true # mu/sigma head, output_size == 2 (v1 task.py:645)
+          gaussian: true # mu/sigma head, output_size == 2
           targets: HadronConeExclTruthLabelPt
           norm_params: {mean: 1.0, std: 1.0}
           loss: GaussianNLLLoss
@@ -113,22 +96,8 @@ model:
           loss: GaussianNLLLoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4d: this config is migrated OFF the (removed) auto-collect H5OutputSink
-# onto the get_output()-on-task + outputs:-section + dumb-sinks architecture (plan 34
-# §2), self-contained (no -cutover34 overlay needed). RegressionTaskModule.forward
-# publishes RAW (scaled) preds in TEST/ONNX (W34.3 forward-flip); a single
-# RunTaskOutput([gaussian tasks]) calls each head's get_output() — the gaussian
-# means‖softplus-stddev one-array de-scale folds onto the task (replacing the W4/W5.2
-# per-head Regression(gaussian=true) producer nodes). The dumb sinks dump ALL active
-# outputs.* leaves; the SECTION supplies names + dtypes + ORDER.
-#
-# The top-level outputs: section is composed AFTER the model. Section writers in EXACT
-# v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields -> PadMaskWriter.
-# The RunTaskOutput tasks list is the v1 model-declaration order (global gaussian head,
-# then per-token gaussian head), so the H5 task-column order + the ONNX Athena tuple
-# order match v1.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
@@ -145,24 +114,17 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4d): no init args — they dump ALL active outputs.* leaves,
-# names/dtypes/order from the bound section manifest. The OnnxExportSink names the
-# de-scaled gaussian leaves (the Athena physics names = the task output_suffixes: R
-# means then R _stddev — jets -> HadronConeExclTruthLabelPt(_stddev); tracks
-# (per-token) -> dummyOutput_dPhi(_stddev)) in canonical tuple order (globals then
-# per-token) — byte-identical to the previous explicit OnnxExportSink tuple (proven by
-# test_w34_gaussian_cutover.py).
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: regressionGaussian # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks} # [L, F]
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 2

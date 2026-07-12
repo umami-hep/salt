@@ -1,48 +1,8 @@
-"""Config-constructed MaskFormer matched loss + Hungarian matcher (FD 1158-1170).
+"""Hungarian-matched MaskFormer loss.
 
-M5 sub-wave C (plan 10). The v2 spelling of v1's matcher-driven MaskFormer loss
-(``salt.models.maskformer_loss.MaskFormerLoss.forward`` + ``salt.models.matcher.
-HungarianMatcher``). A FIT|VAL-only `GraphModule` that, given the decoder's object
-predictions and the truth object labels, solves the optimal 1-to-1 assignment of
-queries to truth objects and emits the four MaskFormer loss components.
-
-M2/M5 porting policy (plan 05): this COMPOSES the verbatim v1 building blocks — a
-v1 ``MaskFormerLoss`` instance OWNS the ``HungarianMatcher`` (matcher.py), the
-``empty_weight`` class-balance buffer, and the three loss methods
-(``loss_labels``/``loss_masks``, maskformer_loss.py:154-227) — and reproduces v1's
-matching + the three v1-decidable loss components (``object_class_ce``,
-``mask_dice``, ``mask_focal``) BYTE-faithfully. Full code absorption is M7.
-
-What is DELIBERATELY DIFFERENT from v1 (FD 1158-1170, the design's single-ownership
-+ no-in-place-permute rules; the alignment change is the MF1b sign-off item):
-
-- **NO in-place permute.** v1 mutates ``preds["objects"][k] = v[idx]`` in place
-  (maskformer_loss.py:338-343), corrupting the prediction dict every other module
-  shares. v2 gathers the matcher-permuted predictions into NEW ``matched.objects.*``
-  bundle keys (write-once, design §2.1); the decoder's ``objects.*`` are never
-  touched. `MaskformerMetrics` consumes ``matched.objects.*`` (its sub-wave-C wiring).
-- **The object regression loss is MATCHED, not query-order.** v1's *effective*
-  regression loss is QUERY-ORDER: the object-regression task runs in
-  ``SaltModel.run_tasks`` with ``labels`` (saltmodel.py:218-219) and computes its L1
-  there, aligning query-i to truth-object-i WITHOUT the matcher; the matcher only
-  uses ``regression`` as a *cost* term, and ``"regression"`` is NOT in
-  ``MaskFormerLoss.losses`` (= ``["labels", "masks"]``), so the matched loop never
-  re-computes it. v2 makes the regression loss MATCHED (the matcher-permuted
-  predictions vs the truth-order targets) and OWNED here — the single-ownership
-  rule. This is a USER-VISIBLE alignment change (FD 1168-1170, §12): the MF1b human
-  sign-off characterises it; the code gate (MF1a/this module) asserts the three
-  mask/class components BYTE vs v1 and the matched-regression as a DESIGN-conformance
-  property (no v1 byte reference exists for a matched object-regression loss).
-- **NO double task execution.** v1 runs the object task twice (saltmodel.py:218-219
-  for the loss + maskformer_loss.py:330 for the matcher cost). v2 runs the
-  regression task ONCE; its scaled predictions/targets arrive here as the declared
-  ``preds.objects.regression`` / ``targets.objects.regression`` keys.
-- **NO ``aux_loss`` deep supervision** (maskformer_loss.py:306-322). PARKED (FD §10;
-  shipped MaskFormer.yaml:39 sets ``aux_loss: false``) — re-deferred, not implemented.
-
-Matching costs stay in SCALED space (v1 behaviour, FD 1166): the matcher reads the
-scaled ``regression`` predictions/targets exactly as v1's
-``get_batch_cost`` does (matcher.py:236-239).
+Given the decoder's object predictions and truth object labels, solves the
+optimal 1-to-1 assignment of queries to truth objects (Hungarian matching)
+and computes the matched classification/mask/regression loss components.
 """
 
 from __future__ import annotations
@@ -60,27 +20,14 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
 
-# MFU-4 (upstream matcher.py): adopt the upstream py_lap_solver BATCHED LAP path in
-# place of v1's per-batch-element scipy ``linear_sum_assignment`` loop. The cost
-# matrix (``get_batch_cost``) is UNCHANGED — only which solver consumes it changes.
-# ``SOLVER_REGISTRY`` maps solver name -> solver instance for the py_lap_solver build
-# actually installed. The container ships py_lap_solver's full registry (it links
-# libstdc++ via LD_PRELOAD so the batched C++ extension imports), so upstream's
-# default ``"BatchedScipyOMP"`` IS present. We follow upstream EXACTLY: validate the
-# requested solver against this registry and raise on an unknown name (NO silent
-# fallback — a silent swap would mask a regressed container). LAP is exact, so every
-# registry solver yields the SAME total matched cost as scipy; only tie-breaking
-# order can differ.
+# Maps solver name -> solver instance for the installed py_lap_solver build.
+# Validate requested solver names against this registry (no silent fallback — a
+# silent swap would mask a regressed container missing the expected solver).
 SOLVER_REGISTRY = Solvers.get_available_solvers()
 
 
 def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: int) -> Tensor:
     """Fill unmatched assignments (-1 values) with remaining prediction indices (vectorized).
-
-    Ported verbatim from upstream ``salt.models.matcher`` — pure tensor logic that
-    appends the unused prediction indices (in sorted order) to the ``-1`` slots left
-    by the batched solver for padded/invalid targets. This reproduces v1's
-    ``list(idx) + sorted(default_idx - set(idx))`` tail.
 
     Parameters
     ----------
@@ -127,23 +74,11 @@ def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: 
     # Replace -1 values with the filled indices (only where unmatched_mask is True)
     return torch.where(unmatched_mask, filled_indices, assignments)
 
-# M7 W2c-3 (the FINAL absorption): the MaskFormer matched loss + the Hungarian
-# matcher are now v2-NATIVE, copied VERBATIM into this module from v1
-# ``salt.models.maskformer_loss.MaskFormerLoss`` (maskformer_loss.py:100-349) and
-# ``salt.models.matcher.HungarianMatcher`` (matcher.py:134-317), together with
-# their ``@torch.jit.script`` cost/loss helpers. The matcher cost + the scipy
-# ``linear_sum_assignment`` LAP are byte-for-byte v1's, so the matched assignment
-# (matched indices) and the matched loss stay BITWISE identical vs v1 (the MF1c
-# gate oracle builds a fresh v1 ``MaskFormerLoss`` and compares ``torch.equal``).
-# The composed ``MaskFormerLoss`` below carries ONLY the config-deterministic
-# ``empty_weight`` buffer (matcher has no parameters), so it remains
-# state_dict-compatible with a fresh v1 ``MaskFormerLoss``.
-
 __all__ = ["HungarianMatcher", "MaskFormerLoss", "MaskFormerMatchedLoss"]
 
 
 # ---------------------------------------------------------------------------
-# HungarianMatcher cost helpers (M7 W2c-3 verbatim copy of v1 matcher.py:9-131)
+# HungarianMatcher cost helpers
 # ---------------------------------------------------------------------------
 
 
@@ -169,12 +104,7 @@ def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
     """
     inputs = inputs.sigmoid()
 
-    # inputs has shape (B, N, C), targets has shape (B, M, C)
-    # We want to compute the DICE loss for each combination of N and M for each batch
-    # Using torch.einsum to handle the batched matrix multiplication
     numerator = 2 * torch.einsum("bnc,bmc->bnm", inputs, targets)
-
-    # Compute the denominator using sum over the last dimension (C) and broadcasting
     denominator = inputs.sum(-1).unsqueeze(2) + targets.sum(-1).unsqueeze(1)
 
     return 1 - (numerator + 1) / (denominator + 1)
@@ -275,15 +205,6 @@ def batch_mae_loss(inputs: Tensor, targets: Tensor) -> Tensor:
 class HungarianMatcher(nn.Module):
     """Solve LSAP matching between predictions and targets via Hungarian algorithm.
 
-    M7 W2c-3 v2-native absorption of v1 ``salt.models.matcher.HungarianMatcher``
-    (matcher.py:134-317). The cost matrix assembly (``get_batch_cost``) is byte-for-byte
-    v1's. MFU-4 replaces v1's per-batch-element scipy ``linear_sum_assignment`` loop
-    with the upstream py_lap_solver BATCHED path: the whole-batch cost is transposed to
-    ``[B, M, N]`` and solved in one ``solver.batch_solve`` call (padded targets excluded
-    via ``num_valid``). LAP is exact, so the assignment has the SAME total matched cost
-    as v1's scipy path (the MF1c gate asserts total-matched-cost optimality, not index
-    identity — ties + fill ordering may differ legitimately).
-
     The module aggregates multiple cost terms (classification, mask losses, optional
     regression) into a single cost matrix per batch element and solves the linear
     sum assignment problem to obtain a 1-to-1 matching.
@@ -325,11 +246,8 @@ class HungarianMatcher(nn.Module):
         self.loss_weights = loss_weights
         assert sum(self.loss_weights.values()) != 0, "Sum of loss weights must be positive"
 
-        # MFU-4: validate the requested solver against the installed py_lap_solver build,
-        # EXACTLY as upstream does (matcher.py:__init__). Default mirrors upstream
-        # ("BatchedScipyOMP"); raise a clear error listing the available solvers if the
-        # name is unknown — NO silent fallback (a silent solver swap would mask a
-        # regressed container that dropped the batched OpenMP solver).
+        # No silent fallback: a silent solver swap would mask a regressed container
+        # that dropped the requested solver.
         if solver_name not in SOLVER_REGISTRY:
             available_solvers = ", ".join(sorted(SOLVER_REGISTRY))
             msg = f"Unknown LAP solver '{solver_name}'. Available solvers: {available_solvers}"
@@ -367,23 +285,20 @@ class HungarianMatcher(nn.Module):
         Tensor
             Tensor of shape ``[B, 1]`` with the valid number of target objects per batch element.
         """
-        # get some useful things
         bs = len(targets["object_class"])
         dev = preds["class_probs"].device
 
         obj_class_tgt = targets["object_class"].detach()
         obj_class_pred = preds["class_probs"].detach()
         mask_pred = preds["masks"].detach()
-        # MFU-1 (upstream matcher.py): clamp mask logits to a finite range before
-        # building the mask cost terms. No-op on clean data (logits well inside
-        # +/-1e4); guards against inf/NaN cost -> garbage LSAP assignment.
+        # clamp mask logits to a finite range: guards against inf/NaN cost -> garbage
+        # LSAP assignment.
         mask_pred = mask_pred.clamp(min=-1e4, max=1e4)
         mask_tgt = targets["masks"].detach().to(mask_pred.dtype)
 
         valid_obj_idx = obj_class_tgt != self.num_classes
         batch_obj_lengths = torch.sum(valid_obj_idx, dim=1)
 
-        # compute the object class loss
         obj_class_tgt = (
             obj_class_tgt[:, : self.num_classes].unsqueeze(1).expand(-1, obj_class_pred.size(1), -1)
         )
@@ -392,10 +307,8 @@ class HungarianMatcher(nn.Module):
         obj_class_cost = torch.zeros((bs, self.num_objects, self.num_objects), device=dev)
         obj_class_cost[:, :, : self.num_classes] = -output
 
-        # initialize the cost matrix with the object class loss
         cost_matrix = self.loss_weights["object_class_ce"] * obj_class_cost
 
-        # add mask costs
         if self.loss_weights.get("mask_dice"):
             cost_mask_dice = batch_dice_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_dice"] * cost_mask_dice
@@ -406,18 +319,15 @@ class HungarianMatcher(nn.Module):
             cost_mask_focal = batch_sigmoid_focal_cost(mask_pred, mask_tgt)
             cost_matrix += self.loss_weights["mask_focal"] * cost_mask_focal
 
-        # add regression costs
         if "regression" in preds and self.loss_weights.get("regression"):
             reg_pred = preds["regression"]
             reg_tgt = targets["regression"] * valid_obj_idx.unsqueeze(-1)
-            # MFU-1 (upstream matcher.py): sanitise regression targets used in the
-            # cost matrix. No-op on clean (finite) targets; guards against nan/inf
-            # targets producing nan MAE cost -> garbage LSAP assignment.
+            # sanitise regression targets: guards against nan/inf targets producing
+            # nan MAE cost -> garbage LSAP assignment.
             reg_tgt = torch.nan_to_num(reg_tgt, nan=0.0, posinf=0.0, neginf=0.0)
             cost_matrix += self.loss_weights["regression"] * batch_mae_loss(reg_pred, reg_tgt)
 
-        # set entries corresponding to invalid objects to nan
-        # (these are removed later when running LSAP)
+        # invalid target objects get nan cost; removed later when running LSAP.
         batch_obj_lengths = batch_obj_lengths.unsqueeze(-1)
         col_indices = torch.arange(obj_class_cost.size(-1), device=dev).unsqueeze(0)
         null_obj_cost_mask = (col_indices < batch_obj_lengths).unsqueeze(1).expand_as(cost_matrix)
@@ -450,31 +360,25 @@ class HungarianMatcher(nn.Module):
         """
         device = preds["class_logits"].device
 
-        # Get the full cost matrix [B, N, M], then run the BATCHED LAP solver.
         full_cost, batch_n = self.get_batch_cost(preds, targets)
-        # valid target counts per batch element -> 1-D numpy for ``num_valid``
         batch_n = batch_n.squeeze(-1).cpu().numpy()
 
-        # MFU-4: solve all batch elements in one call. Transpose [B, N, M] -> [B, M, N]
-        # so targets are the solver ROWS and predictions the COLUMNS; ``num_valid=batch_n``
-        # restricts each problem to its valid target rows (the padded/NaN target rows
-        # M >= batch_n are sliced out, exactly as v1's per-element ``[:, :n_batch]`` slice
-        # dropped the NaN target columns). ``batch_solve`` returns [B, M] where entry
-        # [b, i] is the prediction column assigned to target row i (-1 for the padded
-        # rows beyond ``num_valid``).
+        # Transpose [B, N, M] -> [B, M, N] so targets are the solver rows and
+        # predictions the columns; num_valid restricts each problem to its valid
+        # target rows (padded/NaN rows M >= batch_n are excluded). batch_solve
+        # returns [B, M] where entry [b, i] is the prediction column assigned to
+        # target row i (-1 for padded rows).
         solver = SOLVER_REGISTRY[self.solver_name]
         full_cost = full_cost.transpose(1, 2).to(torch.float32).cpu().numpy()
         assignments = solver.batch_solve(full_cost, num_valid=batch_n)
         assignments = torch.from_numpy(assignments).to(torch.int64).to(device)
 
-        # Fill the -1 (padded-target) slots with the unused prediction indices in sorted
-        # order, reproducing v1's ``+ sorted(default_idx - set(idx))`` tail. full_cost is
-        # now [B, M, N], so shape[1] (== num_objects, square cost) is the prediction count.
+        # full_cost is [B, M, N]; shape[1] is the prediction count (square cost).
         assignments = fill_unmatched_assignments_vectorized(assignments, full_cost.shape[1])
 
         self.global_step += 1
-        # Same indexing-tuple contract as before: (batch_arange [B, 1], assignments [B, M]),
-        # consumed downstream as ``preds["objects"][k][idx]`` to permute predictions.
+        # (batch_arange [B, 1], assignments [B, M]) consumed downstream as
+        # preds["objects"][k][idx] to permute predictions.
         batch_arange = torch.arange(len(assignments)).unsqueeze(1).to(device)
         return (batch_arange, assignments)
 
@@ -527,10 +431,7 @@ def mask_ce_loss(inputs: Tensor, labels: Tensor):
         Single-element loss tensor
     """
     loss = functional.binary_cross_entropy_with_logits(inputs, labels, reduction="none")
-    # find the mean loss for each mask
     loss = loss.mean(1)
-
-    # take the average over all masks
     return loss.sum() / len(inputs)
 
 
@@ -571,15 +472,6 @@ def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma
 class MaskFormerLoss(nn.Module):
     """Compute the loss of MaskFormer, based on DETR.
 
-    M7 W2c-3 v2-native absorption of v1 ``salt.models.maskformer_loss.MaskFormerLoss``
-    (maskformer_loss.py:100-349), COPIED VERBATIM — the same ``empty_weight`` buffer,
-    ``HungarianMatcher`` (now the absorbed one above), ``loss_labels`` / ``loss_masks``
-    / ``get_loss`` / ``weight_loss`` methods, so the three v1-decidable loss components
-    are byte-for-byte v1's (the MF1c gate builds a fresh v1 ``MaskFormerLoss`` and
-    asserts ``torch.equal``). The v1 original is UNTOUCHED as the gate oracle; this
-    class carries ONLY the config-deterministic ``empty_weight`` buffer, so its
-    ``state_dict()`` stays loadable into a fresh v1 ``MaskFormerLoss``.
-
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the preds of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box).
@@ -597,13 +489,9 @@ class MaskFormerLoss(nn.Module):
     null_class_weight: float, optional
         Relative classification weight applied to the no-object category, by default 0.5
     class_weights: list[float] | None, optional
-        Optional per-class weights folded into the ``empty_weight`` CE balance buffer
-        EXACTLY as upstream (snapshot maskformer_loss.py:132-159). May be of length
-        ``num_classes`` (the null weight is appended) or ``num_classes + 1`` (used as-is).
-        ``None`` (the shipped default) keeps ``empty_weight`` byte-identical to the
-        pre-MFU-5 v2 buffer. The MFU-2 ``MaskFormerTargets.object_weights`` (the per-class
-        list) is the INTENDED source — the config auto-link that feeds it here is deferred
-        to MFU-7, so today this parameter must be set explicitly, by default None.
+        Optional per-class weights folded into the ``empty_weight`` CE balance buffer.
+        May be of length ``num_classes`` (the null weight is appended) or
+        ``num_classes + 1`` (used as-is), by default None.
     losses: list[str] | None, optional
         List of all the losses to be applied. See get_loss for list of available losses,
         by default None
@@ -628,12 +516,7 @@ class MaskFormerLoss(nn.Module):
         self.num_classes = num_classes
         self.null_class_weight = null_class_weight
         assert self.num_classes > 0
-        # MFU-5 (Δ3): fold class_weights into empty_weight EXACTLY as upstream
-        # (snapshot maskformer_loss.py:144-162). The num_classes == 1 binary branch is
-        # FIRST and ignores class_weights (matches v1); a provided class_weights of
-        # length num_classes appends the null weight, length num_classes + 1 is used
-        # as-is, anything else raises. class_weights=None -> the original ones/null
-        # buffer, so the default stays byte-identical to the pre-MFU-5 buffer.
+        # num_classes == 1 is a binary task and ignores class_weights.
         if self.num_classes == 1:
             empty_weight = torch.tensor([self.null_class_weight])
         elif class_weights is not None:
@@ -685,8 +568,6 @@ class MaskFormerLoss(nn.Module):
             A single-key dictionary ``{"object_class_ce": loss}`` containing
             the cross-entropy or binary cross-entropy loss.
         """
-        # use the new indices to calculate the loss
-        # process full inidices
         flav_pred_logits = preds["class_logits"].flatten(0, 1)
         flavour_labels = labels["object_class"].flatten(0, 1)
         if flav_pred_logits.shape[1] == 1:
@@ -723,12 +604,10 @@ class MaskFormerLoss(nn.Module):
             ``"mask_dice"``, ``"mask_focal"``, ``"mask_ce"`` depending on
             ``self.loss_weights``.
         """
-        # select valid masks via flavour label
         valid_idx = labels["object_class"] != self.num_classes
         target_masks = labels["masks"][valid_idx].float()
         pred_masks = preds["masks"][valid_idx]
 
-        # compute losses on valid masks
         losses: dict[str, torch.Tensor] = {}
         if self.loss_weights.get("mask_dice"):
             losses["mask_dice"] = dice_loss(pred_masks, target_masks)
@@ -814,10 +693,8 @@ class MaskFormerLoss(nn.Module):
         """
         losses: dict[str, torch.Tensor] = {}
 
-        # loop over intermediate outputs and compute losses
         if "intermediate_outputs" in preds:
             for i, aux_pred in enumerate(preds["intermediate_outputs"]):
-                # add regression prediction for cost
                 for task in tasks:
                     if task.input_name == "objects":
                         aux_pred.update(task(aux_pred, labels))
@@ -833,17 +710,14 @@ class MaskFormerLoss(nn.Module):
                     l_dict = {k + f"_layer{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
-        # run tasks on the objects (e.g. regression) for the main predictions
         for task in tasks:
             if task.input_name == "objects":
-                # Get the scaled targets for this task and store them in the labels dict
-                # for the matcher to use
+                # store the scaled targets in labels for the matcher to use
                 task_targets = task.get_targets(labels)
                 task_pred, _ = task(preds["objects"]["embed"], labels)
                 preds["objects"].update({task.name: task_pred})
                 labels["objects"][task.name] = task_targets
 
-        # get the optimal assignment of the predictions to the labels
         idx = self.matcher(preds["objects"], labels["objects"])
 
         # warning: don't put this into a function or comprehension
@@ -854,7 +728,6 @@ class MaskFormerLoss(nn.Module):
             if k != "intermediate_outputs":  # don't permute input reps
                 preds["objects"][k] = v[idx]
 
-        # compute the requested losses
         for loss in self.losses:
             losses.update(self.get_loss(loss, preds, labels))
 
@@ -862,69 +735,43 @@ class MaskFormerLoss(nn.Module):
 
 
 _UNNAMED = "unnamed"
-"""Placeholder instance name — the config dict key is assigned before compile (design §2.2)."""
+"""Placeholder instance name, assigned before compile."""
 
-# the v2 bundle stream name for the reconstructed objects (matches the MaskDecoder
-# out_stream and the MaskFormerTargets object stream — FD uses objects.* / labels.objects.*)
+# bundle stream name for the reconstructed objects (matches the MaskDecoder
+# out_stream and the MaskFormerTargets object stream).
 _OBJECT_STREAM = "objects"
 
 
 class MaskFormerMatchedLoss(nn.Module):
-    """Hungarian-matched MaskFormer loss over the decoder's object predictions (FD 1158-1170).
+    """Hungarian-matched MaskFormer loss over the decoder's object predictions.
 
-    A FIT|VAL-only `GraphModule`. It composes a v1 ``MaskFormerLoss`` (which holds
-    the ``HungarianMatcher`` + the ``empty_weight`` buffer + the v1 ``loss_labels``/
-    ``loss_masks`` methods), runs the matcher on the SCALED object predictions/targets
-    (v1 ``get_batch_cost``, matcher.py:171-248), then:
+    A FIT|VAL-only module. Runs the matcher on the scaled object
+    predictions/targets, then publishes the matcher-permuted predictions plus the
+    truth labels as new ``matched.objects.*`` keys (no in-place permute) and emits
+    ``losses.{object_class_ce, mask_dice, mask_focal, regression}`` for whichever
+    components have a positive ``loss_weights`` entry.
 
-    - publishes the matcher-permuted predictions + the truth labels as NEW
-      ``matched.objects.*`` keys (no in-place permute — design §2.1); and
-    - emits ``losses.{object_class_ce, mask_dice, mask_focal, regression}`` (only the
-      components with a positive ``loss_weights`` entry are produced, v1
-      maskformer_loss.py:221-226).
-
-    The three mask/class components are computed by the composed v1 methods on the
-    permuted predictions (byte-faithful v1). The regression component is the MATCHED
-    L1 over valid (non-null) objects (the FD alignment change; no v1 byte reference).
-
-    Lifecycle (design §2.3): ``__init__`` builds the composed v1 loss (the matcher +
-    buffer are width-free), `declare_io` is static (FIT|VAL only), `bind` validates
-    the regression prediction/target widths agree when a regression component is
-    requested. forward runs the matcher + the loss methods and returns ONLY the new
-    ``matched.objects.*`` + ``losses.*`` keys (write-once).
+    The regression component is the matched L1 over valid (non-null) objects.
 
     Parameters
     ----------
     num_classes : int
-        The number of NON-null object classes (v1 ``loss_config.num_classes``,
-        MaskFormer.yaml:58). The null/no-object class index is ``num_classes`` (the
-        sentinel the matcher + target masks use, matcher.py:209). MUST equal the
-        decoder's ``class_net.output_size - 1``.
+        The number of non-null object classes. The null/no-object class index is
+        ``num_classes``. MUST equal the decoder's ``class_net.output_size - 1``.
     num_objects : int
-        The number of object queries ``M`` (v1 ``num_objects``, passed from the
-        ``MaskDecoder`` to the loss, maskformer.py:74; MaskFormer.yaml:36). The
-        matcher cost matrix is ``[B, M, M]`` (matcher.py:218), so ``M`` must equal
-        the decoder's ``num_objects`` AND the truth-object slot count. MUST be >= 1.
+        The number of object queries ``M``. Must equal the decoder's
+        ``num_objects`` and the truth-object slot count. MUST be >= 1.
     loss_weights : Mapping[str, float]
-        Per-component LOSS weights (v1 ``loss_config.loss_weights``,
-        MaskFormer.yaml:59-63): keys among ``object_class_ce``, ``mask_dice``,
+        Per-component loss weights; keys among ``object_class_ce``, ``mask_dice``,
         ``mask_focal``, ``mask_ce``, ``regression``. A component is produced only
-        when its weight is present and truthy (v1 maskformer_loss.py:221-226). The
-        ``object_class_ce`` weight is always applied (v1 always computes labels).
+        when its weight is present and truthy. ``object_class_ce`` is always applied.
     matcher_weights : Mapping[str, float] | None, optional
-        Per-component MATCHER cost weights (v1 ``matcher_weights``), defaulting to
-        ``loss_weights`` (v1 maskformer_loss.py:144-145).
+        Per-component matcher cost weights, defaulting to ``loss_weights``.
     null_class_weight : float, optional
-        The class-balance weight on the null category in the CE
-        (v1 ``null_class_weight``, maskformer_loss.py:130,135-142), by default 0.5.
+        The class-balance weight on the null category in the CE, by default 0.5.
     class_weights : list[float] | None, optional
-        MFU-5 (Δ3): optional per-class CE balance weights, forwarded to the composed
-        ``MaskFormerLoss`` and folded into its ``empty_weight`` buffer EXACTLY as
-        upstream (snapshot maskformer_loss.py:132-159). The MFU-2
-        ``MaskFormerTargets.object_weights`` (per-class list) is the INTENDED source (the
-        config auto-link that feeds it is deferred to MFU-7). ``None``
-        (the shipped default) keeps ``empty_weight`` byte-identical to today (MF1c
-        stays green / clean configs unchanged), by default None.
+        Optional per-class CE balance weights forwarded to the composed
+        ``MaskFormerLoss``, by default None.
     input_stream : str, optional
         The decoder's object stream name, by default ``objects`` — the
         ``<input_stream>.{class_logits,class_probs,masks}`` keys it reads.
@@ -933,13 +780,9 @@ class MaskFormerMatchedLoss(nn.Module):
     ------
     ConfigError
         On a non-positive ``num_classes``, an unknown ``loss_weights`` key, an
-        all-zero matcher-weight sum (the matcher asserts it positive,
-        matcher.py:167), or no requested loss component.
+        all-zero matcher-weight sum, or no requested loss component.
     """
 
-    # the loss components this module knows how to emit (v1 maskformer_loss.py loss_map
-    # + the matched-regression extension); mask_ce is v1-supported but NOT in the shipped
-    # MaskFormer.yaml weights, so it is emitted only if weighted.
     _KNOWN_COMPONENTS = ("object_class_ce", "mask_dice", "mask_focal", "mask_ce", "regression")
 
     def __init__(
@@ -981,14 +824,13 @@ class MaskFormerMatchedLoss(nn.Module):
                 f"MaskFormerMatchedLoss: unknown matcher_weights keys {unknown} — known components "
                 f"are {list(self._KNOWN_COMPONENTS)}"
             )
-        # v1 requires object_class_ce in the matcher cost (get_batch_cost reads it
-        # unconditionally, matcher.py:222) — default it to the loss weight if absent.
+        # get_batch_cost reads object_class_ce unconditionally — default it to the
+        # loss weight if absent.
         self.matcher_weights.setdefault(
             "object_class_ce", self.loss_weights.get("object_class_ce", 1.0)
         )
-        # the composed v1 matcher asserts the cost-weight sum is positive
-        # (matcher.py:167, a bare AssertionError); promote it to the loud config
-        # surface so a zero-cost config fails as a ConfigError at construction.
+        # the matcher asserts the cost-weight sum is positive; raise a clear
+        # ConfigError here instead of a bare AssertionError deeper in construction.
         if sum(self.matcher_weights.values()) == 0:
             raise ConfigError(
                 "MaskFormerMatchedLoss: the matcher cost weights sum to 0 — at least one "
@@ -996,9 +838,8 @@ class MaskFormerMatchedLoss(nn.Module):
                 "HungarianMatcher asserts this, matcher.py:167)"
             )
 
-        # the produced loss components: object_class_ce is always computed (v1 always
-        # runs loss_labels), the others only when their loss weight is truthy
-        # (v1 maskformer_loss.py:221-226). regression is the matched extension.
+        # object_class_ce is always computed; the others only when their loss
+        # weight is truthy. regression is the matched extension.
         self.components: tuple[str, ...] = tuple(
             c for c in self._KNOWN_COMPONENTS if c == "object_class_ce" or self.loss_weights.get(c)
         )
@@ -1009,23 +850,12 @@ class MaskFormerMatchedLoss(nn.Module):
             )
 
         self.null_class_weight = float(null_class_weight)
-        # MFU-5 (Δ3): per-class CE weights forwarded to the composed loss (the MFU-2
-        # MaskFormerTargets.object_weights is the INTENDED source; the config auto-link
-        # that feeds it is deferred to MFU-7). None keeps empty_weight byte-identical.
         self.class_weights = list(class_weights) if class_weights is not None else None
 
-        # compose the absorbed MaskFormerLoss (M7 W2c-3, v2-native above): it owns the
-        # absorbed HungarianMatcher, the empty_weight class-balance buffer, and the three
-        # loss methods. The matcher asserts sum(matcher_weights) != 0 (matcher.py:167); v1
-        # passes the FULL loss_weights to MaskFormerLoss and forwards matcher_weights to the
-        # matcher (maskformer_loss.py:148-152). ``losses=["labels", "masks"]`` is the v1
-        # default; we drive loss_labels/loss_masks directly so the list is unused. The
-        # absorbed loss is byte-for-byte v1's (the attribute name ``v1_loss`` is kept: the
-        # MF1c gate oracle copies ``composed.v1_loss.state_dict()`` into a fresh v1 loss,
-        # and the absorbed loss carries the SAME single ``empty_weight`` buffer key).
+        # composes the HungarianMatcher + empty_weight buffer + loss_labels/loss_masks
         self.v1_loss = MaskFormerLoss(
             num_classes=num_classes,
-            num_objects=num_objects,  # the matcher cost matrix is [B, M, M] (matcher.py:218)
+            num_objects=num_objects,
             loss_weights=self.loss_weights,
             matcher_weights=self.matcher_weights,
             null_class_weight=self.null_class_weight,
@@ -1034,56 +864,30 @@ class MaskFormerMatchedLoss(nn.Module):
 
     @property
     def matcher(self) -> HungarianMatcher:
-        """The composed (absorbed v2-native) `HungarianMatcher` (owned by the loss).
-
-        Returns
-        -------
-        HungarianMatcher
-            The matcher instance the forward drives.
-        """
+        """The composed `HungarianMatcher` (owned by the loss)."""
         return self.v1_loss.matcher
 
     def _reg_pred_key(self) -> str:
-        """The scaled object-regression PREDICTION key (``preds.<stream>.regression``).
-
-        Returns
-        -------
-        str
-            The bundle key the object-regression task publishes.
-        """
+        """The scaled object-regression prediction key (``preds.<stream>.regression``)."""
         return f"preds.{self.input_stream}.regression"
 
     def _reg_tgt_key(self) -> str:
-        """The scaled object-regression TARGET key (``targets.<stream>.regression``).
-
-        Returns
-        -------
-        str
-            The bundle key the object-regression task publishes in FIT|VAL.
-        """
+        """The scaled object-regression target key (``targets.<stream>.regression``)."""
         return f"targets.{self.input_stream}.regression"
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare the object preds + truth labels -> ``matched.objects.*`` + ``losses.*``.
 
-        FIT|VAL only (the matched loss is pruned from TEST/ONNX, FD 1159). Requires
-        the decoder's ``<stream>.{class_logits,class_probs,masks}`` and the truth
-        ``labels.objects.{object_class,masks}``; additionally the scaled
-        ``preds.<stream>.regression`` + ``targets.<stream>.regression`` when a
-        regression component is requested. Produces the matcher-permuted predictions
-        + the truth labels as NEW ``matched.objects.*`` keys (consumed by
-        `MaskformerMetrics`) and one scalar ``losses.<component>`` per requested
-        component.
-
-        Returns
-        -------
-        IO
-            Empty in TEST/ONNX (the module is mode-inactive there).
+        FIT|VAL only — empty IO in TEST/ONNX (the matched loss is mode-inactive
+        there). Requires the decoder's ``<stream>.{class_logits,class_probs,masks}``
+        and the truth ``labels.objects.{object_class,masks}``; additionally the
+        scaled ``preds.<stream>.regression`` + ``targets.<stream>.regression`` when a
+        regression component is requested.
         """
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
 
-        m = self.num_objects  # the query count M (concrete; matcher cost is [B, M, M])
+        m = self.num_objects
         tok = sym_dim("T", self.name)
         emb = sym_dim("E", self.name)
         n_classes = self.num_classes + 1
@@ -1110,7 +914,6 @@ class MaskFormerMatchedLoss(nn.Module):
             requires[self._reg_tgt_key()] = TensorSpec(shape=("B", m, r), dtype="float32", modes=f)
 
         produces: dict[str, TensorSpec] = {
-            # the matcher-permuted predictions + the truth labels, for MaskformerMetrics
             f"matched.{_OBJECT_STREAM}.embed": TensorSpec(
                 shape=("B", m, emb), dtype="float32", modes=f
             ),
@@ -1130,8 +933,6 @@ class MaskFormerMatchedLoss(nn.Module):
                 shape=("B", m, tok), dtype="bool", kind="label", modes=f
             ),
         }
-        # the decoder's embed feeds the permuted matched.embed (MaskformerMetrics reads
-        # the matched query embeddings); only required when the embed is available.
         requires[f"{self.input_stream}.embed"] = TensorSpec(
             shape=("B", m, emb), dtype="float32", modes=f
         )
@@ -1150,25 +951,13 @@ class MaskFormerMatchedLoss(nn.Module):
     def bind(self, schema: ResolvedSchema) -> None:
         """Validate the regression prediction/target widths agree (element-wise L1).
 
-        The query count ``M`` is config-known (``num_objects``, baked into the
-        composed matcher at ``__init__``), so nothing structural binds here. When a
-        regression component is requested, the scaled prediction width
-        (``preds.<stream>.regression``) and target width
-        (``targets.<stream>.regression``) must match — the matched L1 is element-wise
-        (v1 ``batch_mae_loss`` cost, matcher.py:131).
-
-        The matched loss is FIT|VAL-only (`declare_io` is empty in TEST/ONNX), but
-        ``bind_all`` runs ``bind`` on EVERY configured module regardless of the
-        compiled mode. In a TEST/ONNX-only bind schema (``salt test`` compiles the
-        TEST plan alone) the object-regression pred/target keys are absent — the
-        regression head opts out of TEST via ``expose`` (e.g. ``[fit, val, onnx]``)
-        and the matched loss itself is pruned — so their widths never resolve
-        statically. Guard the lookup on schema presence: when either key is absent
-        the schema carries no training plan and there is nothing to validate here.
-        The width agreement is asserted at the FIT-stage bind (which compiles
-        FIT+VAL, where both keys are produced); a genuinely missing regression
-        producer in a training plan fails earlier as a planner `ConnectivityError`,
-        so this guard cannot mask a real training-mode wiring bug.
+        ``bind_all`` runs ``bind`` on every configured module regardless of the
+        compiled mode, but this loss is FIT|VAL-only, so in a TEST/ONNX-only bind
+        schema the regression pred/target keys are absent and their widths never
+        resolve statically — skip validation when either key is missing from
+        ``schema.widths``. A genuinely missing regression producer in a training
+        plan still fails earlier as a planner `ConnectivityError`, so this guard
+        cannot mask a real training-mode wiring bug.
 
         Raises
         ------
@@ -1192,14 +981,11 @@ class MaskFormerMatchedLoss(nn.Module):
     def _matched_regression_loss(
         self, reg_pred: Tensor, reg_tgt: Tensor, object_class: Tensor
     ) -> Tensor:
-        """The MATCHED object-regression L1 over valid (non-null) objects (FD 1168-1170).
+        """The matched object-regression L1 over valid (non-null) objects.
 
-        The FD alignment change: the matcher-permuted regression predictions are
-        aligned to the truth-order targets, and the L1 is averaged over the VALID
-        objects only (``object_class != num_classes``) — the same validity mask v1
-        uses for the mask losses (maskformer_loss.py:215). No v1 byte reference: v1's
-        regression loss is query-order (see module docstring); this is the design's
-        matched alignment, gated as a design-conformance property.
+        The matcher-permuted regression predictions are aligned to the truth-order
+        targets, and the L1 is averaged over the valid objects only
+        (``object_class != num_classes``).
 
         Returns
         -------
@@ -1216,17 +1002,15 @@ class MaskFormerMatchedLoss(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Match queries to truth, then emit the matched predictions + the loss components.
 
-        Reproduces v1's matched loop (maskformer_loss.py:334-347) WITHOUT the
-        in-place permute: solve the assignment (matcher reads the SCALED preds/targets,
-        v1 get_batch_cost), gather the permuted predictions into NEW ``matched.*`` keys,
-        and compute the three v1-decidable losses (``object_class_ce``, ``mask_dice``,
-        ``mask_focal``) via the composed v1 methods on the permuted predictions plus
-        the MATCHED regression L1.
+        Solves the assignment on the scaled preds/targets, gathers the permuted
+        predictions into new ``matched.*`` keys (no in-place permute), and computes
+        the classification/mask losses via the composed v1 methods plus the matched
+        regression L1.
 
         Returns
         -------
         dict[str, Tensor]
-            The new ``matched.objects.*`` + ``losses.*`` keys only (design §2.5).
+            The new ``matched.objects.*`` + ``losses.*`` keys only.
         """
         del mode
         class_logits = b.get(f"{self.input_stream}.class_logits")
@@ -1236,8 +1020,7 @@ class MaskFormerMatchedLoss(nn.Module):
         object_class = b.get(f"labels.{_OBJECT_STREAM}.object_class")
         target_masks = b.get(f"labels.{_OBJECT_STREAM}.masks")
 
-        # the matcher cost dict (v1 keys: class_logits/class_probs/masks [+regression],
-        # matcher.py:181-190). Costs stay in SCALED space (FD 1166).
+        # matcher cost stays in scaled space
         pred_for_match: dict[str, Tensor] = {
             "class_logits": class_logits,
             "class_probs": class_probs,
@@ -1254,13 +1037,10 @@ class MaskFormerMatchedLoss(nn.Module):
             pred_for_match["regression"] = reg_pred
             tgt_for_match["regression"] = reg_tgt
 
-        # solve the optimal assignment: idx = (batch_arange[B,1], tgt_idx[B,M]) — the
-        # advanced-indexing tuple v1 applies as v[idx] (matcher.py:293-296).
         idx = self.matcher(pred_for_match, tgt_for_match)
 
-        # permute the predictions into NEW tensors (NO in-place; v1 does
-        # preds["objects"][k] = v[idx] in place, maskformer_loss.py:338-343). Advanced
-        # indexing returns a fresh tensor, so matched.* never aliases the decoder output.
+        # advanced indexing returns a fresh tensor, so matched.* never aliases the
+        # decoder output (no in-place permute).
         m_class_logits = class_logits[idx]
         m_class_probs = class_probs[idx]
         m_masks = masks[idx]
@@ -1275,9 +1055,6 @@ class MaskFormerMatchedLoss(nn.Module):
             f"matched.{_OBJECT_STREAM}.target_masks": target_masks,
         }
 
-        # the three v1-decidable losses, on the PERMUTED predictions vs truth-order
-        # labels, via the composed v1 methods (loss_labels/loss_masks already apply
-        # the loss weights via weight_loss, maskformer_loss.py:252-254 -> 256-271).
         permuted_preds = {"objects": {"class_logits": m_class_logits, "masks": m_masks}}
         truth_labels = {"objects": {"object_class": object_class, "masks": target_masks}}
         losses: dict[str, Tensor] = {}

@@ -1,37 +1,6 @@
-# gn2v2-opendata.yaml — GN2v2 at the v1 GN2 nominal scale (256/128, 4 layers,
-# 8 heads — salt/configs/GN2/GN2.yaml), on the ATLAS open-data ttbar sample
-# produced by umami-preprocessing (4 jet classes incl. taujets; the IP3D_*
-# track significances are named lifetimeSigned* in this sample).
-#
-# Data paths are REQUIRED overrides — NO machine paths are committed (design
-# §5 placeholder policy / plan-25 §5.1 R9). The `input_samples` block below is
-# the plan-25 W3.A config-native data-sourcing form: a per-stage `files` map
-# (train/val/test) on the data-sourcing setup module, with `${DATA_*}`
-# placeholders so the placeholder-only preflight passes. A typical invocation
-# FROM THE REPO ROOT (use `python -m salt.core.main` when the salt2 script is
-# not installed) overrides the placeholders:
-#
-#   salt2 fit --config salt/core/configs/gn2v2-opendata.yaml \
-#     --data.modules.input_samples.init_args.files.train $DATA/pp_output_train.h5 \
-#     --data.modules.input_samples.init_args.files.val   $DATA/pp_output_val.h5 \
-#     --model.modules.norm.init_args.norm_dict $DATA/norm_dict.yaml \
-#     --class_dict $DATA/class_dict.yaml
-#
-# The deprecated --data.train_file/--data.val_file/--data.test_file kwargs still
-# work for one migration window (plan-25 O-ALIAS-WINDOW): if set with no
-# `input_samples` block, the datamodule synthesises an implicit InputSamples.
-#
-# `norm_dict` is the `Normaliser` module's OWN config (its sole consumer): it is
-# set directly on `model.modules.norm.init_args.norm_dict` below, as a
-# `${DATA_NORM_DICT_PATH}` placeholder (override per run / let the placeholder
-# resolver fill it). It is NOT a top-level fan-out flag — only `--class_dict`
-# remains a one-flag fan-out (genuinely multi-task → every ClassificationTaskModule,
-# reproducing v1 use_class_dict, GN2.yaml:50,64); leave `--class_dict` unset for
-# unweighted CE losses.
-#
-# Optional (recommended): --data.modules.reader.init_args.schema $DATA/schema.yaml
-# (from `salt2 schema dump`, design §2.6). attn_type stays torch-math here:
-# flash-varlen is the M6 cluster follow-up (plan 05 hardware note).
+# GN2v2 at the v1 GN2 nominal scale (256/128, 4 layers, 8 heads) on the ATLAS
+# open-data ttbar sample from umami-preprocessing (4 jet classes incl.
+# taujets; IP3D_* track significances are named lifetimeSigned* here).
 
 name: GN2v2_opendata
 
@@ -39,13 +8,10 @@ data:
   batch_size: 1000
   num_workers: 8
   modules:
-    # plan-25 W3.A data-sourcing: per-stage source files on the setup-only
-    # InputSamples module (shape A — the parity-preserving default). Paths are
-    # ${DATA_*} placeholders (placeholder-only preflight); override per stage.
-    # `num` is the per-stage row cap (-1 = all, v1 semantics).
     input_samples:
       class_path: salt.core.data.InputSamples
       init_args:
+        # ${DATA_*} placeholders — override per stage. num: -1 = all rows.
         files:
           train: ${DATA_TRAIN_PATH}
           val: ${DATA_VAL_PATH}
@@ -91,16 +57,12 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # lrs: == design §5.1 OneCycleLR block (the v1 ModelWrapper 'lrs_config'
-    # kwarg, renamed to 'lrs' in M5 sub-wave D)
     lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # the Normaliser's own config (its sole consumer); ${DATA_*} placeholder
-          # so the placeholder-only preflight passes — override per run (see header)
           norm_dict: ${DATA_NORM_DICT_PATH}
           streams: [jets, tracks]
           global_object: jets
@@ -108,22 +70,22 @@ model:
         class_path: salt.core.nn.StreamEmbed
         init_args:
           stream: tracks
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
+          context: [normed.jets]
           out_dim: 256
           dense: {hidden_layers: [256], activation: ReLU}
       concat:
         class_path: salt.core.nn.Concat
-        init_args: {streams: [tracks]} # registers live in the encoder in M2
+        init_args: {streams: [tracks]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
           dim: 256
           out_dim: 128
           num_layers: 4
-          attention: {num_heads: 8, attn_type: torch-math} # flash-varlen: M6
+          attention: {num_heads: 8, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       split:
-        class_path: salt.core.nn.Split # production task path (design §3.3)
+        class_path: salt.core.nn.Split
         init_args: {streams: [tracks]}
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
@@ -135,7 +97,7 @@ model:
           input: pooled.global
           label: flavour_label
           class_names: [bjets, cjets, ujets, taujets] # open-data label order
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
         class_path: salt.core.nn.tasks.ClassificationTaskModule
@@ -145,43 +107,25 @@ model:
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
           weight: 0.5
-          weight_source: null # v1 use_class_dict — override (see header)
+          weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_vertexing:
         class_path: salt.core.nn.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
-          origin_label: ftagTruthOriginLabel # declared dependency (design §3.3)
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
           weight: 1.5
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
-          # origin_weighting takes integer origin IDS in M2 (default
-          # heavy: [3, 4, 5], fake: [1] == v1 hardcoded); the design §5.1
-          # name-based form ({heavy: [FromB, ...]}) lands in M3
+          # origin_weighting takes integer origin IDs (default heavy: [3,4,5], fake: [1])
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4b: the plan-29/31 conversion PRODUCER nodes (jet_probs/
-# track_origin_probs/track_origin_index/track_vertex_index) are RETIRED — the
-# 1:1 conversion math folds back ONTO each task via get_output (W34.1/W34.3),
-# orchestrated by the RunTaskOutput writer in the outputs: section below. The
-# dumb sinks dump ALL active outputs.* leaves; the SECTION supplies names +
-# dtypes + ORDER. Proven byte-for-byte against the legacy WriterCallback oracle
-# in test_w34_outputs_section.py (the gn2v2-dummy-cutover34 sibling of this
-# config). NOTE: this RESTORES the per-token VertexIndex eval H5 column (v1
-# WriterCallback parity) that the superseded W5 auto-collect H5 sink deferred —
-# the vertexing get_output mints it in BOTH TEST (i8 VertexIndex) and ONNX (int8
-# VertexIndex).
-# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model).
-# Section writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput
-# task fields -> PadMaskWriter. The RunTaskOutput tasks list is the v1 model-
-# declaration order (the head column order). The section FIELD ORDER is the H5
-# column-order authority (NOT executor topo order).
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]} # all source fields (v1 default), copy_inputs={} parity
+    init_args: {streams: [jets, tracks]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
@@ -190,30 +134,18 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
-# leaves, with names/dtypes/order from the bound outputs: section manifest. The
-# H5OutputSink keeps the FIXED-mode serialisation mechanics (u2s pack, per-token
-# pad re-expansion, input-copy file re-read, v1 group naming/path). The DUMB
-# OnnxExportSink names the section's get_output ONNX leaves (pb/pc/pu/ptau
-# globals + TrackOrigin + VertexIndex per-token int8) in the canonical Athena
-# tuple order.
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half, consumed by `salt2 export` (design §5.1, §7); inert during fit/test
-  model_name: GN2v2opendata # Athena name: no '_'/'-' (validated at export only)
+export:
+  model_name: GN2v2opendata # Athena name: no '_'/'-'
   inputs:
-    - { port: inputs.jets, name: jet_features } # [1, F] global
-    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # outputs: NONE — the OnnxExportSink names the section's get_output ONNX leaves
-  # (GN2v2opendata_pb/_pc/_pu/_ptau split_scalars from the open-data 4-class head's
-  # class_names — reorder/extend the classes and eval columns AND ONNX outputs move
-  # together; _TrackOrigin argmax int8; _VertexIndex vertex_union_find int8).
-  # Inspect with `salt2 export --manifest` or `salt2 graph resolve [--annotate]`.
+    - { port: inputs.jets, name: jet_features }
+    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks }
 
 trainer:
   max_epochs: 40
-  precision: 32-true # 16-mixed on GPU clusters (M6 follow-up)
+  precision: 32-true

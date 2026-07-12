@@ -1,8 +1,7 @@
 """Exception hierarchy for the salt v2 graph kernel.
 
-Design §2.1 (write-once bundle), §3.2 (executor merge checks). Planner-stage
-errors (connectivity, config, cycles, ...) are appended to this module by the
-planner stage — see the anchor comment at the bottom.
+Planner-stage errors (connectivity, config, cycles, ...) are appended to this
+module by the planner stage — see the anchor comment at the bottom.
 """
 
 from __future__ import annotations
@@ -31,15 +30,15 @@ class KeyCollisionError(GraphError):
     """Write-once violation: a bundle key was written more than once.
 
     Raised by `Bundle.set` / `Bundle.merge` when a dotted key (or a subtree /
-    leaf prefix of it) already exists in the bundle (design §2.1).
+    leaf prefix of it) already exists in the bundle.
     """
 
 
 class DeclarationError(GraphError):
     """A module's returned key set does not match its declared produces.
 
-    Raised by `Bundle.merge` on every merge — the executor passes the producing
-    module's declared key set and the comparison is always on (design §2.1, §3.2).
+    Raised by `Bundle.merge` on every merge — the executor passes the
+    producing module's declared key set and the comparison is always on.
     """
 
 
@@ -47,7 +46,7 @@ class DeclarationError(GraphError):
 
 
 class ConfigError(GraphError):
-    """A module configuration is structurally invalid (design §3.1, §4.1).
+    """A module configuration is structurally invalid.
 
     Raised by the planner for config bugs that are not connectivity problems:
     instance-name mismatches, wildcard patterns on non-framework modules or in
@@ -56,27 +55,25 @@ class ConfigError(GraphError):
 
 
 class ConnectivityError(GraphError):
-    """A required key has no producer, or a key has more than one (design §4.1).
+    """A required key has no producer, or a key has more than one.
 
-    Messages meet the §4.1 quality bar: they name the consumer, the missing
-    key, nearest-key suggestions, and modules that could produce the key in
-    another mode. Also raised when a wildcard-narrowed key fails schema
-    validation (design §2.2 rule (d)).
+    Messages name the consumer, the missing key, nearest-key suggestions, and
+    modules that could produce the key in another mode. Also raised when a
+    wildcard-narrowed key fails schema validation.
     """
 
 
 class CycleError(GraphError):
-    """The dependency graph contains a cycle (design §3.1).
+    """The dependency graph contains a cycle.
 
     Cycles are always a config error — there is no fixpoint execution. The
     message names the cycle as a key-level chain. Also raised when a wildcard
-    producer's narrowed outputs transitively feed its own inputs
-    (design §2.2 rule (b)).
+    producer's narrowed outputs transitively feed its own inputs.
     """
 
 
 class KindError(GraphError):
-    """A consumer port's kind does not match its producer leaf's kind (design §2.2).
+    """A consumer port's kind does not match its producer leaf's kind.
 
     Kind typing makes mask-polarity and label/feature mix-ups static type
     errors, not runtime surprises.
@@ -84,7 +81,7 @@ class KindError(GraphError):
 
 
 class ShapeError(GraphError):
-    """Shape or dtype unification failed across a graph edge (design §2.2, §4.1).
+    """Shape or dtype unification failed across a graph edge.
 
     Symbolic dims are unified globally at validate time; the message names
     both endpoints and the conflicting sizes.
@@ -92,7 +89,7 @@ class ShapeError(GraphError):
 
 
 class AllModesDeadError(ConfigError):
-    """A configured module is dead in every mode (design §1 principle 10, §3.1).
+    """A configured module is dead in every mode.
 
     Per-mode pruning is a feature; a module whose outputs reach no sink in
     *any* mode is a config bug and fails validation loudly — silently dropping
@@ -101,11 +98,11 @@ class AllModesDeadError(ConfigError):
 
 
 class SchemaError(GraphError):
-    """A demanded field is absent from the dataset schema (design §2.6).
+    """A demanded field is absent from the dataset schema.
 
     Reserved for the schema artifact tooling and the reader's bind-time check
-    (`salt2 schema`, stage D / M2); the planner reports schema-invalid
-    wildcard narrowing as `ConnectivityError` per design §2.2 rule (d).
+    (``salt2 schema``); the planner reports schema-invalid wildcard narrowing
+    as `ConnectivityError`.
     """
 
 
@@ -113,7 +110,7 @@ class SchemaError(GraphError):
 
 
 class UndeclaredAccessError(GraphError):
-    """An undeclared bundle access by a module under debug execution (design §3.2, §4.1).
+    """An undeclared bundle access by a module under debug execution.
 
     Raised by the executor's read-tracking bundle view (``run(debug=True)``)
     when a module reads or probes a key absent from its declared requires for
@@ -124,12 +121,12 @@ class UndeclaredAccessError(GraphError):
 
 
 class MutationError(GraphError):
-    """A module mutated a bundle tensor in place under debug execution (design §2.1).
+    """A module mutated a bundle tensor in place under debug execution.
 
     Bundle keys are write-once, but key-level checks cannot see ``tensor.add_``
     style in-place edits that corrupt an upstream key for later consumers.
     Under ``run(debug=True)`` the executor snapshots ``torch.Tensor._version``
     for every bundle leaf around each step and raises this error — naming the
     module and the key — when a version counter bumps. Read-time mutation is
-    sanctioned only inside the reader (design §2, M2), never in graph modules.
+    sanctioned only inside the reader, never in graph modules.
     """

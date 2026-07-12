@@ -1,15 +1,4 @@
-"""Small config-constructed GN2v2 builder for the M2 nn-module tests (plan 05, stage A2).
-
-Mirrors the v1 fixture (`gn2_fixture.build_test_gn2`) module-for-module so
-the v1->v2 state-dict transfer is well-defined: same widths (16/16, 2
-layers, 2 heads, 1 register), same activation/hidden layers, same task
-order (module-dict order = v1 ``model.tasks`` order — the
-`map_v1_state_dict` default association), same norm-dict file.
-
-Everything here is built from plain config kwargs — no ``input_size``
-anywhere (widths are inferred at bind, design §2.3) and no live v1
-instances (those are the parity wrappers' job, plan 04).
-"""
+"""Small config-constructed GN2v2 builder for the M2 nn-module tests (plan 05, stage A2)."""
 
 from __future__ import annotations
 
@@ -69,30 +58,7 @@ def build_gn2v2_modules(
     num_heads: int = 2,
     class_dict: Path | str | None = None,
 ) -> dict[str, GraphModule]:
-    """Build the GN2v2 module dict from plain config kwargs (design §5.1 shape).
-
-    Parameters
-    ----------
-    norm_dict : Path | str
-        Path to the norm dict YAML (read only at `Normaliser.materialise`).
-    embed_dim : int, optional
-        Encoder embedding width, by default 16 (matches the v1 fixture).
-    out_dim : int, optional
-        Encoder output width, by default 16.
-    num_layers : int, optional
-        Encoder layers, by default 2.
-    num_heads : int, optional
-        Attention heads, by default 2.
-    class_dict : Path | str | None, optional
-        When given, ``track_origin`` declares
-        ``weight_source: {from_class_dict: <path>}`` (design §3.3), by
-        default None (unweighted losses, matching the v1 fixture).
-
-    Returns
-    -------
-    dict[str, GraphModule]
-        Instance-named modules with `LossSum` already narrowed.
-    """
+    """Build the GN2v2 module dict from plain config kwargs (design §5.1 shape)."""
     dense = {"hidden_layers": [embed_dim], "activation": "ReLU"}
     head_dense = {"hidden_layers": [out_dim], "activation": "ReLU"}
     modules: dict[str, GraphModule] = {
@@ -149,19 +115,7 @@ def build_gn2v2_modules(
 
 
 def gn2v2_sources() -> NestedSpec:
-    """Build the dataset-boundary source spec for the GN2v2 plans.
-
-    Mirrors the v1 batch contract (datasets.py:435-441, 448-559):
-    ``inputs.*`` carry the declared variables as `fields` (the bind-time
-    column-name source, design §2.2), ``masks.*`` are True-is-padded, and
-    label leaves are gated to ``Mode.TRAINING`` (test plans never read
-    them).
-
-    Returns
-    -------
-    NestedSpec
-        The nested source spec for `compile_plan`.
-    """
+    """Build the dataset-boundary source spec for the GN2v2 plans."""
     label = {"dtype": "int64", "kind": "label", "modes": Mode.TRAINING}
     return unflatten_spec({
         "inputs.jets": TensorSpec(
@@ -180,31 +134,13 @@ def gn2v2_sources() -> NestedSpec:
 
 
 def compile_gn2v2(modules: dict[str, GraphModule], mode: Mode) -> Plan:
-    """Compile the GN2v2 plan for one mode with the canonical sinks.
-
-    Returns
-    -------
-    Plan
-        The compiled plan (FIT/VAL anchor on ``loss.total``, TEST/ONNX on
-        the three ``preds.*`` leaves — design §3.1 sink anchoring).
-    """
+    """Compile the GN2v2 plan for one mode with the canonical sinks."""
     sinks = FIT_SINKS if mode & Mode.TRAINING else TEST_SINKS
     return compile_plan(modules, mode, sources=gn2v2_sources(), sinks=sinks)
 
 
 def make_gn2_labels(batch_size: int, n_tracks: int, seed: int = 7) -> dict[str, dict[str, Tensor]]:
-    """Build deterministic labels in the v1 ``labels_dict`` nesting.
-
-    Vertex labels include negatives (unmatched, excluded from the match
-    matrix, task.py:925-929); origin labels span all 8 classes so the
-    heavy/fake edge weighting (ids 3,4,5 / 1) is exercised.
-
-    Returns
-    -------
-    dict[str, dict[str, Tensor]]
-        ``{stream: {label: tensor}}`` — v1 shape; flatten to dotted
-        ``labels.*`` keys for the v2 bundle.
-    """
+    """Build deterministic labels in the v1 ``labels_dict`` nesting."""
     gen = torch.Generator().manual_seed(seed)
     return {
         "jets": {"flavour_label": torch.randint(0, 3, (batch_size,), generator=gen)},

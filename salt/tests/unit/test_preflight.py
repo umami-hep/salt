@@ -1,10 +1,4 @@
-"""Tests for the data-free norm-dict preflight (M3 leftover, design §2.3).
-
-`Normaliser.preflight` validates the norm-dict YAML without any bind/data
-I/O; `SaltModule._run_preflights` calls it (duck-typed) at fresh-fit setup;
-``salt2 graph validate`` reports failures as warnings (data-less machines
-stay supported — the documented ``--set ...norm_dict=unused.yaml`` flow).
-"""
+"""Tests for the data-free norm-dict preflight (M3 leftover, design §2.3)."""
 
 from __future__ import annotations
 

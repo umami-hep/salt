@@ -171,13 +171,7 @@ class TestShapeStrWidthSubstitution:
 
 
 def _static_widths(cfg):
-    """Resolve widths data-free across every compilable primary mode (no batch run).
-
-    Returns
-    -------
-    dict[str, int]
-        The resolved per-key feature widths.
-    """
+    """Resolve widths data-free across every compilable primary mode (no batch run)."""
     plans = []
     for plan_mode in PRIMARY_MODES:
         if plan_mode in cfg.mode_errors:

@@ -1,9 +1,9 @@
 """Runtime tensor bundle for the salt v2 graph kernel.
 
-Design §2.1: the bundle is a nested dict of tensors with dotted-path
-addressing and write-once semantics. Payloads stay plain nested dicts of
-`torch.Tensor` / `np.ndarray` (or any other plain values), so tracing and
-pickling see nothing exotic — `Bundle` is only a thin helper around them.
+The bundle is a nested dict of tensors with dotted-path addressing and
+write-once semantics. Payloads stay plain nested dicts of `torch.Tensor` /
+`np.ndarray` (or any other plain values), so tracing and pickling see
+nothing exotic — `Bundle` is only a thin helper around them.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ _MISSING = object()
 
 
 class Bundle:
-    """Nested dict of tensors with dotted-path access and write-once semantics (design §2.1).
+    """Nested dict of tensors with dotted-path access and write-once semantics.
 
     All mutation goes through `set` / `merge`, which enforce write-once: a key
     (or a subtree/leaf prefix of it) may never be written twice. Leaf values
@@ -139,8 +139,8 @@ class Bundle:
     def set(self, key: str, value: Any) -> None:
         """Set a leaf at a dotted key; raises KeyCollisionError if the key exists.
 
-        Write-once (design §2.1): collisions with existing leaves, existing
-        subtrees, or leaf prefixes of `key` all raise KeyCollisionError.
+        Write-once: collisions with existing leaves, existing subtrees, or
+        leaf prefixes of `key` all raise KeyCollisionError.
         """
         parts = split_key(key)
         self._check_writable(key, who=None)
@@ -149,12 +149,12 @@ class Bundle:
     def merge(self, produced: dict[str, Any], who: str, expected: AbstractSet[str]) -> None:
         """Merge a module's produced nested dict into the bundle (executor-only).
 
-        Design §2.1/§3.2: write-once enforced, and the produced key set is
-        checked against the producing module's declaration on EVERY merge —
-        the executor passes the declared key set as `expected` (Bundle stays
-        decoupled from planner types). The check-then-insert order makes the
-        merge atomic: on error, no produced key has been written. A produced
-        key colliding with the bundle raises KeyCollisionError.
+        Write-once enforced, and the produced key set is checked against the
+        producing module's declaration on EVERY merge — the executor passes
+        the declared key set as `expected` (Bundle stays decoupled from
+        planner types). The check-then-insert order makes the merge atomic:
+        on error, no produced key has been written. A produced key colliding
+        with the bundle raises KeyCollisionError.
 
         Raises
         ------

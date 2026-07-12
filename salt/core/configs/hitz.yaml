@@ -1,34 +1,6 @@
-# hitz.yaml — the HLT hits-based PV-z GaussianRegressionTask in the v2 schema
-# (M5-CONV, Gaussian-PVz family). The v2-native MIGRATED fixture for the legacy
-# top-level salt/configs/hitz.yaml.
-#
-# A SINGLE constituent stream (HLT `hits`) is embedded to 32 dims (v1 init_nets
-# output_size 32, hitz.yaml:17), run through a `TransformerEncoder` (v1
-# hitz.yaml:22-31 — 6 layers, embed_dim 32 -> out_dim 128, NOT encoder-less; v1
-# re-anchors out_dim 128 at hitz.yaml:27), globally attention-pooled at 128, and
-# fed to ONE pooled GAUSSIAN regression head
-# predicting the per-jet primary-vertex z (`TruthJetPVz`). The Gaussian head
-# emits 2 x targets (mu ‖ raw variance), softplus variance, Gaussian NLL, and a
-# `stddev = sqrt(softplus(var))` inference de-scaling (v1
-# salt.models.GaussianRegressionTask, task.py:645) — the M5 RegressionTaskModule
-# `gaussian: true` path.
-#
-# v1 single head (hitz.yaml:47-59):
-#   - gaussian_regression : pooled global head, mean/std norm_params, TruthJetPVz
-#
-# The Gaussian head publishes ONE [B, 2R] array (R means then R stddevs, FD
-# 1567-1568 one-array contract); the TaskWriter owns the `_stddev` suffix split.
-# The ONNX stddev representation is the M4.5 deferral-(b) design-conformance
-# (stddev = sqrt(softplus(var)) traced in-graph) — there is NO v1 ONNX golden
-# (v1 onnx/to_onnx.py has zero Gaussian handling).
-#
-# v1 `jets` carries [pt, eta] (hitz.yaml:73-75) as the global context object the
-# hits embedding attaches; the regression head is on the `jets` stream.
-#
-# NO machine paths committed (design §5 placeholder policy). Static validation
-# (no data) FROM THE REPO ROOT (use `python -m salt.core.main`):
-#   python -m salt.core.main graph validate -c salt/core/configs/hitz.yaml \
-#     --set model.modules.norm.init_args.norm_dict=unused.yaml
+# Hitz: HLT hits-based primary-vertex-z GaussianRegressionTask. A single
+# `hits` constituent stream is embedded, encoded, globally pooled, and fed to
+# a Gaussian regression head predicting TruthJetPVz (mean + softplus stddev).
 
 name: Hitz
 
@@ -55,36 +27,32 @@ data:
 model:
   class_path: salt.core.SaltModule
   init_args:
-    # v1 `lrs_config:` block (renamed to `lrs` in M5 sub-wave D)
     lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-7, pct_start: 0.2}
     optimizer: AdamW
     modules:
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          # norm_dict: REQUIRED override (see header)
+          # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, hits]
           global_object: jets
       hits_embed:
         class_path: salt.core.nn.StreamEmbed
         init_args:
-          stream: hits # requires normed.hits
-          context: [normed.jets] # v1 attach_global layout (design §9.2)
-          # v1 init_nets output_size 32 (hitz.yaml:17) — the init_net embeds hits
-          # to 32; the encoder then projects 32 -> 128 (v1 re-anchors out_dim 128
-          # at hitz.yaml:27, so embed_dim 32 feeds the encoder, out_dim 128 leaves)
+          stream: hits
+          context: [normed.jets]
           out_dim: &embed_dim 32
           dense: {hidden_layers: [128, 128, 128], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask
+        class_path: salt.core.nn.Concat
         init_args: {streams: [hits]}
       encoder:
         class_path: salt.core.nn.TransformerEncoder
         init_args:
-          dim: *embed_dim # v1 encoder embed_dim 32 (= init_net output_size)
-          out_dim: &out_dim 128 # v1 encoder out_dim 128 (hitz.yaml:27)
-          num_layers: 6 # v1 hitz.yaml:25
-          attention: {num_heads: 2, attn_type: torch-math} # flash-varlen: M6
+          dim: *embed_dim
+          out_dim: &out_dim 128
+          num_layers: 6
+          attention: {num_heads: 2, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
         class_path: salt.core.nn.GlobalAttentionPooling
@@ -94,49 +62,33 @@ model:
         init_args:
           stream: jets
           input: pooled.global
-          gaussian: true # mu/sigma head, output_size == 2 (v1 task.py:645)
+          gaussian: true # mu/sigma head, output_size == 2
           targets: TruthJetPVz
-          # v1 hitz.yaml:52 — mean 0, std 37.81209182739258
           norm_params: {mean: 0.0, std: 37.81209182739258}
           loss: GaussianNLLLoss
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum # losses.** narrowed by SaltModule
+        class_path: salt.core.nn.LossSum
 
-# plan 34 W34.4b: the plan-29/31 Regression (gaussian=true) producer (gaussian_out)
-# is RETIRED — the gaussian means ‖ softplus-stddev one-array de-scale folds back
-# ONTO the task via get_output (W34.3), orchestrated by the RunTaskOutput writer
-# below. The dumb sinks dump ALL active outputs.* leaves; the SECTION supplies names
-# + dtypes + ORDER (mean then _stddev). Proven byte-for-byte against the producer
-# oracle in test_w34_gaussian_cutover.py (the regression_gaussian-cutover34 sibling).
-# The regression head is on the GLOBAL jets stream (the `hits` sequence is an INPUT
-# only, bearing no task head), so the section has NO PadMaskWriter.
-# The PLAN 34 W34.4b top-level outputs: section (composed AFTER the model). Section
-# writers in EXACT v1 H5 column order — InputCopyWriter -> RunTaskOutput task fields.
 outputs:
   inputs_copy:
     class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets]} # all jets source fields (v1 default), copy_inputs={jets: []} parity
+    init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [gaussian_regression]}
 
-# The DUMB sinks (plan 34 W34.4b): no init args — they dump ALL active outputs.*
-# leaves, names/dtypes/order from the bound outputs: section manifest. The
-# OnnxExportSink names the de-scaled gaussian leaves (TruthJetPVz mean + _stddev)
-# in the canonical tuple order. (--no-check on export: v1 to_onnx has zero gaussian
-# handling, so the torch-vs-ONNX sweep checker is skipped.)
 callbacks:
   h5_output:
     class_path: salt.core.outputs.H5OutputSink
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
 
-export: # export-ONLY half (design §5.1, §7); inert during fit/test
+export:
   model_name: Hitz # Athena name: no '_'/'-'
   inputs:
-    - {port: inputs.jets, name: jet_features} # [1, F] global
-    - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits} # [L, F]
+    - {port: inputs.jets, name: jet_features}
+    - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits}
 
 trainer:
   max_epochs: 100

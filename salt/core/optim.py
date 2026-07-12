@@ -15,58 +15,37 @@ from torch.optim import Optimizer
 class MuonParamPolicy:
     """Policy for deciding which parameters should be optimized by Muon.
 
-    This policy determines whether a parameter is assigned to the Muon optimizer
-    based on its tensor dimensionality (must be 2D), explicit module-name
-    include/exclude lists, and — as a documented fallback — broad name regexes.
+    Determines whether a parameter is assigned to the Muon optimizer based on its
+    tensor dimensionality (must be 2D), explicit module-name include/exclude
+    lists, and — as a fallback — broad name regexes.
 
-    Selection order (M6 sub-wave E explicit-routing hardening; FD §3.4 696-699):
+    Selection order:
 
     1. Non-2D or non-trainable parameters always go to AdamW (Muon needs 2D
        weight matrices).
-    2. ``exclude`` — an EXPLICIT module-name substring match forces the
-       parameter to AdamW (the highest-priority routing decision; e.g.
-       ``("readout", "task")`` keeps every head on AdamW regardless of name).
-    3. ``include`` — an EXPLICIT module-name substring match forces the
-       parameter to Muon, OVERRIDING the broad ``exclude_name_patterns``
-       regexes (e.g. ``("encoder.layers",)`` puts the transformer block
-       matrices on Muon even though a sub-name might match a default regex).
-    4. ``exclude_name_patterns`` — the v1 broad regexes (``hybrid_muon_adamw.py:
-       36-41``), kept ONLY as documented DEFAULTS the converter can cite: a 2D
-       parameter whose lowercased name matches any pattern goes to AdamW. With
-       empty ``include``/``exclude`` lists the behaviour is byte-identical to
-       v1's regex-only policy (the GN3-family default).
+    2. ``exclude`` — an explicit module-name substring match forces the
+       parameter to AdamW (highest priority).
+    3. ``include`` — an explicit module-name substring match forces the
+       parameter to Muon, overriding the broad ``exclude_name_patterns`` regexes.
+    4. ``exclude_name_patterns`` — broad regex defaults: a 2D parameter whose
+       lowercased name matches any pattern goes to AdamW.
 
-    The explicit lists are the v2 hardening over v1's regex-only routing: a
-    GN3-family config can pin exactly which modules Muon optimizes by instance
-    name, decoupled from how the parameters happen to be spelled. A policy whose
-    ``include`` / ``exclude`` list matches ZERO parameters is surfaced as a
-    warning by `HybridMuonAdamW` (a dead routing entry — design §3.4 validator
-    rule, the lion/HybridMuonAdamW analogue of the muP zero-match warning).
+    A policy whose ``include`` / ``exclude`` list matches ZERO parameters is
+    surfaced as a warning by `HybridMuonAdamW` (a likely typo or renamed module).
 
     Parameters
     ----------
     exclude_name_patterns : tuple[str, ...]
         Case-insensitive regex patterns. If a 2D parameter's name matches any
         of these (and no ``include`` entry overrides it), it is excluded from
-        Muon. The v1 defaults are kept verbatim.
+        Muon.
     include : tuple[str, ...]
-        Explicit module-name substrings that FORCE a 2D parameter onto Muon,
+        Explicit module-name substrings that force a 2D parameter onto Muon,
         overriding ``exclude_name_patterns`` (but not ``exclude``). Empty by
-        default (pure-regex, v1-identical behaviour).
+        default.
     exclude : tuple[str, ...]
-        Explicit module-name substrings that FORCE a parameter onto AdamW,
+        Explicit module-name substrings that force a parameter onto AdamW,
         taking precedence over everything else. Empty by default.
-
-    Attributes
-    ----------
-    exclude_name_patterns : tuple[str, ...]
-        Regex patterns used to filter out parameters that should *not* be
-        optimized by Muon. Typically includes biases, LayerNorm/BatchNorm
-        parameters, embeddings, and output heads.
-    include : tuple[str, ...]
-        Explicit module-name substrings forcing Muon.
-    exclude : tuple[str, ...]
-        Explicit module-name substrings forcing AdamW.
     """
 
     exclude_name_patterns: tuple[str, ...] = (
@@ -82,21 +61,8 @@ class MuonParamPolicy:
         """Return whether a parameter should be optimized by Muon.
 
         Applies the selection order documented on the class: 2D/trainable gate,
-        explicit ``exclude`` (forces AdamW), explicit ``include`` (forces Muon,
-        overriding the regexes), then the broad ``exclude_name_patterns``
-        defaults.
-
-        Parameters
-        ----------
-        name : str
-            Parameter name (from ``named_parameters()``).
-        param : nn.Parameter
-            Parameter tensor.
-
-        Returns
-        -------
-        bool
-            True if the parameter should go to Muon, False otherwise.
+        explicit ``exclude``, explicit ``include``, then the broad
+        ``exclude_name_patterns`` defaults.
         """
         if not param.requires_grad:
             return False
@@ -308,22 +274,9 @@ class HybridMuonAdamW(Optimizer):
     def _warn_dead_routing(policy: MuonParamPolicy, names: Sequence[str]) -> None:
         """Warn when an explicit ``include`` / ``exclude`` token matches no parameter.
 
-        The lion/HybridMuonAdamW routing analogue of the muP zero-match
-        validator (FD §3.4 696-699; design §3.4 validator rule): an explicit
-        module-name token that matches ZERO parameter names is a DEAD routing
-        entry — a likely typo or a renamed module — and is surfaced loudly
-        rather than silently ignored (v1's broad regexes never had this safety
-        net). No-op when the policy carries no explicit lists. A staticmethod so
-        the validator can be exercised WITHOUT constructing the optimizer (whose
-        internal ``torch.optim.Muon`` needs torch >= 2.9).
-
-        Parameters
-        ----------
-        policy : MuonParamPolicy
-            The routing policy whose explicit include/exclude lists to check.
-        names : Sequence[str]
-            Every parameter name (``named_parameters()`` keys) the optimizer
-            received.
+        A token matching zero parameter names is likely a typo or renamed module.
+        A staticmethod so the validator can be exercised without constructing the
+        optimizer (whose internal ``torch.optim.Muon`` needs torch >= 2.9).
         """
         for label, tokens in (("include", policy.include), ("exclude", policy.exclude)):
             for token in tokens:
@@ -338,20 +291,10 @@ class HybridMuonAdamW(Optimizer):
     def _sync_lrs_from_wrapper(self) -> None:
         """Synchronize internal optimizer learning rates from wrapper param groups.
 
-        Torch schedulers update the learning rate stored in ``self.param_groups`` of this
-        wrapper optimizer. This method propagates that base learning rate to the internal
-        Muon and AdamW optimizers.
-
-        Notes
-        -----
-        The wrapper treats ``self.param_groups[0]["lr"]`` as a *base LR* and applies
-        constant ratios computed at initialization time:
-
-        - ``lr_muon  = base_lr * self._lr_ratio_muon``
-        - ``lr_adamw = base_lr * self._lr_ratio_adamw``
-
-        This allows schedulers like OneCycleLR to work unchanged while preserving a fixed
-        ratio between the Muon and AdamW learning rates when overrides are provided.
+        Torch schedulers update ``self.param_groups[0]["lr"]`` on this wrapper; this
+        propagates it to Muon/AdamW as ``base_lr * self._lr_ratio_{muon,adamw}``, so
+        schedulers like OneCycleLR work unchanged while preserving the fixed ratio
+        between the two learning rates.
         """
         base_lr = float(self.param_groups[0]["lr"])
         lr_muon = base_lr * self._lr_ratio_muon
@@ -366,17 +309,8 @@ class HybridMuonAdamW(Optimizer):
     def step(self, closure: Callable[[], Any] | None = None) -> Any:
         """Perform a single optimization step.
 
-        Parameters
-        ----------
-        closure : Callable[[], Any] | None, optional
-            A callable that re-evaluates the model and returns a value (typically
-            the loss). If provided, it is executed once under ``enable_grad()``
-            and its return value is propagated.
-
-        Returns
-        -------
-        Any
-            The value returned by ``closure`` if provided; otherwise ``None``.
+        ``closure``, if provided, is executed once under ``enable_grad()`` and its
+        return value is propagated (typically the loss).
         """
         loss: Any = None
         if closure is not None:
@@ -391,25 +325,12 @@ class HybridMuonAdamW(Optimizer):
         return loss
 
     def zero_grad(self, set_to_none: bool = True) -> None:
-        """Clear gradients of all optimized parameters.
-
-        Parameters
-        ----------
-        set_to_none : bool, optional
-            Whether to set gradients to None instead of zeroing in place.
-        """
+        """Clear gradients of all optimized parameters."""
         self.muon.zero_grad(set_to_none=set_to_none)
         self.adamw.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the state of the optimizer.
-
-        Returns
-        -------
-        dict
-            A dictionary containing state for both internal optimizers and
-            the wrapper optimizer metadata needed by schedulers.
-        """
+        """Return the state of the optimizer (both internal optimizers plus wrapper metadata)."""
         return {
             "wrapper": super().state_dict(),
             "muon": self.muon.state_dict(),
@@ -419,13 +340,7 @@ class HybridMuonAdamW(Optimizer):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load the optimizer state.
-
-        Parameters
-        ----------
-        state_dict : dict[str, Any]
-            State dictionary as produced by :meth:`state_dict`.
-        """
+        """Load the optimizer state, as produced by :meth:`state_dict`."""
         if "wrapper" in state_dict:
             super().load_state_dict(state_dict["wrapper"])
 
@@ -437,42 +352,17 @@ class HybridMuonAdamW(Optimizer):
 
     @property
     def muon_param_names(self) -> list[str]:
-        """Return names (or synthetic names) of Muon-optimized parameters.
-
-        Returns
-        -------
-        list[str]
-            Parameter names (from ``named_parameters()``) or synthetic names if
-            the optimizer was created from ``parameters()``.
-        """
+        """Return names (or synthetic names) of Muon-optimized parameters."""
         return list(self._muon_names)
 
     @property
     def adamw_param_names(self) -> list[str]:
-        """Return names (or synthetic names) of AdamW-optimized parameters.
-
-        Returns
-        -------
-        list[str]
-            Parameter names (from ``named_parameters()``) or synthetic names if
-            the optimizer was created from ``parameters()``.
-        """
+        """Return names (or synthetic names) of AdamW-optimized parameters."""
         return list(self._adamw_names)
 
 
 def _looks_like_named_params(items: Sequence[Any]) -> bool:
-    """Heuristically determine whether an iterable looks like named parameters.
-
-    Parameters
-    ----------
-    items : Sequence[Any]
-        Materialized sequence passed into the optimizer.
-
-    Returns
-    -------
-    bool
-        True if items look like ``(name, Parameter)`` pairs, False otherwise.
-    """
+    """Heuristically determine whether an iterable looks like named parameters."""
     first = items[0]
     if not isinstance(first, tuple) or len(first) != 2:
         return False

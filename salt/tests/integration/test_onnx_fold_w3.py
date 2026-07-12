@@ -1,35 +1,4 @@
-"""End-to-end gates for the plan-29 W3 folded ONNX path — the HARD reduces (design §6, §8 W3 row).
-
-W3 folds the TWO hardest export reduces into the executor-traced forward:
-
-- ``VertexUnionFind`` folds ``reduces._bind_vertex_union_find`` — the
-  ``@torch.jit.script`` union-find (``get_node_assignment_jit`` +
-  ``mask_fill_flattened`` + ``.reshape(-1).char()``) now runs INSIDE
-  ``executor.run`` instead of the post-executor reduce loop (R1, the sharpest
-  fold).
-- ``MaskFormerObject`` folds BOTH ``_bind_leading_object`` + ``_bind_object_index``
-  into ONE node: a single ``get_maskformer_outputs`` call (null-suppression + pT
-  reorder) emitting BOTH the leading-regression (float32 global) and the
-  object-index (int8 per-token) leaves (collapsing the two reduces that each
-  re-run it). Declares ALL cross-node requires (R4), clones before the in-place
-  mutate (R4), implements ``derived_width`` for the index collapse (R6).
-
-The HARD CONSTRAINT (design §8 W3 row): the LEGACY reduce path stays
-BITWISE-identical (the W0 oracle shas) and the FOLDED outputs are bitwise-equal
-to the legacy reduces on the SAME weights (int8 exact incl L=0 + zero-token /
-fake-pad-track edges; floats 1e-6).
-
-union_find_outcome=FOLDED (the byte-diff finding): the folded VertexIndex ONNX is
-NOT byte-identical to the legacy reduce export, BUT the difference is PURELY the
-auto-generated node-NAME strings (the deeper executor call frame names the
-scripted subgraph's nodes differently). The graphs are structurally identical —
-same node count, same op-type histogram, same op-type SEQUENCE — and the int8
-union-find outputs compare EXACTLY across L=0..N. Per the §6.4 gate
-("check_onnx-exact AND ordered output_names/dtypes/dynamic_axes identical" when
-the byte-diff is fragile), the @torch.jit.script union-find traces IDENTICALLY
-inside ``executor.run``; the fold holds. This file pins that finding
-(``test_vertex_union_find_op_sequence_identical_to_legacy``).
-"""
+"""End-to-end gates for the plan-29 W3 folded ONNX path — the HARD reduces (design §6, §8 W3 row)."""
 
 from __future__ import annotations
 
@@ -114,11 +83,9 @@ def _mf_export_cfg() -> ExportConfig:
 
 
 
-# ---------------------------------------------------------------------------
 # GO (W4): the FOLDED export contract matches the W0 oracle (the legacy reduce
 # path is RETIRED — the folded conversion nodes are the SOLE path; the legacy
 # equivalence is captured in the W0 oracle JSON these tests assert against).
-# ---------------------------------------------------------------------------
 
 _LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
 _N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
@@ -177,12 +144,10 @@ def test_vertex_folded_check_onnx_agrees_including_zero_tokens(vertex):
     assert result.n_cases == 2 * len(grid)
 
 
-# ---------------------------------------------------------------------------
 # MaskFormerObjects: ONE node folds BOTH legacy reduces (leading_object +
 # object_index). The legacy reference is the W0 oracle JSON; self-consistency
 # (torch == ort) is NaN-aware because the random decoder weights yield a NaN
 # leading_object by design (v1 null-suppression semantics).
-# ---------------------------------------------------------------------------
 
 
 def _build_maskformer_folded(tmp_path):
@@ -247,13 +212,7 @@ def test_maskformer_folded_contract_matches_oracle(maskformer):
 
 
 def test_maskformer_folded_torch_vs_ort_nan_aware(maskformer):
-    """torch == onnxruntime, NaN-aware, incl L=0 — the folded node traces correctly.
-
-    The random decoder weights yield all-null/all-PV jets -> the leading_object
-    float leaf is NaN by design (v1 null-suppression semantics), so the comparison
-    is NaN-aware (equal_nan=True, 1e-4 float / int8 exact). The int8 HadronIndex is
-    NaN-free and bitwise-exact across L=0..N.
-    """
+    """torch == onnxruntime, NaN-aware, incl L=0 — the folded node traces correctly."""
     adapter = maskformer.folded.adapter
     session = make_session(maskformer.folded.onnx_path)
     names = adapter.output_names
@@ -277,12 +236,10 @@ def test_maskformer_folded_torch_vs_ort_nan_aware(maskformer):
             )
 
 
-# ---------------------------------------------------------------------------
 # The TWO-NODE MaskFormer split (USER DESIGN 2026-06-22): the MaskFormerObjects
 # reconstruction node exposes the per-vertex leaves; the MFLeadVertexDecorator
 # reads them and emits jet-level scalars. End-to-end ONNX export (no oracle —
 # the decorator is a NEW capability, unit-tested separately in tests/unit).
-# ---------------------------------------------------------------------------
 
 
 def _build_two_node_mf(tmp_path):
@@ -331,13 +288,7 @@ def _build_two_node_mf(tmp_path):
 
 @pytest.fixture(scope="module")
 def two_node_mf(tmp_path_factory):
-    """The two-node MaskFormer export (reconstruction node + lead-vertex decorator).
-
-    Returns
-    -------
-    ExportResult
-        The exported two-node chain.
-    """
+    """The two-node MaskFormer export (reconstruction node + lead-vertex decorator)."""
     return _build_two_node_mf(tmp_path_factory.mktemp("two_node_mf"))
 
 
@@ -357,14 +308,7 @@ def test_two_node_mf_export_contract(two_node_mf):
 
 
 def test_two_node_mf_traces_and_runs_including_zero_tokens(two_node_mf):
-    """The exported two-node chain runs in onnxruntime across L=0..N (the decorator is trace-safe).
-
-    No legacy oracle (the decorator is a NEW capability — unit-tested in
-    tests/unit/outputs/test_hard_reduce_nodes_w3.py); here we assert the full chain
-    traces + runs: the per-token HadronIndex sizes to the constituent count and the
-    two jet-level scalars are finite-or-NaN (well-defined, never raising) at every
-    sequence length including the L=0 zero-token jet.
-    """
+    """The exported two-node chain runs in onnxruntime across L=0..N (the decorator is trace-safe)."""
     session = make_session(two_node_mf.onnx_path)
     names = two_node_mf.adapter.output_names
     gen = torch.Generator().manual_seed(11)
@@ -382,14 +326,7 @@ def test_two_node_mf_traces_and_runs_including_zero_tokens(two_node_mf):
 
 
 class _DecoratorOnnxWrapper(nn.Module):
-    """Wrap MFLeadVertexDecorator.forward as a 2-tensor-in / N-scalar-out module for export.
-
-    Drives the decorator's selection math directly (class_probs + regression in,
-    the configured jet-level scalars out) so the NEW capability's NON-NaN selection
-    path can be exercised through onnxruntime with CONTROLLED inputs — the full
-    two-node fixture only ever hits the all-NaN path with random decoder weights
-    (R1 LOW: the non-NaN selection was ONNX-untested in the repo before this).
-    """
+    """Wrap MFLeadVertexDecorator.forward as a 2-tensor-in / N-scalar-out module for export."""
 
     def __init__(self, decorator: MFLeadVertexDecorator) -> None:
         super().__init__()
@@ -407,16 +344,7 @@ class _DecoratorOnnxWrapper(nn.Module):
 
 
 def test_lead_vertex_decorator_onnx_reproduces_non_nan_selection(tmp_path):
-    """The decorator's NON-NaN selection survives ONNX export (R1 LOW coverage pin).
-
-    The two-node fixture's random decoder weights only ever yield all-null/all-PV
-    jets (NaN lead vertex), so the only NEW capability was ONNX-verified on the NaN
-    path alone. Here we export the decorator math STANDALONE and drive onnxruntime
-    with a controlled input where v2 is the highest-pT non-PV non-null vertex —
-    onnxruntime must reproduce the eager selection (pt=7.0, mass=70.0), proving the
-    masked-argmax-over-(-inf) + torch.where(NaN) trace is selection-correct, not just
-    finite-or-NaN. A second all-PV row must still come back NaN through ORT.
-    """
+    """The decorator's NON-NaN selection survives ONNX export (R1 LOW coverage pin)."""
     dec = MFLeadVertexDecorator(
         source="outputs.objects.vertices_class_probs",
         outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 2},
@@ -467,15 +395,7 @@ def test_lead_vertex_decorator_onnx_reproduces_non_nan_selection(tmp_path):
 
 
 def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
-    """G5 render: the folded MaskFormer config renders the onnx_export card + the W3 nodes.
-
-    The static ONNX plan wiring the reconstruction node + the lead-vertex decorator
-    + the OnnxExportSink renders (a) an ``onnx_export (OnnxExportSink)`` card with NO
-    ``<sinks>`` sentinel, (b) the ``maskformer_objects`` reconstruction node + the
-    ``mf_lead_vertex`` decorator node on-graph, and (c) the node->node edge
-    (reconstruction -> decorator) the decorator's demand creates — proving the
-    decorator's demand keeps the reconstruction node alive (design §7 render payoff).
-    """
+    """G5 render: the folded MaskFormer config renders the onnx_export card + the W3 nodes."""
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
@@ -519,13 +439,7 @@ def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
 
 
 def test_two_node_mf_object_index_equals_single_node_fold(two_node_mf, maskformer):
-    """The two-node object_index is bitwise-equal to the single-node fold (same reconstruction).
-
-    Splitting reconstruction from decoration must NOT perturb the object_index parity:
-    the HadronIndex int8 leaf the two-node chain emits is the SAME tensor the
-    single-node ``MaskFormerObjects`` fold emits across L=0..N (both fold the legacy
-    ``object_index`` math, captured in the W0 oracle).
-    """
+    """The two-node object_index is bitwise-equal to the single-node fold (same reconstruction)."""
     s_two = make_session(two_node_mf.onnx_path)
     s_single = make_session(maskformer.folded.onnx_path)
     two_names = two_node_mf.adapter.output_names

@@ -1,13 +1,9 @@
 """Unit tests for the modular generator ``Pipeline`` + contract validator.
 
-Covers (design §1.4, §1.6):
-  * contract ordering -- inserter-before-Tracks raises ``RecipeError``;
-  * field-level ``requires`` resolution;
-  * duplicate-producer + undeclared-mutation + self-cycle + no-writer errors;
-  * jsonargparse ``class_path`` / ``init_args`` load + end-to-end run to a
-    written H5 (the plan's done-criterion).
-
-These are additive; the 23 engine tests in ``test_engine.py`` stay green.
+Covers contract ordering (inserter-before-Tracks raises ``RecipeError``),
+field-level ``requires`` resolution, duplicate-producer / undeclared-mutation /
+self-cycle / no-writer errors, and jsonargparse ``class_path``/``init_args``
+load + end-to-end run to a written H5.
 """
 
 from __future__ import annotations

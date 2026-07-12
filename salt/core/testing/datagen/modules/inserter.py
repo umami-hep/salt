@@ -3,15 +3,15 @@
 It produces the ``truth_hadrons`` object group (real ``barcode`` ids + a
 ``flavour`` object-class label) AND injects the matching
 ``ftagTruthParentBarcode`` link field into the pre-existing ``tracks`` array,
-reusing the FIXED ``engine._resolve_link`` semantics (design §2.3 / fix #1+#2).
+reusing ``engine._resolve_link``.
 
-Critical wiring (fix #1): ``_resolve_link(rng, schema, data, g, f, flags)`` where
+Critical wiring: ``_resolve_link(rng, schema, data, g, f, flags)`` where
 ``g`` is the SOURCE-group GroupSpec (the resolver does ``src = data[g.name]``
 internally) and ``f`` is the ``LinkField`` that lives INSIDE that source group's
 ``.fields`` -- NOT a free-standing/hand-built link field, and NOT the structured
 array.
 
-Critical typing (fix #2): every field -- including the barcode ``id`` and the
+Critical typing: every field -- including the barcode ``id`` and the
 ``ftagTruthParentBarcode`` ``link`` -- is routed through ``parse_schema`` (hence
 ``_parse_field``), so they default to ``'i4'`` (32-bit int). We NEVER hand-build
 ``LinkField`` / ``IdField`` / ``GroupSpec`` (the bare dataclasses default ``f4``).
@@ -55,7 +55,7 @@ class TruthHadronInserter(GenModule):
         self._hadron_fields = resolve_fields(hadron_fields)
         if references is None:
             references = f"{hadron_name}.barcode"
-        # Hold DICT-FORM specs only (fix #2). Parsed via parse_schema in __call__.
+        # Hold DICT-FORM specs only. Parsed via parse_schema in __call__.
         self._hadron_dict = {
             "name": hadron_name,
             "kind": "constituent",
@@ -84,8 +84,8 @@ class TruthHadronInserter(GenModule):
     def _build_schema(self, data):
         # Reconstruct the existing tracks group's dict-form field specs, append
         # the link field, and parse the 2-group schema. parse_schema routes the
-        # barcode id + the link through _parse_field (i4 default, fix #2) and runs
-        # _propagate_required_match_min_valid (the FIXED min_valid>=1 semantics).
+        # barcode id + the link through _parse_field (i4 default) and runs
+        # _propagate_required_match_min_valid (min_valid>=1 semantics).
         track_fields = field_dicts_from_array(data[self.track_name])
         track_fields.append(self._link_dict)
         tracks_prime = {
@@ -126,8 +126,8 @@ class TruthHadronInserter(GenModule):
             data[self.track_name], self.link_field, np.dtype(link.dtype)
         )
 
-        # 3. resolve the link with the CORRECT signature (fix #1):
-        #    g = source GroupSpec (resolver does src = data[g.name]); f = its LinkField.
+        # 3. resolve the link: g = source GroupSpec (resolver does src = data[g.name]);
+        #    f = its LinkField.
         data_slice = {self.hadron_name: hads, self.track_name: tracks_widened}
         engine._resolve_link(rng, schema, data_slice, track_group, link, self.flags or {})
 

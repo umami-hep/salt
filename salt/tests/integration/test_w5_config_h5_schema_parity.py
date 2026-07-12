@@ -1,24 +1,4 @@
-"""Per-config gate — dumb ``outputs:``-section H5 column schema == legacy TaskWriter schema.
-
-Each migrated config's dumb `H5OutputSink` (driven by its top-level ``outputs:``
-section) must reproduce the legacy `TaskWriter` H5 column schema (names + dtype +
-ORDER) for the families it serialises — classification (global + per-token probs) +
-regression. The legacy schema is `task.output_names(run_name)` per task head (the
-authority); the section schema is the sink's resolved `OutputColumn` table. This is a
-STATIC, data-free gate (no run): it loads each config through the run-free CLI (which
-composes + binds the ``outputs:`` section onto the sink), resolves the section columns,
-and asserts per-stream column-name + dtype equality against the legacy
-`task.output_names` of every NON-DEFERRED head.
-
-W34.4d re-point: the ``regression`` / ``regression_gaussian`` configs were migrated OFF
-the (now-removed) auto-collect path onto the ``outputs:`` section + dumb sinks; this
-gate now cross-checks the SECTION schema (not the producer-discovery schema) against the
-legacy authority. The classification family is gated equivalently by the cutover34 tests
-(test_w34_outputs_section.py / test_w34_regression_cutover.py / test_w34_gaussian_cutover.py).
-
-DEFERRED families (excluded, by design — no H5 conversion in scope): vertexing
-(VertexIndex; the head demand-prunes from TEST) and MaskFormer (W6).
-"""
+"""Per-config gate — dumb ``outputs:``-section H5 column schema == legacy TaskWriter schema."""
 
 from __future__ import annotations
 
@@ -55,11 +35,7 @@ _DEFERRED_TASK_TYPES = {"VertexingTaskModule"}
 
 
 def _legacy_columns(modules, run_name: str) -> dict[str, list[tuple[str, str]]]:
-    """The legacy TaskWriter H5 schema per stream: {stream: [(column, dtype), ...]}.
-
-    Mirrors `TaskWriter.columns`: each task head's `output_names(run_name)`, grouped
-    by stream in module declaration order. Deferred (vertexing) heads excluded.
-    """
+    """The legacy TaskWriter H5 schema per stream: {stream: [(column, dtype), ...]}."""
     out: dict[str, list[tuple[str, str]]] = {}
     for module in modules.values():
         pred_key = getattr(module, "pred_key", None)
@@ -94,13 +70,7 @@ def _section_columns(sink, run_name: str) -> dict[str, list[tuple[str, str]]]:
 
 @pytest.mark.parametrize("config_name", sorted(MIGRATED))
 def test_section_h5_schema_matches_legacy_taskwriter(config_name):
-    """The migrated config's dumb-section H5 schema == legacy TaskWriter schema (per stream).
-
-    The run-free CLI composes + binds the ``outputs:`` section onto the sink (so the dumb
-    sink resolves its columns from the section manifest, NOT producer discovery — the
-    auto-collect path was removed in W34.4d). The resolved section schema must equal the
-    legacy ``task.output_names`` of every NON-DEFERRED head.
-    """
+    """The migrated config's dumb-section H5 schema == legacy TaskWriter schema (per stream)."""
     from salt.core.cli import _as_sink_node, _static_writer_sink_callback
 
     config = CONFIG_DIR / f"{config_name}.yaml"

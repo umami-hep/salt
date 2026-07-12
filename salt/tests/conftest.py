@@ -1,17 +1,4 @@
-"""Pytest configuration for the salt test suite.
-
-Integration tests — the gate harnesses plus anything that builds/runs a full
-model or reads a real data file — live under ``salt/tests/integration/`` and/or
-carry the ``@pytest.mark.integration`` marker. They are **GPU-only by default**:
-
-* a plain ``pytest`` on a CPU box runs the fast unit suite and *skips* the
-  integration tests;
-* on a machine with a CUDA device they run automatically;
-* ``pytest --run-integration`` forces them even on CPU.
-
-So day-to-day ``pytest`` (or ``pytest salt/tests/unit``) stays fast, and the
-heavy parity / ONNX / training gates only fire where they belong.
-"""
+"""Pytest configuration for the salt test suite."""
 
 from __future__ import annotations
 
@@ -22,24 +9,7 @@ from salt.core.config_utils import disable_logger_in_config  # noqa: F401
 
 @pytest.fixture(scope="session", autouse=True)
 def _warm_salt2cli_model_resolution():
-    """Absorb the first run-free ``Salt2CLI`` parse's model-resolution failure.
-
-    Empirically (see the plan-35 investigation), the FIRST run-free
-    ``Salt2CLI(... run=False)`` parse in a test process fails to validate the
-    ``model:`` block ("model does not validate against any of the Union
-    subtypes"), but the attempt itself "warms" jsonargparse's first-time
-    resolution of the ``salt.core.SaltModule`` subclass typehint, so EVERY
-    subsequent parse in the process succeeds. It only triggers once the test
-    collection has imported the sibling test modules (``test_main`` alone never
-    trips it), and which test pays the cost depends on the pytest-randomly
-    schedule — hence the intermittent CI flake on whichever ``make_cli``-based
-    test happens to run first. Production never imports the test modules and
-    parses once per fresh process, so it is unaffected (``salt2 graph validate``
-    and the GPU integration suite all pass). Do one throwaway parse here, at
-    session start, so the real tests always run warm. ``Salt2CLI(run=False)``
-    raises ``SystemExit`` on a parse error, so catch that too — the resolution
-    is warmed regardless of how the throwaway parse ends.
-    """
+    """Absorb the first run-free ``Salt2CLI`` parse's model-resolution failure."""
     try:
         from salt.core.main import CONFIG_DIR, Salt2CLI
 

@@ -1,28 +1,4 @@
-"""Small deterministic v1 GN2 builder for the forward-parity gate (plan 04).
-
-Shared by the wrapper unit tests (stage 2) and the parity harness (stage 3).
-Construction kwargs follow the stage-1 recipe exactly — every non-obvious
-kwarg is load-bearing and commented with its v1 citation.
-
-Determinism notes (recipe §3):
-
-- Importing ``salt.utils.inputs`` seeds torch to 42 as an import side effect
-  (inputs.py:134-135) — `build_test_gn2` therefore re-seeds explicitly AFTER
-  imports, before parameter init.
-- ``attn_type="torch-math"`` picks the deterministic SDPBackend.MATH kernel
-  at CONSTRUCTION (attention.py:212-220); it matches v1 test/ONNX semantics
-  (modelwrapper.py:331-335) and avoids the flash-varlen packing path even on
-  a CUDA+flash machine.
-- The batch is generated from a local ``torch.Generator`` (no global-RNG
-  call-order dependence) with real padding (mask-polarity bugs must be
-  excitable), one jet with exactly one valid track, and one jet with ZERO
-  valid tracks (production edge case: pooling's all-padded path and the
-  zero-edge vertexing contribution).
-- The norm dict is written by `write_parity_norm_dict` with DISTINCT
-  per-variable constants — salt's ``write_dummy_norm_dict`` (mean=1/std=1
-  for every variable) made per-variable constant misordering invisible
-  (stage-4 critic finding: rolled constants gave a false PASS).
-"""
+"""Small deterministic v1 GN2 builder for the forward-parity gate (plan 04)."""
 
 from __future__ import annotations
 
@@ -81,30 +57,7 @@ ELECTRON_VARIABLES = [  # GN2e-style second sequence stream (subset of inputs.py
 
 
 def write_parity_norm_dict(nd_path: Path, cd_path: Path) -> None:
-    """Write the parity norm/class dicts with DISTINCT per-variable constants.
-
-    salt's ``write_dummy_norm_dict`` (inputs.py:348-357) gives EVERY variable
-    ``mean=1.0, std=1.0`` — under uniform constants, rolling the means/stds
-    across variables is the identity, so a per-variable field-order mismatch
-    between the norm dict and the input columns passes the gate silently
-    (stage-4 critic finding: demonstrated false PASS), and ``std=1.0`` hides
-    any scale-wiring difference. Distinct constants make both excitable:
-
-    - ``mean_i = 0.1 * (i + 1)`` — nonzero for every variable, so skipping
-      the normaliser entirely stays caught (negative control 2);
-    - ``std_i = 1.0 + 0.05 * (i + 1)`` — non-unit, so scale wiring is
-      exercised, and bounded away from 0 (InputNorm rejects zero stds);
-
-    indexed by the variable's position in the stream's variable list.
-
-    Parameters
-    ----------
-    nd_path : Path
-        Output path for the normalisation dictionary YAML.
-    cd_path : Path
-        Output path for the class dictionary YAML (same content as
-        ``write_dummy_norm_dict``'s non-GN3 class dict).
-    """
+    """Write the parity norm/class dicts with DISTINCT per-variable constants."""
     sd = {
         stream: {
             v: {"mean": round(0.1 * (i + 1), 6), "std": round(1.0 + 0.05 * (i + 1), 6)}
@@ -141,49 +94,7 @@ def build_test_gn2(
     variables: dict[str, list[str]] | None = None,
     norm_dict: Path | str | None = None,
 ) -> ModelWrapper:
-    """Construct a small v1 GN2 `ModelWrapper` directly (no CLI), in eval mode.
-
-    Parameters
-    ----------
-    norm_dir : Path | str
-        Writable directory for the parity norm/class dicts. Constants are
-        DISTINCT per variable with nonzero means (`write_parity_norm_dict`),
-        so missing-norm, constant-order, and scale wiring are all caught.
-    embed_dim : int, optional
-        Encoder embedding width, by default 16 (GN2 nominal: 256).
-    out_dim : int, optional
-        Encoder output width, by default 16 (GN2 nominal: 128).
-    num_layers : int, optional
-        Encoder layers, by default 2.
-    num_heads : int, optional
-        Attention heads, by default 2.
-    seed : int, optional
-        ``torch.manual_seed`` applied right before construction (parameter
-        init), by default 42.
-    with_electrons : bool, optional
-        Add a second sequence stream (GN2e-style ``electrons`` init net,
-        same recipe as ``tracks``), by default False. Two streams make the
-        multi-stream Concat order / per-stream mask dict order genuinely
-        excitable — with a single stream they are vacuous (stage-4 critic
-        finding: a reversed single-stream Concat passes trivially).
-    variables : dict[str, list[str]] | None, optional
-        TEST-ONLY override of the per-stream input variable lists (must
-        carry ``jets`` and ``tracks``), by default None — the fixture
-        `JET_VARIABLES`/`TRACK_VARIABLES`. Added for the M3 W2 gate (plan
-        06): the real open-data sample names the IP3D significances
-        ``lifetimeSigned*``; the model is width-matched as long as the list
-        LENGTHS match the defaults. Ignores `with_electrons`.
-    norm_dict : Path | str | None, optional
-        TEST-ONLY existing norm-dict YAML used INSTEAD of the parity dict
-        written into `norm_dir` (which is still written, for callers reading
-        the class dict), by default None. Must cover every variable in
-        `variables`. Added for the M3 W2 gate (real open-data norm dict).
-
-    Returns
-    -------
-    ModelWrapper
-        The constructed v1 model, switched to ``eval()``.
-    """
+    """Construct a small v1 GN2 `ModelWrapper` directly (no CLI), in eval mode."""
     norm_dir = Path(norm_dir)
     nd_path = norm_dir / "norm_dict.yaml"
     cd_path = norm_dir / "class_dict.yaml"
@@ -324,48 +235,7 @@ def make_gn2_batch(
     seed: int = 123,
     n_electrons: int = 0,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """Build a deterministic GN2 batch with real padding.
-
-    Mirrors the v1 dataset contract (datasets.py:435-441, 448-559):
-    ``inputs = {"jets": [B, 2] f32, "tracks": [B, T, 19] f32}``,
-    ``pad_masks = {"tracks": [B, T] bool}`` with True = padded
-    (datasets.py:523), padded input positions ZEROED (datasets.py:524),
-    valid tracks first, jet 0 with EXACTLY one valid track (recipe edge
-    case), and — for ``batch_size >= 2`` — jet 1 with ZERO valid tracks
-    (production edge case: pooling's all-padded ONNX branch, pooling.py:59-63,
-    and a zero-edge per-jet vertexing contribution; verified bitwise-safe by
-    the stage-4 critic probe).
-
-    With ``n_electrons > 0`` a second sequence stream is added AFTER tracks
-    (matching the two-stream fixture's init_nets order — the batch dict
-    order must match it, since v1's encoder concatenates dict values in
-    insertion order, transformer.py:684-686): ``inputs["electrons"]``
-    ``[B, T_e, 5]`` and ``pad_masks["electrons"]``, with jet 2 (when present)
-    forced to ZERO electrons. Electron tensors are drawn AFTER all track
-    draws, so the tracks/jets content is unchanged vs ``n_electrons=0``.
-
-    Parameters
-    ----------
-    batch_size : int, optional
-        Number of jets, by default 6.
-    n_tracks : int, optional
-        Track positions per jet, by default 10.
-    p_valid : float, optional
-        Probability a position is valid, by default 0.6 — so padded
-        positions exist and mask-polarity bugs are excitable.
-    seed : int, optional
-        Seed for the local generator, by default 123.
-    n_electrons : int, optional
-        Electron positions per jet (0 disables the stream), by default 0.
-
-    Returns
-    -------
-    tuple[dict[str, Tensor], dict[str, Tensor]]
-        ``(inputs, pad_masks)``. Callers must CLONE both dicts (and never
-        share them between two forwards): v1's InputNorm rebinds the inputs
-        dict's keys (inputnorm.py:103-106) and the encoder ADDS a
-        ``"REGISTERS"`` key to the pad-mask dict (transformer.py:777,785).
-    """
+    """Build a deterministic GN2 batch with real padding."""
     gen = torch.Generator().manual_seed(seed)
     jets = torch.randn(batch_size, len(JET_VARIABLES), generator=gen)
     tracks = torch.randn(batch_size, n_tracks, len(TRACK_VARIABLES), generator=gen)
@@ -395,19 +265,7 @@ def v1_forward(
     inputs: dict[str, Tensor],
     pad_masks: dict[str, Tensor],
 ) -> dict:
-    """Run the v1 reference forward on CLONED dicts (inference, no labels).
-
-    Equivalent to v1's test_step path (modelwrapper.py:318-338) for a
-    torch-math model: ``wrapper(inputs, pad_masks, None)`` under
-    ``no_grad``. Fresh dicts with cloned tensors per call — see
-    `make_gn2_batch` for why sharing dicts between forwards is wrong.
-
-    Returns
-    -------
-    dict
-        The v1 preds dict: ``embed_xs``, ``global_rep``, and the nested
-        ``{stream: {task: raw_output}}`` leaves.
-    """
+    """Run the v1 reference forward on CLONED dicts (inference, no labels)."""
     with torch.no_grad():
         preds, _loss = wrapper(
             {k: v.clone() for k, v in inputs.items()},
