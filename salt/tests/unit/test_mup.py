@@ -65,11 +65,60 @@ def mup_override(tmp_path) -> Path:
     return path
 
 
-def _muP_modules(norm_dict: Path) -> dict:
-    """A GN2_muP-shaped module dict with mup embed + mup encoder (reuses the gate fixture)."""
-    from salt.tests.integration.gates_m6 import _mu1_modules  # noqa: PLC0415 - shared fixture
+# GN2_muP.yaml scaled-down dims (inlined from the retired gates_m6._mu1_modules)
+_MUP_TRACK_VARIABLES: tuple[str, ...] = ("d0", "z0SinTheta", "dphi", "deta", "qOverP")
+_MUP_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
+_MUP_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")
+_MUP_EMBED_DIM = 16
+_MUP_OUT_DIM = 8
+_MUP_NUM_HEADS = 2
+_MUP_NUM_LAYERS = 2
 
-    return _mu1_modules(norm_dict)
+
+def _muP_modules(norm_dict: Path) -> dict:
+    """A GN2_muP-shaped module dict with mup embed + mup encoder."""
+    from salt.core.nn import (  # noqa: PLC0415 - test-local fixture
+        Concat,
+        GlobalAttentionPooling,
+        LossSum,
+        Normaliser,
+        StreamEmbed,
+        TransformerEncoder,
+    )
+    from salt.core.nn.tasks import ClassificationTaskModule  # noqa: PLC0415
+
+    modules: dict = {
+        "norm": Normaliser(norm_dict=norm_dict, streams=["jets", "tracks"], global_object="jets"),
+        "track_embed": StreamEmbed(
+            stream="tracks",
+            out_dim=_MUP_EMBED_DIM,
+            dense={"hidden_layers": [_MUP_EMBED_DIM], "activation": "ReLU"},
+            context=["normed.jets"],
+            mup=True,
+        ),
+        "concat": Concat(streams=["tracks"]),
+        "encoder": TransformerEncoder(
+            dim=_MUP_EMBED_DIM,
+            num_layers=_MUP_NUM_LAYERS,
+            out_dim=_MUP_OUT_DIM,
+            attention={"num_heads": _MUP_NUM_HEADS, "attn_type": "torch-math"},
+            dense={"activation": "ReLU"},
+            mup=True,
+        ),
+        "pool": GlobalAttentionPooling(input="encoded.seq", out="pooled.global"),
+        "jets_classification": ClassificationTaskModule(
+            stream="jets",
+            label="flavour_label",
+            class_names=list(_MUP_CLASS_NAMES),
+            input="pooled.global",
+            dense={"hidden_layers": [_MUP_OUT_DIM], "activation": "ReLU"},
+        ),
+        "loss": LossSum(),
+    }
+    for name, module in modules.items():
+        module.name = name
+    modules["loss"].narrow(LossSum.collect_loss_keys(modules))
+    return modules
 
 
 class TestRoutingValidator:
