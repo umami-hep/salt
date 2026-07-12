@@ -1157,20 +1157,37 @@ class MaskFormerMatchedLoss(nn.Module):
         (``targets.<stream>.regression``) must match — the matched L1 is element-wise
         (v1 ``batch_mae_loss`` cost, matcher.py:131).
 
+        The matched loss is FIT|VAL-only (`declare_io` is empty in TEST/ONNX), but
+        ``bind_all`` runs ``bind`` on EVERY configured module regardless of the
+        compiled mode. In a TEST/ONNX-only bind schema (``salt test`` compiles the
+        TEST plan alone) the object-regression pred/target keys are absent — the
+        regression head opts out of TEST via ``expose`` (e.g. ``[fit, val, onnx]``)
+        and the matched loss itself is pruned — so their widths never resolve
+        statically. Guard the lookup on schema presence: when either key is absent
+        the schema carries no training plan and there is nothing to validate here.
+        The width agreement is asserted at the FIT-stage bind (which compiles
+        FIT+VAL, where both keys are produced); a genuinely missing regression
+        producer in a training plan fails earlier as a planner `ConnectivityError`,
+        so this guard cannot mask a real training-mode wiring bug.
+
         Raises
         ------
         ConfigError
             If a requested regression component has mismatched pred/target widths.
         """
-        if "regression" in self.components:
-            wp = schema.width(self._reg_pred_key())
-            wt = schema.width(self._reg_tgt_key())
-            if wp != wt:
-                raise ConfigError(
-                    f"MaskFormerMatchedLoss {self.name!r}: regression prediction width {wp} != "
-                    f"target width {wt} ({self._reg_pred_key()!r} vs {self._reg_tgt_key()!r}) — "
-                    "the matched L1 is element-wise (v1 maskformer_loss.py regression cost)"
-                )
+        if "regression" not in self.components:
+            return
+        reg_pred_key, reg_tgt_key = self._reg_pred_key(), self._reg_tgt_key()
+        if reg_pred_key not in schema.widths or reg_tgt_key not in schema.widths:
+            return
+        wp = schema.width(reg_pred_key)
+        wt = schema.width(reg_tgt_key)
+        if wp != wt:
+            raise ConfigError(
+                f"MaskFormerMatchedLoss {self.name!r}: regression prediction width {wp} != "
+                f"target width {wt} ({reg_pred_key!r} vs {reg_tgt_key!r}) — "
+                "the matched L1 is element-wise (v1 maskformer_loss.py regression cost)"
+            )
 
     def _matched_regression_loss(
         self, reg_pred: Tensor, reg_tgt: Tensor, object_class: Tensor
