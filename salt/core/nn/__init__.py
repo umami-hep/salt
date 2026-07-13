@@ -21,7 +21,7 @@ from salt.core.nn.featurewise import FeaturewiseTransformation
 from salt.core.nn.from_v1 import from_v1, v1_sinks, v1_sources
 from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.nn.maskdecoder import MaskDecoder
-from salt.core.nn.maskformer_loss import MaskFormerMatchedLoss
+from salt.core.nn.maskformer_matched_loss import MaskFormerMatchedLoss
 from salt.core.nn.norm import MaskedInputNormaliser, Normaliser
 from salt.core.nn.pooling import GlobalAttentionPooling
 from salt.core.nn.posenc import PositionalEncoder
