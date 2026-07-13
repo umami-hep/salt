@@ -30,6 +30,10 @@ dependencies = [
   "onnxruntime==1.27.0",
   "onnxscript>=0.7.0",
   "puma-hep==0.5.3",
+  # hard import at salt.core module load since the MaskFormer-update wave
+  # (salt/core/nn/maskformer_loss.py) — without it every CI test job dies at
+  # conftest import (feature/modular-core pipelines red since 2026-07-10)
+  "py-lap-solver>=0.1.4",
   "rich>=15.0.0",
   "scipy>=1.18.0",
   # torch stays in the 2.12 minor: the prebuilt flash-attn wheel is built against
