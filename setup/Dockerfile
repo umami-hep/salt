@@ -51,8 +51,30 @@ RUN uv pip install --index-url https://download.pytorch.org/whl/cu126 \
 RUN uv pip install --no-deps \
     "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl"
 
+# py-lap-solver 0.1.4: no cp314 wheel (max cp312), so a source build is needed.
+# Its pyproject uses cmake.minimum-version, which scikit-build-core>=0.8 rejects
+# ("Use cmake.version instead"). Mirror the proven recipe from
+# container/salt-py314-cuda.def: pin scikit-build-core<0.8 + build deps and build
+# with --no-build-isolation, so the later dep resolve sees it already satisfied.
+# pyproject-metadata + pathspec: scikit-build-core 0.7.x runtime deps (required
+# under --no-build-isolation). pybind11[global]: CMake config files on the
+# global prefix for find_package(pybind11).
+RUN uv pip install "scikit-build-core<0.8" cmake ninja pyproject-metadata pathspec "pybind11[global]" && \
+    uv pip install --no-build-isolation --no-deps "py-lap-solver>=0.1.4"
+
 # Install dependencies (torch already satisfied above; flash already installed)
 RUN uv pip install --group dev ".[muP]"
+
+# py-lap-solver's _batched_scipy_lap C++ extension lacks DT_NEEDED for
+# libstdc++ ("undefined symbol: _ZTVN10__cxxabiv117__class_type_infoE" at
+# import), so BatchedScipyOMP (salt's default LAP solver, no fallback) fails to
+# register without preloading it. Same fix as container/salt-py314-cuda.def;
+# Ubuntu 24.04 path, safe for torch/scipy/salt.
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+
+# Fail the image build (not the downstream test jobs) if the solver is missing.
+RUN python -c "from py_lap_solver.solvers import Solvers; \
+    assert 'BatchedScipyOMP' in Solvers.get_available_solvers(), 'BatchedScipyOMP missing — libstdc++ LD_PRELOAD fix not working'"
 
 # Copy and install package (Source layer)
 COPY . .
