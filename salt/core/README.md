@@ -74,11 +74,12 @@ pin (redundant by construction):
   now detects the v1 (`ModelWrapper`) state-dict layout (`model.pool_net.*`
   keys) and raises an explicit `ConfigError` instead of a missing-keys cascade.
 
-**Regeneration recipe** (only if the frozen-oracle check is ever wanted again;
-from `provenance.json` at the pin): at commit `a9e2ac2`, run
-`generate_oracle.py` in the salt-py314 container
-(`apptainer exec --bind $PWD --bind /tmp salt-py314.sif env PYTHONPATH=$PWD
-python generate_oracle.py`) with `salt/core/configs/gn2v2-dummy.yaml`;
+**Regeneration recipe** (only if the frozen-oracle check is ever wanted again):
+`generate_oracle.py` was a throwaway script never committed — reconstruct it
+from `provenance.json` and the retired oracle test, both in git history at
+`93a29ed^` (`salt/tests/_fixtures/gn2v2_dummy_oracle/provenance.json`,
+`salt/tests/integration/test_outputs_h5_parity.py`). Parameters recorded there:
+commit `a9e2ac2`, salt-py314 container, `salt/core/configs/gn2v2-dummy.yaml`;
 synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
 `np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
 `limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
@@ -95,8 +96,8 @@ container) fixes both — afterwards `salt2` works from any directory.
 # generate a dummy training file + norm dict (copy-paste):
 python -c "
 from pathlib import Path
-from salt.tests.core.gn2_fixture import write_parity_norm_dict
-from salt.utils.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.core.testing.inputs import write_dummy_file
 Path('/tmp/v2').mkdir(parents=True, exist_ok=True)
 write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
 write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
