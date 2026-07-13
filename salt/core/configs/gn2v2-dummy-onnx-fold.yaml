@@ -21,9 +21,12 @@ model:
     jet_probs:
       class_path: salt.core.outputs.ClassProbs
       init_args: { task: jets_classification, stream: jets }
+    # distinct leaf name: the base's track_origin_probs (SeqClassProbs, the TEST
+    # H5 producer) already owns outputs.tracks.track_origin — the ONNX argmax
+    # writes its own leaf so the two producers never collide
     track_origin_index:
       class_path: salt.core.outputs.SeqClassIndex
-      init_args: { task: track_origin, stream: tracks }
+      init_args: { task: track_origin, stream: tracks, name: track_origin_index }
     pbc:
       class_path: salt.core.outputs.Combination
       init_args:
@@ -38,4 +41,4 @@ callbacks:
       outputs:
         - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
         - { key: outputs.jets.pbc, name: pbc }
-        - { key: outputs.tracks.track_origin, name: TrackOrigin, dtype: int8, per_token: true }
+        - { key: outputs.tracks.track_origin_index, name: TrackOrigin, dtype: int8, per_token: true }
