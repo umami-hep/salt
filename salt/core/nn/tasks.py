@@ -23,7 +23,8 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.modules import Dense, _reject_width_keys, _stream_len
+from salt.core.nn.dense import Dense, _reject_width_keys
+from salt.core.nn.stream_embed import _stream_len
 from salt.core.onnx.config import ExportOutput
 from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.producers import OutputField

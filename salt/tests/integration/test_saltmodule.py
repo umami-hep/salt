@@ -13,7 +13,7 @@ from torch import nn
 
 from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
 from salt.core.graph import Bundle, ConfigError, Mode
-from salt.core.nn.modules import LossGLS, LossSum
+from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
 from salt.core.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2_fixture import (

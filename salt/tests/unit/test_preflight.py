@@ -7,7 +7,7 @@ import yaml
 
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode, flatten_spec
-from salt.core.nn.modules import Normaliser
+from salt.core.nn.norm import Normaliser
 from salt.core.saltmodule import SaltModule
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources

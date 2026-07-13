@@ -12,7 +12,7 @@ from salt.core.main import (
     _has_callback_persistence_sink,
     _is_persistence_sink,
 )
-from salt.core.nn.modules import LossSum
+from salt.core.nn.losses import LossSum
 from salt.core.outputs import (
     H5OutputSink,
     OnnxExportLeaf,

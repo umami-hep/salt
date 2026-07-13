@@ -5,5 +5,5 @@ Byte-faithful copies of the v1 ``salt.utils`` helpers that production
 tree. Modules: ``array_utils`` (array helpers), ``scalers``
 (``RegressionTargetScaler``), ``union_find`` (the ONNX union-find path),
 ``file_utils`` (temp-file / S3 staging), ``mask_utils`` (MaskFormer mask/index
-helpers + reconstruction metrics).
+helpers + reconstruction metrics), ``tensor_utils`` (tensor-shape helpers).
 """

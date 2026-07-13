@@ -1,0 +1,142 @@
+"""GlobalAttentionPooling GraphModule and absorbed v1 pooling math."""
+
+from __future__ import annotations
+
+import torch
+from torch import Tensor, nn
+
+from salt.core.graph.bundle import Bundle
+from salt.core.graph.spec import (
+    IO,
+    Mode,
+    TensorSpec,
+    sym_dim,
+    unflatten_spec,
+)
+from salt.core.nn.bind import ResolvedSchema
+from salt.core.nn.featurewise import _UNNAMED
+from salt.core.nn.transformer_encoder import _SEQ_LEN
+from salt.core.utils.tensor_utils import (
+    flatten_tensor_dict,
+    masked_softmax,
+)
+
+# ---------------------------------------------------------------------------
+# pooling.py absorption (GlobalAttentionPooling math — composed by the v2
+# GlobalAttentionPooling GraphModule below)
+# ---------------------------------------------------------------------------
+
+
+class _GlobalAttentionPoolingV1(nn.Module):
+    """Global attention pooling over concatenated node embeddings.
+
+    Named with the ``V1`` suffix because the config-facing `GraphModule` below
+    is also called `GlobalAttentionPooling`; this is the inner ``nn.Module`` it
+    composes.
+
+    Parameters
+    ----------
+    input_size : int
+        Dimensionality of each node embedding feature vector.
+    """
+
+    def __init__(self, input_size: int):
+        super().__init__()
+        self.gate_nn = nn.Linear(input_size, 1)
+
+    def forward(
+        self,
+        x: dict[str, Tensor] | dict,
+        pad_mask: dict | None = None,
+    ) -> Tensor:
+        """Apply global attention pooling.
+
+        Returns
+        -------
+        Tensor
+            Pooled tensor of shape ``[B, D]``.
+        """
+        x_flat = flatten_tensor_dict(x, exclude=["objects"])
+
+        if pad_mask is not None:
+            pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
+
+        weights = masked_softmax(self.gate_nn(x_flat), pad_mask, dim=1)
+        # add padded track to avoid error in onnx model when there are no tracks in the jet
+        weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
+        x_pad = torch.zeros((x_flat.shape[0], 1, x_flat.shape[2]), device=x_flat.device)
+        weights = torch.cat([weights, weight_pad], dim=1)
+        x_flat = torch.cat([x_flat, x_pad], dim=1)
+
+        return (x_flat * weights).sum(dim=1)
+
+
+class GlobalAttentionPooling(nn.Module):
+    """Config-constructed global attention pooling, with explicit input/out ports.
+
+    Composes a fresh v1 `GlobalAttentionPooling` built at `bind`. Pools the
+    register-augmented sequence with the post-register mask order
+    streams-then-REGISTERS. Two wirings, one class:
+
+    - **With an encoder**: ``input`` is ``encoded.seq`` and `TransformerEncoder`
+      publishes ``masks.registers`` (register rows sit after every stream).
+    - **Encoder-less** (DiPS/DeepSets family, every regression config): no
+      ``encoder:`` block, so nothing produces ``masks.registers``. ``input``
+      points at ``seq.x`` and ``masks.registers`` is declared OPTIONAL — absent
+      from the plan when no producer exists, so the pad dict is just
+      ``{"seq": seq.mask}``.
+    """
+
+    def __init__(self, input: str = "encoded.seq", out: str = "pooled.global") -> None:  # noqa: A002
+        """Capture the explicit input/output ports."""
+        super().__init__()
+        self.name = _UNNAMED
+        self.input_key = input
+        self.out_key = out
+        self.pool_net: nn.Module | None = None
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare input + masks -> the pooled vector.
+
+        The input's width symbol is shared with the produced key, so the
+        pooled width resolves from the producing module's declaration.
+        """
+        del mode
+        width = sym_dim("D", self.name)
+        return IO(
+            requires=unflatten_spec({
+                self.input_key: TensorSpec(
+                    shape=("B", sym_dim("L", self.name), width), dtype="float32"
+                ),
+                "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
+                # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder path,
+                # ABSENT on the encoder-less path — the planner drops it when no
+                # module produces it, so encoder-less configs still plan-compile.
+                "masks.registers": TensorSpec(
+                    shape=("B", sym_dim("R", "registers")),
+                    dtype="bool",
+                    kind="pad_mask",
+                    optional=True,
+                ),
+            }),
+            produces=unflatten_spec({
+                self.out_key: TensorSpec(shape=("B", width), dtype="float32"),
+            }),
+        )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Build the composed v1 pooling with the inferred gate width."""
+        self.pool_net = _GlobalAttentionPoolingV1(input_size=schema.width(self.input_key))
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Pool the sequence with the (optionally register-augmented) mask dict."""
+        del mode
+        assert self.pool_net is not None, "forward before bind()"
+        x = {"seq": b.get(self.input_key)}
+        # streams-then-REGISTERS dict order is numerics-critical: pooling cats
+        # mask values in dict order. The encoder-less path has no register row,
+        # so the pad dict is just {"seq": seq.mask}.
+        pad = {"seq": b.get("seq.mask")}
+        if "masks.registers" in b:
+            pad["REGISTERS"] = b.get("masks.registers")
+        return {self.out_key: self.pool_net(x, pad_mask=pad)}

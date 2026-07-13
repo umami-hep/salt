@@ -13,15 +13,12 @@ import torch
 from torch import Tensor
 
 from salt.core.graph.spec import GraphModule
-from salt.core.nn.modules import (
-    Concat,
-    GlobalAttentionPooling,
-    MaskedInputNormaliser,
-    Normaliser,
-    StreamEmbed,
-    TransformerEncoder,
-)
+from salt.core.nn.concat import Concat
+from salt.core.nn.norm import MaskedInputNormaliser, Normaliser
+from salt.core.nn.pooling import GlobalAttentionPooling
+from salt.core.nn.stream_embed import StreamEmbed
 from salt.core.nn.tasks import ClassificationTaskModule, VertexingTaskModule
+from salt.core.nn.transformer_encoder import TransformerEncoder
 
 __all__ = ["map_v1_state_dict"]
 

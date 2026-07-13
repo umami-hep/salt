@@ -36,7 +36,7 @@ from salt.core.nn.bind import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.modules import LossGLS, LossSum
+from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.optim import HybridMuonAdamW
 
 try:
