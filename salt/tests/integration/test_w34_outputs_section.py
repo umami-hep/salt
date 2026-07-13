@@ -1,4 +1,13 @@
-"""PLAN 34 W34.2 FULL-PAYLOAD H5 PARITY GATE — outputs:-section + dumb sinks vs WriterCallback."""
+"""PLAN 34 W34.2 outputs:-section + dumb-sink eval H5 — v2 self-consistency gate.
+
+Historical note (DEL-1, plan 45): this file was the FULL-PAYLOAD H5 PARITY GATE
+diffing the outputs:-section eval H5 against the legacy ``WriterCallback``
+oracle. The legacy writers path is deleted; the byte-for-byte parity was proven
+and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, salt/core/README.md).
+What remains are the v2-only checks: the cutover34 stack runs end-to-end via the
+real CLI, and the section H5's contents/order are asserted from first principles
+(config + section manifest), not from a legacy oracle.
+"""
 
 from __future__ import annotations
 
@@ -23,14 +32,12 @@ DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
 RUN_NAME = "GN2v2_dummy"
 N_TEST = 300
-_FLOAT_TOL = 1e-6
 
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
-# plan 34 W34.3: VertexIndex is NO LONGER deferred — the vertexing get_output fold
-# mints it (H5 i8 column + ONNX int8 leaf), proven byte-for-byte here. Nothing is
-# deferred in the gn2v2-dummy cutover any more.
-DEFERRED_COLUMNS: dict[str, list[str]] = {}
+# plan 34 W34.3: VertexIndex is NOT deferred — the vertexing get_output fold
+# mints it (H5 integer column + ONNX int8 leaf). Nothing is deferred in the
+# gn2v2-dummy cutover any more.
 
 
 @pytest.fixture(scope="module")
@@ -79,26 +86,6 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def oracle_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the M4.5 ``WriterCallback`` (the v1-parity ORACLE)."""
-    out = tmp_path_factory.mktemp("w34_oracle") / "oracle.h5"
-    rc = main([
-        "test",
-        "--config",
-        str(DUMMY_CFG),
-        f"--data.test_file={data['h5']}",
-        f"--ckpt_path={ckpt}",
-        f"--data.num_test={N_TEST}",
-        f"--trainer.default_root_dir={data['dir']}",
-        f"--writers.output={out}",
-        *_overrides(data),
-    ])
-    assert rc == 0
-    assert out.exists()
-    return out
-
-
-@pytest.fixture(scope="module")
 def section_h5(data, ckpt, tmp_path_factory) -> Path:
     """Eval H5 from the PLAN 34 outputs:-section + dumb sinks (via the real CLI)."""
     out = tmp_path_factory.mktemp("w34_section") / "section.h5"
@@ -120,83 +107,45 @@ def section_h5(data, ckpt, tmp_path_factory) -> Path:
     return out
 
 
-def _drop_deferred(names: list[str], stream: str) -> list[str]:
-    deferred = set(DEFERRED_COLUMNS.get(stream, ()))
-    return [n for n in names if n not in deferred]
-
-
-def _compare_column(group: str, col: str, want: np.ndarray, got: np.ndarray) -> str | None:
-    if want.dtype != got.dtype:
-        return f"{group}.{col}: dtype {want.dtype} (oracle) != {got.dtype} (section)"
-    if want.shape != got.shape:
-        return f"{group}.{col}: shape {want.shape} (oracle) != {got.shape} (section)"
-    if np.issubdtype(want.dtype, np.floating):
-        if not np.allclose(want, got, rtol=0.0, atol=_FLOAT_TOL, equal_nan=True):
-            bad = int(np.argmax(np.abs(want.ravel() - got.ravel())))
-            return (
-                f"{group}.{col}: float values differ beyond atol={_FLOAT_TOL} — first worst "
-                f"at flat idx {bad}: oracle={want.ravel()[bad]!r} section={got.ravel()[bad]!r}"
-            )
-    elif not np.array_equal(want, got):
-        bad = int(np.argmax(want.ravel() != got.ravel()))
-        return (
-            f"{group}.{col}: int/bool values differ (exact required) — first at flat idx "
-            f"{bad}: oracle={want.ravel()[bad]!r} section={got.ravel()[bad]!r}"
-        )
-    return None
-
-
 @pytest.mark.cpu_always
-class TestW34SectionH5Parity:
-    """The plan-34 outputs:-section eval H5 == the legacy WriterCallback oracle."""
+class TestW34SectionH5SelfConsistency:
+    """The plan-34 outputs:-section eval H5, asserted from first principles.
 
-    def test_deferred_columns_present_in_oracle(self, oracle_h5):
-        """Sanity: the DEFERRED (W34.3 vertexing) columns DO exist in the oracle."""
-        with h5py.File(oracle_h5) as f:
-            for stream, cols in DEFERRED_COLUMNS.items():
-                names = set(f[stream].dtype.names)
-                missing = [c for c in cols if c not in names]
-                assert not missing, f"deferred columns {missing} absent from oracle {stream!r}"
+    The legacy-WriterCallback parity oracle is retired (DEL-1; parity closed at
+    29c67a1) — every expectation here derives from the cutover34 config + the
+    section manifest alone.
+    """
 
-    def test_groups_match(self, oracle_h5, section_h5):
-        """Both eval paths write the same H5 groups."""
-        with h5py.File(oracle_h5) as a, h5py.File(section_h5) as b:
-            assert set(a.keys()) == set(b.keys())
+    def test_groups_are_the_reader_streams(self, section_h5):
+        """The eval H5 carries exactly the reader streams as groups."""
+        with h5py.File(section_h5) as f:
+            assert set(f.keys()) == {"jets", "tracks"}
 
     def test_row_count_matches(self, section_h5):
         """The section eval H5 carries all N_TEST rows."""
         with h5py.File(section_h5) as f:
             assert f["jets"].shape[0] == N_TEST
 
-    def test_full_payload_h5_parity(self, oracle_h5, section_h5):
-        """Per-column array equality + EXACT column NAMES + ORDER (deferred excluded)."""
-        diffs: list[str] = []
-        with h5py.File(oracle_h5) as a, h5py.File(section_h5) as b:
-            for group in a:
-                oracle = a[group][:]
-                section = b[group][:]
-                want_cols = _drop_deferred(list(oracle.dtype.names), group)
-                got_cols = list(section.dtype.names)
-                # the section file must carry EXACTLY the compared (non-deferred)
-                # columns, in the SAME ORDER (column order IS part of the schema —
-                # the v1 inputs_copy -> tasks -> pad_mask layout, section-order-driven)
-                if want_cols != got_cols:
-                    diffs.append(
-                        f"{group}: column set/order mismatch\n  oracle (minus deferred): "
-                        f"{want_cols}\n  section                : {got_cols}"
-                    )
-                    continue
-                if oracle.shape != section.shape:
-                    diffs.append(
-                        f"{group}: shape {oracle.shape} (oracle) != {section.shape} (section)"
-                    )
-                    continue
-                diffs.extend(
-                    msg
-                    for col in want_cols
-                    if (msg := _compare_column(group, col, oracle[col], section[col])) is not None
-                )
-        assert not diffs, "W34.2 FULL-PAYLOAD H5 PARITY FAILED:\n" + "\n".join(diffs)
+    def test_task_columns_present(self, section_h5):
+        """All task columns exist: jet probs (f4), origin probs (f4), VertexIndex (int).
+
+        W34.3: nothing is deferred — the vertexing get_output fold mints the
+        per-token VertexIndex integer column alongside the classification probs.
+        """
+        with h5py.File(section_h5) as f:
+            jets, tracks = f["jets"].dtype, f["tracks"].dtype
+        for s in JET_SUFFIXES:
+            col = f"{RUN_NAME}_{s}"
+            assert col in jets.names, f"missing jet prob column {col}"
+            assert np.issubdtype(jets[col], np.floating)
+        for s in ORIGIN_SUFFIXES:
+            col = f"{RUN_NAME}_{s}"
+            assert col in tracks.names, f"missing origin prob column {col}"
+            assert np.issubdtype(tracks[col], np.floating)
+        # bare (un-prefixed) column — the v1 convention (prefix_vertex_column=False)
+        vtx = "VertexIndex"
+        assert vtx in tracks.names, f"missing vertexing column {vtx}"
+        assert np.issubdtype(tracks[vtx], np.integer)
 
     def test_probs_are_softmaxed_not_double_converted(self, section_h5):
         """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
@@ -249,17 +198,14 @@ class TestW34CutoverConfigContent:
         assert mods["track_origin_probs"] is None
         assert mods["track_origin_index"] is None
         assert mods["track_vertex_index"] is None
-        # plan 34 W34.3: track_vertexing is NO LONGER opted out of TEST/ONNX (no
-        # expose key) — the vtx get_output fold mints its eval/ONNX leaves.
-        assert "track_vertexing" not in mods or "expose" not in mods.get(
-            "track_vertexing", {}
-        ).get("init_args", {})
-        # the M4.5 writers are nulled
-        assert cfg["writers"]["modules"] == {
-            "inputs_copy": None,
-            "tasks": None,
-            "pad_mask": None,
-        }
+        # plan 34 W34.3: track_vertexing is NOT opted out of TEST/ONNX — the vtx
+        # get_output fold mints its eval/ONNX leaves. The base gn2v2-dummy.yaml
+        # defers vertexing (expose: [fit, val]) for its writer sink path, so the
+        # cutover34 overlay must null the expose opt-out back to the all-modes
+        # default (same-class init_args deep-merge keeps the base's other args).
+        assert mods["track_vertexing"]["init_args"]["expose"] is None
+        # the writers: block is gone entirely (W34.4c base2 flip + W6c removal)
+        assert "writers" not in cfg
         # the outputs: section in EXACT v1 column order
         section = cfg["outputs"]
         assert list(section.keys()) == ["inputs_copy", "run_tasks", "pad_mask"]
@@ -272,12 +218,13 @@ class TestW34CutoverConfigContent:
             "track_vertexing",
         ]
         assert section["pad_mask"]["class_path"] == "salt.core.outputs.PadMaskWriter"
-        # the DUMB sinks have no init args (they dump the section's outputs.* leaves)
+        # the DUMB sinks null the base's explicit outputs: tables (they dump the
+        # section's outputs.* leaves instead — an explicit table would win)
         assert cfg["callbacks"]["h5_output"]["class_path"] == "salt.core.outputs.H5OutputSink"
-        assert "init_args" not in cfg["callbacks"]["h5_output"]
-        # plan 34 W34.3: the DUMB OnnxExportSink is re-enabled (no init args)
+        assert cfg["callbacks"]["h5_output"]["init_args"]["outputs"] is None
+        # plan 34 W34.3: the DUMB OnnxExportSink is re-enabled (explicit leaves nulled)
         assert cfg["callbacks"]["onnx_export"]["class_path"] == "salt.core.outputs.OnnxExportSink"
-        assert "init_args" not in cfg["callbacks"]["onnx_export"]
+        assert cfg["callbacks"]["onnx_export"]["init_args"]["outputs"] is None
 
 
 @pytest.mark.cpu_always
