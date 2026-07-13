@@ -14,20 +14,20 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import (
+    _OBJECT_STREAM,
+    _UNNAMED,
+    IO,
+    Mode,
+    TensorSpec,
+    sym_dim,
+    unflatten_spec,
+)
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.maskformer_loss import MaskFormerLoss
 from salt.core.nn.matcher import HungarianMatcher
 
 __all__ = ["MaskFormerMatchedLoss"]
-
-
-_UNNAMED = "unnamed"
-"""Placeholder instance name, assigned before compile."""
-
-# bundle stream name for the reconstructed objects (matches the MaskDecoder
-# out_stream and the MaskFormerTargets object stream).
-_OBJECT_STREAM = "objects"
 
 
 class MaskFormerMatchedLoss(nn.Module):

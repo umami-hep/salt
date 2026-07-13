@@ -6,11 +6,8 @@ import torch
 from torch import Tensor, nn
 
 from salt.core.graph.errors import ConfigError
+from salt.core.graph.spec import _UNNAMED
 from salt.core.nn.dense import Dense, _reject_width_keys
-
-_UNNAMED = "unnamed"
-"""Placeholder instance name — the config dict key is assigned before compile."""
-
 
 _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
 """Valid FiLM ``layer`` placements: ``input`` applies scale/bias before a

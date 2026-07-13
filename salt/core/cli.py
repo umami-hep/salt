@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from salt.core.graph.errors import ConfigError, GraphError
+from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
 from salt.core.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
 from salt.core.graph.spec import (
     KEY_SEP,
@@ -33,6 +33,8 @@ from salt.core.graph.spec import (
     Mode,
     NestedSpec,
     TensorSpec,
+    _has_wildcard,
+    _pattern_matches,
     flatten_spec,
     split_key,
     unflatten_spec,
@@ -44,8 +46,6 @@ from salt.core.schema import dump_schema, load_schema, save_schema
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
 
-_SUGGESTION_CUTOFF = 0.5
-_WILDCARD_PARTS = frozenset({"*", "**"})
 _MODE_CHOICES = ("fit", "val", "test", "onnx")
 _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"})
 
@@ -740,49 +740,6 @@ def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
     raise ConfigError(
         f"config {path}: 'schema' must be a schema.yaml path or a flat list of dotted keys"
     )
-
-
-# ---------------------------------------------------------------------------
-# small shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _has_wildcard(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component.
-
-    Returns
-    -------
-    bool
-        True if any component is ``"*"`` or ``"**"``.
-    """
-    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
-
-
-def _pattern_matches(pattern: str, key: str) -> bool:
-    """Match a concrete key against a wildcard pattern.
-
-    ``"*"`` matches exactly one component, ``"**"`` one or more — mirrors the
-    planner's matcher for `why` explanations.
-
-    Returns
-    -------
-    bool
-        True if `key` matches `pattern`.
-    """
-
-    def match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
-        if not pat:
-            return not parts
-        head, rest = pat[0], pat[1:]
-        if head == "**":
-            return any(match(rest, parts[i:]) for i in range(1, len(parts) + 1))
-        if not parts:
-            return False
-        if head in {"*", parts[0]}:
-            return match(rest, parts[1:])
-        return False
-
-    return match(tuple(pattern.split(KEY_SEP)), tuple(key.split(KEY_SEP)))
 
 
 def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:

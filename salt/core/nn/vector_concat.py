@@ -10,13 +10,13 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.featurewise import _UNNAMED
 
 
 class VectorConcat(nn.Module):

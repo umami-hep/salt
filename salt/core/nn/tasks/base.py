@@ -14,12 +14,11 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode, TensorSpec
+from salt.core.graph.spec import _UNNAMED, Mode, TensorSpec
 from salt.core.nn.dense import Dense, _reject_width_keys
 from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.output_field import OutputField
 
-_UNNAMED = "unnamed"
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 
 

@@ -10,6 +10,7 @@ from salt.core.graph.planner import SINKS, SOURCES, Plan
 from salt.core.graph.spec import (
     KEY_SEP,
     TensorSpec,
+    _has_wildcard,
     flatten_spec,
     is_symbolic_dim,
     split_symbolic_dim,
@@ -23,20 +24,12 @@ if TYPE_CHECKING:
 
 __all__ = ["dot_source", "plan_table"]
 
-_WILDCARD_PARTS = frozenset({"*", "**"})
-
 # Symbolic dim families that are genuinely data-dependent (batch, per-stream
 # token length, encoder layer length, merged seq length) and so stay symbolic
 # in rendered shapes. Every other symbolic family is a config-fixed feature
 # width resolved by `salt.core.nn.bind.resolve_bind_schema`, so the renderer
 # substitutes the concrete int instead.
 _DATA_DIM_FAMILIES = frozenset({"B", "T", "L", "S"})
-
-
-def _has_wildcard(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component."""
-    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
-
 
 # ---------------------------------------------------------------------------
 # plan table (the salt2 graph plan stdout == plan_<mode>.txt artifact)

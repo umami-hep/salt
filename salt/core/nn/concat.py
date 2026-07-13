@@ -11,13 +11,13 @@ from torch import nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.featurewise import _UNNAMED
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.transformer_encoder import _SEQ_LEN
 

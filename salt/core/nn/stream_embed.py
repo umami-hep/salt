@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
@@ -18,7 +19,7 @@ from salt.core.graph.spec import (
 )
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense, _reject_width_keys
-from salt.core.nn.featurewise import _UNNAMED, FeaturewiseTransformation
+from salt.core.nn.featurewise import FeaturewiseTransformation
 from salt.core.nn.posenc import PositionalEncoder
 from salt.core.utils.tensor_utils import (
     attach_context,

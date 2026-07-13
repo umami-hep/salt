@@ -10,11 +10,7 @@ import numpy as np
 
 from salt.core.data.base import Processor
 from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-
-# the v2 bundle stream name for the reconstructed objects (independent of the
-# file group name the raw object features live in, e.g. truth_hadrons)
-_OBJECT_STREAM = "objects"
+from salt.core.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, unflatten_spec
 
 
 @dataclass(frozen=True)

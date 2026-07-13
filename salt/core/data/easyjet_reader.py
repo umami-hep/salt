@@ -14,32 +14,13 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.base import Reader, WorkerCtx, _require_root_deps
 from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.graph.errors import ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema
 
 __all__ = ["EasyjetGroupConfig", "EasyjetReader"]
-
-
-def _require_root_deps() -> None:
-    """Import-time guard for the optional ROOT reader extra.
-
-    Raises a clear, actionable error pointing at the correct install command
-    instead of a bare ``ModuleNotFoundError`` from deep inside an array method.
-    Cheap when the deps are present (cached imports).
-    """
-    try:
-        import awkward  # noqa: F401
-        import uproot  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "EasyjetReader requires the 'easyjet' extra — install with:\n"
-            "  pip install 'salt[easyjet]'\n"
-            "or directly:\n"
-            "  pip install uproot awkward"
-        ) from exc
 
 
 @dataclass(frozen=True)
@@ -295,7 +276,7 @@ class EasyjetReader(Reader):
         """
         if self._table is not None:
             return
-        _require_root_deps()
+        _require_root_deps("EasyjetReader", "easyjet")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 
@@ -372,7 +353,7 @@ class EasyjetReader(Reader):
         For a jagged field the inner content dtype is taken (the per-jet scalar
         type).
         """
-        _require_root_deps()
+        _require_root_deps("EasyjetReader", "easyjet")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
         flat = ak.flatten(arr, axis=None) if is_jagged else arr
@@ -499,7 +480,7 @@ class EasyjetReader(Reader):
         self, stream: str, fields: list[str], start: int, stop: int
     ) -> dict[str, Any]:
         """Read the demanded branches over a global row range (multi-file stitched)."""
-        _require_root_deps()
+        _require_root_deps("EasyjetReader", "easyjet")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 

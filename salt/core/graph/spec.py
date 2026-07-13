@@ -135,6 +135,51 @@ def join_key(parts: tuple[str, ...] | list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# wildcard key patterns (shared by planner, CLI, renderer, SaltModule)
+# ---------------------------------------------------------------------------
+
+_WILDCARD_PARTS = frozenset({"*", "**"})
+"""Wildcard key components: ``"*"`` matches exactly one component, ``"**"`` one or more."""
+
+
+def _has_wildcard(key: str) -> bool:
+    """Check whether a dotted key contains a wildcard component.
+
+    Returns
+    -------
+    bool
+        True if any component is ``"*"`` or ``"**"``.
+    """
+    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
+
+
+def _pattern_matches(pattern: str, key: str) -> bool:
+    """Match a concrete dotted key against a wildcard pattern.
+
+    ``"*"`` matches exactly one component; ``"**"`` matches one or more.
+
+    Returns
+    -------
+    bool
+        True if `key` matches `pattern`.
+    """
+
+    def match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
+        if not pat:
+            return not parts
+        head, rest = pat[0], pat[1:]
+        if head == "**":
+            return any(match(rest, parts[i:]) for i in range(1, len(parts) + 1))
+        if not parts:
+            return False
+        if head in {"*", parts[0]}:
+            return match(rest, parts[1:])
+        return False
+
+    return match(tuple(pattern.split(KEY_SEP)), tuple(key.split(KEY_SEP)))
+
+
+# ---------------------------------------------------------------------------
 # symbolic-dim vocabulary — strings only, unification happens in the planner
 # ---------------------------------------------------------------------------
 
@@ -368,6 +413,17 @@ class IO:
         # Validate both trees eagerly (component names + leaf types).
         flatten_spec(self.requires)
         flatten_spec(self.produces)
+
+
+_UNNAMED = "unnamed"
+"""Placeholder `GraphModule.name` — the instance name (the config dict key) is
+assigned before compile."""
+
+_OBJECT_STREAM = "objects"
+"""The maskformer object-stream key component — the ``labels.objects.*`` /
+``matched.objects.*`` contract shared by the data-side target builder
+(`salt.core.data.maskformer_targets`) and the nn-side matched loss
+(`salt.core.nn.maskformer_matched_loss`)."""
 
 
 @runtime_checkable

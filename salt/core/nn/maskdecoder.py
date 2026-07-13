@@ -15,7 +15,7 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.attention import Attention
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense
@@ -23,9 +23,6 @@ from salt.core.nn.glu import GLU
 from salt.core.nn.stream_embed import _stream_len
 
 __all__ = ["MaskDecoder", "MaskDecoderLayer"]
-
-_UNNAMED = "unnamed"
-"""Placeholder instance name; the real name is assigned before compile."""
 
 
 def get_masks(

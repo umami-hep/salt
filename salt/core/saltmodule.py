@@ -27,6 +27,7 @@ from salt.core.graph.spec import (
     GraphModule,
     Mode,
     TensorSpec,
+    _has_wildcard,
     flatten_spec,
     unflatten_spec,
 )
@@ -67,7 +68,6 @@ CKPT_KEY = "salt_core"
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "HybridMuonAdamW")
 _MUP_KEYS = frozenset({"apply_to", "shape_path"})
-_WILDCARD_PARTS = frozenset({"*", "**"})
 # dataset-boundary demand is declared for the three runtime modes; ONNX
 # export feeds the model directly and has no dataset plan.
 _DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
@@ -328,7 +328,7 @@ class SaltModule(lightning.LightningModule):
                 )
             demand = [key for key in required if key not in produced]
             for key in demand:
-                if _WILDCARD_PARTS & set(key.split(KEY_SEP)):
+                if _has_wildcard(key):
                     raise ConfigError(
                         f"boundary demand key {key!r} (mode {mode.name}) contains a wildcard — "
                         "narrow it before compile (design §2.2 rule (d), §3.3)"
@@ -352,7 +352,7 @@ class SaltModule(lightning.LightningModule):
                 for key, who in (self._writer_demand() or {}).items():
                     if key == "meta.rows" or key in produced or key in required:
                         continue  # appended below / a plan sink / already demanded
-                    if _WILDCARD_PARTS & set(key.split(KEY_SEP)):
+                    if _has_wildcard(key):
                         raise ConfigError(
                             f"writer demand key {key!r} ({who}) contains a wildcard — "
                             "writer requires are concrete keys (design §2.2, §8)"
@@ -377,7 +377,7 @@ class SaltModule(lightning.LightningModule):
                 for key, who in self._callback_demand(mode).items():
                     if key in produced or key in required:
                         continue  # a model-plan sink / already task-demanded
-                    if _WILDCARD_PARTS & set(key.split(KEY_SEP)):
+                    if _has_wildcard(key):
                         raise ConfigError(
                             f"callback demand key {key!r} ({who}) contains a wildcard — "
                             "callback requires are concrete keys (design §2.2, §3.1)"

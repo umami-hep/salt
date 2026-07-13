@@ -7,6 +7,7 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
@@ -14,7 +15,6 @@ from salt.core.graph.spec import (
     unflatten_spec,
 )
 from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.featurewise import _UNNAMED
 from salt.core.nn.transformer_encoder import _SEQ_LEN
 from salt.core.utils.tensor_utils import (
     flatten_tensor_dict,

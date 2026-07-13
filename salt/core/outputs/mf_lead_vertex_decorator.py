@@ -10,9 +10,8 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.core.outputs.output_field import OutputField
-from salt.core.outputs.task_output import _UNNAMED
 
 
 class MFLeadVertexDecorator(nn.Module):

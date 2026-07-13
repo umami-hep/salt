@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.base import Reader, WorkerCtx, _require_root_deps
 from salt.core.data.cuts import CutSpec
 from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.graph.errors import ConfigError, SchemaError
@@ -22,25 +22,6 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema
 
 __all__ = ["FTAG1LiteGroupConfig", "FTAG1LiteReader"]
-
-
-def _require_root_deps() -> None:
-    """Import-time guard for the optional ROOT reader extra (reuse easyjet pattern).
-
-    Raises a clear, actionable `ImportError` (pointing at ``salt[root]`` /
-    ``salt[easyjet]``) instead of a bare ``ModuleNotFoundError`` from deep inside
-    an array method. Cheap when the deps ARE present (cached imports).
-    """
-    try:
-        import awkward  # noqa: F401
-        import uproot  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "FTAG1LiteReader requires uproot + awkward — install with:\n"
-            "  pip install 'salt[root]'\n"
-            "or directly:\n"
-            "  pip install uproot awkward"
-        ) from exc
 
 
 @dataclass(frozen=True)
@@ -292,7 +273,7 @@ class FTAG1LiteReader(Reader):
         """
         if self._table is not None:
             return
-        _require_root_deps()
+        _require_root_deps("FTAG1LiteReader", "root")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 
@@ -451,7 +432,7 @@ class FTAG1LiteReader(Reader):
         reading its numpy dtype. ROOT stores big-endian; the structured array
         uses native byte order so the rest of the pipeline sees ordinary arrays.
         """
-        _require_root_deps()
+        _require_root_deps("FTAG1LiteReader", "root")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
         del is_jagged  # both jet-level and constituent arrays are ragged here
@@ -610,7 +591,7 @@ class FTAG1LiteReader(Reader):
         ``stop-start``; constituent fields return a depth-1 jagged ``[jet][track]``
         array.
         """
-        _require_root_deps()
+        _require_root_deps("FTAG1LiteReader", "root")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
         import uproot  # noqa: PLC0415 - optional reader extra (lazy)
 

@@ -14,12 +14,10 @@ from pathlib import Path
 import numpy as np
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import GraphModule, TensorSpec
+from salt.core.graph.spec import _UNNAMED, GraphModule, TensorSpec
 from salt.core.onnx.config import ExportOutput
 
 __all__ = ["ExportOnlyWriter", "WriteCtx", "Writer", "WriterDeclareCtx", "task_modules"]
-
-_UNNAMED = "unnamed"
 
 
 def task_modules(model_modules: Mapping[str, GraphModule]) -> dict[str, GraphModule]:

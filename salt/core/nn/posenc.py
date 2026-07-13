@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.core.graph.errors import ConfigError
-from salt.core.nn.featurewise import _UNNAMED
+from salt.core.graph.spec import _UNNAMED
 
 _POSENC_SYM_VARS: frozenset[str] = frozenset({"phi"})
 """Variables whose positional encoding is symmetric (sin/cos of the sin/cos)."""

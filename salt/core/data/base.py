@@ -16,7 +16,7 @@ from salt.core.data.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.planner import PlanStep
 from salt.core.graph.setup_spec import SetupIO, SetupStage
-from salt.core.graph.spec import IO, KEY_SEP, Mode
+from salt.core.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
 from salt.core.schema import GroupSchema, Schema
 
 __all__ = [
@@ -38,7 +38,29 @@ SetupBundle = Bundle
 RAW_NAMESPACE = "raw"
 """Bundle namespace for post-selection structured arrays."""
 
-_UNNAMED = "unnamed"  # instance names are assigned from the config dict key
+
+def _require_root_deps(who: str, extra: str) -> None:
+    """Import-time guard for the optional ROOT reader extras.
+
+    Raises a clear, actionable error pointing at the correct install command
+    instead of a bare ``ModuleNotFoundError`` from deep inside an array method.
+    Cheap when the deps are present (cached imports).
+
+    Raises
+    ------
+    ImportError
+        When uproot / awkward are missing — names `who` and the pip extra.
+    """
+    try:
+        import awkward  # noqa: F401
+        import uproot  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            f"{who} requires uproot + awkward — install with:\n"
+            f"  pip install 'salt[{extra}]'\n"
+            "or directly:\n"
+            "  pip install uproot awkward"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -130,7 +152,7 @@ class DatasetModule(ABC):
         del stage
         return ctx
 
-    def teardown(self, ctx: SetupBundle, stage: SetupStage) -> None:  # noqa: B027
+    def teardown(self, ctx: SetupBundle, stage: SetupStage) -> None:
         """Reverse a setup-time side-effect for `stage`; default no-op.
 
         The symmetric cleanup hook (e.g. `ShmStage` rmtree-ing its

@@ -10,7 +10,8 @@ from torch import Tensor
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import Mode, TensorSpec, sym_dim
 from salt.core.outputs.names import pascal_case
-from salt.core.outputs.output_field import OutputField, _masked_softmax
+from salt.core.outputs.output_field import OutputField
+from salt.core.utils.tensor_utils import masked_softmax
 
 # Conversion ops: small strategy objects (not nn.Module) holding config and
 # reproducing one task family's eval math. Three hooks parameterise the
@@ -158,7 +159,7 @@ class SeqClassIndexOp(ConversionOp):
         """
         logits = b.get(pred_key)
         mask = b.get(f"masks.{stream}") if self.has_pad_mask else None
-        probs = _masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+        probs = masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
         if mode & Mode.ONNX:
             # zero-row append/strip keeps the traced argmax valid for zero-token
             # jets; strip it back off before casting to the int8 [L] output
@@ -211,4 +212,4 @@ class SeqClassProbsOp(ConversionOp):
         del mode
         logits = b.get(pred_key)
         mask = b.get(f"masks.{stream}") if self.has_pad_mask else None
-        return _masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+        return masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)

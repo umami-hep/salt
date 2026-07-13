@@ -25,34 +25,9 @@ from salt.core.nn.tasks.base import (
 from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.names import pascal_case
 from salt.core.outputs.output_field import OutputField
+from salt.core.utils.tensor_utils import masked_softmax
 
 _DEFAULT_CLS_LOSS: dict[str, Any] = {"class_path": "torch.nn.CrossEntropyLoss"}
-
-
-def _add_dims(x: Tensor, ndim: int) -> Tensor:
-    """Add singleton dims after the batch dim to reach ``ndim``.
-
-    Raises
-    ------
-    ValueError
-        If ``ndim`` is smaller than ``x.ndim``.
-    """
-    if (dim_diff := ndim - x.dim()) < 0:
-        raise ValueError(f"Target ndim ({ndim}) is smaller than input ndim ({x.dim()})")
-    if dim_diff > 0:
-        x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
-    return x
-
-
-def _masked_softmax(x: Tensor, mask: Tensor | None, dim: int = -1) -> Tensor:
-    """Softmax ignoring padded elements: masked positions set to -inf before softmax, zeroed after."""
-    if mask is not None:
-        mask = _add_dims(mask, x.dim())
-        x = x.masked_fill(mask, -torch.inf)
-    x = torch.softmax(x, dim=dim)
-    if mask is not None:
-        x = x.masked_fill(mask, 0)
-    return x
 
 
 class ClassificationTaskModule(_TaskModuleBase):
@@ -272,7 +247,7 @@ class ClassificationTaskModule(_TaskModuleBase):
             probs = torch.softmax(preds, dim=-1)
         else:
             assert preds.ndim == 3
-            probs = _masked_softmax(preds, pad_mask.unsqueeze(-1))
+            probs = masked_softmax(preds, pad_mask.unsqueeze(-1))
         return probs
 
     def materialise(self) -> None:
@@ -464,7 +439,7 @@ class ClassificationTaskModule(_TaskModuleBase):
                 for c, px in enumerate(self.class_suffixes)
             ]
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        probs = _masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+        probs = masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
         if mode & Mode.ONNX:
             # zero-row append/strip -> [L] int8 argmax leaf under the pascal-case task name
             padded = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)

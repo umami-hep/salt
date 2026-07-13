@@ -8,13 +8,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from salt.core.graph.errors import GraphError
+from salt.core.graph.errors import _SUGGESTION_CUTOFF, GraphError
 from salt.core.graph.planner import Plan
 from salt.core.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
 
 __all__ = ["BindError", "ResolvedSchema", "bind_all", "materialise_all", "resolve_bind_schema"]
-
-_SUGGESTION_CUTOFF = 0.5
 
 
 class BindError(GraphError):

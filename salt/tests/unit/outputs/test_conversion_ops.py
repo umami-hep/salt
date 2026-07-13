@@ -8,15 +8,14 @@ import torch
 from salt.core.graph import Mode
 from salt.core.graph.bundle import Bundle
 from salt.core.outputs import ClassProbsOp, SeqClassIndexOp, SeqClassProbsOp, TaskOutput
-from salt.core.outputs.output_field import _masked_softmax  # noqa: PLC2701 — parity-oracle access
-from salt.tests.unit.outputs.conftest import (  # noqa: PLC2701 — shared split helpers
+from salt.core.utils.tensor_utils import masked_softmax  # parity-oracle access
+from salt.tests.unit.outputs.conftest import (
     _FLOAT_TOL,
     _STREAM_J,
     _STREAM_T,
     _bind_classification,
     _producer,
 )
-
 
 # GATE 1: ClassProbs (global classification) == task.run_inference softmax/sigmoid
 
@@ -94,7 +93,7 @@ def test_seq_class_index_matches_argmax_of_masked_softmax():
     mask[1, :] = True  # fully padded jet (zero valid tokens edge case)
 
     # ORACLE: the exact masked-softmax then argmax over classes
-    probs = _masked_softmax(logits.clone(), mask.unsqueeze(-1))
+    probs = masked_softmax(logits.clone(), mask.unsqueeze(-1))
     oracle = torch.argmax(probs, dim=-1)
 
     producer = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassIndexOp())
@@ -166,7 +165,7 @@ def test_seq_class_index_onnx_branch_matches_bind_argmax():
     b = Bundle({"preds": {_STREAM_T: {"t": logits.clone()}}, "masks": {_STREAM_T: mask}})
     got = op.convert(b, Mode.ONNX, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
 
-    probs = _masked_softmax(logits.clone(), mask.unsqueeze(-1))
+    probs = masked_softmax(logits.clone(), mask.unsqueeze(-1))
     oracle = _argmax_reduce_oracle(probs)
 
     assert got.dtype == torch.int8
@@ -197,7 +196,7 @@ def test_seq_class_index_test_branch_unchanged_by_onnx_fold():
     test_b = Bundle({"preds": {_STREAM_T: {"t": logits.clone()}}, "masks": {_STREAM_T: mask}})
     got = op.convert(test_b, Mode.TEST, pred_key=f"preds.{_STREAM_T}.t", stream=_STREAM_T)
 
-    oracle = torch.argmax(_masked_softmax(logits.clone(), mask.unsqueeze(-1)), dim=-1)
+    oracle = torch.argmax(masked_softmax(logits.clone(), mask.unsqueeze(-1)), dim=-1)
     assert got.dtype == torch.int64
     assert got.shape == (b_, length)  # [B, L] — full batch, no zero-row strip
     torch.testing.assert_close(got, oracle, rtol=0, atol=0)
@@ -234,7 +233,7 @@ def test_seq_class_probs_matches_masked_softmax():
     mask[0, 3:] = True  # padded tail on jet 0
     mask[1, :] = True  # fully padded jet (zero valid tokens edge case)
 
-    oracle = _masked_softmax(logits.clone(), mask.unsqueeze(-1))
+    oracle = masked_softmax(logits.clone(), mask.unsqueeze(-1))
 
     producer = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassProbsOp())
     producer.name = "p"

@@ -8,7 +8,7 @@ from typing import Any
 from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, sym_dim, unflatten_spec
 
 # The two scripted union-find helpers + the MaskFormer export math are inlined
 # verbatim in salt.core.onnx.reduces (the legacy reduce path); the conversion
@@ -17,7 +17,6 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.names import VERTEX_INDEX
 from salt.core.outputs.output_field import OutputField
-from salt.core.outputs.task_output import _UNNAMED
 from salt.core.utils.union_find import get_node_assignment_jit
 
 

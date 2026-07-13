@@ -9,7 +9,7 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
 from salt.core.outputs.output_field import OutputField
 
 
@@ -22,9 +22,6 @@ class OutputSectionWriter(nn.Module):
     writers supply their own ``declare_io`` / manifest surface.
     """
 
-
-_UNNAMED = "unnamed"
-"""Placeholder instance name — the config dict key is assigned at assembly."""
 
 # the bundle modes that run get_output (everything but pure FIT/VAL training):
 # get_output mints serialisation leaves only for TEST + ONNX. (FIT/VAL prune the

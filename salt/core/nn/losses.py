@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     GraphModule,
     Mode,
@@ -18,7 +19,6 @@ from salt.core.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.core.nn.featurewise import _UNNAMED
 
 
 class LossSum(nn.Module):

@@ -10,14 +10,13 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
 
 # The MaskFormer export math is inlined verbatim in salt.core.onnx.reduces (the
 # legacy reduce path); this node reuses that exact copy so the folded node and
 # the legacy reduce can never drift.
 from salt.core.onnx.reduces import get_maskformer_outputs
 from salt.core.outputs.output_field import OutputField
-from salt.core.outputs.task_output import _UNNAMED
 
 
 class MaskFormerObjects(nn.Module):

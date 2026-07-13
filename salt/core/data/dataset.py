@@ -18,7 +18,7 @@ from torch.utils.data import Dataset, get_worker_info
 from salt.core.data.base import RAW_NAMESPACE, DatasetModule, Reader, WorkerCtx
 from salt.core.data.labels import Labels
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError, MutationError, SchemaError
+from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
 from salt.core.graph.executor import canonical_produced
 from salt.core.graph.planner import Plan, Sinks, compile_plan
 from salt.core.graph.spec import KEY_SEP, Mode, TensorSpec
@@ -28,8 +28,6 @@ __all__ = ["MODEL_VISIBLE_NAMESPACES", "GraphDataset"]
 
 MODEL_VISIBLE_NAMESPACES = ("inputs", "masks", "labels", "meta")
 """Bundle namespaces converted at the numpy->torch boundary."""
-
-_SUGGESTION_CUTOFF = 0.5
 
 
 class GraphDataset(Dataset):

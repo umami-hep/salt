@@ -8,7 +8,7 @@ from typing import Any
 from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
 from salt.core.outputs.conversion_ops import (
     ClassProbsOp,
     ConversionOp,
@@ -17,9 +17,6 @@ from salt.core.outputs.conversion_ops import (
 )
 from salt.core.outputs.output_field import OutputField, _resolve_task
 from salt.core.outputs.regression_descale_op import RegressionDescaleOp
-
-_UNNAMED = "unnamed"
-"""Placeholder instance name — the config assembly step assigns the dict key."""
 
 
 class TaskOutput(nn.Module):

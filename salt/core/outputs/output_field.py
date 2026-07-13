@@ -1,7 +1,7 @@
 """`OutputField` — one output column a producer contributes to a sink's field manifest.
 
-Also home to the shared producer-side private helpers (`_resolve_task`,
-`_add_dims`, `_masked_softmax`) per the §3.4 split map.
+Also home to the shared producer-side private helper `_resolve_task` per the
+§3.4 split map (tensor helpers live in `salt.core.utils.tensor_utils`).
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import torch
 from torch import Tensor
 
 from salt.core.graph.errors import ConfigError
@@ -96,29 +95,3 @@ def _resolve_task(model_modules: Mapping[str, Any], task_name: str, who: str) ->
             "(plan 31 §3.1)"
         )
     return task
-
-
-def _add_dims(x: Tensor, ndim: int) -> Tensor:
-    """Add singleton dims after the batch dim to reach ``ndim``.
-
-    Raises
-    ------
-    ValueError
-        If ``ndim`` is smaller than ``x.ndim``.
-    """
-    if (dim_diff := ndim - x.dim()) < 0:
-        raise ValueError(f"Target ndim ({ndim}) is smaller than input ndim ({x.dim()})")
-    if dim_diff > 0:
-        x = x.view(x.shape[0], *dim_diff * (1,), *x.shape[1:])
-    return x
-
-
-def _masked_softmax(x: Tensor, mask: Tensor | None, dim: int = -1) -> Tensor:
-    """Softmax that ignores padded elements (mask=True set to -inf before, 0 after)."""
-    if mask is not None:
-        mask = _add_dims(mask, x.dim())
-        x = x.masked_fill(mask, -torch.inf)
-    x = torch.softmax(x, dim=dim)
-    if mask is not None:
-        x = x.masked_fill(mask, 0)
-    return x

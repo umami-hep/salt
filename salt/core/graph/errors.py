@@ -21,6 +21,9 @@ __all__ = [
     "UndeclaredAccessError",
 ]
 
+_SUGGESTION_CUTOFF = 0.5
+"""`difflib.get_close_matches` cutoff for did-you-mean suggestions in error messages."""
+
 
 class GraphError(Exception):
     """Base class for all errors raised by the salt.core graph kernel."""

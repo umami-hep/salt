@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
+    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
@@ -19,7 +20,6 @@ from salt.core.graph.spec import (
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense, _reject_width_keys
 from salt.core.nn.edge_features import calculate_edge_features, check_edge_config
-from salt.core.nn.featurewise import _UNNAMED
 from salt.core.nn.stream_embed import _stream_len
 
 _EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")

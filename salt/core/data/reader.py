@@ -20,16 +20,14 @@ from ftag import Cuts
 from ftag.track_selector import TrackSelector
 
 from salt.core.data.base import Reader, WorkerCtx
+from salt.core.data.dtypes import get_dtype
 from salt.core.data.stream import StreamConfig
 from salt.core.data.vds import create_vds, has_wildcard
-from salt.core.graph.errors import ConfigError, SchemaError
+from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, SchemaError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.schema import GroupSchema, Schema, load_schema
-from salt.core.data.dtypes import get_dtype
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
-
-_SUGGESTION_CUTOFF = 0.5
 
 
 @dataclass(frozen=True)

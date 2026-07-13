@@ -17,7 +17,7 @@ import h5py
 import numpy as np
 import yaml
 
-from salt.core.graph.errors import SchemaError
+from salt.core.graph.errors import _SUGGESTION_CUTOFF, SchemaError
 from salt.core.graph.spec import KEY_SEP, join_key, split_key
 
 __all__ = [
@@ -32,8 +32,6 @@ __all__ = [
 
 SCHEMA_VERSION = 1
 """Current schema artifact version."""
-
-_SUGGESTION_CUTOFF = 0.5
 
 
 @dataclass(frozen=True)

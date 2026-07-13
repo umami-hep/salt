@@ -18,6 +18,7 @@ from types import MappingProxyType
 from typing import Any, Literal, NoReturn, TypeAlias
 
 from salt.core.graph.errors import (
+    _SUGGESTION_CUTOFF,
     AllModesDeadError,
     ConfigError,
     ConnectivityError,
@@ -38,6 +39,8 @@ from salt.core.graph.spec import (
     Mode,
     NestedSpec,
     TensorSpec,
+    _has_wildcard,
+    _pattern_matches,
     flatten_spec,
     iter_spec_leaves,
     split_key,
@@ -66,8 +69,6 @@ SINKS = "<sinks>"
 Sinks: TypeAlias = "Iterable[str] | Mapping[Mode, Iterable[str]] | None"
 """Sink keys: flat iterable (compiled mode only) or per-mode mapping."""
 
-_WILDCARD_PARTS = frozenset({"*", "**"})
-_SUGGESTION_CUTOFF = 0.5
 _MAX_SHOWN_KEYS = 12
 
 
@@ -373,6 +374,7 @@ def deadcode(
     # (never --strict-promoted), exactly like the ONNX-narrowing case — a
     # config carrying ONNX export nodes must still pass
     # `salt2 graph validate --strict --mode test`.
+
     def _is_conversion_producer(name: str) -> bool:
         return isinstance(getattr(modules.get(name), "output_key", None), str)
 
@@ -574,7 +576,7 @@ def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
     """
     src: dict[str, TensorSpec] = {}
     for key, spec in flatten_spec(sources).items():
-        if _is_pattern(key):
+        if _has_wildcard(key):
             raise ConfigError(
                 f"source key {key!r} may not contain wildcards — sources are concrete (design §2.2)"
             )
@@ -629,7 +631,7 @@ def _collect_nodes(
         produces: dict[str, Any] = {}
         patterns: dict[str, Any] = {}
         for key, spec in face.flatten(io.requires).items():
-            if _is_pattern(key):
+            if _has_wildcard(key):
                 raise ConfigError(
                     f"module {name!r} declares wildcard require {key!r} — only framework "
                     "producers may declare patterns, and only in produces (design §2.2)"
@@ -639,7 +641,7 @@ def _collect_nodes(
         for key, spec in face.flatten(io.produces).items():
             if not face.gate(spec, mode):
                 continue
-            if _is_pattern(key):
+            if _has_wildcard(key):
                 if not allow_wildcards:
                     raise ConfigError(
                         f"module {name!r} declares wildcard produces {key!r} but is not a "
@@ -696,7 +698,7 @@ def _checked_sink_keys(sink_keys: list[str] | None) -> list[str] | None:
         return None
     for key in sink_keys:
         split_key(key)
-        if _is_pattern(key):
+        if _has_wildcard(key):
             raise ConfigError(f"sink key {key!r} may not contain wildcards — sinks are concrete")
     return sink_keys
 
@@ -894,7 +896,7 @@ def _is_terminal_consumer(module: GraphModule) -> bool:
     """
     for m in PRIMARY_MODES:
         for key, spec in flatten_spec(module.declare_io(m).produces).items():
-            if not _is_pattern(key) and spec.active_in(m):
+            if not _has_wildcard(key) and spec.active_in(m):
                 return False
     return True
 
@@ -1275,7 +1277,7 @@ def _other_mode_producers(
             for pkey, spec in iter_spec_leaves(io.produces):
                 if not spec.active_in(other):
                     continue
-                if pkey == key or (_is_pattern(pkey) and _pattern_matches(pkey, key)):
+                if pkey == key or (_has_wildcard(pkey) and _pattern_matches(pkey, key)):
                     candidates.setdefault(name, []).append(other.name)
                     break
     notes = [
@@ -1394,34 +1396,8 @@ def _alive_probe(
 
 
 # ---------------------------------------------------------------------------
-# wildcard patterns and plan hashing
+# plan hashing
 # ---------------------------------------------------------------------------
-
-
-def _is_pattern(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component."""
-    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
-
-
-def _pattern_matches(pattern: str, key: str) -> bool:
-    """Match a concrete dotted key against a wildcard pattern.
-
-    ``"*"`` matches exactly one component; ``"**"`` matches one or more.
-    """
-    return _match_parts(tuple(pattern.split(KEY_SEP)), tuple(key.split(KEY_SEP)))
-
-
-def _match_parts(pattern: tuple[str, ...], parts: tuple[str, ...]) -> bool:
-    if not pattern:
-        return not parts
-    head, rest = pattern[0], pattern[1:]
-    if head == "**":
-        return any(_match_parts(rest, parts[i:]) for i in range(1, len(parts) + 1))
-    if not parts:
-        return False
-    if head in {"*", parts[0]}:
-        return _match_parts(rest, parts[1:])
-    return False
 
 
 def _spec_payload(spec: TensorSpec | SourceSpec) -> dict[str, Any]:
