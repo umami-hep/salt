@@ -61,9 +61,9 @@ class TestClassificationTaskModule:
         assert produces["losses.track_origin"].modes == Mode.TRAINING
         assert produces["losses.track_origin"].kind == "loss"
 
-    def test_bind_builds_v1_head_with_inferred_widths(self, gn2v2):
+    def test_bind_builds_head_with_inferred_widths(self, gn2v2):
         modules, _, _ = gn2v2
-        head = modules["track_origin"].task
+        head = modules["track_origin"]
         assert head.net.input_size == 16
         assert head.net.context_size == 16
         assert head.net.output_size == len(ORIGIN_CLASSES)
@@ -83,13 +83,13 @@ class TestClassificationTaskModule:
         """Class weights fill the CE buffer at materialise (design §3.3)."""
         modules = build_gn2v2_modules(norm_paths[0], class_dict=norm_paths[1])
         bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
-        head = modules["track_origin"].task
+        head = modules["track_origin"]
         assert torch.equal(head.loss.weight, torch.ones(8))  # bind: allocated, identity
         materialise_all(modules)
         expected = torch.tensor([4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3])
         assert torch.allclose(head.loss.weight, expected)
         # the buffer is in the state dict (resume inherits it, cli.py:253-267)
-        assert "task.loss.weight" in modules["track_origin"].state_dict()
+        assert "loss.weight" in modules["track_origin"].state_dict()
 
     def test_weight_source_length_mismatch_raises(self, norm_paths):
         """The fixture class dict has 4 flavour weights but 3 class names."""

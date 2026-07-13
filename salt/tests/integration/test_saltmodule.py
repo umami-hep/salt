@@ -682,8 +682,6 @@ class TestOriginWeightingResolvedAtSetup:
         vtx = model.net["track_vertexing"]
         assert vtx.heavy_ids == (3, 4, 5)
         assert vtx.fake_ids == (1,)
-        # the composed head got the resolved ids
-        assert vtx.task._heavy_ids == (3, 4, 5)  # noqa: SLF001
 
     def test_name_based_without_schema_fails_loudly(self, data):
         # a name-based config but the standard datamodule schema has no origin

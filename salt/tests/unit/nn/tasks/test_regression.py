@@ -125,9 +125,9 @@ class TestRegressionTaskModule:
         )
         task.name = "regression"
         _bind_reg_module(task, {"pooled.global": 16, "ctx": 8})
-        assert task.task.net.input_size == 16
-        assert task.task.net.context_size == 8
-        assert task.task.net.output_size == 2
+        assert task.net.input_size == 16
+        assert task.net.context_size == 8
+        assert task.net.output_size == 2
 
     def test_bind_rejects_denominator_not_an_input_feature(self):
         """A ratio denominator absent from inputs.<stream> Features fails at bind."""
@@ -170,10 +170,10 @@ class TestRegressionTaskModule:
         out = Executor(fit).run(b, debug=True)
         v2_pred = out.get("preds.jets.regression")
         v2_loss = out.get("losses.regression")
-        # the composed v1 head IS task.task — call it directly for the reference
+        # call the head math directly (head_forward) for the reference
         pooled = out.get("pooled.global")
         tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
-        ref_pred, ref_loss = task.task(pooled, tdict, None, context=None)
+        ref_pred, ref_loss = task.head_forward(pooled, tdict, None, context=None)
         assert torch.allclose(v2_pred, ref_pred, atol=1e-6)  # FIT preds are raw/scaled
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
@@ -206,13 +206,13 @@ class TestRegressionTaskModule:
         v2_test = b.get("preds.jets.regression")
         pooled = b.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.task(pooled, {}, None, context=None)
+            raw, _ = task.head_forward(pooled, {}, None, context=None)
         # W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
         # get_h5 now owns the de-scale (label-sourced denominator, v1 get_h5)
         h5 = task.get_h5(b, run_name="reg")
         with torch.no_grad():
-            ref = task.task.run_inference(
+            ref = task.run_inference(
                 raw.clone(), labels={"jets": {"pt_btagJes": labels["labels.jets.pt_btagJes"]}}
             )
         assert torch.allclose(torch.as_tensor(h5["reg_pt"]), ref[..., 0], atol=1e-6)
@@ -259,8 +259,8 @@ class TestRegressionTaskModule:
         denom_from_input = inputs["jets"][..., col]
         pooled = b_onnx.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.task(pooled, {}, None, context=None)
-            ref_onnx = task.task.run_inference(
+            raw, _ = task.head_forward(pooled, {}, None, context=None)
+            ref_onnx = task.run_inference(
                 raw.clone(), labels={"jets": {"pt_btagJes": denom_from_input}}
             )
         (onnx_field,) = task.get_output(b_onnx, Mode.ONNX, "reg")
@@ -279,7 +279,7 @@ class TestRegressionTaskModule:
         task = RegressionTaskModule(stream="tracks", targets=["pt", "mass"], scaler=scaler)
         task.name = "regression"
         _bind_reg_module(task, {"encoded.tracks": d})
-        assert task.task.scaler is not None
+        assert task.scaler is not None
         x = torch.randn(B, T, d)
         mask = torch.zeros(B, T, dtype=torch.bool)
         mask[:, T - 1] = True
@@ -301,7 +301,7 @@ class TestRegressionTaskModule:
         assert pred.shape == (B, T, 2)
         # W34.3: the TEST forward emits the RAW scaled preds (no de-scale, no nan-pad)
         with torch.no_grad():
-            raw, _ = task.task(x, {}, {"tracks": mask}, context=None)
+            raw, _ = task.head_forward(x, {}, {"tracks": mask}, context=None)
         assert torch.equal(pred, raw)
         # get_output now owns the scaler de-scale + the masked-position nan-pad
         bt2 = Bundle()
@@ -309,7 +309,7 @@ class TestRegressionTaskModule:
         bt2.set("masks.tracks", mask)
         with torch.no_grad():
             fields = task.get_output(bt2, Mode.TEST, "reg")
-            ref = task.task.run_inference(raw.clone(), labels=None, pad_mask=mask)
+            ref = task.run_inference(raw.clone(), labels=None, pad_mask=mask)
         for i, f in enumerate(fields):
             assert torch.isnan(f.value[:, T - 1]).all()  # masked positions nan-padded
             assert torch.equal(torch.nan_to_num(f.value), torch.nan_to_num(ref[..., i]))
@@ -326,7 +326,7 @@ class TestRegressionTaskModule:
         )
         task.name = "gaussian_regression"
         _bind_reg_module(task, {"pooled.global": 16})
-        assert task.task.net.output_size == 2  # 2 * 1 target
+        assert task.net.output_size == 2  # 2 * 1 target
         assert task.output_suffixes == ("pt", "pt_stddev")
         produces = flatten_spec(task.declare_io(Mode.TEST).produces)
         assert produces["preds.jets.gaussian_regression"].shape == ("B", 2)
@@ -378,7 +378,7 @@ class TestRegressionTaskModule:
         assert v2_pred.shape == (B, 2)  # means ‖ raw variances
         pooled = out.get("pooled.global")
         tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
-        ref_pred, ref_loss = task.task(pooled, tdict, None, context=None)
+        ref_pred, ref_loss = task.head_forward(pooled, tdict, None, context=None)
         assert torch.allclose(v2_pred, ref_pred, atol=1e-6)
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
@@ -408,12 +408,12 @@ class TestRegressionTaskModule:
         assert v2_test.shape == (B, 2)
         pooled = b.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.task(pooled, {}, None, context=None)
+            raw, _ = task.head_forward(pooled, {}, None, context=None)
         # W34.3: the gaussian TEST forward publishes the RAW [B, 2R] (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
         # get_output owns the de-scale + the means‖stds one-array re-concat
         with torch.no_grad():
-            ref_means, ref_stds = task.task.run_inference(raw.clone())
+            ref_means, ref_stds = task.run_inference(raw.clone())
             fields = task.get_output(b, Mode.TEST, "reg")
         descaled = torch.stack([f.value for f in fields], dim=-1)
         assert torch.allclose(descaled, torch.cat([ref_means, ref_stds], dim=-1), atol=1e-6)
@@ -485,7 +485,7 @@ class TestRegressionTaskModule:
         pooled = out.get("pooled.global")
         tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
         tdict["jets"]["w"] = w
-        _, ref_loss = task.task(pooled, tdict, None, context=None)
+        _, ref_loss = task.head_forward(pooled, tdict, None, context=None)
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_nan_target_masking_loss_parity(self, norm_paths):
@@ -519,7 +519,7 @@ class TestRegressionTaskModule:
         assert torch.isfinite(v2_loss)  # NaN targets did not poison the loss
         pooled = out.get("pooled.global")
         tdict = {"jets": {targets[0]: poisoned}}
-        _, ref_loss = task.task(pooled, tdict, None, context=None)
+        _, ref_loss = task.head_forward(pooled, tdict, None, context=None)
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):

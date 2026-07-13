@@ -315,7 +315,7 @@ class TransformerEncoder(nn.Module):
         No-op when no edge port is configured.
 
         Also builds the optional encoder/global FiLM: per-layer encoder FiLMs
-        are sized to the encoder embed width and populated into the absorbed
+        are sized to the encoder embed width and populated into the composed
         `Transformer`'s ``featurewise`` ModuleList; the global FiLM is sized to
         the encoder output width.
 
@@ -411,7 +411,7 @@ class TransformerEncoder(nn.Module):
         if self.edges_key is not None:
             kwargs["edge_x"] = b.get(self.edges_key)
         if len(self.encoder.featurewise) > 0:
-            # encoder-layer FiLM: thread the per-event parameters into the absorbed
+            # encoder-layer FiLM: thread the per-event parameters into the composed
             # Transformer forward, which applies featurewise[i](params, x) per layer
             kwargs["inputs"] = b.get(self.params_key)
         encoded, out_pad = self.encoder(xs, pad_mask=pad, **kwargs)

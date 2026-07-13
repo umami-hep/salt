@@ -117,7 +117,7 @@ def modules(data):
 def bound_modules(data):
     # bound + materialised module dict: needed wherever get_h5 runs the eval
     # conversion (since the P1.5 flip ClassificationTaskModule.get_h5 calls
-    # self.task.run_inference, which exists only after bind). The TEST plan is
+    # self.run_inference, which needs the bound head). The TEST plan is
     # compiled, the schema resolved and the heads built so the softmax op-chain
     # runs on the synthetic raw-logit bundle exactly as on the live oracle path.
     modules = build_gn2v2_modules(data["nd"])

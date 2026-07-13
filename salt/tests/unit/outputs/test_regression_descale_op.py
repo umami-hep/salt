@@ -27,7 +27,7 @@ def test_regression_norm_params_matches_task_run_inference():
     module = _bind_regression(_STREAM_J, ["mHH", "dR"], sequence=False, norm=norm)
     preds = torch.randn(9, 2)
 
-    oracle = module.task.run_inference(preds.clone())  # v1 de-norm, no mask
+    oracle = module.run_inference(preds.clone())  # v1 de-norm, no mask
 
     op = RegressionDescaleOp(stream=_STREAM_J, targets=["mHH", "dR"], norm_params=norm)
     got = _producer(op, stream=_STREAM_J, task="t").forward(
@@ -48,7 +48,7 @@ def test_regression_scaler_matches_task_run_inference():
     # v1 run_inference masks with NaN; the descale MATH is the scaler.inverse —
     # compare with an all-valid mask so no NaN fill enters (the NaN fill is a
     # sink-side serialisation concern, design §2 layer 2)
-    oracle = module.task.run_inference(preds.clone(), pad_mask=mask)
+    oracle = module.run_inference(preds.clone(), pad_mask=mask)
 
     op = RegressionDescaleOp(stream=_STREAM_T, targets=["pt", "Lxy"], scaler=scales)
     got = _producer(op, stream=_STREAM_T, task="t").forward(
@@ -68,7 +68,7 @@ def test_regression_ratio_denominator_test_mode_matches_task():
     denom = torch.rand(6) + 0.5
 
     # v1 run_inference(labels={stream: {denom: tensor}}) (tasks.py:533-535)
-    oracle = module.task.run_inference(preds.clone(), labels={_STREAM_J: {"mHH": denom}})
+    oracle = module.run_inference(preds.clone(), labels={_STREAM_J: {"mHH": denom}})
 
     op = RegressionDescaleOp(stream=_STREAM_J, targets=["m_over_mHH"], target_denominators=["mHH"])
     op.bind(("mHH", "pt"))  # capture input-Feature field order (ONNX gather)
@@ -128,7 +128,7 @@ def test_regression_gaussian_global_producer_matches_task_run_inference():
     module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, gaussian=True, norm=norm)
     preds = torch.randn(8, 2)  # [B, 2R] = mean ‖ raw-var
 
-    oracle = _gaussian_concat(module.task.run_inference(preds.clone()))
+    oracle = _gaussian_concat(module.run_inference(preds.clone()))
 
     op = RegressionDescaleOp(stream=_STREAM_J, targets=["mHH"], norm_params=norm, gaussian=True)
     got = _producer(op, stream=_STREAM_J, task="t").forward(
@@ -147,7 +147,7 @@ def test_regression_gaussian_per_token_producer_matches_task_run_inference():
     mask = torch.zeros(3, 4, dtype=torch.bool)
     mask[0, 3] = True  # a real padded position -> NaN-filled means + stds
 
-    oracle = _gaussian_concat(module.task.run_inference(preds.clone(), pad_mask=mask))
+    oracle = _gaussian_concat(module.run_inference(preds.clone(), pad_mask=mask))
 
     op = RegressionDescaleOp(
         stream=_STREAM_T, targets=["dphi"], norm_params=norm, gaussian=True, sequence=True
@@ -173,7 +173,7 @@ def test_regression_sequence_nan_fill_producer_matches_task_with_real_padding():
     mask[1, 3] = True
     mask[1, 4] = True  # real padded rows on both jets
 
-    oracle = module.task.run_inference(preds.clone(), pad_mask=mask)
+    oracle = module.run_inference(preds.clone(), pad_mask=mask)
 
     op = RegressionDescaleOp(stream=_STREAM_T, targets=["a", "b"], norm_params=norm, sequence=True)
     got = _producer(op, stream=_STREAM_T, task="t").forward(

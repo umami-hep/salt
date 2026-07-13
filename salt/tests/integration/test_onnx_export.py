@@ -120,7 +120,7 @@ class TestExportedModel:
         # perturbation is ASYMMETRIC (one output-layer bias element): a
         # uniform first-layer shift can cancel through the softmax to ~1e-8
         # (observed) and would not exercise the comparison.
-        head = exported.modules["jets_classification"].task
+        head = exported.modules["jets_classification"]
         weight = list(head.parameters())[-1]  # the output-layer bias [n_classes]
         original = weight.detach().clone()
         try:

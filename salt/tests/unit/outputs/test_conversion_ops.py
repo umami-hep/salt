@@ -29,7 +29,7 @@ def test_class_probs_global_softmax_matches_task_run_inference():
     )
     logits = torch.randn(7, 3)
 
-    oracle = module.task.run_inference(logits.clone())  # v1 softmax (tasks.py:322-324)
+    oracle = module.run_inference(logits.clone())  # v1 softmax (tasks.py:322-324)
 
     producer = _producer(ClassProbsOp(), stream=_STREAM_J, task="t")
     out = producer.forward(Bundle({"preds": {_STREAM_J: {"t": logits.clone()}}}), Mode.TEST)
@@ -71,7 +71,7 @@ def test_class_probs_bce_uses_sigmoid_matches_task():
         loss={"class_path": "torch.nn.BCEWithLogitsLoss"},
     )
     logits = torch.randn(6, 1)
-    oracle = module.task.run_inference(logits.clone())
+    oracle = module.run_inference(logits.clone())
 
     producer = _producer(ClassProbsOp(bce=True), stream=_STREAM_J, task="t")
     got = producer.forward(
@@ -263,7 +263,7 @@ def test_seq_class_probs_matches_task_run_inference_and_get_h5():
     mask = torch.zeros(b, t, dtype=torch.bool)
     mask[0, 2:] = True
 
-    oracle = module.task.run_inference(logits.clone(), mask)
+    oracle = module.run_inference(logits.clone(), mask)
 
     producer = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassProbsOp())
     producer.name = "p"

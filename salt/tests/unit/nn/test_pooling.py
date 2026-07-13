@@ -38,7 +38,7 @@ class TestSplitAndPooling:
 
     def test_pooling_binds_gate_width(self, gn2v2):
         modules, _, _ = gn2v2
-        assert modules["pool"].pool_net.gate_nn.in_features == 16
+        assert modules["pool"].gate_nn.in_features == 16
 
     def test_pooled_shape(self, gn2v2):
         _, plan, _ = gn2v2
@@ -46,7 +46,7 @@ class TestSplitAndPooling:
         assert b.get("pooled.global").shape == (B, 16)
 
 
-# encoder-less pooling (M5; DiPS/DeepSets — init_nets + pool_net, no encoder)
+# encoder-less pooling (M5; DiPS/DeepSets — stream embeds + pooling, no encoder)
 
 
 def _encoderless_modules(norm_dict):
@@ -111,8 +111,8 @@ class TestEncoderlessPooling:
         assert b.get("pooled.global").shape == (B, 16)
         assert torch.isfinite(b.get("loss.total"))
 
-    def test_encoderless_pool_equals_v1_no_registers(self, norm_paths):
-        """The pooled vector == a direct v1 GAP call with the {"seq": seq.mask}"""
+    def test_encoderless_pool_equals_direct_call_no_registers(self, norm_paths):
+        """The pooled vector == a direct .pool() call with the {"seq": seq.mask}"""
         modules = _encoderless_modules(norm_paths[0])
         plan = compile_plan(modules, Mode.FIT, sources=gn2v2_sources(), sinks=["loss.total"])
         bind_all(modules, resolve_bind_schema(plan))
@@ -124,6 +124,7 @@ class TestEncoderlessPooling:
         captured["seq.x"] = b.get("seq.x")
         captured["seq.mask"] = b.get("seq.mask")
         v2_pooled = b.get("pooled.global")
-        v1_pool = modules["pool"].pool_net  # the SAME composed v1 instance
-        v1_pooled = v1_pool({"seq": captured["seq.x"]}, pad_mask={"seq": captured["seq.mask"]})
-        assert torch.equal(v2_pooled, v1_pooled)
+        direct = modules["pool"].pool(
+            {"seq": captured["seq.x"]}, pad_mask={"seq": captured["seq.mask"]}
+        )
+        assert torch.equal(v2_pooled, direct)

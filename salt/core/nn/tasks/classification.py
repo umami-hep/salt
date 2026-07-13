@@ -1,4 +1,4 @@
-"""Classification task module (+ the absorbed v1 classification head)."""
+"""Classification task module."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
+from salt.core.nn.dense import Dense
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.tasks.base import (
-    _AbsorbedTaskBase,
     _checked_weight_source,
     _loss_class,
     _TaskModuleBase,
@@ -53,117 +53,6 @@ def _masked_softmax(x: Tensor, mask: Tensor | None, dim: int = -1) -> Tensor:
     if mask is not None:
         x = x.masked_fill(mask, 0)
     return x
-
-
-class _AbsorbedClassificationTask(_AbsorbedTaskBase):
-    """Classification head: CE/BCE loss with ignore_index=-1 and a ``-2`` pad-label fold;
-    ``run_inference`` applies sigmoid/softmax/padded-softmax.
-    """
-
-    def __init__(
-        self,
-        label: str,
-        class_names: list[str],
-        label_map: Mapping | None = None,
-        sample_weight: str | None = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.label = label
-        self.class_names = class_names
-        self.label_map = label_map
-        if self.label_map is not None and self.class_names is None:
-            raise ValueError("Specify class names when using label_map.")
-        if hasattr(self.loss, "ignore_index"):
-            self.loss.ignore_index = -1
-        self.sample_weight = sample_weight
-        if self.sample_weight is not None:
-            assert self.loss.reduction == "none", (
-                "Sample weights only supported for reduction='none'"
-            )
-        if len(self.class_names) != self.net.output_size:
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of outputs ({self.net.output_size}) does not match "
-                f"number of class names ({len(self.class_names)}). Class names: {self.class_names}"
-            )
-
-    def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
-        """Apply per-sample weights to a loss tensor if configured.
-
-        Returns
-        -------
-        Tensor
-            Weighted mean loss if ``sample_weight`` is set; otherwise the input.
-        """
-        if self.sample_weight is None:
-            return loss
-        return (loss * labels_dict[self.input_name][self.sample_weight]).mean()
-
-    def forward(
-        self,
-        x: Tensor,
-        labels_dict: Mapping,
-        pad_masks: Mapping | None = None,
-        context: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        """Compute logits and classification loss.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor | None]
-            Predicted logits and the loss (``None`` when no labels).
-        """
-        if pad_masks is not None:
-            input_name_mask = self.input_name_mask(pad_masks)
-            preds = self.net(x[:, input_name_mask], context)
-            pad_mask = pad_masks[self.input_name]
-        else:
-            preds = self.net(x, context)
-            pad_mask = None
-
-        labels = labels_dict[self.input_name][self.label] if labels_dict else None
-        if labels is not None and self.label_map is not None:
-            mapped_labels = torch.clone(labels)
-            for k, v in self.label_map.items():
-                mapped_labels[labels == k] = v
-            labels = mapped_labels
-
-        if pad_mask is not None and labels is not None:
-            # TODO @npond: remove once fixed upstream (MR!60199)
-            pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
-            labels = torch.masked_fill(labels, pad_mask, -1)
-
-        loss: Tensor | None = None
-        if labels is not None:
-            if preds.ndim == 3:
-                loss = self.loss(preds.permute(0, 2, 1), labels)
-            elif isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
-                loss = self.loss(preds.squeeze(-1), labels.float())
-            else:
-                loss = self.loss(preds, labels)
-            loss = self.apply_sample_weight(loss, labels_dict)
-            loss *= self.weight
-
-        return preds, loss
-
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
-        """Convert logits to probabilities.
-
-        Returns
-        -------
-        Tensor
-            Probabilities with the same leading dimensions as ``preds``.
-        """
-        if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
-            probs = torch.sigmoid(preds)
-        elif pad_mask is None:
-            assert preds.ndim == 2
-            probs = torch.softmax(preds, dim=-1)
-        else:
-            assert preds.ndim == 3
-            probs = _masked_softmax(preds, pad_mask.unsqueeze(-1))
-        return probs
 
 
 class ClassificationTaskModule(_TaskModuleBase):
@@ -236,6 +125,8 @@ class ClassificationTaskModule(_TaskModuleBase):
         self.class_names = tuple(class_names)
         self.sequence = sequence if sequence is not None else input is None
         self.label_map = dict(label_map) if label_map is not None else None
+        # per-sample loss weighting is not part of this module's config surface
+        self.sample_weight: str | None = None
         self.weight_source = _checked_weight_source(weight_source)
         if self.weight_source is not None and "weight" in self.loss_cfg.get("init_args", {}):
             raise ConfigError(
@@ -285,7 +176,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the composed head with inferred widths.
+        """Build the head layers with inferred widths.
 
         When `weight_source` is set, the loss is constructed with a
         ones-initialised ``weight`` buffer sized ``len(class_names)`` so it
@@ -297,22 +188,92 @@ class ClassificationTaskModule(_TaskModuleBase):
         elif isinstance(init_args.get("weight"), (list, tuple)):
             init_args["weight"] = torch.as_tensor(init_args["weight"], dtype=torch.float32)
         loss_module = _loss_class(self.loss_cfg)(**init_args)
-        dense_config = {
-            "input_size": schema.width(self.input_key),
-            "output_size": len(self.class_names),
+        if hasattr(loss_module, "ignore_index"):
+            loss_module.ignore_index = -1
+        self.loss = loss_module
+        self.net = Dense(
+            input_size=schema.width(self.input_key),
+            output_size=len(self.class_names),
             **({"context_size": schema.width(self.context)} if self.context else {}),
             **self.dense_cfg,
-        }
-        self.task = _AbsorbedClassificationTask(
-            name=self.name,
-            input_name=self.stream,
-            label=self.label,
-            class_names=list(self.class_names),
-            label_map=self.label_map,
-            loss=loss_module,
-            weight=self.weight,
-            dense_config=dense_config,
         )
+
+    def apply_sample_weight(self, loss: Tensor, labels_dict: Mapping) -> Tensor:
+        """Apply per-sample weights to a loss tensor if configured.
+
+        Returns
+        -------
+        Tensor
+            Weighted mean loss if ``sample_weight`` is set; otherwise the input.
+        """
+        if self.sample_weight is None:
+            return loss
+        return (loss * labels_dict[self.input_name][self.sample_weight]).mean()
+
+    def head_forward(
+        self,
+        x: Tensor,
+        labels_dict: Mapping | None,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute logits and classification loss.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted logits and the loss (``None`` when no labels).
+        """
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
+        labels = labels_dict[self.input_name][self.label] if labels_dict else None
+        if labels is not None and self.label_map is not None:
+            mapped_labels = torch.clone(labels)
+            for k, v in self.label_map.items():
+                mapped_labels[labels == k] = v
+            labels = mapped_labels
+
+        if pad_mask is not None and labels is not None:
+            # TODO @npond: remove once fixed upstream (MR!60199)
+            pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
+            labels = torch.masked_fill(labels, pad_mask, -1)
+
+        loss: Tensor | None = None
+        if labels is not None:
+            if preds.ndim == 3:
+                loss = self.loss(preds.permute(0, 2, 1), labels)
+            elif isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
+                loss = self.loss(preds.squeeze(-1), labels.float())
+            else:
+                loss = self.loss(preds, labels)
+            loss = self.apply_sample_weight(loss, labels_dict)
+            loss *= self.weight
+
+        return preds, loss
+
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
+        """Convert logits to probabilities.
+
+        Returns
+        -------
+        Tensor
+            Probabilities with the same leading dimensions as ``preds``.
+        """
+        if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
+            probs = torch.sigmoid(preds)
+        elif pad_mask is None:
+            assert preds.ndim == 2
+            probs = torch.softmax(preds, dim=-1)
+        else:
+            assert preds.ndim == 3
+            probs = _masked_softmax(preds, pad_mask.unsqueeze(-1))
+        return probs
 
     def materialise(self) -> None:
         """Resolve ``weight_source`` from the class dict (the ONLY file I/O).
@@ -327,7 +288,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         """
         if self.weight_source is None:
             return
-        if self.task is None:
+        if self.loss is None:
             raise RuntimeError(f"{type(self).__name__} {self.name!r}: materialise before bind()")
         path = self.weight_source["from_class_dict"]
         with open(path) as fh:
@@ -346,10 +307,10 @@ class ClassificationTaskModule(_TaskModuleBase):
                 f"but the task declares {len(self.class_names)} class_names (design §3.3)"
             )
         with torch.no_grad():
-            self.task.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
+            self.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed head; publishes RAW logits in EVERY non-training mode.
+        """Run the head; publishes RAW logits in EVERY non-training mode.
 
         The eval conversion (softmax / masked softmax) is owned by the
         `ClassProbs`/`SeqClassProbs`/`SeqClassIndex` producers and by `get_h5`,
@@ -361,7 +322,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         dict[str, Tensor]
             The newly produced keys only.
         """
-        assert self.task is not None, "forward before bind()"
+        assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
         # objects-stream (query-bank) heads have no pad mask
@@ -369,9 +330,9 @@ class ClassificationTaskModule(_TaskModuleBase):
         if mode & Mode.TRAINING:
             labels_dict = {self.stream: {self.label: b.get(self.label_key)}}
             pad_masks = {self.stream: mask} if self.has_pad_mask else None
-            preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
+            preds, loss = self.head_forward(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
-        preds, _ = self.task(x, None, None, context=ctx)
+        preds, _ = self.head_forward(x, None, None, context=ctx)
         return {self.pred_key: preds}
 
     # -- output rendering ---------------------------------------------------
@@ -412,9 +373,9 @@ class ClassificationTaskModule(_TaskModuleBase):
         np.ndarray
             ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
         """
-        assert self.task is not None, "get_h5 before bind()"
+        assert self.net is not None, "get_h5 before bind()"
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        preds = self.task.run_inference(b.get(self.pred_key), mask)
+        preds = self.run_inference(b.get(self.pred_key), mask)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.float().cpu().numpy(), dtype)
 
@@ -481,10 +442,10 @@ class ClassificationTaskModule(_TaskModuleBase):
             field (ONNX seq head); each carries a torch ``value``.
         """
         del run_name
-        assert self.task is not None, "get_output before bind()"
+        assert self.net is not None, "get_output before bind()"
         logits = b.get(self.pred_key)
         if not self.sequence:
-            if isinstance(self.task.loss, torch.nn.BCEWithLogitsLoss):
+            if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
                 probs = torch.sigmoid(logits)
             else:
                 assert logits.ndim == 2, "global classification head expects [B, C] logits"

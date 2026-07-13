@@ -74,6 +74,14 @@ class TestStateDictMapping:
         modules = build_gn2v2_modules(norm_dict)
         bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
         mapped = map_v1_state_dict(v1_sd, modules)
+        # flattened target layout: task heads carry net/loss directly
+        # (no `.task.` segment) and pooling carries gate_nn directly
+        # (no `.pool_net.` segment)
+        assert "jets_classification.net.net.0.weight" in mapped
+        assert "track_vertexing.net.net.0.weight" in mapped
+        assert "pool.gate_nn.weight" in mapped
+        assert "pool.gate_nn.bias" in mapped
+        assert not any(".task." in key or ".pool_net." in key for key in mapped)
         holder = nn.ModuleDict(modules)
         missing = set(holder.state_dict()) - set(mapped)
         extra = set(mapped) - set(holder.state_dict())
@@ -91,8 +99,11 @@ class TestStateDictMapping:
         v1_sd, modules, _ = transferred
         v2_dense = modules["track_embed"].net
         assert torch.equal(v1_sd["model.init_nets.0.net.net.0.weight"], v2_dense.net[0].weight)
-        v2_task = modules["track_vertexing"].task  # v1 model.tasks index 2
+        v2_task = modules["track_vertexing"]  # v1 model.tasks index 2
         assert torch.equal(v1_sd["model.tasks.2.net.net.0.weight"], v2_task.net.net[0].weight)
+        # v1 model.pool_net.* lands on the pooling module's own gate layer
+        assert torch.equal(v1_sd["model.pool_net.gate_nn.weight"], modules["pool"].gate_nn.weight)
+        assert torch.equal(v1_sd["model.pool_net.gate_nn.bias"], modules["pool"].gate_nn.bias)
 
     def test_unknown_v1_key_is_an_error(self, transferred):
         """Nothing is dropped silently — unmapped v1 keys raise."""

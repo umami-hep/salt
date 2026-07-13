@@ -1,4 +1,4 @@
-"""Regression task module, plain + gaussian (+ the absorbed v1 regression heads)."""
+"""Regression task module, plain + gaussian."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
+from salt.core.nn.dense import Dense
 from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.tasks.base import _AbsorbedTaskBase, _loss_class, _TaskModuleBase
+from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
 from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.output_field import OutputField
 from salt.core.utils.array_utils import listify
@@ -23,322 +24,6 @@ from salt.core.utils.scalers import RegressionTargetScaler
 
 _DEFAULT_REG_LOSS: dict[str, Any] = {"class_path": "torch.nn.MSELoss"}
 _DEFAULT_GAUSS_LOSS: dict[str, Any] = {"class_path": "torch.nn.GaussianNLLLoss"}
-
-
-class _AbsorbedRegressionTaskBase(_AbsorbedTaskBase):
-    """Base regression head: single-scaling guard, NaN-masked loss, and target scaling/stacking."""
-
-    def __init__(
-        self,
-        targets: list[str] | str,
-        scaler: RegressionTargetScaler | None = None,
-        target_denominators: list[str] | str | None = None,
-        norm_params: dict | None = None,
-        custom_output_names: list[str] | str | None = None,
-        sample_weight: str | None = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.scaler = scaler
-        self.targets = listify(targets)
-        self.target_denominators = listify(target_denominators)
-        self.custom_output_names = listify(custom_output_names)
-        if norm_params:
-            norm_params["mean"] = listify(norm_params["mean"])
-            norm_params["std"] = listify(norm_params["std"])
-        self.norm_params = norm_params
-        self.sample_weight = sample_weight
-
-        if [scaler, target_denominators, norm_params].count(None) not in {2, 3}:
-            raise ValueError("Can only use a single scaling method")
-
-        if self.scaler:
-            for target in self.targets:
-                self.scaler.scale(target, torch.Tensor(1))
-        if self.target_denominators and len(self.targets) != len(self.target_denominators):
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of targets ({len(self.targets)}) does not match "
-                f"number of target denominators ({len(self.target_denominators)})"
-            )
-        if self.norm_params and len(self.norm_params["mean"]) != len(self.targets):
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of means in norm_params ({len(self.norm_params['mean'])}) does not match "
-                f"number of targets ({len(self.targets)})"
-            )
-        if self.norm_params and len(self.norm_params["std"]) != len(self.targets):
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
-                f"number of targets ({len(self.targets)})"
-            )
-        if self.sample_weight is not None:
-            assert self.loss.reduction == "none", (
-                "Sample weights only supported for reduction='none'"
-            )
-
-    def nan_loss(self, preds: Tensor, targets: Tensor, targets_dict: Mapping, **kwargs) -> Tensor:
-        """Loss that ignores NaN targets.
-
-        Returns
-        -------
-        Tensor
-            Mean loss over non-NaN elements.
-
-        Raises
-        ------
-        ValueError
-            If the resulting loss becomes NaN.
-        """
-        invalid = torch.isnan(targets)
-        preds = torch.where(invalid, torch.zeros_like(preds), preds)
-        targets = torch.where(invalid, torch.zeros_like(targets), targets)
-
-        if "var" in kwargs:
-            kwargs["var"] = torch.where(invalid, torch.zeros_like(kwargs["var"]), kwargs["var"])
-
-        loss = self.loss(preds, targets, **kwargs)
-
-        if len(loss.shape) == 0:
-            if torch.isnan(loss):
-                raise ValueError(
-                    "Regression loss is NaN. This may be due to NaN targets,"
-                    " check configs/nan_regression.yaml for options to deal with this."
-                )
-            return loss
-
-        if self.sample_weight is not None:
-            weights = targets_dict[self.input_name][self.sample_weight]
-            weights = weights.unsqueeze(1)
-            # If multiple regression targets, expand the weights to match the shape
-            if loss.shape[1] > 1:
-                weights = weights.expand(-1, loss.shape[1])
-            loss = loss * weights
-
-        nanmean = torch.nanmean(loss)
-        if torch.isnan(nanmean):
-            raise ValueError("NanRegression is NaN. This means all model predictions are NaN")
-        return nanmean
-
-    def get_targets(self, targets_dict: Mapping) -> Tensor | None:
-        """Assemble and scale regression targets.
-
-        Returns
-        -------
-        Tensor | None
-            Targets of shape ``[B, R]`` (or ``[B, L, R]`` for queries), scaled
-            per configuration; ``None`` when there are no targets.
-        """
-        targets = None
-        if targets_dict:
-            targets = torch.stack(
-                [targets_dict[self.input_name][target] for target in self.targets], dim=1
-            )
-
-        if targets is not None:
-            if self.scaler is not None:
-                for i in range(len(self.targets)):
-                    targets[:, i] = self.scaler.scale(self.targets[i], targets[:, i])
-            if self.target_denominators is not None:
-                for i in range(len(self.targets)):
-                    targets[:, i] = torch.div(
-                        targets[:, i], targets_dict[self.input_name][self.target_denominators[i]]
-                    )
-            if self.norm_params is not None:
-                for i in range(len(self.norm_params["mean"])):
-                    targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
-                        self.norm_params["std"][i]
-                    )
-
-            # targets are stacked over dim 0 for scaling consistency, but a query
-            # target needs the target axis last, so transpose for that case only
-            if len(targets.shape) == 3:
-                targets = targets.transpose(1, 2)
-
-        # Must run BEFORE forward's pad-mask NaN fill and nan_loss's isnan-masking:
-        # this zeroes NaN/inf in the *data* targets, while padding NaNs (added by
-        # forward after this returns) stay NaN and are masked out later — the two
-        # mechanisms act on disjoint sets and don't double-count.
-        if targets is not None:
-            targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
-        return targets
-
-
-class _AbsorbedRegressionTask(_AbsorbedRegressionTaskBase):
-    """Plain regression head: ``output_size == len(targets)``; forward NaN-fills padded
-    targets before ``nan_loss``; ``run_inference`` inverts the scaling.
-    """
-
-    def __init__(self, scaler: RegressionTargetScaler | None = None, **kwargs) -> None:
-        super().__init__(**kwargs)
-        if self.net.output_size != len(self.targets):
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of outputs ({self.net.output_size}) does not match "
-                f"number of targets ({len(self.targets)})"
-            )
-        self.scaler = scaler
-
-    def forward(
-        self,
-        x: Tensor,
-        targets_dict: Mapping,
-        pad_masks: Mapping | None = None,
-        context: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        """Compute regression predictions and loss.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor | None]
-            Predicted values and the loss (``None`` when no targets).
-        """
-        if pad_masks is not None and self.input_name != "objects":
-            input_name_mask = self.input_name_mask(pad_masks)
-            preds = self.net(x[:, input_name_mask], context)
-            pad_mask = pad_masks[self.input_name]
-        else:
-            preds = self.net(x, context)
-            pad_mask = None
-
-        targets = self.get_targets(targets_dict)
-
-        # NaN-fill padded targets so nan_loss excludes them
-        if pad_mask is not None and targets is not None:
-            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
-
-        loss: Tensor | None = None
-        if targets is not None:
-            loss = self.nan_loss(preds, targets, targets_dict) * self.weight
-
-        return preds, loss
-
-    def run_inference(
-        self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
-    ) -> Tensor:
-        """Invert target scaling to the original space.
-
-        Indexes the trailing (target-channel) axis ``preds[..., i]`` so a
-        per-token ``[B, L, R]`` head de-scales column ``i`` of every token
-        (not just token ``i``); bit-identical to indexing axis 1 for a global
-        ``[B, R]`` head.
-
-        Returns
-        -------
-        Tensor
-            De-scaled predictions with NaN padding.
-        """
-        preds = preds.float()
-        if self.target_denominators is not None and labels is not None:
-            for i in range(len(self.targets)):
-                preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
-        elif self.norm_params is not None:
-            for i in range(len(self.norm_params["mean"])):
-                preds[..., i] *= self.norm_params["std"][i]
-                preds[..., i] += self.norm_params["mean"][i]
-        elif self.scaler is not None:
-            for i in range(len(self.targets)):
-                preds[..., i] = self.scaler.inverse(self.targets[i], preds[..., i])
-
-        if pad_mask is not None:
-            preds = torch.masked_fill(preds, pad_mask.unsqueeze(-1), np.nan)
-
-        return preds
-
-
-class _AbsorbedGaussianRegressionTask(_AbsorbedRegressionTaskBase):
-    """Mu/sigma regression head: ``output_size == 2 * len(targets)``; softplus variance,
-    Gaussian NLL loss; ``run_inference`` returns de-scaled ``(means, stds)``.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        if self.net.output_size != 2 * len(self.targets):
-            raise ValueError(
-                f"{self.name}: "
-                f"Number of targets ({len(self.targets)}) is not twice the "
-                f"number of outputs ({self.net.output_size})"
-            )
-
-    def forward(
-        self,
-        x: Tensor,
-        targets_dict: Mapping,
-        pad_masks: Mapping | None = None,
-        context: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        """Compute mean/variance predictions and Gaussian NLL loss.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor | None]
-            Concatenated means/variances ``[B, 2R]`` and the loss.
-        """
-        if pad_masks is not None:
-            input_name_mask = self.input_name_mask(pad_masks)
-            preds = self.net(x[:, input_name_mask], context)
-            pad_mask = pad_masks[self.input_name]
-        else:
-            preds = self.net(x, context)
-            pad_mask = None
-
-        targets = self.get_targets(targets_dict)
-
-        means, variances = preds.tensor_split(2, -1)
-        variances = nn.functional.softplus(variances)  # ensure variance stays positive
-
-        # NaN-fill padded targets so nan_loss excludes them
-        if pad_mask is not None and targets is not None:
-            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
-
-        loss: Tensor | None = None
-        if targets is not None:
-            loss = self.nan_loss(means, targets, targets_dict, var=variances) * self.weight
-
-        return preds, loss
-
-    def run_inference(
-        self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
-    ) -> tuple[Tensor, Tensor]:
-        """Invert scaling for means + (sqrt of) variances.
-
-        Indexes the trailing axis (``preds[..., i]`` / ``preds[..., i + 1]``) so a
-        per-token ``[B, L, 2R]`` head de-scales column ``i``/``i + 1`` of every
-        token; bit-identical to indexing axis 1 for a global ``[B, 2R]`` head.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor]
-            De-scaled ``(means, stds)`` each of shape ``[..., R]``.
-
-        Raises
-        ------
-        ValueError
-            If called without the necessary scaling parameters.
-        """
-        if self.target_denominators is not None and labels is not None:
-            for i in range(len(self.targets)):
-                preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
-                preds[..., i + 1] *= labels[self.input_name][self.target_denominators[i]]
-        elif self.norm_params is not None:
-            for i in range(len(self.norm_params["mean"])):
-                preds[..., i] *= self.norm_params["std"][i]
-                preds[..., i] += self.norm_params["mean"][i]
-                # return stddev as sqrt(var)
-                preds[..., i + 1] = (
-                    torch.sqrt(nn.functional.softplus(preds[..., i + 1]))
-                    * self.norm_params["std"][i]
-                )
-        else:
-            raise ValueError("Inference for Gaussian regression requires scaling parameters.")
-        means, stds = preds.tensor_split(2, -1)
-
-        if pad_mask is not None:
-            means = torch.masked_fill(means, pad_mask.unsqueeze(-1), np.nan)
-            stds = torch.masked_fill(stds, pad_mask.unsqueeze(-1), np.nan)
-
-        return means, stds
 
 
 class RegressionTaskModule(_TaskModuleBase):
@@ -466,6 +151,8 @@ class RegressionTaskModule(_TaskModuleBase):
         self.target_denominators = _opt_tuple(target_denominators)
         self.norm_params = self._checked_norm_params(norm_params)
         self.scaler_scales = dict(scaler) if scaler is not None else None
+        # the built `RegressionTargetScaler` (bind constructs it from scaler_scales)
+        self.scaler: RegressionTargetScaler | None = None
         self.custom_output_names = _opt_tuple(custom_output_names)
         self.sample_weight = sample_weight
         self.publish_targets = bool(publish_targets)
@@ -539,6 +226,220 @@ class RegressionTaskModule(_TaskModuleBase):
             "mean": [float(x) for x in listify(norm_params["mean"])],
             "std": [float(x) for x in listify(norm_params["std"])],
         }
+
+    # -- the head math (loss + target scaling + inference de-scaling) -----------
+
+    def nan_loss(self, preds: Tensor, targets: Tensor, targets_dict: Mapping, **kwargs) -> Tensor:
+        """Loss that ignores NaN targets.
+
+        Returns
+        -------
+        Tensor
+            Mean loss over non-NaN elements.
+
+        Raises
+        ------
+        ValueError
+            If the resulting loss becomes NaN.
+        """
+        invalid = torch.isnan(targets)
+        preds = torch.where(invalid, torch.zeros_like(preds), preds)
+        targets = torch.where(invalid, torch.zeros_like(targets), targets)
+
+        if "var" in kwargs:
+            kwargs["var"] = torch.where(invalid, torch.zeros_like(kwargs["var"]), kwargs["var"])
+
+        loss = self.loss(preds, targets, **kwargs)
+
+        if len(loss.shape) == 0:
+            if torch.isnan(loss):
+                raise ValueError(
+                    "Regression loss is NaN. This may be due to NaN targets,"
+                    " check configs/nan_regression.yaml for options to deal with this."
+                )
+            return loss
+
+        if self.sample_weight is not None:
+            weights = targets_dict[self.input_name][self.sample_weight]
+            weights = weights.unsqueeze(1)
+            # If multiple regression targets, expand the weights to match the shape
+            if loss.shape[1] > 1:
+                weights = weights.expand(-1, loss.shape[1])
+            loss = loss * weights
+
+        nanmean = torch.nanmean(loss)
+        if torch.isnan(nanmean):
+            raise ValueError("NanRegression is NaN. This means all model predictions are NaN")
+        return nanmean
+
+    def get_targets(self, targets_dict: Mapping) -> Tensor | None:
+        """Assemble and scale regression targets.
+
+        Returns
+        -------
+        Tensor | None
+            Targets of shape ``[B, R]`` (or ``[B, L, R]`` for queries), scaled
+            per configuration; ``None`` when there are no targets.
+        """
+        targets = None
+        if targets_dict:
+            targets = torch.stack(
+                [targets_dict[self.input_name][target] for target in self.targets], dim=1
+            )
+
+        if targets is not None:
+            if self.scaler is not None:
+                for i in range(len(self.targets)):
+                    targets[:, i] = self.scaler.scale(self.targets[i], targets[:, i])
+            if self.target_denominators is not None:
+                for i in range(len(self.targets)):
+                    targets[:, i] = torch.div(
+                        targets[:, i], targets_dict[self.input_name][self.target_denominators[i]]
+                    )
+            if self.norm_params is not None:
+                for i in range(len(self.norm_params["mean"])):
+                    targets[:, i] = (targets[:, i] - self.norm_params["mean"][i]) / (
+                        self.norm_params["std"][i]
+                    )
+
+            # targets are stacked over dim 0 for scaling consistency, but a query
+            # target needs the target axis last, so transpose for that case only
+            if len(targets.shape) == 3:
+                targets = targets.transpose(1, 2)
+
+        # Must run BEFORE forward's pad-mask NaN fill and nan_loss's isnan-masking:
+        # this zeroes NaN/inf in the *data* targets, while padding NaNs (added by
+        # forward after this returns) stay NaN and are masked out later — the two
+        # mechanisms act on disjoint sets and don't double-count.
+        if targets is not None:
+            targets = torch.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
+        return targets
+
+    def head_forward(
+        self,
+        x: Tensor,
+        targets_dict: Mapping,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute regression predictions and loss.
+
+        A plain head predicts ``[..., R]`` values; a gaussian head predicts
+        ``[..., 2R]`` (means ‖ raw variances) and takes the Gaussian NLL of
+        the means against the (softplus) variances.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted values and the loss (``None`` when no targets).
+        """
+        if self.gaussian:
+            if pad_masks is not None:
+                input_name_mask = self.input_name_mask(pad_masks)
+                preds = self.net(x[:, input_name_mask], context)
+                pad_mask = pad_masks[self.input_name]
+            else:
+                preds = self.net(x, context)
+                pad_mask = None
+
+            targets = self.get_targets(targets_dict)
+
+            means, variances = preds.tensor_split(2, -1)
+            variances = nn.functional.softplus(variances)  # ensure variance stays positive
+
+            # NaN-fill padded targets so nan_loss excludes them
+            if pad_mask is not None and targets is not None:
+                targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
+
+            loss: Tensor | None = None
+            if targets is not None:
+                loss = self.nan_loss(means, targets, targets_dict, var=variances) * self.weight
+
+            return preds, loss
+
+        if pad_masks is not None and self.input_name != "objects":
+            input_name_mask = self.input_name_mask(pad_masks)
+            preds = self.net(x[:, input_name_mask], context)
+            pad_mask = pad_masks[self.input_name]
+        else:
+            preds = self.net(x, context)
+            pad_mask = None
+
+        targets = self.get_targets(targets_dict)
+
+        # NaN-fill padded targets so nan_loss excludes them
+        if pad_mask is not None and targets is not None:
+            targets = torch.masked_fill(targets, pad_mask.unsqueeze(-1), torch.nan)
+
+        loss = None
+        if targets is not None:
+            loss = self.nan_loss(preds, targets, targets_dict) * self.weight
+
+        return preds, loss
+
+    def run_inference(
+        self, preds: Tensor, labels: Mapping | None = None, pad_mask: Tensor | None = None
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        """Invert target scaling to the original space.
+
+        Indexes the trailing (target-channel) axis ``preds[..., i]`` so a
+        per-token ``[B, L, R]`` head de-scales column ``i`` of every token
+        (not just token ``i``); bit-identical to indexing axis 1 for a global
+        ``[B, R]`` head. A gaussian head de-scales means + (sqrt of softplus)
+        variances and returns the ``(means, stds)`` pair instead.
+
+        Returns
+        -------
+        Tensor | tuple[Tensor, Tensor]
+            De-scaled predictions with NaN padding (plain head), or de-scaled
+            ``(means, stds)`` each of shape ``[..., R]`` (gaussian head).
+
+        Raises
+        ------
+        ValueError
+            If a gaussian head is called without the necessary scaling
+            parameters.
+        """
+        if self.gaussian:
+            if self.target_denominators is not None and labels is not None:
+                for i in range(len(self.targets)):
+                    preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
+                    preds[..., i + 1] *= labels[self.input_name][self.target_denominators[i]]
+            elif self.norm_params is not None:
+                for i in range(len(self.norm_params["mean"])):
+                    preds[..., i] *= self.norm_params["std"][i]
+                    preds[..., i] += self.norm_params["mean"][i]
+                    # return stddev as sqrt(var)
+                    preds[..., i + 1] = (
+                        torch.sqrt(nn.functional.softplus(preds[..., i + 1]))
+                        * self.norm_params["std"][i]
+                    )
+            else:
+                raise ValueError("Inference for Gaussian regression requires scaling parameters.")
+            means, stds = preds.tensor_split(2, -1)
+
+            if pad_mask is not None:
+                means = torch.masked_fill(means, pad_mask.unsqueeze(-1), np.nan)
+                stds = torch.masked_fill(stds, pad_mask.unsqueeze(-1), np.nan)
+
+            return means, stds
+
+        preds = preds.float()
+        if self.target_denominators is not None and labels is not None:
+            for i in range(len(self.targets)):
+                preds[..., i] *= labels[self.input_name][self.target_denominators[i]]
+        elif self.norm_params is not None:
+            for i in range(len(self.norm_params["mean"])):
+                preds[..., i] *= self.norm_params["std"][i]
+                preds[..., i] += self.norm_params["mean"][i]
+        elif self.scaler is not None:
+            for i in range(len(self.targets)):
+                preds[..., i] = self.scaler.inverse(self.targets[i], preds[..., i])
+
+        if pad_mask is not None:
+            preds = torch.masked_fill(preds, pad_mask.unsqueeze(-1), np.nan)
+
+        return preds
 
     @property
     def output_suffixes(self) -> tuple[str, ...]:
@@ -696,7 +597,7 @@ class RegressionTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the composed regression head + resolve the ONNX denominator source.
+        """Build the head layers + resolve the ONNX denominator source.
 
         ``output_size = len(targets)`` (``2 * len(targets)`` for a gaussian
         head). When ``target_denominators`` is set, every denominator must be
@@ -710,6 +611,9 @@ class RegressionTaskModule(_TaskModuleBase):
         ConfigError
             If a ratio denominator is not a declared input Feature, or a
             gaussian head has no scaling method for inference de-scaling.
+        ValueError
+            If ``norm_params`` carries a mean/std count that does not match
+            the target count.
         """
         if self.gaussian and self.norm_params is None and self.target_denominators is None:
             raise ConfigError(
@@ -718,43 +622,32 @@ class RegressionTaskModule(_TaskModuleBase):
                 "scaling params (task.py:765-766)"
             )
         init_args = dict(self.loss_cfg.get("init_args", {}))
-        loss_module = _loss_class(self.loss_cfg)(**init_args)
-        scaler = RegressionTargetScaler(self.scaler_scales) if self.scaler_scales else None
-        dense_config = {
-            "input_size": schema.width(self.input_key),
-            "output_size": (2 if self.gaussian else 1) * len(self.targets),
+        self.loss = _loss_class(self.loss_cfg)(**init_args)
+        # only the plain head takes the functional `scaler` (gaussian has no
+        # scaler branch — guarded at __init__); an unknown target surfaces at
+        # the first get_targets/run_inference call, as before
+        self.scaler = RegressionTargetScaler(self.scaler_scales) if self.scaler_scales else None
+        if self.norm_params and len(self.norm_params["mean"]) != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of means in norm_params ({len(self.norm_params['mean'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        if self.norm_params and len(self.norm_params["std"]) != len(self.targets):
+            raise ValueError(
+                f"{self.name}: "
+                f"Number of stds in norm_params ({len(self.norm_params['std'])}) does not match "
+                f"number of targets ({len(self.targets)})"
+            )
+        if self.sample_weight is not None:
+            assert self.loss.reduction == "none", (
+                "Sample weights only supported for reduction='none'"
+            )
+        self.net = Dense(
+            input_size=schema.width(self.input_key),
+            output_size=(2 if self.gaussian else 1) * len(self.targets),
             **({"context_size": schema.width(self.context)} if self.context else {}),
             **self.dense_cfg,
-        }
-        # the composed task mutates norm_params in place; pass a fresh copy to
-        # keep this module's config immutable
-        norm_params = (
-            {"mean": list(self.norm_params["mean"]), "std": list(self.norm_params["std"])}
-            if self.norm_params is not None
-            else None
-        )
-        common = {
-            "name": self.name,
-            "input_name": self.stream,
-            "targets": list(self.targets),
-            "target_denominators": (
-                list(self.target_denominators) if self.target_denominators is not None else None
-            ),
-            "norm_params": norm_params,
-            "custom_output_names": (
-                list(self.custom_output_names) if self.custom_output_names is not None else None
-            ),
-            "sample_weight": self.sample_weight,
-            "loss": loss_module,
-            "weight": self.weight,
-            "dense_config": dense_config,
-        }
-        # only the plain head takes the functional `scaler` (gaussian has no
-        # scaler branch — guarded at __init__)
-        self.task = (
-            _AbsorbedGaussianRegressionTask(**common)
-            if self.gaussian
-            else _AbsorbedRegressionTask(scaler=scaler, **common)
         )
         if self.target_denominators is not None:
             self._input_fields = schema.fields_of(self.input_feature_key)
@@ -770,7 +663,7 @@ class RegressionTaskModule(_TaskModuleBase):
                 )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed head; publishes RAW (scaled) preds in EVERY non-training mode.
+        """Run the head; publishes RAW (scaled) preds in EVERY non-training mode.
 
         The head is handed a single-stream targets dict; the per-sample weight
         (when configured) rides in that dict so ``nan_loss`` finds it.
@@ -786,7 +679,7 @@ class RegressionTaskModule(_TaskModuleBase):
         dict[str, Tensor]
             The newly produced keys only.
         """
-        assert self.task is not None, "forward before bind()"
+        assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
         # objects-stream (query-bank) heads have no pad mask
@@ -804,17 +697,17 @@ class RegressionTaskModule(_TaskModuleBase):
                 targets_dict[self.stream][denom] = b.get(key)
             if self.sample_weight is not None:
                 targets_dict[self.stream][self.sample_weight] = b.get(self.weight_label_key)
-            preds, loss = self.task(x, targets_dict, pad_masks, context=ctx)
+            preds, loss = self.head_forward(x, targets_dict, pad_masks, context=ctx)
             if self.publish_targets:
                 # matched-loss feature head: publish preds + scaled targets for the
                 # matcher; the standalone loss is discarded (MaskFormerMatchedLoss
                 # owns losses.regression instead)
                 return {
                     self.pred_key: preds,
-                    self.targets_key: self.task.get_targets(targets_dict),
+                    self.targets_key: self.get_targets(targets_dict),
                 }
             return {self.pred_key: preds, self.loss_key: loss}
-        preds, _ = self.task(x, {}, pad_masks, context=ctx)
+        preds, _ = self.head_forward(x, {}, pad_masks, context=ctx)
         return {self.pred_key: preds}
 
     def _descale_source(self, b: Bundle, mode: Mode) -> dict[str, dict[str, Tensor]]:
@@ -851,7 +744,7 @@ class RegressionTaskModule(_TaskModuleBase):
 
         Reads the RAW ``preds.*`` leaf + the mode-split denominator source
         (labels in TEST, the input Feature by name in ONNX) + the pad mask,
-        and runs ``self.task.run_inference``. A gaussian head's
+        and runs ``self.run_inference``. A gaussian head's
         ``run_inference`` returns a ``(means, stds)`` tuple, re-concatenated
         here to ONE ``[..., 2R]`` array. Both ``get_h5`` and ``get_output``
         call this so the de-scaling happens exactly once and is identical
@@ -863,14 +756,14 @@ class RegressionTaskModule(_TaskModuleBase):
             The de-scaled physical predictions: ``[..., R]`` (plain) or
             ``[..., 2R]`` (gaussian, means ‖ stds).
         """
-        assert self.task is not None, "de-scale before bind()"
+        assert self.net is not None, "de-scale before bind()"
         # clone before the in-place de-scale: run_inference mutates preds[..., i]
         # in place, so a bare b.get(...) would corrupt the bundle's RAW preds.*
         # leaf and double-de-scale on any later read
         preds = b.get(self.pred_key).float().clone()
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
         labels = self._descale_source(b, mode) if self.target_denominators is not None else None
-        descaled = self.task.run_inference(preds, labels=labels, pad_mask=mask)
+        descaled = self.run_inference(preds, labels=labels, pad_mask=mask)
         if self.gaussian:
             # run_inference returns (means, stds); publish ONE [..., 2R] array
             # (means ‖ stds) for the single-leaf graph contract

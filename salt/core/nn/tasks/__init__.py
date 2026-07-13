@@ -1,6 +1,6 @@
 """Config-constructed task modules (classification, regression, vertexing).
 
-Each task composes a v1 task head (loss math kept verbatim) at `bind`, declares
+Each task builds its head layers (`Dense` net + loss) at `bind`, declares
 its label/mask/context dependencies, and publishes ``preds.<stream>.<task>``
 plus ``losses.<task>`` (FIT|VAL only).
 """

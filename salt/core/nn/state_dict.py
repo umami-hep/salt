@@ -152,11 +152,13 @@ def map_v1_state_dict(
                     f"map_v1_state_dict: v1 task index {index} out of range — the module "
                     f"dict has {len(task_names)} task modules ({task_names})"
                 )
-            out[f"{task_names[index]}.task.{rest}"] = value
+            out[f"{task_names[index]}.{rest}"] = value
         elif key.startswith("model.encoder."):
             out[f"{encoder_name}.encoder.{key[len('model.encoder.') :]}"] = value
         elif key.startswith("model.pool_net."):
-            out[f"{pool_name}.pool_net.{key[len('model.pool_net.') :]}"] = value
+            # v1 nests the gate under `model.pool_net.`; the v2 module carries
+            # `gate_nn` directly, so only the module name is prepended
+            out[f"{pool_name}.{key[len('model.pool_net.') :]}"] = value
         else:
             unmapped.append(key)
     if unmapped:

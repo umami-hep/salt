@@ -1,4 +1,4 @@
-"""Shared task-module base classes, absorbed-head base, and config helpers."""
+"""Shared task-module base class and config helpers."""
 
 from __future__ import annotations
 
@@ -31,42 +31,12 @@ _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 _NO_PAD_MASK_STREAMS = frozenset({"objects"})
 
 
-class _AbsorbedTaskBase(nn.Module):
-    """Wraps a `Dense` head, a loss, an ``input_name`` stream tag, and a scalar ``weight``."""
-
-    def __init__(
-        self,
-        name: str,
-        input_name: str,
-        dense_config: dict,
-        loss: nn.Module,
-        weight: float = 1.0,
-    ) -> None:
-        super().__init__()
-        self.name = name
-        self.input_name = input_name
-        self.net = Dense(**dense_config)
-        self.loss = loss
-        self.weight = weight
-
-    def input_name_mask(self, pad_masks: Mapping) -> Tensor:
-        """Boolean mask selecting tokens from ``self.input_name``.
-
-        Returns
-        -------
-        Tensor
-            Boolean mask of shape ``[L]``, True for positions in ``self.input_name``.
-        """
-        return torch.cat(
-            [
-                torch.ones(m.shape[1], device=m.device) * (1 if (t == self.input_name) else 0)
-                for t, m in pad_masks.items()
-            ],
-        ).bool()
-
-
 class _TaskModuleBase(nn.Module):
-    """Shared config capture + loss construction for the v2 task modules."""
+    """Shared config capture + loss construction for the task modules.
+
+    The head itself (``net`` `Dense` layer + ``loss`` module) is built by the
+    subclass ``bind()`` once the input/context widths are known.
+    """
 
     def __init__(
         self,
@@ -84,6 +54,9 @@ class _TaskModuleBase(nn.Module):
         self.name = _UNNAMED
         _reject_width_keys(type(self).__name__, dense, _WIDTH_KEYS)
         self.stream = stream
+        # `input_name` is the head-math name for the task's stream tag (the
+        # single source of both the label-dict key and the pad-mask selection)
+        self.input_name = stream
         self.label = label
         self.input_key = input if input is not None else f"encoded.{stream}"
         self.context = context
@@ -91,7 +64,24 @@ class _TaskModuleBase(nn.Module):
         self.loss_cfg = _loss_cfg(loss, default_loss)
         self.weight = float(weight)
         self.expose_modes = _parse_expose(expose, type(self).__name__)
-        self.task: nn.Module | None = None
+        # the head layers — built by the subclass bind() (widths known there)
+        self.net: Dense | None = None
+        self.loss: nn.Module | None = None
+
+    def input_name_mask(self, pad_masks: Mapping) -> Tensor:
+        """Boolean mask selecting tokens from ``self.input_name``.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask of shape ``[L]``, True for positions in ``self.input_name``.
+        """
+        return torch.cat(
+            [
+                torch.ones(m.shape[1], device=m.device) * (1 if (t == self.input_name) else 0)
+                for t, m in pad_masks.items()
+            ],
+        ).bool()
 
     def _pred_spec(self, spec: TensorSpec) -> TensorSpec:
         """Restrict a prediction port spec to the configured ``expose`` modes.

@@ -1,4 +1,4 @@
-"""GlobalAttentionPooling GraphModule and absorbed v1 pooling math."""
+"""GlobalAttentionPooling GraphModule."""
 
 from __future__ import annotations
 
@@ -22,56 +22,12 @@ from salt.core.utils.tensor_utils import (
 )
 
 
-class _GlobalAttentionPoolingV1(nn.Module):
-    """Global attention pooling over concatenated node embeddings.
-
-    Named with the ``V1`` suffix because the config-facing `GraphModule` below
-    is also called `GlobalAttentionPooling`; this is the inner ``nn.Module`` it
-    composes.
-
-    Parameters
-    ----------
-    input_size : int
-        Dimensionality of each node embedding feature vector.
-    """
-
-    def __init__(self, input_size: int):
-        super().__init__()
-        self.gate_nn = nn.Linear(input_size, 1)
-
-    def forward(
-        self,
-        x: dict[str, Tensor] | dict,
-        pad_mask: dict | None = None,
-    ) -> Tensor:
-        """Apply global attention pooling.
-
-        Returns
-        -------
-        Tensor
-            Pooled tensor of shape ``[B, D]``.
-        """
-        x_flat = flatten_tensor_dict(x, exclude=["objects"])
-
-        if pad_mask is not None:
-            pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
-
-        weights = masked_softmax(self.gate_nn(x_flat), pad_mask, dim=1)
-        # add padded track to avoid error in onnx model when there are no tracks in the jet
-        weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
-        x_pad = torch.zeros((x_flat.shape[0], 1, x_flat.shape[2]), device=x_flat.device)
-        weights = torch.cat([weights, weight_pad], dim=1)
-        x_flat = torch.cat([x_flat, x_pad], dim=1)
-
-        return (x_flat * weights).sum(dim=1)
-
-
 class GlobalAttentionPooling(nn.Module):
     """Config-constructed global attention pooling, with explicit input/out ports.
 
-    Composes a fresh v1 `GlobalAttentionPooling` built at `bind`. Pools the
-    register-augmented sequence with the post-register mask order
-    streams-then-REGISTERS. Two wirings, one class:
+    The gate layer (``gate_nn``) is built at `bind` once the input width is
+    known. Pools the register-augmented sequence with the post-register mask
+    order streams-then-REGISTERS. Two wirings, one class:
 
     - **With an encoder**: ``input`` is ``encoded.seq`` and `TransformerEncoder`
       publishes ``masks.registers`` (register rows sit after every stream).
@@ -88,7 +44,8 @@ class GlobalAttentionPooling(nn.Module):
         self.name = _UNNAMED
         self.input_key = input
         self.out_key = out
-        self.pool_net: nn.Module | None = None
+        # the gate layer — built at bind (input width known there)
+        self.gate_nn: nn.Linear | None = None
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + masks -> the pooled vector.
@@ -120,13 +77,39 @@ class GlobalAttentionPooling(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the composed v1 pooling with the inferred gate width."""
-        self.pool_net = _GlobalAttentionPoolingV1(input_size=schema.width(self.input_key))
+        """Build the gate layer with the inferred input width."""
+        self.gate_nn = nn.Linear(schema.width(self.input_key), 1)
+
+    def pool(
+        self,
+        x: dict[str, Tensor] | dict,
+        pad_mask: dict | None = None,
+    ) -> Tensor:
+        """Apply global attention pooling over the concatenated node embeddings.
+
+        Returns
+        -------
+        Tensor
+            Pooled tensor of shape ``[B, D]``.
+        """
+        x_flat = flatten_tensor_dict(x, exclude=["objects"])
+
+        if pad_mask is not None:
+            pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)
+
+        weights = masked_softmax(self.gate_nn(x_flat), pad_mask, dim=1)
+        # add padded track to avoid error in onnx model when there are no tracks in the jet
+        weight_pad = torch.zeros((weights.shape[0], 1, weights.shape[2]), device=weights.device)
+        x_pad = torch.zeros((x_flat.shape[0], 1, x_flat.shape[2]), device=x_flat.device)
+        weights = torch.cat([weights, weight_pad], dim=1)
+        x_flat = torch.cat([x_flat, x_pad], dim=1)
+
+        return (x_flat * weights).sum(dim=1)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Pool the sequence with the (optionally register-augmented) mask dict."""
         del mode
-        assert self.pool_net is not None, "forward before bind()"
+        assert self.gate_nn is not None, "forward before bind()"
         x = {"seq": b.get(self.input_key)}
         # streams-then-REGISTERS dict order is numerics-critical: pooling cats
         # mask values in dict order. The encoder-less path has no register row,
@@ -134,4 +117,4 @@ class GlobalAttentionPooling(nn.Module):
         pad = {"seq": b.get("seq.mask")}
         if "masks.registers" in b:
             pad["REGISTERS"] = b.get("masks.registers")
-        return {self.out_key: self.pool_net(x, pad_mask=pad)}
+        return {self.out_key: self.pool(x, pad_mask=pad)}

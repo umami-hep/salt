@@ -49,7 +49,7 @@ class TestVertexingTaskModule:
 
     def test_bind_pair_widths_and_reduction_check(self, gn2v2):
         modules, _, _ = gn2v2
-        head = modules["track_vertexing"].task
+        head = modules["track_vertexing"]
         assert head.net.input_size == 2 * 16  # pair concat (task.py:894-896)
         assert head.net.context_size == 16
         task = VertexingTaskModule(
@@ -121,8 +121,8 @@ class TestOriginWeightingConfig:
         labels = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
         n = labels.shape[1]
         adjmat = ~torch.eye(n, dtype=torch.bool).unsqueeze(0)
-        ref_weights = indep.task.get_weights(labels, adjmat)
-        v2_weights = task.task.get_weights(labels, adjmat)
+        ref_weights = indep.get_weights(labels, adjmat)
+        v2_weights = task.get_weights(labels, adjmat)
         assert torch.equal(ref_weights, v2_weights)
 
     def test_resolve_origin_weighting_module_helper(self):

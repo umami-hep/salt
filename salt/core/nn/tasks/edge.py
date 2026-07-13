@@ -1,4 +1,4 @@
-"""Edge-classification vertexing task module (+ the absorbed v1 vertexing head)."""
+"""Edge-classification vertexing task module."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.bind import ResolvedSchema
+from salt.core.nn.dense import Dense
 from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.tasks.base import _AbsorbedTaskBase, _loss_class, _TaskModuleBase
+from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
 from salt.core.onnx.config import ExportOutput
 from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.names import VERTEX_INDEX
@@ -49,125 +50,6 @@ def _mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
             start_index = end_index
 
     return filled
-
-
-class _AbsorbedVertexingTask(_AbsorbedTaskBase):
-    """Edge-classification vertexing head: builds the compressed track-track matrix,
-    weights per-edge BCE by origin labels (``get_weights``), and ``run_inference``
-    returns per-node union-find assignments. ``_OriginWeightedVertexing`` overrides
-    ``get_weights``.
-    """
-
-    def __init__(self, label: str, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.label = label
-
-    def forward(
-        self,
-        x: Tensor,
-        labels_dict: Mapping,
-        pad_masks: Tensor | None = None,
-        context: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        """Compute pair classification for vertexing and its loss.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor | None]
-            Predicted edge logits ``[E, 1]`` and the scalar loss.
-        """
-        if pad_masks is not None:
-            input_name_mask = self.input_name_mask(pad_masks)
-            mask = pad_masks[self.input_name]
-            x = x[:, input_name_mask]
-        else:
-            mask = None
-        b, n, d = x.shape
-        ex_size = (b, n, n, d)
-        t_mask = torch.ones(b, n, device=x.device) if mask is None else ~mask
-        t_mask = torch.cat(
-            [t_mask, torch.zeros(b, 1, device=x.device)], dim=1
-        )  # pad t_mask for onnx compatibility
-        adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
-        adjmat = (
-            adjmat.bool() & ~torch.eye(n + 1, n + 1, device=adjmat.device).repeat(b, 1, 1).bool()
-        )
-
-        context_matrix = None
-        if context is not None:
-            context_d = context.shape[-1]
-            context = context.unsqueeze(1).expand(b, n, context_d)
-            context_matrix = torch.zeros(
-                (adjmat.sum(), 2 * context_d), device=x.device, dtype=x.dtype
-            )
-            context_matrix = context.unsqueeze(-2).expand((b, n, n, context_d))[adjmat[:, :-1, :-1]]
-
-        # compressed track-track matrix (one row per valid edge, not [B, N, N])
-        tt_matrix = torch.zeros((adjmat.sum(), d * 2), device=x.device, dtype=x.dtype)
-        tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat[:, :-1, :-1]]
-        tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
-        pred = self.net(tt_matrix, context_matrix)
-        loss: Tensor | None = None
-        if labels_dict:
-            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat[:, :-1, :-1])
-
-        return pred, loss
-
-    def calculate_loss(self, pred: Tensor, labels_dict: Mapping, adjmat: Tensor) -> Tensor:
-        """Compute the vertexing loss against pairwise matching labels.
-
-        Returns
-        -------
-        Tensor
-            Weighted average loss scaled by ``self.weight``.
-        """
-        labels = labels_dict[self.input_name][self.label]
-
-        match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
-
-        # negative-class labels never count as a match, even to each other
-        unique_matrix = labels < 0
-        unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
-        match_matrix *= ~unique_matrix
-
-        match_matrix = match_matrix[adjmat].float()
-
-        loss = self.loss(pred.squeeze(-1), match_matrix)
-
-        origin_label = self.label.replace("VertexIndex", "OriginLabel")
-        weights = self.get_weights(labels_dict[self.input_name][origin_label], adjmat)
-        weighted_loss = loss * weights
-
-        num_non_masked_elements = match_matrix.sum()
-        loss = weighted_loss.sum() / num_non_masked_elements
-
-        return loss * self.weight
-
-    def get_weights(self, labels: Tensor, adjmat: Tensor) -> Tensor:
-        """Per-edge weights from hardcoded heavy/fake origin ids (3, 4, 5 / 1).
-
-        ``_OriginWeightedVertexing`` overrides this with config-driven ids.
-
-        Returns
-        -------
-        Tensor
-            Per-edge weights ``[E]`` after adjacency compression.
-        """
-        weights = torch.clip(sum(labels == i for i in (3, 4, 5)), 0, 1) - (labels == 1).int()
-        weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
-        weights = weights[adjmat]
-        return 1 + weights
-
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
-        """Per-node assignments from edge predictions.
-
-        Returns
-        -------
-        Tensor
-            Flattened per-node assignments with paddings filled to ``-inf``.
-        """
-        preds = get_node_assignment_jit(preds, pad_mask)
-        return _mask_fill_flattened(preds, pad_mask)
 
 
 class VertexingTaskModule(_TaskModuleBase):
@@ -205,7 +87,7 @@ class VertexingTaskModule(_TaskModuleBase):
         Parameters
         ----------
         label : str
-            Vertex-index label; must contain ``"VertexIndex"`` (the composed
+            Vertex-index label; must contain ``"VertexIndex"`` (the vertexing
             loss derives the origin key by string-replace).
         origin_label : str
             Declared origin-label dependency for edge weighting (and, for
@@ -240,8 +122,8 @@ class VertexingTaskModule(_TaskModuleBase):
         if "VertexIndex" not in label:
             raise ConfigError(
                 f"VertexingTaskModule: label {label!r} must contain 'VertexIndex' — the "
-                "composed v1 loss derives the origin key as "
-                "label.replace('VertexIndex', 'OriginLabel') (task.py:937; absorbed at M7)"
+                "vertexing loss derives the origin key as "
+                "label.replace('VertexIndex', 'OriginLabel')"
             )
         self.origin_label = origin_label
         self.prefix_vertex_column = bool(prefix_vertex_column)
@@ -391,7 +273,7 @@ class VertexingTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the composed vertexing head with inferred widths.
+        """Build the head layers with inferred widths.
 
         ``input_size = 2 * width(input)`` (pair concat); ``context_size = width(context)``.
 
@@ -418,29 +300,130 @@ class VertexingTaskModule(_TaskModuleBase):
                 f"VertexingTaskModule {self.name!r}: loss reduction must be 'none' — the "
                 "origin weighting multiplies the per-edge loss (task.py:938-947)"
             )
+        self.loss = loss_module
         width = schema.width(self.input_key)
-        dense_config = {
-            "input_size": 2 * width,
-            "output_size": 1,
+        self.net = Dense(
+            input_size=2 * width,
+            output_size=1,
             **({"context_size": schema.width(self.context)} if self.context else {}),
             **self.dense_cfg,
-        }
-        self.task = _OriginWeightedVertexing(
-            heavy_ids=self.heavy_ids,
-            fake_ids=self.fake_ids,
-            name=self.name,
-            input_name=self.stream,
-            label=self.label,
-            loss=loss_module,
-            weight=self.weight,
-            dense_config=dense_config,
         )
 
+    def head_forward(
+        self,
+        x: Tensor,
+        labels_dict: Mapping | None,
+        pad_masks: Mapping | None = None,
+        context: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Compute pair classification for vertexing and its loss.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor | None]
+            Predicted edge logits ``[E, 1]`` and the scalar loss.
+        """
+        if pad_masks is not None:
+            input_name_mask = self.input_name_mask(pad_masks)
+            mask = pad_masks[self.input_name]
+            x = x[:, input_name_mask]
+        else:
+            mask = None
+        b, n, d = x.shape
+        ex_size = (b, n, n, d)
+        t_mask = torch.ones(b, n, device=x.device) if mask is None else ~mask
+        t_mask = torch.cat(
+            [t_mask, torch.zeros(b, 1, device=x.device)], dim=1
+        )  # pad t_mask for onnx compatibility
+        adjmat = t_mask.unsqueeze(-1) * t_mask.unsqueeze(-2)
+        adjmat = (
+            adjmat.bool() & ~torch.eye(n + 1, n + 1, device=adjmat.device).repeat(b, 1, 1).bool()
+        )
+
+        context_matrix = None
+        if context is not None:
+            context_d = context.shape[-1]
+            context = context.unsqueeze(1).expand(b, n, context_d)
+            context_matrix = torch.zeros(
+                (adjmat.sum(), 2 * context_d), device=x.device, dtype=x.dtype
+            )
+            context_matrix = context.unsqueeze(-2).expand((b, n, n, context_d))[adjmat[:, :-1, :-1]]
+
+        # compressed track-track matrix (one row per valid edge, not [B, N, N])
+        tt_matrix = torch.zeros((adjmat.sum(), d * 2), device=x.device, dtype=x.dtype)
+        tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat[:, :-1, :-1]]
+        tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
+        pred = self.net(tt_matrix, context_matrix)
+        loss: Tensor | None = None
+        if labels_dict:
+            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat[:, :-1, :-1])
+
+        return pred, loss
+
+    def calculate_loss(self, pred: Tensor, labels_dict: Mapping, adjmat: Tensor) -> Tensor:
+        """Compute the vertexing loss against pairwise matching labels.
+
+        Returns
+        -------
+        Tensor
+            Weighted average loss scaled by ``self.weight``.
+        """
+        labels = labels_dict[self.input_name][self.label]
+
+        match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
+
+        # negative-class labels never count as a match, even to each other
+        unique_matrix = labels < 0
+        unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
+        match_matrix *= ~unique_matrix
+
+        match_matrix = match_matrix[adjmat].float()
+
+        loss = self.loss(pred.squeeze(-1), match_matrix)
+
+        origin_label = self.label.replace("VertexIndex", "OriginLabel")
+        weights = self.get_weights(labels_dict[self.input_name][origin_label], adjmat)
+        weighted_loss = loss * weights
+
+        num_non_masked_elements = match_matrix.sum()
+        loss = weighted_loss.sum() / num_non_masked_elements
+
+        return loss * self.weight
+
+    def get_weights(self, labels: Tensor, adjmat: Tensor) -> Tensor:
+        """Compute per-edge weights from the configured heavy/fake origin ids.
+
+        With the default ids (3, 4, 5 / 1) this reproduces the historic
+        hardcoded weighting bit-for-bit.
+
+        Returns
+        -------
+        Tensor
+            Per-edge weights of shape ``[E]`` after adjacency compression.
+        """
+        heavy = torch.clip(sum(labels == i for i in self.heavy_ids), 0, 1)
+        fake = torch.clip(sum(labels == i for i in self.fake_ids), 0, 1)
+        weights = heavy - fake.int()
+        weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
+        weights = weights[adjmat]
+        return 1 + weights
+
+    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
+        """Per-node assignments from edge predictions.
+
+        Returns
+        -------
+        Tensor
+            Flattened per-node assignments with paddings filled to ``-inf``.
+        """
+        preds = get_node_assignment_jit(preds, pad_mask)
+        return _mask_fill_flattened(preds, pad_mask)
+
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the composed head; publishes RAW ``[E, 1]`` edge scores in EVERY non-training mode.
+        """Run the head; publishes RAW ``[E, 1]`` edge scores in EVERY non-training mode.
 
         The labels dict carries the origin labels under the derived key
-        (``label.replace("VertexIndex", "OriginLabel")``) so the composed loss
+        (``label.replace("VertexIndex", "OriginLabel")``) so ``calculate_loss``
         finds them — the graph dependency is the declared ``origin_label`` port.
 
         The union-find conversion (edge scores -> per-node assignments) is
@@ -452,7 +435,7 @@ class VertexingTaskModule(_TaskModuleBase):
         dict[str, Tensor]
             The newly produced keys only.
         """
-        assert self.task is not None, "forward before bind()"
+        assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
         mask = b.get(f"masks.{self.stream}")
@@ -465,9 +448,9 @@ class VertexingTaskModule(_TaskModuleBase):
                     derived: b.get(self.origin_label_key),
                 }
             }
-            preds, loss = self.task(x, labels_dict, pad_masks, context=ctx)
+            preds, loss = self.head_forward(x, labels_dict, pad_masks, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
-        preds, _ = self.task(x, None, pad_masks, context=ctx)
+        preds, _ = self.head_forward(x, None, pad_masks, context=ctx)
         return {self.pred_key: preds}
 
     # -- output rendering ---------------------------------------------------
@@ -498,9 +481,9 @@ class VertexingTaskModule(_TaskModuleBase):
         np.ndarray
             ``[B, L]`` structured array with one ``i8`` field.
         """
-        assert self.task is not None, "get_h5 before bind()"
+        assert self.net is not None, "get_h5 before bind()"
         mask = b.get(f"masks.{self.stream}")
-        preds = self.task.run_inference(b.get(self.pred_key), mask)
+        preds = self.run_inference(b.get(self.pred_key), mask)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.int().cpu().numpy(), dtype)
 
@@ -561,7 +544,7 @@ class VertexingTaskModule(_TaskModuleBase):
             One int8 vertex-index field (the per-token union-find assignment).
         """
         del run_name
-        assert self.task is not None, "get_output before bind()"
+        assert self.net is not None, "get_output before bind()"
         edge_scores = b.get(self.pred_key)
         mask = b.get(f"masks.{self.stream}")
         if mode & Mode.ONNX:
@@ -578,7 +561,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 )
             ]
         # H5 (TEST): union-find then cast to int (-inf padding -> int32 -2147483648)
-        preds = self.task.run_inference(edge_scores, mask).int()
+        preds = self.run_inference(edge_scores, mask).int()
         return [
             OutputField(
                 h5_name=VERTEX_INDEX,
@@ -620,34 +603,6 @@ class VertexingTaskModule(_TaskModuleBase):
                 prefix=self.prefix_vertex_column,
             )
         ]
-
-
-class _OriginWeightedVertexing(_AbsorbedVertexingTask):
-    """`_AbsorbedVertexingTask` with config-driven heavy/fake origin ids.
-
-    With the default ids (3,4,5 / 1), `get_weights` is bit-identical to the
-    hardcoded base version.
-    """
-
-    def __init__(self, heavy_ids: Sequence[int], fake_ids: Sequence[int], **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._heavy_ids = tuple(heavy_ids)
-        self._fake_ids = tuple(fake_ids)
-
-    def get_weights(self, labels: Tensor, adjmat: Tensor) -> Tensor:
-        """Compute per-edge weights from configured origin ids.
-
-        Returns
-        -------
-        Tensor
-            Per-edge weights of shape ``[E]`` after adjacency compression.
-        """
-        heavy = torch.clip(sum(labels == i for i in self._heavy_ids), 0, 1)
-        fake = torch.clip(sum(labels == i for i in self._fake_ids), 0, 1)
-        weights = heavy - fake.int()
-        weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
-        weights = weights[adjmat]
-        return 1 + weights
 
 
 def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
