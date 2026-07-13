@@ -21,7 +21,7 @@ model:
 
 callbacks:
   loss_history:
-    class_path: salt.utils.loss_history.LossHistoryWriter
+    class_path: salt.core.loss_history.LossHistoryWriter
   checkpoint:
     class_path: lightning.pytorch.callbacks.ModelCheckpoint
     init_args:

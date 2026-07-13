@@ -8,6 +8,22 @@ statically, and no data file is touched before the run starts (design §2.3).
 > Design doc references (`§…`) point at the v2 design document
 > (`plans/02_design-doc.md` in the modularise-salt study).
 
+## Parity-closure doctrine (v1 vs v2 comparisons)
+
+The v1 stack (`salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
+`salt.onnx`, `salt.main`, `salt.modelwrapper`) is being deleted from `main`.
+All v1↔v2 numerical parity was established and passed at the frozen commit
+**`29c67a1`** (`29c67a186f01`) — the last commit where both stacks coexist and
+the parity gates (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
+green.
+
+**Doctrine (user decision):** future v1-vs-v2 comparisons are done by
+`git checkout 29c67a1` — everything needed lives there and passed there. We do
+**not** vendor the v1 model/data stack into the tree to keep parity tests
+alive; the frozen pin is the single source of truth for the v1 reference. The
+one exception already in the tree is `salt/tests/_fixtures/upstream_mf_snapshot/`
+(a frozen upstream MaskFormer snapshot kept as the MF oracle).
+
 ## Quickstart: train GN2v2 on a dummy file
 
 One-time setup: if the container's installed salt predates `salt/core/`,
