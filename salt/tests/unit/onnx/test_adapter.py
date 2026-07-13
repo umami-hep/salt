@@ -218,7 +218,7 @@ class TestExportSinkOutputs:
     # plan-29 W4: the ONNX output manifest is declared by the OnnxExportSink, whose
     # OnnxExportLeaf carries the per-output naming/dtype/per-token rules the M4.5
     # ExportOutput + attach_manifest used to validate (the conversion math itself is
-    # proven bitwise in test_onnx_fold_w2/w3). These assert the migrated surface.
+    # proven bitwise in test_onnx_fold_classification/objects). These assert the migrated surface.
 
     def test_name_and_names_exclusive(self):
         with pytest.raises(ConfigError, match="exactly one of"):
@@ -265,7 +265,7 @@ class TestExportSinkOutputs:
 
 # plan-29 W4: the SHIPPED reduces are RETIRED — folded into conversion nodes.
 # The argmax/union_find/maskformer math is now proven BITWISE in
-# test_onnx_fold_w2.py (SeqClassIndex/Combination) and test_onnx_fold_w3.py
+# test_onnx_fold_classification.py (SeqClassIndex/Combination) and test_onnx_fold_objects.py
 # (VertexUnionFind/MaskFormerObjects) against the same v1 chains these reduces
 # composed. These tests pin the RETIREMENT (no shipped reduce registered).
 

@@ -44,12 +44,12 @@ modular-unit-tests:
 modular-integration-cpu-gates:
   extends: .test-template
   script:
-    - JUNIT_FILE=reports/modular-int-w34-section.xml run_test salt/tests/integration/test_w34_outputs_section.py
-    - JUNIT_FILE=reports/modular-int-w34-regression.xml run_test salt/tests/integration/test_w34_regression_cutover.py
-    - JUNIT_FILE=reports/modular-int-w34-gaussian.xml run_test salt/tests/integration/test_w34_gaussian_cutover.py
-    - JUNIT_FILE=reports/modular-int-w5-schema.xml run_test salt/tests/integration/test_w5_config_h5_schema_parity.py
-    - JUNIT_FILE=reports/modular-int-onnx-fold-w2.xml run_test salt/tests/integration/test_onnx_fold_w2.py
-    - JUNIT_FILE=reports/modular-int-onnx-fold-w3.xml run_test salt/tests/integration/test_onnx_fold_w3.py
+    - JUNIT_FILE=reports/modular-int-outputs-section.xml run_test salt/tests/integration/test_outputs_section.py
+    - JUNIT_FILE=reports/modular-int-regression-e2e.xml run_test salt/tests/integration/test_regression_e2e.py
+    - JUNIT_FILE=reports/modular-int-gaussian-e2e.xml run_test salt/tests/integration/test_regression_gaussian_e2e.py
+    - JUNIT_FILE=reports/modular-int-config-schema.xml run_test salt/tests/integration/test_config_h5_schema_parity.py
+    - JUNIT_FILE=reports/modular-int-onnx-fold-classification.xml run_test salt/tests/integration/test_onnx_fold_classification.py
+    - JUNIT_FILE=reports/modular-int-onnx-fold-objects.xml run_test salt/tests/integration/test_onnx_fold_objects.py
 
 # --------------------- GPU RUNNER (k8s-gpu) SMOKE ---------------------
 # Proves the GPU path end-to-end on CERN's k8s-gpu fleet: GPU visible, our salt
