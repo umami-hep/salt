@@ -24,7 +24,7 @@ from salt.core.nn.tasks.base import (
 )
 from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.names import pascal_case
-from salt.core.outputs.producers import OutputField
+from salt.core.outputs.output_field import OutputField
 
 _DEFAULT_CLS_LOSS: dict[str, Any] = {"class_path": "torch.nn.CrossEntropyLoss"}
 

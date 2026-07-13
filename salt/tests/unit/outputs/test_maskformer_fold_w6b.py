@@ -10,7 +10,7 @@ import pytest
 
 from salt.core.graph.bundle import Bundle
 from salt.core.outputs import MaskFormerObjectsSink
-from salt.core.outputs.sinks import _ExtraGroupCtx
+from salt.core.outputs.h5_sink import _ExtraGroupCtx
 from salt.core.outputs.maskformer import MaskFormerObjectWriter
 from salt.core.outputs.names import OBJECT_INDEX
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (pytest fixtures)
@@ -235,7 +235,7 @@ class TestW6bOnnxTupleOrder:
 
     def _onnx_sink(self, tmp_path: Path):
         from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
-        from salt.core.outputs.writers import RunTaskOutput
+        from salt.core.outputs.run_task_output import RunTaskOutput
         from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
         from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 

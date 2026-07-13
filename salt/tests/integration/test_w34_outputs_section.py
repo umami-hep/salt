@@ -11,7 +11,9 @@ import yaml
 
 from salt.core.graph.spec import Mode
 from salt.core.main import CONFIG_DIR, main
-from salt.core.outputs.writers import InputCopyWriter, PadMaskWriter, RunTaskOutput
+from salt.core.outputs.input_copy_writer import InputCopyWriter
+from salt.core.outputs.pad_mask_writer import PadMaskWriter
+from salt.core.outputs.run_task_output import RunTaskOutput
 from salt.core.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules

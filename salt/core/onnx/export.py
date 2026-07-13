@@ -495,7 +495,7 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
     ConfigError
         When the config has no `Features` processor.
     """
-    from salt.core.data.processors import Features  # noqa: PLC0415 - heavy/circular
+    from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
 
     for module in cli.datamodule.modules.values():
         if isinstance(module, Features):

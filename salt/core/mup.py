@@ -238,7 +238,7 @@ def _model_boundary_sources(cli: Any) -> Any:
     ConfigError
         When the config declares no `Features` module to derive field counts.
     """
-    from salt.core.data.processors import Features  # noqa: PLC0415 - heavy/circular
+    from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
     from salt.core.graph.spec import TensorSpec, sym_dim, unflatten_spec  # noqa: PLC0415
 
     model, dm = cli.model, cli.datamodule
@@ -287,7 +287,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
     dict[str, Any]
         ``{**data_modules, **model_modules}`` in pipeline order.
     """
-    from salt.core.data.processors import Labels  # noqa: PLC0415 - heavy/circular
+    from salt.core.data.labels import Labels  # noqa: PLC0415 - heavy/circular
 
     model, dm = cli.model, cli.datamodule
     data_modules = dm.modules

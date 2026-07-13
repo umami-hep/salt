@@ -271,7 +271,7 @@ def _apply_cut_and_sort(
 
     # --- 1. cut: drop-then-pad (a failing constituent is REMOVED) ---
     if stream_cfg.cuts:
-        from salt.core.data.processors import _OPERATORS  # noqa: PLC0415
+        from salt.core.data.multi_target import _OPERATORS  # noqa: PLC0415
 
         keep = None
         for c in stream_cfg.cuts:

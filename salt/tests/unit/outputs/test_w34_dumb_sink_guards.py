@@ -8,7 +8,7 @@ import pytest
 
 from salt.core.graph.errors import ConfigError
 from salt.core.outputs import H5OutputSink, OnnxExportSink
-from salt.core.outputs.writers import RunTaskOutput
+from salt.core.outputs.run_task_output import RunTaskOutput
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
@@ -50,7 +50,7 @@ class TestDumbH5SinkSectionResolution:
         """A bound section with no RunTaskOutput is a zero-output hard fail."""
         sink = H5OutputSink()
         # an empty section (no RunTaskOutput) -> no final H5 column
-        from salt.core.outputs.writers import InputCopyWriter
+        from salt.core.outputs.input_copy_writer import InputCopyWriter
 
         icw = InputCopyWriter(streams=["jets"])
         icw.name = "inputs_copy"

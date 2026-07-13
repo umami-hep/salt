@@ -8,7 +8,8 @@ import pytest
 
 from salt.core.graph.planner import compile_plan
 from salt.core.graph.spec import Mode, TensorSpec, unflatten_spec
-from salt.core.outputs.writers import PadMaskWriter, RunTaskOutput
+from salt.core.outputs.pad_mask_writer import PadMaskWriter
+from salt.core.outputs.run_task_output import RunTaskOutput
 from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 

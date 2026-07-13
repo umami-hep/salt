@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from salt.core.graph.errors import ConfigError
-from salt.core.outputs.sinks import H5OutputSink, OutputColumn, _ExtraGroupCtx
+from salt.core.outputs.h5_sink import H5OutputSink, _ExtraGroupCtx
+from salt.core.outputs.output_column import OutputColumn
 
 pytestmark = pytest.mark.cpu_always
 

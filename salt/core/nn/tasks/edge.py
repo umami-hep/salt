@@ -19,7 +19,7 @@ from salt.core.nn.tasks.base import _AbsorbedTaskBase, _loss_class, _TaskModuleB
 from salt.core.onnx.config import ExportOutput
 from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.names import VERTEX_INDEX
-from salt.core.outputs.producers import OutputField
+from salt.core.outputs.output_field import OutputField
 from salt.core.utils.union_find import get_node_assignment_jit
 
 _DEFAULT_VTX_LOSS: dict[str, Any] = {

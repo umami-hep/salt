@@ -17,7 +17,7 @@ from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.tasks.base import _AbsorbedTaskBase, _loss_class, _TaskModuleBase
 from salt.core.onnx.config import ExportOutput
-from salt.core.outputs.producers import OutputField
+from salt.core.outputs.output_field import OutputField
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 

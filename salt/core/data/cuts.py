@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from salt.core.data.processors import _OPERATORS
+from salt.core.data.multi_target import _OPERATORS
 from salt.core.graph.errors import ConfigError
 
 __all__ = ["Cut", "CutSpec"]

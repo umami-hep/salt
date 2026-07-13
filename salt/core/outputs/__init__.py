@@ -22,40 +22,34 @@ about (`OutputColumn` is its declarative per-leaf column schema).
 
 from __future__ import annotations
 
-from salt.core.outputs.producers import (
-    ClassProbs,
+from salt.core.outputs.collect_outputs import CollectOutputs
+from salt.core.outputs.combination import Combination
+from salt.core.outputs.conversion_ops import (
     ClassProbsOp,
-    Combination,
     ConversionOp,
     IdentityOp,
-    MaskFormerObject,
-    MaskFormerObjects,
-    MFLeadVertexDecorator,
-    OutputField,
-    Regression,
-    RegressionDescaleOp,
-    SeqClassIndex,
     SeqClassIndexOp,
-    SeqClassProbs,
     SeqClassProbsOp,
+)
+from salt.core.outputs.h5_sink import H5OutputSink, H5OutputWriter
+from salt.core.outputs.input_copy_writer import InputCopyWriter
+from salt.core.outputs.maskformer_objects import MaskFormerObject, MaskFormerObjects
+from salt.core.outputs.maskformer_objects_sink import MaskFormerObjectsSink
+from salt.core.outputs.mf_lead_vertex_decorator import MFLeadVertexDecorator
+from salt.core.outputs.onnx_sink import OnnxExportLeaf, OnnxExportSink
+from salt.core.outputs.output_column import OutputColumn
+from salt.core.outputs.output_field import OutputField
+from salt.core.outputs.pad_mask_writer import PadMaskWriter
+from salt.core.outputs.regression_descale_op import RegressionDescaleOp
+from salt.core.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
+from salt.core.outputs.task_output import (
+    ClassProbs,
+    Regression,
+    SeqClassIndex,
+    SeqClassProbs,
     TaskOutput,
-    VertexUnionFind,
 )
-from salt.core.outputs.sinks import (
-    CollectOutputs,
-    H5OutputSink,
-    H5OutputWriter,
-    OnnxExportLeaf,
-    OnnxExportSink,
-    OutputColumn,
-)
-from salt.core.outputs.writers import (
-    InputCopyWriter,
-    MaskFormerObjectsSink,
-    OutputSectionWriter,
-    PadMaskWriter,
-    RunTaskOutput,
-)
+from salt.core.outputs.vertex_union_find import VertexUnionFind
 
 __all__ = [
     "ClassProbs",

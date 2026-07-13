@@ -262,7 +262,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     """
     # local import: the trainer surface (lightning/jsonargparse) is heavy
     # and circular with this module (salt.core.main dispatches to cli.main)
-    from salt.core.data.processors import Labels  # noqa: PLC0415 - heavy/circular (docstring)
+    from salt.core.data.labels import Labels  # noqa: PLC0415 - heavy/circular (docstring)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule

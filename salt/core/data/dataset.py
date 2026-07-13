@@ -29,7 +29,7 @@ import torch
 from torch.utils.data import Dataset, get_worker_info
 
 from salt.core.data.base import RAW_NAMESPACE, DatasetModule, Reader, WorkerCtx
-from salt.core.data.processors import Labels
+from salt.core.data.labels import Labels
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError, MutationError, SchemaError
 from salt.core.graph.executor import canonical_produced

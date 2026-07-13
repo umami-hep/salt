@@ -17,7 +17,7 @@ from salt.core.nn.tasks import (
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
 from salt.core.outputs import ClassProbs, Regression, SeqClassIndex, SeqClassProbs, VertexUnionFind
-from salt.core.outputs.producers import OutputField
+from salt.core.outputs.output_field import OutputField
 from salt.core.outputs.names import VERTEX_INDEX, pascal_case
 
 _FLOAT_TOL = 1e-6
