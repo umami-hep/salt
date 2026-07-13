@@ -13,8 +13,8 @@
     - |
       # -p no:nb_regression: the nb_regression plugin in the image uses the
       # removed pytest_collect_file(path,...) hook and crashes collection on the
-      # image's pytest — disable it (salt's tests aren't notebooks) so EVERY test
-      # job (legacy v1 + modular) can collect. Pre-existing breakage, not new.
+      # image's pytest — disable it (salt's tests aren't notebooks) so every test
+      # job can collect. Pre-existing breakage, not new.
       run_test() {
         coverage run -p --source salt -m pytest -p no:nb_regression --show-capture=stdout --junitxml="${JUNIT_FILE:-report.xml}" "$@"
       }
@@ -24,48 +24,23 @@
     - when: on_success
 
 # --------------------------- UNIT TESTS ---------------------------
-unit-tests:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/unit-attention.xml run_test salt/tests/test_attention.py
-    - JUNIT_FILE=reports/unit-cli.xml run_test salt/tests/test_cli.py
-    - JUNIT_FILE=reports/unit-datasets.xml run_test salt/tests/test_datasets.py
-    - JUNIT_FILE=reports/unit-edges.xml run_test salt/tests/test_edges.py
-    - JUNIT_FILE=reports/unit-featurewise.xml run_test salt/tests/test_featurewise.py
-    - JUNIT_FILE=reports/unit-initnet.xml run_test salt/tests/test_initnet.py
-    - JUNIT_FILE=reports/unit-masks.xml run_test salt/tests/test_masks.py
-    - JUNIT_FILE=reports/unit-models.xml run_test salt/tests/test_models.py
-    - JUNIT_FILE=reports/unit-optimizer.xml run_test salt/tests/test_optimizer.py
-    - JUNIT_FILE=reports/unit-posenc.xml run_test salt/tests/test_posenc.py
-    - JUNIT_FILE=reports/unit-transformer.xml run_test salt/tests/test_transformer.py
-    - JUNIT_FILE=reports/unit-union_find.xml run_test salt/tests/test_union_find.py
-    - JUNIT_FILE=reports/unit-utils.xml run_test salt/tests/test_utils.py
-
-# --------------------- MODULAR (v2) CORE TESTS ---------------------
-# The salt/core v2 modular refactor. salt/tests/unit mirrors salt/core 1:1
-# (data/, graph/, nn/, onnx/, writers/) — fast on CPU. The conftest GPU-guard
+# salt/tests/unit mirrors salt/core 1:1 — fast on CPU. The conftest GPU-guard
 # keeps the heavy salt/tests/integration gates OUT of this job (they need
-# --run-integration). The parity control (parity_gn2, ~9 fast bitwise checks)
-# guards the modular model code against drift.
+# --run-integration).
 modular-unit-tests:
   extends: .test-template
   script:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
-modular-parity-control:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/modular-parity-gn2.xml run_test salt/tests/integration/test_parity_gn2.py --run-integration
-
-# --------------- MODULAR (v2) CPU INTEGRATION GATES ---------------
+# --------------- CPU INTEGRATION GATES ---------------
 # The W34/W5 section-path gates live under salt/tests/integration but are
 # `cpu_always` (pure-CPU, data-free static schema + ONNX-trace-fold checks). The
 # conftest marks them CI-load-bearing — they must NEVER be silently skipped — yet
-# `modular-unit-tests` (salt/tests/unit only) and `modular-parity-control`
-# (parity_gn2 only) don't collect them, so without this job they never run in CI.
-# These gate the W34.4d cutover: the migrated configs' `outputs:`-section H5/ONNX
-# schema == legacy authority. Run WITHOUT --run-integration so only the cpu_always
-# tests execute (any GPU-only sibling in these files is skipped on the CPU runner).
+# `modular-unit-tests` (salt/tests/unit only) doesn't collect them, so without
+# this job they never run in CI. These gate the W34.4d cutover: the migrated
+# configs' `outputs:`-section H5/ONNX schema == legacy authority. Run WITHOUT
+# --run-integration so only the cpu_always tests execute (any GPU-only sibling
+# in these files is skipped on the CPU runner).
 modular-integration-cpu-gates:
   extends: .test-template
   script:
@@ -77,11 +52,12 @@ modular-integration-cpu-gates:
     - JUNIT_FILE=reports/modular-int-onnx-fold-w3.xml run_test salt/tests/integration/test_onnx_fold_w3.py
 
 # --------------------- GPU RUNNER (k8s-gpu) SMOKE ---------------------
-# Proves the GPU path end-to-end on CERN's k8s-gpu fleet before moving the heavy
-# jobs there: GPU visible, our salt test image actually ships CUDA torch, and a
-# real training runs on the GPU (accelerator=auto -> cuda). `tags: [k8s-gpu]`
-# selects the GPU runner; we keep the .test-template salt image (overrides the
-# runner's default AlmaLinux9). FAIR USE: keep k8s-gpu jobs <= 5 in parallel.
+# Proves the GPU path end-to-end on CERN's k8s-gpu fleet: GPU visible, our salt
+# test image actually ships CUDA torch, and a real training runs on the GPU
+# (fast_dev_run on the synthetic gn2v2-dummy config — the same generator +
+# override pattern the unit suite uses). `tags: [k8s-gpu]` selects the GPU
+# runner; we keep the .test-template salt image (overrides the runner's default
+# AlmaLinux9). FAIR USE: keep k8s-gpu jobs <= 5 in parallel.
 gpu-smoke:
   extends: .test-template
   tags:
@@ -95,81 +71,29 @@ gpu-smoke:
   script:
     - nvidia-smi || echo "nvidia-smi not in image (ok as long as torch sees CUDA below)"
     - python -c "import torch; print('cuda_available:', torch.cuda.is_available()); print('torch built for CUDA:', torch.version.cuda); assert torch.cuda.is_available(), 'GPU runner gave no CUDA device to torch — check the image CUDA major is <= the runner driver (nvidia-smi above)'; print('gpu:', torch.cuda.get_device_name(0))"
-    - JUNIT_FILE=reports/gpu-gn2.xml run_test salt/tests/test_pipeline.py::test_GN2
-
-# --------------------------- PIPELINE TESTS ---------------------------
-test-dev:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/dev.xml run_test salt/tests/test_pipeline.py::test_train_dev
-    - JUNIT_FILE=reports/dev-move.xml run_test salt/tests/test_pipeline.py::test_train_movefilestemp
-
-test-DIPS-DL1:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/dips.xml run_test salt/tests/test_pipeline.py::test_DIPS
-    - JUNIT_FILE=reports/dl1.xml run_test salt/tests/test_pipeline.py::test_DL1
-
-test-flow:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/flow.xml run_test salt/tests/test_pipeline.py::test_flow
-
-test-GN2:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn2.xml run_test salt/tests/test_pipeline.py::test_GN2
-
-test-GN2_muP:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn2-mup.xml run_test salt/tests/test_pipeline.py::test_GN2_muP
-
-test-GN2emu:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn2emu.xml run_test salt/tests/test_pipeline.py::test_GN2emu
-
-test-GN2XE:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn2xe.xml run_test salt/tests/test_pipeline.py::test_GN2XE
-
-test-GN3:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/gn3-v00.xml run_test salt/tests/test_pipeline.py::test_GN3V00
-    - JUNIT_FILE=reports/gn3-v01.xml run_test salt/tests/test_pipeline.py::test_GN3V01
-
-test-maskformer:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/maskformer.xml run_test salt/tests/test_pipeline.py::test_maskformer
-
-test-misc:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/misc-gls.xml run_test salt/tests/test_pipeline.py::test_gls_weighting
-    - JUNIT_FILE=reports/misc-noglobal.xml run_test salt/tests/test_pipeline.py::test_no_global_inputs
-    - JUNIT_FILE=reports/misc-hybrid_muon_adamw.xml run_test salt/tests/test_pipeline.py::test_hybrid_muon_adamw
-
-test-parameterisation:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/param-concat.xml run_test salt/tests/test_pipeline.py::test_param_concat
-    - JUNIT_FILE=reports/param-featurewise.xml run_test salt/tests/test_pipeline.py::test_param_featurewise
-
-test-regression:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/regression.xml run_test salt/tests/test_pipeline.py::test_regression
-    - JUNIT_FILE=reports/regression-nan.xml run_test salt/tests/test_pipeline.py::test_nan_regression
-    - JUNIT_FILE=reports/regression-gauss.xml run_test salt/tests/test_pipeline.py::test_regression_gaussian
-    - JUNIT_FILE=reports/regression-multi-target.xml run_test salt/tests/test_pipeline.py::test_regression_multi_target
-    - JUNIT_FILE=reports/regression.xml run_test salt/tests/test_pipeline.py::test_regression_weighted
-
-test-truncate-inputs:
-  extends: .test-template
-  script:
-    - JUNIT_FILE=reports/truncate.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs
-    - JUNIT_FILE=reports/truncate-error.xml run_test salt/tests/test_pipeline.py::test_truncate_inputs_error
+    - |
+      # Synthetic training data for the gn2v2-dummy config (deterministic,
+      # same generators the unit suite uses — salt/tests/unit/test_main.py).
+      python - <<'EOF'
+      from pathlib import Path
+      from salt.core.schema import dump_schema, save_schema
+      from salt.core.testing.inputs import write_dummy_file
+      from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+      base = Path("gpu_smoke_data")
+      base.mkdir(exist_ok=True)
+      nd, cd = base / "norm_dict.yaml", base / "class_dict.yaml"
+      write_parity_norm_dict(nd, cd)
+      h5 = base / "pp_output_train.h5"
+      write_dummy_file(h5, nd)
+      save_schema(dump_schema(h5), base / "schema.yaml")
+      EOF
+    - salt2 fit
+      --config salt/core/configs/gn2v2-dummy.yaml
+      --data.train_file=gpu_smoke_data/pp_output_train.h5
+      --data.val_file=gpu_smoke_data/pp_output_train.h5
+      --data.modules.reader.init_args.schema=gpu_smoke_data/schema.yaml
+      --model.modules.norm.init_args.norm_dict=gpu_smoke_data/norm_dict.yaml
+      --trainer.accelerator=gpu
+      --trainer.logger=false
+      --trainer.fast_dev_run=2
+      --trainer.default_root_dir=gpu_smoke_out

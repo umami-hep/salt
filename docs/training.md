@@ -254,8 +254,8 @@ Use `--trainer.accelerator=cpu` to run on the CPU instead of the GPU.
 
 Salt will automatically check:
 
-- That there are no `nan` inputs (see [salt.data.SaltDataset][salt.data.SaltDataset])
-- That your normalisation paramters are finite in (see [salt.models.InputNorm][salt.models.InputNorm])
+- That there are no `nan` inputs (see the reader in `salt.core.data`)
+- That your normalisation paramters are finite (see `salt.core.nn.Normaliser`)
 
 You may still encounter `nan` values in your outputs and losses.
 Here are some mitigation strategies you can try:
@@ -264,7 +264,7 @@ Here are some mitigation strategies you can try:
 - Make doubly sure that your inputs are finite, even apply applying normalisation.
 - Ensure you don't have unexpected non-finite labels.
 - Try lowering your max learning rate in the `lrs_config`.
-- If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your [Tasks][salt.models.TaskBase].
+- If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your task modules (`salt.core.nn.tasks`).
 - Check your training precision: if you have done the above and still have problems, you can try  `--trainer.precision=32` or `--trainer.precision=bf16-mixed`. See [here](https://lightning.ai/docs/pytorch/stable/common/trainer.html#precision) for more info. 
 - Apply gradient clipping to negate the effects of exploding gradients. See [here] for more info.
 - Auto detect gradient anomalies. See [here](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies) for more info.

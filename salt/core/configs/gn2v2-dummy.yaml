@@ -1,6 +1,6 @@
 # GN2v2 at test scale for the salt dummy-file generators (16-dim, 2 layers,
 # 2 heads, 1 register). Trains on a file from
-# salt.utils.inputs.write_dummy_file with the matching parity norm dict.
+# salt.core.testing.inputs.write_dummy_file with the matching parity norm dict.
 
 name: GN2v2_dummy
 

@@ -12,7 +12,7 @@ Salt was developed for state-of-the art jet flavour tagging algorithms such as [
 ### Features
 
 - Built on [Pytorch Lightning](https://lightning.ai/docs/pytorch/stable/).
-- Support for multiple YAML-configurable [input modalities][salt.models.InitNet] and [output tasks][task-heads].
+- Support for multiple YAML-configurable input modalities and output tasks.
 - ONNX export support to use trained models in C++ environments like [Athena](https://gitlab.cern.ch/atlas/athena/).
 - Easily extensible: you can implement your own custom dataloaders and models.
 - Documented and tested.
@@ -28,8 +28,6 @@ Below are some helpful links to get you started:
 !!! abstract "A tutorial on using Salt with open data can be found [here](tutorial.md). A tutorial using internal CERN data is [also available](tutorial-Xbb.md)"
 
 !!! note "[Contributions](contributing) are welcome! Check out [existing issues](https://gitlab.cern.ch/aft/algorithms/salt/-/issues) for inspiration, or open your own"
-
-!!! tip "You can become a Salt expert by checking out the [API reference](api/data)"
 
 ### Current Usage
 

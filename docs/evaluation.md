@@ -69,10 +69,6 @@ callbacks:
 By default, only the jet quantities are evaluated to save time and space.
 If you want to study the track aux task performance, you need to specify `write_tracks: True` in the `PredictionWriter` callback configuration.
 
-The full API for the `PredictionWriter` callback is found below.
-
-### ::: salt.callbacks.PredictionWriter
-
 ### Integrated Gradients 
 
 Integrated gradients is a method for attributing contributions from each input feature to model outputs. Further details
@@ -102,10 +98,6 @@ callbacks:
       overwrite: true
 ```
 
-Descriptions of the parameters can be found below:
-
-### ::: salt.callbacks.IntegratedGradientWriter
-
 ### Confusion Matrix
 
 A callback to log the confusion matrix during training, at the end of each epoch. The confusion matrix is calculated on the validation dataset.
@@ -122,7 +114,3 @@ callbacks:
 The `class_names_override` can also be a mapping between the existing class names and the new ones.
 This is particularly useful when the user wants to override only some of the class names.
 Class names that don't appear as keys in the mapping are left unchanged.
-
-Descriptions of the parameters can be found below:
-
-### ::: salt.callbacks.ConfusionMatrixCallback

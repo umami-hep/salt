@@ -1,9 +1,7 @@
 """salt.core.nn — model-side GraphModules for the v2 core.
 
 Package-level exports are the standalone, config-constructed modules
-(one module per file under `salt.core.nn`, plus `salt.core.nn.tasks`). v1-wrapping parity
-modules that wrap LIVE v1 instances live in `salt.core.nn.wrappers` /
-`salt.core.nn.from_v1` — import those explicitly, they are not re-exported.
+(one module per file under `salt.core.nn`, plus `salt.core.nn.tasks`).
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from salt.core.nn.bind import (
 from salt.core.nn.concat import Concat
 from salt.core.nn.edge_embed import EdgeEmbed, EdgeFeatures
 from salt.core.nn.featurewise import FeaturewiseTransformation
-from salt.core.nn.from_v1 import from_v1, v1_sinks, v1_sources
 from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.nn.maskdecoder import MaskDecoder
 from salt.core.nn.maskformer_matched_loss import MaskFormerMatchedLoss
@@ -59,10 +56,7 @@ __all__ = [
     "VectorConcat",
     "VertexingTaskModule",
     "bind_all",
-    "from_v1",
     "map_v1_state_dict",
     "materialise_all",
     "resolve_bind_schema",
-    "v1_sinks",
-    "v1_sources",
 ]

@@ -39,12 +39,6 @@ nav:
   - Contributing: contributing.md
   - Tutorial (public): tutorial.md
   - Tutorial (internal): tutorial-Xbb.md
-  - API Reference:
-      - api/data.md
-      - api/initialisation.md
-      - api/transformer.md
-      - api/models.md
-      - api/tasks.md
 
 plugins:
   - search
