@@ -1199,8 +1199,26 @@ class SaltModule(lightning.LightningModule):
         strict ``load_state_dict`` so a compile-trained checkpoint loads
         into a non-compiled eval module. No-op on checkpoints written
         without ``--compile``.
+
+        v1 (``ModelWrapper``) checkpoints are detected by their signature key
+        layout and rejected with an explicit `ConfigError` — failing early and
+        clearly instead of cascading into hundreds of missing-key errors.
+
+        Raises
+        ------
+        ConfigError
+            If the checkpoint carries the v1 (``ModelWrapper``) state-dict
+            layout, or (via `_verify_ckpt_hash`) on a FIT plan-hash mismatch.
         """
         state_dict = checkpoint.get("state_dict")
+        if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
+            raise ConfigError(
+                "this checkpoint has the v1 (ModelWrapper) state-dict layout "
+                "('model.pool_net.*' keys) — v1 checkpoints are not supported by "
+                "salt.core. Use them at the v1 pin 29c67a1 (git checkout 29c67a1) "
+                "or convert the weights offline (see the parity-closure section "
+                "of salt/core/README.md)."
+            )
         if state_dict and any("_orig_mod." in k for k in state_dict):
             checkpoint["state_dict"] = {
                 k.replace("_orig_mod.", ""): v for k, v in state_dict.items()

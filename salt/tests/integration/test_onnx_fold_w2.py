@@ -1,9 +1,7 @@
-"""End-to-end gates for the plan-29 W2 folded ONNX path (design §6, §8 W2 row)."""
+"""End-to-end gates for the folded ONNX export path (classification + combination)."""
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -37,17 +35,15 @@ from salt.tests._fixtures.gn2v2_fixture import (
     write_parity_norm_dict,
 )
 
-ORACLE_DIR = Path("/tmp/w2_oracle")
-
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
-# plan 29 W2 B3: these are pure-CPU ONNX-trace gates (oracle byte-identity,
-# folded==legacy argmax, combination==pb+pc, check_onnx incl L=0). They are NOT
-# GPU/heavy integration tests despite living under tests/integration/ — the
-# `cpu_always` marker (conftest.py) opts them OUT of the GPU skip so they run on
-# EVERY CI invocation, with or without --run-integration. Skipping them silently
-# would let an ONNX-contract regression (a reorder/rename/redtype, a folded-vs-
-# legacy drift, or a double-softmax) ship unnoticed.
+# These are pure-CPU ONNX-trace gates (export contract, folded argmax,
+# combination==pb+pc, check_onnx incl L=0). They are NOT GPU/heavy integration
+# tests despite living under tests/integration/ — the `cpu_always` marker
+# (conftest.py) opts them OUT of the GPU skip so they run on EVERY CI
+# invocation, with or without --run-integration. Skipping them silently would
+# let an ONNX-contract regression (a reorder/rename/redtype or a
+# double-softmax) ship unnoticed.
 pytestmark = pytest.mark.cpu_always
 
 
@@ -63,13 +59,13 @@ def _export_cfg() -> ExportConfig:
     )
 
 
-# GO: the W0 oracle export contract is byte-identical post-W2 (legacy path)
+# the full GN2 export contract (ClassProbs + SeqClassIndex + VertexUnionFind)
 
 
 def _folded_gn2_export(tmp_path):
-    """A deterministically-weighted GN2 export through the FOLDED path (W4): ClassProbs +"""
+    """A deterministically-weighted GN2 export through the folded conversion nodes."""
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
+    torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
     ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
@@ -90,25 +86,22 @@ def _folded_gn2_export(tmp_path):
     return result, modules
 
 
-@pytest.mark.skipif(
-    not (ORACLE_DIR / "gn2v2.json").is_file(),
-    reason="W0 oracle goldens not present (run /tmp/w2_oracle/dump_onnx_meta.py)",
-)
-def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
-    """The MIGRATED folded gn2v2 export contract matches the W0 golden EXACTLY (W4)."""
-    golden = json.loads((ORACLE_DIR / "gn2v2.json").read_text())
+def test_folded_gn2v2_export_contract_full(tmp_path):
+    """The folded gn2v2 export contract (incl VertexIndex) matches the pinned literals."""
+    want_names = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "GN2v2_VertexIndex"]
+    want_dtypes = ["float32", "float32", "float32", "int8", "int8"]
     result, _ = _folded_gn2_export(tmp_path)
     adapter = result.adapter
-    assert adapter.output_names == golden["output_names"]  # ORDERED list-equality
-    assert adapter.output_dtypes == golden["output_dtypes"]
-    assert json.loads(json.dumps(adapter.dynamic_axes)) == golden["dynamic_axes"]
+    assert adapter.output_names == want_names  # ORDERED list-equality
+    assert adapter.output_dtypes == want_dtypes
+    assert adapter.dynamic_axes["GN2v2_TrackOrigin"] == {0: "n_tracks"}
+    assert adapter.dynamic_axes["GN2v2_VertexIndex"] == {0: "n_tracks"}
     example = adapter.example_inputs(sequence_length=5)
     with torch.no_grad():
         out_tuple = adapter(*example)
-    assert len(out_tuple) == golden["output_tuple_len"]
-    assert len(adapter.output_names) == golden["output_tuple_len"]
+    assert len(out_tuple) == len(want_names)
     session = make_session(result.onnx_path)
-    assert [o.name for o in session.get_outputs()] == golden["output_names"]
+    assert [o.name for o in session.get_outputs()] == want_names
 
 
 @pytest.fixture(scope="module")
@@ -117,7 +110,7 @@ def folded(tmp_path_factory):
     Combination + sink)."""
     tmp = tmp_path_factory.mktemp("onnx_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
+    torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
     jet_probs = ClassProbs(task="jets_classification", stream="jets")
     jet_probs.name = "jet_probs"
@@ -155,7 +148,7 @@ def folded(tmp_path_factory):
 
 
 def test_folded_export_contract(folded):
-    """The folded sink names the conversion leaves: split + combine + per-token int8 axis."""
+    """The export sink names the conversion leaves: split + combine + per-token int8 axis."""
     adapter = folded.result.adapter
     assert adapter.output_names == [
         "GN2v2_pb",
@@ -169,7 +162,7 @@ def test_folded_export_contract(folded):
 
 
 def test_folded_check_onnx_agrees_including_zero_tokens(folded):
-    """torch-vs-ort 1e-6 incl. L=0 — the folded conversions trace correctly (§6.4 gate)."""
+    """torch-vs-ort 1e-6 incl. L=0 — the folded conversions trace correctly."""
     grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
     result = check_onnx(
         folded.result.adapter,
@@ -184,7 +177,7 @@ def test_folded_check_onnx_agrees_including_zero_tokens(folded):
 
 
 def test_folded_combination_equals_pb_plus_pc(folded):
-    """The ``pbc`` combination leaf == ``pb + pc`` bitwise (folds the combine loop, Q2)."""
+    """The ``pbc`` combination leaf == ``pb + pc`` bitwise."""
     session = make_session(folded.result.onnx_path)
     gen = torch.Generator().manual_seed(11)
     jets = torch.rand(1, len(JET_VARIABLES), generator=gen).numpy()
@@ -202,15 +195,13 @@ def test_folded_combination_equals_pb_plus_pc(folded):
 
 
 
-# folded correctness vs the v1 weight oracle + the W0 oracle contract (W4: the
-# legacy reduce path is RETIRED — folded is the SOLE path. The argmax/union-find
-# math equivalence vs v1's chains is proven in test_onnx_fold_w3.py).
+# no-double-softmax: the folded path applies the conversion exactly once
 
 
 def test_folded_pb_pc_pu_equal_single_softmax_of_raw_logits(tmp_path):
-    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the RAW
+    """No-double-softmax: the folded pb/pc/pu == ONE softmax of the RAW
     TEST-plan logits, computed through the independent Executor path (the eager
-    v2 model on the SAME weights — replaces the retired v1 forward oracle)."""
+    v2 model on the SAME weights)."""
     result, modules = _folded_gn2_export(tmp_path)
     session = make_session(result.onnx_path)
     test_plan = compile_gn2v2(modules, Mode.TEST)
@@ -234,12 +225,8 @@ def test_folded_pb_pc_pu_equal_single_softmax_of_raw_logits(tmp_path):
         np.testing.assert_allclose(folded, ref, atol=1e-6)
 
 
-@pytest.mark.skipif(
-    not (ORACLE_DIR / "gn2v2.json").is_file(),
-    reason="W0 oracle goldens not present",
-)
 def test_folded_int8_track_origin_check_onnx(tmp_path):
-    """The folded int8 TrackOrigin leaf is torch-vs-ort exact incl L=0 (folds _bind_argmax)."""
+    """The folded int8 TrackOrigin leaf is torch-vs-ort exact incl L=0."""
     result, _ = _folded_gn2_export(tmp_path)
     grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
     cr = check_onnx(result.adapter, result.onnx_path, trials=2, float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid)

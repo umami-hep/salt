@@ -1,4 +1,4 @@
-"""Unit gates for the plan-29 W2 `OnnxExportSink` declare-only terminal node (design §4.2)."""
+"""Unit gates for the `OnnxExportSink` declare-only terminal node (design §4.2)."""
 
 from __future__ import annotations
 
@@ -174,7 +174,7 @@ def test_leaf_rejects_unknown_dtype():
 
 
 def test_sink_empty_outputs_defers_to_section():
-    """W34.4d: an OMITTED/empty `outputs` defers to a bound `outputs:` section (not an error)."""
+    """An OMITTED/empty `outputs` defers to a bound `outputs:` section (not an error)."""
     sink = OnnxExportSink(outputs=[], model_name="M")
     with pytest.raises(ConfigError, match="has no export leaves"):
         sink.output_names()

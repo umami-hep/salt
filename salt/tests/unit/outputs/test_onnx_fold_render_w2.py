@@ -1,4 +1,4 @@
-"""Render gate for the plan-29 W2 folded ONNX path (design §7 render payoff, §8 W2 row)."""
+"""Render gate for the folded ONNX export path (design §7 render payoff)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _FOLDED_NODES = ("jet_probs", "track_origin_index", "pbc")
 
 @pytest.fixture(scope="module")
 def fold_cfg():
-    """The folded-ONNX config (gn2v2-dummy + the W2 fold override)."""
+    """The folded-ONNX config (gn2v2-dummy + the onnx-fold override)."""
     return load_config([_DUMMY, _FOLD], _OVERRIDES)
 
 
@@ -42,7 +42,7 @@ def _compile(cfg, mode):
 
 
 def test_onnx_render_has_named_export_sink_card(fold_cfg):
-    """The ONNX DOT renders the OnnxExportSink as its OWN named card (design §7 W2 payoff)."""
+    """The ONNX DOT renders the OnnxExportSink as its OWN named card (design §7)."""
     onnx = _compile(fold_cfg, Mode.ONNX)
     dot = dot_source(onnx, fold_cfg.modules)
 
@@ -68,7 +68,7 @@ def test_export_sink_pruned_from_test_render(fold_cfg):
 
 @pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL])
 def test_fit_val_plan_hash_unchanged_by_folded_onnx_nodes(fold_cfg, mode):
-    """FIT/VAL ``plan_hash`` is byte-identical with vs without the W2 folded nodes."""
+    """FIT/VAL ``plan_hash`` is byte-identical with vs without the folded ONNX nodes."""
     full = _compile(fold_cfg, mode).plan_hash
     fold_only = {"jet_probs", "track_origin_index", "pbc", "onnx_export"}
     base_modules = {k: v for k, v in fold_cfg.modules.items() if k not in fold_only}

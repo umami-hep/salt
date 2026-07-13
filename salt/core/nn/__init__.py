@@ -23,7 +23,6 @@ from salt.core.nn.norm import MaskedInputNormaliser, Normaliser
 from salt.core.nn.pooling import GlobalAttentionPooling
 from salt.core.nn.posenc import PositionalEncoder
 from salt.core.nn.split import Split
-from salt.core.nn.state_dict import map_v1_state_dict
 from salt.core.nn.stream_embed import StreamEmbed
 from salt.core.nn.tasks import (
     ClassificationTaskModule,
@@ -56,7 +55,6 @@ __all__ = [
     "VectorConcat",
     "VertexingTaskModule",
     "bind_all",
-    "map_v1_state_dict",
     "materialise_all",
     "resolve_bind_schema",
 ]

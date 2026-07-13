@@ -1,10 +1,10 @@
-"""PLAN 34 W34.2 outputs:-section + dumb-sink eval H5 — v2 self-consistency gate.
+"""The outputs:-section + dumb-sink eval H5 — v2 self-consistency gate.
 
 Historical note (DEL-1, plan 45): this file was the FULL-PAYLOAD H5 PARITY GATE
 diffing the outputs:-section eval H5 against the legacy ``WriterCallback``
 oracle. The legacy writers path is deleted; the byte-for-byte parity was proven
 and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, salt/core/README.md).
-What remains are the v2-only checks: the cutover34 stack runs end-to-end via the
+What remains are the v2-only checks: the section stack runs end-to-end via the
 real CLI, and the section H5's contents/order are asserted from first principles
 (config + section manifest), not from a legacy oracle.
 """
@@ -35,9 +35,8 @@ N_TEST = 300
 
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
-# plan 34 W34.3: VertexIndex is NOT deferred — the vertexing get_output fold
-# mints it (H5 integer column + ONNX int8 leaf). Nothing is deferred in the
-# gn2v2-dummy cutover any more.
+# VertexIndex is NOT deferred — the vertexing get_output fold mints it (H5
+# integer column + ONNX int8 leaf). Nothing is deferred in this config.
 
 
 @pytest.fixture(scope="module")
@@ -87,8 +86,8 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def section_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the PLAN 34 outputs:-section + dumb sinks (via the real CLI)."""
-    out = tmp_path_factory.mktemp("w34_section") / "section.h5"
+    """Eval H5 from the outputs:-section + dumb sinks (via the real CLI)."""
+    out = tmp_path_factory.mktemp("section") / "section.h5"
     rc = main([
         "test",
         "--config",
@@ -102,17 +101,17 @@ def section_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the cutover34 outputs:-section config must run end-to-end"
+    assert rc == 0, "salt2 test on the outputs:-section config must run end-to-end"
     assert out.exists()
     return out
 
 
 @pytest.mark.cpu_always
-class TestW34SectionH5SelfConsistency:
-    """The plan-34 outputs:-section eval H5, asserted from first principles.
+class TestSectionH5SelfConsistency:
+    """The outputs:-section eval H5, asserted from first principles.
 
     The legacy-WriterCallback parity oracle is retired (DEL-1; parity closed at
-    29c67a1) — every expectation here derives from the cutover34 config + the
+    29c67a1) — every expectation here derives from the section config + the
     section manifest alone.
     """
 
@@ -129,7 +128,7 @@ class TestW34SectionH5SelfConsistency:
     def test_task_columns_present(self, section_h5):
         """All task columns exist: jet probs (f4), origin probs (f4), VertexIndex (int).
 
-        W34.3: nothing is deferred — the vertexing get_output fold mints the
+        Nothing is deferred — the vertexing get_output fold mints the
         per-token VertexIndex integer column alongside the classification probs.
         """
         with h5py.File(section_h5) as f:
@@ -163,7 +162,7 @@ class TestW34SectionH5SelfConsistency:
 
 
 @pytest.mark.cpu_always
-class TestW34ColumnOrderDrivenBySection:
+class TestColumnOrderDrivenBySection:
     """The H5 column ORDER is enforced by _merge_columns; the SECTION drives task-column order."""
 
     def test_pad_mask_is_last_column_in_tracks(self, section_h5):
@@ -187,31 +186,31 @@ class TestW34ColumnOrderDrivenBySection:
         )
 
 
-class TestW34CutoverConfigContent:
-    """The gn2v2-dummy-cutover34.yaml wires the outputs: section + dumb sinks."""
+class TestSectionOverlayConfigContent:
+    """The gn2v2-dummy-cutover34.yaml overlay wires the outputs: section + dumb sinks."""
 
     def test_config_content(self):
         cfg = yaml.safe_load(CUTOVER34_CFG.read_text())
-        # the plan-29/31 producers are nulled (the get_output fold replaces them)
+        # the standalone conversion producers are nulled (get_output replaces them)
         mods = cfg["model"]["modules"]
         assert mods["jet_probs"] is None
         assert mods["track_origin_probs"] is None
         assert mods["track_origin_index"] is None
         assert mods["track_vertex_index"] is None
-        # plan 34 W34.3: track_vertexing is NOT opted out of TEST/ONNX — the vtx
-        # get_output fold mints its eval/ONNX leaves. The base gn2v2-dummy.yaml
-        # defers vertexing (expose: [fit, val]) for its writer sink path, so the
-        # cutover34 overlay must null the expose opt-out back to the all-modes
+        # track_vertexing is NOT opted out of TEST/ONNX — the vtx get_output
+        # fold mints its eval/ONNX leaves. The base gn2v2-dummy.yaml defers
+        # vertexing (expose: [fit, val]) for its explicit-tables sink path, so
+        # the overlay must null the expose opt-out back to the all-modes
         # default (same-class init_args deep-merge keeps the base's other args).
         assert mods["track_vertexing"]["init_args"]["expose"] is None
-        # the writers: block is gone entirely (W34.4c base2 flip + W6c removal)
+        # no legacy writers: block
         assert "writers" not in cfg
-        # the outputs: section in EXACT v1 column order
+        # the outputs: section in EXACT column order
         section = cfg["outputs"]
         assert list(section.keys()) == ["inputs_copy", "run_tasks", "pad_mask"]
         assert section["inputs_copy"]["class_path"] == "salt.core.outputs.InputCopyWriter"
         assert section["run_tasks"]["class_path"] == "salt.core.outputs.RunTaskOutput"
-        # plan 34 W34.3: track_vertexing JOINS the orchestrated tasks
+        # track_vertexing JOINS the orchestrated tasks
         assert section["run_tasks"]["init_args"]["tasks"] == [
             "jets_classification",
             "track_origin",
@@ -222,18 +221,16 @@ class TestW34CutoverConfigContent:
         # section's outputs.* leaves instead — an explicit table would win)
         assert cfg["callbacks"]["h5_output"]["class_path"] == "salt.core.outputs.H5OutputSink"
         assert cfg["callbacks"]["h5_output"]["init_args"]["outputs"] is None
-        # plan 34 W34.3: the DUMB OnnxExportSink is re-enabled (explicit leaves nulled)
+        # the DUMB OnnxExportSink (explicit leaves nulled)
         assert cfg["callbacks"]["onnx_export"]["class_path"] == "salt.core.outputs.OnnxExportSink"
         assert cfg["callbacks"]["onnx_export"]["init_args"]["outputs"] is None
 
 
 @pytest.mark.cpu_always
-class TestW34SectionWriterUnits:
+class TestSectionWriterUnits:
     """Unit-level checks of the section writers' declare_io + manifest + ordering."""
 
     def _bound_run_task(self):
-        from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict as _wnd  # noqa: F401
-
         # build the gn2v2 model modules (no file I/O for declare_io / manifest)
         import tempfile
 
@@ -241,7 +238,7 @@ class TestW34SectionWriterUnits:
         cd = nd.parent / "cd.yaml"
         write_parity_norm_dict(nd, cd)
         modules = build_gn2v2_modules(nd)
-        # plan 34 W34.3: orchestrate the FULL gn2v2 family (incl track_vertexing)
+        # orchestrate the FULL gn2v2 family (incl track_vertexing)
         rt = RunTaskOutput(tasks=["jets_classification", "track_origin", "track_vertexing"])
         rt.name = "run_tasks"
         rt.bind_model_modules(modules)
@@ -255,7 +252,7 @@ class TestW34SectionWriterUnits:
         req = flatten_spec(rt.declare_io(Mode.TEST).requires)
         assert "preds.jets.jets_classification" in req
         assert "preds.tracks.track_origin" in req
-        # plan 34 W34.3: the vertexing head's raw edge-score leaf
+        # the vertexing head's raw edge-score leaf
         assert "preds.tracks.track_vertexing" in req
         # the seq head (track_origin) AND the vertexing head declare masks.tracks
         # via output_time_requires
@@ -273,7 +270,7 @@ class TestW34SectionWriterUnits:
         # seq head: one leaf per origin class suffix (H5 probs)
         for s in ORIGIN_SUFFIXES:
             assert f"outputs.tracks.track_origin.{s}" in prod
-        # plan 34 W34.3: vertexing head -> one i8 VertexIndex per-token leaf (H5)
+        # vertexing head -> one i8 VertexIndex per-token leaf (H5)
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
 
     def test_run_task_produces_argmax_leaf_onnx(self):
@@ -289,7 +286,7 @@ class TestW34SectionWriterUnits:
         assert "outputs.tracks.track_origin.TrackOrigin" in prod
         # NOT the per-class probs leaves in ONNX (mode-keyed write-once)
         assert "outputs.tracks.track_origin.pPrimary" not in prod
-        # plan 34 W34.3: vertexing head ONNX -> a single VertexIndex union-find leaf
+        # vertexing head ONNX -> a single VertexIndex union-find leaf
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
 
     def test_manifest_fields_order_is_task_then_field(self):
@@ -298,7 +295,7 @@ class TestW34SectionWriterUnits:
         fields = rt.manifest_fields(Mode.TEST)
         cols = [f.h5_name for _, f in fields]
         # jets columns first (task order), then tracks origin columns, then the
-        # vertexing VertexIndex column (plan 34 W34.3 task-then-field order)
+        # vertexing VertexIndex column (task-then-field order)
         n_j, n_o = len(JET_SUFFIXES), len(ORIGIN_SUFFIXES)
         assert cols[:n_j] == JET_SUFFIXES
         assert cols[n_j : n_j + n_o] == ORIGIN_SUFFIXES
@@ -329,17 +326,21 @@ class TestW34SectionWriterUnits:
             RunTaskOutput(tasks=["a", "a"])
 
 
-# ONNX parity: the dumb OnnxExportSink names the section's get_output leaves
-# byte-identically vs the /tmp/w4_oracle golden (classification subset — vtx is
-# W34.3). PROVES the LOCKED no-double-split decision: get_output squeezes the
-# global per-class scalars (W34.1), so the dumb sink ONLY names them.
+# ONNX contract: the dumb OnnxExportSink names the section's get_output leaves.
+# PROVES the LOCKED no-double-split decision: get_output squeezes the global
+# per-class scalars, so the dumb sink ONLY names them. Expectations are
+# hand-pinned literals (the /tmp golden apparatus is retired — closure at the
+# v1 pin, see salt/core/README.md).
 
-W4_ORACLE = Path("/tmp/w4_oracle")
+# the FULL gn2v2 contract — pb/pc/pu globals + the TrackOrigin per-token
+# argmax + the VertexIndex per-token union-find (both int8).
+SECTION_ONNX_NAMES = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "GN2v2_VertexIndex"]
+SECTION_ONNX_DTYPES = ["float32", "float32", "float32", "int8", "int8"]
 
 
 @pytest.mark.cpu_always
-class TestW34SectionOnnxParity:
-    """The dumb OnnxExportSink names the section's get_output leaves vs /tmp/w4_oracle."""
+class TestSectionOnnxContract:
+    """The dumb OnnxExportSink names the section's get_output leaves (pinned contract)."""
 
     def _section_export(self, tmp_path):
         import torch
@@ -370,13 +371,12 @@ class TestW34SectionOnnxParity:
         )
         tmp_path.mkdir(parents=True, exist_ok=True)
         write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-        # deterministic non-trivial weights (v2-native stand-in for the retired
-        # v1 weight-transfer fixture); the golden asserts contract, not values
+        # deterministic non-trivial weights; the tests assert contract, not values
         torch.manual_seed(42)
         modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-        # the plan-34 W34.3 section: RunTaskOutput over the FULL gn2v2 family
-        # (classification + vertexing) + the DUMB OnnxExportSink, both folded into
-        # the export module dict.
+        # the section: RunTaskOutput over the FULL gn2v2 family (classification
+        # + vertexing) + the DUMB OnnxExportSink, both folded into the export
+        # module dict.
         run_tasks = RunTaskOutput(
             tasks=["jets_classification", "track_origin", "track_vertexing"]
         )
@@ -396,46 +396,25 @@ class TestW34SectionOnnxParity:
             modules, export_cfg, variables, tmp_path / "section.onnx", outputs=[], run_name="GN2_v2"
         )
 
-    @pytest.mark.skipif(
-        not (W4_ORACLE / "gn2v2.json").is_file(),
-        reason="W4 oracle golden /tmp/w4_oracle/gn2v2.json not present",
-    )
-    def test_onnx_full_golden_matches_incl_vertex_index(self, tmp_path):
-        """The dumb-section ONNX names/dtypes/axes/ORDER == the FULL golden (incl VertexIndex)."""
-        import json
-
-        golden = json.loads((W4_ORACLE / "gn2v2.json").read_text())
+    def test_onnx_contract_names_dtypes_axes_order(self, tmp_path):
+        """The dumb-section ONNX names/dtypes/axes/ORDER == the pinned contract."""
         adapter = self._section_export(tmp_path).adapter
-        # plan 34 W34.3: the FULL gn2v2 golden — pb/pc/pu globals + the TrackOrigin
-        # per-token argmax + the VertexIndex per-token union-find (all int8).
-        want_names = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "GN2v2_VertexIndex"]
-        want_dtypes = ["float32", "float32", "float32", "int8", "int8"]
-        # the golden lists these names in this exact order (FULL golden)
-        assert golden["output_names"] == want_names
-        assert golden["output_dtypes"] == want_dtypes
-        # the dumb-section export reproduces the FULL golden byte-for-byte (ORDERED)
-        assert adapter.output_names == want_names, (
-            f"section ONNX names {adapter.output_names} != golden {want_names}"
+        assert adapter.output_names == SECTION_ONNX_NAMES, (
+            f"section ONNX names {adapter.output_names} != pinned {SECTION_ONNX_NAMES}"
         )
-        assert adapter.output_dtypes == want_dtypes
+        assert adapter.output_dtypes == SECTION_ONNX_DTYPES
         # the per-token int8 leaves (TrackOrigin argmax + VertexIndex union-find)
-        # carry the n_tracks dynamic axis; json normalises int axis keys to strings.
-        adapter_axes = json.loads(json.dumps(adapter.dynamic_axes))
+        # carry the n_tracks dynamic axis
         for per_token in ("GN2v2_TrackOrigin", "GN2v2_VertexIndex"):
-            assert adapter_axes.get(per_token) == golden["dynamic_axes"][per_token], (
-                f"{per_token} dynamic axis {adapter_axes.get(per_token)} != golden "
-                f"{golden['dynamic_axes'][per_token]}"
+            assert adapter.dynamic_axes.get(per_token) == {0: "n_tracks"}, (
+                f"{per_token} dynamic axis {adapter.dynamic_axes.get(per_token)}"
             )
         # the global scalars carry NO dynamic axis (the no-double-split scalars)
         for g in ("GN2v2_pb", "GN2v2_pc", "GN2v2_pu"):
             assert g not in adapter.dynamic_axes
 
-    @pytest.mark.skipif(
-        not (W4_ORACLE / "gn2v2.json").is_file(),
-        reason="W4 oracle golden /tmp/w4_oracle/gn2v2.json not present",
-    )
     def test_onnx_session_runs_no_double_split(self, tmp_path):
-        """The exported ONNX session runs (onnxruntime) — 5 outputs, no re-split."""
+        """The exported ONNX adapter runs — 5 outputs, no re-split."""
         import torch
 
         result = self._section_export(tmp_path)
@@ -444,12 +423,8 @@ class TestW34SectionOnnxParity:
             example = adapter.example_inputs(sequence_length=length)
             with torch.no_grad():
                 out = adapter(*example)
-            assert len(out) == 5  # pb, pc, pu, TrackOrigin, VertexIndex (W34.3)
+            assert len(out) == 5  # pb, pc, pu, TrackOrigin, VertexIndex
 
-    @pytest.mark.skipif(
-        not (W4_ORACLE / "gn2v2.json").is_file(),
-        reason="W4 oracle golden /tmp/w4_oracle/gn2v2.json not present",
-    )
     def test_onnx_output_ranks_match_global_vs_per_token(self, tmp_path):
         """The exported ONNX graph's output RANKS: globals rank-0 [], per-token rank-1."""
         import onnx

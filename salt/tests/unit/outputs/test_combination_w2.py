@@ -1,4 +1,4 @@
-"""Unit gates for the plan-29 W2 `Combination` conversion node (design §6.2 / Q2)."""
+"""Unit gates for the `Combination` conversion node (design §6.2)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ _SRC = "outputs.jets.jets_classification"
 
 
 def test_combination_sum_matches_indexed_channel_adds_bitwise():
-    """``pbc = probs[..., 0] + probs[..., 1]`` bitwise-equal to the v1 renamed-scalar add."""
+    """``pbc = probs[..., 0] + probs[..., 1]`` bitwise-equal to the indexed-channel add."""
     torch.manual_seed(1)
     probs = torch.rand(5, 3)  # [B, C=3] softmaxed probs (pb, pc, pu)
     node = Combination(source=_SRC, name="pbc", terms={0: 1.0, 1: 1.0})

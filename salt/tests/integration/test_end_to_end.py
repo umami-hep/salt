@@ -1,4 +1,4 @@
-"""Toy end-to-end integration test for the M1 kernel (plan 03 stage F, M1 gate 3)."""
+"""Toy end-to-end integration test for the graph kernel (validate/plan/execute/plot)."""
 
 from pathlib import Path
 
@@ -7,7 +7,6 @@ import torch
 
 from salt.core.cli import load_config
 from salt.core.cli import main as cli_main
-from salt.tests.integration.demo_m1 import main as demo_main
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import AllModesDeadError
 from salt.core.graph.executor import Executor
@@ -243,28 +242,3 @@ class TestBrokenConfig:
         # §4.1 quality bar: suggestion AND availability AND a concrete fix
         assert "available keys:" in err
         assert "fix: correct the require in module 'head'" in err
-
-
-# demo script (M1 gate 3 artifact loop)
-
-
-class TestDemo:
-    def test_demo_writes_all_artifacts(self, tmp_path, capsys):
-        assert demo_main(["--outdir", str(tmp_path)]) == 0
-        assert "plan [mode=FIT]" in (tmp_path / "plan_fit.txt").read_text()
-        assert "plan [mode=TEST]" in (tmp_path / "plan_test.txt").read_text()
-        deadcode_text = (tmp_path / "deadcode.txt").read_text()
-        assert "[deadcode] mode=FIT:" in deadcode_text
-        assert (tmp_path / "graph.dot").exists()
-        out = capsys.readouterr().out
-        assert "executed FIT plan" in out
-        assert "executed TEST plan" in out
-        assert "losses.total =" in out
-        assert "[demo] done" in out
-
-    def test_demo_narrowed_wildcards_in_plan_table(self, tmp_path, capsys):
-        # §4.4: the plan table surfaces the narrowed label list
-        assert demo_main(["--outdir", str(tmp_path)]) == 0
-        plan_fit = (tmp_path / "plan_fit.txt").read_text()
-        assert "narrowed wildcards [mode=FIT]:" in plan_fit
-        assert "labels: labels.x" in plan_fit

@@ -1,10 +1,8 @@
-"""End-to-end gates for the plan-29 W3 folded ONNX path — the HARD reduces (design §6, §8 W3 row)."""
+"""End-to-end ONNX export gates for the vertexing union-find and MaskFormer object nodes."""
 
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -42,16 +40,14 @@ from salt.tests._fixtures.v2_builders import (
     build_maskformer_writer_modules,
 )
 
-ORACLE_DIR = Path("/tmp/w3_oracle")
-
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
-# plan 29 W3 B3 (mirrors W2): these are pure-CPU ONNX-trace gates (oracle
-# byte-identity, folded==legacy union-find / maskformer). They are NOT GPU/heavy
-# despite living under tests/integration/ — the `cpu_always` marker
-# (conftest.py) opts them OUT of the GPU skip so they run on EVERY CI invocation,
-# with or without --run-integration. Skipping them would let a hard-reduce fold
-# regression ship unnoticed.
+# These are pure-CPU ONNX-trace gates (export contract, union-find and
+# maskformer traces). They are NOT GPU/heavy despite living under
+# tests/integration/ — the `cpu_always` marker (conftest.py) opts them OUT of
+# the GPU skip so they run on EVERY CI invocation, with or without
+# --run-integration. Skipping them would let an object-node export regression
+# ship unnoticed.
 pytestmark = pytest.mark.cpu_always
 
 
@@ -82,17 +78,13 @@ def _mf_export_cfg() -> ExportConfig:
 
 
 
-# GO (W4): the FOLDED export contract matches the W0 oracle (the legacy reduce
-# path is RETIRED — the folded conversion nodes are the SOLE path; the legacy
-# equivalence is captured in the W0 oracle JSON these tests assert against).
-
 _LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
 _N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
 
 
 def _build_vertex_folded(tmp_path):
     """Folded ``VertexUnionFind`` node + ``OnnxExportSink`` export of the gn2v2 weights."""
-    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
+    torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     vuf = VertexUnionFind(task="track_vertexing", stream="tracks")
     vuf.name = "vertex_uf"
@@ -116,14 +108,14 @@ def _build_vertex_folded(tmp_path):
 
 @pytest.fixture(scope="module")
 def vertex(tmp_path_factory):
-    """The folded VertexIndex export on deterministic weights (W4)."""
+    """The folded VertexIndex export on deterministic weights."""
     tmp = tmp_path_factory.mktemp("vertex_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     return SimpleNamespace(folded=_build_vertex_folded(tmp))
 
 
 def test_vertex_folded_export_contract(vertex):
-    """The folded VertexUnionFind sink names the int8 leaf with the v1 dynamic axis."""
+    """The folded VertexUnionFind sink names the int8 leaf with the n_tracks dynamic axis."""
     adapter = vertex.folded.adapter
     assert adapter.output_names == ["GN2v2_VertexIndex"]
     assert adapter.output_dtypes == ["int8"]
@@ -131,7 +123,7 @@ def test_vertex_folded_export_contract(vertex):
 
 
 def test_vertex_folded_check_onnx_agrees_including_zero_tokens(vertex):
-    """torch-vs-ort 1e-6 incl. L=0 — the folded scripted union-find traces correctly (§6.4)."""
+    """torch-vs-ort 1e-6 incl. L=0 — the folded scripted union-find traces correctly."""
     grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
     result = check_onnx(
         vertex.folded.adapter, vertex.folded.onnx_path, trials=2,
@@ -141,10 +133,10 @@ def test_vertex_folded_check_onnx_agrees_including_zero_tokens(vertex):
     assert result.n_cases == 2 * len(grid)
 
 
-# MaskFormerObjects: ONE node folds BOTH legacy reduces (leading_object +
-# object_index). The legacy reference is the W0 oracle JSON; self-consistency
-# (torch == ort) is NaN-aware because the random decoder weights yield a NaN
-# leading_object by design (v1 null-suppression semantics).
+# MaskFormerObject: ONE node mints BOTH object leaves (leading_object +
+# object_index). Self-consistency (torch == ort) is NaN-aware because the
+# random decoder weights yield a NaN leading_object by design (null-suppression
+# semantics).
 
 
 def _build_maskformer_folded(tmp_path):
@@ -175,7 +167,7 @@ def _build_maskformer_folded(tmp_path):
 
 @pytest.fixture(scope="module")
 def maskformer(tmp_path_factory):
-    """The folded one-node maskformer export (W4)."""
+    """The folded one-node maskformer export."""
     tmp = tmp_path_factory.mktemp("maskformer_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     return SimpleNamespace(folded=_build_maskformer_folded(tmp))
@@ -192,20 +184,6 @@ def test_maskformer_folded_export_contract(maskformer):
     ]
     assert adapter.output_dtypes == ["float32", "float32", "float32", "int8"]
     assert adapter.dynamic_axes["MaskFormer_HadronIndex"] == {0: "n_tracks"}
-
-
-@pytest.mark.skipif(
-    not (ORACLE_DIR / "maskformer.json").is_file(),
-    reason="W0 oracle goldens not present",
-)
-def test_maskformer_folded_contract_matches_oracle(maskformer):
-    """The folded maskformer export contract matches the W0 golden EXACTLY (W4)."""
-    golden = json.loads((ORACLE_DIR / "maskformer.json").read_text())
-    adapter = maskformer.folded.adapter
-    assert adapter.output_names == golden["output_names"]
-    assert adapter.output_dtypes == golden["output_dtypes"]
-    assert json.loads(json.dumps(adapter.dynamic_axes)) == golden["dynamic_axes"]
-    assert len(adapter.output_names) == golden["output_tuple_len"]
 
 
 def test_maskformer_folded_torch_vs_ort_nan_aware(maskformer):
@@ -233,7 +211,7 @@ def test_maskformer_folded_torch_vs_ort_nan_aware(maskformer):
             )
 
 
-# The TWO-NODE MaskFormer split (USER DESIGN 2026-06-22): the MaskFormerObjects
+# The TWO-NODE MaskFormer split (design decision 2026-06-22): the MaskFormerObjects
 # reconstruction node exposes the per-vertex leaves; the MFLeadVertexDecorator
 # reads them and emits jet-level scalars. End-to-end ONNX export (no oracle —
 # the decorator is a NEW capability, unit-tested separately in tests/unit).
@@ -341,7 +319,7 @@ class _DecoratorOnnxWrapper(nn.Module):
 
 
 def test_lead_vertex_decorator_onnx_reproduces_non_nan_selection(tmp_path):
-    """The decorator's NON-NaN selection survives ONNX export (R1 LOW coverage pin)."""
+    """The decorator's NON-NaN selection survives ONNX export."""
     dec = MFLeadVertexDecorator(
         source="outputs.objects.vertices_class_probs",
         outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 2},
@@ -392,7 +370,7 @@ def test_lead_vertex_decorator_onnx_reproduces_non_nan_selection(tmp_path):
 
 
 def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
-    """G5 render: the folded MaskFormer config renders the onnx_export card + the W3 nodes."""
+    """Render: the MaskFormer object nodes render the onnx_export card + node cards."""
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
@@ -428,7 +406,7 @@ def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
     assert "OnnxExportSink" in dot
     assert "maskformer_objects" in plan.module_names
     assert "mf_lead_vertex" in plan.module_names
-    # named-consumer edges flow into the NAMED export node (both W3 nodes feed it)
+    # named-consumer edges flow into the NAMED export node (both object nodes feed it)
     sink_edges = set(re.findall(r'"(\w+)" -> "onnx_export"', dot))
     assert {"maskformer_objects", "mf_lead_vertex"} <= sink_edges
     # the node->node edge: the decorator reads the reconstruction node's vertices leaf

@@ -1,4 +1,4 @@
-"""Unit gates for the plan-29 W3 hard-reduce conversion nodes (declare_io / widths / forward)."""
+"""Unit gates for the hard-reduce conversion nodes (declare_io / widths / forward)."""
 
 from __future__ import annotations
 

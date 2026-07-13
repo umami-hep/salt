@@ -1,4 +1,4 @@
-"""PLAN 34 W34.2 unit gates — demand-pruning + FIT/VAL plan_hash stability + guards."""
+"""Outputs-section unit gates — demand-pruning + FIT/VAL plan_hash stability + guards."""
 
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ def _modules(tmp_path: Path):
 
 
 def _bare_gn2v2(tmp_path: Path) -> dict:
-    """The gn2v2 fixture WITHOUT any plan-29/31 producers (model + tasks + loss only)."""
+    """The gn2v2 fixture WITHOUT any standalone conversion producers (model + tasks + loss only)."""
     modules = _modules(tmp_path)
-    # the gn2v2 fixture ships plan-29/31 ONNX producers — drop them so the bare
-    # model is just nets + tasks + loss (the plan-34 model.modules shape).
+    # the gn2v2 fixture ships standalone ONNX producers — drop them so the bare
+    # model is just nets + tasks + loss.
     for k in ("jet_probs", "track_origin_index", "track_vertex_index"):
         modules.pop(k, None)
     return modules
@@ -51,7 +51,7 @@ def _fit_sources() -> dict:
     })
 
 
-class TestW34FitPlanHashStability:
+class TestFitPlanHashStability:
     """The outputs: section is byte-invisible to the FIT/VAL plan (demand-pruned)."""
 
     def test_fit_plan_hash_unchanged_by_section(self, tmp_path):
@@ -72,7 +72,7 @@ class TestW34FitPlanHashStability:
 
         assert sec_hash == bare_hash, (
             "the outputs: section perturbed the FIT plan_hash — it MUST be demand-pruned "
-            f"from FIT (plan §6 gate 4): bare={bare_hash[:16]} withsection={sec_hash[:16]}"
+            f"from FIT: bare={bare_hash[:16]} withsection={sec_hash[:16]}"
         )
 
     def test_section_nodes_absent_from_fit_plan_steps(self, tmp_path):

@@ -1,4 +1,4 @@
-"""W5.0 unit gate — producer ``output_columns`` reproduces the legacy task schema."""
+"""Producer ``output_columns`` reproduces the task modules' ``output_names`` schema."""
 
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ def _reg_modules() -> dict:
 @pytest.mark.parametrize("task_name", ["reg_normed", "reg_multinorm", "reg_ratio"])
 def test_regression_identity_passthrough_matches_legacy(task_name):
     mods = _reg_modules()
-    prod = TaskOutput(task=task_name, stream="jets")  # identity (W5 stopgap)
+    prod = TaskOutput(task=task_name, stream="jets")  # identity (regression stopgap)
     prod.name = f"{task_name}_out"
     fields = prod.output_columns(RUN, mods)
     # H5 names == legacy output_names suffixes (targets / custom names)

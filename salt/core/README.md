@@ -17,12 +17,71 @@ All v1↔v2 numerical parity was established and passed at the frozen commit
 the parity gates (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
 green.
 
-**Doctrine (user decision):** future v1-vs-v2 comparisons are done by
-`git checkout 29c67a1` — everything needed lives there and passed there. We do
-**not** vendor the v1 model/data stack into the tree to keep parity tests
-alive; the frozen pin is the single source of truth for the v1 reference. The
-one exception already in the tree is `salt/tests/_fixtures/upstream_mf_snapshot/`
-(a frozen upstream MaskFormer snapshot kept as the MF oracle).
+**Doctrine (user decision):** comparisons against v1 (or a pinned upstream)
+are done by `git checkout <pin>` — NO frozen comparison artifacts (goldens,
+specimens, vendored snapshots) live in the tree. For v1, everything needed
+lives at `29c67a1` and passed there; the frozen pin is the single source of
+truth for the v1 reference. Git history is the archive.
+
+### Pins of record
+
+| Comparison | Pin | Where |
+|---|---|---|
+| v1 ↔ v2 numerical parity | `29c67a1` (`29c67a186f01`) | this repo — `git checkout 29c67a1` |
+| v2 MaskFormer ↔ upstream | `6570e85` | upstream salt — see checkout below |
+
+The upstream MaskFormer equivalence (established during the MFU wave) closes
+at the upstream pin. To reproduce the comparison:
+
+```bash
+git remote add upstream ssh://gitlab.cern.ch:7999/aft/algorithms/salt.git  # if absent
+git fetch upstream
+git checkout 6570e85   # the validated upstream MaskFormer reference
+```
+
+### Closure evidence (plan 47 sweep, 2026-07-13)
+
+The remaining in-tree frozen comparison artifacts were retired at this commit.
+In each case the frozen artifact IS the reference output, so the final green
+run at deletion time IS the final parity check — none was regenerated from the
+pin (redundant by construction):
+
+- **`salt/tests/_fixtures/gn2v2_dummy_oracle/`** (frozen `WriterCallback` eval
+  H5 + ckpt): the byte-parity tests consuming it were green at `b8d81bd`
+  (pipeline `#15271499`) and `fb90a7c` (pipeline `#15272018`). Retired test
+  node ids:
+  `salt/tests/integration/test_outputs_h5_parity.py::TestH5OutputWriterParity::{test_deferred_columns_present_in_oracle,test_groups_match,test_semantic_h5_parity}`
+  and `::TestCutoverCliE2E::{test_cli_groups_match_oracle,test_cli_semantic_h5_parity}`.
+  The file keeps the live single-leg CLI e2e checks (softmax-once, column
+  presence) re-anchored to a live 1-epoch fit.
+- **`salt/tests/_fixtures/upstream_mf_snapshot/`** +
+  **`salt/tests/_fixtures/mf_writer_parity/upstream_6570e85_schema.json`**
+  (vendored upstream MaskFormer modules + writer schema): the snapshot modules
+  had zero consumers left; the schema-parity assertions in
+  `salt/tests/unit/outputs/test_maskformer_fold_w6b.py::TestSchemaParityVsFixture`
+  (green in the same pipelines) were re-anchored to first-principles literals
+  and the upstream cross-checks retired. Closure at upstream pin `6570e85`.
+  Also retired: the `/tmp`-golden ONNX contract tests
+  (`test_onnx_fold_w2.py::test_folded_gn2v2_export_contract_matches_oracle`
+  re-anchored to pinned literals;
+  `test_onnx_fold_w3.py::test_maskformer_folded_contract_matches_oracle`
+  dropped — its literal twin `test_maskformer_folded_export_contract` stays).
+- **`map_v1_state_dict`** (v1→v2 checkpoint weight mapper,
+  `salt/core/nn/state_dict.py`) + `salt/tests/_fixtures/v1_gn2_state_dict.json`
+  + `salt/tests/unit/nn/test_state_dict.py::TestStateDictMapping::*`:
+  v1-checkpoint loading is deliberately dropped — recoverable from history
+  (`fb90a7c`) or usable at the pin `29c67a1`. `SaltModule.on_load_checkpoint`
+  now detects the v1 (`ModelWrapper`) state-dict layout (`model.pool_net.*`
+  keys) and raises an explicit `ConfigError` instead of a missing-keys cascade.
+
+**Regeneration recipe** (only if the frozen-oracle check is ever wanted again;
+from `provenance.json` at the pin): at commit `a9e2ac2`, run
+`generate_oracle.py` in the salt-py314 container
+(`apptainer exec --bind $PWD --bind /tmp salt-py314.sif env PYTHONPATH=$PWD
+python generate_oracle.py`) with `salt/core/configs/gn2v2-dummy.yaml`;
+synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
+`np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
+`limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
 
 ## Quickstart: train GN2v2 on a dummy file
 

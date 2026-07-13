@@ -1,4 +1,4 @@
-"""PLAN 34 W34.2 dumb-sink guard gates — dup-name, zero-output, no-double-split naming."""
+"""Dumb-sink guard gates — dup-name, zero-output, no-double-split naming."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ class TestDumbOnnxSinkNoDoubleSplit:
         for leaf in leaves:
             assert leaf.names is None, (
                 f"leaf {leaf.key!r} carries a plural-names split — the dumb ONNX sink must NAME "
-                "the already-scalar get_output values, NOT re-split (plan §4 W34.2 LOCKED)"
+                "the already-scalar get_output values, NOT re-split (LOCKED decision)"
             )
             assert leaf.name is not None
         # the global pb/pc/pu scalars precede the per-token TrackOrigin argmax (the

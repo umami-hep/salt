@@ -1,4 +1,4 @@
-"""Regression gates for the plan-29 W1 sink-node surface (design §4, §5, §7)."""
+"""Regression gates for the sink-node surface (design §4, §5, §7)."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ _TRK_OUT = "outputs.tracks.track_origin"
 
 @pytest.fixture(scope="module")
 def cutover_cfg():
-    """The live P1.5 cutover config — the H5OutputSink folded as a node (design §4.3)."""
+    """The live cutover config — the H5OutputSink folded as a node (design §4.3)."""
     return load_config([_DUMMY, _CUTOVER], _OVERRIDES)
 
 
@@ -204,7 +204,7 @@ def test_cutover_test_render_has_named_h5_sink_card(cutover_cfg):
     test = _compile(cutover_cfg, Mode.TEST)
     dot = dot_source(test, cutover_cfg.modules)
 
-    assert "<sinks>" not in dot  # the sentinel branch is dead (the W1 payoff)
+    assert "<sinks>" not in dot  # the sentinel branch is dead (sinks are named nodes)
     assert "h5_output" in dot
     assert "H5OutputSink" in dot
     for leaf in (_JET_OUT, _TRK_OUT, "meta.rows", "masks.tracks"):
@@ -222,7 +222,7 @@ def test_cutover_onnx_render_prunes_h5_sink(cutover_cfg):
     assert "h5_output" not in dot
 
 
-# (5) dead-preds safety net on the folded-sink TEST path (parity with M4.5)
+# (5) dead-preds safety net on the folded-sink TEST path
 
 
 class _Stub:

@@ -1,8 +1,7 @@
-"""W6b — the MaskFormer object writer FOLD onto the H5OutputSink ``extra_groups`` seam."""
+"""The MaskFormer objects sink on the H5OutputSink ``extra_groups`` seam."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -20,22 +19,17 @@ from salt.tests._fixtures.writers_common import (  # noqa: F401  (pytest fixture
 
 pytestmark = pytest.mark.cpu_always
 
-_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "_fixtures"
-    / "mf_writer_parity"
-    / "upstream_6570e85_schema.json"
-)
-
-# the v2 object classes (v1 object.class_names; null LAST, quoted), == the
-# fixture's MaskFormer_pb/_pc/_pnull object-class columns.
+# the v2 object classes (null LAST, quoted) — the MaskFormer_pb/_pc/_pnull
+# object-class columns.
 OBJECT_CLASSES = ["b", "c", "null"]
-# the run name == the upstream model name (the {run_name}_ column prefix).
+# the run name == the model name (the {run_name}_ column prefix).
 RUN_NAME = "MaskFormer"
-# the upstream group the v2 "objects" group diverges from (USER DECISION 2026-06-30).
+# the upstream group name the v2 "objects" group deliberately diverges from
+# (recorded decision 2026-06-30; upstream equivalence closed at pin 6570e85,
+# see the parity-closure section of salt/core/README.md).
 UPSTREAM_OBJECT_GROUP = "truth_hadrons"
 # the deferred per-object regression eval columns — KNOWN-ABSENT from v2's objects
-# group (no v2 writer emits per-object regression in TEST yet; MaskFormer.yaml :197).
+# group (no v2 writer emits per-object regression in TEST yet; MaskFormer.yaml).
 DEFERRED_REGRESSION_COLUMNS = (
     "MaskFormer_pt",
     "MaskFormer_Lxy",
@@ -43,12 +37,8 @@ DEFERRED_REGRESSION_COLUMNS = (
     "MaskFormer_dphi",
     "MaskFormer_mass",
 )
-# numpy descriptor <- fixture dtype string.
-_NP = {"float32": np.dtype("f4"), "int64": np.dtype("i8")}
-
-
-def _fixture() -> dict:
-    return json.loads(_FIXTURE.read_text())
+_F4, _I8 = np.dtype("f4"), np.dtype("i8")
+_M_MAX_OBJECTS = 5  # the builder modules' max_objects (query bank size)
 
 
 def _mf_modules(data):  # noqa: ANN001
@@ -75,77 +65,66 @@ def _ctx(precision: str = "full") -> _ExtraGroupCtx:
     )
 
 
-# 1. schema parity vs the upstream 6570e85 fixture (the v2-owned columns)
+# 1. the sink's H5 schema (upstream equivalence closed at pin 6570e85 —
+# expectations are asserted from first principles, not a vendored schema)
 
 
-class TestSchemaParityVsFixture:
-    def test_objects_group_class_columns_match_fixture(self, data):
-        """objects: MaskFormer_pb/_pc/_pnull (f4) + class_label (i8) == fixture object-class fields."""
+class TestSinkSchema:
+    def test_objects_group_class_columns(self, data):
+        """objects: MaskFormer_pb/_pc/_pnull (f4) + class_label (i8)."""
         cols = _sink(data).columns(_ctx())
         objects = cols["objects"]
         assert list(objects.names) == ["MaskFormer_pb", "MaskFormer_pc", "MaskFormer_pnull",
                                        "class_label"]
-        assert objects["MaskFormer_pb"] == _NP["float32"]
-        assert objects["MaskFormer_pc"] == _NP["float32"]
-        assert objects["MaskFormer_pnull"] == _NP["float32"]
-        assert objects["class_label"] == _NP["int64"]
+        assert objects["MaskFormer_pb"] == _F4
+        assert objects["MaskFormer_pc"] == _F4
+        assert objects["MaskFormer_pnull"] == _F4
+        assert objects["class_label"] == _I8
 
-        # the SAME field names/dtypes live in the fixture's truth_hadrons group
-        fx = _fixture()["groups"][UPSTREAM_OBJECT_GROUP]["fields"]
-        for col in ("MaskFormer_pb", "MaskFormer_pc", "MaskFormer_pnull", "class_label"):
-            assert col in fx, f"{col} missing from upstream {UPSTREAM_OBJECT_GROUP}"
-            assert objects[col] == _NP[fx[col]], f"{col} dtype diverges from upstream"
-
-    def test_object_masks_group_exact_match_fixture(self, data):
-        """object_masks: truth_mask (i8) + mask_logits (f4) — EXACT name/dtype match of fixture."""
+    def test_object_masks_group_columns(self, data):
+        """object_masks: truth_mask (i8) + mask_logits (f4) — exact names and dtypes."""
         cols = _sink(data).columns(_ctx())
         om = cols["object_masks"]
         assert list(om.names) == ["truth_mask", "mask_logits"]
-        fx = _fixture()["groups"]["object_masks"]["fields"]
-        assert list(fx) == ["truth_mask", "mask_logits"]  # same group name AND fields upstream
-        for col in om.names:
-            assert om[col] == _NP[fx[col]]
+        assert om["truth_mask"] == _I8
+        assert om["mask_logits"] == _F4
 
-    def test_maskindex_on_tracks_match_fixture(self, data):
-        """MaskFormer_MaskIndex (i8) rides the tracks reader stream — matches fixture tracks."""
+    def test_maskindex_on_tracks(self, data):
+        """MaskFormer_MaskIndex (i8) rides the tracks reader stream (PINNED suffix)."""
         cols = _sink(data).columns(_ctx())
         tracks = cols["tracks"]
-        index_col = f"{RUN_NAME}_{OBJECT_INDEX.test}"  # MaskFormer_MaskIndex (PINNED suffix)
+        index_col = f"{RUN_NAME}_{OBJECT_INDEX.test}"  # MaskFormer_MaskIndex
         assert list(tracks.names) == [index_col]
-        assert tracks[index_col] == _NP["int64"]
-        fx = _fixture()["groups"]["tracks"]["fields"]
-        assert index_col in fx and _NP[fx[index_col]] == np.dtype("i8")
+        assert tracks[index_col] == _I8
 
     def test_extra_group_shapes_BM_and_BMT(self, data):
-        """extra_groups sizes objects (M,) and object_masks (M, T) — the [B, 5] compactness."""
+        """extra_groups sizes objects (M,) and object_masks (M, T) — the [B, M] compactness."""
         groups = _sink(data).extra_groups(_ctx())
-        m = _fixture()["dims"]["M_max_objects"]  # 5
-        t = _fixture()["dims"]["C_max_constituents"]  # 40 == L_FILE
-        assert groups == {"objects": (m,), "object_masks": (m, t)}
+        assert groups == {
+            "objects": (_M_MAX_OBJECTS,),
+            "object_masks": (_M_MAX_OBJECTS, L_FILE),
+        }
 
 
 class TestRecordedDivergences:
     """The honest assert-as-known allowlist: the divergences are intentional, on record."""
 
-    def test_v2_group_name_diverges_from_truth_hadrons(self, data):
+    def test_v2_group_name_is_objects_not_truth_hadrons(self, data):
         """(a) v2 emits the object group as 'objects', NOT 'truth_hadrons' (user decision)."""
         groups = _sink(data).extra_groups(_ctx())
         assert "objects" in groups
-        assert UPSTREAM_OBJECT_GROUP not in groups  # NOT merged into truth_hadrons (DEFERRED)
-        # the upstream fixture DOES carry the object preds under truth_hadrons —
-        # this is the recorded, intentional group-name divergence.
-        assert UPSTREAM_OBJECT_GROUP in _fixture()["groups"]
+        # the upstream writer carries the object preds under truth_hadrons; the
+        # v2 group name is a recorded, intentional divergence (merge deferred).
+        assert UPSTREAM_OBJECT_GROUP not in groups
 
     def test_deferred_regression_columns_known_absent(self, data):
         """(b) the per-object regression eval columns are KNOWN-ABSENT from v2 objects."""
         objects = _sink(data).columns(_ctx())["objects"]
-        fx = _fixture()["groups"][UPSTREAM_OBJECT_GROUP]["fields"]
         for col in DEFERRED_REGRESSION_COLUMNS:
             assert col not in objects.names, f"{col} unexpectedly emitted (deferral broken)"
-            assert col in fx, f"{col} not in upstream fixture — stale deferral allowlist"
 
 
-# 2. byte parity vs MFU-6's MaskFormerObjectWriter (drift-proof delegation)
+# 2. byte parity vs the delegated MaskFormerObjectWriter (drift-proof delegation)
 
 
 def _bundle(batch_size=6, n_tracks=10):
@@ -167,8 +146,8 @@ def _legacy_writer(data):  # noqa: ANN001
     return w
 
 
-class TestByteParityVsLegacyWriter:
-    def test_write_byte_identical_to_mfu6_writer(self, data):
+class TestByteParityVsDelegatedWriter:
+    def test_write_byte_identical_to_writer(self, data):
         """The sink node's write() is byte-identical to MaskFormerObjectWriter.write()."""
         bundle = _bundle()
         rows = slice(0, 6)
@@ -179,14 +158,14 @@ class TestByteParityVsLegacyWriter:
             assert sink[group].dtype == legacy[group].dtype, f"{group} dtype drift"
             for col in legacy[group].dtype.names:
                 assert sink[group][col].tobytes() == legacy[group][col].tobytes(), (
-                    f"{group}.{col} bytes drift from MFU-6 writer"
+                    f"{group}.{col} bytes drift from MaskFormerObjectWriter"
                 )
         # the -2 (no-object) / -1 (padded) MaskIndex sentinels are both present
         idx = sink["tracks"][f"MFrun_{OBJECT_INDEX.test}"]
         assert (idx == -1).any() and (idx == -2).any()
 
-    def test_columns_byte_identical_to_mfu6_writer(self, data):
-        """columns() is byte-identical to the legacy writer's (same group dtypes)."""
+    def test_columns_byte_identical_to_writer(self, data):
+        """columns() is byte-identical to the delegated writer's (same group dtypes)."""
         ctx = _ctx()
         legacy = _legacy_writer(data).columns(ctx)
         sink = _sink(data).columns(ctx)
@@ -195,7 +174,7 @@ class TestByteParityVsLegacyWriter:
             assert sink[group] == legacy[group]
 
 
-# T1 — W6b ONNX tuple order: explicit object leaves AFTER the section block
+# 3. ONNX tuple order: explicit object leaves AFTER the section block
 
 # The MaskFormer explicit leaves (the two object reduces that the
 # outputs: section cannot mint). In MaskFormer.yaml emission order:
@@ -230,8 +209,8 @@ EXPECTED_MFV2_OUTPUT_NAMES = [
 ]
 
 
-class TestW6bOnnxTupleOrder:
-    """T1 — explicit MaskFormer object leaves appear AFTER the section block."""
+class TestMaskFormerOnnxTupleOrder:
+    """Explicit MaskFormer object leaves appear AFTER the section block."""
 
     def _onnx_sink(self, tmp_path: Path):
         from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
@@ -280,11 +259,11 @@ class TestW6bOnnxTupleOrder:
         assert names[-1] == "MFv2_HadronIndex"
 
 
-# T2 — object_masks shape guard: mismatch raises ConfigError loudly
+# 4. object_masks shape guard: mismatch raises ConfigError loudly
 
 
 class TestObjectMasksShapeGuard:
-    """T2 — _extra_group_fragments rejects a fragment with wrong per-row shape."""
+    """_extra_group_fragments rejects a fragment with wrong per-row shape."""
 
     _M = 5    # num objects
     _T = 40   # T_file (full file constituent width)

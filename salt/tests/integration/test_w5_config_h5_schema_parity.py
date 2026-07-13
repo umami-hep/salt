@@ -13,12 +13,12 @@ from salt.core.onnx.export import _run_free_cli
 pytestmark = pytest.mark.cpu_always
 
 # the dumb ``outputs:``-section H5OutputSink schema gate. All production
-# classification/regression/gaussian configs ride the plan-34 ``outputs:`` section +
-# dumb sinks (the auto-collect producer-discovery path was removed in W34.4d). The
-# classification family's section H5 schema is gated byte-for-byte against the legacy
-# WriterCallback by the cutover34 tests (test_w34_outputs_section.py /
-# test_w34_regression_cutover.py / test_w34_gaussian_cutover.py); this gate guards the
-# ``regression`` / ``regression_gaussian`` section schema == legacy task.output_names.
+# classification/regression/gaussian configs ride the ``outputs:`` section +
+# dumb sinks (the auto-collect producer-discovery path was removed). The
+# classification family's section H5 output is gated end-to-end by
+# test_outputs_section.py (and the regression family by test_regression_e2e.py /
+# test_regression_gaussian_e2e.py); this gate guards the ``regression`` /
+# ``regression_gaussian`` section schema == the tasks' declared output_names.
 _NORM = "model.modules.norm.init_args.norm_dict=unused.yaml"
 # disable the logger so the run-free parse does not hit the keyless CometLogger
 # instantiate failure (no COMET_API_KEY in CI/local) — _run_free_cli does not apply
@@ -29,7 +29,7 @@ MIGRATED = {
     "regression_gaussian": [_NORM, _NO_LOGGER],
 }
 
-# heads whose H5 eval column is a DEFERRED family (no W5 conversion producer):
+# heads whose H5 eval column is a DEFERRED family (no conversion producer):
 # their columns are excluded from the parity comparison (documented deferral).
 _DEFERRED_TASK_TYPES = {"VertexingTaskModule"}
 
@@ -84,7 +84,7 @@ def test_section_h5_schema_matches_legacy_taskwriter(config_name):
     # (the run-free CLI path); assert it really is the dumb-section path now.
     assert sink._is_dumb_section(), (  # noqa: SLF001
         f"{config_name}: H5OutputSink is not driven by the outputs: section "
-        "(the auto-collect path was removed in W34.4d)"
+        "(the auto-collect path was removed)"
     )
 
     legacy = _legacy_columns(modules, run_name)

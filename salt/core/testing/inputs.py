@@ -142,8 +142,7 @@ ELECTRON_VARS = [
 HADRON_VARS = ["pt", "Lxy", "deta", "dphi", "mass"]
 
 # Module-level generator + torch seeding, faithful to the v1 helper: the FIRST
-# write_dummy_file call in a fresh process is deterministic (default_rng(42)) —
-# the frozen-oracle tests (gn2v2_dummy_oracle) rely on exactly this.
+# write_dummy_file call in a fresh process is deterministic (default_rng(42)).
 rng = np.random.default_rng(42)
 torch.manual_seed(42)
 

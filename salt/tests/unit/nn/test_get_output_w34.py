@@ -1,4 +1,4 @@
-"""W34.1 unit gate — `ClassificationTaskModule.get_output` parity (plan 34)."""
+"""Unit gates for the task modules' ``get_output`` output rendering."""
 
 from __future__ import annotations
 
@@ -346,7 +346,7 @@ def test_seq_get_output_onnx_argmax_invariant_to_softmax():
 
 
 def test_seq_output_time_requires_pad_mask():
-    """Seq head declares ``masks.<stream>`` as an output-time dep (W34.2 RunTaskOutput surface)."""
+    """Seq head declares ``masks.<stream>`` as an output-time dep (RunTaskOutput surface)."""
     module = _bind_classification(
         _STREAM_T, "origin_label", [f"o{i}" for i in range(8)], sequence=True
     )
@@ -394,7 +394,7 @@ def test_base_get_output_raises_for_unsupported_family():
 
 
 # ===========================================================================
-# GATE D — vertexing (plan 34 W34.3): union-find int8 (TEST i8 / ONNX char index)
+# GATE D — vertexing: union-find int8 (TEST i8 / ONNX char index)
 # ===========================================================================
 
 
@@ -422,7 +422,7 @@ def _vtx_bundle(module, edge_scores, mask):
 
 
 def test_vtx_output_time_requires_pad_mask():
-    """The vertexing head declares ``masks.<stream>`` as its output-time dep (W34.2 surface)."""
+    """The vertexing head declares ``masks.<stream>`` as its output-time dep."""
     module = _bind_vertexing()
     assert module.output_time_requires(Mode.TEST) == [f"masks.{_STREAM_T}"]
     assert module.output_time_requires(Mode.ONNX) == [f"masks.{_STREAM_T}"]
@@ -514,7 +514,7 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
 
 
 # ===========================================================================
-# GATE E — regression (plan 34 W34.3): de-scale (TEST f4 / ONNX squeezed scalars)
+# GATE E — regression: de-scale (TEST f4 / ONNX squeezed scalars)
 # ===========================================================================
 
 
@@ -649,7 +649,7 @@ def test_reg_get_output_manifest_mirrors_get_output():
             assert m.value is None and m.dtype == "f4" and m.axis == "global"
 
 
-# --- W34.3 critic-fix: write-once + per-token agreement of get_output ---------
+# --- write-once + per-token agreement of get_output ---------------------------
 
 
 def test_reg_get_output_does_not_mutate_raw_preds_leaf():

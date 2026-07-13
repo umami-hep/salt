@@ -1,14 +1,12 @@
-"""Small config-constructed GN2v2 builder for the M2 nn-module tests (plan 05, stage A2).
+"""Small config-constructed GN2v2 builder for the nn-module tests.
 
-Since DEL-1 this module also owns the (v1-free) GN2 fixture constants and
-helpers that used to live in ``gn2_fixture.py`` — the variable lists, the
-parity norm-dict writer, the deterministic batch builder and the frozen v1
-state-dict synthesiser — so the kept v2 tests never import the v1 fixture.
+This module owns the (v1-free) GN2 fixture constants and helpers — the
+variable lists, the parity norm-dict writer and the deterministic batch
+builder — so the tests never import a v1 fixture.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import torch
@@ -40,7 +38,6 @@ __all__ = [
     "gn2v2_sources",
     "make_gn2_batch",
     "make_gn2_labels",
-    "make_v1_gn2_state_dict",
     "write_parity_norm_dict",
 ]
 
@@ -136,33 +133,6 @@ def make_gn2_batch(
     return inputs, pad_masks
 
 
-_V1_STATE_DICT_SCHEMA = Path(__file__).parent / "v1_gn2_state_dict.json"
-
-
-def make_v1_gn2_state_dict(seed: int = 3) -> dict[str, Tensor]:
-    """A synthetic v1 `ModelWrapper.state_dict()` for the GN2 parity fixture geometry.
-
-    The key/shape/dtype schema was frozen from the retired v1 fixture
-    (``gn2_fixture.build_test_gn2(...).state_dict()``) at DEL-1 — this is what a
-    real v1 GN2 checkpoint looks like at the 16-wide fixture geometry. It
-    exercises `map_v1_state_dict` (the kept v1-checkpoint-compat surface)
-    without instantiating any v1 module. Values are deterministic random fills;
-    the mapping tests assert routing, not physics.
-    """
-    schema = json.loads(_V1_STATE_DICT_SCHEMA.read_text())
-    gen = torch.Generator().manual_seed(seed)
-    out: dict[str, Tensor] = {}
-    for key, spec in schema.items():
-        dtype = getattr(torch, spec["dtype"])
-        if not dtype.is_floating_point:
-            out[key] = torch.zeros(spec["shape"], dtype=dtype)
-        elif key.endswith("_stds"):
-            # keep the normaliser numerically sane (a real checkpoint has std > 0)
-            out[key] = 0.5 + torch.rand(spec["shape"], generator=gen, dtype=dtype)
-        else:
-            out[key] = torch.randn(spec["shape"], generator=gen, dtype=dtype) * 0.5
-    return out
-
 ORIGIN_CLASSES = [
     "Pileup",
     "Fake",
@@ -208,8 +178,6 @@ def build_gn2v2_modules(
         ),
         "split": Split(streams=["tracks"]),
         "pool": GlobalAttentionPooling(input="encoded.seq", out="pooled.global"),
-        # task order below mirrors the v1 fixture's model.tasks order — the
-        # default index association in map_v1_state_dict.
         "jets_classification": ClassificationTaskModule(
             stream="jets",
             label="flavour_label",

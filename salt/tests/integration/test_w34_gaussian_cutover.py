@@ -1,4 +1,18 @@
-"""PLAN 34 W34.4 GAUSSIAN cutover proof — outputs:-section gaussian get_output parity."""
+"""End-to-end gate for the shipped ``regression_gaussian.yaml`` — fit, eval H5, ONNX.
+
+Historical note (plan 47): this file was the gaussian CUTOVER A/B gate, diffing
+the explicit gaussian ``Regression``-producer eval path against the
+``outputs:``-section path via a ``regression_gaussian-cutover34.yaml`` overlay.
+The shipped ``regression_gaussian.yaml`` has since been migrated onto the
+section + dumb sinks natively, which made the overlay a no-op and the A/B
+comparison degenerate (both legs ran the identical path). The comparison seam
+is retired (section==producer parity was proven while both paths existed — see
+the parity-closure section of ``salt/core/README.md``); what remains is the
+live single-leg coverage: the shipped config trains, evaluates and exports
+through the real CLI, with the gaussian doubled columns and the ONNX contract
+asserted from first principles. ``--no-check`` on export: the torch-vs-ONNX
+sweep checker has no gaussian handling (orthogonal to the contract checks).
+"""
 
 from __future__ import annotations
 
@@ -12,20 +26,18 @@ import pytest
 from salt.core.main import CONFIG_DIR, main
 from salt.core.onnx import make_session
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.core.testing.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always
 
 GAUSSIAN_CFG = CONFIG_DIR / "regression_gaussian.yaml"
-CUTOVER34_CFG = CONFIG_DIR / "regression_gaussian-cutover34.yaml"
 N_TEST = 200
-_FLOAT_TOL = 1e-6
 
 
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("w34_gauss_parity")
+    base = tmp_path_factory.mktemp("gauss_e2e")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
     h5_path = base / "pp_output_test_ttbar.h5"
@@ -47,7 +59,7 @@ def _overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    fit_dir = tmp_path_factory.mktemp("w34_gauss_fit")
+    fit_dir = tmp_path_factory.mktemp("gauss_e2e_fit")
     rc = main([
         "fit",
         "--config",
@@ -69,9 +81,9 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def producer_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the W34.3 gaussian Regression producer path (the ORACLE)."""
-    out = tmp_path_factory.mktemp("w34_gauss_producer") / "producer.h5"
+def eval_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from the ``outputs:``-section gaussian get_output path (via the CLI)."""
+    out = tmp_path_factory.mktemp("gauss_e2e_eval") / "eval.h5"
     rc = main([
         "test",
         "--config",
@@ -83,148 +95,60 @@ def producer_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])
-    assert rc == 0
+    assert rc == 0, "salt2 test on the shipped regression_gaussian.yaml must run end-to-end"
     assert out.exists()
     return out
 
 
-@pytest.fixture(scope="module")
-def section_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the PLAN 34 outputs:-section gaussian get_output path (via the CLI)."""
-    out = tmp_path_factory.mktemp("w34_gauss_section") / "section.h5"
-    rc = main([
-        "test",
-        "--config",
-        str(GAUSSIAN_CFG),
-        "--config",
-        str(CUTOVER34_CFG),
-        f"--data.test_file={data['h5']}",
-        f"--ckpt_path={ckpt}",
-        f"--data.num_test={N_TEST}",
-        f"--trainer.default_root_dir={data['dir']}",
-        f"--callbacks.h5_output.init_args.output={out}",
-        *_overrides(data),
-    ])
-    assert rc == 0, "salt2 test on the regression_gaussian-cutover34 outputs:-section must run"
-    assert out.exists()
-    return out
-
-
-def _compare_column(group, col, want, got) -> str | None:
-    if want.dtype != got.dtype:
-        return f"{group}.{col}: dtype {want.dtype} != {got.dtype}"
-    if want.shape != got.shape:
-        return f"{group}.{col}: shape {want.shape} != {got.shape}"
-    if np.issubdtype(want.dtype, np.floating):
-        if not np.allclose(want, got, rtol=0.0, atol=_FLOAT_TOL, equal_nan=True):
-            bad = int(np.argmax(np.abs(np.nan_to_num(want.ravel()) - np.nan_to_num(got.ravel()))))
-            return (
-                f"{group}.{col}: floats differ beyond atol={_FLOAT_TOL} at flat idx {bad}: "
-                f"producer={want.ravel()[bad]!r} section={got.ravel()[bad]!r}"
-            )
-    elif not np.array_equal(want, got):
-        return f"{group}.{col}: int/bool values differ (exact required)"
-    return None
-
-
-def test_gaussian_section_h5_matches_producer_oracle(producer_h5, section_h5):
-    """The gaussian get_output de-scale eval H5 == the gaussian Regression producer oracle."""
-    diffs: list[str] = []
-    with h5py.File(producer_h5) as a, h5py.File(section_h5) as b:
-        assert set(a.keys()) == set(b.keys()), f"groups differ: {set(a)} vs {set(b)}"
-        for group in a:
-            want, got = a[group][:], b[group][:]
-            want_cols, got_cols = list(want.dtype.names), list(got.dtype.names)
-            if want_cols != got_cols:
-                diffs.append(
-                    f"{group}: column set/order mismatch\n  producer: {want_cols}\n  "
-                    f"section : {got_cols}"
-                )
-                continue
-            diffs.extend(
-                msg
-                for col in want_cols
-                if (msg := _compare_column(group, col, want[col], got[col])) is not None
-            )
-    assert not diffs, "W34.4 GAUSSIAN CUTOVER H5 PARITY FAILED:\n" + "\n".join(diffs)
-
-
-def test_gaussian_section_has_stddev_columns(section_h5):
-    """Sanity: the section H5 carries the gaussian doubled columns (mean + _stddev)."""
-    with h5py.File(section_h5) as f:
+def test_gaussian_eval_h5_has_stddev_columns(eval_h5):
+    """The eval H5 carries the gaussian doubled columns (mean + _stddev), both streams."""
+    with h5py.File(eval_h5) as f:
         jet_cols = set(f["jets"].dtype.names)
         track_cols = set(f["tracks"].dtype.names)
+        n_rows = f["jets"].shape[0]
+    assert n_rows == N_TEST
     assert any(c.endswith("_stddev") for c in jet_cols), f"no gaussian stddev in jets: {jet_cols}"
     assert any(
         c.endswith("_stddev") for c in track_cols
     ), f"no gaussian stddev in tracks: {track_cols}"
 
 
-# ===========================================================================
-# W34.4 §7 GATE: GAUSSIAN ONNX value-parity. The gaussian descale-in-graph ONNX
-# path (get_output ONNX squeeze + the section single-name leaf naming + the
-# in-graph means‖softplus-stddev concat) had ZERO automated ONNX coverage on the
-# SECTION path. This exports BOTH the explicit-ONNX producer (regression_gaussian
-# .yaml, the ORACLE) and the dumb outputs:-section (regression_gaussian.yaml +
-# regression_gaussian-cutover34.yaml) from ONE checkpoint, then asserts the ONNX
-# contract (names/dtypes/dynamic_axes/order) AND the onnxruntime VALUES are
-# identical (atol 1e-6). --no-check: v1 to_onnx has zero gaussian handling, so the
-# torch-vs-ONNX sweep checker is skipped (orthogonal to value parity).
-# ===========================================================================
+# ONNX: the gaussian descale-in-graph export path (get_output ONNX squeeze + the
+# section single-name leaf naming + the in-graph means‖softplus-stddev concat)
+# through the real `salt2 export` CLI.
 
 
-def _export_onnx(extra_cfgs, ckpt, out: Path) -> Path:
-    """Export to ONNX via the real `salt2 export` CLI (--no-check)."""
-    saved_config = Path(ckpt).parents[1] / "config.yaml"
-    assert saved_config.is_file(), f"no saved run config at {saved_config}"
-    argv = ["export", "--config", str(saved_config)]
-    for c in extra_cfgs:
-        argv += ["--config", str(c)]
-    argv += [f"--ckpt_path={ckpt}", f"--output={out}", "--no-check", "--overwrite"]
-    rc = main(argv)
-    assert rc == 0, f"salt2 export failed (rc={rc}) for extra configs {[str(c) for c in extra_cfgs]}"  # noqa: E501
-    assert out.exists()
-    return out
-
-
-def _onnx_contract(path: Path) -> tuple[list[str], dict[str, int], dict[str, int]]:
-    """The exported graph's output names, ranks and element dtypes."""
-    model = onnx.load(str(path))
-    names = [o.name for o in model.graph.output]
-    ranks = {o.name: len(o.type.tensor_type.shape.dim) for o in model.graph.output}
-    dtypes = {o.name: o.type.tensor_type.elem_type for o in model.graph.output}
-    return names, ranks, dtypes
-
-
-class TestW34GaussianOnnxParity:
-    """Gaussian ONNX: the dumb outputs:-section export == the producer-oracle export."""
+class TestGaussianOnnxContract:
+    """The shipped regression_gaussian.yaml exports a well-formed ONNX contract."""
 
     @pytest.fixture(scope="class")
-    def oracle_onnx(self, ckpt, tmp_path_factory) -> Path:
-        out = tmp_path_factory.mktemp("w34_gauss_onnx_oracle") / "oracle.onnx"
-        return _export_onnx([], ckpt, out)  # saved config = the gaussian Regression oracle
+    def exported(self, ckpt, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("gauss_e2e_onnx") / "gaussian.onnx"
+        saved_config = Path(ckpt).parents[1] / "config.yaml"
+        assert saved_config.is_file(), f"no saved run config at {saved_config}"
+        rc = main([
+            "export",
+            "--config",
+            str(saved_config),
+            f"--ckpt_path={ckpt}",
+            f"--output={out}",
+            "--no-check",
+            "--overwrite",
+        ])
+        assert rc == 0, f"salt2 export failed (rc={rc})"
+        assert out.exists()
+        return out
 
-    @pytest.fixture(scope="class")
-    def section_onnx(self, ckpt, tmp_path_factory) -> Path:
-        out = tmp_path_factory.mktemp("w34_gauss_onnx_section") / "section.onnx"
-        return _export_onnx([CUTOVER34_CFG], ckpt, out)  # stack the dumb outputs:-section
+    def test_onnx_output_ranks_global_vs_per_token(self, exported):
+        """2 rank-0 globals (mean + _stddev of the global head) + 2 rank-1 per-token."""
+        model = onnx.load(str(exported))
+        ranks = {o.name: len(o.type.tensor_type.shape.dim) for o in model.graph.output}
+        assert sorted(ranks.values()) == [0, 0, 1, 1], ranks
 
-    def test_onnx_output_contract_matches(self, oracle_onnx, section_onnx):
-        """Names + dtypes + dynamic axes + ORDER + ranks identical (oracle vs section)."""
-        o_names, o_ranks, o_dtypes = _onnx_contract(oracle_onnx)
-        s_names, s_ranks, s_dtypes = _onnx_contract(section_onnx)
-        assert s_names == o_names, f"ONNX names differ\n  oracle : {o_names}\n  section: {s_names}"
-        assert s_ranks == o_ranks, f"ONNX ranks differ: {o_ranks} vs {s_ranks}"
-        assert s_dtypes == o_dtypes, f"ONNX dtypes differ: {o_dtypes} vs {s_dtypes}"
-        # 2 global rank-0 (mean + _stddev of the global gaussian head) + 2 per-token
-        # rank-1 (mean + _stddev of the per-token gaussian head)
-        assert sorted(o_ranks.values()) == [0, 0, 1, 1], o_ranks
-
-    def test_onnx_runtime_values_match(self, oracle_onnx, section_onnx):
-        """Onnxruntime values identical (atol 1e-6) between section and producer oracle."""
-        oracle_sess = make_session(oracle_onnx)
-        section_sess = make_session(section_onnx)
-        in_meta = {i.name: i.shape for i in oracle_sess.get_inputs()}
+    def test_onnx_session_runs(self, exported):
+        """The exported graph runs in onnxruntime on batch-1 inputs (L=5 tokens)."""
+        sess = make_session(exported)
+        in_meta = {i.name: i.shape for i in sess.get_inputs()}
         rng = np.random.default_rng(0)
 
         def shape_for(dims):
@@ -234,19 +158,5 @@ class TestW34GaussianOnnxParity:
             name: rng.standard_normal(shape_for(dims)).astype(np.float32)
             for name, dims in in_meta.items()
         }
-        oracle_out = {
-            o.name: v
-            for o, v in zip(oracle_sess.get_outputs(), oracle_sess.run(None, feeds), strict=True)
-        }
-        section_out = {
-            o.name: v
-            for o, v in zip(section_sess.get_outputs(), section_sess.run(None, feeds), strict=True)
-        }
-        assert set(oracle_out) == set(section_out)
-        max_diff = 0.0
-        for name, a in oracle_out.items():
-            b = section_out[name]
-            assert a.shape == b.shape, f"{name}: shape {a.shape} != {b.shape}"
-            d = np.abs(np.nan_to_num(a) - np.nan_to_num(b))
-            max_diff = max(max_diff, float(d.max()) if d.size else 0.0)
-        assert max_diff <= 1e-6, f"section ONNX values diverge from producer oracle: max {max_diff}"
+        out = {o.name: v for o, v in zip(sess.get_outputs(), sess.run(None, feeds), strict=True)}
+        assert len(out) == 4, f"expected the 4 gaussian outputs, got {sorted(out)}"

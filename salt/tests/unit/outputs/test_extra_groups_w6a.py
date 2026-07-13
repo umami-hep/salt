@@ -1,4 +1,4 @@
-"""W6a — POSITIVE coverage for the H5OutputSink ``extra_groups`` seam."""
+"""POSITIVE coverage for the H5OutputSink ``extra_groups`` seam."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ _T = 40  # the constituent (tracks) file token length
 
 
 class _StubExtraNode:
-    """A minimal extra-group node (MaskFormer-object-writer shaped, W6b stand-in)."""
+    """A minimal extra-group node (MaskFormer-object-writer shaped stand-in)."""
 
     def __init__(
         self,
@@ -82,13 +82,13 @@ class TestCollectExtraGroups:
         assert sink._collect_extra_groups(_ctx(), _STREAMS) == ({}, {})  # noqa: SLF001
 
     def test_group_shadowing_reader_stream_raises(self):
-        """An extra group named after a reader stream is a ConfigError (callback.py:891)."""
+        """An extra group named after a reader stream is a ConfigError."""
         sink = _sink(_StubExtraNode(extra={"jets": (_M,)}))
         with pytest.raises(ConfigError, match="shadows reader stream"):
             sink._collect_extra_groups(_ctx(), _STREAMS)  # noqa: SLF001
 
     def test_duplicate_owner_raises(self):
-        """Two nodes claiming the same extra group is a ConfigError (callback.py:897)."""
+        """Two nodes claiming the same extra group is a ConfigError."""
         sink = H5OutputSink(
             outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])],
             extra_groups=["a", "b"],

@@ -1,8 +1,0 @@
-# Frozen W6c.0 oracle fixtures (commit a9e2ac2). These binaries are
-# intentionally committed even though the repo-level .gitignore ignores
-# *.h5 (line 35) and *.ckpt (line 32). Un-ignore them here so `git add`
-# picks them up — without this, the parity test loses its frozen oracle in CI.
-# (data.h5 is NOT committed: it is regenerated deterministically in the `data`
-# fixture via write_dummy_file's default_rng(42) — see test_outputs_h5_parity.py.)
-!oracle.h5
-!ckpt.ckpt

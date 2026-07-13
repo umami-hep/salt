@@ -1,4 +1,4 @@
-"""Plan-29 W2 B2 gates: ORDER-INDEPENDENT TEST sink selection + persistence discrimination."""
+"""ORDER-INDEPENDENT TEST sink selection + persistence discrimination."""
 
 from __future__ import annotations
 
@@ -199,13 +199,14 @@ def test_setup_test_does_not_crash_regardless_of_order(cutover_data, onnx_first)
     # attach a trainer carrying the callbacks (selection source) + the real
     # datamodule (boundary source) — the surface ``setup('test')`` reads. The
     # callbacks must be in place BEFORE sink_demand (it routes through the same
-    # _attached_writer selection B2 hardens).
+    # _attached_writer selection hardened here).
     model._trainer = SimpleNamespace(callbacks=callbacks, datamodule=dm)  # noqa: SLF001
     dm.set_sinks(model.sink_demand())  # the model boundary demand (TEST sinks)
     dm.setup("test")  # build the test dataset (the boundary source compile_mode reads)
 
-    # the load-bearing call: pre-fix this raised ConfigError (dead preds) when
-    # onnx_first; post-fix it compiles the TEST plan with the H5 sink folded.
+    # the load-bearing call: order-dependent selection would raise ConfigError
+    # (dead preds) when onnx_first; it must compile the TEST plan with the H5
+    # sink folded in BOTH orders.
     model.setup("test")
 
     test_plan = model.plans[Mode.TEST]
@@ -217,7 +218,7 @@ def test_setup_test_does_not_crash_regardless_of_order(cutover_data, onnx_first)
 
 
 def test_is_persistence_sink_false_for_onnx_only_sink():
-    """`_is_persistence_sink(OnnxExportSink)` is False (no TEST persistence, W2 B2)."""
+    """`_is_persistence_sink(OnnxExportSink)` is False (no TEST persistence)."""
     assert _is_persistence_sink(_ONNX_CLASS_PATH) is False
     assert _is_persistence_sink(_H5_CLASS_PATH) is True
 
