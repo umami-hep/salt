@@ -1,26 +1,7 @@
 """`GraphDataModule` — Lightning wiring for the v2 dataset pipeline.
 
-One module dict shared across the three stages; per-stage readers are cloned
-from the single configured reader prototype via `Reader.with_source`.
-``DataLoader(batch_size=None, collate_fn=None, sampler=RandomBatchSampler)`` —
-the dataset itself returns complete batches, so there is no collate step.
-``drop_last`` only for fit; batch order is weakly shuffled, never row order.
-
-Wildcard->VDS resolution is a declared setup-graph module (`VDS`): auto-injected
-alongside `InputSamples`, it produces ``source.<reader>.<stage>.vds_path``, and
-`create_vds`'s FileLock + ``.done`` marker make every-rank execution safe with
-no rank-0 gating or DDP barrier.
-
-The val dataset compiles the VAL plan (not the FIT plan — keeps parameter
-randomisation out of validation); read-time transforms are FIT-only.
-
-``move_files_temp`` staging is an opt-in, default-off file-staging surface: the
-datamodule does not copy files itself — it arms a ``_stage_root`` in
-``setup('fit')`` and each per-stage `Reader` restages its own files there
-(`Reader.restage` -> `salt.core.data.vds.stage_file`), which handles multi-file
-and multi-sample readers uniformly. ``teardown('fit')`` removes the
-``_stage_root`` tree. With ``move_files_temp=None`` (the default) ``_stage`` is
-identity and the read path is byte-identical.
+Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
+(no collate); declared setup graph for VDS resolution and optional staging.
 """
 
 from __future__ import annotations

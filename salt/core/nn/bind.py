@@ -1,11 +1,5 @@
-"""Two-phase bind support: the resolved schema handed to ``module.bind``.
-
-After ``compile_plans`` the framework calls ``bind(schema)`` on every module so
-width-dependent layers can be built from the resolved graph. `ResolvedSchema` is
-a static map from dotted bundle key to its feature width (last dim) and, where
-declared, its field names — built by `resolve_bind_schema` from compiled
-`Plan`s via the same union-find discipline as the planner's shape check.
-Resolution is static: no data files, no tensors.
+"""Two-phase bind support: `ResolvedSchema` (dotted key -> feature width/fields)
+built statically from compiled `Plan`s and handed to ``module.bind``.
 """
 
 from __future__ import annotations

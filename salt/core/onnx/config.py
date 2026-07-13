@@ -1,10 +1,5 @@
-"""The ``export:`` config block (dataclasses, jsonargparse-registered as ``--export``) plus manifest
-resolution: `resolve_export_config` validates the export-only half; `attach_manifest` attaches the
-writer-derived output manifest (`export.outputs` itself is never config-declared).
-
-This module's body stays torch-free — reduce-registry lookups (`KNOWN_REDUCES`, `PER_TOKEN_REDUCES`,
-dtype/arity checks) are deferred imports, since `salt.core.main` imports `ExportConfig` from here at
-CLI startup.
+"""The ``export:`` config block (dataclasses) plus manifest resolution; the
+module body stays torch-free (reduce-registry lookups are deferred imports).
 """
 
 from __future__ import annotations

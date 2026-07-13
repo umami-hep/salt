@@ -1,49 +1,7 @@
 """Writer-side base class and contexts.
 
-A `Writer` is the output manifest of a salt2 model, with one role per output
-mode:
-
-- **TEST — the writer executes**: it declares the bundle keys it consumes
-  (`Writer.requires` — kind-typed `TensorSpec`s, like a module's
-  ``declare_io``) and turns each test batch into structured-array columns for
-  the shared H5 sink owned by `salt.core.writers.callback.WriterCallback`.
-  Demand-gating works end to end: writer-demanded keys keep their producers
-  alive in the TEST plan, dataset-served keys (labels, masks, ``meta.rows``)
-  flow into the boundary demand, and a produced ``preds.*`` key no writer
-  consumes is a hard `ConfigError`.
-- **ONNX — the writer is read, never run**: `Writer.onnx_outputs` declares the
-  writer's export-manifest entries as `ExportOutput` objects, and the exporter
-  assembles ``export.outputs`` from them. ONNX demand derives from the
-  manifest (``{o.port for o in onnx_outputs(ctx)}``). **Export = reduces
-  only: ``write()`` never traces and never runs inside Athena** — the
-  manifest is declarative because arbitrary ``write()`` numpy cannot enter
-  the traced graph. Export math comes from the live reduce registry
-  (``salt.core.onnx.reduces``; ``salt.core.onnx.config.KNOWN_REDUCES`` is a
-  live view of its registered names). Custom writers may register their own
-  export math via ``salt.core.onnx.reduces.register_reduce`` (a binder +
-  declared dtype + per-token flag) and name it in ``ExportOutput.reduce``.
-
-Both directions of mode-narrowing are first-class: a writer that never
-overrides `Writer.onnx_outputs` is **eval-only** (the default —
-`InputCopyWriter`, `PadMaskWriter`, truth columns; ``TaskWriter(onnx=false)``
-narrows per instance), and `ExportOnlyWriter` is the blessed **export-only**
-pattern (non-empty manifest, no TEST role, explicit ``export_only`` flag). A
-writer with neither role is a `ConfigError`. Naming: writers declare logical
-*suffixes* (`salt.core.outputs.names`); TEST prefixes with the run name, ONNX
-with ``export.model_name``.
-
-Note: the signature is ``columns(ctx: WriteCtx)`` rather than a bare resolved
-schema — writers need *file* metadata (source dtypes for input copies, the
-file's sequence lengths for v1's ``maybe_pad`` re-expansion) which the
-model-side `ResolvedSchema` does not carry; `WriteCtx` bundles both.
-
-`WriterCallback.validate_specs` additionally unifies each writer-declared
-require's kind/dtype against the leaf that actually produces it (a model
-TEST-port or a dataset boundary source), reusing the planner's
-`_unify_edge`/`KindError` rules: kind must match, dtypes must match when both
-are declared, a ``None`` on either side unifies with anything. Shape
-unification is not replayed here — writer requires carry symbolic-dim shapes
-that only bind against the live boundary inside the compiled plan.
+A `Writer` executes in TEST (H5 columns from bundle keys) and is read
+declaratively in ONNX (`onnx_outputs` export-manifest entries, never traced).
 """
 
 from __future__ import annotations

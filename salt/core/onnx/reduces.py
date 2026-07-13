@@ -1,23 +1,6 @@
-"""Export output reduces: the live registry of bundle-port -> ONNX-output conversions.
-
-`register_reduce` binds a reduce name to a binder + its declared output dtype + a
-per-token flag; `salt.core.onnx.config` validates ``export.outputs`` against the
-live registry and defaults each entry's dtype from the registration. Each entry
-binds one resolved `ExportOutput` to a `BoundReduce` that knows its output names,
-dtypes and dynamic axes, so the exporter's ``output_names``/``dynamic_axes`` are
-generated from the export config; the reduce functions run INSIDE the traced graph.
-
-No reduces are registered here by default — the shipped conversions
-(split_scalars/argmax/vertex_union_find/leading_object/object_index) were folded
-into real plan nodes in `salt.core.outputs.producers`. This module now keeps only
-the public `register_reduce` surface (for custom export-only writers) plus two
-shared math helpers (`mask_fill_flattened`, `get_maskformer_outputs`) that the
-folded conversion nodes still import.
-
-Torch-free seam: `salt.core.onnx.config`'s module body does not import this module
-at top level (this module imports ``config.ExportOutput``, so the dependency is
-one-way) — it reaches the live registry only via a deferred import inside its
-export-only resolution path, never at fit-time parse.
+"""Export output reduces: the live registry of bundle-port -> ONNX-output
+conversions (`register_reduce`) plus shared math helpers used by the folded
+conversion nodes in `salt.core.outputs.producers`.
 """
 
 from __future__ import annotations

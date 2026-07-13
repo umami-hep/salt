@@ -1,13 +1,5 @@
-"""Torch-vs-ONNX agreement checker.
-
-The eager `OnnxAdapter` (the SAME module instances the trace saw, torch-math
-forced) is the reference; onnxruntime (CPUExecutionProvider) evaluates the
-exported graph on identical random inputs; outputs are addressed BY NAME from
-the export config.
-
-Default bars: float outputs at ``rtol=atol=1e-4`` with no-NaN and no-exact-zero
-asserts, int8 aux outputs exact. The sweep covers every sequence length
-0..max_length-1 (including the zero-token edge case) times `trials` random draws.
+"""Torch-vs-ONNX agreement checker: eager `OnnxAdapter` vs onnxruntime on
+identical random inputs, swept over every sequence length.
 """
 
 from __future__ import annotations

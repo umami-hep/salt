@@ -1,22 +1,5 @@
-"""Declared SETUP-time interfaces for the salt v2 setup-graph kernel.
-
-The data-acquisition preamble (sample resolution -> VDS build -> ``/dev/shm``
-staging -> reader probe) is wired by a separate, parallel graph that runs once
-per stage in ``datamodule.setup()`` — never per batch. That graph carries two
-SETUP-only port flavours, PATH and SCALAR/CONFIG, declared here as
-`SourceSpec` leaves.
-
-This module is deliberately separate from the tensor-only `spec.py`: a
-`SourceSpec` has no ``shape``/``dtype``/``fields`` — a setup leaf is a
-filesystem PATH string or a resolved SCALAR/CONFIG artifact (a dict of
-str/float, or an opaque resolved object such as a ``num`` row-cap dict), never
-a tensor. Keeping the type system disjoint makes it structurally impossible
-for a path/scalar kind to leak into the per-batch tensor bundle — the hot loop
-stays tensor-only, so demand-pruning and static-shape resolution on the tensor
-side are untouched.
-
-The dotted-key machinery (``check_key_component`` / ``split_key`` / write-once
-`Bundle`) is reused from `spec.py`/`bundle.py`; only the leaf type differs.
+"""Declared SETUP-time interfaces for the setup-graph kernel: `SourceSpec`
+PATH / SCALAR-CONFIG leaves, kept disjoint from the tensor-only `spec.py`.
 """
 
 from __future__ import annotations

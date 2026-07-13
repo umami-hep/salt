@@ -1,11 +1,5 @@
-"""Core-local copies of the v1 mask helpers used by production ``salt.core`` code.
-
-Only the genuinely-shared subset is copied — ``indices_from_mask`` /
-``mask_from_logits`` (+ its ``sigmoid_mask`` / ``argmax_mask`` / ``sanitise_mask``
-/ ``mask_from_indices`` chain) / ``reco_metrics`` (+ its ``mask_effs_purs`` /
-``mask_eff_pur`` helper) — matching the v1 functions byte-for-byte.
-``build_target_masks`` and the training-only ``mask_from_indices`` callers are
-not core consumers and stay in v1.
+"""Core-local copies of the v1 mask helpers used by production ``salt.core``
+code (``indices_from_mask``, the ``mask_from_logits`` chain, ``reco_metrics``).
 """
 
 import torch

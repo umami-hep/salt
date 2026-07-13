@@ -1,13 +1,5 @@
-"""Declared tensor interfaces for the salt v2 graph kernel.
-
-Graph participants declare what they consume and produce as nested dicts
-mirroring the bundle layout, with `TensorSpec` leaves. A `Mode` flag gates
-ports, and `kind` typing makes mask-polarity and label/feature mix-ups
-static type errors. Declarations are static — building them must not touch
-data files, the network, or tensors.
-
-Symbolic dims (``"B"``, ``"T:tracks"``, ``"F:tracks"``) are preserved as
-plain strings here; unification across the graph happens in the planner.
+"""Declared tensor interfaces for the salt v2 graph kernel: `TensorSpec` leaves
+with `Mode` gating, `kind` typing, and symbolic dims (unified in the planner).
 """
 
 from __future__ import annotations

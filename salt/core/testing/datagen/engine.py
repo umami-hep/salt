@@ -1,10 +1,5 @@
-"""The two-phase, dependency-sorted generation engine.
-
-Phase 1 -- independent fields (distribution / label / id) per group, valid masks,
-           invalid fill.
-Phase 2 -- resolve ``link`` foreign keys in dependency (topological) order.
-Finally -- materialise ``alias_of`` groups by copying the post-link-resolution
-           source array.
+"""The two-phase, dependency-sorted generation engine: independent fields per
+group, then topological ``link`` resolution, then ``alias_of`` materialisation.
 """
 
 from __future__ import annotations

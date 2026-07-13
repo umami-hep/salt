@@ -12,13 +12,6 @@ from salt.core.utils.tensor_utils import (
     attach_context,
 )
 
-# ===========================================================================
-# Absorbed v1 Dense / Transformer / pooling layer family
-# ---------------------------------------------------------------------------
-# Copied verbatim (math + attribute layout + parameter registration order)
-# from the v1 originals in salt/models/*, which stay untouched.
-# ===========================================================================
-
 
 class Dense(nn.Module):
     """A fully connected feed forward neural network, with optional context.

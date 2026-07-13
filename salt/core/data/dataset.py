@@ -1,18 +1,5 @@
-"""`GraphDataset` — the map-style dataset that runs the compiled dataset plan.
-
-One ``__getitem__`` call = one full batch. The plan is compiled once (per
-process) by the same kernel planner as the model side; execution walks the
-steps in plan order, passing the batch row slice explicitly (`Reader.read` /
-`Processor.process`) and merging returns under write-once + declaration
-checks (`Bundle.merge`). After the plan runs, every leaf under the
-model-visible namespaces (``inputs``, ``masks``, ``labels``, ``meta``)
-crosses the numpy->torch boundary via ``torch.from_numpy(maybe_copy(x))``;
-``raw.*`` never crosses.
-
-Demand: the dataset plan's sinks are the model boundary's source
-requirements (``inputs.* / masks.* / labels.* / meta.rows``); label demand
-narrows the `Labels` wildcard per mode and is validated against the reader's
-schema artifact.
+"""`GraphDataset` — the map-style dataset that runs the compiled dataset plan;
+one ``__getitem__`` = one full batch, ending at the numpy->torch boundary.
 """
 
 from __future__ import annotations

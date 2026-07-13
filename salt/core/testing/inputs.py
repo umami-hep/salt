@@ -1,11 +1,5 @@
-"""Synthetic-input writers for the v2 test suite.
-
-Relocated (verbatim behaviour) from ``salt/utils/inputs.py`` at DEL-1 so the
-kept v2 tests carry no dependency on the retired v1 ``salt.utils`` namespace.
-Only the helpers with live v2 consumers were moved: the dummy structured-H5
-writer and the dummy norm/class-dict writer (plus the variable-name lists they
-draw on). The legacy tensor helpers (``inputs_sep_*``, ``get_random_mask``,
-``inputs_concat``, ...) stay behind with the v1 tests and die with them.
+"""Synthetic-input writers for the v2 test suite: the dummy structured-H5
+writer and the dummy norm/class-dict writer (relocated from v1 at DEL-1).
 """
 
 from __future__ import annotations

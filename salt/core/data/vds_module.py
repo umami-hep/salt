@@ -1,33 +1,7 @@
 """`VDS` — the wildcard->virtual-dataset resolution setup module.
 
-`VDS` is the second link of the superseding path chain (``pattern ->
-vds_path -> staged_path``): it consumes ``source.<reader>.<stage>.pattern``
-(emitted by `InputSamples`) and produces ``source.<reader>.<stage>.vds_path``.
-Like `InputSamples` it is a setup-only `DatasetModule` (non-empty
-`declare_setup_io`, empty `declare_io`), so it lives in the datamodule's
-``_setup_modules`` namespace and — requiring ``pattern`` — topo-sorts after
-`InputSamples` in the setup plan.
-
-What `VDS.setup` does:
-
-- **`vds_capable` reader + wildcard pattern** -> build a real h5py virtual
-  dataset (``create_vds``) and emit its path as ``vds_path``.
-- **anything else** (non-wildcard pattern, or a non-`vds_capable` ROOT reader
-  whose value happens to glob) -> identity edge: ``vds_path == pattern``
-  verbatim, and `create_vds` is never called. A ROOT glob is a wildcard that
-  would crash `create_vds`/`create_virtual_file`; the ROOT reader keeps its
-  own native glob.
-
-The build-vs-identity choice is gated on the reader's `vds_capable` flag, not
-an `isinstance` check — the reader name + capability are wired onto this
-module by `GraphDataModule` at assembly time (the same one-field assembly
-poke `InputSamples._reader` uses), because the ctx does not exist at
-`declare_setup_io` time.
-
-`VDS` declares ``incompatible_with = ("ShmStage",)``: the setup-plan compiler
-enforces mutual exclusion (staging a VDS copies h5py pointers, not data — a
-design incompatibility). The rule lives on `VDS` because it owns the
-h5py-specific knowledge.
+Consumes ``source.<reader>.<stage>.pattern`` and emits ``vds_path`` (a built
+h5py VDS for vds-capable readers + wildcards; an identity edge otherwise).
 """
 
 from __future__ import annotations

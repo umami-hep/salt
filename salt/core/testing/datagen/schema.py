@@ -1,14 +1,5 @@
-"""Schema dataclasses + loader for the schema-driven test-data generator.
-
-The schema is a JSON/YAML document describing the groups (HDF5 datasets) and the
-fields within each group. Four field types are supported:
-
-* ``distribution`` -- a float feature drawn from a named distribution.
-* ``label``        -- a categorical integer drawn from an explicit class set.
-* ``id``           -- a primary-key integer, unique within a per-sample scope.
-* ``link``         -- a foreign-key integer referencing an ``id`` field.
-
-See ``design/01_schema_spec.md`` for the binding specification.
+"""Schema dataclasses + loader for the schema-driven test-data generator
+(field types: distribution, label, id, link).
 """
 
 from __future__ import annotations

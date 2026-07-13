@@ -1,36 +1,7 @@
 """`FTAG1LiteReader` — a config-driven Reader for xAOD DAOD_FTAG1LITE POOL files.
 
-Reads ATLAS xAOD DAOD POOL files (``CollectionTree`` with aux-store branches) via
-``uproot`` and emits the same ``raw.<stream>`` / ``masks.<stream>`` structured
-arrays as `H5StructuredReader` / `EasyjetReader`.
-
-Three things distinguish this from the easyjet path:
-
-- **The sample unit is the JET, but the file is keyed by EVENT.** FTAG1LITE stores
-  ``std::vector<T>`` jet-level scalars (``[event][jet]``) and
-  ``std::vector<std::vector<T>>`` constituent vectors (``[event][jet][track]``).
-  `prepare` builds an event->jet offset index (cumulative per-event jet counts) so
-  a contiguous jet-slice maps to a covering event range; `read` reads whole
-  events, flattens ``[event][jet] -> jet``, and slices to exactly the requested
-  jets.
-
-- **Constituents are double-jagged.** A track stream is ``[event][jet][track]``;
-  after flattening events away it is ``[jet][track]`` (depth-2 jagged), padded to
-  ``pad_max`` per jet (float -> 0.0, signed-int labels -> -1 sentinel, unsigned ->
-  0), giving a structured ``(B, pad_max)`` array with a ``valid`` field.
-
-- **Branch names are config, prefixed by the aux store.** ``jet_collection`` (e.g.
-  ``AntiKt4EMPFlowJets``) gives the aux prefix ``<collection>AuxDyn.``; per-stream
-  ``groups`` map the v2 field name to the bare branch. ``_bf16`` branches are
-  auto-decoded to float32 by uproot.
-
-An optional `CutSpec` is evaluated at index-build time over the jet-level
-scalars, keeping only passing jets in the offset index — ``__len__`` and every
-``read`` slice are over the filtered set. Per-split cuts ride
-``with_source(stage=...)``.
-
-``uproot`` and ``awkward`` are imported lazily (the optional ``root`` extra);
-``salt.core`` imports without them.
+Reads jet-keyed slices out of event-keyed CollectionTree branches via uproot,
+emitting the same ``raw.<stream>`` / ``masks.<stream>`` arrays as the H5 readers.
 """
 
 from __future__ import annotations

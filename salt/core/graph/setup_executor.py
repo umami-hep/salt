@@ -1,23 +1,5 @@
-"""Execution of a compiled SETUP plan.
-
-The setup graph's runtime is a small bespoke loop — deliberately not
-`Executor.run`. `Executor.run` is hardwired to ``module(view, mode)`` and
-validates ``callable(module)`` at construction, but a `DatasetModule.setup`
-is a *named method*, not ``__call__``. So the setup pass is a third small loop
-(parallel to `GraphDataset.__getitem__`, not the executor) that:
-
-1. walks the compiled setup-plan steps in topological order;
-2. calls ``produced = module.setup(ctx, stage)`` for each;
-3. merges the produced keys into one shared write-once `Bundle` (the
-   ``SetupBundle``) via ``Bundle.merge(produced, who, expected=set(step.produces))``.
-
-The genuinely reused kernel pieces are exactly: the planner's topological
-order (`compile_setup_plan`) and `Bundle`'s write-once ``merge``-with-
-``expected``. Modules that produce nothing (the default no-op `setup`) simply
-return the ctx unchanged and merge nothing.
-
-For ``setup("fit")`` the datamodule runs this loop for both ``"train"`` and
-``"val"`` into the same ctx (disjoint stage-qualified keys).
+"""Execution of a compiled SETUP plan: walk steps in topological order, call
+``module.setup(ctx, stage)``, merge into a shared write-once bundle.
 """
 
 from __future__ import annotations

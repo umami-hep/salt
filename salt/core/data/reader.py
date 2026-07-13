@@ -1,32 +1,7 @@
 """`H5StructuredReader` — the throughput-preserving H5 reader.
 
-- Contiguous B-element slab reads from structured arrays into reusable
-  per-worker numpy buffers (``ndarray.resize(refcheck=False)`` +
-  ``ds.read_direct``).
-- Lazy pid-guarded ``h5py.File(swmr=True, libver="latest")`` handles, one per
-  (worker, file), shared across groups.
-- VDS creation for wildcard filenames (`salt.core.data.vds`, FileLock + done
-  marker + a staleness check).
-- Per-group ``truncate`` keeping the leading constituents (pt-sorted dumps).
-- Read-time mutation order: per-stream ``selections`` (ftag `Cuts` via
-  `TrackSelector` — NaN floats, -1 ints, ``valid=False`` for failing
-  constituents) immediately after the read, then ``transforms`` (FIT-only,
-  per-worker seeded). Because they run before ``raw.*`` / ``masks.*`` exist,
-  cuts flow into features, masks and labels. Transforms receive the full
-  post-selection structured batch, so label fields are in scope — transform
-  authors must keep ``used_fields`` to input variables unless label
-  augmentation is intended.
-- Demand-narrowed read columns: the per-mode read set is ``(demanded union
-  selection/transform fields) intersect schema``, computed from the compiled
-  plan and delivered via `WorkerCtx.read_fields`. ``get_dtype`` keeps file
-  field order, preserves on-disk ``f2`` via ``as_half``, and auto-appends
-  ``valid``.
-
-Produces ``raw.<stream>`` (structured, post-selection — may alias the
-reusable buffer; never crosses the torch boundary), ``masks.<stream>``
-(``~valid``, True = padded) for non-``global_object`` streams, and
-``meta.rows`` (TEST only). ``global_object: true`` per-group config is
-inferred from the schema artifact's ``valid`` field when not given.
+Contiguous slab reads into reusable per-worker buffers, lazy SWMR handles,
+demand-narrowed columns; produces ``raw.<stream>``, ``masks.<stream>``, ``meta.rows``.
 """
 
 from __future__ import annotations

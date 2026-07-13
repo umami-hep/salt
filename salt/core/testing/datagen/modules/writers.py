@@ -1,10 +1,5 @@
-"""Terminal writer modules: ``H5Writer`` / ``NormWriter`` / ``ClassDictWriter``.
-
-Each reuses an ``io.py`` function verbatim, passing a thin ``Schema``
-reconstructed from the producer modules' ``GroupSpec``s (collected by the
-pipeline and assigned to ``self._schema`` before ``__call__``). This keeps
-``write_h5``'s class_names attrs and the ``compute_class_dict`` length ==
-head ``output_size`` guarantee intact.
+"""Terminal writer modules: ``H5Writer`` / ``NormWriter`` / ``ClassDictWriter``,
+each reusing an ``io.py`` function with a reconstructed thin ``Schema``.
 """
 
 from __future__ import annotations

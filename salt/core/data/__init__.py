@@ -1,15 +1,5 @@
-"""salt.core.data — the v2 dataset pipeline.
-
-Reader -> processors -> numpy->torch boundary, compiled and executed by the
-same graph kernel as the model side. Public surface:
-
-- base classes: `DatasetModule`, `Reader`, `Processor`, `WorkerCtx`
-- the throughput-preserving reader: `H5StructuredReader` (+ `GroupConfig`)
-- the multi-sample combining reader: `MultiSampleReader` (+ `SampleConfig`)
-- shipped processors: `Features`, `Labels`, `FtagLabeller`, `MultiTarget`
-- the runtime: `GraphDataset` (per-batch plan execution + torch boundary)
-  and `GraphDataModule` (Lightning wiring, ``data:`` YAML block)
-- VDS helpers: `create_vds`, `default_vds_path`, `has_wildcard`
+"""salt.core.data — the v2 dataset pipeline: readers, processors, the
+`GraphDataset` runtime and `GraphDataModule` Lightning wiring, VDS helpers.
 """
 
 from __future__ import annotations

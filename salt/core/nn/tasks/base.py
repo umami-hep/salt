@@ -31,13 +31,6 @@ _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 _NO_PAD_MASK_STREAMS = frozenset({"objects"})
 
 
-# ===========================================================================
-# Task-head family: math kept verbatim from ``salt.models.task`` (loss,
-# ignore_index=-1 / ``-2`` label fold, nan_loss, target scaling, origin
-# weighting) since other code compares against it bitwise.
-# ===========================================================================
-
-
 class _AbsorbedTaskBase(nn.Module):
     """Wraps a `Dense` head, a loss, an ``input_name`` stream tag, and a scalar ``weight``."""
 

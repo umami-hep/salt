@@ -1,12 +1,5 @@
-"""``Pipeline`` -- an ordered ``list[GenModule]`` + a linear contract validator.
-
-Wires modules using the same ``class_path`` / ``init_args`` block grammar salt
-uses for a model's module collection, but as an **ordered list** rather than
-salt's name-keyed ``dict[str, GraphModule]`` -- because order is the authoring
-intent ("first Jets, then Tracks, then the writer").
-
-The validator mirrors salt's ``planner.py`` connectivity / duplicate-producer /
-cycle / terminal-consumer checks, linearised (order is given, no topo-sort).
+"""``Pipeline`` — an ordered ``list[GenModule]`` + a linear contract validator
+mirroring the planner's connectivity/duplicate/cycle/terminal checks.
 """
 
 from __future__ import annotations

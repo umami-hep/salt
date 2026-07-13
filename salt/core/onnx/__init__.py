@@ -1,11 +1,5 @@
-"""salt v2 ONNX export: writer manifest + export block -> ``.onnx``.
-
-Public surface: `ExportConfig`/`ExportInput`/`ExportOutput`/`ExportCombine` (the
-parsed ``export:`` block + output manifest), `resolve_export_config`/
-`attach_manifest` (validation + manifest resolution), `compile_onnx_plan`/
-`export_graph` (the programmatic export core), `OnnxAdapter` (the traced
-wrapper handed to ``torch.onnx.export``), `check_onnx` (the torch-vs-onnxruntime
-sweep checker), and the ``salt2 export`` CLI (`salt.core.onnx.export.main`).
+"""salt v2 ONNX export: writer manifest + export block -> ``.onnx``
+(config dataclasses, manifest resolution, export core, adapter, checker, CLI).
 """
 
 from salt.core.onnx.adapter import OnnxAdapter

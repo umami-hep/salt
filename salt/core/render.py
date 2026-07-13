@@ -1,9 +1,5 @@
-"""Plan rendering: plan tables and the Graphviz DOT source.
-
-Two text renderings of a compiled `Plan`, used by the static graph tooling
-(``salt2 graph plan/plot``) and the run-dir artifact callback: `plan_table`
-(the ordered step table) and `dot_source` (Graphviz DOT text, port-card
-layout, rasterised to PNG/PDF via the ``dot`` binary).
+"""Plan rendering: `plan_table` (ordered step table) and `dot_source`
+(Graphviz DOT text) for a compiled `Plan`.
 """
 
 from __future__ import annotations

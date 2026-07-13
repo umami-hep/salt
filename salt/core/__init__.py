@@ -1,9 +1,5 @@
-"""salt.core — modular v2 core.
-
-Re-exports the graph-kernel public API, the dataset schema artifact API,
-and the Lightning integration (`SaltModule`). Dataset/model modules live
-in `salt.core.data` / `salt.core.nn`; the ``salt2`` CLI lives in
-`salt.core.main` and is not re-exported here.
+"""salt.core — modular v2 core; re-exports the graph-kernel public API, the
+schema artifact API, and the Lightning integration (`SaltModule`).
 """
 
 from __future__ import annotations

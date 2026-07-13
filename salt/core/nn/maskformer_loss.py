@@ -13,12 +13,6 @@ from salt.core.nn.matcher import HungarianMatcher
 __all__ = ["MaskFormerLoss"]
 
 
-# ---------------------------------------------------------------------------
-# MaskFormerLoss loss helpers (M7 W2c-3 verbatim copy of v1
-# maskformer_loss.py:17-97)
-# ---------------------------------------------------------------------------
-
-
 @torch.jit.script
 def dice_loss(inputs: Tensor, labels: Tensor):
     """Compute the DICE loss, similar to generalized IOU for masks.

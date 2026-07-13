@@ -1,10 +1,4 @@
-"""Unit tests for the modular generator ``Pipeline`` + contract validator.
-
-Covers contract ordering (inserter-before-Tracks raises ``RecipeError``),
-field-level ``requires`` resolution, duplicate-producer / undeclared-mutation /
-self-cycle / no-writer errors, and jsonargparse ``class_path``/``init_args``
-load + end-to-end run to a written H5.
-"""
+"""Unit tests for the modular generator ``Pipeline`` + contract validator."""
 
 from __future__ import annotations
 

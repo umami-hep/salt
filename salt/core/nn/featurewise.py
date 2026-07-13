@@ -12,11 +12,6 @@ _UNNAMED = "unnamed"
 """Placeholder instance name — the config dict key is assigned before compile."""
 
 
-# ---------------------------------------------------------------------------
-# featurewise.py + posenc.py absorption — FiLM + positional encoding
-# ---------------------------------------------------------------------------
-
-
 _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
 """Valid FiLM ``layer`` placements: ``input`` applies scale/bias before a
 `StreamEmbed`'s projection; ``encoder`` at the start of every encoder layer;

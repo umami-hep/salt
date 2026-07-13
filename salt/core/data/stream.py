@@ -1,28 +1,6 @@
-"""Shared `Reader`-base stream-assembly helpers.
-
-Folds the per-reader jagged pad / file-offset / dtype-sentinel code that the
-easyjet, ftag1lite, and multisample readers each need into one shared surface:
-
-- `StreamConfig` — a per-stream description of the cut -> sort -> truncate ->
-  pad pipeline (``pad_max``, ``sort``, ``cuts``, ``jagged``). Lives on the
-  `Reader` base so every reader speaks the same vocabulary.
-- `_cut_sort_truncate_pad` — the shared assembly: cut (per-constituent
-  keep-mask, drop-then-pad: a cut constituent is removed before padding,
-  never wasting a ``pad_max`` slot) -> sort (argsort by ``sort.var`` + permute
-  all fields) -> truncate to the leading ``pad_max`` -> pad + ``valid`` with
-  dtype-aware sentinels (float ``0.0``, signed-int label ``-1``, unsigned
-  ``0``, bool ``False``).
-- `OffsetIndex` — cumulative row offsets across a deterministic file list plus
-  the covering-range mapping a contiguous global slice needs.
-
-**Hard invariant.** With no cuts and no sort configured (the default),
-`_cut_sort_truncate_pad` produces a result that is byte-for-byte identical to
-the readers' contiguous truncate+pad+valid path: ``valid`` is computed first
-from the per-row counts, each field is truncated to the leading ``pad_max``,
-padded per dtype, cast to the schema dtype, and assembled into a structured
-``(B, T)`` array with a trailing ``valid`` bool field. The cut/sort machinery
-is skipped entirely on the default path — it engages only when a
-`StreamConfig` carries a non-empty ``cuts`` tuple or a ``sort`` spec.
+"""Shared `Reader`-base stream-assembly helpers: `StreamConfig`,
+`_cut_sort_truncate_pad` (cut -> sort -> truncate -> pad + valid), and
+`OffsetIndex` (cumulative file offsets for contiguous global slices).
 """
 
 from __future__ import annotations

@@ -1,27 +1,5 @@
-"""Reusable index-build-time selections for v2 `Reader`s.
-
-A `CutSpec` is a small, frozen, reader-agnostic description of which jet-level
-(global-object) rows are eligible to be served. It is evaluated once at the
-reader's index-build stage (`prepare`) — not as a per-batch processor and not
-as a `Dataset` wrapper.
-
-Row-dropping cuts in a per-batch wrapper would break the ``(B, ...)`` batch
-contract (every reader read is a contiguous slice; fancy indices are
-rejected) and downstream length-coherence. Event/jet selections decide which
-rows are eligible, so they belong at the reader's index-build stage: each
-batch then stays a contiguous slice of the filtered row index, ``__len__`` is
-the filtered count, and `Features` / `Labels` / the sampler all see a clean
-dense stream.
-
-``CutSpec`` carries a ``global_cuts`` tuple applied to every split, plus an
-optional ``per_split`` map (``{"train": (...), "val": (...), "test": (...)}``).
-The reader's ``with_source(stage=...)`` clone passes the bound stage through,
-and ``for_split(stage)`` returns ``global + this split's`` cuts. A train/val
-split by ``eventNumber`` parity, or a per-split ``pt`` floor, is therefore a
-config change with no reader-code change.
-
-The comparison operators reuse ``processors._OPERATORS`` so a cut's ``op`` is
-one of ``==  !=  >=  <=  >  <``.
+"""`CutSpec` — reusable index-build-time row selections for v2 `Reader`s,
+evaluated once in `prepare` (global cuts plus optional per-split cuts).
 """
 
 from __future__ import annotations

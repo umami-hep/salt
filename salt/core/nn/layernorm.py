@@ -5,10 +5,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-# ---------------------------------------------------------------------------
-# layernorm.py absorption (hybrid/RMS norm)
-# ---------------------------------------------------------------------------
-
 
 class LayerNorm(nn.LayerNorm):
     """Faster LayerNorm by setting elementwise_affine=False."""

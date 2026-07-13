@@ -1,20 +1,6 @@
-"""``TruthHadronInserter`` -- owns BOTH sides of the maskformer link.
-
-It produces the ``truth_hadrons`` object group (real ``barcode`` ids + a
-``flavour`` object-class label) AND injects the matching
-``ftagTruthParentBarcode`` link field into the pre-existing ``tracks`` array,
-reusing ``engine._resolve_link``.
-
-Critical wiring: ``_resolve_link(rng, schema, data, g, f, flags)`` where
-``g`` is the SOURCE-group GroupSpec (the resolver does ``src = data[g.name]``
-internally) and ``f`` is the ``LinkField`` that lives INSIDE that source group's
-``.fields`` -- NOT a free-standing/hand-built link field, and NOT the structured
-array.
-
-Critical typing: every field -- including the barcode ``id`` and the
-``ftagTruthParentBarcode`` ``link`` -- is routed through ``parse_schema`` (hence
-``_parse_field``), so they default to ``'i4'`` (32-bit int). We NEVER hand-build
-``LinkField`` / ``IdField`` / ``GroupSpec`` (the bare dataclasses default ``f4``).
+"""``TruthHadronInserter`` — produces the ``truth_hadrons`` object group and
+injects the matching ``ftagTruthParentBarcode`` link field into ``tracks``
+(all fields routed through ``parse_schema``; never hand-builds specs).
 """
 
 from __future__ import annotations

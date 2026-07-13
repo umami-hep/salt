@@ -1,9 +1,5 @@
-"""``GlobalObject`` / ``Jets`` -- the [N]-shape global group module.
-
-Reuses ``engine._build_group_array`` (global path). Holds a dict-form group
-spec and parses it via ``schema.parse_schema`` at call time so ``_parse_field``
-runs (i4 int defaults) and validation fires -- NEVER hand-builds GroupSpec /
-FieldSpec.
+"""``GlobalObject`` / ``Jets`` — the [N]-shape global group module (parses its
+dict-form spec via ``schema.parse_schema``; never hand-builds specs).
 """
 
 from __future__ import annotations

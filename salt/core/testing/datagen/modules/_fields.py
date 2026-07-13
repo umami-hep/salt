@@ -1,10 +1,5 @@
-"""Resolve a ``fields:`` init-arg that is either an inline list or a YAML path.
-
-Feature-list YAML (``recipes/feature_lists/*.yaml``) is referenced by path from
-``init_args`` so a shared list is declared once and reused across recipes. A
-path is resolved relative to the ``recipes/feature_lists/`` directory (the
-feature lists live beside the recipes that use them), then falls back to the
-recipe dir / cwd. The YAML document is a bare list of field-spec dicts.
+"""Resolve a ``fields:`` init-arg that is either an inline list or a YAML path
+(relative to ``recipes/feature_lists/``, then recipe dir / cwd).
 """
 
 from __future__ import annotations

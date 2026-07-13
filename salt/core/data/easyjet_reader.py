@@ -1,32 +1,7 @@
 """`EasyjetReader` — a config-driven Reader for easyjet ``AnalysisMiniTree`` ROOT ntuples.
 
-Reads easyjet output-tree ROOT files (the DAOD_PHYS -> ntuple step's product)
-and emits the same ``raw.<stream>`` / ``masks.<stream>`` structured arrays the
-`H5StructuredReader` produces.
-
-Two things distinguish this from the H5 path:
-
-- **The file format is jagged, not pre-padded.** easyjet jets are a per-event
-  variable-length list (``recojet_antikt4PFlow_*`` branches are ``AsJagged``). The
-  reader pads each jagged stream to a fixed multiplicity ``T`` per ``read``,
-  computing the ``valid`` length first, then filling per dtype — float features
-  -> 0.0, integer labels -> sentinel -1 (not 0, so a padded label can never be
-  consumed as a real class). The result is a structured ``(B, T)`` array with a
-  ``valid`` bool field, and ``masks.<stream> = ~valid`` (True = padded).
-
-- **Branch names are config, not hardcoded.** The ``_NOSYS`` suffix and the jet
-  collection prefix vary between samples (HH4b vs flavtag), so the reader takes a
-  ``groups`` mapping of ``stream -> {branches: {field: branch_name}, jagged,
-  truncate}``. The HH4b and flavtag files become two configs sharing one reader.
-
-``uproot`` and ``awkward`` are imported lazily inside the methods that touch the
-file — ``salt.core`` imports cleanly without them.
-
-Multi-file: ``prepare`` globs the source (a directory, a glob, or a single file),
-builds a deterministic (sorted) file table with cumulative entry offsets, and
-``read(rows, mode)`` translates a global row slice into per-file uproot
-``entry_start``/``entry_stop`` reads of the demanded branches only. A slice
-crossing a file boundary is stitched together.
+Pads jagged per-event branches into the same ``raw.<stream>`` / ``masks.<stream>``
+structured arrays the H5 reader produces; branch names come from config.
 """
 
 from __future__ import annotations

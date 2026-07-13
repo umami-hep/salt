@@ -16,12 +16,6 @@ from salt.core.utils.tensor_utils import (
     undo_padding,
 )
 
-# ---------------------------------------------------------------------------
-# transformer.py absorption (GLU / LayerScale / DropPath / NormResidual /
-# EncoderLayer / Transformer — the pieces TransformerEncoder uses)
-# ---------------------------------------------------------------------------
-
-
 try:
     from mup import MuReadout as _MuReadout
 

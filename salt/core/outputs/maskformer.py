@@ -1,34 +1,7 @@
 """The MaskFormer object writer — eval columns AND ONNX object outputs.
 
-TEST role (executes):
-
-- ``objects`` group ``[total, M]`` — per-object class probabilities
-  ``{run_name}_p{class}`` (f4, one column per object class) plus the truth
-  ``class_label`` (i8);
-- the constituent stream (e.g. ``tracks``) gains one ``{run_name}_MaskIndex``
-  i8 column — the per-constituent owning-object index from
-  ``indices_from_mask(masks.sigmoid() > 0.5)`` (noindex ``-2``), with padded
-  constituents set to ``-1``;
-- an ``object_masks`` group ``[total, M, T]`` — the truth mask ``truth_mask``
-  (i8) and the raw ``mask_logits`` (f4).
-
-ONNX role (declares): two `ExportOutput` entries — ``preds.objects.regression``
--> the ``leading_object`` reduce (R leading-object regression scalars) and
-``objects.masks`` -> the ``object_index`` reduce (int8 per-constituent index
-named `OBJECT_INDEX.onnx` = ``HadronIndex``). The truth columns never reach
-ONNX: `requires` is TEST-only, so the ``labels.objects.*`` demand never enters
-the ONNX plan and `MaskFormerTargets` stays pruned there.
-
-The MaskIndex / HadronIndex cross-mode suffix divergence is the pinned
-`salt.core.outputs.names.OBJECT_INDEX` pair — this writer imports it, never
-re-declares the strings.
-
-One documented v1 value divergence (not a byte-parity break): the
-``class_label`` truth column carries the remapped object class
-(``labels.objects.object_class``, the canonical v2 truth `MaskFormerTargets`
-produces), where v1 wrote the raw ``flavour`` field. The column name, dtype
-and structure are v1-identical; only the integer mapping differs,
-intentionally.
+TEST: per-object class probabilities, the MaskIndex column, truth/logit masks.
+ONNX: the ``leading_object`` and ``object_index`` reduces.
 """
 
 from __future__ import annotations

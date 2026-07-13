@@ -1,14 +1,5 @@
-"""Shared helpers for the generation modules.
-
-* ``add_field``          -- widen a structured array with one new column,
-                            preserving every existing column byte-for-byte.
-* ``infer_n``            -- resolve the per-module row count.
-* ``field_dicts_from_array`` -- reconstruct dict-form distribution-field specs
-                            from an existing structured array's dtype (used by
-                            the inserter to rebuild the ``tracks'`` group spec).
-* ``reconstruct_schema`` -- build a thin ``Schema`` from a list of GroupSpecs
-                            (used by the writers; keeps class_names attrs and the
-                            class_dict length == output_size guarantee).
+"""Shared helpers for the generation modules: ``add_field``, ``infer_n``,
+``field_dicts_from_array``, ``reconstruct_schema``.
 """
 
 from __future__ import annotations

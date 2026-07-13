@@ -1,23 +1,6 @@
-"""`MultiSampleReader` — combines N labelled samples (each read by any sub-`Reader`)
-into one proportionally-stratified stream, injecting a per-event sample label.
-Enables event-level classification (e.g. HH->4b vs ttbar) read directly from
-per-sample files at read time, with no pre-resampling into a single shuffled file.
-
-The combined index is built at ``prepare`` time as a largest-remainder (Hamilton)
-round-robin interleave: every prefix's per-sample counts stay within ±1 of the
-ideal proportional share, so any contiguous batch window has a bounded (±2)
-per-sample count instead of long single-class stretches. The order is seeded at
-``prepare`` and stable for the process lifetime (no per-epoch reshuffle).
-
-``read(rows, mode)`` only ever receives a contiguous slice (the `Reader` contract
-guarantees this — sub-readers translate slices into file entry_start/entry_stop
-reads, never fancy-indexed reads). It decomposes the window into ordered
-per-sample contiguous runs, reads each via its sub-reader, then concatenates the
-per-run blocks back into combined batch order, injecting the label per run.
-
-Each sample may carry a per-stage ``sources: {train, val, test}`` map; on
-``with_source(..., stage=...)`` the single ``filename`` arg is ignored (meaningless
-for N samples) and each sub-reader is re-sourced from its own ``sources[stage]``.
+"""`MultiSampleReader` — combines N labelled samples into one proportionally
+stratified stream (largest-remainder interleave), injecting a per-event
+sample label; each sub-read stays a contiguous per-file slice.
 """
 
 from __future__ import annotations

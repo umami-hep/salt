@@ -1,10 +1,5 @@
-"""Virtual-dataset (VDS) creation for wildcard inputs.
-
-Multi-process-safe VDS machinery: FileLock serialisation, a ``.done``
-completion marker, atomic tmp-file publish, plus a staleness check (VDS mtime
-vs member-file mtimes) that avoids silently serving stale data after a
-re-dump. DDP rank-0 pre-creation + barrier lives in
-`salt.core.data.datamodule.GraphDataModule`, not here.
+"""Virtual-dataset (VDS) creation for wildcard inputs: FileLock serialisation,
+``.done`` marker, atomic publish, and a staleness check.
 """
 
 from __future__ import annotations

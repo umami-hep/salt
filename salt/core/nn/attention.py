@@ -12,11 +12,6 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from salt.core.nn.layernorm import RMSNorm
 
-# ---------------------------------------------------------------------------
-# attention.py absorption (MultiheadAttention / EdgeAttention / SDPA helpers)
-# ---------------------------------------------------------------------------
-
-
 try:
     from flash_attn import flash_attn_varlen_qkvpacked_func as _flash_attn_func
 except ImportError:

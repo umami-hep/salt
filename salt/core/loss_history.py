@@ -1,29 +1,7 @@
 """Per-epoch loss history as a plain CSV — a stack-neutral measurement instrument.
 
-Written for the GN2 before/after retraining gate (modularise-salt plan 09):
-the v1 stack's CometLogger produces no parseable local artifact when offline
-(no API key -> the experiment object is never materialised, nothing is
-flushed), and v1's CLI hard-wires CometLogger so a CSVLogger cannot be
-swapped in (``utils/cli.py`` links ``name`` to
-``trainer.logger.init_args.experiment_name``). This callback side-steps
-loggers entirely: it snapshots ``trainer.callback_metrics`` and appends rows
-to ``<log_dir>/loss_history.csv``.
-
-It is deliberately identical for BOTH stacks (attach via
-``--trainer.callbacks+=salt.core.loss_history.LossHistoryWriter`` on v1, or a
-``callbacks:`` dict entry on v2) so the before/after loss-curve overlay
-compares numbers measured by the same code. (Historical note: the module
-lived at ``salt.utils.loss_history`` before the v1 deletion; the full v1
-stack is preserved at pin ``29c67a1``.)
-
-Semantics (same on both stacks — both log with ``self.log`` defaults):
-
-- ``val/*`` rows are EPOCH MEANS (``on_epoch=True`` default in validation).
-- ``train/*`` rows are the LAST optimiser step's values of the epoch
-  (training-step logging defaults to ``on_step=True, on_epoch=False``).
-- The sanity-check validation loop is skipped.
-
-CSV columns: ``stage, epoch, step, metric, value``.
+Snapshots ``trainer.callback_metrics`` each epoch into ``<log_dir>/loss_history.csv``
+(columns: ``stage, epoch, step, metric, value``).
 """
 
 from __future__ import annotations

@@ -1,16 +1,5 @@
-"""``gnn_config`` ONNX metadata, bit-compatible with v1 on equivalent config.
-
-Athena parses the JSON under the single ``gnn_config`` metadata key. The v1
-top-level key ORDER is reproduced exactly — ``ckpt_path``, ``layers``, ``nodes``,
-``config.yaml``, ``metadata.yaml``, ``salt_export_hash``, ``onnx_model_version``,
-``output_names``, ``model_name``, ``inputs``, ``input_sequences``,
-``combine_outputs``, ``rename_outputs`` — with ONE additive key, ``plan_hash``,
-APPENDED after the v1 set (never interleaved), so the v1 keys remain a
-byte-ordered prefix of the envelope.
-
-``onnx_model_version`` stays ``"v1"``: the default GN2 export reproduces v1
-Athena-visible content exactly; the version is bumped to ``v2`` only if
-Athena-visible content changes.
+"""``gnn_config`` ONNX metadata, bit-compatible with v1 on equivalent config
+(v1 key order preserved; one additive ``plan_hash`` key appended).
 """
 
 from __future__ import annotations

@@ -1,24 +1,6 @@
-"""`InputSamples` — the pure-source data-sourcing setup module.
-
-`InputSamples` answers "which bytes back this reader, for this stage" at the
-shallowest level of the superseding path chain (``pattern -> vds_path ->
-staged_path``). It is a setup-only `DatasetModule` (non-empty
-`declare_setup_io`, empty `declare_io`), so it lives in the datamodule's
-``_setup_modules`` namespace and never reaches the per-batch
-``compile_plan``/``_check_all_modes_dead`` — it cannot trip
-`AllModesDeadError`.
-
-Per-stage literal files: `InputSamples` performs path arithmetic only — it
-selects ``files[stage]`` and emits it as ``source.<reader>.<stage>.pattern``
-(path), plus a whole-dict ``artifacts.<reader>.num`` (scalar) row-cap leaf
-written once across the ``setup("fit")`` train+val passes. No filesystem I/O,
-no globbing — wildcards pass through verbatim and are resolved downstream
-(the reader's own ``has_wildcard -> create_vds``, or the `VDS` module).
-
-The ``<reader>`` component is wired by `GraphDataModule` after the
-single-Reader guard: the ctx does not exist at ``declare_setup_io`` time, so
-the reader name is embedded at declaration time via a one-field assembly poke
-(``input_samples._reader = self._reader_name``).
+"""`InputSamples` — the pure-source data-sourcing setup module: selects
+``files[stage]`` and emits ``source.<reader>.<stage>.pattern`` plus the
+``artifacts.<reader>.num`` row-cap leaf (path arithmetic only, no I/O).
 """
 
 from __future__ import annotations

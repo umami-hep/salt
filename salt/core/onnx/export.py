@@ -1,18 +1,7 @@
 """``salt2 export``: config + checkpoint -> validated ``.onnx``.
 
-Compiles the ``Mode.ONNX`` plan from config-derived sources (no data touched;
-boundary specs mirror the dataset `Features` declaration), demands the ports of the
-writer-derived output manifest, wraps the plan in the traceable `OnnxAdapter`,
-traces with ``torch.onnx.export(opset_version=20, dynamo=False)``, writes the
-``gnn_config`` metadata, and sweep-checks torch vs onnxruntime.
-
-Programmatic surface (fixture-driven gates, no checkpoint/CLI required):
-`compile_onnx_plan` + `export_graph` on a bound, weight-loaded module dict, with the
-manifest passed explicitly (``outputs=``). CLI surface: ``salt2 export --ckpt_path
-<ckpt> [-c config ...]`` (``-c`` repeatable — later files deep-merge on top, e.g. an
-export-block override onto a run config trained without one); ``salt2 export
---manifest -c <config>`` prints the assembled manifest and exits (no checkpoint
-needed). Dispatched from `salt.core.main` exactly like the graph subcommands.
+Compiles the ONNX plan, traces via `OnnxAdapter`, writes ``gnn_config``
+metadata, and sweep-checks torch vs onnxruntime.
 """
 
 from __future__ import annotations

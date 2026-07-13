@@ -1,12 +1,6 @@
-"""Public IO + dict-derivation functions for the schema-driven generator.
-
-* ``write_h5``           -- thin HDF5 writer (structured arrays + schema attrs).
-* ``compute_norm_dict``  -- real per-feature mean/std from produced data.
-* ``compute_class_dict`` -- schema-length, data-counted class weights.
-
-norm/class dicts are computed from the PRODUCED DATA (real stats / frequencies),
-not from the schema. The schema only disambiguates field roles (norm) and pins
-the weight-list length+order to the head ``output_size`` (class).
+"""Public IO + dict-derivation functions for the schema-driven generator:
+``write_h5``, ``compute_norm_dict``, ``compute_class_dict`` (stats from
+produced data, field roles and lengths from the schema).
 """
 
 from __future__ import annotations

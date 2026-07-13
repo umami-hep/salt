@@ -21,11 +21,6 @@ from salt.core.utils.tensor_utils import (
     masked_softmax,
 )
 
-# ---------------------------------------------------------------------------
-# pooling.py absorption (GlobalAttentionPooling math — composed by the v2
-# GlobalAttentionPooling GraphModule below)
-# ---------------------------------------------------------------------------
-
 
 class _GlobalAttentionPoolingV1(nn.Module):
     """Global attention pooling over concatenated node embeddings.

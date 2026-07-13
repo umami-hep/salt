@@ -1,12 +1,6 @@
-"""``GenModule`` base for the modular test-data generator pipeline.
-
-A pipeline is an ordered ``list[GenModule]``. Each module declares its data
-contract as instance-level lists of *contract keys* (``requires`` /
-``produces`` / ``mutates``) and implements ``__call__(data, rng) -> data``.
-
-A contract key is either a GROUP key (``"tracks"``) or a FIELD key
-(``"tracks.ftagTruthParentBarcode"``) -- a naming convention over a structured
-array's ``dtype.names``, not a change in storage.
+"""``GenModule`` base for the modular test-data generator pipeline: modules
+declare ``requires``/``produces``/``mutates`` contract keys and implement
+``__call__(data, rng) -> data``.
 """
 
 from __future__ import annotations

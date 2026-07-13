@@ -1,24 +1,5 @@
-"""Shared output-suffix constants — one owner per logical output name.
-
-Writers are the single source of output names for both modes: a writer
-declares a logical *suffix*; the TEST column name is ``{run_name}_{suffix}``
-and the ONNX output name is ``{export.model_name}_{suffix}`` (the exporter
-owns the prefix — writers never see the Athena name). The constants here are
-the suffixes shared (or explicitly pinned as divergent) across modes, so a
-logical output can never be named independently in two different files —
-every cross-mode name decision lives in this module.
-
-Two kinds of entries:
-
-- **Shared constants** (`VERTEX_INDEX`): the SAME suffix in TEST and ONNX.
-  The remaining v1 asymmetry (TEST writes the bare column while
-  ``prefix_vertex_column=false``) is a *prefix policy* on the TaskWriter, not
-  a second name — see ``modules.py``.
-- **Pinned divergences** (`OBJECT_INDEX`): v1 shipped two different suffixes
-  for one logical output and byte-parity gating forces v2 to keep both —
-  recorded as one explicit, documented pair instead of two accidental
-  literals. `MaskFormerObjectWriter` must import `OBJECT_INDEX` — never
-  re-declare the strings.
+"""Shared output-suffix constants — one owner per logical output name, covering
+both shared TEST/ONNX suffixes and pinned cross-mode divergences.
 """
 
 from __future__ import annotations

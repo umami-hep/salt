@@ -1,36 +1,7 @@
 """Plan execution for the salt v2 graph kernel.
 
-The executor is the entire runtime — it walks a compiled `Plan`'s steps in
-order, invokes each module, and merges the returned keys into the run
-`Bundle` under write-once + declaration checks. No reflection, no dispatch
-tables, no dict-order dependence; ONNX tracing sees a plain sequence of
-module invocations.
-
-Module call convention
------------------------
-Each step's module is invoked as ``produced = module(b, mode)``:
-
-- ``b`` is the run `Bundle` itself (or, under ``run(debug=True)``, a
-  read-tracking view of it). Modules read their declared requires via
-  ``b.get(...)`` / ``b.subtree(...)``; for ``nn.Module`` subclasses the call
-  lands in ``forward(b, mode)``.
-- ``mode`` is the plan's primary `Mode` — a plan property resolved before
-  tracing, never a tensor input.
-- The return value is the module's newly produced keys ONLY. Both nested
-  dicts (``{"preds": {"x": y}}``) and flat dotted keys (``{"preds.x": y}``),
-  or any mixture, are accepted and canonicalised before the merge. A dict
-  value whose dotted path is itself a declared key (e.g. the ``seq.layout``
-  meta leaf) is kept whole as a dict-valued leaf.
-- The executor merges via
-  ``Bundle.merge(produced, who=step.name, expected=set(step.produces))`` —
-  extra, missing, or colliding keys raise with the module name in the
-  message, on every merge, independent of debug mode.
-
-Optional ports: an optional require with no producer in the plan's mode is
-dropped from `PlanStep.requires` at compile time; at runtime the key is
-simply *absent* from the bundle — absent optional inputs are omitted, not
-passed as ``None``. Modules probe with ``key in b``; the debug view permits
-this for every declared require, bound or not.
+Walks a compiled `Plan`'s steps as ``produced = module(bundle, mode)`` and
+merges returns under write-once + declaration checks.
 """
 
 from __future__ import annotations

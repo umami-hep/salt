@@ -1,12 +1,5 @@
-"""Schema-driven synthetic test-data generation for salt/core.
-
-Public API
-----------
-* ``generate_data(schema, flags=None)`` -> ``{group: structured ndarray}``
-* ``write_h5(data, path, attrs=None, schema=None)``
-* ``compute_norm_dict(data, schema=None)``
-* ``compute_class_dict(data, schema=None, flags=None)``
-* ``load_schema(path)``
+"""Schema-driven synthetic test-data generation for salt/core: ``generate_data``,
+``write_h5``, ``compute_norm_dict``, ``compute_class_dict``, ``load_schema``.
 """
 
 from .engine import generate_data

@@ -1,10 +1,4 @@
-"""Unit tests for `salt.core.optim` — HybridMuonAdamW + MuonParamPolicy.
-
-Ported at DEL-1 from the legacy top-level ``salt/tests/test_optimizer.py``
-(which targeted the retired ``salt.optim`` copy): `salt.core.optim` carries the
-verbatim live implementation used by `salt.core.saltmodule`, and this port is
-its only coverage.
-"""
+"""Unit tests for `salt.core.optim` — HybridMuonAdamW + MuonParamPolicy."""
 
 from __future__ import annotations
 

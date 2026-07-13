@@ -1,26 +1,6 @@
-"""Dataset-side base classes for the salt v2 pipeline.
-
-Dataset modules operate on batches of B elements as nested dicts of numpy
-arrays. Two roles exist:
-
-- `Reader` — disk -> nested dict of numpy arrays for a contiguous batch
-  slice. Source node (``requires={}``). Readers own the read-time mutation
-  stages (selections, augmentation transforms): they run inside ``read()``
-  on the structured array before any bundle key exists, so cuts flow into
-  features, masks and labels — the one sanctioned mutation point.
-- `Processor` — pure batch transform on the numpy bundle, returning only
-  newly produced keys (write-once applies).
-
-Both are `GraphModule`s: plans are compiled by the same kernel planner used
-on the model side; only the call convention differs — the dataset runner
-(`salt.core.data.dataset.GraphDataset`) passes the batch row slice
-explicitly, because dataset modules are functions of *which rows* are being
-read, which model modules never are.
-
-Lifecycle: ``__init__`` is pure config capture (reading the small schema YAML
-artifact is config I/O); per-worker file handles and reusable buffers are
-created in ``bind(ctx)``; main-process file probing (VDS resolution, row
-counts) lives in `Reader.prepare`.
+"""Dataset-side base classes for the v2 pipeline: `Reader` (disk -> numpy batch
+dicts, owns read-time selections/transforms) and `Processor` (pure batch
+transform). Both are `GraphModule`s compiled by the same kernel planner.
 """
 
 from __future__ import annotations

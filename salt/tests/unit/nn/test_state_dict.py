@@ -1,10 +1,5 @@
-"""v1 -> v2 state-dict transfer (plan 05, stage A2).
-
-DEL-1: the live v1 fixture is retired — the v1 side is now a SYNTHETIC state
-dict built from the frozen key/shape schema (`make_v1_gn2_state_dict`), which
-is exactly what a real v1 GN2 checkpoint looks like at the fixture geometry.
-The v1-vs-v2 forward-equivalence legs were retired with the v1 tree
-(parity-closure doctrine: future v1 comparisons = ``git checkout 29c67a1``).
+"""v1 -> v2 state-dict transfer tests, driven by a synthetic v1 GN2 state dict
+built from the frozen key/shape schema (`make_v1_gn2_state_dict`).
 """
 
 from __future__ import annotations

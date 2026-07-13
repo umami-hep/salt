@@ -1,9 +1,5 @@
-"""Runtime tensor bundle for the salt v2 graph kernel.
-
-The bundle is a nested dict of tensors with dotted-path addressing and
-write-once semantics. Payloads stay plain nested dicts of `torch.Tensor` /
-`np.ndarray` (or any other plain values), so tracing and pickling see
-nothing exotic — `Bundle` is only a thin helper around them.
+"""Runtime tensor bundle: a nested dict of tensors with dotted-path addressing
+and write-once semantics.
 """
 
 from __future__ import annotations

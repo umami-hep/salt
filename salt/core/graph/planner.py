@@ -1,27 +1,7 @@
 """Plan compilation for the salt v2 graph kernel.
 
-Modules declare their interfaces (`declare_io`), the planner flattens them to
-dotted ports, narrows wildcard producers against concrete demand, builds
-producer->consumer edges, checks connectivity/kinds/symbolic shape
-unification, prunes per mode, and emits a frozen, hashed `Plan`.
-
-Static only: compilation never touches data files, the network, or tensors.
-Topological order is fully deterministic — Kahn's algorithm with ties broken
-by *config declaration order* (the order module names appear in the
-``modules`` dict, which YAML preserves) — so the same config yields the same
-plan (and `plan_hash`) on every machine, and reordering independent modules in
-YAML is the supported way to nudge execution order (e.g. peak memory). The
-plan hash makes any reorder detectable.
-
-Sinks anchor demand pruning: in the full framework FIT/VAL sinks are
-``loss.total`` plus callback requires, TEST sinks are the writers, ONNX sinks
-are the export ports. The kernel takes them as an explicit ``sinks``
-argument — either a flat iterable of dotted keys for the compiled mode, or a
-``{Mode: keys}`` mapping enabling full per-mode demand analysis for the
-all-modes-dead check. Modules that declare requires but no produces in ANY
-mode (writers) are terminal consumers and anchor demand themselves; a module
-producing nothing only in THIS mode because its ports are mode-gated out (the
-``expose:`` opt-out) is a prunable producer, not a terminal.
+Flattens `declare_io` to dotted ports, checks connectivity/kinds/shapes,
+demand-prunes per mode against the sinks, and emits a frozen, hashed `Plan`.
 """
 
 from __future__ import annotations

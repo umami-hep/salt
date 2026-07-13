@@ -1,15 +1,5 @@
-"""The traceable export wrapper around a compiled ONNX plan.
-
-`OnnxAdapter` is the `nn.Module` handed to ``torch.onnx.export``: positional
-tensor inputs named/ordered by ``export.inputs``, in-wrapper bundle assembly
-(sequence ``[L, F]`` -> ``[1, L, F]`` + all-valid pad masks), frozen-plan
-execution through the `Executor`, and a flat output tuple from the plan's
-`OnnxExportSink`.
-
-Trace-safety: the executor's step loop is a plain Python sequence of module
-invocations over MappingProxyType plan steps — ``torch.onnx.export(dynamo=False)``
-neither pickles nor deep-copies the module, so holding the frozen `Plan` is fine.
-Mode is a plan property resolved before tracing, never a tensor input.
+"""`OnnxAdapter` — the traceable export wrapper around a compiled ONNX plan,
+handed to ``torch.onnx.export`` (in-wrapper bundle assembly, flat output tuple).
 """
 
 from __future__ import annotations
