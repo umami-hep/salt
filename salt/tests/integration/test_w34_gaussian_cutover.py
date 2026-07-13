@@ -12,8 +12,8 @@ import pytest
 from salt.core.main import CONFIG_DIR, main
 from salt.core.onnx import make_session
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
-from salt.utils.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.core.testing.inputs import write_dummy_file
 
 pytestmark = pytest.mark.cpu_always
 

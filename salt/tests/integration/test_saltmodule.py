@@ -16,13 +16,13 @@ from salt.core.graph import Bundle, ConfigError, Mode
 from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
     write_parity_norm_dict,
 )
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
-from salt.utils.inputs import write_dummy_file
+from salt.core.testing.inputs import write_dummy_file
 
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 TASKS = ["jets_classification", "track_origin", "track_vertexing"]

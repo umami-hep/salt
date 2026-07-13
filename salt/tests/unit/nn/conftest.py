@@ -13,7 +13,7 @@ from salt.core.nn import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     make_gn2_batch,
     write_parity_norm_dict,
 )

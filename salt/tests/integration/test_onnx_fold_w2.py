@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from torch import nn
 
-from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
+from salt.core.graph import Bundle, Executor, Mode
+from salt.core.nn import bind_all, resolve_bind_schema
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
@@ -29,12 +29,13 @@ from salt.core.outputs import (
     SeqClassIndex,
     VertexUnionFind,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_test_gn2,
+    build_gn2v2_modules,
+    compile_gn2v2,
+    write_parity_norm_dict,
 )
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
 ORACLE_DIR = Path("/tmp/w2_oracle")
 
@@ -66,8 +67,9 @@ def _export_cfg() -> ExportConfig:
 
 
 def _folded_gn2_export(tmp_path):
-    """A weight-matched GN2 export through the FOLDED path (W4): ClassProbs +"""
-    v1 = build_test_gn2(tmp_path)
+    """A deterministically-weighted GN2 export through the FOLDED path (W4): ClassProbs +"""
+    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
     ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
@@ -81,10 +83,11 @@ def _folded_gn2_export(tmp_path):
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(v1.state_dict(), modules), strict=False
+    modules["norm"].materialise()
+    result = export_graph(
+        modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2"
     )
-    return export_graph(modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2")
+    return result, modules
 
 
 @pytest.mark.skipif(
@@ -94,7 +97,7 @@ def _folded_gn2_export(tmp_path):
 def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
     """The MIGRATED folded gn2v2 export contract matches the W0 golden EXACTLY (W4)."""
     golden = json.loads((ORACLE_DIR / "gn2v2.json").read_text())
-    result = _folded_gn2_export(tmp_path)
+    result, _ = _folded_gn2_export(tmp_path)
     adapter = result.adapter
     assert adapter.output_names == golden["output_names"]  # ORDERED list-equality
     assert adapter.output_dtypes == golden["output_dtypes"]
@@ -110,9 +113,11 @@ def test_folded_gn2v2_export_contract_matches_oracle(tmp_path):
 
 @pytest.fixture(scope="module")
 def folded(tmp_path_factory):
-    """A weight-matched GN2 export through the FOLDED path (SeqClassIndex + Combination + sink)."""
+    """A deterministically-weighted GN2 export through the FOLDED path (SeqClassIndex +
+    Combination + sink)."""
     tmp = tmp_path_factory.mktemp("onnx_fold")
-    v1 = build_test_gn2(tmp)
+    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
+    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
     jet_probs = ClassProbs(task="jets_classification", stream="jets")
     jet_probs.name = "jet_probs"
@@ -139,13 +144,11 @@ def folded(tmp_path_factory):
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(v1.state_dict(), modules), strict=False
-    )
+    modules["norm"].materialise()
     result = export_graph(
         modules, _export_cfg(), VARIABLES, tmp / "folded.onnx", outputs=[], run_name="GN2_v2"
     )
-    return SimpleNamespace(result=result, v1=v1, modules=modules)
+    return SimpleNamespace(result=result, modules=modules)
 
 
 # folded export correctness
@@ -204,12 +207,13 @@ def test_folded_combination_equals_pb_plus_pc(folded):
 # math equivalence vs v1's chains is proven in test_onnx_fold_w3.py).
 
 
-def test_folded_pb_pc_pu_equal_single_v1_softmax(tmp_path):
-    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the v1 raw logits."""
-    result = _folded_gn2_export(tmp_path)
-    v1 = build_test_gn2(tmp_path)
-    v1.eval()
+def test_folded_pb_pc_pu_equal_single_softmax_of_raw_logits(tmp_path):
+    """POST-P4 no-double-softmax: the folded pb/pc/pu == ONE softmax of the RAW
+    TEST-plan logits, computed through the independent Executor path (the eager
+    v2 model on the SAME weights — replaces the retired v1 forward oracle)."""
+    result, modules = _folded_gn2_export(tmp_path)
     session = make_session(result.onnx_path)
+    test_plan = compile_gn2v2(modules, Mode.TEST)
     gen = torch.Generator().manual_seed(31)
     for _ in range(4):
         jets = torch.rand(1, len(JET_VARIABLES), generator=gen)
@@ -218,10 +222,15 @@ def test_folded_pb_pc_pu_equal_single_v1_softmax(tmp_path):
                        session.run(None, {"jet_features": jets.numpy(), "track_features": tracks.numpy()}),
                        strict=True))
         folded = np.array([np.ravel(out[f"GN2v2_{s}"])[0] for s in ("pb", "pc", "pu")])
+        b = Bundle()
+        b.set("inputs.jets", jets.clone())
+        b.set("inputs.tracks", tracks.unsqueeze(0).clone())
+        b.set("masks.tracks", torch.zeros((1, 7), dtype=torch.bool))
         with torch.no_grad():
-            preds, _ = v1({"jets": jets.clone(), "tracks": tracks.unsqueeze(0).clone()},
-                          {"tracks": torch.zeros((1, 7), dtype=torch.bool)}, None)
-        ref = torch.softmax(preds["jets"]["jets_classification"], dim=-1).numpy().ravel()
+            res = Executor(test_plan).run(b)
+        # ONE softmax of the raw TEST logits — a double softmax in the folded
+        # path would break the 1e-6 agreement
+        ref = torch.softmax(res.get("preds.jets.jets_classification"), dim=-1).numpy().ravel()
         np.testing.assert_allclose(folded, ref, atol=1e-6)
 
 
@@ -231,7 +240,7 @@ def test_folded_pb_pc_pu_equal_single_v1_softmax(tmp_path):
 )
 def test_folded_int8_track_origin_check_onnx(tmp_path):
     """The folded int8 TrackOrigin leaf is torch-vs-ort exact incl L=0 (folds _bind_argmax)."""
-    result = _folded_gn2_export(tmp_path)
+    result, _ = _folded_gn2_export(tmp_path)
     grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
     cr = check_onnx(result.adapter, result.onnx_path, trials=2, float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid)
     assert cr.passed, cr.failures

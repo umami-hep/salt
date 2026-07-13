@@ -7,11 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from salt.callbacks.confusion_matrix import ConfusionMatrixCallback as V1ConfusionMatrix
 from salt.core.callbacks import ConfusionMatrix
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.saltmodule import bundle_as_v1_outputs
 
 
 ORIGIN_NAMES = tuple(f"c{i}" for i in range(8))
@@ -57,48 +55,32 @@ def run_v2(task_name: str, bundles: list[Bundle], **kwargs) -> ConfusionMatrix:
     return callback
 
 
-def run_v1(task_name: str, stream: str, label: str, class_names, bundles) -> V1ConfusionMatrix:
-    """Drive the v1 callback with shimmed outputs (`bundle_as_v1_outputs`)."""
-    callback = V1ConfusionMatrix(task_name=task_name)
-    callback.truth_labels = []
-    callback.pred_labels = []
-    callback.task_input_name = stream
-    callback.task_label_name = label
-    callback.task_class_names = list(class_names)
-    for i, bundle in enumerate(bundles):
-        callback.on_validation_batch_end(
-            None, None, {"outputs": bundle_as_v1_outputs(bundle)}, None, i
-        )
-    return callback
-
-
 class TestConfusionMatrixValues:
-    """W5 in miniature: v2 values == v1 values on identical eval batches."""
+    """Accumulation + reduction values on deterministic eval batches."""
+
+    # DEL-1: run_v1 + test_matches_v1_callback (v1-vs-v2 value parity) retired
+    # with the v1 tree (parity-closure doctrine: git checkout 29c67a1). The
+    # accumulation-across-batches surface is pinned below.
 
     @pytest.mark.parametrize(
-        ("task_name", "stream", "label", "class_names"),
+        ("task_name", "label_key", "n_classes"),
         [
-            ("jets_classification", "jets", "flavour_label", ("bjets", "cjets", "ujets")),
-            ("track_origin", "tracks", "ftagTruthOriginLabel", ORIGIN_NAMES),
+            ("jets_classification", "labels.jets.flavour_label", 3),
+            ("track_origin", "labels.tracks.ftagTruthOriginLabel", 8),
         ],
     )
-    def test_matches_v1_callback(self, task_name, stream, label, class_names):
+    def test_accumulates_across_batches(self, task_name, label_key, n_classes):
         bundles = [make_bundle(seed) for seed in (1, 2, 3)]
         v2 = run_v2(task_name, bundles)
-        v1 = run_v1(task_name, stream, label, class_names, bundles)
-        # identical accumulated values, element-wise (v1 keeps its lists —
-        # it only resets at epoch end; v2 stashes them at epoch end)
-        assert len(v2.last_truth_labels) == len(v1.truth_labels) > 0
-        for ours, theirs in zip(v2.last_truth_labels, v1.truth_labels, strict=True):
-            assert torch.equal(ours, theirs)
-        for ours, theirs in zip(v2.last_pred_labels, v1.pred_labels, strict=True):
-            assert torch.equal(ours, theirs)
-        # identical matrix under the same transparent reduction
-        v1_matrix, v1_ignored = ConfusionMatrix.confusion_counts(
-            v1.truth_labels, v1.pred_labels, len(class_names)
-        )
-        assert torch.equal(v2.last_matrix, v1_matrix)
-        assert v2.last_ignored == v1_ignored
+        # every label element from every batch is accumulated exactly once
+        n_labels = sum(int(b.get(label_key).numel()) for b in bundles)
+        assert len(v2.last_truth_labels) > 0
+        assert sum(int(t.numel()) for t in v2.last_truth_labels) == n_labels
+        assert sum(int(t.numel()) for t in v2.last_pred_labels) == n_labels
+        # the epoch matrix counts every non-padded label exactly once
+        n_padded = sum(int((b.get(label_key) == -1).sum()) for b in bundles)
+        assert int(v2.last_matrix.sum()) + n_padded == n_labels
+        assert v2.last_matrix.shape == (n_classes, n_classes)
 
     def test_counts_matrix_hand_example(self):
         truth = [torch.tensor([0, 1, 2, -1, 1])]

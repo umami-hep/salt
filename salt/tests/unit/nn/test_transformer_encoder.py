@@ -20,7 +20,6 @@ from salt.core.nn import (
     BindError,
     TransformerEncoder,
 )
-from salt.models import Transformer as V1Transformer
 from salt.tests.unit.nn.conftest import B, T, fit_bundle
 
 
@@ -154,44 +153,8 @@ class TestTransformerEncoderMup:
         out = enc(b, Mode.FIT)
         assert out["encoded.seq"].shape == (B, T + 1, 8)
 
-    def test_mup_forward_bitwise_vs_independent_v1(self):
-        """The v2 mup encoder forward == an INDEPENDENT v1 Transformer(mup=True)."""
-        torch.manual_seed(2)
-        enc = TransformerEncoder(
-            dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
-        )
-        enc.name = "encoder"
-        # non-zero weights so the comparison is meaningful (zeroed readout -> all 0)
-        with torch.no_grad():
-            for p in enc.encoder.parameters():
-                p.copy_(torch.randn(p.shape) * 0.1)
-        from mup import set_base_shapes
-
-        ref = V1Transformer(
-            num_layers=2,
-            embed_dim=16,
-            out_dim=8,
-            norm="LayerNorm",
-            attn_type="torch-math",
-            do_final_norm=True,
-            num_registers=enc.num_registers,
-            attn_kwargs={"num_heads": 2},
-            dense_kwargs={"activation": "SiLU"},
-            mup=True,
-        )
-        set_base_shapes(ref, ref, rescale_params=False)
-        ref.load_state_dict(enc.encoder.state_dict())
-        ref.eval()
-        enc.encoder.eval()
-        seq_x = torch.randn(B, T, 16)
-        seq_mask = torch.zeros(B, T, dtype=torch.bool)
-        b = Bundle()
-        b.set("seq.x", seq_x)
-        b.set("seq.mask", seq_mask)
-        with torch.no_grad():
-            v2 = enc(b, Mode.FIT)["encoded.seq"]
-            v1, _ = ref({"seq": seq_x}, pad_mask={"seq": seq_mask})
-        assert torch.equal(v2, v1)
+    # DEL-1: test_mup_forward_bitwise_vs_independent_v1 retired with the v1 tree
+    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
 
     def test_set_export_mode_folds_mu_readout_to_plain_linear(self):
         """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged."""

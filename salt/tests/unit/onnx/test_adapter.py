@@ -6,7 +6,6 @@ from dataclasses import replace
 
 import pytest
 import torch
-from torch import nn
 
 from salt.core.graph import Bundle, Mode
 from salt.core.graph.errors import ConfigError, ConnectivityError, ShapeError
@@ -18,7 +17,6 @@ from salt.core.nn import (
     StreamEmbed,
     TransformerEncoder,
     bind_all,
-    map_v1_state_dict,
     resolve_bind_schema,
 )
 from salt.core.nn.tasks import ClassificationTaskModule
@@ -48,13 +46,12 @@ from salt.core.outputs import (
     SeqClassIndex,
     VertexUnionFind,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_test_gn2,
+    build_gn2v2_modules,
     write_parity_norm_dict,
 )
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
@@ -415,14 +412,12 @@ class TestRegisterReduce:
 def gn2_modules(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("onnx_adapter_fixture")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    v1 = build_test_gn2(tmp)
+    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
     modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(v1.state_dict(), modules), strict=False
-    )
+    modules["norm"].materialise()
     return modules, resolved, plan
 
 

@@ -16,7 +16,7 @@ from salt.core.nn import (
     VectorConcat,
     resolve_bind_schema,
 )
-from salt.tests._fixtures.regression_fixture import (
+from salt.tests._fixtures.v2_builders import (
     GLOBAL_VARIABLES,
     build_vector_concat_modules,
     compile_vector_concat,

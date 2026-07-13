@@ -24,7 +24,7 @@ from salt.core.graph.setup_executor import run_setup_plan
 from salt.core.graph.setup_spec import SetupIO, SetupStage, SourceSpec, flatten_source_spec
 from salt.core.graph.spec import IO, Mode
 from salt.core.schema import dump_schema, save_schema
-from salt.utils.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]

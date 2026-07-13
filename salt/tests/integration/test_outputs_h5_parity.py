@@ -18,8 +18,8 @@ from salt.core.graph.spec import Mode
 from salt.core.main import CONFIG_DIR, main
 from salt.core.outputs import ClassProbs, H5OutputWriter, OutputColumn, SeqClassProbs
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
-from salt.tests._fixtures.gn2_fixture import JET_VARIABLES, TRACK_VARIABLES
-from salt.utils.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import JET_VARIABLES, TRACK_VARIABLES
+from salt.core.testing.inputs import write_dummy_file
 
 # frozen oracle fixture directory
 # Generated once (commit a9e2ac2) from the WriterCallback path on the synthetic

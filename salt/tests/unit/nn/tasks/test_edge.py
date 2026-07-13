@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
 
 from salt.core.graph import (
     ConfigError,
@@ -63,18 +62,8 @@ class TestVertexingTaskModule:
         with pytest.raises(ConfigError, match="reduction"):
             task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
 
-    def test_default_origin_weighting_matches_v1(self, gn2v2):
-        """Configured default ids reproduce v1's hardcoded weights bitwise."""
-        from salt.models.task import VertexingTask as V1
-
-        modules, _, _ = gn2v2
-        head = modules["track_vertexing"].task
-        labels = torch.tensor([[0, 1, 3, 4, 5, 2]])
-        n = labels.shape[1]
-        adjmat = ~torch.eye(n, dtype=torch.bool).unsqueeze(0)
-        v1_weights = V1.get_weights(head, labels, adjmat)
-        v2_weights = head.get_weights(labels, adjmat)
-        assert torch.equal(v1_weights, v2_weights)
+    # DEL-1: test_default_origin_weighting_matches_v1 retired with the v1 tree
+    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
 
 
 def _origin_schema_reader(origin_label: str = "ftagTruthOriginLabel") -> SimpleNamespace:
@@ -112,29 +101,29 @@ class TestOriginWeightingConfig:
         assert task.fake_ids == (1,)
         assert task._names_pending is False  # noqa: SLF001
 
-    def test_name_resolved_weights_match_independent_v1(self):
-        # parity: name-resolved ids produce weights bit-identical to a FRESH,
-        # independently-constructed v1 VertexingTask whose get_weights HARDCODES
-        # (3,4,5)/1 — never the v2 module's own head (gate-quality rule)
-        from salt.models.task import VertexingTask as V1VertexingTask
-
+    def test_name_resolved_weights_match_integer_configured(self):
+        # name-resolved ids produce weights bit-identical to a FRESH,
+        # independently-constructed head configured with the literal default
+        # integer ids (3,4,5)/1 — never the resolved module's own head.
+        # (DEL-1: the retired v1 reference hardcoded these same ids; the
+        # id-parity itself is pinned by test_names_resolve_to_v1_default_ids.)
         task = self._name_based()
         task.resolve_origin_names(_origin_schema_reader())
         task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
-        # independent v1 reference: a fresh head built from the same dense kwargs
-        indep_v1 = V1VertexingTask(
-            name="track_vertexing",
-            input_name="tracks",
+        indep = VertexingTaskModule(
+            stream="tracks",
             label="ftagTruthVertexIndex",
-            loss=nn.BCEWithLogitsLoss(reduction="none"),
-            dense_config={"input_size": 32, "output_size": 1},
+            origin_label="ftagTruthOriginLabel",
+            origin_weighting={"heavy": [3, 4, 5], "fake": [1]},
         )
+        indep.name = "track_vertexing_int"
+        indep.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
         labels = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
         n = labels.shape[1]
         adjmat = ~torch.eye(n, dtype=torch.bool).unsqueeze(0)
-        v1_weights = V1VertexingTask.get_weights(indep_v1, labels, adjmat)
+        ref_weights = indep.task.get_weights(labels, adjmat)
         v2_weights = task.task.get_weights(labels, adjmat)
-        assert torch.equal(v1_weights, v2_weights)
+        assert torch.equal(ref_weights, v2_weights)
 
     def test_resolve_origin_weighting_module_helper(self):
         # the saltmodule helper resolves over a module dict, counting resolutions

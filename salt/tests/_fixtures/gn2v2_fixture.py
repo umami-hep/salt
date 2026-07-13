@@ -1,10 +1,18 @@
-"""Small config-constructed GN2v2 builder for the M2 nn-module tests (plan 05, stage A2)."""
+"""Small config-constructed GN2v2 builder for the M2 nn-module tests (plan 05, stage A2).
+
+Since DEL-1 this module also owns the (v1-free) GN2 fixture constants and
+helpers that used to live in ``gn2_fixture.py`` — the variable lists, the
+parity norm-dict writer, the deterministic batch builder and the frozen v1
+state-dict synthesiser — so the kept v2 tests never import the v1 fixture.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
+import yaml
 from torch import Tensor
 
 from salt.core.graph.planner import Plan, compile_plan
@@ -19,17 +27,141 @@ from salt.core.nn import (
     TransformerEncoder,
 )
 from salt.core.nn.tasks import ClassificationTaskModule, VertexingTaskModule
-from salt.tests._fixtures.gn2_fixture import JET_VARIABLES, TRACK_VARIABLES
 
 __all__ = [
+    "ELECTRON_VARIABLES",
     "FIT_SINKS",
+    "JET_VARIABLES",
     "ORIGIN_CLASSES",
     "TEST_SINKS",
+    "TRACK_VARIABLES",
     "build_gn2v2_modules",
     "compile_gn2v2",
     "gn2v2_sources",
+    "make_gn2_batch",
     "make_gn2_labels",
+    "make_v1_gn2_state_dict",
+    "write_parity_norm_dict",
 ]
+
+JET_VARIABLES = ["pt_btagJes", "eta_btagJes"]  # GN2.yaml:90-92
+
+TRACK_VARIABLES = [  # the 19 GN2 track variables, GN2.yaml:93-112
+    "d0",
+    "z0SinTheta",
+    "dphi",
+    "deta",
+    "qOverP",
+    "IP3D_signed_d0_significance",
+    "IP3D_signed_z0_significance",
+    "phiUncertainty",
+    "thetaUncertainty",
+    "qOverPUncertainty",
+    "numberOfPixelHits",
+    "numberOfSCTHits",
+    "numberOfInnermostPixelLayerHits",
+    "numberOfNextToInnermostPixelLayerHits",
+    "numberOfInnermostPixelLayerSharedHits",
+    "numberOfInnermostPixelLayerSplitHits",
+    "numberOfPixelSharedHits",
+    "numberOfPixelSplitHits",
+    "numberOfSCTSharedHits",
+]
+
+ELECTRON_VARIABLES = [  # GN2e-style second sequence stream (subset of the ELECTRON_VARS list)
+    "pt",
+    "ptfrac",
+    "ptrel",
+    "dr",
+    "abs_eta",
+]
+
+
+def write_parity_norm_dict(nd_path: Path, cd_path: Path) -> None:
+    """Write the parity norm/class dicts with DISTINCT per-variable constants."""
+    sd = {
+        stream: {
+            v: {"mean": round(0.1 * (i + 1), 6), "std": round(1.0 + 0.05 * (i + 1), 6)}
+            for i, v in enumerate(variables)
+        }
+        for stream, variables in (
+            ("jets", JET_VARIABLES),
+            ("tracks", TRACK_VARIABLES),
+            ("electrons", ELECTRON_VARIABLES),
+        )
+    }
+    with open(nd_path, "w") as file:
+        yaml.dump(sd, file, sort_keys=False)
+
+    cd = {
+        "jets": {
+            "HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0],
+            "flavour_label": [1.0, 2.0, 2.0, 2.0],
+        },
+        "tracks": {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]},
+    }
+    with open(cd_path, "w") as file:
+        yaml.dump(cd, file, sort_keys=False)
+
+
+def make_gn2_batch(
+    batch_size: int = 6,
+    n_tracks: int = 10,
+    p_valid: float = 0.6,
+    seed: int = 123,
+    n_electrons: int = 0,
+) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    """Build a deterministic GN2 batch with real padding."""
+    gen = torch.Generator().manual_seed(seed)
+    jets = torch.randn(batch_size, len(JET_VARIABLES), generator=gen)
+    tracks = torch.randn(batch_size, n_tracks, len(TRACK_VARIABLES), generator=gen)
+    mask = torch.rand(batch_size, n_tracks, generator=gen) >= p_valid  # True = padded
+    mask = torch.sort(mask.to(torch.uint8), dim=-1).values.bool()  # valid first, like v1 dumps
+    mask[:, 0] = False  # >=1 valid track per jet by default
+    mask[0, 1:] = True  # jet 0: exactly one valid track
+    if batch_size >= 2:
+        mask[1, :] = True  # jet 1: ZERO valid tracks (production edge case)
+    tracks[mask] = 0.0  # padded positions zeroed (v1 datasets.py:524 semantics)
+    inputs = {"jets": jets, "tracks": tracks}
+    pad_masks = {"tracks": mask}
+    if n_electrons > 0:
+        electrons = torch.randn(batch_size, n_electrons, len(ELECTRON_VARIABLES), generator=gen)
+        emask = torch.rand(batch_size, n_electrons, generator=gen) >= p_valid  # True = padded
+        emask = torch.sort(emask.to(torch.uint8), dim=-1).values.bool()  # valid first
+        if batch_size >= 3:
+            emask[2, :] = True  # jet 2: ZERO electrons (typical for real jets)
+        electrons[emask] = 0.0  # padded positions zeroed
+        inputs["electrons"] = electrons
+        pad_masks["electrons"] = emask
+    return inputs, pad_masks
+
+
+_V1_STATE_DICT_SCHEMA = Path(__file__).parent / "v1_gn2_state_dict.json"
+
+
+def make_v1_gn2_state_dict(seed: int = 3) -> dict[str, Tensor]:
+    """A synthetic v1 `ModelWrapper.state_dict()` for the GN2 parity fixture geometry.
+
+    The key/shape/dtype schema was frozen from the retired v1 fixture
+    (``gn2_fixture.build_test_gn2(...).state_dict()``) at DEL-1 — this is what a
+    real v1 GN2 checkpoint looks like at the 16-wide fixture geometry. It
+    exercises `map_v1_state_dict` (the kept v1-checkpoint-compat surface)
+    without instantiating any v1 module. Values are deterministic random fills;
+    the mapping tests assert routing, not physics.
+    """
+    schema = json.loads(_V1_STATE_DICT_SCHEMA.read_text())
+    gen = torch.Generator().manual_seed(seed)
+    out: dict[str, Tensor] = {}
+    for key, spec in schema.items():
+        dtype = getattr(torch, spec["dtype"])
+        if not dtype.is_floating_point:
+            out[key] = torch.zeros(spec["shape"], dtype=dtype)
+        elif key.endswith("_stds"):
+            # keep the normaliser numerically sane (a real checkpoint has std > 0)
+            out[key] = 0.5 + torch.rand(spec["shape"], generator=gen, dtype=dtype)
+        else:
+            out[key] = torch.randn(spec["shape"], generator=gen, dtype=dtype) * 0.5
+    return out
 
 ORIGIN_CLASSES = [
     "Pileup",

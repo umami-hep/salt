@@ -4,9 +4,12 @@ import torch
 from torch import Tensor, nn
 
 from .maskformer_loss import MaskFormerLoss
-from salt.models.transformer import GLU, Attention
+# DEL-1 deviation from the verbatim 6570e85 snapshot: GLU/Attention/indices_from_mask
+# now come from their salt.core ports (interface-identical) — the v1 modules are deleted.
+from salt.core.nn.attention import Attention
+from salt.core.nn.glu import GLU
+from salt.core.utils.mask_utils import indices_from_mask
 from salt.stypes import Tensors
-from salt.utils.mask_utils import indices_from_mask
 
 
 class MaskDecoder(nn.Module):
@@ -306,7 +309,7 @@ def get_maskformer_outputs(
       1. Thresholds the "null" class probability and suppresses masks/regression
          for objects with ``p_null > max_null``.
       2. Converts per-position mask logits into sparse mask indices via
-         :func:`salt.utils.mask_utils.indices_from_mask`.
+         :func:`salt.core.utils.mask_utils.indices_from_mask`.
       3. Optionally reorders objects so that the "leading" object is first
          (highest regression[0], e.g. pT in vertexing).
 

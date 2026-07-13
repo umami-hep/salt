@@ -18,13 +18,11 @@ from salt.core.nn import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     make_gn2_batch,
 )
-from salt.tests._fixtures.regression_fixture import (
+from salt.tests._fixtures.v2_builders import (
     MASKFORMER_NUM_OBJECTS,
-    build_independent_v1_mask_decoder,
-    build_independent_v1_transformer_drop,
     build_maskformer_decoder_modules,
     compile_maskformer_decoder,
 )
@@ -134,38 +132,8 @@ class TestMaskDecoder:
         probs = out.get("objects.class_probs")
         assert torch.allclose(probs.sum(-1), torch.ones(B, MASKFORMER_NUM_OBJECTS), atol=1e-5)
 
-    def test_forward_bitwise_vs_independent_v1(self, norm_paths):
-        # the four objects.* outputs == an INDEPENDENT v1 MaskDecoder BITWISE; the
-        # encoded.seq == an INDEPENDENT v1 Transformer(drop_registers=True) BITWISE
-        modules, test_plan, _ = self._build(norm_paths)
-        inputs, masks = make_gn2_batch(B, T)
-        b = Bundle()
-        for stream, x in inputs.items():
-            b.set(f"inputs.{stream}", x)
-        b.set("masks.tracks", masks["tracks"])
-        out = Executor(test_plan).run(b, debug=True)
-        # drop_registers parity
-        v1_enc = build_independent_v1_transformer_drop(modules["encoder"])
-        with torch.no_grad():
-            v1_encoded, v1_pad = v1_enc(
-                {"seq": out.get("seq.x").clone()}, pad_mask={"seq": out.get("seq.mask").clone()}
-            )
-        assert torch.equal(out.get("encoded.seq"), v1_encoded)
-        assert "REGISTERS" not in v1_pad
-        # decoder parity
-        v1_dec = build_independent_v1_mask_decoder(modules["mask_decoder"])
-        with torch.no_grad():
-            preds, _, _ = v1_dec(
-                {"embed_xs": out.get("encoded.seq").clone()},
-                tasks=[],
-                pad_mask=out.get("seq.mask").clone(),
-                labels=None,
-            )
-        obj = preds["objects"]
-        assert torch.equal(out.get("objects.embed"), obj["embed"])
-        assert torch.equal(out.get("objects.class_logits"), obj["class_logits"])
-        assert torch.equal(out.get("objects.class_probs"), obj["class_probs"])
-        assert torch.equal(out.get("objects.masks"), obj["masks"])
+    # DEL-1: test_forward_bitwise_vs_independent_v1 retired with the v1 tree
+    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
 
     def test_zero_constituent_jet_is_finite(self):
         # the dummy-token trick keeps a zero-length sequence from NaN-ing (ONNX)

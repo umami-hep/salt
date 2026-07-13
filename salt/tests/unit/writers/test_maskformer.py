@@ -28,7 +28,7 @@ OBJECT_CLASSES = ["b", "c", "null"]
 
 
 def mf_writer_modules(nd):
-    from salt.tests._fixtures.regression_fixture import build_maskformer_writer_modules
+    from salt.tests._fixtures.v2_builders import build_maskformer_writer_modules
 
     return build_maskformer_writer_modules(nd)
 
@@ -83,8 +83,8 @@ class TestMaskFormerObjectWriter:
         assert list(cols["object_masks"].names) == ["truth_mask", "mask_logits"]
 
     def test_write_byte_parity_vs_v1_opchain(self, data, modules):
-        from salt.tests._fixtures.regression_fixture import make_maskformer_writer_batch
-        from salt.utils.mask_utils import indices_from_mask
+        from salt.tests._fixtures.v2_builders import make_maskformer_writer_batch
+        from salt.core.utils.mask_utils import indices_from_mask
 
         mods = mf_writer_modules(data["nd"])
         writer = self._writer()

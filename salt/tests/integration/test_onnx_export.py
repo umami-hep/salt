@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 import torch
 import yaml
-from torch import nn
 
+from salt.core.graph import Bundle, Executor, Mode
 from salt.core.graph.spec import GraphModule
 from salt.core.nn import (
     Concat,
@@ -21,7 +21,6 @@ from salt.core.nn import (
     StreamEmbed,
     TransformerEncoder,
     bind_all,
-    map_v1_state_dict,
     resolve_bind_schema,
 )
 from salt.core.nn.tasks import ClassificationTaskModule
@@ -35,14 +34,14 @@ from salt.core.onnx import (
     resolve_export_config,
 )
 from salt.core.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_test_gn2,
+    build_gn2v2_modules,
+    compile_gn2v2,
     write_parity_norm_dict,
 )
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 from salt.tests.unit.onnx.test_adapter import (
     VARIABLES,
     gn2_export_cfg,
@@ -56,17 +55,16 @@ SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
 
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
-    """Weight-matched GN2 fixture exported through the FOLDED conversion-node path (W4)."""
+    """Deterministically-weighted GN2 fixture exported through the FOLDED
+    conversion-node path (W4)."""
     tmp = tmp_path_factory.mktemp("onnx_export")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    v1 = build_test_gn2(tmp)
+    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
     modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(v1.state_dict(), modules), strict=False
-    )
+    modules["norm"].materialise()
     result = export_graph(
         modules,
         gn2_export_cfg(),
@@ -75,7 +73,7 @@ def exported(tmp_path_factory):
         outputs=[],
         run_name="GN2_v2",
     )
-    return SimpleNamespace(v1=v1, modules=modules, result=result, tmp=tmp)
+    return SimpleNamespace(modules=modules, result=result, tmp=tmp)
 
 
 class TestExportedModel:
@@ -94,24 +92,27 @@ class TestExportedModel:
         assert all(diff <= 1e-6 for diff in result.worst_abs_diff.values())
 
     @pytest.mark.parametrize("length", [0, 5, 39])
-    def test_v1_torch_spot_check(self, exported, length):
-        # gate O2 at unit scale: the weight-matched v1 softmax vs v2 ONNX
+    def test_eager_test_plan_spot_check(self, exported, length):
+        # gate O2 at unit scale: the eager TEST-plan softmax (independent
+        # Executor path on the SAME weights) vs v2 ONNX — replaces the retired
+        # v1 forward oracle
         session = make_session(exported.result.onnx_path)
+        test_plan = compile_gn2v2(exported.modules, Mode.TEST)
         gen = torch.Generator().manual_seed(7)
         jets = torch.rand(1, len(JET_VARIABLES), generator=gen)
         tracks = torch.rand(length, len(TRACK_VARIABLES), generator=gen)
+        b = Bundle()
+        b.set("inputs.jets", jets.clone())
+        b.set("inputs.tracks", tracks.unsqueeze(0).clone())
+        b.set("masks.tracks", torch.zeros((1, length), dtype=torch.bool))
         with torch.no_grad():
-            preds, _ = exported.v1(
-                {"jets": jets.clone(), "tracks": tracks.unsqueeze(0).clone()},
-                {"tracks": torch.zeros((1, length), dtype=torch.bool)},
-                None,
-            )
-        p_v1 = torch.softmax(preds["jets"]["jets_classification"], dim=-1).numpy().ravel()
+            res = Executor(test_plan).run(b)
+        p_ref = torch.softmax(res.get("preds.jets.jets_classification"), dim=-1).numpy().ravel()
         outputs = session.run(
             None, {"jet_features": jets.numpy(), "track_features": tracks.numpy()}
         )
         p_onnx = np.array(outputs[:3]).ravel()
-        assert np.max(np.abs(p_v1 - p_onnx)) <= 1e-6
+        assert np.max(np.abs(p_ref - p_onnx)) <= 1e-6
 
     def test_perturbed_weights_fail_the_checker(self, exported):
         # negative control (gate O5 pattern): the checker must FAIL when the
@@ -362,15 +363,14 @@ def cli_run(tmp_path_factory):
     from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
     from salt.core.main import CONFIG_DIR
     from salt.core.saltmodule import SaltModule
-    from salt.utils.inputs import write_dummy_file
+    from salt.core.testing.inputs import write_dummy_file
 
     tmp_path = tmp_path_factory.mktemp("onnx_cli_run")
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
-    (tmp_path / "fixture").mkdir()
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     write_dummy_file(str(tmp_path / "dummy_test_file_ttbar.h5"), str(tmp_path / "norm_dict.yaml"))
-    v1 = build_test_gn2(tmp_path / "fixture")
+    torch.manual_seed(42)  # deterministic checkpoint weights (retired v1 transfer stand-in)
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     model = SaltModule(
         modules,
@@ -400,8 +400,6 @@ def cli_run(tmp_path_factory):
         limit_test_batches=0,
     )
     trainer.test(model, datamodule=dm)
-    mapped = map_v1_state_dict(v1.state_dict(), modules)
-    model.load_state_dict({f"net.{key}": value for key, value in mapped.items()}, strict=True)
     ckpt = run_dir / "checkpoints" / "epoch=000-loss=0.10000.ckpt"
     trainer.save_checkpoint(ckpt)
     config = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())

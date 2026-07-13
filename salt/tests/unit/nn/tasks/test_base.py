@@ -25,7 +25,7 @@ from salt.core.nn.tasks import (
     RegressionTaskModule,
     VertexingTaskModule,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     make_gn2_batch,
 )
 from salt.tests._fixtures.gn2v2_fixture import (

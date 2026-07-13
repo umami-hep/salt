@@ -9,7 +9,7 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode, flatten_spec
 from salt.core.nn.norm import Normaliser
 from salt.core.saltmodule import SaltModule
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
 
 LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
@@ -87,7 +87,7 @@ class TestSaltModulePreflights:
         # FileNotFoundError from inside materialise)
         from salt.core.schema import dump_schema, save_schema
         from salt.tests.integration.test_saltmodule import build_datamodule, build_model, make_trainer
-        from salt.utils.inputs import write_dummy_file
+        from salt.core.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)
@@ -116,7 +116,7 @@ class TestSaltModulePreflights:
         from salt.core.cli import main as cli_main
         from salt.core.main import CONFIG_DIR
         from salt.core.schema import dump_schema, save_schema
-        from salt.utils.inputs import write_dummy_file
+        from salt.core.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)

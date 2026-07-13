@@ -33,7 +33,7 @@ class TestMaskformerMetrics:
         from salt.core.callbacks import MaskformerMetrics
         from salt.core.graph.planner import compile_plan
         from salt.core.nn import LossSum
-        from salt.tests._fixtures.regression_fixture import (
+        from salt.tests._fixtures.v2_builders import (
             build_matched_loss_module,
         )
 

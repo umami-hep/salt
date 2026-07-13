@@ -1,17 +1,30 @@
-"""Small deterministic v1 GN2 builder for the forward-parity gate (plan 04)."""
+"""Small deterministic v1 GN2 builder for the forward-parity gate (plan 04).
+
+DEL-1: the v1-free constants/helpers (JET_VARIABLES, TRACK_VARIABLES,
+ELECTRON_VARIABLES, write_parity_norm_dict, make_gn2_batch) moved to
+``gn2v2_fixture.py`` and are re-imported here so the remaining v1-only
+consumers (parity_gn2, test_wrappers, ...) keep working until this file is
+deleted with the rest of the v1 tree.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import torch
-import yaml
 from torch import Tensor, nn
 
 from salt.models import SaltModel, Transformer
 from salt.models.pooling import GlobalAttentionPooling
 from salt.models.task import ClassificationTask, VertexingTask
 from salt.modelwrapper import ModelWrapper
+from salt.tests._fixtures.gn2v2_fixture import (
+    ELECTRON_VARIABLES,
+    JET_VARIABLES,
+    TRACK_VARIABLES,
+    make_gn2_batch,
+    write_parity_norm_dict,
+)
 
 __all__ = [
     "ELECTRON_VARIABLES",
@@ -22,65 +35,6 @@ __all__ = [
     "v1_forward",
     "write_parity_norm_dict",
 ]
-
-JET_VARIABLES = ["pt_btagJes", "eta_btagJes"]  # GN2.yaml:90-92
-
-TRACK_VARIABLES = [  # the 19 GN2 track variables, GN2.yaml:93-112
-    "d0",
-    "z0SinTheta",
-    "dphi",
-    "deta",
-    "qOverP",
-    "IP3D_signed_d0_significance",
-    "IP3D_signed_z0_significance",
-    "phiUncertainty",
-    "thetaUncertainty",
-    "qOverPUncertainty",
-    "numberOfPixelHits",
-    "numberOfSCTHits",
-    "numberOfInnermostPixelLayerHits",
-    "numberOfNextToInnermostPixelLayerHits",
-    "numberOfInnermostPixelLayerSharedHits",
-    "numberOfInnermostPixelLayerSplitHits",
-    "numberOfPixelSharedHits",
-    "numberOfPixelSplitHits",
-    "numberOfSCTSharedHits",
-]
-
-ELECTRON_VARIABLES = [  # GN2e-style second sequence stream (subset of inputs.py ELECTRON_VARS)
-    "pt",
-    "ptfrac",
-    "ptrel",
-    "dr",
-    "abs_eta",
-]
-
-
-def write_parity_norm_dict(nd_path: Path, cd_path: Path) -> None:
-    """Write the parity norm/class dicts with DISTINCT per-variable constants."""
-    sd = {
-        stream: {
-            v: {"mean": round(0.1 * (i + 1), 6), "std": round(1.0 + 0.05 * (i + 1), 6)}
-            for i, v in enumerate(variables)
-        }
-        for stream, variables in (
-            ("jets", JET_VARIABLES),
-            ("tracks", TRACK_VARIABLES),
-            ("electrons", ELECTRON_VARIABLES),
-        )
-    }
-    with open(nd_path, "w") as file:
-        yaml.dump(sd, file, sort_keys=False)
-
-    cd = {
-        "jets": {
-            "HadronConeExclTruthLabelID": [1.0, 2.0, 2.0, 2.0],
-            "flavour_label": [1.0, 2.0, 2.0, 2.0],
-        },
-        "tracks": {"ftagTruthOriginLabel": [4.2, 73.7, 1.0, 17.5, 12.3, 12.5, 141.7, 22.3]},
-    }
-    with open(cd_path, "w") as file:
-        yaml.dump(cd, file, sort_keys=False)
 
 
 def build_test_gn2(
@@ -226,38 +180,6 @@ def build_test_gn2(
     )
     wrapper.eval()
     return wrapper
-
-
-def make_gn2_batch(
-    batch_size: int = 6,
-    n_tracks: int = 10,
-    p_valid: float = 0.6,
-    seed: int = 123,
-    n_electrons: int = 0,
-) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """Build a deterministic GN2 batch with real padding."""
-    gen = torch.Generator().manual_seed(seed)
-    jets = torch.randn(batch_size, len(JET_VARIABLES), generator=gen)
-    tracks = torch.randn(batch_size, n_tracks, len(TRACK_VARIABLES), generator=gen)
-    mask = torch.rand(batch_size, n_tracks, generator=gen) >= p_valid  # True = padded
-    mask = torch.sort(mask.to(torch.uint8), dim=-1).values.bool()  # valid first, like v1 dumps
-    mask[:, 0] = False  # >=1 valid track per jet by default (inputs.py:296-297 analogue)
-    mask[0, 1:] = True  # jet 0: exactly one valid track
-    if batch_size >= 2:
-        mask[1, :] = True  # jet 1: ZERO valid tracks (production edge case)
-    tracks[mask] = 0.0  # padded positions zeroed (datasets.py:524)
-    inputs = {"jets": jets, "tracks": tracks}
-    pad_masks = {"tracks": mask}
-    if n_electrons > 0:
-        electrons = torch.randn(batch_size, n_electrons, len(ELECTRON_VARIABLES), generator=gen)
-        emask = torch.rand(batch_size, n_electrons, generator=gen) >= p_valid  # True = padded
-        emask = torch.sort(emask.to(torch.uint8), dim=-1).values.bool()  # valid first
-        if batch_size >= 3:
-            emask[2, :] = True  # jet 2: ZERO electrons (typical for real jets)
-        electrons[emask] = 0.0  # padded positions zeroed (datasets.py:524)
-        inputs["electrons"] = electrons
-        pad_masks["electrons"] = emask
-    return inputs, pad_masks
 
 
 def v1_forward(

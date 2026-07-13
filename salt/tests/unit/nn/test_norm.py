@@ -17,11 +17,9 @@ from salt.core.nn import (
     bind_all,
     resolve_bind_schema,
 )
-from salt.tests._fixtures.gn2_fixture import (
-    TRACK_VARIABLES,
-    build_test_gn2,
-)
 from salt.tests._fixtures.gn2v2_fixture import (
+    JET_VARIABLES,
+    TRACK_VARIABLES,
     build_gn2v2_modules,
     compile_gn2v2,
 )
@@ -55,14 +53,24 @@ class TestNormaliser:
         with pytest.raises(ConfigError, match="global_object"):
             Normaliser(norm_dict="x.yaml", streams=["a"], global_object="b")
 
-    def test_materialise_fills_buffers_to_v1_values(self, norm_paths, gn2v2):
-        """Buffer values equal v1 InputNorm's from the same norm dict."""
+    def test_materialise_fills_buffers_to_norm_dict_values(self, gn2v2):
+        """Buffer values equal the parity norm dict's per-variable constants, in
+        variable order (write_parity_norm_dict: mean 0.1*(i+1), std 1+0.05*(i+1))."""
         modules, _, _ = gn2v2
-        wrapper = build_test_gn2(norm_paths[0].parent)
         norm = modules["norm"]
-        assert torch.equal(norm.means_tracks, wrapper.norm.tracks_means)
-        assert torch.equal(norm.stds_tracks, wrapper.norm.tracks_stds)
-        assert torch.equal(norm.means_jets, wrapper.norm.jets_means)
+        exp_means_tracks = torch.tensor(
+            [round(0.1 * (i + 1), 6) for i in range(len(TRACK_VARIABLES))], dtype=torch.float32
+        )
+        exp_stds_tracks = torch.tensor(
+            [round(1.0 + 0.05 * (i + 1), 6) for i in range(len(TRACK_VARIABLES))],
+            dtype=torch.float32,
+        )
+        exp_means_jets = torch.tensor(
+            [round(0.1 * (i + 1), 6) for i in range(len(JET_VARIABLES))], dtype=torch.float32
+        )
+        assert torch.equal(norm.means_tracks, exp_means_tracks)
+        assert torch.equal(norm.stds_tracks, exp_stds_tracks)
+        assert torch.equal(norm.means_jets, exp_means_jets)
         assert bool(norm.materialised)
 
     def test_forward_before_materialise_raises(self, norm_paths):

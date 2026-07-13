@@ -7,7 +7,7 @@ import pytest
 from salt.core.nn import (
     BindError,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
 )

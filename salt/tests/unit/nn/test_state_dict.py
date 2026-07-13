@@ -1,4 +1,11 @@
-"""v1 -> v2 state-dict transfer + forward comparison (plan 05, stage A2; feeds gate G3)."""
+"""v1 -> v2 state-dict transfer (plan 05, stage A2).
+
+DEL-1: the live v1 fixture is retired — the v1 side is now a SYNTHETIC state
+dict built from the frozen key/shape schema (`make_v1_gn2_state_dict`), which
+is exactly what a real v1 GN2 checkpoint looks like at the fixture geometry.
+The v1-vs-v2 forward-equivalence legs were retired with the v1 tree
+(parity-closure doctrine: future v1 comparisons = ``git checkout 29c67a1``).
+"""
 
 from __future__ import annotations
 
@@ -8,15 +15,15 @@ from torch import nn
 
 from salt.core.graph import Bundle, Executor, Mode
 from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
-from salt.tests._fixtures.gn2_fixture import build_test_gn2, make_gn2_batch
 from salt.tests._fixtures.gn2v2_fixture import (
     build_gn2v2_modules,
     compile_gn2v2,
+    make_gn2_batch,
     make_gn2_labels,
+    make_v1_gn2_state_dict,
 )
 
 B, T = 6, 10
-ATOL = 1e-6
 TASKS = [
     ("jets", "jets_classification"),
     ("tracks", "track_origin"),
@@ -25,24 +32,33 @@ TASKS = [
 
 
 @pytest.fixture
-def transferred(tmp_path):
-    """v1 wrapper + v2 modules with transferred weights (strict load) + FIT plan."""
-    wrapper = build_test_gn2(tmp_path)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+def norm_dict(tmp_path):
+    from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+
+    nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+    write_parity_norm_dict(nd, cd)
+    return nd
+
+
+@pytest.fixture
+def transferred(norm_dict):
+    """Synthetic v1 state dict + v2 modules with transferred weights (strict load) + FIT plan."""
+    v1_sd = make_v1_gn2_state_dict()
+    modules = build_gn2v2_modules(norm_dict)
     plan = compile_gn2v2(modules, Mode.FIT)
     bind_all(modules, resolve_bind_schema(plan))
     # NOTE: no materialise() — transfer is the checkpoint-load path
     # (design §2.3: values arrive via the state_dict, incl. the
     # `materialised` flag).
-    mapped = map_v1_state_dict(wrapper.state_dict(), modules)
+    mapped = map_v1_state_dict(v1_sd, modules)
     holder = nn.ModuleDict(modules)
     holder.load_state_dict(mapped, strict=True)
     holder.eval()
-    return wrapper, modules, plan
+    return v1_sd, modules, plan
 
 
 def v2_fit_bundle() -> Bundle:
-    """Bundle with the deterministic batch + labels (clones — v1 mutates its dicts)."""
+    """Bundle with the deterministic batch + labels."""
     inputs, masks = make_gn2_batch(B, T)
     labels = make_gn2_labels(B, T)
     b = Bundle()
@@ -56,26 +72,13 @@ def v2_fit_bundle() -> Bundle:
     return b
 
 
-def v1_fit_forward(wrapper):
-    """Run the v1 training-path forward (with labels) on cloned dicts."""
-    inputs, masks = make_gn2_batch(B, T)
-    labels = make_gn2_labels(B, T)
-    with torch.no_grad():
-        preds, loss = wrapper(
-            {k: v.clone() for k, v in inputs.items()},
-            {k: v.clone() for k, v in masks.items()},
-            {s: {k: v.clone() for k, v in d.items()} for s, d in labels.items()},
-        )
-    return preds, loss
-
-
 class TestStateDictMapping:
-    def test_strict_load_covers_every_key(self, tmp_path):
+    def test_strict_load_covers_every_key(self, norm_dict):
         """The mapping is total: strict=True load succeeds in both directions."""
-        wrapper = build_test_gn2(tmp_path)
-        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+        v1_sd = make_v1_gn2_state_dict()
+        modules = build_gn2v2_modules(norm_dict)
         bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
-        mapped = map_v1_state_dict(wrapper.state_dict(), modules)
+        mapped = map_v1_state_dict(v1_sd, modules)
         holder = nn.ModuleDict(modules)
         missing = set(holder.state_dict()) - set(mapped)
         extra = set(mapped) - set(holder.state_dict())
@@ -83,92 +86,43 @@ class TestStateDictMapping:
         holder.load_state_dict(mapped, strict=True)
 
     def test_norm_buffers_and_flag(self, transferred):
-        wrapper, modules, _ = transferred
+        v1_sd, modules, _ = transferred
         norm = modules["norm"]
-        assert torch.equal(norm.means_tracks, wrapper.norm.tracks_means)
-        assert torch.equal(norm.stds_jets, wrapper.norm.jets_stds)
+        assert torch.equal(norm.means_tracks, v1_sd["norm.tracks_means"])
+        assert torch.equal(norm.stds_jets, v1_sd["norm.jets_stds"])
         assert bool(norm.materialised)
 
     def test_embed_and_head_weights_transferred(self, transferred):
-        wrapper, modules, _ = transferred
-        v1_dense = wrapper.model.init_nets[0].net
+        v1_sd, modules, _ = transferred
         v2_dense = modules["track_embed"].net
-        assert torch.equal(v1_dense.net[0].weight, v2_dense.net[0].weight)
-        v1_task = wrapper.model.tasks[2]  # track_vertexing
-        v2_task = modules["track_vertexing"].task
-        assert torch.equal(v1_task.net.net[0].weight, v2_task.net.net[0].weight)
+        assert torch.equal(v1_sd["model.init_nets.0.net.net.0.weight"], v2_dense.net[0].weight)
+        v2_task = modules["track_vertexing"].task  # v1 model.tasks index 2
+        assert torch.equal(v1_sd["model.tasks.2.net.net.0.weight"], v2_task.net.net[0].weight)
 
     def test_unknown_v1_key_is_an_error(self, transferred):
         """Nothing is dropped silently — unmapped v1 keys raise."""
-        wrapper, modules, _ = transferred
-        sd = dict(wrapper.state_dict())
+        v1_sd, modules, _ = transferred
+        sd = dict(v1_sd)
         sd["model.mystery.weight"] = torch.zeros(1)
         with pytest.raises(ValueError, match="model.mystery.weight"):
             map_v1_state_dict(sd, modules)
 
     def test_missing_stream_embed_is_an_error(self, transferred):
-        wrapper, modules, _ = transferred
+        v1_sd, modules, _ = transferred
         incomplete = {k: m for k, m in modules.items() if k != "track_embed"}
         with pytest.raises(ValueError, match="StreamEmbed"):
-            map_v1_state_dict(wrapper.state_dict(), incomplete)
+            map_v1_state_dict(v1_sd, incomplete)
 
-
-class TestForwardEquivalence:
-    """v2 (transferred weights, Split path) vs v1, <= 1e-6 — see module docstring."""
-
-    def test_fit_preds_match(self, transferred):
-        wrapper, _, plan = transferred
-        v1_preds, _ = v1_fit_forward(wrapper)
-        with torch.no_grad():
-            b = Executor(plan).run(v2_fit_bundle(), debug=True)
-        for stream, task in TASKS:
-            v1_out = v1_preds[stream][task]
-            v2_out = b.get(f"preds.{stream}.{task}")
-            assert v2_out.shape == v1_out.shape, (stream, task)
-            diff = (v2_out - v1_out).abs().max().item()
-            assert diff <= ATOL, f"{stream}.{task}: max |diff| {diff} > {ATOL}"
-
-    def test_fit_losses_match(self, transferred):
-        wrapper, _, plan = transferred
-        _, v1_loss = v1_fit_forward(wrapper)
-        with torch.no_grad():
-            b = Executor(plan).run(v2_fit_bundle())
-        for _, task in TASKS:
-            diff = (b.get(f"losses.{task}") - v1_loss[task]).abs().item()
-            assert diff <= ATOL, f"{task}: |loss diff| {diff} > {ATOL}"
-        total = sum(v1_loss.values())
-        assert (b.get("loss.total") - total).abs().item() <= ATOL
-
-    def test_losses_require_grad_in_train_mode(self, tmp_path):
-        """The FIT path is trainable: loss.total carries grad back to all modules."""
-        wrapper = build_test_gn2(tmp_path)
-        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+    def test_losses_require_grad_in_train_mode(self, norm_dict):
+        """The FIT path is trainable after transfer: loss.total carries grad everywhere."""
+        v1_sd = make_v1_gn2_state_dict()
+        modules = build_gn2v2_modules(norm_dict)
         plan = compile_gn2v2(modules, Mode.FIT)
         bind_all(modules, resolve_bind_schema(plan))
         holder = nn.ModuleDict(modules)
-        holder.load_state_dict(map_v1_state_dict(wrapper.state_dict(), modules), strict=True)
+        holder.load_state_dict(map_v1_state_dict(v1_sd, modules), strict=True)
         b = Executor(plan).run(v2_fit_bundle())
         b.get("loss.total").backward()
         for name in ("track_embed", "encoder", "pool", "jets_classification"):
             grads = [p.grad for p in modules[name].parameters() if p.grad is not None]
             assert grads, f"no gradients reached module {name!r}"
-
-    def test_without_transfer_outputs_differ(self, tmp_path):
-        """Negative control: fresh v2 init does NOT match v1 (the comparison has teeth)."""
-        wrapper = build_test_gn2(tmp_path)
-        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-        plan = compile_gn2v2(modules, Mode.FIT)
-        bind_all(modules, resolve_bind_schema(plan))
-        from salt.core.nn import materialise_all
-
-        materialise_all(modules)  # norm values, but fresh random weights
-        v1_preds, _ = v1_fit_forward(wrapper)
-        with torch.no_grad():
-            b = Executor(plan).run(v2_fit_bundle())
-        diff = (
-            (b.get("preds.jets.jets_classification") - v1_preds["jets"]["jets_classification"])
-            .abs()
-            .max()
-            .item()
-        )
-        assert diff > ATOL

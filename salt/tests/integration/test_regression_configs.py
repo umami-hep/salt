@@ -10,9 +10,9 @@ import yaml
 from salt.core.main import CONFIG_DIR
 from salt.core.main import main as salt2_main
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
-from salt.tests._fixtures.regression_fixture import write_vector_concat_norm_dict
-from salt.utils.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.v2_builders import write_vector_concat_norm_dict
+from salt.core.testing.inputs import write_dummy_file
 
 CONFIGS = [
     "regression",

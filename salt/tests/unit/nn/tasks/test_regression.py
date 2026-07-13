@@ -21,11 +21,11 @@ from salt.core.nn import (
 from salt.core.nn.tasks import (
     RegressionTaskModule,
 )
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     make_gn2_batch,
 )
-from salt.tests._fixtures.regression_fixture import (
+from salt.tests._fixtures.v2_builders import (
     build_regression_modules,
     compile_regression,
     make_regression_labels,

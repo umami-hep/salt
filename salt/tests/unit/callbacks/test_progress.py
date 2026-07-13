@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from salt.core.callbacks import Checkpoint, ProgressBar
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 
 class TestProgressBar:
@@ -19,7 +19,7 @@ class TestProgressBar:
         # CLI assembles both into trainer.callbacks (run=False, no fit)
         from salt.core.schema import dump_schema, save_schema
         from salt.tests.unit.test_main import make_cli
-        from salt.utils.inputs import write_dummy_file
+        from salt.core.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)

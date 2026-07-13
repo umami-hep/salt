@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
+from salt.core.nn import bind_all, resolve_bind_schema
 from salt.core.onnx import (
     ExportConfig,
     ExportInput,
@@ -31,16 +31,15 @@ from salt.core.outputs import (
     VertexUnionFind,
 )
 from salt.core.render import dot_source
-from salt.tests._fixtures.gn2_fixture import (
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_test_gn2,
+    build_gn2v2_modules,
+    write_parity_norm_dict,
 )
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
-from salt.tests._fixtures.regression_fixture import (
+from salt.tests._fixtures.v2_builders import (
     MASKFORMER_WRITER_REG_TARGETS,
     build_maskformer_writer_modules,
-    write_parity_norm_dict,
 )
 
 ORACLE_DIR = Path("/tmp/w3_oracle")
@@ -91,8 +90,9 @@ _LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
 _N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
 
 
-def _build_vertex_folded(tmp_path, weights):
+def _build_vertex_folded(tmp_path):
     """Folded ``VertexUnionFind`` node + ``OnnxExportSink`` export of the gn2v2 weights."""
+    torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     vuf = VertexUnionFind(task="track_vertexing", stream="tracks")
     vuf.name = "vertex_uf"
@@ -106,9 +106,7 @@ def _build_vertex_folded(tmp_path, weights):
     resolved = resolve_export_config(_gn2_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
-    nn.ModuleDict({k: v for k, v in modules.items() if isinstance(v, nn.Module)}).load_state_dict(
-        map_v1_state_dict(weights, modules), strict=False
-    )
+    modules["norm"].materialise()
     torch.manual_seed(42)
     return export_graph(
         modules, _gn2_export_cfg(), VARIABLES, tmp_path / "folded_vertex.onnx",
@@ -118,11 +116,10 @@ def _build_vertex_folded(tmp_path, weights):
 
 @pytest.fixture(scope="module")
 def vertex(tmp_path_factory):
-    """The folded VertexIndex export of the v1 weights (W4)."""
+    """The folded VertexIndex export on deterministic weights (W4)."""
     tmp = tmp_path_factory.mktemp("vertex_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    weights = build_test_gn2(tmp).state_dict()
-    return SimpleNamespace(folded=_build_vertex_folded(tmp, weights))
+    return SimpleNamespace(folded=_build_vertex_folded(tmp))
 
 
 def test_vertex_folded_export_contract(vertex):

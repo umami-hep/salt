@@ -20,14 +20,16 @@ work (the live worktree copies already carry extra features such as
 Only the two cross-module imports were edited to relative form so the snapshot
 is self-contained:
 
-- ``maskformer.py``:      ``from salt.models.maskformer_loss import MaskFormerLoss``
+- ``maskformer.py``:      ``from <v1 models pkg>.maskformer_loss import MaskFormerLoss``
                             -> ``from .maskformer_loss import MaskFormerLoss``
-- ``maskformer_loss.py``: ``from salt.models.matcher import HungarianMatcher``
+- ``maskformer_loss.py``: ``from <v1 models pkg>.matcher import HungarianMatcher``
                             -> ``from .matcher import HungarianMatcher``
 
-All remaining imports point at STABLE, shared v1-oracle infra that is byte-
-identical between upstream 6570e85 and the worktree (verified): ``GLU`` /
-``Attention`` from ``salt.models.transformer``, ``Tensors`` from ``salt.stypes``,
-``indices_from_mask`` from ``salt.utils.mask_utils``, and ``Solvers`` from the
-external ``py_lap_solver`` package.
+DEL-1 (single further deviation from verbatim): with the v1 tree retired,
+``maskformer.py``'s three shared-infra imports were repointed to the
+interface-identical salt.core ports — ``GLU`` (``salt.core.nn.glu``),
+``Attention`` (``salt.core.nn.attention``), ``indices_from_mask``
+(``salt.core.utils.mask_utils``) — so the MF oracle semantics are unchanged.
+``Tensors`` still comes from ``salt.stypes`` and ``Solvers`` from the external
+``py_lap_solver`` package.
 """

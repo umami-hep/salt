@@ -15,9 +15,13 @@ from salt.core.main import CONFIG_DIR
 from salt.core.nn import bind_all, materialise_all, resolve_bind_schema
 from salt.core.schema import dump_schema, save_schema
 from salt.core.outputs.writer_base import WriteCtx, Writer, WriterDeclareCtx
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
-from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules, compile_gn2v2
-from salt.utils.inputs import write_dummy_file
+from salt.core.testing.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import (
+    ORIGIN_CLASSES,
+    build_gn2v2_modules,
+    compile_gn2v2,
+    write_parity_norm_dict,
+)
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`

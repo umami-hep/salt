@@ -52,7 +52,7 @@ def _fixture() -> dict:
 
 
 def _mf_modules(data):  # noqa: ANN001
-    from salt.tests._fixtures.regression_fixture import build_maskformer_writer_modules
+    from salt.tests._fixtures.v2_builders import build_maskformer_writer_modules
 
     return build_maskformer_writer_modules(data["nd"])
 
@@ -149,7 +149,7 @@ class TestRecordedDivergences:
 
 
 def _bundle(batch_size=6, n_tracks=10):
-    from salt.tests._fixtures.regression_fixture import make_maskformer_writer_batch
+    from salt.tests._fixtures.v2_builders import make_maskformer_writer_batch
 
     batch = make_maskformer_writer_batch(batch_size=batch_size, n_tracks=n_tracks)
     bundle = Bundle()
@@ -236,7 +236,7 @@ class TestW6bOnnxTupleOrder:
     def _onnx_sink(self, tmp_path: Path):
         from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
         from salt.core.outputs.run_task_output import RunTaskOutput
-        from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+        from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
         from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
         nd_path = tmp_path / "norm_dict.yaml"

@@ -11,7 +11,7 @@ import pytest
 from salt.core.callbacks import GraphArtifacts
 from salt.core.graph.spec import Mode, flatten_spec
 from salt.core.saltmodule import SaltModule
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
 from salt.tests.unit.callbacks.conftest import LRS
 
@@ -121,7 +121,7 @@ class TestGraphArtifacts:
         # trainer.callbacks (run=False instantiation — no fit needed)
         from salt.core.schema import dump_schema, save_schema
         from salt.tests.unit.test_main import make_cli
-        from salt.utils.inputs import write_dummy_file
+        from salt.core.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)

@@ -12,7 +12,7 @@ LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
 
 def make_matched_bundle(seed: int = 5, batch: int = 6, m: int = 5, n_cls: int = 3, t: int = 10):
     """A VAL step bundle carrying the matcher-permuted ``matched.objects.*`` keys."""
-    from salt.tests._fixtures.regression_fixture import MASKFORMER_WRITER_REG_TARGETS
+    from salt.tests._fixtures.v2_builders import MASKFORMER_WRITER_REG_TARGETS
 
     gen = torch.Generator().manual_seed(seed)
     bundle = Bundle()

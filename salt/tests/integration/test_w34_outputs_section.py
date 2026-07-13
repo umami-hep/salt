@@ -15,9 +15,9 @@ from salt.core.outputs.input_copy_writer import InputCopyWriter
 from salt.core.outputs.pad_mask_writer import PadMaskWriter
 from salt.core.outputs.run_task_output import RunTaskOutput
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
-from salt.utils.inputs import write_dummy_file
+from salt.core.testing.inputs import write_dummy_file
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
@@ -285,7 +285,7 @@ class TestW34SectionWriterUnits:
     """Unit-level checks of the section writers' declare_io + manifest + ordering."""
 
     def _bound_run_task(self):
-        from salt.tests._fixtures.gn2_fixture import write_parity_norm_dict as _wnd  # noqa: F401
+        from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict as _wnd  # noqa: F401
 
         # build the gn2v2 model modules (no file I/O for declare_io / manifest)
         import tempfile
@@ -395,9 +395,9 @@ class TestW34SectionOnnxParity:
     """The dumb OnnxExportSink names the section's get_output leaves vs /tmp/w4_oracle."""
 
     def _section_export(self, tmp_path):
-        from torch import nn
+        import torch
 
-        from salt.core.nn import bind_all, map_v1_state_dict, resolve_bind_schema
+        from salt.core.nn import bind_all, resolve_bind_schema
         from salt.core.onnx import (
             ExportConfig,
             ExportInput,
@@ -406,10 +406,9 @@ class TestW34SectionOnnxParity:
             resolve_export_config,
         )
         from salt.core.outputs import OnnxExportSink
-        from salt.tests._fixtures.gn2_fixture import (
+        from salt.tests._fixtures.gn2v2_fixture import (
             JET_VARIABLES,
             TRACK_VARIABLES,
-            build_test_gn2,
         )
 
         variables = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
@@ -423,7 +422,10 @@ class TestW34SectionOnnxParity:
             ],
         )
         tmp_path.mkdir(parents=True, exist_ok=True)
-        v1 = build_test_gn2(tmp_path)
+        write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+        # deterministic non-trivial weights (v2-native stand-in for the retired
+        # v1 weight-transfer fixture); the golden asserts contract, not values
+        torch.manual_seed(42)
         modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
         # the plan-34 W34.3 section: RunTaskOutput over the FULL gn2v2 family
         # (classification + vertexing) + the DUMB OnnxExportSink, both folded into
@@ -442,9 +444,7 @@ class TestW34SectionOnnxParity:
         resolved = resolve_export_config(export_cfg, "GN2_v2")
         plan = compile_onnx_plan(modules, resolved, variables)
         bind_all(modules, resolve_bind_schema([plan]))
-        nn.ModuleDict(
-            {k: v for k, v in modules.items() if isinstance(v, nn.Module)}
-        ).load_state_dict(map_v1_state_dict(v1.state_dict(), modules), strict=False)
+        modules["norm"].materialise()
         return export_graph(
             modules, export_cfg, variables, tmp_path / "section.onnx", outputs=[], run_name="GN2_v2"
         )

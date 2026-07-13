@@ -15,8 +15,8 @@ from salt.core.nn import (
     ResolvedSchema,
     StreamEmbed,
 )
-from salt.models import Dense as V1Dense
-from salt.tests._fixtures.gn2_fixture import (
+from salt.core.nn.dense import Dense
+from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
 )
@@ -92,14 +92,16 @@ class TestStreamEmbedVector:
         assert embed.net.input_size == 2
         assert embed.net.output_size == 16
 
-    def test_forward_rank_two_bitwise_vs_independent_v1(self):
-        """[B, F] embed forward == an INDEPENDENT v1 no-context InitNet/Dense."""
+    def test_forward_rank_two_bitwise_vs_plain_dense(self):
+        """[B, F] embed forward == an INDEPENDENT no-context Dense (the module adds
+        nothing beyond its net). DEL-1: the reference was the v1 Dense; the v2
+        Dense is its verbatim port, so the assertion's teeth are unchanged."""
         torch.manual_seed(0)
         embed = StreamEmbed(stream="jets", out_dim=4, dense={"hidden_layers": [8, 8]})
         embed.name = "jet_embed"
         embed.bind(ResolvedSchema(widths={"normed.jets": 2}))
-        # independent v1 reference Dense with the SAME hyper-params + weights
-        ref = V1Dense(input_size=2, output_size=4, hidden_layers=[8, 8])
+        # independent reference Dense with the SAME hyper-params + weights
+        ref = Dense(input_size=2, output_size=4, hidden_layers=[8, 8])
         ref.load_state_dict(embed.net.state_dict())
         x = torch.randn(B, 2)
         b = Bundle()
@@ -128,19 +130,9 @@ class TestStreamEmbedMup:
         with pytest.raises(ConfigError, match="set mup on the module"):
             StreamEmbed(stream="tracks", out_dim=8, dense={"mup": True})
 
-    def test_mup_init_matches_independent_v1_dense_mup(self):
-        """The bound mup Dense has the SAME parameter distribution as a v1 Dense(mup=True)."""
-        torch.manual_seed(0)
-        embed = StreamEmbed(stream="tracks", out_dim=4, dense={"hidden_layers": [8]}, mup=True)
-        embed.name = "track_embed"
-        embed.bind(ResolvedSchema(widths={"normed.tracks": 5}))
-        torch.manual_seed(0)
-        ref = V1Dense(input_size=5, output_size=4, hidden_layers=[8], mup=True)
-        for (k1, p1), (k2, p2) in zip(
-            embed.net.state_dict().items(), ref.state_dict().items(), strict=True
-        ):
-            assert k1 == k2
-            assert torch.equal(p1, p2), k1
+    # DEL-1: test_mup_init_matches_independent_v1_dense_mup retired with the v1
+    # tree — its essence was v1-vs-v2 muP init parity (a v2-vs-v2 rewrite would
+    # be circular). Parity closure: git checkout 29c67a1.
 
     def test_mup_forward_is_unchanged(self):
         """muP affects init only — the forward math is the standard Dense forward."""
@@ -148,7 +140,7 @@ class TestStreamEmbedMup:
         embed = StreamEmbed(stream="tracks", out_dim=4, dense={"hidden_layers": [8]}, mup=True)
         embed.name = "track_embed"
         embed.bind(ResolvedSchema(widths={"normed.tracks": 5}))
-        ref = V1Dense(input_size=5, output_size=4, hidden_layers=[8], mup=True)
+        ref = Dense(input_size=5, output_size=4, hidden_layers=[8], mup=True)
         ref.load_state_dict(embed.net.state_dict())
         x = torch.randn(B, T, 5)
         b = Bundle()
