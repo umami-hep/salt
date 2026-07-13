@@ -59,8 +59,28 @@ RUN uv pip install --no-deps \
 # pyproject-metadata + pathspec: scikit-build-core 0.7.x runtime deps (required
 # under --no-build-isolation). pybind11[global]: CMake config files on the
 # global prefix for find_package(pybind11).
+#
+# PORTABLE CODEGEN (gpu-smoke SIGILL/exit-132 fix): the 0.1.4 sdist's
+# CMakeLists.txt hard-appends `-march=native -m64 -mfpmath=sse` (x86_64) via
+# target_compile_options(), which lands AFTER CMAKE_CXX_FLAGS on the compile
+# line — so CFLAGS/CXXFLAGS/CMAKE_ARGS flag overrides can NEVER win (the last
+# -march wins for gcc/clang). Compiled on the docker build runner, the
+# extension then carries ISA extensions (e.g. AVX-512) that the GPU CI node's
+# CPU lacks -> SIGILL at `import salt.core` (via py_lap_solver). Fix: fetch the
+# pinned sdist, patch -march=native to the portable x86-64-v2 baseline (and
+# -mcpu=native -> generic for arm), PROVE the patch took (grep gates), then
+# build from the patched tree. The pyproject's own CMAKE_*_FLAGS_RELEASE are
+# already portable (-O3 -fPIC).
 RUN uv pip install "scikit-build-core<0.8" cmake ninja pyproject-metadata pathspec "pybind11[global]" && \
-    uv pip install --no-build-isolation --no-deps "py-lap-solver>=0.1.4"
+    curl -sSL -o /tmp/py_lap_solver-0.1.4.tar.gz \
+      "https://files.pythonhosted.org/packages/29/e2/7969402f59360378fa5bbd978daf8999155e78de823614546d8af80c2683/py_lap_solver-0.1.4.tar.gz" && \
+    tar -xzf /tmp/py_lap_solver-0.1.4.tar.gz -C /tmp && \
+    sed -i -e 's/-march=native/-march=x86-64-v2/g' -e 's/-mcpu=native/-mcpu=generic/g' \
+      /tmp/py_lap_solver-0.1.4/CMakeLists.txt && \
+    grep -q -- '-march=x86-64-v2' /tmp/py_lap_solver-0.1.4/CMakeLists.txt && \
+    ! grep -qE -- '-(march|mcpu)=native' /tmp/py_lap_solver-0.1.4/CMakeLists.txt && \
+    uv pip install --no-build-isolation --no-deps /tmp/py_lap_solver-0.1.4 && \
+    rm -rf /tmp/py_lap_solver-0.1.4 /tmp/py_lap_solver-0.1.4.tar.gz
 
 # Install dependencies (torch already satisfied above; flash already installed)
 RUN uv pip install --group dev ".[muP]"
