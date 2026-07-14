@@ -6,11 +6,12 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 
 # The MaskFormer export math is inlined verbatim in salt.core.onnx.reduces (the
 # legacy reduce path); this node reuses that exact copy so the folded node and
@@ -19,7 +20,7 @@ from salt.core.onnx.reduces import get_maskformer_outputs
 from salt.core.outputs.output_field import OutputField
 
 
-class MaskFormerObjects(nn.Module):
+class MaskFormerObjects(SaltModelModule):
     """MaskFormer object reconstruction node (the "writer" half of the two-node MaskFormer split).
 
     Runs `get_maskformer_outputs` once inside ``forward(b, Mode.ONNX)`` (the
@@ -105,7 +106,6 @@ class MaskFormerObjects(nn.Module):
                 f"MaskFormerObjects: n_reg must be a positive int (the leading-object regression "
                 f"target count R, matching the export leading names), got {n_reg!r}"
             )
-        self.name = _UNNAMED
         self.stream = stream
         self.constituent_stream = constituent_stream
         self.regression_task = regression_task
@@ -124,10 +124,7 @@ class MaskFormerObjects(nn.Module):
         self.vertices_regression_key = f"outputs.{stream}.{vertices_regression_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Requires the three maskformer reads; produces the leading-regression,
-        object-index, and per-vertex leaves. Widths are re-emitted via
-        `derived_widths` (the index has no recoverable last dim from a bind).
-        """
+        """Requires the three maskformer reads; produces the leading/index/per-vertex leaves."""
         del mode
         # ONNX-only ports (same gate as `VertexUnionFind`): the null-suppression
         # + pT-reorder chain is shaped for the traced export batch, so this node

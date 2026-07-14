@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from salt.core.data.base import DatasetModule, SetupBundle
+from salt.core.data.base import SaltDatasetModule, SetupBundle
 from salt.core.graph.executor import canonical_produced
 from salt.core.graph.setup_spec import (
     SETUP_STAGES,
@@ -21,7 +21,7 @@ from salt.core.graph.spec import IO, Mode, check_key_component
 __all__ = ["InputSamples"]
 
 
-class InputSamples(DatasetModule):
+class InputSamples(SaltDatasetModule):
     """Pure-source setup module emitting per-stage source patterns.
 
     Parameters

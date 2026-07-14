@@ -13,7 +13,7 @@ from pathlib import Path
 import lightning
 from torch.utils.data import DataLoader
 
-from salt.core.data.base import DatasetModule, Reader, SetupBundle
+from salt.core.data.base import Reader, SaltDatasetModule, SetupBundle
 from salt.core.data.dataset import GraphDataset
 from salt.core.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.core.data.samplers import RandomBatchSampler
@@ -33,7 +33,7 @@ _STAGE_OF_MODE: dict[Mode, str] = {Mode.FIT: "train", Mode.VAL: "val", Mode.TEST
 _SETUP_STAGES: tuple[str, ...] = ("train", "val", "test")
 
 
-def _is_setup_only(module: DatasetModule) -> bool:
+def _is_setup_only(module: SaltDatasetModule) -> bool:
     """Whether `module` declares setup IO for some stage but no per-batch IO.
 
     Such modules (InputSamples/VDS/ShmStage) must be partitioned out before
@@ -58,7 +58,7 @@ class GraphDataModule(lightning.LightningDataModule):
 
     Parameters
     ----------
-    modules : dict[str, DatasetModule | None]
+    modules : dict[str, SaltDatasetModule | None]
         Dataset modules by instance name — exactly one `Reader` prototype
         (typically unbound; per-stage clones get the stage file) plus the
         processors. ``None`` entries are dropped (config null-deletion).
@@ -107,12 +107,13 @@ class GraphDataModule(lightning.LightningDataModule):
     Raises
     ------
     ConfigError
-        If `modules` does not contain exactly one `Reader`.
+        If a `modules` entry is not a `SaltDatasetModule`, or `modules` does
+        not contain exactly one `Reader`.
     """
 
     def __init__(
         self,
-        modules: dict[str, DatasetModule | None],
+        modules: dict[str, SaltDatasetModule | None],
         train_file: str | Path | None = None,
         val_file: str | Path | None = None,
         test_file: str | Path | None = None,
@@ -138,6 +139,12 @@ class GraphDataModule(lightning.LightningDataModule):
         # a None module entry (config-file or CLI override) deletes the module.
         modules = {name: module for name, module in modules.items() if module is not None}
         for name, module in modules.items():
+            if not isinstance(module, SaltDatasetModule):
+                raise ConfigError(
+                    f"module {name!r} ({type(module).__name__}) is not a SaltDatasetModule — "
+                    "data-graph entries must subclass SaltDatasetModule; wrap or extend it "
+                    "(design §6.1)"
+                )
             module.name = name
         # single-Reader guard FIRST, over all modules, before the setup-only
         # partition below: gives us `_reader_name` so InputSamples can be wired
@@ -198,7 +205,7 @@ class GraphDataModule(lightning.LightningDataModule):
         self.val_dset: GraphDataset | None = None
         self.test_dset: GraphDataset | None = None
 
-    def _wire_input_samples(self, modules: dict[str, DatasetModule]) -> None:
+    def _wire_input_samples(self, modules: dict[str, SaltDatasetModule]) -> None:
         """Assemble the data-sourcing setup graph (mutates `modules` in place).
 
         1. Alias migration: with no `InputSamples` configured but the
@@ -238,7 +245,7 @@ class GraphDataModule(lightning.LightningDataModule):
             samples._reader = self._reader_name  # noqa: SLF001 — assembly poke
         self._input_samples: InputSamples | None = existing[0][1] if existing else None
 
-    def _wire_vds(self, modules: dict[str, DatasetModule]) -> None:
+    def _wire_vds(self, modules: dict[str, SaltDatasetModule]) -> None:
         """Assemble the wildcard->VDS setup module (mirrors `_wire_input_samples`).
 
         1. Auto-injection: when an `InputSamples` is present and no explicit
@@ -281,17 +288,17 @@ class GraphDataModule(lightning.LightningDataModule):
         self._vds: VDS | None = existing[0][1] if existing else None
 
     @property
-    def modules(self) -> dict[str, DatasetModule]:
+    def modules(self) -> dict[str, SaltDatasetModule]:
         """All assembled dataset modules (both graphs) — use `batch_modules` for compiling."""
         return dict(self._modules)
 
     @property
-    def batch_modules(self) -> dict[str, DatasetModule]:
+    def batch_modules(self) -> dict[str, SaltDatasetModule]:
         """The per-batch modules (reader + processors), excluding setup-only ones."""
         return dict(self._batch_modules)
 
     @property
-    def setup_modules(self) -> dict[str, DatasetModule]:
+    def setup_modules(self) -> dict[str, SaltDatasetModule]:
         """The setup-only modules (InputSamples/VDS/ShmStage) — the setup graph."""
         return dict(self._setup_modules)
 

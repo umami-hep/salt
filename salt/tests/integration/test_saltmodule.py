@@ -12,8 +12,9 @@ from lightning import Callback, Trainer
 from torch import nn
 
 from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
-from salt.core.graph import Bundle, ConfigError, Mode
+from salt.core.graph import IO, Bundle, ConfigError, Mode
 from salt.core.nn.losses import LossGLS, LossSum
+from salt.core.outputs import RunTaskOutput
 from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
 from salt.core.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import (
@@ -185,6 +186,80 @@ class TestConstruction:
         modules["loss"] = LossGLS()
         with pytest.raises(ConfigError, match="does not utilise task weights"):
             SaltModule(modules, lrs=LRS)
+
+    def test_raw_nn_module_in_modules_rejected(self, data):
+        # plan 49 §4: a raw nn.Module (not a SaltModelModule) is rejected at
+        # construction, naming the offending config key.
+        modules = build_gn2v2_modules(data["nd"])
+        modules["loss"] = LossSum()
+        modules["track_embed"] = nn.Linear(4, 4)
+        with pytest.raises(ConfigError, match=r"track_embed.*not a SaltModelModule"):
+            SaltModule(modules, lrs=LRS)
+
+    def test_valid_output_section_writer_accepted(self, data):
+        # RunTaskOutput (an OutputSectionWriter, hence a SaltModelModule) is a
+        # legitimate outputs: entry — composes without error.
+        model = build_model(data)
+        model.compose_output_section({"jets_out": RunTaskOutput(tasks=["jets_classification"])})
+        assert "jets_out" in model._output_section  # noqa: SLF001 - asserting composition landed
+
+    def test_raw_nn_module_in_outputs_rejected(self, data):
+        # a raw nn.Module in outputs: is neither a SaltModelModule nor a
+        # SinkModule — rejected at composition, naming the offending key.
+        model = build_model(data)
+        with pytest.raises(ConfigError, match=r"bogus_out.*neither a SaltModelModule"):
+            model.compose_output_section({"bogus_out": nn.Linear(4, 4)})
+
+    def test_sink_module_protocol_accepted_in_outputs(self, data):
+        # plan 49 §4 audited defensive branch: a terminal callback-style sink
+        # (SinkModule-protocol, not nn.Module) is ALSO accepted here — real
+        # shipped configs never exercise this (terminal sinks are wired via
+        # trainer.callbacks:, see salt.core.nn.base.SaltModelModule docstring),
+        # but the validation must not reject the protocol shape outright.
+        class _FakeManifestOnlySink:
+            name = "fake_sink"
+
+            def is_sink(self) -> bool:
+                return True
+
+            def declare_io(self, mode):  # the SinkModule Protocol also carries this
+                del mode
+                return IO(requires={}, produces={})
+
+            def is_manifest_only(self) -> bool:
+                # manifest-only so compose_output_section never tries to ride
+                # it on the nn.ModuleDict (it isn't an nn.Module)
+                return True
+
+        model = build_model(data)
+        model.compose_output_section({"fake_sink": _FakeManifestOnlySink()})
+        assert "fake_sink" in model._output_section  # noqa: SLF001
+
+
+class TestDataModuleConstruction:
+    """Plan 49 §4: GraphDataModule validates its module dict against SaltDatasetModule."""
+
+    def test_raw_object_in_data_modules_rejected(self, data):
+        class _NotADatasetModule:
+            pass
+
+        modules = {
+            "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
+            "features": Features(
+                variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
+            ),
+            "labels": Labels(),
+            "bogus": _NotADatasetModule(),
+        }
+        with pytest.raises(ConfigError, match=r"bogus.*not a SaltDatasetModule"):
+            GraphDataModule(
+                modules,
+                train_file=data["h5"],
+                val_file=data["h5"],
+                test_file=data["h5"],
+                batch_size=100,
+                num_workers=0,
+            )
 
 
 class TestFit:

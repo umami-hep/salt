@@ -16,13 +16,13 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense, _reject_width_keys
 from salt.core.nn.stream_embed import _stream_len
@@ -143,7 +143,7 @@ def calculate_edge_features(
     return torch.nan_to_num(ebatch, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-class EdgeFeatures(nn.Module):
+class EdgeFeatures(SaltModelModule):
     """Config-constructed pairwise edge-feature builder.
 
     Requires the RAW (un-normalised) ``inputs.<stream>`` ``[B, T, F]`` plus
@@ -189,7 +189,6 @@ class EdgeFeatures(nn.Module):
             edge feature.
         """
         super().__init__()
-        self.name = _UNNAMED
         if not features:
             raise ConfigError("EdgeFeatures: features must be a non-empty sequence (design §6.7)")
         if len(set(features)) != len(tuple(features)):
@@ -207,11 +206,7 @@ class EdgeFeatures(nn.Module):
         self.indices_map: dict[str, int] | None = None
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare raw ``inputs.<stream>`` + ``masks.<stream>`` -> ``edges.<stream>``.
-
-        The produced edge tensor is ``[B, T, T, E]`` with the SAME
-        ``T:<stream>`` symbol on both token axes (a square pairwise matrix).
-        """
+        """Declare raw ``inputs``/``masks.<stream>`` -> ``edges.<stream>`` ``[B,T,T,E]``."""
         del mode
         tlen = _stream_len(self.stream)
         edge_dim = len(self.features)
@@ -230,20 +225,13 @@ class EdgeFeatures(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Resolve the variable-name -> column-index map and validate features.
-
-        ``check_edge_config`` validates that every feature's required
-        variables are present (e.g. ``dR`` needs ``eta``/``phi``).
-        """
+        """Resolve the variable-name -> column-index map and validate the requested features."""
         fields = schema.fields_of(self.input_key)
         check_edge_config(list(self.features), list(fields))
         self.indices_map = {name: i for i, name in enumerate(fields)}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Compute the pairwise edge features on the RAW input.
-
-        Returns a FRESH tensor; never mutates ``inputs.*``.
-        """
+        """Compute the pairwise edge features on the RAW input; returns a FRESH tensor."""
         del mode
         assert self.indices_map is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -251,7 +239,7 @@ class EdgeFeatures(nn.Module):
         return {self.out_key: edges}
 
 
-class EdgeEmbed(nn.Module):
+class EdgeEmbed(SaltModelModule):
     """Config-constructed edge-feature embedding.
 
     An edge-typed `StreamEmbed`: maps ``edges.<stream>`` ``[B, T, T, E]`` ->
@@ -295,7 +283,6 @@ class EdgeEmbed(nn.Module):
             If `dense` configures widths (inferred at bind) or `out_dim` is not positive.
         """
         super().__init__()
-        self.name = _UNNAMED
         if out_dim < 1:
             raise ConfigError(f"EdgeEmbed: out_dim must be >= 1, got {out_dim}")
         _reject_width_keys("EdgeEmbed", dense, ("input_size", "output_size", "context_size"))

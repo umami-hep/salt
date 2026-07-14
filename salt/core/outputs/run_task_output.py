@@ -5,21 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.output_field import OutputField
 
 
-class OutputSectionWriter(nn.Module):
-    """Shared concrete base for the ``outputs:`` section writers.
+class OutputSectionWriter(SaltModelModule):
+    """Shared base for the ``outputs:`` section writers.
 
-    Concrete (instantiable) so the top-level ``outputs:`` CLI namespace can be
-    typed ``dict[str, OutputSectionWriter | None]`` and jsonargparse builds each
-    writer from its ``class_path``. Carries no behaviour — the three section
-    writers supply their own ``declare_io`` / manifest surface.
+    Named (not just `SaltModelModule` directly) so the top-level ``outputs:``
+    CLI namespace can be typed ``dict[str, OutputSectionWriter | None]`` and
+    jsonargparse builds each writer from its ``class_path``. Carries no
+    behaviour of its own beyond the `SaltModelModule` contract — the section
+    writers supply their own ``declare_io`` / manifest surface (some, like
+    `InputCopyWriter`, are manifest-only and never override `forward`).
     """
 
 
@@ -71,7 +74,6 @@ class RunTaskOutput(OutputSectionWriter):
 
     def __init__(self, tasks: Sequence[str]) -> None:
         super().__init__()
-        self.name = _UNNAMED
         names = list(tasks or [])
         if not names:
             raise ConfigError(
@@ -146,11 +148,7 @@ class RunTaskOutput(OutputSectionWriter):
     # -- graph node surface -------------------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
-        """Per orchestrated task: requires its raw ``preds.*`` leaf plus each
-        ``output_time_requires(mode)`` key; produces one ``outputs.*`` leaf per
-        field its ``get_output_manifest(mode, ...)`` declares. ``modes=ALL``,
-        demand-gated.
-        """
+        """Per task: requires its raw preds + output-time deps; produces its output fields."""
         requires: dict[str, TensorSpec] = {}
         produces: dict[str, TensorSpec] = {}
         for task in self._resolved_tasks().values():

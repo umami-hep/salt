@@ -10,13 +10,13 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense, _reject_width_keys
 from salt.core.nn.featurewise import FeaturewiseTransformation
@@ -31,7 +31,7 @@ def _stream_len(stream: str) -> str:
     return sym_dim("T", stream)
 
 
-class StreamEmbed(nn.Module):
+class StreamEmbed(SaltModelModule):
     """Config-constructed per-stream initial embedding.
 
     Composes a `Dense` built at `bind`, with input width inferred
@@ -104,7 +104,6 @@ class StreamEmbed(nn.Module):
             If `dense` configures widths (inferred at bind) or `out_dim` is not positive.
         """
         super().__init__()
-        self.name = _UNNAMED
         if out_dim < 1:
             raise ConfigError(f"StreamEmbed: out_dim must be >= 1, got {out_dim}")
         _reject_width_keys("StreamEmbed", dense, ("input_size", "output_size", "context_size"))
@@ -139,11 +138,7 @@ class StreamEmbed(nn.Module):
         self.pos_enc_indices: tuple[int, ...] = ()
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare input + context keys -> ``embed.<stream>``.
-
-        Rank-agnostic: both declare ``shape=None``, so the embed inherits its
-        rank from the bound input; ``out_dim`` is contributed at bind.
-        """
+        """Declare input + context keys -> ``embed.<stream>`` (rank-agnostic, ``shape=None``)."""
         del mode
         requires: dict[str, TensorSpec] = {
             self.input_key: TensorSpec(shape=None, dtype="float32"),
@@ -168,12 +163,7 @@ class StreamEmbed(nn.Module):
         return {f"embed.{self.stream}": self.out_dim}
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the internal `Dense` (``input_size = width(input) + sum(width(ctx))``).
-
-        Also builds the optional input-layer FiLM (sized from ``parameters``
-        width and the embed input width) and resolves the optional positional
-        encoder's variable column indices from the input's declared fields.
-        """
+        """Build the internal `Dense` + optional input-FiLM + optional pos-enc column indices."""
         input_size = schema.width(self.input_key) + sum(schema.width(key) for key in self.context)
         self.net = Dense(
             input_size=input_size, output_size=self.out_dim, mup=self.mup, **self.dense_cfg

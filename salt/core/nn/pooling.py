@@ -7,13 +7,13 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.transformer_encoder import _SEQ_LEN
 from salt.core.utils.tensor_utils import (
@@ -22,7 +22,7 @@ from salt.core.utils.tensor_utils import (
 )
 
 
-class GlobalAttentionPooling(nn.Module):
+class GlobalAttentionPooling(SaltModelModule):
     """Config-constructed global attention pooling, with explicit input/out ports.
 
     The gate layer (``gate_nn``) is built at `bind` once the input width is
@@ -41,18 +41,13 @@ class GlobalAttentionPooling(nn.Module):
     def __init__(self, input: str = "encoded.seq", out: str = "pooled.global") -> None:  # noqa: A002
         """Capture the explicit input/output ports."""
         super().__init__()
-        self.name = _UNNAMED
         self.input_key = input
         self.out_key = out
         # the gate layer — built at bind (input width known there)
         self.gate_nn: nn.Linear | None = None
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare input + masks -> the pooled vector.
-
-        The input's width symbol is shared with the produced key, so the
-        pooled width resolves from the producing module's declaration.
-        """
+        """Declare input + masks -> the pooled vector (width symbol shared with the input)."""
         del mode
         width = sym_dim("D", self.name)
         return IO(

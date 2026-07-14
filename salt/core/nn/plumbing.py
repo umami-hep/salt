@@ -8,23 +8,23 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.transformer_encoder import _ENC_LEN, _SEQ_LEN
 
 
-class Concat(nn.Module):
+class Concat(SaltModelModule):
     """Concatenate embedded streams into one sequence.
 
     Produces ``seq.x`` / ``seq.mask`` / ``seq.layout``; the concat ORDER is
@@ -47,7 +47,6 @@ class Concat(nn.Module):
             is nonzero (registers live in `TransformerEncoder`, see class docstring).
         """
         super().__init__()
-        self.name = _UNNAMED
         if not streams:
             raise ConfigError("Concat: streams must be a non-empty sequence")
         if len(set(streams)) != len(tuple(streams)):
@@ -62,13 +61,7 @@ class Concat(nn.Module):
         self.registers = registers
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``embed.*``/``masks.*`` per stream -> seq keys.
-
-        All streams share one instance-scoped embed-width symbol — equal
-        widths are a genuine concat constraint. In ONNX mode an additional
-        ``seq.offsets`` int64 tensor is produced (the trace-safe stream
-        boundary table consumed by `Split`'s export branch).
-        """
+        """Declare ``embed.*``/``masks.*`` per stream -> seq keys (+ ONNX ``seq.offsets``)."""
         del mode
         embed_dim = sym_dim("E", self.name)
         requires: dict[str, TensorSpec] = {}
@@ -104,13 +97,7 @@ class Concat(nn.Module):
         return {}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Any]:
-        """Concatenate streams along the token dim and record the layout.
-
-        In ONNX mode the per-stream token counts are ALSO published as the
-        ``seq.offsets`` cumulative-boundary tensor, built with
-        ``torch.onnx.operators.shape_as_tensor`` so the boundaries trace to
-        Shape/Concat/CumSum nodes that stay symbolic under tracing.
-        """
+        """Concatenate streams along the token dim + record the layout (+ ONNX ``seq.offsets``)."""
         xs = [b.get(f"embed.{stream}") for stream in self.streams]
         masks = [b.get(f"masks.{stream}") for stream in self.streams]
         layout: dict[str, tuple[int, int]] = {}
@@ -130,7 +117,7 @@ class Concat(nn.Module):
         return out
 
 
-class Split(nn.Module):
+class Split(SaltModelModule):
     """Per-stream slices of ``encoded.seq`` via the ``seq.layout`` meta leaf.
 
     Register rows sit AFTER every stream in the encoder output, so the
@@ -153,7 +140,6 @@ class Split(nn.Module):
             If `streams` is empty or contains duplicates.
         """
         super().__init__()
-        self.name = _UNNAMED
         if not streams:
             raise ConfigError("Split: streams must be a non-empty sequence")
         if len(set(streams)) != len(tuple(streams)):
@@ -161,11 +147,7 @@ class Split(nn.Module):
         self.streams = tuple(streams)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``encoded.seq`` + ``seq.layout`` -> ``encoded.<stream>`` per stream.
-
-        In ONNX mode the `Concat` ``seq.offsets`` boundary tensor is
-        additionally required (the trace-safe slicing path, see class docstring).
-        """
+        """Declare ``encoded.seq``/``seq.layout`` -> per-stream ``encoded.*`` (+ ONNX offsets)."""
         del mode
         width = sym_dim("D", self.name)
         return IO(
@@ -183,13 +165,7 @@ class Split(nn.Module):
         )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Slice each configured stream out of the encoded sequence.
-
-        ONNX mode uses dynamic ``index_select`` slicing driven by
-        ``seq.offsets`` (see class docstring); the stream's position in the
-        offsets table is its position in the ``seq.layout`` dict, so a
-        `Split` over a stream SUBSET stays correct without the full concat list.
-        """
+        """Slice each stream out of the encoded sequence (ONNX: dynamic ``index_select``)."""
         encoded = b.get("encoded.seq")
         layout = b.get("seq.layout")
         out: dict[str, Tensor] = {}
@@ -207,7 +183,7 @@ class Split(nn.Module):
         return out
 
 
-class VectorConcat(nn.Module):
+class VectorConcat(SaltModelModule):
     """Ordered concatenation of ``[B, D_i]`` vectors into one ``[B, Dsum]`` key.
 
     GN3's 2-feature ``global`` stream is fed past the encoder and
@@ -239,7 +215,6 @@ class VectorConcat(nn.Module):
             (a self-feed).
         """
         super().__init__()
-        self.name = _UNNAMED
         if not inputs:
             raise ConfigError("VectorConcat: inputs must be a non-empty sequence")
         if len(set(inputs)) != len(tuple(inputs)):
@@ -253,12 +228,7 @@ class VectorConcat(nn.Module):
         self.out_key = out
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare each ``[B, D_i]`` input -> the ``[B, Dsum]`` output.
-
-        Each input gets its OWN instance-scoped width symbol (inputs are
-        genuinely different widths, so they must NOT share a symbol); the
-        output's ``Dsum`` is resolved at bind via `derived_widths`.
-        """
+        """Declare each ``[B, D_i]`` input (own width symbol) -> the ``[B, Dsum]`` output."""
         del mode
         requires: dict[str, TensorSpec] = {
             key: TensorSpec(shape=("B", sym_dim(f"D{i}", self.name)), dtype="float32")

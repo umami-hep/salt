@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.conversion_ops import (
     ClassProbsOp,
     ConversionOp,
@@ -19,7 +20,7 @@ from salt.core.outputs.output_field import OutputField, _resolve_task
 from salt.core.outputs.regression_descale_op import RegressionDescaleOp
 
 
-class TaskOutput(nn.Module):
+class TaskOutput(SaltModelModule):
     """Generic producer: ``preds.<stream>.<task>`` -> ``outputs.<stream>.<name>``.
 
     The copy/softmax/argmax/de-scale majority needs no dedicated class — one
@@ -55,7 +56,6 @@ class TaskOutput(nn.Module):
         op: ConversionOp | None = None,
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         self.task = task
         self.stream = stream
         self.output_name = name if name is not None else task
@@ -64,10 +64,7 @@ class TaskOutput(nn.Module):
         self.output_key = f"outputs.{stream}.{self.output_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Requires ``preds.<stream>.<task>`` (+ op extras); produces
-        ``outputs.<stream>.<name>``. ``modes=ALL``, gated by demand (not a
-        hard mode flag), so FIT/VAL drop it via the planner's demand closure.
-        """
+        """Requires ``preds.<stream>.<task>`` (+ op extras); produces the ``outputs.*`` leaf."""
         del mode
         pred_spec = TensorSpec(shape=None, dtype="float32")
         out_spec = TensorSpec(shape=None, dtype="float32")
@@ -79,11 +76,7 @@ class TaskOutput(nn.Module):
         )
 
     def bind(self, schema: Any) -> None:
-        """Delegate to the op's ``bind`` (capture input-Feature field order, if any).
-
-        Only `RegressionDescaleOp` needs a bind; other ops have no ``bind``
-        and this no-ops.
-        """
+        """Delegate to the op's ``bind`` (only `RegressionDescaleOp` has one); else no-op."""
         op_bind = getattr(self.op, "bind", None)
         if not callable(op_bind):
             return

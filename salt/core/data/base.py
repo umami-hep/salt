@@ -20,10 +20,10 @@ from salt.core.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
 from salt.core.schema import GroupSchema, Schema
 
 __all__ = [
-    "DatasetModule",
     "OffsetIndex",
     "Processor",
     "Reader",
+    "SaltDatasetModule",
     "SetupBundle",
     "StreamConfig",
     "WorkerCtx",
@@ -65,7 +65,7 @@ def _require_root_deps(who: str, extra: str) -> None:
 
 @dataclass(frozen=True)
 class WorkerCtx:
-    """Per-worker binding context handed to `DatasetModule.bind`.
+    """Per-worker binding context handed to `SaltDatasetModule.bind`.
 
     Built by `GraphDataset` once per (worker, plan): `read_fields` is the
     demand-narrowed per-stream read set computed from the compiled plan,
@@ -84,7 +84,7 @@ class WorkerCtx:
     step: PlanStep | None = None
 
 
-class DatasetModule(ABC):
+class SaltDatasetModule(ABC):
     """Base class for dataset-side graph participants.
 
     Subclasses implement the `GraphModule` protocol (``name`` +
@@ -179,7 +179,7 @@ class DatasetModule(ABC):
         return out
 
 
-class Reader(DatasetModule):
+class Reader(SaltDatasetModule):
     """Disk -> flat dotted dict of numpy arrays for a contiguous batch slice.
 
     Source node: ``requires={}``. The arrays returned by `read` may alias the
@@ -399,7 +399,7 @@ class Reader(DatasetModule):
         return False
 
 
-class Processor(DatasetModule):
+class Processor(SaltDatasetModule):
     """Pure batch transform on the numpy bundle.
 
     `process` reads its declared requires from the bundle and returns only

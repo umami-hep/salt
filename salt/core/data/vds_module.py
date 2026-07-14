@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from salt.core.data.base import DatasetModule, SetupBundle
+from salt.core.data.base import SaltDatasetModule, SetupBundle
 from salt.core.data.vds import create_vds, has_wildcard
 from salt.core.graph.executor import canonical_produced
 from salt.core.graph.setup_spec import (
@@ -23,7 +23,7 @@ from salt.core.graph.spec import IO, Mode
 __all__ = ["VDS"]
 
 
-class VDS(DatasetModule):
+class VDS(SaltDatasetModule):
     """Wildcard->VDS resolution setup module.
 
     Parameters

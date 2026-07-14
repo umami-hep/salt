@@ -6,6 +6,7 @@ Package-level exports are the standalone, config-constructed modules
 
 from __future__ import annotations
 
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import (
     BindError,
     ResolvedSchema,
@@ -47,6 +48,7 @@ __all__ = [
     "PositionalEncoder",
     "RegressionTaskModule",
     "ResolvedSchema",
+    "SaltModelModule",
     "Split",
     "StreamEmbed",
     "TransformerEncoder",

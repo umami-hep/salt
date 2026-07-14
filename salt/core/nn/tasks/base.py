@@ -14,7 +14,8 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, Mode, TensorSpec
+from salt.core.graph.spec import Mode, TensorSpec
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.dense import Dense, _reject_width_keys
 from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.output_field import OutputField
@@ -30,7 +31,7 @@ _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 _NO_PAD_MASK_STREAMS = frozenset({"objects"})
 
 
-class _TaskModuleBase(nn.Module):
+class _TaskModuleBase(SaltModelModule):
     """Shared config capture + loss construction for the task modules.
 
     The head itself (``net`` `Dense` layer + ``loss`` module) is built by the
@@ -50,7 +51,6 @@ class _TaskModuleBase(nn.Module):
         expose: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         _reject_width_keys(type(self).__name__, dense, _WIDTH_KEYS)
         self.stream = stream
         # `input_name` is the head-math name for the task's stream tag (the

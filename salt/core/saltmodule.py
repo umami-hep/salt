@@ -26,11 +26,13 @@ from salt.core.graph.spec import (
     KEY_SEP,
     GraphModule,
     Mode,
+    SinkModule,
     TensorSpec,
     _has_wildcard,
     flatten_spec,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import (
     ResolvedSchema,
     bind_all,
@@ -89,7 +91,7 @@ class SaltModule(lightning.LightningModule):
 
     Parameters
     ----------
-    modules : dict[str, GraphModule | None]
+    modules : dict[str, SaltModelModule | None]
         Model-side graph modules by instance name. ``None`` entries are
         dropped (deletion via ``--model.modules.X=null``).
     lrs : Mapping[str, float]
@@ -118,19 +120,19 @@ class SaltModule(lightning.LightningModule):
     Raises
     ------
     ConfigError
-        For an empty module dict, a non-``nn.Module`` module, a bad
+        For an empty module dict, a non-`SaltModelModule` module, a bad
         optimizer name, or missing `lrs` keys.
     """
 
     def __init__(
         self,
-        modules: dict[str, GraphModule | None],
+        modules: dict[str, SaltModelModule | None],
         lrs: Mapping[str, float],
         optimizer: str = "AdamW",
         mup: Mapping[str, Any] | None = None,
         name: str = "salt",
         debug: bool = False,
-        outputs: dict[str, GraphModule | None] | None = None,
+        outputs: dict[str, SaltModelModule | None] | None = None,
     ) -> None:
         super().__init__()
         # a null entry — from a config-file or CLI override — deletes the module.
@@ -138,10 +140,11 @@ class SaltModule(lightning.LightningModule):
         if not modules:
             raise ConfigError("SaltModule needs a non-empty module dict (design §3.4)")
         for key, module in modules.items():
-            if not isinstance(module, nn.Module):
+            if not isinstance(module, SaltModelModule):
                 raise ConfigError(
-                    f"module {key!r} ({type(module).__name__}) is not an nn.Module — "
-                    "model-side graph modules carry parameters/buffers (design §2.5)"
+                    f"module {key!r} ({type(module).__name__}) is not a SaltModelModule — "
+                    "model-graph entries must subclass SaltModelModule; wrap or extend it "
+                    "(design §2.5)"
                 )
             # instance names come from the config dict key, before any declare_io/compile
             module.name = key
@@ -175,10 +178,13 @@ class SaltModule(lightning.LightningModule):
         self.optimizer = optimizer
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
-        self._graph_modules: dict[str, GraphModule] = dict(modules)
+        # model-only, by construction (see bind_all/materialise_all docstrings):
+        # modules: entries above + the non-manifest-only outputs: writers folded
+        # in by compose_output_section below — never a terminal sink.
+        self._graph_modules: dict[str, SaltModelModule] = dict(modules)
         # the top-level outputs: section, composed AFTER the model (empty until
         # compose_output_section runs — either here or from the CLI path).
-        self._output_section: dict[str, GraphModule] = {}
+        self._output_section: dict[str, SaltModelModule | SinkModule] = {}
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
         self.schema: ResolvedSchema | None = None
@@ -193,7 +199,7 @@ class SaltModule(lightning.LightningModule):
                 {key: w for key, w in outputs.items() if w is not None}
             )
 
-    def compose_output_section(self, section: Mapping[str, GraphModule]) -> None:
+    def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
 
         Section writers (`RunTaskOutput` / `InputCopyWriter` / `PadMaskWriter`) are
@@ -209,19 +215,33 @@ class SaltModule(lightning.LightningModule):
 
         Parameters
         ----------
-        section : Mapping[str, GraphModule]
+        section : Mapping[str, SaltModelModule | SinkModule]
             The section writers by instance name, in declaration order (the eval-H5
             column-order authority).
 
         Raises
         ------
         ConfigError
-            For a section writer whose name collides with a model module.
+            For a section writer that is neither a `SaltModelModule` nor a
+            `SinkModule`, or whose name collides with a model module.
         """
         section = {key: w for key, w in section.items() if w is not None}
         if not section:
             return
         for key, w in section.items():
+            # accepted shapes (design §2.5): a graph-folded section writer
+            # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter/
+            # MaskFormerObjectsSink today) or a terminal callback-style sink
+            # (SinkModule) — see salt.core.nn.base.SaltModelModule for the
+            # audited rationale (real shipped configs only ever wire the
+            # former here; terminal sinks are wired via trainer.callbacks:
+            # and folded into the per-mode plan separately, at compile_mode).
+            if not isinstance(w, (SaltModelModule, SinkModule)):
+                raise ConfigError(
+                    f"outputs: section writer {key!r} ({type(w).__name__}) is neither a "
+                    "SaltModelModule nor a SinkModule — model-graph outputs: entries must "
+                    "subclass SaltModelModule; wrap or extend it (design §2.5)"
+                )
             if key in self._graph_modules:
                 raise ConfigError(
                     f"outputs: section writer {key!r} collides with a model module — instance "

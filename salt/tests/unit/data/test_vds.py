@@ -16,7 +16,7 @@ from salt.core.data import (
     InputSamples,
     Labels,
 )
-from salt.core.data.base import DatasetModule, SetupBundle
+from salt.core.data.base import SaltDatasetModule, SetupBundle
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.planner import _check_incompatibilities, compile_setup_plan
@@ -76,7 +76,7 @@ def _wired_vds(*, reader="reader", vds_capable=True, out=None) -> VDS:
 # doesn't exist yet — the rule matches on class NAME, not type).
 
 
-class ShmStage(DatasetModule):
+class ShmStage(SaltDatasetModule):
     """Name-only stub: the incompatibility check matches `type(other).__name__`."""
 
     def declare_io(self, mode: Mode) -> IO:
@@ -277,14 +277,14 @@ class TestIncompatibility:
     def test_check_is_generic_symmetric_stub(self):
         """The check is generic: any module naming another's class raises."""
 
-        class Alpha(DatasetModule):
+        class Alpha(SaltDatasetModule):
             incompatible_with = ("Beta",)
 
             def declare_io(self, mode):
                 del mode
                 return IO()
 
-        class Beta(DatasetModule):
+        class Beta(SaltDatasetModule):
             def declare_io(self, mode):
                 del mode
                 return IO()

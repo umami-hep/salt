@@ -6,15 +6,16 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.output_field import OutputField
 
 
-class MFLeadVertexDecorator(nn.Module):
+class MFLeadVertexDecorator(SaltModelModule):
     """MaskFormer lead-vertex jet-level decorator (the decoration half of the two-node split).
 
     A thin selector that reads `MaskFormerObjects`'s exposed reordered
@@ -94,7 +95,6 @@ class MFLeadVertexDecorator(nn.Module):
         regression_source: str | None = None,
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         parts = split_key(source)
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
@@ -152,10 +152,7 @@ class MFLeadVertexDecorator(nn.Module):
         return index
 
     def declare_io(self, mode: Mode) -> IO:
-        """Requires the two `MaskFormerObjects`-minted per-vertex leaves (a
-        node->node edge keeping that node alive); produces the jet-level
-        scalars. Active in every mode (``modes=ALL``, gated by demand).
-        """
+        """Requires the two `MaskFormerObjects` per-vertex leaves; produces jet-level scalars."""
         del mode
         requires = {
             self.source: TensorSpec(shape=None, dtype="float32", kind="data"),
@@ -172,13 +169,7 @@ class MFLeadVertexDecorator(nn.Module):
         return dict.fromkeys(self.output_keys, 1)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Select the lead vertex (highest-pT, non-null, non-PV) and emit jet-level scalars.
-
-        Trace-safe (no data-dependent control flow): masked-argmax the pT
-        column over the qualify mask (not-null AND not-PV AND
-        real-vertex-class), then gather each regression channel at that
-        index (NaN where no vertex qualifies).
-        """
+        """Select the lead vertex (highest-pT, non-null, non-PV) and emit jet-level scalars."""
         del mode
         class_probs = b.get(self.source)  # [B, M, C]
         regression = b.get(self.regression_source)  # [B, M, R]

@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 
 # The two scripted union-find helpers + the MaskFormer export math are inlined
 # verbatim in salt.core.onnx.reduces (the legacy reduce path); the conversion
@@ -20,7 +21,7 @@ from salt.core.outputs.output_field import OutputField
 from salt.core.utils.union_find import get_node_assignment_jit
 
 
-class VertexUnionFind(nn.Module):
+class VertexUnionFind(SaltModelModule):
     """In-graph union-find conversion node (folds the legacy union-find export reduce).
 
     Reads the RAW ``preds.<stream>.<task>`` ``[E, 1]`` edge scores the
@@ -63,7 +64,6 @@ class VertexUnionFind(nn.Module):
         name: str | None = None,
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         self.task = task
         self.stream = stream
         self.output_name = name if name is not None else task
@@ -72,11 +72,7 @@ class VertexUnionFind(nn.Module):
         self.output_key = f"outputs.{stream}.{self.output_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the RAW ``preds.*`` edge scores + ``masks.*`` -> the int8 ``outputs.*`` leaf.
-
-        The output width is re-emitted via `derived_widths` (the
-        ``reshape(-1)`` collapse has no recoverable last dim).
-        """
+        """Declare the RAW ``preds.*`` edge scores + ``masks.*`` -> the int8 ``outputs.*`` leaf."""
         del mode
         # ONNX-only ports: this node is ONNX-only by construction (class
         # docstring), so gating to Mode.ONNX (rather than demand-gating like

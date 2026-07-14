@@ -6,9 +6,10 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.graph import Bundle, Executor, Mode
+from salt.core.graph import IO, Bundle, Executor, Mode
 from salt.core.nn import (
     BindError,
+    SaltModelModule,
     bind_all,
     materialise_all,
     resolve_bind_schema,
@@ -100,3 +101,69 @@ class TestMaterialisedTrainability:
         for name in ("track_embed", "encoder", "pool", "jets_classification"):
             grads = [p.grad for p in modules[name].parameters() if p.grad is not None]
             assert grads, f"no gradients reached module {name!r}"
+
+
+# bind_all / materialise_all de-duck-typing (plan 49 §5): the PRODUCTION caller argument
+# (SaltModule._graph_modules, saltmodule.py) is model-only by construction (never a terminal
+# sink — see salt.core.nn.bind.bind_all's docstring for the audit). But at least one TEST call
+# site (salt.tests.unit.onnx.test_adapter's gn2_folded_modules fixture) calls bind_all directly
+# on a per-mode LOCAL module dict with a terminal OnnxExportSink folded in, mirroring
+# SaltModule.compile_mode's own fold — so bind_all/materialise_all keep an explicit
+# isinstance(module, SaltModelModule) partition (not getattr/callable duck-typing) rather than
+# calling .bind()/.materialise() unconditionally; a sink is silently skipped, exactly as the
+# pre-plan-49 getattr discovery silently skipped it (sinks never had a bind/materialise method).
+
+
+class TestBindAllDirectCalls:
+    def test_gn2v2_modules_are_all_salt_model_modules(self, tmp_path):
+        """The common-case invariant: every module a production SaltModule sees is model-only."""
+        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+        write_parity_norm_dict(nd, cd)
+        modules = build_gn2v2_modules(nd)
+        assert all(isinstance(m, SaltModelModule) for m in modules.values())
+
+    def test_bind_all_and_materialise_all_call_base_no_op_defaults_directly(self, tmp_path):
+        """A bare `SaltModelModule` subclass (base no-op bind/materialise, no override) works
+        fine through bind_all/materialise_all — proves the direct calls need no discovery.
+        """
+
+        class _Bare(SaltModelModule):
+            def declare_io(self, mode):
+                del mode
+                return IO(requires={}, produces={})
+
+        bare = _Bare()
+        bare.name = "bare"
+        modules = {"bare": bare}
+        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+        write_parity_norm_dict(nd, cd)
+        # base bind()/materialise() are documented no-ops — must not raise
+        bind_all(modules, resolve_bind_schema(compile_gn2v2(build_gn2v2_modules(nd), Mode.FIT)))
+        materialise_all(modules)
+
+    def test_bind_all_and_materialise_all_skip_a_folded_sink(self, tmp_path):
+        """Regression (plan 49 §5): a mixed dict with a non-SaltModelModule 'sink' double is
+        handled — bind_all/materialise_all call the real module and silently skip the sink,
+        matching the pre-plan-49 getattr-discovery behaviour (a sink has no bind/materialise).
+        """
+
+        class _FakeSink:
+            """A minimal stand-in for a folded terminal sink (e.g. OnnxExportSink): no
+            bind/materialise, so calling either unconditionally would raise AttributeError.
+            """
+
+            name = "fake_sink"
+
+            def is_sink(self) -> bool:
+                return True
+
+        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+        write_parity_norm_dict(nd, cd)
+        modules = build_gn2v2_modules(nd)
+        plan = compile_gn2v2(modules, Mode.FIT)
+        mixed = {**modules, "fake_sink": _FakeSink()}
+        # must not raise AttributeError on the sink double
+        bind_all(mixed, resolve_bind_schema(plan))
+        materialise_all(mixed)
+        # the real modules were still bound/materialised (Normaliser flips its buffer)
+        assert bool(modules["norm"].materialised)

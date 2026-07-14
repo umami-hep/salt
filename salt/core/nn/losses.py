@@ -6,12 +6,11 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     GraphModule,
     Mode,
@@ -19,9 +18,10 @@ from salt.core.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 
 
-class LossSum(nn.Module):
+class LossSum(SaltModelModule):
     """Weighted sum of per-task losses -> ``loss.total``.
 
     Per-task weights are applied INSIDE the tasks, so the default here is a
@@ -50,7 +50,6 @@ class LossSum(nn.Module):
             Per-loss multipliers keyed like `losses`, default 1.0 each.
         """
         super().__init__()
-        self.name = _UNNAMED
         self._loss_keys: tuple[str, ...] | None = (
             tuple(_loss_key(k) for k in losses) if losses is not None else None
         )
@@ -112,10 +111,7 @@ class LossSum(nn.Module):
         self._check_weight_keys()
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only, empty in TEST/ONNX).
-
-        Raises `ConfigError` if the loss keys were never fixed.
-        """
+        """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only); raises if unfixed."""
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
         if self._loss_keys is None:

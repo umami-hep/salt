@@ -58,12 +58,7 @@ class PadMaskWriter(OutputSectionWriter):
         return f"outputs.{stream}.mask"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``masks.<stream>`` -> ``outputs.<stream>.mask`` per stream.
-
-        Demand-gated: FIT/VAL prune it (the mask column is eval-H5-only). The
-        require is ``kind=pad_mask`` (unifies with the stream mask producer);
-        the produced leaf is ``kind=data`` (a serialisation column).
-        """
+        """Declare ``masks.<stream>`` -> ``outputs.<stream>.mask`` per stream (demand-gated)."""
         del mode
         requires: dict[str, TensorSpec] = {}
         produces: dict[str, TensorSpec] = {}
@@ -75,11 +70,7 @@ class PadMaskWriter(OutputSectionWriter):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Pass each stream's bool pad mask through to ``outputs.<stream>.mask``.
-
-        The sink owns the ``u2s`` pack + the file-length re-expansion. A fresh
-        clone avoids aliasing the bundle's ``masks.*`` leaf (write-once).
-        """
+        """Pass each stream's bool pad mask through to ``outputs.<stream>.mask`` (fresh clone)."""
         del mode
         return {
             self.output_key(stream): b.get(f"masks.{stream}").clone()

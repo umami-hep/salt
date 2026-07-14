@@ -15,8 +15,9 @@ from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.core.nn.attention import Attention
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import GLU, Dense
 from salt.core.nn.stream_embed import _stream_len
@@ -46,7 +47,7 @@ def get_masks(
     return pred_masks
 
 
-class MaskDecoder(nn.Module):
+class MaskDecoder(SaltModelModule):
     """MaskFormer object decoder over an encoded constituent sequence.
 
     Builds width-fixed submodules (query bank, decoder layers, class/mask heads) sized
@@ -103,7 +104,6 @@ class MaskDecoder(nn.Module):
             config missing ``n_heads``.
         """
         super().__init__()
-        self.name = _UNNAMED
         if embed_dim < 1:
             raise ConfigError(f"MaskDecoder: embed_dim must be >= 1, got {embed_dim}")
         if num_objects < 1:

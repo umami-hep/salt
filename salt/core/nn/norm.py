@@ -7,23 +7,23 @@ from pathlib import Path
 
 import torch
 import yaml
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.stream_embed import _stream_len
 
 
-class Normaliser(nn.Module):
+class Normaliser(SaltModelModule):
     """Config-constructed input normalisation.
 
     The DEFAULT input normaliser: loads a precomputed ``norm_dict.yaml``
@@ -62,7 +62,6 @@ class Normaliser(nn.Module):
             is not one of them.
         """
         super().__init__()
-        self.name = _UNNAMED
         if not streams:
             raise ConfigError("Normaliser: streams must be a non-empty sequence")
         if len(set(streams)) != len(tuple(streams)):
@@ -94,11 +93,7 @@ class Normaliser(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Allocate normalisation buffers (means/stds per stream) from the resolved schema.
-
-        The ``materialised`` buffer guards against silently training on
-        un-normalised values. Raises `RuntimeError` if called twice.
-        """
+        """Allocate normalisation buffers (means/stds per stream); raises if bound twice."""
         if self._bound:
             raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
         for stream in self.streams:
@@ -229,10 +224,7 @@ class Normaliser(nn.Module):
         self.materialised.fill_(True)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Produce ``normed.<stream> = (inputs.<stream> - means) / stds``.
-
-        Raises `RuntimeError` if the buffers were never materialised.
-        """
+        """``normed.<stream> = (inputs.<stream> - means) / stds``; raises if never materialised."""
         del mode
         # skip under tracing: the tensor->bool read would emit a spurious
         # TracerWarning on every export. Tracing is still guarded —
@@ -251,7 +243,7 @@ class Normaliser(nn.Module):
         }
 
 
-class MaskedInputNormaliser(nn.Module):
+class MaskedInputNormaliser(SaltModelModule):
     """Self-normalising input layer with online masked running statistics.
 
     OPT-IN alternative to the fixed-norm-dict `Normaliser`: learns mean/var
@@ -277,7 +269,6 @@ class MaskedInputNormaliser(nn.Module):
         cumulative moving average instead of an EMA.
         """
         super().__init__()
-        self.name = _UNNAMED
         if not streams:
             raise ConfigError("MaskedInputNormaliser: streams must be a non-empty sequence")
         if len(set(streams)) != len(tuple(streams)):
@@ -315,12 +306,7 @@ class MaskedInputNormaliser(nn.Module):
         return TensorSpec(shape=shape, dtype="float32")
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``inputs.<stream>`` (+ optional training ``masks.<stream>``) -> ``normed``.
-
-        Sequence streams' mask port is optional and TRAINING-only (a
-        mask-less stream treats every object as valid); TEST/ONNX stay a
-        pure affine transform with no mask dependency.
-        """
+        """Declare ``inputs.<stream>`` (+ optional TRAINING-only ``masks``) -> ``normed``."""
         del mode
         requires: dict[str, TensorSpec] = {f"inputs.{s}": self._spec(s) for s in self.streams}
         for stream in self.streams:
@@ -339,10 +325,7 @@ class MaskedInputNormaliser(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Allocate the running-statistic buffers (identity init: mean 0 / var 1) from the schema.
-
-        Raises `RuntimeError` if called twice.
-        """
+        """Allocate the running-stat buffers (identity init); raises if bound twice."""
         if self._bound:
             raise RuntimeError(
                 f"MaskedInputNormaliser {self.name!r}: bind() called twice (design §2.3)"
@@ -410,11 +393,7 @@ class MaskedInputNormaliser(nn.Module):
             running_var.mul_(1 - mom).add_(batch_var, alpha=mom)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Apply frozen running-stat normalisation; also update the stats when training.
-
-        Updates only when ``self.training``, the plan mode is training, and
-        the graph is not being traced — so a TEST/ONNX plan never reads a mask.
-        """
+        """Apply frozen running-stat normalisation; updates stats only when training (untraced)."""
         updating = self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing()
         if updating:
             for stream in self.streams:

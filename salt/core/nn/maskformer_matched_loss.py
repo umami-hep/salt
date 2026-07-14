@@ -10,19 +10,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
     _OBJECT_STREAM,
-    _UNNAMED,
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.maskformer_loss import MaskFormerLoss
 from salt.core.nn.matcher import HungarianMatcher
@@ -30,7 +30,7 @@ from salt.core.nn.matcher import HungarianMatcher
 __all__ = ["MaskFormerMatchedLoss"]
 
 
-class MaskFormerMatchedLoss(nn.Module):
+class MaskFormerMatchedLoss(SaltModelModule):
     """Hungarian-matched MaskFormer loss over the decoder's object predictions.
 
     A FIT|VAL-only module. Runs the matcher on the scaled object
@@ -84,7 +84,6 @@ class MaskFormerMatchedLoss(nn.Module):
         input_stream: str = "objects",
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         if num_classes < 1:
             raise ConfigError(
                 f"MaskFormerMatchedLoss: num_classes (non-null classes) must be >= 1, got "
@@ -164,10 +163,7 @@ class MaskFormerMatchedLoss(nn.Module):
         return f"targets.{self.input_stream}.regression"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the object preds + truth labels -> ``matched.objects.*`` + ``losses.*``.
-
-        FIT|VAL only — empty IO in TEST/ONNX.
-        """
+        """Declare the object preds + truth labels -> ``matched.*``/``losses.*`` (FIT|VAL only)."""
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
 
@@ -233,11 +229,7 @@ class MaskFormerMatchedLoss(nn.Module):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Validate the regression prediction/target widths agree (element-wise L1).
-
-        Skips silently when either key is absent from ``schema.widths`` (a
-        TEST/ONNX-only bind schema, where this FIT|VAL-only loss has no keys).
-        """
+        """Validate the regression prediction/target widths agree; skips if either is unresolved."""
         if "regression" not in self.components:
             return
         reg_pred_key, reg_tgt_key = self._reg_pred_key(), self._reg_tgt_key()
@@ -267,11 +259,7 @@ class MaskFormerMatchedLoss(nn.Module):
         return torch.nn.functional.l1_loss(reg_pred[valid], reg_tgt[valid])
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Match queries to truth, then emit the matched predictions + the loss components.
-
-        Gathers the matcher-permuted predictions into new ``matched.*`` keys
-        (no in-place permute).
-        """
+        """Match queries to truth; emit matched preds (new ``matched.*`` keys) + loss components."""
         del mode
         class_logits = b.get(f"{self.input_stream}.class_logits")
         class_probs = b.get(f"{self.input_stream}.class_probs")

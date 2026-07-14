@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from salt.core.data.base import DatasetModule
+from salt.core.data.base import SaltDatasetModule
 from salt.core.data.datamodule import _is_setup_only
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import (
@@ -24,8 +24,8 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 # dummy setup-only modules (no physics — kernel scope)
 
 
-class SetupToy(DatasetModule):
-    """A setup-only DatasetModule: non-empty declare_setup_io, empty declare_io."""
+class SetupToy(SaltDatasetModule):
+    """A setup-only SaltDatasetModule: non-empty declare_setup_io, empty declare_io."""
 
     def __init__(self, name, requires=None, produces=None, values=None):
         super().__init__()
@@ -65,8 +65,8 @@ class SelfMergeToy(SetupToy):
         return ctx
 
 
-class BatchToy(DatasetModule):
-    """A per-batch DatasetModule (non-empty declare_io), e.g. a processor."""
+class BatchToy(SaltDatasetModule):
+    """A per-batch SaltDatasetModule (non-empty declare_io), e.g. a processor."""
 
     def __init__(self, name, requires=None, produces=None):
         super().__init__()

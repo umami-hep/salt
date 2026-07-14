@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from salt.core.data.base import DatasetModule, Processor, Reader, WorkerCtx
+from salt.core.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
 from salt.core.data.cuts import Cut, CutSpec
 from salt.core.data.datamodule import GraphDataModule
 from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
@@ -27,7 +27,6 @@ __all__ = [
     "VDS",
     "Cut",
     "CutSpec",
-    "DatasetModule",
     "EasyjetGroupConfig",
     "EasyjetReader",
     "FTAG1LiteGroupConfig",
@@ -46,6 +45,7 @@ __all__ = [
     "OffsetIndex",
     "Processor",
     "Reader",
+    "SaltDatasetModule",
     "SampleConfig",
     "StreamConfig",
     "WorkerCtx",

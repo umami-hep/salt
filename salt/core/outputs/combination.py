@@ -5,15 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.output_field import OutputField
 
 
-class Combination(nn.Module):
+class Combination(SaltModelModule):
     """Linear-combination producer: a new ``outputs.*`` leaf from a source bundle leaf.
 
     Reads a source ``outputs.<stream>.<src>`` leaf a producer already minted
@@ -52,7 +53,6 @@ class Combination(nn.Module):
         terms: Mapping[int, float],
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
         parts = split_key(source)
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
@@ -91,11 +91,7 @@ class Combination(nn.Module):
         return index
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the source ``outputs.*`` leaf -> the new ``outputs.<stream>.<name>`` leaf.
-
-        Both ports are active in every mode (``modes=ALL``): gated by demand,
-        not a hard mode flag, like the other conversion producers.
-        """
+        """Declare the source ``outputs.*`` leaf -> the new ``outputs.<stream>.<name>`` leaf."""
         del mode
         requires = {self.source: TensorSpec(shape=None, dtype="float32", kind="data")}
         produces = {self.output_key: TensorSpec(shape=None, dtype="float32", kind="data")}

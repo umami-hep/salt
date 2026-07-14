@@ -11,7 +11,6 @@ from torch import Tensor, nn
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import (
-    _UNNAMED,
     IO,
     KEY_SEP,
     Mode,
@@ -19,6 +18,7 @@ from salt.core.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
+from salt.core.nn.base import SaltModelModule
 from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.featurewise import FeaturewiseTransformation
 from salt.core.nn.stream_embed import _stream_len
@@ -30,7 +30,7 @@ _SEQ_LEN = sym_dim("S", "seq")
 _ENC_LEN = sym_dim("L", "enc")
 
 
-class TransformerEncoder(nn.Module):
+class TransformerEncoder(SaltModelModule):
     """Config-constructed transformer encoder, composing a fresh v1 `Transformer`.
 
     Registers, packing, and the out projection stay INTERNAL; the register
@@ -146,7 +146,6 @@ class TransformerEncoder(nn.Module):
             or `update_edges` is set without `edges`.
         """
         super().__init__()
-        self.name = _UNNAMED
         if not isinstance(attention, Mapping) or "num_heads" not in attention:
             raise ConfigError(
                 "TransformerEncoder: attention config must be a mapping containing 'num_heads' "
@@ -259,11 +258,7 @@ class TransformerEncoder(nn.Module):
         return leaf.removesuffix("_emb")
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``seq.x``/``seq.mask`` (+ ``edges.<stream>_emb``) -> ``encoded.seq``.
-
-        With an `edges` port, additionally requires the edge-embed tensor
-        ``[B, T, T, D_e]`` whose both token axes share ``T:<stream>``.
-        """
+        """Declare ``seq.x``/``seq.mask`` (+ edge-embed when `edges` is set) -> ``encoded.seq``."""
         del mode
         produces: dict[str, TensorSpec] = {
             "encoded.seq": TensorSpec(shape=("B", _ENC_LEN, self.out_dim), dtype="float32"),
@@ -295,11 +290,7 @@ class TransformerEncoder(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Validate the resolved edge-embed width against ``edge_embed_dim`` (no-op if no edges).
-
-        Also builds the optional encoder/global FiLM modules, sized from the
-        resolved schema widths.
-        """
+        """Build the optional encoder/global FiLM modules; validate the resolved edge width."""
         if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
             num_params = schema.width(self.params_key)
             if self._encoder_film_cfg is not None:

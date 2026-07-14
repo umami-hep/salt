@@ -11,6 +11,7 @@ from difflib import get_close_matches
 from salt.core.graph.errors import _SUGGESTION_CUTOFF, GraphError
 from salt.core.graph.planner import Plan
 from salt.core.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
+from salt.core.nn.base import SaltModelModule
 
 __all__ = ["BindError", "ResolvedSchema", "bind_all", "materialise_all", "resolve_bind_schema"]
 
@@ -255,28 +256,38 @@ def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
     return derived
 
 
-def bind_all(modules: Mapping[str, GraphModule], schema: ResolvedSchema) -> None:
-    """Call ``bind(schema)`` on every module that defines it, in dict order.
+def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: ResolvedSchema) -> None:
+    """Call ``bind(schema)`` on every `SaltModelModule` in `modules`, in dict order.
 
-    Bind is config-only — building the schema from compiled plans (which are
-    config-derived) keeps that property.
+    `SaltModule._graph_modules` (the production caller argument, see
+    `salt.core.saltmodule`) is model-only by construction — but some test
+    fixtures call this directly on a per-mode LOCAL module dict with a
+    terminal sink folded in (mirroring `SaltModule.compile_mode`'s own fold,
+    e.g. an `OnnxExportSink` under `salt.tests.unit.onnx.test_adapter`), so
+    this stays an explicit `SaltModelModule`-partitioned direct call, not an
+    unconditional one — a sink has no `bind`, exactly as the pre-plan-49
+    getattr-discovery silently skipped it. `SaltModelModule.bind` is a
+    documented no-op default, so no further discovery is needed for the
+    modules the partition DOES call. Bind is config-only — building the
+    schema from compiled plans (which are config-derived) keeps that
+    property.
     """
     for module in modules.values():
-        bind = getattr(module, "bind", None)
-        if callable(bind):
-            bind(schema)
+        if isinstance(module, SaltModelModule):
+            module.bind(schema)
 
 
-def materialise_all(modules: Mapping[str, GraphModule]) -> None:
-    """Call ``materialise()`` on every module that defines it, in dict order.
+def materialise_all(modules: Mapping[str, SaltModelModule | GraphModule]) -> None:
+    """Call ``materialise()`` on every `SaltModelModule` in `modules`, in dict order.
 
-    File-touching value loads happen ONLY here, before a fresh fit; the caller
-    skips this on checkpoint load (values arrive via the state_dict).
+    Same `SaltModelModule` partition as `bind_all` (see its docstring) — a
+    folded sink has no `materialise`. File-touching value loads happen ONLY
+    here, before a fresh fit; the caller skips this on checkpoint load
+    (values arrive via the state_dict).
     """
     for module in modules.values():
-        materialise = getattr(module, "materialise", None)
-        if callable(materialise):
-            materialise()
+        if isinstance(module, SaltModelModule):
+            module.materialise()
 
 
 class _DimBindings:

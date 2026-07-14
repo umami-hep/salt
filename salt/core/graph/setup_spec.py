@@ -164,7 +164,7 @@ def unflatten_source_spec(flat: Mapping[str, SourceSpec]) -> SourceNestedSpec:
 
 @dataclass(frozen=True)
 class SetupIO:
-    """A `DatasetModule`'s SETUP-time interface.
+    """A `SaltDatasetModule`'s SETUP-time interface.
 
     The setup-time analogue of `IO`: required and produced nested specs with
     `SourceSpec` leaves. A separate type from `IO` (whose ``__post_init__``

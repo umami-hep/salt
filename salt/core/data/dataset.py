@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
 
-from salt.core.data.base import RAW_NAMESPACE, DatasetModule, Reader, WorkerCtx
+from salt.core.data.base import RAW_NAMESPACE, Reader, SaltDatasetModule, WorkerCtx
 from salt.core.data.labels import Labels
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
@@ -35,7 +35,7 @@ class GraphDataset(Dataset):
 
     Parameters
     ----------
-    modules : dict[str, DatasetModule]
+    modules : dict[str, SaltDatasetModule]
         The dataset modules by instance name (exactly one `Reader`). Names
         are assigned from the dict keys.
     mode : Mode
@@ -68,7 +68,7 @@ class GraphDataset(Dataset):
 
     def __init__(
         self,
-        modules: dict[str, DatasetModule],
+        modules: dict[str, SaltDatasetModule],
         mode: Mode,
         sinks: Sinks,
         seed: int = 42,
@@ -192,7 +192,7 @@ class GraphDataset(Dataset):
         return self._plan
 
     @property
-    def modules(self) -> dict[str, DatasetModule]:
+    def modules(self) -> dict[str, SaltDatasetModule]:
         """The configured dataset modules by instance name (read-only view)."""
         return dict(self._modules)
 
@@ -239,7 +239,7 @@ class GraphDataset(Dataset):
         )
         for step in self._plan.steps:
             module = step.module
-            if isinstance(module, DatasetModule):
+            if isinstance(module, SaltDatasetModule):
                 module.bind(replace(ctx, step=step))
         self._bound_pid = pid
 
