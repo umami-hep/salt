@@ -151,7 +151,9 @@ def test_reg_test_manifest_declares_one_physical_target_per_target():
         "target_regression_dR",
     ]
     for f in manifest[-2:]:
-        assert f.dtype == "f4" and f.prefix is False and f.onnx_name is None
+        assert f.dtype == "f4"
+        assert f.prefix is False
+        assert f.onnx_name is None
 
 
 def test_reg_get_output_emits_unscaled_physical_targets():
@@ -176,7 +178,7 @@ def test_reg_seq_target_pads_are_nan():
         "labels": {"tracks": {"dEta": torch.tensor([[0.5, 9.9]])}},
     })
     *_, target = module.get_output(b, Mode.TEST, _RUN)
-    assert target.value[0, 0] == 0.5
+    assert torch.isclose(target.value[0, 0], torch.tensor(0.5))
     assert torch.isnan(target.value[0, 1])
 
 
@@ -206,7 +208,9 @@ def test_vtx_test_manifest_declares_target_column():
     manifest = module.get_output_manifest(Mode.TEST, _RUN)
     assert [f.h5_name for f in manifest] == ["VertexIndex", "target_track_vertexing"]
     target = manifest[-1]
-    assert target.dtype == "i4" and target.axis == "per_token" and target.prefix is False
+    assert target.dtype == "i4"
+    assert target.axis == "per_token"
+    assert target.prefix is False
 
 
 def test_vtx_get_output_emits_label_with_pads_minus_one():
@@ -238,13 +242,13 @@ def test_vtx_output_time_requires_label_in_test_only():
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: _cls(),
+        _cls,
         lambda: _cls(stream="tracks", sequence=True),
         lambda: _reg(targets=("mHH", "dR")),
         lambda: _reg(targets=("dEta",), sequence=True),
         lambda: _reg(targets=("pt",), gaussian=True),
         lambda: _reg(targets=("m_over_mHH",), denoms=("mHH",)),
-        lambda: _vtx(),
+        _vtx,
     ],
     ids=[
         "cls-global",
