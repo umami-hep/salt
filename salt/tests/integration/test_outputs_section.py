@@ -25,9 +25,12 @@ from salt.core.outputs.input_copy_writer import InputCopyWriter
 from salt.core.outputs.pad_mask_writer import PadMaskWriter
 from salt.core.outputs.run_task_output import RunTaskOutput
 from salt.core.schema import dump_schema, save_schema
-from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
-from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
 from salt.core.testing.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import (
+    ORIGIN_CLASSES,
+    build_gn2v2_modules,
+    write_parity_norm_dict,
+)
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
@@ -37,7 +40,7 @@ N_TEST = 300
 
 
 def _golden_task_columns() -> dict[str, list[str]]:
-    """Per-stream ordered flat TASK column names from the committed cutover34 golden."""
+    """Per-stream ordered flat TASK column names from the cutover34 golden."""  # noqa: DOC201
     golden = json.loads(GOLDEN.read_text())
     per_stream: dict[str, list[str]] = {}
     for col in golden["h5"]["columns"]:
@@ -54,7 +57,7 @@ def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str
     trailing pad-mask column. Asserting H5 dtype.names EQUAL this (not merely
     contain it) enforces "no ADDED columns" — a Phase-C label-emission leak, or
     an un-deferred extra leaf from a bad expose merge, cannot slip past.
-    """
+    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     h5 = json.loads(GOLDEN.read_text())["h5"]
     tasks: dict[str, list[str]] = {}
     for col in h5["columns"]:
@@ -69,6 +72,7 @@ def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str
             cols.append("mask")
         per_stream[stream] = cols
     return per_stream
+
 
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
@@ -176,7 +180,10 @@ class TestSectionH5SelfConsistency:
         the classification probs.
         """
         with h5py.File(data["h5"]) as src:
-            src_cols = {"jets": list(src["jets"].dtype.names), "tracks": list(src["tracks"].dtype.names)}
+            src_cols = {
+                "jets": list(src["jets"].dtype.names),
+                "tracks": list(src["tracks"].dtype.names),
+            }
         expected = _expected_full_columns(src_cols)
         with h5py.File(section_h5) as f:
             present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}

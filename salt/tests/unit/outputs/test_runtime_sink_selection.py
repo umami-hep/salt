@@ -54,7 +54,7 @@ def _seed_columns(sink: H5OutputSink, columns: list[OutputColumn]) -> H5OutputSi
     Plan 50 Phase B retired the explicit-``outputs`` config table; OutputColumn is
     now the sink's INTERNAL value object (resolved from the bound section). These
     white-box unit tests seed it directly instead of via the removed surface.
-    """
+    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     sink._columns = tuple(columns)  # noqa: SLF001 - internal value object seed
     sink._columns_resolved = True  # noqa: SLF001
     return sink

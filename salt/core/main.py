@@ -281,7 +281,7 @@ def _section_runs_mode(section: Mapping[str, Any], mode: Any) -> bool:
 
     Drives the implicit H5-sink wiring — a section with at least one
     TEST-mode writer needs the H5 persistence sink.
-    """
+    """  # noqa: DOC201 - private helper, no Returns block per docstring policy
     return any(
         callable(getattr(writer, "runs_in_mode", None)) and writer.runs_in_mode(mode)
         for writer in section.values()
@@ -295,7 +295,7 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     leaves (the manifest-only writers — input copies, pad masks — do not), so a
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple (matching a config that historically wired no OnnxExportSink).
-    """
+    """  # noqa: DOC201 - private helper, no Returns block per docstring policy
     from salt.core.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
 
     for writer in section.values():

@@ -13,7 +13,6 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.output_field import OutputField
 
-
 _OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
 """The YAML ``modes:`` vocabulary — ``test`` -> Mode.TEST, ``export`` -> Mode.ONNX."""
 
@@ -24,7 +23,7 @@ def parse_output_modes(modes: Any, who: str) -> Mode:
     ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the pre-plan-50
     default). A non-empty list of ``test``/``export`` names ORs into the flag.
     Raises `ConfigError` on an empty list or an unknown mode name (naming the key).
-    """
+    """  # noqa: DOC201, DOC501 - internal helper, no Returns/Raises blocks per docstring policy
     if modes is None:
         return Mode.TEST | Mode.ONNX
     names = [modes] if isinstance(modes, str) else list(modes)
@@ -69,11 +68,11 @@ class OutputSectionWriter(SaltModelModule):
         self._section_modes = parse_output_modes(modes, type(self).__name__)
 
     def section_modes(self) -> Mode:
-        """The Mode flag this writer runs in (``test`` -> TEST, ``export`` -> ONNX)."""
+        """The Mode flag this writer runs in."""  # noqa: DOC201 - getter, one-line
         return self._section_modes
 
     def runs_in_mode(self, mode: Mode) -> bool:
-        """Whether this writer participates in `mode` (per its ``modes:`` list)."""
+        """Whether this writer runs in `mode`."""  # noqa: DOC201 - getter, one-line
         return bool(mode & self._section_modes)
 
 

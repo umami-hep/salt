@@ -31,7 +31,7 @@ N_TEST = 300
 
 
 def _golden_task_columns() -> dict[str, list[str]]:
-    """Per-stream ordered flat TASK column names from the committed golden."""
+    """Per-stream ordered flat TASK column names from the committed golden."""  # noqa: DOC201
     golden = json.loads(GOLDEN.read_text())
     per_stream: dict[str, list[str]] = {}
     for col in golden["h5"]["columns"]:
@@ -48,7 +48,7 @@ def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str
     the trailing pad-mask column. Asserting the H5 dtype.names EQUAL this list
     (not merely contain it) enforces "no ADDED columns" — the exact Phase-C
     label-leak the gate forbids from landing early.
-    """
+    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     h5 = json.loads(GOLDEN.read_text())["h5"]
     tasks: dict[str, list[str]] = {}
     for col in h5["columns"]:
@@ -153,7 +153,10 @@ class TestImplicitSinkCliE2E:
         label-emission leak, or an accidental extra leaf — fails here.
         """
         with h5py.File(data["h5"]) as src:
-            src_cols = {"jets": list(src["jets"].dtype.names), "tracks": list(src["tracks"].dtype.names)}
+            src_cols = {
+                "jets": list(src["jets"].dtype.names),
+                "tracks": list(src["tracks"].dtype.names),
+            }
         expected = _expected_full_columns(src_cols)
         with h5py.File(cli_h5) as f:
             present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}

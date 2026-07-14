@@ -61,7 +61,7 @@ def _seeded(sink: H5OutputSink) -> H5OutputSink:
     Plan 50 Phase B retired the explicit-``outputs`` config table; OutputColumn is
     now the sink's INTERNAL value object. These white-box extra-group tests seed
     it directly instead of via the removed surface.
-    """
+    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     sink._columns = (OutputColumn(key="outputs.jets.cls", suffixes=["pb"]),)  # noqa: SLF001
     sink._columns_resolved = True  # noqa: SLF001
     return sink
