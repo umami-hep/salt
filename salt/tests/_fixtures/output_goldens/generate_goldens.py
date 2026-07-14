@@ -29,9 +29,26 @@ from typing import Any
 
 HEAD_SHA = "d848b61+phaseC"
 """Worktree state this golden set is anchored to (feature/one-class-per-file):
-the plan-50 Phase-C commit on top of d848b61 — adds the per-task TEST-mode
-target-label columns (``target_{task}`` / ``target_{task}_{target}``) to the
-H5 tables; ONNX tuples and FIT/VAL plans unchanged vs the Phase-A capture."""
+the plan-50 Phase-C commit on top of d848b61.
+
+vs a regen at the Phase-B tip (d848b61) the diff is STRICTLY the per-task
+TEST-mode target-label additions (``target_{task}`` / ``target_{task}_{target}``
+column + TEST-manifest entries, plus TEST plan hashes where labels are newly
+demanded); every ``onnx`` block and ONNX plan hash is byte-identical (verified
+programmatically 2026-07-14, all 30 capturable configs; GN2_muP exempt — mup
+not in salt-py314.sif).
+
+vs the committed Phase-A capture (3031dfb @ 96d88d8) the diff is NOT
+labels-only: Phase B (95d2934) rewrote the four gn2v2-dummy* configs (explicit
+sinks -> implicit dumb-section) WITHOUT regenerating goldens, so this regen
+also folds in that Phase-B re-anchoring — gn2v2-dummy{,-cutover,-onnx-fold}
+flip ``is_dumb_section`` false->true and re-key grouped OutputColumns to
+per-leaf entries (2->13 columns), and gn2v2-dummy's ONNX ``plan_hash`` changed
+(63a88656... -> 2e4171e3...) with the exported ONNX output tuple
+(names/dtypes/dynamic_axes) and flat H5 column names unchanged. To audit the
+Phase-C label delta in isolation, regen at d848b61 (``git archive d848b61 |
+tar -x`` into a scratch dir, run this script there with PYTHONPATH pointing at
+the extraction) and diff those files against these."""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
 CONFIG_DIR = REPO_ROOT / "core" / "configs"
