@@ -223,6 +223,71 @@ class TestSectionH5SelfConsistency:
         assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
         assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
 
+    def test_padded_vertex_index_is_int32_min_sentinel(self, section_h5):
+        """Padded positions carry the design §8 VertexIndex sentinel VALUE.
+
+        The union-find -inf padding int-casts to int32 min (-2147483648) —
+        asserted at value level (re-anchored from the retired
+        ``test_eval_file_v1_layout`` e2e), not just integer-dtype.
+        """
+        with h5py.File(section_h5) as f:
+            tracks = f["tracks"][:]
+        padded = tracks["mask"]
+        assert padded.any(), "fixture must contain padded track positions"
+        assert (tracks["VertexIndex"][padded] == np.int64(-2147483648)).all()
+        # valid positions never carry the sentinel
+        assert (tracks["VertexIndex"][~padded] != np.int64(-2147483648)).all()
+
+
+@pytest.mark.cpu_always
+class TestNoCkptFallback:
+    """``salt2 test`` without ``--ckpt_path`` (the v1 best-epoch glob).
+
+    Re-anchored from the retired ``test_no_ckpt_fallback_globs_v2_checkpoints``
+    / ``test_no_ckpt_needs_single_config_with_losses`` e2e pair; the glob
+    itself is unit-covered in ``test_main.py::TestBestCheckpointFallback``.
+    """
+
+    def test_globs_best_checkpoint_next_to_saved_config(self, data, ckpt, tmp_path):
+        """The saved run config alone drives eval: the fallback globs the
+        loss=-named checkpoint from the sibling ckpts/ dir and runs green.
+        """
+        assert "loss=" in ckpt.name  # the v1 Checkpoint filename contract
+        config = ckpt.parent.parent / "config.yaml"
+        assert config.is_file(), f"no saved run config next to {ckpt.parent}"
+        # declare an explicit H5 sink with a private output path so this eval
+        # cannot collide with the section_h5 fixture's file next to the ckpt
+        out = tmp_path / "fallback.h5"
+        sink = (
+            '{"class_path": "salt.core.outputs.H5OutputSink", '
+            f'"init_args": {{"output": "{out}"}}}}'
+        )
+        rc = main([
+            "test",
+            "--config",
+            str(config),
+            f"--data.test_file={data['h5']}",
+            f"--data.num_test={N_TEST}",
+            f"--callbacks.h5_output={sink}",
+            "--callbacks.progress=null",
+        ])
+        assert rc == 0
+        assert out.exists(), "the no-ckpt fallback eval wrote no H5"
+
+    def test_without_loss_named_checkpoints_fails_loudly(self, data, capsys):
+        """No loss=-named checkpoints next to the single --config -> rc 1
+        naming ckpt (the shipped config dir carries no ckpts/checkpoints).
+        """
+        rc = main([
+            "test",
+            "--config",
+            str(DUMMY_CFG),
+            f"--data.test_file={data['h5']}",
+            *_overrides(data),
+        ])
+        assert rc == 1
+        assert "ckpt" in capsys.readouterr().err
+
 
 @pytest.mark.cpu_always
 class TestColumnOrderDrivenBySection:

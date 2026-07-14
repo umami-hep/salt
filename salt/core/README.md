@@ -159,18 +159,19 @@ model:
 
 All existing modules survive the merge; the new task's label is demanded
 from the dataset automatically and its loss joins `loss.total` via the
-`losses.**` collection (design §3.3) — and the default `TaskWriter`
-(streams=null, onnx=true) persists its predictions in eval AND declares
-its ONNX output (`{model_name}_TrackType`, argmax int8) automatically —
-zero extra config, the M4.5 unified-manifest journey. If the aux head is
-a training-time regulariser that must NOT reach eval OR Athena, set
-`expose: [fit, val]` on the task (design §4.2): its prediction is gated out
-of the TEST/ONNX plans (the task is pruned there) while it keeps training.
-To keep it in eval but out of Athena only, narrow the export surface instead
-(`onnx_tasks:`/`onnx: false` on the TaskWriter) and check with
+`losses.**` collection (design §3.3). To persist its predictions in eval
+and declare its ONNX output, add the task name to a `RunTaskOutput`
+`tasks:` list in the top-level `outputs:` section (one line — see the
+evaluation section below); the per-mode rendering (prob columns in TEST,
+`{model_name}_TrackType` argmax int8 in ONNX) comes from the task's own
+`get_output`. If the aux head is a training-time regulariser that must NOT
+reach eval OR Athena, set `expose: [fit, val]` on the task (design §4.2):
+its prediction is gated out of the TEST/ONNX plans (the task is pruned
+there) while it keeps training. To keep it in eval but out of Athena only,
+list it in a `RunTaskOutput` with `modes: [test]` and check with
 `salt2 export --manifest`.
 
-## Evaluation: `salt2 test` + prediction writers (design §8)
+## Evaluation: `salt2 test` + the `outputs:` section (design §8, plan 50)
 
 ```bash
 salt2 test --config <run_dir>/config.yaml \
@@ -180,7 +181,7 @@ salt2 test --config <run_dir>/config.yaml \
 
 v1 ergonomics kept: the saved run `config.yaml` is the recommended single
 base — further `--config` override files and CLI flags stack on top of it
-exactly as for `fit` (the custom-writer journey below relies on this); one
+exactly as for `fit` (the custom-output journey below relies on this); one
 test file per call; logger off; single device forced. Without `--ckpt_path`
 the v1 best-epoch glob picks the lowest `loss=` checkpoint from `ckpts/`
 (v1 runs) or `checkpoints/` (v2 runs — `base2.yaml` names files
@@ -191,173 +192,174 @@ to the single `--config` — when stacking a second `--config`, pass
 test-file stem heuristic + `--data.test_suff`); the test plan/graph
 artifacts are written into the same directory.
 
-Prediction writing is modular: the top-level `writers:` block (deep-
-mergeable, like `callbacks:`) is assembled into one `WriterCallback`
-owning a single ftag `H5Writer` sink. `base2.yaml` ships the v1 layout —
-**dict order = per-group column order**:
+Prediction writing is declared in the top-level `outputs:` section (deep-
+mergeable, like `callbacks:`): an ORDERED dict of section writers
+(`salt.core.outputs.OutputSectionWriter` graph modules). The section says
+WHAT is written, and in which modes; the COMMAND wires the matching
+implicit sink (plan 50 Phase B): `salt2 test` instantiates the H5 sink
+(`salt.core.outputs.H5OutputSink`) over the section, and the ONNX parse
+folds an `OnnxExportSink` naming the export-mode leaves. Every model
+config defines its own section (`base2.yaml` ships none) — **dict order =
+per-group column order**, the v1 layout being:
 
 ```yaml
-writers:
-  output: "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
-  modules:
-    inputs_copy: {class_path: salt.core.writers.InputCopyWriter}  # source columns, source dtypes
-    tasks:       {class_path: salt.core.writers.TaskWriter}       # {run_name}_pb/... probs, VertexIndex
-    pad_mask:    {class_path: salt.core.writers.PadMaskWriter}    # bool 'mask', True = padded
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter  # source columns, source dtypes
+    init_args: {streams: [jets, tracks]}
+  run_tasks:
+    class_path: salt.core.outputs.RunTaskOutput    # {run_name}_pb/... probs, VertexIndex
+    init_args: {tasks: [jets_classification, track_origin, track_vertexing]}
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter    # bool 'mask', True = padded
+    init_args: {streams: [tracks]}
 ```
 
-Writers declare their consumed bundle keys (`requires`), making them
-first-class TEST-graph sinks: demand-gating keeps exactly the demanded
-producers alive, and a produced `preds.*` key consumed by **no** writer is
-a hard error (design §4.2) — narrowing `TaskWriter` streams and forgetting
-a task fails loudly (naming the producing task's config address and the
-narrowed writer's `streams` entry) instead of silently dropping columns.
-The same error fires statically from `salt2 graph validate`/`deadcode`.
-Deleting all writers is refused on the `salt2 test` path. A train-only aux
-task opts out of eval with the per-task `expose: [fit, val]` config (design
-§4.2): it stays trained (the loss is FIT/VAL anyway) while its `preds.*`
-port is gated out of the TEST/ONNX plans, so the planner prunes the task and
-the dead-preds error never fires. `--model.modules.<task>=null` (delete the
-task entirely) remains the heavier alternative.
+Section writers are first-class graph participants: `RunTaskOutput`
+requires each listed task's raw `preds.*` leaf (plus the task's
+`output_time_requires` — at minimum the stream pad mask), calls
+`task.get_output(bundle, mode, run_name)` and writes one
+`outputs.<stream>.<task>.<col>` leaf per returned `OutputField`; the
+sinks consume ONLY `outputs.*` leaves. Demand-gating keeps exactly the
+demanded producers alive, and a produced `preds.*` key consumed by **no**
+sink is a hard error (design §4.2) — narrowing a `RunTaskOutput` `tasks:`
+list and forgetting a task fails loudly instead of silently dropping
+columns. The same error fires statically from
+`salt2 graph validate`/`deadcode`. A `salt2 test` config without an
+`outputs:` section is refused, and a config still carrying the retired
+top-level `writers:` block fails with a clean migration `ConfigError`. A
+train-only aux task opts out of eval with the per-task
+`expose: [fit, val]` config (design §4.2): it stays trained (the loss is
+FIT/VAL anyway) while its `preds.*` port is gated out of the TEST/ONNX
+plans, so the planner prunes the task and the dead-preds error never
+fires. `--model.modules.<task>=null` (delete the task entirely) remains
+the heavier alternative.
 
-### Writers are the SINGLE output manifest (M4.5 unified manifest)
-
-Since the M4.5 amendment, the same writer declarations drive BOTH output
-modes — **TEST executes, ONNX declares**:
-
-- **TEST**: exactly as above — `requires`/`columns`/`write` run per batch.
-- **ONNX**: the writer is *read, never run* — `Writer.onnx_outputs(ctx)`
-  returns its export-manifest entries (M4 `ExportOutput` objects:
-  port + logical suffix(es) + registered reduce), and `salt2 export`
-  assembles `export.outputs` from them. There is no `export.outputs`
-  config section anymore (declaring one is a hard error pointing here).
-
-Naming policy (amendment §5): writers declare logical **suffixes**; the
-TEST column is `{run_name}_{suffix}` and the ONNX output is
-`{export.model_name}_{suffix}` — one declaration, two prefixes. For
-classification the suffix list is literally the `class_names`-derived list
-both modes share, so reordering classes moves eval columns AND Athena
-outputs together (the v1 eval-vs-ONNX vertex-naming drift class is
-unrepresentable). Cross-mode suffix constants live in
-`salt.core.outputs.names` (`VERTEX_INDEX` shared; the MaskFormer
-`OBJECT_INDEX` MaskIndex/HadronIndex pair is a pinned, documented v1
-divergence M5 must import).
-
-Per-writer ONNX participation (`TaskWriter`):
+Per-writer mode participation is the `modes:` list (plan 50): each
+section writer declares the modes it runs in — `test` (eval H5) and/or
+`export` (ONNX); omitted = both. A `modes: [test]` writer mints no ONNX
+leaves; an export-only writer contributes no eval columns.
+`gn2v2-dummy.yaml` splits its tasks across two writers to keep
+`track_origin` H5-only:
 
 ```yaml
-writers:
-  modules:
-    tasks:
-      class_path: salt.core.writers.TaskWriter
-      init_args:
-        onnx: true                       # default — eval-only with false
-        onnx_streams: [jets, tracks]     # stream-grained narrowing
-        onnx_tasks: [jets_classification, track_vertexing]  # task-grained
-        onnx_names: {track_origin: TrackLabel,              # str: aux rename
-                     jets_classification: [pb, pcharm, plight]}  # list: per-class
+outputs:
+  jets_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [jets_classification]}          # test + export (both)
+  origin_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [track_origin], modes: [test]}  # eval H5 only
 ```
 
 `InputCopyWriter`/`PadMaskWriter` are **eval-only** by design (Athena
-feeds the inputs; a pad-mask output has no consumer). The **export-only**
-direction is `salt.core.writers.ExportOnlyWriter`: subclass it and
-override `onnx_outputs` only — that explicit base class (the
-`export_only` flag) is THE blessed way to declare an Athena output with
-no eval analogue; a hand-rolled empty-columns writer with export entries
-is rejected, as is a writer with no role in either mode. **Export math is
-reduces only**: a custom writer's `write()` numpy never traces and never
-runs inside Athena, and every manifest entry names a reduce from the
-SHIPPED registry — `split_scalars`, `argmax`, `vertex_union_find`
-(`salt.core.onnx.config.KNOWN_REDUCES`, implemented in
-`salt.core.onnx.reduces`). A public registration surface for custom
-reduces is an M5 deliverable; until it lands, export-only writers compose
-the shipped reduces only.
+feeds the inputs; a pad-mask output has no consumer) — listing `export`
+in their `modes:` is inert. The explicit H5 sink config surface is
+RETIRED: wiring `H5OutputSink` with an explicit `OutputColumn` table is a
+hard error pointing back at the section mechanism. A config MAY still
+declare its own composable sink (the MaskFormer object sink, or an
+`OnnxExportSink` with explicit `OnnxExportLeaf` entries for outputs the
+section cannot mint — the MaskFormer object-reduce escape hatch); the
+command leaves declared sinks alone and only injects a sink type that is
+not already present.
 
-The assembled ONNX manifest is a FLAT namespace: two writers declaring
-one suffix is a hard error naming both (fix via `onnx_names:` or
-`export.rename:`). Inspect everything with `salt2 export --manifest`,
-`salt2 graph resolve [--annotate]`, or the manifest table appended to the
-export-time `plan_onnx.txt`.
+### The `outputs:` section is the SINGLE output manifest
 
-#### M4.5 amendment addendum — TaskWriter regression family (AM dec 4, settled M5)
+The same section drives BOTH output modes — **TEST executes into the H5
+sink, ONNX traces into the export tuple**. The per-mode split lives in
+each task's `get_output(bundle, mode, run_name) -> list[OutputField]`
+(and its value-free twin `get_output_manifest`, which gives the sinks the
+column schema before any batch runs): in TEST it returns the eval columns
+(softmaxed probs, de-scaled regression values, the int union-find
+`VertexIndex`, plus the per-task `target_{task}` label columns — default
+on, `write_targets: false` per task to disable); in ONNX it returns the
+Athena outputs (squeezed per-class scalar probs, argmax int8 indices).
+All conversions are traceable torch ops running INSIDE the graph — there
+is no off-graph numpy step between the model and either sink.
 
-`WriterCallback._validate_writer_roles` derives every writer's ONNX
-manifest on the TEST demand-assembly path too (`per_writer_demand` calls it
-during `salt2 test`), so a task family with a TEST representation but NO
-export representation would trip `TaskWriter.onnx_outputs`'s
-unsupported-family `ConfigError` during eval, not just at export. AM
-decision 4 left the M5 implementer two options when `TaskWriter` gains
-**regression**: keep the loud eval-time coupling, or derive only
-export-representable families (skip + deadcode finding).
+Naming policy: fields declare logical **suffixes**; the TEST column is
+`{run_name}_{suffix}` and the ONNX output is `{export.model_name}_{suffix}`
+— one declaration, two prefixes. For classification the suffix list is
+literally the `class_names`-derived list both modes share, so reordering
+classes moves eval columns AND Athena outputs together (the v1
+eval-vs-ONNX vertex-naming drift class is unrepresentable). Cross-mode
+suffix constants live in `salt.core.outputs.names` (`VERTEX_INDEX`
+shared; the MaskFormer `OBJECT_INDEX` MaskIndex/HadronIndex pair is a
+pinned, documented v1 divergence).
 
-**Decision (M5 sub-wave A foundation): derive a regression export
-representation — KEEP the loud error as the correct guard for genuinely
-unrepresentable families, and make scalar regression a supported family in
-BOTH modes so it never trips that error.** Rationale, grounded in AM dec 4
-+ the AM pre-implementation check (§"Pre-implementation check"): global
-scalar regression is *already export-representable in v1* — `RegressionTask`
-has `output_names` (one `{model_name}_{target}` column per target,
-`task.py:512-518`) and a `get_onnx` (one squeezed scalar per target via
-`torch.split`, `task.py:625-642`); the AM check explicitly flags "a plain
-global regression export (GN2X-class, one line in v1)" as the family that
-must NOT become a custom-writer authoring task. So "derive-only-export-
-representable" and "keep the loud error" are not in tension *for
-regression*: regression simply joins classification + vertexing as a
-representable family via its own `output_names`/`get_h5` (TEST) and
-`onnx_outputs` (ONNX, a `split_scalars`-style per-target manifest entry) on
-`RegressionTaskModule` (`salt/core/nn/tasks.py`; the per-family rendering
-lives on the TASK now, mirroring v1's `task.py` placement — `TaskWriter` is
-pure orchestration), built from ONE shared per-family suffix helper exactly
-as the amendment §2.2 single-ownership rule requires. The loud
-unsupported-family raises (`salt/core/nn/tasks.py`
-`_TaskModuleBase.output_names`/`get_h5`/`onnx_outputs`) stay — they remain
-the right error for a future family with no export math — but a regression
-config no longer reaches them.
+The assembled ONNX manifest is a FLAT namespace: two leaves minting one
+suffix is a hard error naming both (fix via `export.rename:`). Inspect
+everything with `salt2 export --manifest` (no checkpoint needed) or the
+manifest table appended to the export-time `plan_onnx.txt`.
 
-Consequence for A2: when `RegressionTaskModule` lands, the default
-`TaskWriter` formats it in TEST and ONNX, so `salt2 test` demand assembly
-does NOT crash on a regression config — the `_validate_writer_roles` check
-passes (the writer has a non-empty TEST demand AND a non-empty manifest).
-A regression task an author chooses NOT to export is still expressible
-(`onnx: false` / `onnx_tasks`): `onnx_outputs` returns `[]` before the
-family dispatch, so the eval-only shape (non-empty demand, empty manifest)
-is legal and never trips the raise. The narrow "TEST-representable but
-intentionally never export-representable" case is therefore served by
-explicit ONNX narrowing, not by silently skipping families.
+Every representable task family owns its export math ON THE TASK:
+classification (`ClassProbs`/`SeqClassProbs`/`SeqClassIndex` in
+`salt.core.outputs.task_output`), vertexing (in-graph union-find), and
+regression (`RegressionTaskModule.get_output` — de-scaled f4 columns in
+TEST, squeezed per-target scalars in ONNX) are all first-class in both
+modes. The legacy per-task rendering surface (`get_h5` / `output_names` /
+`onnx_outputs`) and the writer module family (`Writer` / `TaskWriter` /
+`ExportOnlyWriter` / `WriterCallback` under `salt.core.writers`) were
+retired in plan 50 Phase E; `salt/tests/unit/nn/test_get_output.py`
+carries the re-anchored per-family oracles.
 
 ### Add a custom output column (design §8)
 
-Subclass `salt.core.writers.Writer` and add four YAML lines under
-`writers.modules`. Complete worked example — one new `jets` column holding
-the first track's signed d0, resolved **by name**:
+Two extension seams, by scope:
+
+- **A new column family for a task** — implement it on the task:
+  `get_output(bundle, mode, run_name)` returns `OutputField`s (see
+  `salt/core/outputs/task_output.py` for the shared per-family value
+  helpers and `salt/core/nn/tasks/` for the shipped families). This is
+  the right seam when the column is a rendering of a task's prediction.
+- **A column not owned by any task** — write a custom section writer:
+  subclass `salt.core.outputs.OutputSectionWriter`, declare + produce an
+  `outputs.<stream>.<col>` leaf, and expose the manifest surface the dumb
+  sinks discover (`is_run_task_output()` returning True, plus
+  `manifest_fields(mode)` returning `(leaf_key, OutputField)` pairs — the
+  value-free column schema the H5 sink reads before any batch runs).
+
+Worked example — one new `jets` column counting each jet's valid tracks:
 
 ```python
-# my_writer.py
-import numpy as np
-from numpy.lib.recfunctions import unstructured_to_structured as u2s
-from salt.core.graph.spec import TensorSpec
-from salt.core.writers import Writer
+# my_output.py
+import torch
+from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.core.outputs import OutputField, OutputSectionWriter
+
+_LEAF = "outputs.jets.n_tracks_valid"
 
 
-class FirstTrackD0Writer(Writer):
-    DTYPE = np.dtype([("first_track_d0", "f4")])
+class ValidTrackCountWriter(OutputSectionWriter):
+    @staticmethod
+    def _field(value=None):
+        return OutputField(h5_name="n_tracks_valid", dtype="i4", axis="global",
+                           prefix=False, value=value)
 
-    def requires(self, ctx):  # static demand — keeps producers alive (§8)
-        return {"inputs.tracks": TensorSpec(dtype="float32", kind="data")}
+    def declare_io(self, mode: Mode) -> IO:
+        if not (self.runs_in_mode(mode) and mode & Mode.TEST):
+            return IO(requires={}, produces={})
+        req = {"masks.tracks": TensorSpec(shape=None, dtype="bool", kind="pad_mask")}
+        prod = {_LEAF: TensorSpec(shape=None, dtype=None, kind="data")}
+        return IO(requires=unflatten_spec(req), produces=unflatten_spec(prod))
 
-    def columns(self, ctx):  # output schema, declared before any batch
-        return {"jets": self.DTYPE}
+    def forward(self, b, mode: Mode):
+        mask = b.get("masks.tracks")  # True = padded
+        return {_LEAF: (~mask).sum(-1).to(torch.int32)}
 
-    def write(self, bundle, rows):
-        idx = self.ctx.feature_fields["inputs.tracks"].index("d0")
-        vals = bundle.get("inputs.tracks").cpu().numpy()[:, 0, idx : idx + 1]
-        return {"jets": u2s(vals.astype("f4"), self.DTYPE)}
+    def is_run_task_output(self) -> bool:
+        return True  # the dumb sinks source their column schema from these
+
+    def manifest_fields(self, mode: Mode):
+        if not (self.runs_in_mode(mode) and mode & Mode.TEST):
+            return []
+        return [(_LEAF, self._field())]
 ```
 
 ```yaml
-# add_writer.yaml — stack as a second --config on salt2 test
-writers:
-  modules:
-    first_d0: {class_path: my_writer.FirstTrackD0Writer}
+# add_output.yaml — stack as a second --config on salt2 test
+outputs:
+  n_valid: {class_path: my_output.ValidTrackCountWriter, init_args: {modes: [test]}}
 ```
 
 When stacking a second `--config` on `salt2 test`, pass `--ckpt_path`
@@ -365,11 +367,11 @@ explicitly: the best-checkpoint glob needs exactly ONE `--config` (it
 looks next to the saved run config), so the no-`--ckpt_path` shortcut and
 config stacking are mutually exclusive.
 
-Notes for writer authors:
+Notes for output authors:
 
 - **Importability**: `class_path` is resolved with a normal import, so the
   module must be on `sys.path` — run from the directory holding
-  `my_writer.py` or set `PYTHONPATH` (with apptainer:
+  `my_output.py` or set `PYTHONPATH` (with apptainer:
   `--env PYTHONPATH=/path/to/dir`).
 - **`requires` kinds** for dataset-served keys: `inputs.<stream>` →
   `TensorSpec(dtype="float32", kind="data")`, `masks.<stream>` →
@@ -377,12 +379,13 @@ Notes for writer authors:
   `TensorSpec(kind="label")`, `meta.rows` → `TensorSpec(shape=(2,),
   dtype="int64", kind="meta", modes=Mode.TEST)`. Model-produced keys
   (`preds.*`) take an unconstrained `TensorSpec(shape=None, dtype=None)`.
-- **`ctx.feature_fields`** maps bundle keys to their declared column names
-  (e.g. `"inputs.tracks"` → the configured `Features` variable order), so
-  feature columns are resolved by name, never by hard-coded index.
-- `bundle.get("dotted.key")` reads the executed TEST bundle; per-token
-  outputs must be padded to `ctx.seq_lengths[stream]` (see
-  `salt.core.writers.modules._pad_to`).
+- The section writer emits **torch values, never numpy**: the H5 sink
+  packs each demanded `outputs.*` leaf itself (global `[B]`/`[B, C]` and
+  per-token `[B, L]`/`[B, L, C]` shapes; per-token columns are zero-padded
+  to the file sequence length by the sink — `h5_sink._pad_to`).
+- Whole NON-reader output groups (e.g. the MaskFormer `objects`/
+  `object_masks` groups) go through the H5 sink's `extra_groups` seam
+  instead — see `MaskFormerObjects` + `H5OutputSink(extra_groups=[...])`.
 
 ## Static graph tooling (design §4)
 
@@ -392,16 +395,13 @@ files round-trip directly (`salt2 graph plot -c <run_dir>/config.yaml ...`
 — the run-surface `ckpt_path` key is accepted and ignored). `-c` is
 **repeatable** for trainer configs with the fit/export deep-merge semantics
 — the base + override pattern (e.g. the add-an-aux-task journey above) is
-statically inspectable without a prior fit; with `--annotate` the comment
-block goes into the LAST `-c` file. The parsed
-`writers:` block enters the static TEST graph exactly as at runtime, so
-`validate`/`deadcode` fire the dead-preds error for a narrowed writer set
-before anything runs. `validate` also runs the writer kind/dtype unification
-for TEST (design §2.7/§8 — the same `WriterCallback.validate_specs` check
-`salt2 test` setup runs): a writer declaring a require with a kind/dtype that
-contradicts its producing leaf (e.g. `preds.jets.classification` as
-`kind=label` where the task publishes `data`) is a hard error here, data-free,
-not only at `salt2 test` setup:
+statically inspectable without a prior fit. The parsed
+`outputs:` section (with its implicit command sinks) enters the static TEST
+graph exactly as at runtime, so `validate`/`deadcode` fire the dead-preds
+error for a narrowed section before anything runs, and the planner's
+kind/dtype unification rejects a require that contradicts its producing
+leaf (e.g. `preds.jets.classification` as `kind=label` where the task
+publishes `data`) — data-free, not only at `salt2 test` setup:
 
 ```bash
 salt2 graph validate -c salt/core/configs/gn2v2-dummy.yaml \
@@ -425,32 +425,33 @@ covering every module before any value is materialised. Unconsumed
 case, design §3.3) and never promoted, so `--strict` passes on a standard
 tagger config.
 
-**ONNX mode checks the unified manifest** (design §3.1/§4.1; M4.5): the
-static ONNX sinks are the union of the writers' declared `onnx_outputs`
-ports — exactly what `salt2 export` will trace — with errors attributed to
-the declaring writer (`writers.modules.<name>`). The export-only half of
-the `export:` block is validated as `salt2 export` does: an invalid
-`export.model_name` (`_`/`-`) is an error-level `validate` finding
-(`plan`/`plot`/`why --mode onnx` raise it), `rename:`/`combine:` are
-checked against the assembled manifest, and a legacy config still carrying
-`export.outputs` fails with the M4.5 migration error. A trainer config
-without an `export:` block keeps the writer-derived sinks but WARNS that
-inputs/model_name were unchecked (promoted under `--strict` — the §9.3
-converter CI gate expects converted configs to carry the block).
-Predictions narrowed out of the manifest (`onnx_streams`/`onnx_tasks`)
-show up as info-level ONNX deadcode findings (the §4.2 export-pruning
-story). Note the static ONNX plan/plot remain the **dataset-fed
-approximation** (reader/features included, no reduces); the authoritative
-rendering of the traced graph is the `plan_onnx.txt` that `salt2 export`
-writes next to `network.onnx` — the two plan hashes legitimately differ,
-and the CLI prints this caveat on `plan`/`plot --mode onnx`.
+**ONNX mode checks the unified manifest** (design §3.1/§4.1): the static
+ONNX sinks come from the implicit `OnnxExportSink` folded over the
+section's export-mode leaves — exactly what `salt2 export` will trace —
+with errors attributed to the declaring section writer (`outputs.<name>`).
+The export-only half of the `export:` block is validated as `salt2 export`
+does: an invalid `export.model_name` (`_`/`-`) is an error-level
+`validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
+`rename:`/`combine:` are checked against the assembled manifest, and a
+legacy config still carrying `export.outputs` fails with the migration
+error. A trainer config without an `export:` block keeps the
+section-derived sinks but WARNS that inputs/model_name were unchecked
+(promoted under `--strict` — the §9.3 converter CI gate expects converted
+configs to carry the block). Predictions narrowed out of the manifest (a
+`modes: [test]` writer, or a task listed in no export-mode
+`RunTaskOutput`) show up as info-level ONNX deadcode findings (the §4.2
+export-pruning story). Note the static ONNX plan/plot remain the
+**dataset-fed approximation** (reader/features included); the
+authoritative rendering of the traced graph is the `plan_onnx.txt` that
+`salt2 export` writes next to `network.onnx` — the two plan hashes
+legitimately differ, and the CLI prints this caveat on
+`plan`/`plot --mode onnx`.
 
-**`salt2 graph resolve -c <cfg> [--annotate]`** prints the writer-derived
-output manifest — eval columns per writer/stream AND the full ONNX output
-list (names, dtypes, reduces/combines) — and with `--annotate` writes it
-into the config as a refreshable comment block (the §4.4 labels precedent
-extended to the Athena surface): a reader of the YAML always sees what
-eval writes and what Athena gets, without running anything.
+**`salt2 graph resolve` was removed** with the `writers.modules` manifest
+that was its data source: to see what eval writes and what Athena gets,
+read the `outputs:` section directly, run
+`salt2 export --manifest -c <cfg>` (no checkpoint needed), or consult the
+manifest table in the export-time `plan_onnx.txt`.
 
 `salt2 graph plot` writes the §4.3 Graphviz `.dot` (port-card signature
 layout, namespace-coloured modules) and rasterises it to a PNG + sibling PDF
@@ -514,10 +515,11 @@ MaskFormer metrics (see `SaltModule._model_sinks`).
   error.
 - Loggers (Comet) and run dirs are M6; losses show on the stock progress
   bar meanwhile (`train/loss`, `train/<task>_loss`).
-- `TaskWriter` writes the vertexing column as bare `VertexIndex` (i8) by
-  default — the v1 byte-schema; the design §8 run-name prefix is opt-in via
-  `prefix_vertex_column: true` (default polarity to be revisited when v1
-  byte-parity gating retires — study CLAUDE.md TODO).
+- The vertexing `get_output` writes the eval column as bare `VertexIndex`
+  (i8) by default — the v1 byte-schema; the design §8 run-name prefix is
+  opt-in via `VertexingTaskModule`'s `prefix_vertex_column: true` (default
+  polarity to be revisited when v1 byte-parity gating retires — study
+  CLAUDE.md TODO).
 - Per-task `expose: [fit, val]` (design §4.2, M5 sub-wave D): a train-only
   aux task gates its `preds.*` port to the listed modes — `[fit, val]` prunes
   it from the TEST/ONNX plans (silencing the dead-preds error) while it keeps
@@ -542,15 +544,14 @@ salt2 export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
 # my_export_block.yaml carries ONLY the export: block below
 ```
 
-The export contract has two halves (M4.5 unified manifest, "one manifest
-and a half"):
+The export contract has two halves ("one manifest and a half"):
 
-1. **The outputs come from the writers** (the same declarations that name
-   the eval columns — see the writers section above). There is NO
-   `export.outputs` section: a config declaring one fails with the M4.5
-   migration error. Inspect the assembled manifest any time with
-   `salt2 export --manifest -c <config>` (no checkpoint needed) or
-   `salt2 graph resolve [--annotate]`.
+1. **The outputs come from the `outputs:` section** (the same declarations
+   that name the eval columns — see the evaluation section above): the
+   export-mode selection is folded into the implicit `OnnxExportSink`.
+   There is NO `export.outputs` section: a config declaring one fails with
+   the migration error. Inspect the assembled manifest any time with
+   `salt2 export --manifest -c <config>` (no checkpoint needed).
 2. **The export-only half** lives in the **`export:` block** (top-level,
    shipped in the gn2v2 configs; parsed by the normal salt2 surface so it
    round-trips through saved run configs):
@@ -562,9 +563,9 @@ export:
   inputs:
     - { port: inputs.jets, name: jet_features } # [1, F] global
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # optional Athena-presentation post-processing of the writer manifest
+  # optional Athena-presentation post-processing of the output manifest
   # (the v1 --rename/--combine_outputs features — readers of exotic
-  # configs consult the writers AND these two keys):
+  # configs consult the outputs: section AND these two keys):
   rename: { pu: plight } # old suffix -> new (existence-checked)
   combine: # new output = sum(scale * existing GLOBAL output)
     - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
@@ -572,27 +573,29 @@ export:
 
 How it works (no data file is touched — config + checkpoint only):
 
-- The **ONNX plan** is compiled with the writer-manifest ports as sinks —
-  labels/losses/the writers' own TEST role are demand-pruned
-  automatically; sources mirror the `Features` declaration
-  (widths/columns from `variables:`).
+- The **ONNX plan** is compiled with the folded `OnnxExportSink`'s
+  demanded `outputs.*` leaves as sinks — labels/losses/the section's
+  TEST-only leaves are demand-pruned automatically; sources mirror the
+  `Features` declaration (widths/columns from `variables:`).
 - The **`OnnxAdapter`** wrapper assembles the bundle in-graph (sequences
   `[L, F]` -> `[1, L, F]` + all-valid pad masks — the v1 traced pattern),
   executes the frozen plan, and emits the flat output tuple. Every module
   recursively receives `set_export_mode()` (the encoder forces torch-math
   attention — the Athena-agreement requirement).
-- **Reduces** (`split_scalars`, `argmax`, `vertex_union_find`) generate the
-  output names/dtypes/dynamic axes from the manifest entries; union-find
-  runs INSIDE the traced graph on the raw edge scores the vertexing task
-  publishes in ONNX mode (design §3.3 per-family exception). MaskFormer
-  reduces are M5.
+- **Per-family conversions** (squeezed per-class scalar probs, argmax
+  int8 indices, union-find) run INSIDE the traced graph via each task's
+  `get_output`; the folded sink does no math — it only NAMES the resulting
+  `outputs.*` leaves (with their dtypes and dynamic axes) into the flat
+  Athena tuple. Union-find runs on the raw edge scores the vertexing task
+  publishes in ONNX mode (design §3.3 per-family exception).
 - **`rename:`/`combine:`** post-process the manifest with v1 semantics:
   renames apply first (existence-checked), combined outputs are linear
   combinations of the (renamed) GLOBAL float outputs computed inside the
   traced graph, and they insert after the global entries but BEFORE the
-  per-token aux entries — the v1 output order (`to_onnx.py:258-292`,
-  `combine_insertion_index`). Both are recorded in `gnn_config`
-  byte-compatibly with v1 (`combine_outputs`/`rename_outputs`).
+  per-token aux entries — the v1 output order, owned by the
+  `OnnxExportSink` tuple assembly (globals → combines → per-token aux).
+  Both are recorded in `gnn_config` byte-compatibly with v1
+  (`combine_outputs`/`rename_outputs`).
 - **Multi-stream trace-safety** (design risk 7, adjudicated): eager `Split`
   slicing is wrong under tracing with ≥2 dynamic sequence axes; in ONNX
   mode `Concat` publishes a `seq.offsets` boundary tensor and `Split`
@@ -613,8 +616,8 @@ How it works (no data file is touched — config + checkpoint only):
 - **Artifacts**: alongside `network.onnx` the exporter writes
   `plan_onnx.txt` — the §4.4 plan table of the graph Athena will actually
   run (union-find placement, `Split` `index_select` mechanism) PLUS the
-  writer-derived output-manifest table. This is the authoritative ONNX
-  plan; `salt2 graph plan --mode onnx` shows the dataset-fed static
+  output-manifest table. This is the authoritative ONNX plan;
+  `salt2 graph plan --mode onnx` shows the dataset-fed static
   approximation.
 - **Expected console output**: a clean export prints NO trace warnings.
   The torch `aten::index ... indices of type Byte` UserWarning (raised on
@@ -624,9 +627,9 @@ How it works (no data file is touched — config + checkpoint only):
   proof the traced graph is correct.
 
 Programmatic surface for gates/tests (no checkpoint needed):
-`salt.core.onnx.export_graph(modules, export_cfg, variables, path,
-outputs=<manifest>)` (`outputs` = the writer-derived `ExportOutput` list,
-e.g. `WriterCallback.onnx_manifest(...)` or `gates_m4.writer_manifest`) +
+`salt.core.onnx.export_graph(modules, export_cfg, variables, path)` — the
+output set derives from the folded `OnnxExportSink` in `modules`; passing
+a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
 `salt.core.onnx.check_onnx(adapter, path, ...)`.
 
 ## Checkpoints and resume (design §2.3)
@@ -637,37 +640,14 @@ top-level `salt_core` key. On resume, a FIT plan-hash mismatch is fatal
 come from the state dict — the norm/class dicts are NOT re-read.
 Data-less loading: `SaltModule.load_from_checkpoint(path, modules=...)`.
 
-## Parity and gate harnesses (design §9.5)
+## Parity and gate harnesses (design §9.5) — RETIRED
 
-Four standalone v1-vs-v2 harnesses, each `python -m` runnable, each writing
-a `<gate>_report.json` + stdout table and exiting non-zero on failure:
-
-- `python -m salt.core.parity_gn2 --outdir ...` — bitwise forward parity on
-  a weight-shared GN2 (M1/M2 baseline; must stay exit 0).
-- `python -m salt.core.gates_m2 {g1..g5} ...` — dataset parity, fit smoke,
-  loss-curve parity, throughput, resume round-trip (plan 05).
-- `python -m salt.core.gates_m3 {w1..w5} ...` — the writer/eval milestone
-  (plan 06): `w1` v1-PredictionWriter vs `salt2 test` output-file parity on
-  a dummy file (byte-schema + values; default batch 96 deliberately
-  exercises the partial final batch; `w2` the same on a real file via
-  `--file/--norm-dict`), `w3` negative controls (TEST dead-preds hard error
-  + a corrupted comparison must fail), `w4` the custom-writer four-line
-  override journey, `w5` ConfusionMatrix v1/v2 value parity (with a
-  prediction-diversity non-degeneracy bar). Dummy-file gates generate their
-  data into `--outdir` when no `--file` is given.
-- `python -m salt.core.gates_m4 {o1..o5} --outdir ...` — the ONNX-export
-  milestone (plan 07; NO data needed — fixtures are built in `--outdir`):
-  `o1` v2-torch vs v2-ONNX over the full L=0..39 sweep incl. L=0 at the
-  1e-6 bar (v1 ships 1e-4), `o2` v1-ONNX vs v2-ONNX output identity on the
-  same weights (bitwise on the GN2 fixture) + IO/dynamic-axes/`gnn_config`
-  contract equality, `o3` two independent dynamic sequence axes over a
-  (L_trk, L_el) grid incl. zeros — the design risk-7 blocker, with a v1
-  eager cross-check and the `Concat seq.offsets -> Split index_select`
-  mechanism recorded from the compiled plan, `o4` VertexIndex triple
-  identity (v1-ONNX == v2-ONNX == the v1 torch union-find chain,
-  int8-exact, multi-vertex non-degeneracy bar), `o5` negative controls
-  (corrupted weights fail the checker; `model_name` rule) + `gnn_config`
-  byte-comparison vs v1 (13-key ordered prefix + additive trailing
-  `plan_hash`). The untrained fixture heads are mean-centered before the
-  weight transfer (`_decollapse_v1_heads`) so the int8 comparisons have
-  discriminating power.
+The standalone v1-vs-v2 migration harnesses (`parity_gn2`, `gates_m2`,
+`gates_m3`, `gates_m4`, `gates_m6` + their pytest wrappers) served the
+migration waves and are retired per the parity-closure doctrine above —
+they ran green at the frozen pin and live in git history (the m2/m3/m6
+sweep closed at `1190d7f`; `git checkout 29c67a1` for the full v1-vs-v2
+set). Live coverage of the same surfaces is the ordinary test suite:
+`salt/tests/unit` (CPU-safe) and `salt/tests/integration` (the
+end-to-end fit/test/export flows, e.g. `test_outputs_section.py`,
+`test_onnx_export.py`, `test_regression_e2e.py`).

@@ -13,7 +13,13 @@ from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 from salt.core.callbacks import Checkpoint, ProgressBar
 from salt.core.config_utils import disable_logger_in_config
 from salt.core.data import GraphDataModule
-from salt.core.main import CONFIG_DIR, Salt2CLI, main
+from salt.core.graph.errors import ConfigError
+from salt.core.main import (
+    CONFIG_DIR,
+    Salt2CLI,
+    _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
+    main,
+)
 from salt.core.nn.tasks import ClassificationTaskModule
 from salt.core.saltmodule import SaltModule
 from salt.core.schema import dump_schema, save_schema
@@ -390,6 +396,52 @@ class TestFitSmoke:
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
 
 
+class TestBestCheckpointFallback:
+    """The salt2-test no-``--ckpt_path`` fallback: ``_best_checkpoint`` globs
+    ``{ckpts,checkpoints}/*.ckpt`` next to the saved config and picks the
+    lowest embedded ``loss=`` (v1 best-epoch contract).
+    """
+
+    @staticmethod
+    def _config(tmp_path) -> Path:
+        config = tmp_path / "config.yaml"
+        config.write_text("{}")
+        return config
+
+    def test_picks_lowest_loss_across_both_dirs(self, tmp_path, capsys):
+        """Scans BOTH ckpts/ (v1 runs) and checkpoints/ (Lightning default)."""
+        config = self._config(tmp_path)
+        (tmp_path / "ckpts").mkdir()
+        (tmp_path / "checkpoints").mkdir()
+        (tmp_path / "ckpts" / "epoch=000-loss=0.75.ckpt").touch()
+        (tmp_path / "ckpts" / "epoch=001-loss=0.50.ckpt").touch()
+        (tmp_path / "checkpoints" / "epoch=002-loss=0.25.ckpt").touch()
+        best = _best_checkpoint(config)
+        assert best == str(tmp_path / "checkpoints" / "epoch=002-loss=0.25.ckpt")
+        assert best in capsys.readouterr().out  # the chosen path is announced
+
+    def test_non_loss_named_files_are_skipped(self, tmp_path):
+        """A last.ckpt without a loss= stem never wins over a scored one."""
+        config = self._config(tmp_path)
+        (tmp_path / "ckpts").mkdir()
+        (tmp_path / "ckpts" / "last.ckpt").touch()
+        (tmp_path / "ckpts" / "epoch=000-loss=1.5.ckpt").touch()
+        assert _best_checkpoint(config).endswith("epoch=000-loss=1.5.ckpt")
+
+    def test_no_loss_named_checkpoints_raises_config_error(self, tmp_path):
+        """No loss=-named checkpoint anywhere -> loud ConfigError naming --ckpt_path."""
+        config = self._config(tmp_path)
+        (tmp_path / "ckpts").mkdir()
+        (tmp_path / "ckpts" / "last.ckpt").touch()  # present but unscoreable
+        with pytest.raises(ConfigError, match="ckpt_path"):
+            _best_checkpoint(config)
+
+    def test_missing_ckpt_dirs_raise_config_error(self, tmp_path):
+        """A config with no ckpts/checkpoints sibling dirs at all -> same error."""
+        with pytest.raises(ConfigError, match="loss="):
+            _best_checkpoint(self._config(tmp_path))
+
+
 # graph/schema dispatch (the M1 tooling keeps working through salt2)
 
 
@@ -562,8 +614,8 @@ class TestGraphFitConfigAdapter:
         ])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "REMOVED by the M4.5" in err
-        assert "writers" in err
+        assert "export.outputs was REMOVED" in err
+        assert "OnnxExportSink" in err  # the migration error names the live mechanism
 
     def test_validate_writers_block_raises_clean_migration_error(self, tmp_path, capsys):
         # W6c removal: a config carrying a live top-level writers: block (a real

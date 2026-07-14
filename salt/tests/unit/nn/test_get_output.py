@@ -508,6 +508,29 @@ def test_vtx_get_output_test_matches_literal_union_find_chain():
     )
 
 
+def test_vtx_get_output_test_padded_positions_carry_int32_min_sentinel():
+    """Vertexing (TEST) with PADDED tracks: the padded fill path at value level.
+
+    The union-find chain fills padded positions with -inf, which the eval int
+    cast turns into int32 min (-2147483648, the design §8 sentinel); valid
+    positions carry non-negative vertex indices, never the sentinel.
+    """
+    module = _bind_vertexing()
+    gen = torch.Generator().manual_seed(11)
+    n_tracks, n_valid = 5, 3
+    mask = torch.zeros(1, n_tracks, dtype=torch.bool)
+    mask[0, n_valid:] = True  # last two tracks padded
+    # one edge score per ordered pair of VALID tracks (compressed adjacency)
+    edge_scores = torch.rand(n_valid * (n_valid - 1), 1, generator=gen)
+
+    (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.TEST, _RUN)
+    values = field.value.reshape(-1)
+    flat_mask = mask.reshape(-1)
+    sentinel = torch.tensor(-2147483648, dtype=values.dtype)
+    assert (values[flat_mask] == sentinel).all(), values
+    assert (values[~flat_mask] >= 0).all(), values  # valid: vertex ids, no sentinel
+
+
 def test_vtx_get_output_manifest_mirrors_get_output():
     """Vertexing `get_output_manifest` == `get_output` field metadata (value-free)."""
     module = _bind_vertexing()

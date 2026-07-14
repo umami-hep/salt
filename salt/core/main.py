@@ -430,11 +430,11 @@ class Salt2CLI(LightningCLI):
             type=ExportConfig | None,
             default=None,
             help="the export-ONLY half of the ONNX contract, consumed by `salt2 export` "
-            "(design §5.1, §7; M4.5): model_name (no '_'/'-', validated ONLY at export "
+            "(design §5.1, §7): model_name (no '_'/'-', validated ONLY at export "
             "time), inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
-            "manifest post-processing. The OUTPUT manifest derives from writers.modules "
-            "(M4.5 unified manifest) — declaring export.outputs is a hard error at export "
-            "time. Inert during fit/test; round-trips through saved run configs.",
+            "manifest post-processing. The OUTPUT manifest derives from the outputs: "
+            "section's export-mode selection — declaring export.outputs is a hard error "
+            "at export time. Inert during fit/test; round-trips through saved run configs.",
         )
         parser.add_argument(
             f"--{_CLASS_DICT_ARG}",
