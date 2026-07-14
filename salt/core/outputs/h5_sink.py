@@ -284,6 +284,11 @@ class H5OutputSink(_SinkCallback):
         # args are the OVERRIDE used when no section is bound. One of the two MUST
         # resolve at run setup.
         self._output_section: Mapping[str, Any] | None = None
+        # which section selection the columns resolve from: Mode.TEST (the
+        # `salt2 test` eval schema, the default) or Mode.ONNX (`salt2 inference`
+        # writes STRICTLY the export output set — plan 50 Phase D, via
+        # `use_export_selection`).
+        self._section_mode: Mode = Mode.TEST
         self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
         # dumb-section copy resolution: None until a section binds; True means
         # "copy every stream with a configured task" (v1 default, resolved at
@@ -325,6 +330,18 @@ class H5OutputSink(_SinkCallback):
 
     # -- dumb-section binding -------------------------------------
 
+    def use_export_selection(self) -> None:
+        """Switch the section-derived selection to the EXPORT (``Mode.ONNX``) set.
+
+        Plan 50 Phase D — ``salt2 inference`` writes STRICTLY the export
+        output set to H5: columns resolve from ``manifest_fields(Mode.ONNX)``
+        (one single-suffix column per ONNX leaf, named by the field's resolved
+        ONNX name), and the section's copy/mask writers contribute only when
+        their ``modes:`` include ``export``. Call BEFORE `bind_output_section`.
+        """
+        self._section_mode = Mode.ONNX
+        self._columns_resolved = False
+
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
         """Capture the ``outputs:`` section so the dumb sink dumps its leaves.
 
@@ -334,14 +351,21 @@ class H5OutputSink(_SinkCallback):
         its column schema + input-copy spec + pad-mask streams from the
         SECTION manifest in SECTION DECLARATION ORDER (the H5 column-order
         authority) — the constructor knobs are ignored. The section is bound
-        by the planner/SaltModule after the model.
+        by the planner/SaltModule after the model. A copy/mask writer whose
+        ``modes:`` list excludes this sink's selection mode contributes
+        nothing (an export-only copy writer never adds ``salt2 test`` columns,
+        and a test-only one never adds ``salt2 inference`` columns).
         """
         self._output_section = section
         # the section drives copy_inputs + write_pad_mask too (override the ctor
-        # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter.
+        # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter
+        # that RUN in this sink's selection mode.
         copy_inputs: dict[str, list[str]] = {}
         mask_streams: list[str] = []
         for writer in section.values():
+            runs_in_mode = getattr(writer, "runs_in_mode", None)
+            if callable(runs_in_mode) and not writer.runs_in_mode(self._section_mode):
+                continue
             if callable(getattr(writer, "copy_spec", None)):
                 spec = writer.copy_spec()
                 streams = spec.get("streams")
@@ -404,47 +428,65 @@ class H5OutputSink(_SinkCallback):
             "(plan 34 W34.2)"
         )
 
+    def _column_suffix(self, field: Any) -> str | None:
+        """The field's column suffix under this sink's selection mode, or None.
+
+        TEST keeps fields with an ``h5_name`` (the eval schema); the export
+        selection (``Mode.ONNX``) keeps fields with a resolved ONNX name — the
+        EXACT selection rule the `OnnxExportSink` tuple uses, so the inference
+        H5 columns are 1:1 with the ONNX tuple by construction.
+        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        if self._section_mode is Mode.TEST:
+            return field.h5_name
+        return field.resolved_onnx_name
+
     def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve H5 columns from the bound ``outputs:`` section manifest.
 
-        Walks the section's `RunTaskOutput` writers' ``manifest_fields(Mode.TEST)``
-        (value-free `OutputField` metadata) in SECTION DECLARATION ORDER, keeps
-        the FINAL fields with an ``h5_name``, and assembles ONE `OutputColumn`
-        per ``outputs.*`` leaf (suffixes in field order). The SECTION field
-        order is the H5 column order authority (not executor topo order).
-        Caches the resolved table (run-name-stable). The section's
-        InputCopyWriter/PadMaskWriter contribute their columns through the
-        copy / mask paths (`_merge_columns`), not here.
+        Walks the section's `RunTaskOutput` writers'
+        ``manifest_fields(<selection mode>)`` (value-free `OutputField`
+        metadata, ``Mode.TEST`` unless `use_export_selection` switched to
+        ``Mode.ONNX``) in SECTION DECLARATION ORDER, keeps the FINAL fields the
+        selection names (`_column_suffix`), and assembles ONE `OutputColumn`
+        per ``outputs.*`` leaf (suffixes in field order; export-mode leaves are
+        single-suffix by construction). The SECTION field order is the H5
+        column order authority (not executor topo order). Caches the resolved
+        table (run-name-stable). The section's InputCopyWriter/PadMaskWriter
+        contribute their columns through the copy / mask paths
+        (`_merge_columns`), not here.
 
         Raises
         ------
         ConfigError
-            When the section mints no final H5 task column, or two leaves
-            mint the same flat H5 column.
+            When the section mints no final task column for the selection, or
+            two leaves mint the same flat H5 column.
         """
-        by_key: dict[str, list[Any]] = {}
+        by_key: dict[str, list[tuple[str, Any]]] = {}
         key_order: list[str] = []
         for run_task in self._run_task_outputs():
-            for output_key, field in run_task.manifest_fields(Mode.TEST):
-                if field.h5_name is None:
+            for output_key, field in run_task.manifest_fields(self._section_mode):
+                suffix = self._column_suffix(field)
+                if suffix is None:
                     continue
                 if output_key not in by_key:
                     by_key[output_key] = []
                     key_order.append(output_key)
-                by_key[output_key].append(field)
+                by_key[output_key].append((suffix, field))
         if not key_order:
             raise ConfigError(
-                "H5OutputSink (dumb-section) found no RunTaskOutput task with a final H5 column — "
-                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2)"
+                "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "
+                f"{'export-selection' if self._section_mode is Mode.ONNX else 'H5'} column — "
+                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2; for "
+                "salt2 inference the RunTaskOutput's modes: list must include 'export')"
             )
         seen_cols: dict[tuple[str, str], str] = {}
         columns: list[OutputColumn] = []
         for output_key in key_order:
-            fields = by_key[output_key]
+            pairs = by_key[output_key]
             stream = output_key.split(KEY_SEP)[1]
-            prefix = fields[0].prefix
-            dtype = fields[0].dtype
-            suffixes = [f.h5_name for f in fields]
+            prefix = pairs[0][1].prefix
+            dtype = pairs[0][1].dtype
+            suffixes = [suffix for suffix, _ in pairs]
             col = OutputColumn(key=output_key, suffixes=suffixes, dtype=dtype, prefix=prefix)
             for column_name in col.column_names(run_name):
                 if (other := seen_cols.get((stream, column_name))) is not None:

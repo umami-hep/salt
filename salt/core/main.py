@@ -1,8 +1,8 @@
 """``salt2`` entry point — the jsonargparse YAML CLI for salt v2.
 
 ``salt2 fit``/``test`` go through `Salt2CLI` (`LightningCLI` over `SaltModule`
-+ `GraphDataModule`); ``salt2 graph``/``schema``/``export``/muP tooling
-dispatch to their own mains.
++ `GraphDataModule`); ``salt2 graph``/``schema``/``export``/``inference``/muP
+tooling dispatch to their own mains.
 """
 
 from __future__ import annotations
@@ -71,6 +71,7 @@ CONFIG_DIR = Path(__file__).parent / "configs"
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
 _EXPORT_COMMAND = "export"
+_INFERENCE_COMMAND = "inference"
 
 
 def _needs_logger(callback: Any) -> bool:
@@ -731,10 +732,11 @@ def main(args: Sequence[str] | None = None) -> int:
     """``salt2`` console entry point.
 
     ``salt2 graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
-    the static graph + muP tooling (`salt.core.cli.main`) and ``salt2 export``
-    to the ONNX exporter; everything else goes to `Salt2CLI` (``salt2
-    fit``/``test``). Graph errors (`GraphError`) print as a clean one-block
-    form on stderr instead of a Python traceback.
+    the static graph + muP tooling (`salt.core.cli.main`), ``salt2 export``
+    to the ONNX exporter, and ``salt2 inference`` to the eager export-set
+    runner; everything else goes to `Salt2CLI` (``salt2 fit``/``test``).
+    Graph errors (`GraphError`) print as a clean one-block form on stderr
+    instead of a Python traceback.
 
     Raises
     ------
@@ -751,6 +753,13 @@ def main(args: Sequence[str] | None = None) -> int:
         from salt.core.onnx import export as onnx_export  # noqa: PLC0415 - heavy, export-only
 
         return onnx_export.main(argv[1:])
+    if argv and argv[0] == _INFERENCE_COMMAND:
+        # trainer-free like export: inference executes the export-mode plan
+        # eagerly per jet (plan 50 Phase D), so it dispatches to its own main
+        # rather than a Lightning Trainer subcommand.
+        from salt.core import inference as inference_cli  # noqa: PLC0415 - heavy, eager-only
+
+        return inference_cli.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
         with warnings.catch_warnings():
@@ -765,7 +774,9 @@ def main(args: Sequence[str] | None = None) -> int:
                 "why/deadcode/resolve, design §4), 'salt2 schema --help' (schema artifacts, "
                 "§2.6), 'salt2 mup-shapes --help' / 'salt2 mup-coord-check --help' (muP base/"
                 "delta infshapes + coord-check, design §3.4), 'salt2 export --help' (ONNX "
-                "export, §7; --manifest prints the writer-derived output manifest)"
+                "export, §7; --manifest prints the writer-derived output manifest), "
+                "'salt2 inference --help' (label-free eager inference: the export output "
+                "set written to H5, plan 50)"
             )
         raise
     except GraphError as err:

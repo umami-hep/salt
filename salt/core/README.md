@@ -252,9 +252,12 @@ outputs:
     init_args: {tasks: [track_origin], modes: [test]}  # eval H5 only
 ```
 
-`InputCopyWriter`/`PadMaskWriter` are **eval-only** by design (Athena
-feeds the inputs; a pad-mask output has no consumer) — listing `export`
-in their `modes:` is inert. The explicit H5 sink config surface is
+`InputCopyWriter`/`PadMaskWriter` mint no ONNX leaves (Athena feeds the
+inputs; a pad-mask output has no Athena consumer) — but their `modes:`
+list is NOT inert: it decides whether they add copy/mask columns to the
+`salt2 inference` H5 (which writes the export selection; omitted `modes:`
+= both, so they run there by default; `modes: [test]` keeps them
+eval-only). The explicit H5 sink config surface is
 RETIRED: wiring `H5OutputSink` with an explicit `OutputColumn` table is a
 hard error pointing back at the section mechanism. A config MAY still
 declare its own composable sink (the MaskFormer object sink, or an
@@ -386,6 +389,48 @@ Notes for output authors:
 - Whole NON-reader output groups (e.g. the MaskFormer `objects`/
   `object_masks` groups) go through the H5 sink's `extra_groups` seam
   instead — see `MaskFormerObjects` + `H5OutputSink(extra_groups=[...])`.
+
+## Inference: `salt2 inference` — the export set, offline (plan 50 Phase D)
+
+```bash
+salt2 inference --ckpt_path <run_dir>/checkpoints/....ckpt \
+  --data.test_file /tmp/v2/unlabelled.h5
+# config inferred at <ckpt>/../../config.yaml (pass -c to override; -c stacks
+# like fit); output defaults to {ckpt_dir}/{ckpt_stem}__inference_{sample}.h5
+```
+
+**`salt2 inference` == Athena semantics by construction.** The command is
+STRICTLY the export output set written to H5 (plan 50 decision 2 — no
+separate config surface): it compiles the SAME `Mode.ONNX` plan `salt2
+export` traces (the section's export-mode `OutputField` selection, via the
+implicit `OnnxExportSink`) and executes it eagerly per jet through the
+`OnnxAdapter` — the exact eager reference the post-export `check_onnx`
+sweep certifies against onnxruntime. Each jet is fed Athena-style (valid
+tokens only, all-valid mask), so the H5 values match what Athena computes
+from the exported network, at the checker tolerance. One H5 column per
+ONNX tuple output, named `{run_name}_{suffix}` for tuple output
+`{model_name}_{suffix}` (e.g. the seq-classification argmax lands as one
+int8 `TrackOrigin` column, not per-class probs); per-token columns are
+zero-padded to the file length, with the `mask` column marking pads.
+
+**Label-free.** The dataset demand is derived from `export.inputs` alone
+(feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
+demanded, so the command runs unchanged on a label-stripped file (the
+`Labels` producer narrows to nothing; Phase C keeps export-mode
+`get_output` label-free on the task side). No `target_{task}` columns are
+written. `InputCopyWriter`/`PadMaskWriter` participate iff their `modes:`
+include `export` (the default) — input copies re-read source columns by
+row, which is file content, not label demand.
+
+What governs participation is the single `modes:` surface: `export` in a
+`RunTaskOutput`'s modes list puts its tasks in the ONNX tuple AND the
+inference H5; `modes: [test]` keeps them eval-only. A config whose section
+mints no export-mode field is refused (there is nothing Athena-visible to
+write). The explicit `OnnxExportLeaf` escape hatch (MaskFormer object
+reduces) has no H5 counterpart here and is out of scope. Note the eager
+loop runs per jet (the ONNX-mode graph branches assume the Athena calling
+convention) — for bulk labelled evaluation use `salt2 test`; this command
+is the offline twin of the deployed network.
 
 ## Static graph tooling (design §4)
 
