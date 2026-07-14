@@ -13,19 +13,8 @@ import numpy as np
 
 
 def as_half(typestr: Any) -> np.dtype:
-    """Return a NumPy dtype, “casting” float16-like specifiers to half precision.
-
-    Parameters
-    ----------
-    typestr : Any
-        Any object understood by :class:`numpy.dtype` (e.g., ``"f2"``, ``np.float16``,
-        or an existing dtype).
-
-    Returns
-    -------
-    numpy.dtype
-        If ``typestr`` corresponds to a floating type of itemsize ``2`` bytes, returns
-        ``np.dtype("f2")``; otherwise returns the dtype constructed from ``typestr``.
+    """Cast a float16-like dtype specifier to half precision (``f2``); other dtypes pass
+    through unchanged.
     """
     t = np.dtype(typestr)
     if t.kind != "f" or t.itemsize != 2:
@@ -34,22 +23,8 @@ def as_half(typestr: Any) -> np.dtype:
 
 
 def get_dtype(ds: h5py.Dataset, variables: Iterable[str] | None = None) -> np.dtype:
-    """Return a structured dtype based on an existing dataset and requested variables.
-
-    Parameters
-    ----------
-    ds : h5py.Dataset
-        Input dataset providing the source structured dtype (``ds.dtype``).
-    variables : Iterable[str] | None, optional
-        Variable names to include in the returned dtype. If ``None``, use
-        ``ds.dtype.names``. If the dataset contains a ``"valid"`` field and
-        it is not listed, it will be appended automatically.
-
-    Returns
-    -------
-    numpy.dtype
-        Structured dtype consisting of the requested fields. Each field's
-        element dtype is converted via :func:`as_half`.
+    """Structured dtype for the requested `variables` (default: all of ``ds.dtype.names``),
+    each field cast via `as_half`; a present ``"valid"`` field is auto-included.
     """
     # Normalize to a concrete, mutable list
     if variables is None:

@@ -143,13 +143,7 @@ _WILDCARD_PARTS = frozenset({"*", "**"})
 
 
 def _has_wildcard(key: str) -> bool:
-    """Check whether a dotted key contains a wildcard component.
-
-    Returns
-    -------
-    bool
-        True if any component is ``"*"`` or ``"**"``.
-    """
+    """Check whether a dotted key contains a wildcard component (``"*"`` or ``"**"``)."""
     return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
 
 
@@ -157,11 +151,7 @@ def _pattern_matches(pattern: str, key: str) -> bool:
     """Match a concrete dotted key against a wildcard pattern.
 
     ``"*"`` matches exactly one component; ``"**"`` matches one or more.
-
-    Returns
-    -------
-    bool
-        True if `key` matches `pattern`.
+    Returns True if `key` matches `pattern`.
     """
 
     def match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:

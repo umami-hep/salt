@@ -75,23 +75,14 @@ class VDS(DatasetModule):
         self._vds_capable: bool = False
 
     def declare_io(self, mode: Mode) -> IO:
-        """Empty per-batch interface — `VDS` never produces tensors.
-
-        The empty default (no requires, no produces): this module is
-        setup-only and is partitioned into ``_setup_modules``.
+        """Empty per-batch interface — `VDS` never produces tensors; setup-only,
+        partitioned into `_setup_modules`.
         """
         del mode
         return IO()
 
     def _reader_name(self) -> str:
-        """The wired reader name, or raise if assembly never poked it.
-
-        Raises
-        ------
-        RuntimeError
-            If `_reader` was never wired (`VDS` used outside a GraphDataModule,
-            or before assembly).
-        """
+        """The wired reader name, or raise `RuntimeError` if assembly never wired `_reader`."""
         if self._reader is None:
             raise RuntimeError(
                 f"VDS {self.name!r} has no reader name wired — it must be assembled "
@@ -103,17 +94,8 @@ class VDS(DatasetModule):
     def declare_setup_io(self, stage: SetupStage) -> SetupIO:
         """Declare the per-stage ``pattern`` require and ``vds_path`` produce.
 
-        Requires ``source.<reader>.<stage>.pattern`` (path, from `InputSamples`)
-        and produces ``source.<reader>.<stage>.vds_path`` (path). Requiring
-        ``pattern`` makes the topo-sort order `VDS` after `InputSamples`. Active
-        for every stage (a `VDS` resolves whichever stages `InputSamples`
-        produced; an absent ``pattern`` would be caught by the compiler's
-        connectivity check, not silently ignored).
-
-        Returns
-        -------
-        SetupIO
-            The per-stage require (`pattern`) and produce (`vds_path`).
+        Requires ``source.<reader>.<stage>.pattern`` (from `InputSamples`) and
+        produces ``source.<reader>.<stage>.vds_path``; active for every stage.
         """
         reader = self._reader_name()
         requires = unflatten_source_spec(
@@ -127,21 +109,10 @@ class VDS(DatasetModule):
     def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
         """Resolve ``pattern`` -> ``vds_path`` for `stage` (build or identity).
 
-        Reads ``source.<reader>.<stage>.pattern`` off the ctx. If the reader is
-        `vds_capable` and the pattern is a wildcard, builds a real VDS via
-        `create_vds` (FileLock + ``.done`` makes it every-rank safe) and emits
-        its path; otherwise the identity edge (``vds_path == pattern``
-        verbatim, `create_vds` never called). The whole-dict ``out[stage]``
-        overrides the default VDS path when configured.
-
-        This module owns the merge into `ctx` and returns `ctx`, so the flat
-        dotted produces are canonicalised (`canonical_produced`) before
-        `Bundle.merge`.
-
-        Returns
-        -------
-        SetupBundle
-            The same `ctx`, with this stage's ``vds_path`` merged in (write-once).
+        Builds a real VDS via `create_vds` when the reader is `vds_capable`
+        and the pattern is a wildcard; otherwise the identity edge
+        (``vds_path == pattern`` verbatim, `create_vds` never called). The
+        whole-dict ``out[stage]`` overrides the default VDS path when configured.
         """
         reader = self._reader_name()
         pattern = ctx.get(f"source.{reader}.{stage}.pattern")

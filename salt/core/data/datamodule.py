@@ -34,15 +34,11 @@ _SETUP_STAGES: tuple[str, ...] = ("train", "val", "test")
 
 
 def _is_setup_only(module: DatasetModule) -> bool:
-    """Whether `module` participates ONLY in the setup graph.
+    """Whether `module` declares setup IO for some stage but no per-batch IO.
 
-    A setup-only module declares a non-empty `declare_setup_io` for some stage
-    AND an empty `declare_io` for every per-batch mode. Such a module (e.g.
-    `InputSamples`/`VDS`/`ShmStage`) must be partitioned out before the
-    per-batch dataset deepcopy, or `compile_plan`'s dead-module check and
-    `GraphDataset`'s single-Reader guard would both miscount it. A dual-face
-    reader has a non-empty `declare_io`, so it stays in the per-batch set and
-    appears in both graphs.
+    Such modules (InputSamples/VDS/ShmStage) must be partitioned out before
+    the per-batch dataset deepcopy so the dead-module check and single-Reader
+    guard don't miscount them; a dual-face reader stays in the batch set.
     """
     has_setup = any(
         not module.declare_setup_io(stage).is_empty()  # type: ignore[arg-type]
@@ -203,29 +199,13 @@ class GraphDataModule(lightning.LightningDataModule):
         self.test_dset: GraphDataset | None = None
 
     def _wire_input_samples(self, modules: dict[str, DatasetModule]) -> None:
-        """Assemble the data-sourcing setup graph.
+        """Assemble the data-sourcing setup graph (mutates `modules` in place).
 
-        Two responsibilities:
-
-        1. **Alias migration**: if no `InputSamples` is configured but the
-           deprecated ``train_file``/``val_file``/``test_file`` kwargs are set,
-           synthesise an implicit `InputSamples` from them (with the matching
-           per-stage ``num``) and add it to the setup-only namespace.
-        2. **Reader-name wiring**: the ``source.<reader>.*`` keys are embedded at
-           declaration time, so each `InputSamples` instance is poked with the
-           single reader's name after the single-Reader guard.
-
-        Parameters
-        ----------
-        modules : dict[str, DatasetModule]
-            The full assembled module dict (mutated in place when an implicit
-            `InputSamples` is synthesised).
-
-        Raises
-        ------
-        ConfigError
-            If more than one `InputSamples` is configured (the single Reader can
-            have exactly one source owner).
+        1. Alias migration: with no `InputSamples` configured but the
+           deprecated train_file/val_file/test_file kwargs set, synthesise an
+           implicit `InputSamples` and add it to the setup-only namespace.
+        2. Reader-name wiring: poke the single reader's name onto each
+           `InputSamples` instance so its ``source.<reader>.*`` keys match.
         """
         existing = [(name, m) for name, m in modules.items() if isinstance(m, InputSamples)]
         if len(existing) > 1:
@@ -259,35 +239,16 @@ class GraphDataModule(lightning.LightningDataModule):
         self._input_samples: InputSamples | None = existing[0][1] if existing else None
 
     def _wire_vds(self, modules: dict[str, DatasetModule]) -> None:
-        """Assemble the wildcard->VDS setup module.
+        """Assemble the wildcard->VDS setup module (mirrors `_wire_input_samples`).
 
-        Two responsibilities, mirroring `_wire_input_samples`:
+        1. Auto-injection: when an `InputSamples` is present and no explicit
+           `VDS` is configured, synthesise one from the deprecated
+           train_vds_path/val_vds_path/test_vds_path kwargs (only when an
+           `InputSamples` exists — otherwise there is no ``pattern`` to consume).
+        2. Reader wiring: poke the reader's name and `vds_capable` flag onto
+           the VDS, gating its build-vs-identity choice.
 
-        1. **Auto-injection**: whenever an `InputSamples` is present (explicit or
-           alias-synthesised) and no explicit `VDS` is configured, synthesise one
-           (with per-stage ``out`` paths from the deprecated
-           ``train_vds_path``/``val_vds_path``/``test_vds_path`` kwargs) and add
-           it to the setup-only namespace.
-        2. **Reader wiring**: poke the single Reader's name and its
-           `vds_capable` flag onto the `VDS` (auto-injected or explicit), so its
-           setup keys match the handoff and the build-vs-identity choice is
-           gated on the reader's capability.
-
-        An auto-injected `VDS` is only synthesised when an `InputSamples` exists:
-        with no source owner there is no ``pattern`` for the `VDS` to consume.
-        An explicit `VDS` in ``data.modules`` overrides the auto-injection.
-
-        Parameters
-        ----------
-        modules : dict[str, DatasetModule]
-            The full assembled module dict (mutated in place when an implicit
-            `VDS` is synthesised).
-
-        Raises
-        ------
-        ConfigError
-            If more than one `VDS` is configured (one VDS owns the single
-            Reader's wildcard resolution).
+        An explicit `VDS` in ``data.modules`` overrides auto-injection.
         """
         existing = [(name, m) for name, m in modules.items() if isinstance(m, VDS)]
         if len(existing) > 1:
@@ -321,23 +282,12 @@ class GraphDataModule(lightning.LightningDataModule):
 
     @property
     def modules(self) -> dict[str, DatasetModule]:
-        """All assembled dataset modules by instance name — the union of both graphs.
-
-        Includes both the per-batch modules and the setup-only modules
-        (InputSamples/VDS/ShmStage). The per-batch compile must use
-        `batch_modules`, not this union (a setup-only module in the per-batch
-        compile trips the dead-module check).
-        """
+        """All assembled dataset modules (both graphs) — use `batch_modules` for compiling."""
         return dict(self._modules)
 
     @property
     def batch_modules(self) -> dict[str, DatasetModule]:
-        """The per-batch modules (reader + processors), excluding setup-only ones.
-
-        The namespace handed to `GraphDataset` / the per-batch `compile_plan`:
-        setup-only modules are partitioned out so the per-batch compile and its
-        single-Reader guard see exactly the tensor pipeline.
-        """
+        """The per-batch modules (reader + processors), excluding setup-only ones."""
         return dict(self._batch_modules)
 
     @property
@@ -352,12 +302,7 @@ class GraphDataModule(lightning.LightningDataModule):
 
     @reader.setter
     def reader(self, reader: Reader) -> None:
-        """Replace the reader prototype (the ``reader.restage`` staging trigger).
-
-        ``setup('fit')`` reassigns ``self.reader = self.reader.restage(root)`` when
-        opt-in staging is active, so the per-stage clones derive from the staged
-        reader. Keeps the instance ``name`` and the ``modules`` view consistent.
-        """
+        """Replace the reader prototype (used by the staging trigger); keeps `modules` in sync."""
         reader.name = self._reader_name
         self._reader_proto = reader
         self._modules[self._reader_name] = reader
@@ -373,12 +318,8 @@ class GraphDataModule(lightning.LightningDataModule):
         self._sinks = dict(sinks)
 
     def _auto_sinks(self) -> None:
-        """Adopt the attached model's boundary demand when no sinks were set.
-
-        A `SaltModule` attached to the same trainer declares its per-mode
-        dataset-boundary demand via ``sink_demand()`` — duck-typed here so the
-        data side stays free of a model-side import. Explicit sinks (constructor
-        or `set_sinks`) win.
+        """Adopt the attached model's `sink_demand()` when no sinks were set
+        (duck-typed; explicit sinks win).
         """
         if self._sinks is not None:
             return
@@ -391,21 +332,12 @@ class GraphDataModule(lightning.LightningDataModule):
                 self._sink_origins = {mode: dict(who) for mode, who in origins().items()}
 
     def _run_setup_pass(self, stages: Iterable[str]) -> None:
-        """Compile + run the setup-graph plan once per `stages` into one ctx.
+        """Compile + run the setup-graph plan once per `stages` into one shared ctx.
 
-        For each stage it compiles the setup plan over ``_setup_modules`` and
-        walks it (`run_setup_plan`) into one shared write-once ctx, so e.g.
-        ``setup("fit")`` accumulates both ``"train"`` and ``"val"`` into disjoint
-        stage-qualified keys. ``_make_dataset`` then reads the resolved deepest
-        path off this ctx. A no-op when no setup modules are configured.
-
-        DDP-safe by construction: every rank runs the identical pass, and setup
-        modules touch no filesystem, so there is no copy to serialise.
-
-        Parameters
-        ----------
-        stages : Iterable[str]
-            The setup stages to resolve (``"train"``/``"val"``/``"test"``).
+        Accumulates disjoint stage-qualified keys across stages (e.g.
+        ``setup("fit")`` covers both "train" and "val"); `_make_dataset` reads
+        the resolved deepest path off this ctx. No-op with no setup modules.
+        DDP-safe: every rank runs the identical pass (no filesystem touched).
         """
         if self._setup_ctx is None:
             self._setup_ctx = SetupBundle()
@@ -428,15 +360,8 @@ class GraphDataModule(lightning.LightningDataModule):
     def _resolve_source(self, mode: Mode) -> tuple[str | Path | None, int]:
         """Resolve the stage's source path + row cap from the setup ctx.
 
-        When an `InputSamples` resolved this stage, return its deepest present
-        path and the per-stage ``num`` off the whole-dict scalar leaf. With no
-        setup ctx populated it falls back to the legacy ``train_file``/
-        ``num_train`` kwargs.
-
-        Returns
-        -------
-        tuple[str | Path | None, int]
-            ``(filename, num)`` for `mode`'s stage.
+        Uses the `InputSamples`-resolved deepest path + per-stage ``num`` when
+        available; falls back to the legacy ``train_file``/``num_train`` kwargs.
         """
         stage = _STAGE_OF_MODE[mode]
         if self._input_samples is not None and self._setup_ctx is not None:
@@ -462,10 +387,9 @@ class GraphDataModule(lightning.LightningDataModule):
     ) -> GraphDataset:
         """Clone the reader prototype onto a stage file and build its dataset.
 
-        Raises
-        ------
-        ConfigError
-            If the stage file or the sinks are unset.
+        Deep-copies processors per stage — bind-time state (e.g. Labels'
+        narrowed key set) must not leak across train/val/test plans sharing
+        this module dict.
         """
         if filename is None:
             raise ConfigError(f"no file configured for mode {mode.name} (design §6.1)")
@@ -511,34 +435,18 @@ class GraphDataModule(lightning.LightningDataModule):
         return Path(self.move_files_temp)
 
     def _stage(self, reader: Reader) -> Reader:
-        """Restage a per-stage reader onto ``_stage_root`` when staging is active.
-
-        With ``_stage_root`` set, the reader copies its own sourced file(s) under
-        the root (rank-0 + FileLock coordinated inside `Reader.restage` ->
-        `vds.stage_file`) and returns a clone reading the copies — single-file H5,
-        multi-file easyjet, and multi-sample readers all stage their full source
-        set. With ``_stage_root`` None this returns the reader unchanged.
+        """Restage the reader onto ``_stage_root`` (FileLock-coordinated) when staging is
+        active; returns the reader unchanged when ``_stage_root`` is None.
         """
         if self._stage_root is None:
             return reader
         return reader.restage(self._stage_root)
 
     def setup(self, stage: str) -> None:
-        """Build the per-stage datasets.
+        """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST.
 
-        Train compiles the FIT plan, val the VAL plan, test the TEST plan. The
-        data-sourcing setup graph runs first: the setup pass resolves each
-        stage's source path onto one write-once ctx, then ``_make_dataset`` binds
-        the reader from the ctx-resolved deepest key. Wildcard->VDS resolution is
-        part of that setup pass (the `VDS` module) — `create_vds`'s FileLock +
-        ``.done`` marker make every-rank execution safe with no DDP barrier. When
-        opt-in temp staging is active the ``_stage_root`` is armed before dataset
-        building, so every per-stage reader restages its own files onto the root.
-
-        Raises
-        ------
-        ConfigError
-            If the stage's file or the sinks are unset.
+        Runs the data-sourcing setup pass (source resolution + wildcard->VDS)
+        into one write-once ctx first, then binds each stage's reader from it.
         """
         self._auto_sinks()
         self._stage_root = self._resolve_stage_root(stage)
@@ -610,19 +518,8 @@ class GraphDataModule(lightning.LightningDataModule):
         return self.get_dataloader(dataset=self.test_dset, stage="test", shuffle=False)
 
     def teardown(self, stage: str | None = None) -> None:
-        """Remove the staging root after fit when staging is on.
-
-        A no-op unless ``move_files_temp`` is set (and not ``fast_dev_run``); only
-        the global-zero rank cleans up, and only after ``fit``. Removes the
-        entire ``_stage_root`` tree (every staged copy + its FileLock / ``.done``
-        markers — single-file, multi-file, and multi-sample staging all land
-        under the one root). With ``move_files_temp=None`` this never touches
-        the filesystem.
-
-        Parameters
-        ----------
-        stage : str | None, optional
-            The Lightning stage being torn down, by default None.
+        """Remove the staging root after fit, when staging is on (global-zero rank
+        only, else no-op).
         """
         root = self._resolve_stage_root("fit") if stage == "fit" else None
         if root is None:

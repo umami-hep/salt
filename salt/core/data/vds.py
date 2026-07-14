@@ -65,13 +65,7 @@ def _done_marker(vds_out: Path) -> Path:
 
 
 def _is_stale(out_fname: Path, members: list[Path]) -> bool:
-    """Check whether an existing VDS predates any of its member files.
-
-    Returns
-    -------
-    bool
-        True if the VDS is missing or older than any member file.
-    """
+    """Whether an existing VDS is missing or older than any member file."""
     if not out_fname.exists():
         return True
     vds_mtime = out_fname.stat().st_mtime

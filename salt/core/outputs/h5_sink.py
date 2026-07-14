@@ -38,9 +38,8 @@ DEFAULT_OUTPUT = "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
 def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     """Zero-pad a per-token array along axis 1 to the file sequence length.
 
-    Positions beyond the model's (possibly truncated) sequence read as
-    zeros — including the ``mask`` column's documented quirk (truncated-away
-    positions read ``mask=False``), preserved for v1 byte parity.
+    Positions beyond the model's (possibly truncated) sequence read as zeros
+    (so a truncated-away ``mask`` position reads ``mask=False``).
     """
     if arr.ndim < 2 or arr.shape[1] >= length:
         return arr
@@ -50,22 +49,16 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
 
 
 class _SinkCallback(Callback):
-    """Generated thin Lightning bridge for a terminal sink node ("the node IS the callback").
+    """Thin Lightning bridge for a terminal sink node ("the node IS the callback").
 
-    A sink node owns its Lightning hooks through this shared base, eliminating
-    a parallel duck-typed callback. The single node declaration (`declare_io`)
-    drives both the planner demand (``writer_demand`` is GENERATED from
-    ``declare_io(Mode.TEST).requires``) and the lifecycle (the hooks below
-    forward to the node's named methods).
-
-    `SaltModule._attached_writer` still discovers this adapter via
-    ``callable(getattr(cb, "writer_demand", None))``; the node also registers
-    in the TEST plan as a real `PlanStep` (rendering its own card), and the
-    executor partitions it out of the per-batch forward loop via `is_sink()`.
-
-    A subclass provides the node surface: ``name``, ``declare_io(mode)`` (TEST
-    requires, empty produces), ``open_schema(trainer)`` / ``consume(bundle)`` /
-    ``flush()`` / ``close_if_open()``.
+    ``declare_io`` drives both ``writer_demand`` (generated from
+    ``declare_io(Mode.TEST).requires``) and the lifecycle (hooks below forward
+    to the node's named methods). `SaltModule._attached_writer` discovers it
+    via ``callable(getattr(cb, "writer_demand", None))``; the node registers
+    in the TEST plan as a `PlanStep` and is excluded from the per-batch
+    forward loop via `is_sink()`. A subclass provides: ``name``,
+    ``declare_io(mode)``, ``open_schema(trainer)``, ``consume(bundle)``,
+    ``flush()``, ``close_if_open()``.
     """
 
     name: str
@@ -77,13 +70,10 @@ class _SinkCallback(Callback):
     def is_test_sink(self) -> bool:
         """Whether this sink is the TEST persistence sink.
 
-        The order-independent discriminator `SaltModule` uses to pick the TEST
-        persistence sink among callbacks that all expose ``writer_demand``. A
-        sink whose ``declare_io(Mode.TEST).requires`` is non-empty serialises
-        TEST predictions (e.g. `H5OutputSink`); an ONNX-only sink
-        (`OnnxExportSink`, empty TEST requires) returns False so it is never
-        chosen as the TEST sink, even when it appears first in the
-        ``callbacks:`` list.
+        Discriminator among ``writer_demand``-exposing callbacks: True when
+        ``declare_io(Mode.TEST).requires`` is non-empty (e.g. `H5OutputSink`);
+        an ONNX-only sink (`OnnxExportSink`) returns False regardless of
+        ``callbacks:`` list order.
         """
         return bool(flatten_spec(self.declare_io(Mode.TEST).requires))
 
@@ -93,13 +83,13 @@ class _SinkCallback(Callback):
         return IO(requires={}, produces={})
 
     def open_schema(self, trainer: Trainer) -> None:  # pragma: no cover - overridden
-        """Open the sink's output schema before the first batch (was ``on_test_start``)."""
+        """Open the sink's output schema before the first batch."""
 
     def consume(self, bundle: Bundle) -> None:  # pragma: no cover - overridden
-        """Consume one executed bundle (was ``on_test_batch_end``)."""
+        """Consume one executed bundle."""
 
     def flush(self) -> None:  # pragma: no cover - overridden
-        """Finalise the sink (was ``on_test_end``)."""
+        """Finalise the sink."""
 
     def close_if_open(self) -> None:  # pragma: no cover - overridden
         """Idempotently close any open handle (failure-cleanup)."""
@@ -114,12 +104,8 @@ class _SinkCallback(Callback):
     # -- lightning hooks: forward to the node's named methods (the bridge) -------
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Single-device assertion at test setup (multi-device test writing out of scope).
-
-        Raises
-        ------
-        ConfigError
-            When testing on more than one device.
+        """Enforce single-device TEST; raises `ConfigError` otherwise (multi-device
+        out of scope).
         """
         del pl_module
         if stage == "test" and trainer.world_size != 1:
@@ -162,25 +148,12 @@ class _SinkCallback(Callback):
 class _ExtraGroupCtx:
     """The minimal write-context an extra-group node reads to size its groups.
 
-    Duck-types the legacy ``WriteCtx`` surface that a node's ``extra_groups``
-    / ``columns`` declaration consumes. A node's OWN model modules ride its
-    prior ``bind_model_modules`` — they do NOT come through this ctx; this
-    carries only the file-geometry facts the sink owns. An empty
-    ``extra_groups`` list never builds one (the no-op path).
-
-    Parameters
-    ----------
-    streams : tuple[str, ...]
-        The reader streams (the extra-group shadow check rejects a group named
-        after one).
-    seq_lengths : Mapping[str, int]
-        Per sequence stream file token length (the object-masks trailing ``T``).
-    total : int
-        The fixed-mode row count.
-    run_name : str
-        The TEST column prefix.
-    precision : str
-        ``"half"`` / ``"full"`` (the f2/f4 column dtype selector).
+    Duck-types the ``WriteCtx`` surface that a node's ``extra_groups`` /
+    ``columns`` declaration consumes — carries only the file-geometry facts
+    the sink owns (a node's own model modules ride its prior
+    ``bind_model_modules``, not this ctx). ``streams`` feeds the extra-group
+    shadow check; ``precision`` is the f2/f4 column dtype selector. An empty
+    ``extra_groups`` list never builds one.
     """
 
     streams: tuple[str, ...]
@@ -200,8 +173,7 @@ class H5OutputSink(_SinkCallback):
 
     It accumulates the named ``outputs.*`` producer leaves per batch and
     writes them through one ftag `H5Writer` (FIXED mode, ``num_jets`` known
-    up front — a valid empty file for an empty test set), matching the v1
-    `WriterCallback` H5 contract.
+    up front — a valid empty file for an empty test set).
 
     Responsibilities the sink owns (the producers must NOT know about these):
 
@@ -209,14 +181,12 @@ class H5OutputSink(_SinkCallback):
       / ``[B, L, C]`` tensor; the sink ``u2s``-packs it into the declared
       ``{run_name}_{suffix}`` columns (`OutputColumn`).
     - **per-token pad re-expansion**: per-token leaves and the pad-mask
-      column are zero-padded to the FILE sequence length (the v1
-      ``maybe_pad``, ``_pad_to``).
+      column are zero-padded to the FILE sequence length (``_pad_to``).
     - **input-variable copies**: optional source-file columns re-read by
       absolute rows (``meta.rows``) through one cached handle, with SOURCE
       dtypes/order.
     - **pad-mask columns**: an optional boolean ``mask`` column per sequence
-      stream (True = padded); truncated-away positions read ``mask=False``
-      (the v1 ``add_mask`` quirk).
+      stream (True = padded); truncated-away positions read ``mask=False``.
     - **output-group naming**: reader streams map to their FILE dataset name.
 
     `writer_demand` returns the consumed ``outputs.*`` leaves PLUS the source
@@ -226,10 +196,9 @@ class H5OutputSink(_SinkCallback):
     pad-mask stream's mask.
 
     Note: keeping input copies / masks / pad re-expansion here means this
-    sink inherits the full DataModule/reader/source-file coupling of the v1
-    `WriterCallback` (it reads the file's sequence length from
-    ``reader.source_path``). The win is composable additional sinks, not
-    decoupling of the H5 sink itself.
+    sink carries extra DataModule/reader/source-file coupling (it reads the
+    file's sequence length from ``reader.source_path``). The win is
+    composable additional sinks, not decoupling of the H5 sink itself.
 
     Parameters
     ----------
@@ -238,8 +207,8 @@ class H5OutputSink(_SinkCallback):
         group. Each entry is an `OutputColumn` (or a mapping jsonargparse
         builds into one).
     copy_inputs : Mapping[str, Sequence[str]] | None, optional
-        Per-stream source-file variables to copy into the eval H5 (the v1
-        input copies), in column order, by default None.
+        Per-stream source-file variables to copy into the eval H5, in column
+        order, by default None.
     write_pad_mask : bool | Sequence[str], optional
         Boolean ``mask`` column per sequence stream: ``True`` writes one for
         every demanded output's sequence stream; a list names the streams;
@@ -341,15 +310,8 @@ class H5OutputSink(_SinkCallback):
     # -- column resolution ------------------------------------------------------
 
     def is_test_sink(self) -> bool:
-        """An `H5OutputSink` is ALWAYS the TEST persistence sink.
-
-        Overrides the base `_SinkCallback.is_test_sink`, which probes
-        ``declare_io(Mode.TEST).requires`` — a dumb-section sink resolves its
-        columns from the bound ``outputs:`` section, which may be bound only
-        AFTER this sink is recognised as the TEST sink. An `H5OutputSink`
-        serialises TEST predictions by construction (it always demands
-        ``meta.rows`` at minimum), so this is a cheap constant True —
-        order-independent and resolution-free.
+        """Always True (unlike the base probe): always demands ``meta.rows``, so this
+        is resolution-free even before a dumb-section binds its columns.
         """
         return True
 
@@ -502,17 +464,9 @@ class H5OutputSink(_SinkCallback):
     # -- graph node surface -------------------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
-        """The terminal node's IO: TEST requires ``outputs.*``/``meta.rows``/``masks.*``; empty out.
-
-        In TEST the sink requires the demanded ``outputs.*`` leaves
-        (``kind=data``), the ``meta.rows`` row anchor (``kind=meta``), and
-        each pad-mask stream's ``masks.<stream>`` (``kind=pad_mask``); it
-        produces nothing — a terminal node the planner keeps (rendering its
-        own card). In FIT/VAL/ONNX it declares empty requires AND produces,
-        so the demand-closure prunes it — the FIT/VAL ``plan_hash`` stays
-        byte-unchanged. The old ``preds.*`` back-discovery disappears: the
-        conversion producers declare their own ``preds.*`` requires, so the
-        dead-preds gate is satisfied transitively via the producer node.
+        """TEST requires the demanded ``outputs.*`` leaves, ``meta.rows``, and each
+        pad-mask stream's ``masks.<stream>``; produces nothing (terminal node,
+        planner keeps it). FIT/VAL/ONNX: empty requires/produces (pruned).
         """
         if not (mode & Mode.TEST):
             return IO(requires={}, produces={})
@@ -567,20 +521,9 @@ class H5OutputSink(_SinkCallback):
     # -- static demand (consumed by SaltModule) ----------------------
 
     def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The TEST demand this sink anchors — GENERATED from `declare_io`.
-
-        Returns the sink's TEST-mode ``declare_io`` requires (the consumed
-        ``outputs.*`` leaves, the ``meta.rows`` row anchor, and each pad-mask
-        stream's ``masks.<stream>``), each mapped to a demander description.
-        `SaltModule._attached_writer` discovers this via
-        ``callable(getattr(cb, "writer_demand", None))`` and folds the keys
-        into the TEST plan sinks — the keys are now DERIVED from the single
-        node declaration rather than hand-coded.
-
-        The old ``preds.*`` back-discovery is gone: the conversion producers
-        declare their own ``preds.*`` requires, so the dead-preds gate is
-        satisfied transitively. This sink demands ONLY
-        ``outputs.*``/``meta.rows``/``masks.*``.
+        """The sink's TEST ``declare_io`` requires, each mapped to a demander
+        description; discovered by `SaltModule._attached_writer` via
+        ``callable(getattr(cb, "writer_demand", None))``.
         """
         del model_modules, reader
         who = "sink 'H5OutputSink' demanding"
@@ -604,7 +547,7 @@ class H5OutputSink(_SinkCallback):
     # -- node lifecycle (relocated VERBATIM from on_test_*) --------
 
     def open_schema(self, trainer: Trainer) -> None:
-        """Create the eval H5 with the full schema BEFORE the first batch (was ``on_test_start``).
+        """Create the eval H5 with the full schema BEFORE the first batch.
 
         Resolves the output path + total rows from the trainer/datamodule,
         opens the source handle for input copies, merges the output /
@@ -683,18 +626,12 @@ class H5OutputSink(_SinkCallback):
         self._expected = total
 
     def consume(self, bundle: Bundle) -> None:
-        """Serialise one batch of ``outputs.*`` (+ input copies + masks); was ``on_test_batch_end``.
+        """Serialise one batch of ``outputs.*`` (+ input copies + masks).
 
-        Reads ``meta.rows`` to validate row alignment against the running
-        counter (sharded/uneven-batch loaders fail loudly), packs each
-        demanded leaf into its declared columns, re-reads the input-copy
-        columns by absolute rows, builds the pad-mask columns, merges
+        Validates row alignment against the running counter (raises
+        `ConfigError` on a break or wrong-row-count fragment), packs each
+        demanded leaf, re-reads input copies, builds pad masks, merges
         same-group fragments, and streams one `H5Writer.write`.
-
-        Raises
-        ------
-        ConfigError
-            On a row-alignment break or a fragment with the wrong row count.
         """
         assert self._h5 is not None, "consume before open_schema"
         rows_t = bundle.get("meta.rows")
@@ -741,7 +678,7 @@ class H5OutputSink(_SinkCallback):
         self._rows_written = stop
 
     def flush(self) -> None:
-        """Close the source handle and the sink, warning on a truncated loop (was ``on_test_end``)."""
+        """Close the source handle and the sink, warning on a truncated loop."""
         self._close_copies()
         if self._h5 is None:
             return
@@ -779,8 +716,7 @@ class H5OutputSink(_SinkCallback):
         """Pack each demanded ``outputs.*`` leaf into its declared columns.
 
         Per-token (sequence-stream) leaves are re-expanded to the file
-        sequence length (the v1 ``maybe_pad``); a 2-D ``[B, C]`` global leaf
-        is packed directly.
+        sequence length; a 2-D ``[B, C]`` global leaf is packed directly.
         """
         out: dict[str, np.ndarray] = {}
         frags: dict[str, list[np.ndarray]] = {}
@@ -803,8 +739,7 @@ class H5OutputSink(_SinkCallback):
     def _mask_fragments(self, bundle: Bundle) -> dict[str, np.ndarray]:
         """Build the boolean ``mask`` column per requested sequence stream.
 
-        True = padded, padded to the file sequence length with
-        ``mask=False`` (the preserved v1 quirk).
+        True = padded, padded to the file sequence length with ``mask=False``.
         """
         out: dict[str, np.ndarray] = {}
         for stream in self._mask_streams:
@@ -822,24 +757,14 @@ class H5OutputSink(_SinkCallback):
     def _extra_group_fragments(self, bundle: Bundle, rows: slice) -> dict[str, np.ndarray]:
         """Pack each extra-group node's per-batch structured arrays.
 
-        For each configured ``extra_groups`` node exposing a ``write`` (the
-        MaskFormer object writer), calls
-        ``write(bundle, rows, run_name, precision)`` and collects its
-        per-group structured arrays. A per-token fragment landing on a
-        reader sequence stream is re-expanded to the file token length (the
-        v1 ``maybe_pad`` quirk); a NON-reader extra group (e.g. ``objects`` /
-        ``object_masks``) is written verbatim, but a shape guard rejects any
-        fragment whose per-row shape diverges from the schema-declared
-        extra-group shape — ``object_masks`` must span the full file
-        constituent width and is incompatible with a ``truncate`` on the
-        tracks stream. Nodes without a ``write`` contribute nothing.
-
-        Raises
-        ------
-        ConfigError
-            When two extra-group nodes both write the same group, or an
-            extra-group fragment's per-row shape does not match the
-            schema-declared shape.
+        Calls ``write(bundle, rows, run_name, precision)`` on each configured
+        ``extra_groups`` node exposing one. A per-token fragment on a reader
+        sequence stream is re-expanded to the file token length; a
+        NON-reader extra group is written verbatim, guarded against a
+        per-row shape mismatch with the schema-declared shape (raises
+        `ConfigError`; ``object_masks`` must span the full constituent
+        width, incompatible with a tracks ``truncate``). Nodes without
+        ``write`` contribute nothing.
         """
         out: dict[str, np.ndarray] = {}
         if not self._extra_group_names:
@@ -874,7 +799,7 @@ class H5OutputSink(_SinkCallback):
 
     def _copy_fragments(self, rows: slice) -> dict[str, np.ndarray]:
         """Re-read this batch's input-copy columns by absolute rows, at full file
-        sequence length, SOURCE dtypes/order (the v1 input-copy contract).
+        sequence length, SOURCE dtypes/order.
         """
         return {
             stream: ds.fields(fields)[rows.start : rows.stop]
@@ -886,13 +811,8 @@ class H5OutputSink(_SinkCallback):
     def _open_copies(
         self, source_path: Path, group_datasets: Mapping[str, str], streams: tuple[str, ...]
     ) -> None:
-        """Open the cached source handle and resolve per-stream copy field lists.
-
-        Raises
-        ------
-        ConfigError
-            For an unknown copy stream or a copy variable missing from the
-            file (the v1 ``extra_vars`` validation).
+        """Open the cached source handle and resolve per-stream copy field lists;
+        raises `ConfigError` for an unknown copy stream or a missing copy variable.
         """
         self._close_copies()
         # dumb-section: InputCopyWriter(streams=None) means "every reader stream"
@@ -930,15 +850,10 @@ class H5OutputSink(_SinkCallback):
     def _extra_group_node(self, name: str) -> Any:
         """Resolve an ``extra_groups`` name to its bound ``outputs:``-section node.
 
-        Extra-group nodes (the MaskFormer object writer) live in the
-        ``outputs:`` section bound via `bind_output_section`. Resolving here
-        (not at config construction) lets the name reference a section node
-        composed AFTER the model.
-
-        Raises
-        ------
-        ConfigError
-            When the name is not a bound section node.
+        Nodes live in the ``outputs:`` section bound via
+        `bind_output_section`; resolved here (not at config construction) so
+        the name can reference a node composed AFTER the model. Raises
+        `ConfigError` when the name is not a bound section node.
         """
         section = self._output_section or {}
         if name not in section:
@@ -952,23 +867,14 @@ class H5OutputSink(_SinkCallback):
     def _collect_extra_groups(
         self, ctx: _ExtraGroupCtx, streams: tuple[str, ...]
     ) -> tuple[dict[str, tuple[int, ...]], dict[str, str]]:
-        """Merge the configured nodes' ``extra_groups`` declarations (port of the v1 `WriterCallback`).
+        """Merge the configured nodes' ``extra_groups`` declarations.
 
         Each `extra_groups`-listed node sizes its NON-reader output groups
-        via ``extra_groups(ctx) -> {group: trailing}``, and this merges them
-        under the same two checks the legacy callback applied: an extra
-        group may NOT shadow a reader stream, and two nodes may NOT own the
-        same group. Returns ``(group -> trailing per-row shape, group ->
-        declaring node)``.
-
-        Empty ``extra_groups`` short-circuits to ``({}, {})`` — the no-op
-        path: `_merge_columns` then sees no extra shapes and the H5 schema is
-        byte-identical to a plain sink.
-
-        Raises
-        ------
-        ConfigError
-            On a duplicate extra group or one shadowing a reader stream.
+        via ``extra_groups(ctx) -> {group: trailing}``; an extra group may
+        NOT shadow a reader stream, and two nodes may NOT own the same group
+        (raises `ConfigError`). Returns ``(group -> trailing per-row shape,
+        group -> declaring node)``; empty ``extra_groups`` short-circuits to
+        ``({}, {})`` (the no-op path).
         """
         shapes: dict[str, tuple[int, ...]] = {}
         owner: dict[str, str] = {}
@@ -1000,16 +906,10 @@ class H5OutputSink(_SinkCallback):
     ) -> tuple[dict[str, np.dtype], dict[str, tuple[int, ...]]]:
         """Merge copy / output / pad-mask columns into per-group dtypes/shapes.
 
-        Column order = input copies, then output columns (declaration
-        order), then the pad mask — the v1 ``inputs_copy -> tasks ->
-        pad_mask`` group layout. Output groups are named after the FILE
-        dataset (v1 group naming). A column-name collision is a
+        Column order: input copies, then output columns (declaration order),
+        then the pad mask. Output groups are named after the FILE dataset. A
+        column collision or an output leaf for an unknown stream raises
         `ConfigError` naming both contributors.
-
-        Raises
-        ------
-        ConfigError
-            On a column collision or an output leaf for an unknown stream.
         """
         descrs: dict[str, list] = {}
         owners: dict[tuple[str, str], str] = {}
@@ -1082,8 +982,8 @@ class H5OutputSink(_SinkCallback):
     def _expected_rows(trainer: Trainer, total: int, batch_size: int) -> int:
         """Rows the (possibly ``limit_test_batches``-capped) loop will write.
 
-        ``min(total, num_batches * batch_size)`` (the v1 sink contract: with
-        the sequential no-drop sampler only the last batch is partial).
+        ``min(total, num_batches * batch_size)`` — with the sequential
+        no-drop sampler only the last batch is partial.
         """
         num_batches = getattr(trainer, "num_test_batches", None)
         if not num_batches:
@@ -1094,12 +994,8 @@ class H5OutputSink(_SinkCallback):
         return total
 
     def _output_path(self, trainer: Trainer, dm: Any, reader: Any) -> Path:
-        """Render the output template (the v1 output-path contract).
-
-        Raises
-        ------
-        ConfigError
-            When ``ckpt_path`` is unset or the template names an unknown key.
+        """Render the output template; raises `ConfigError` when ``ckpt_path``
+        is unset or the template names an unknown key.
         """
         ckpt_path = trainer.ckpt_path
         if ckpt_path is None:

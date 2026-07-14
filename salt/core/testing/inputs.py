@@ -1,5 +1,5 @@
-"""Synthetic-input writers for the v2 test suite: the dummy structured-H5
-writer and the dummy norm/class-dict writer (relocated from v1 at DEL-1).
+"""Synthetic-input writers for the test suite: the dummy structured-H5
+writer and the dummy norm/class-dict writer.
 """
 
 from __future__ import annotations

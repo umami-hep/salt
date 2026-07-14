@@ -56,12 +56,8 @@ class Checkpoint(ModelCheckpoint):
         self.dirname = dirname
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit.
-
-        Raises
-        ------
-        ConfigError
-            When the trainer log dir is an ``s3://`` path (not yet supported).
+        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit; raises
+        `ConfigError` for an unsupported ``s3://`` log dir.
         """
         if stage == "fit" and not trainer.fast_dev_run:
             log_dir = trainer.log_dir or trainer.default_root_dir

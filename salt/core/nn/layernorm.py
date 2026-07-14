@@ -1,4 +1,4 @@
-"""LayerNorm/RMSNorm variants (v1 salt/models/layernorm.py absorption)."""
+"""LayerNorm/RMSNorm variants."""
 
 from __future__ import annotations
 

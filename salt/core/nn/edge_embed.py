@@ -34,11 +34,9 @@ class EdgeFeatures(nn.Module):
     ``masks.<stream>``, and produces ``edges.<stream>`` ``[B, T, T, E]`` where
     ``E = len(features)``. Produces a NEW key; never mutates ``inputs.*``.
 
-    The per-element math (dR/kt/z/subjetIndex/isSelfLoop/mass) is byte-faithful
-    to v1's inlined `calculate_edge_features`/`check_edge_config`. The
-    ``indices_map`` (variable name -> column index) is resolved at `bind` from
-    the resolved schema's declared fields — column lookups resolve by NAME,
-    never by YAML list position.
+    The ``indices_map`` (variable name -> column index) is resolved at `bind`
+    from the resolved schema's declared fields — column lookups resolve by
+    NAME, never by YAML list position.
 
     ONNX: the produced tensor carries the SAME ``T:<stream>`` symbol on both
     token axes, so both trace as dynamic; the math is all
@@ -141,16 +139,15 @@ class EdgeEmbed(nn.Module):
     """Config-constructed edge-feature embedding.
 
     An edge-typed `StreamEmbed`: maps ``edges.<stream>`` ``[B, T, T, E]`` ->
-    ``edges.<stream>_emb`` ``[B, T, T, D_e]`` with an internal v1 `Dense` (an
+    ``edges.<stream>_emb`` ``[B, T, T, D_e]`` with an internal `Dense` (an
     ``nn.Linear`` stack over the last dim, so it embeds each pairwise edge
     independently). No context, no muP, no per-stream rank inference — edges
     are always the rank-4 pairwise matrix.
 
     ONNX: both ``T:<stream>`` token axes flow through unchanged (dynamic).
 
-    Carries no FiLM/positional-encoding, faithfully to v1: those live on
-    `StreamEmbed` for the constituent streams and on `TransformerEncoder` for
-    the encoder/global FiLM.
+    Carries no FiLM/positional-encoding — those live on `StreamEmbed` for the
+    constituent streams and on `TransformerEncoder` for the encoder/global FiLM.
     """
 
     def __init__(
@@ -170,7 +167,7 @@ class EdgeEmbed(nn.Module):
         out_dim : int
             Output edge-embedding width ``D_e`` (concrete, config-fixed).
         dense : dict[str, Any] | None, optional
-            Extra kwargs for the internal v1 `Dense`; must not contain width keys.
+            Extra kwargs for the internal `Dense`; must not contain width keys.
         input : str | None, optional
             Edge input key override, by default ``edges.<stream>``.
         out : str | None, optional

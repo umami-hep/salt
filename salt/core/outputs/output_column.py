@@ -18,9 +18,8 @@ class OutputColumn:
 
     The producer emits a bare ``outputs.<stream>.<name>`` tensor; the sink
     owns the serialisation schema the trace cannot recover — the per-column
-    suffixes, the H5 dtype, and the run-name prefix — reproducing the v1
-    ``task.output_names`` column-naming contract without the sink reaching
-    into the task.
+    suffixes, the H5 dtype, and the run-name prefix — without the sink
+    reaching into the task.
 
     Parameters
     ----------
@@ -36,7 +35,7 @@ class OutputColumn:
         The H5 column dtype (numpy descriptor), by default ``"f4"``.
     prefix : bool, optional
         Whether to prefix each suffix with ``{run_name}_``, by default True
-        (False reproduces a bare-column family like the v1 ``VertexIndex``).
+        (False for a bare-column family like ``VertexIndex``).
 
     Raises
     ------

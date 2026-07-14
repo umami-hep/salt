@@ -1,4 +1,4 @@
-"""PositionalEncoder GraphModule (v1 salt/models/posenc.py absorption)."""
+"""PositionalEncoder GraphModule."""
 
 from __future__ import annotations
 
@@ -17,25 +17,9 @@ _POSENC_SYM_VARS: frozenset[str] = frozenset({"phi"})
 class PositionalEncoder(nn.Module):
     """Sin/cos positional encoding over coordinate variables.
 
-    Evenly shares the embedding space between the encoded variables; any
-    remaining dimensions are left as zeros. Parameter-free (``@torch.no_grad``).
-
-    Parameters
-    ----------
-    variables : Sequence[str]
-        Variable names to encode. Symmetric variables (``phi``) get the
-        sin-of-sin / sin-of-cos symmetric encoding.
-    dim : int
-        Total positional-encoding width, split evenly across variables
-        (``per_input_dim = dim // (2 * len(variables))``, remainder zero-padded).
-    alpha : int, optional
-        Frequency scaling factor, by default 100.
-
-    Raises
-    ------
-    ConfigError
-        If `variables` is empty or `dim` is too small to give each variable at
-        least one frequency band.
+    Evenly shares ``dim`` across the encoded ``variables`` (remainder
+    zero-padded); ``phi`` gets the symmetric sin-of-sin/sin-of-cos encoding.
+    Parameter-free (``@torch.no_grad``).
     """
 
     def __init__(self, variables: Sequence[str], dim: int, alpha: int = 100) -> None:
@@ -56,13 +40,7 @@ class PositionalEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, inputs: Tensor) -> Tensor:
-        """Encode each coordinate column (in ``variables`` order); concat along the last dim.
-
-        Returns
-        -------
-        Tensor
-            The positional encoding ``[..., dim]``.
-        """
+        """Encode each coordinate column (in ``variables`` order); concat along the last dim."""
         encodings: list[Tensor] = []
         for i, var in enumerate(self.variables):
             symmetric = var in _POSENC_SYM_VARS
@@ -72,13 +50,7 @@ class PositionalEncoder(nn.Module):
         return torch.cat(encodings, dim=-1)
 
     def pos_enc(self, xs: Tensor, dim: int, symmetric: bool = False) -> Tensor:
-        """One variable's sin/cos encoding.
-
-        Returns
-        -------
-        Tensor
-            The ``[..., 2*dim]`` encoding for this variable.
-        """
+        """One variable's sin/cos encoding -> ``[..., 2*dim]``."""
         xs = xs.unsqueeze(-1)
         kwargs = {"device": xs.device, "dtype": xs.dtype}
         omegas = self.alpha * torch.logspace(0, 2 / (dim) - 1, dim, 10_000, **kwargs)

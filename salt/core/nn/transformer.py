@@ -1,4 +1,4 @@
-"""Transformer/EncoderLayer and residual wrappers (v1 salt/models/transformer.py absorption)."""
+"""Transformer/EncoderLayer and residual wrappers."""
 
 from __future__ import annotations
 
@@ -34,13 +34,7 @@ class LayerScale(nn.Module):
         self.gamma = nn.Parameter(init_value * torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
-        """Scale the input by a learnable vector ``gamma``.
-
-        Returns
-        -------
-        Tensor
-            Scaled inputs as Tensor
-        """
+        """Scale the input by a learnable vector ``gamma``."""
         return x * self.gamma
 
 
@@ -52,13 +46,7 @@ class DropPath(nn.Module):
         self.drop_prob = drop_prob
 
     def forward(self, x: Tensor) -> Tensor:
-        """Randomly drop residual paths during training.
-
-        Returns
-        -------
-        Tensor
-            Output tensor with stochastic depth applied when training.
-        """
+        """Randomly drop residual paths (no-op outside training)."""
         if self.drop_prob == 0.0 or not self.training:
             return x
         keep_prob = 1 - self.drop_prob
@@ -69,25 +57,10 @@ class DropPath(nn.Module):
 
 
 class NormResidual(nn.Module):
-    """Residual wrapper with normalization, LayerScale, and DropPath.
+    """Residual wrapper (PostNorm/PreNorm/NoNorm) around ``fn``, with LayerScale/DropPath.
 
-    Represents PostNorm/PreNorm/NoNorm patterns and forwards edge features
-    for `EdgeAttention`.
-
-    Parameters
-    ----------
-    fn : GLU | Attention | EdgeAttention
-        The wrapped non-resizing module.
-    norm : str, optional
-        Normalization class name. The default is ``"LayerNorm"``.
-    ls_init : float | None, optional
-        Initial value for LayerScale. If ``None``, LayerScale is disabled.
-    drop_path : float, optional
-        Drop-path rate for stochastic depth. The default is ``0.0``.
-    embed_dim : int, optional
-        Input/output dimension. If ``0``, attempts to read ``fn.embed_dim``.
-    norm_type : str, optional
-        One of ``{"pre", "post", "none"}``. The default is ``"pre"``.
+    ``ls_init=None`` disables LayerScale; ``embed_dim=0`` falls back to
+    ``fn.embed_dim``; forwards edge features through for `EdgeAttention`.
     """
 
     def __init__(
@@ -112,13 +85,7 @@ class NormResidual(nn.Module):
         self.edges = bool(isinstance(fn, EdgeAttention))
 
     def _forward_edges(self, x: Tensor, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]:
-        """Apply residual wrapper around ``fn`` that returns edge features.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor]
-            Output tensor with residual + the edge features from ``fn``.
-        """
+        """Residual wrapper around an ``fn`` that also returns edge features."""
         if self.norm_type == "pre":
             fn_out, edge_out = self.fn(self.norm(x), *args, **kwargs)
             res_out = x + self.drop_path(self.ls(fn_out))
@@ -132,13 +99,7 @@ class NormResidual(nn.Module):
         return res_out, edge_out
 
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]:
-        """Apply residual wrapper around ``fn``.
-
-        Returns
-        -------
-        Tensor | tuple[Tensor, Tensor]
-            Output tensor with residual; a tuple ``(output, edge_out)`` for `EdgeAttention`.
-        """
+        """Apply the residual wrapper; dispatches to the edge-returning path for `EdgeAttention`."""
         if self.edges:
             return self._forward_edges(x, *args, **kwargs)
         if self.norm_type == "pre":
@@ -152,32 +113,9 @@ class NormResidual(nn.Module):
 class EncoderLayer(nn.Module):
     """Transformer encoder layer: self-attention + feed-forward.
 
-    Parameters
-    ----------
-    embed_dim : int
-        Embedding dimension.
-    norm : str, optional
-        Normalization style. The default is ``"LayerNorm"``.
-    ls_init : float | None, optional
-        Initial LayerScale value. If ``None``, LayerScale is disabled.
-    drop_path : float, optional
-        Drop-path rate. The default is ``0.0``.
-    depth : int, optional
-        Layer depth index, used for differential attention weighting. The default is ``1``.
-    dense_kwargs : dict | None, optional
-        Keyword args for :class:`GLU`.
-    attn_kwargs : dict | None, optional
-        Keyword args for :class:`Attention`.
-    norm_type : str, optional
-        One of ``{"pre", "post", "hybrid"}``. The default is ``"pre"``.
-    edge_embed_dim : int, optional
-        Model embedding dimension for edge features. The default is ``0``.
-    update_edges : bool, optional
-        If ``True``, edge features are updated after attention. The default is ``False``
-    mup: bool, optional
-        Whether to use μP parameterization. The default is ``False``.
-    num_dense: int, optional
-        Number of dense layers to stack in the feed-forward block. The default is ``1``.
+    ``edge_embed_dim > 0`` swaps `Attention` for `EdgeAttention`;
+    ``norm_type="hybrid"`` forces qk/v norm and a pre-FFN norm; ``num_dense``
+    stacks that many `GLU` blocks in the feed-forward.
     """
 
     def __init__(
@@ -253,13 +191,7 @@ class EncoderLayer(nn.Module):
     def forward(
         self, x: Tensor, edge_x: Tensor | None = None, **kwargs: Any
     ) -> Tensor | tuple[Tensor, Tensor]:
-        """Apply self-attention and feed-forward.
-
-        Returns
-        -------
-        Tensor | tuple[Tensor, Tensor]
-            The updated token embeddings (and edges when ``edge_x`` is provided).
-        """
+        """Self-attention + feed-forward; returns updated edges too when ``edge_x`` is given."""
         if edge_x is not None:
             x, edge_x = self.attn(x, edge_x=edge_x, **kwargs)
             if self.update_edges:
@@ -407,13 +339,7 @@ class Transformer(nn.Module):
         edge_x: Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[Tensor, BoolTensor | dict[str, BoolTensor]]:
-        """Run the encoder stack.
-
-        Returns
-        -------
-        tuple[Tensor, BoolTensor | dict[str, BoolTensor]]
-            Tuple of ``(encoded, pad_mask)`` where ``encoded`` has shape ``[B, L, D_out]``.
-        """
+        """Run the encoder stack; returns ``(encoded [B, L, D_out], pad_mask)``."""
         if self.num_registers:
             x, pad_mask = self._add_registers(x, pad_mask)
 
@@ -486,13 +412,7 @@ class Transformer(nn.Module):
     def _add_registers(
         self, x: Tensor | dict[str, Tensor], pad_mask: BoolTensor | dict[str, BoolTensor] | None
     ) -> tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]:
-        """Add the learnable registers to the end of the input sequence (and mask).
-
-        Returns
-        -------
-        tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]
-            Updated ``(x, pad_mask)`` including appended registers.
-        """
+        """Append the learnable registers to the input sequence (and mask)."""
         batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
 
         reg = self.registers.expand(batch_size, -1, -1)

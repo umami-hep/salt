@@ -166,11 +166,7 @@ class MaskFormerMatchedLoss(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare the object preds + truth labels -> ``matched.objects.*`` + ``losses.*``.
 
-        FIT|VAL only — empty IO in TEST/ONNX (the matched loss is mode-inactive
-        there). Requires the decoder's ``<stream>.{class_logits,class_probs,masks}``
-        and the truth ``labels.objects.{object_class,masks}``; additionally the
-        scaled ``preds.<stream>.regression`` + ``targets.<stream>.regression`` when a
-        regression component is requested.
+        FIT|VAL only — empty IO in TEST/ONNX.
         """
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
@@ -239,18 +235,8 @@ class MaskFormerMatchedLoss(nn.Module):
     def bind(self, schema: ResolvedSchema) -> None:
         """Validate the regression prediction/target widths agree (element-wise L1).
 
-        ``bind_all`` runs ``bind`` on every configured module regardless of the
-        compiled mode, but this loss is FIT|VAL-only, so in a TEST/ONNX-only bind
-        schema the regression pred/target keys are absent and their widths never
-        resolve statically — skip validation when either key is missing from
-        ``schema.widths``. A genuinely missing regression producer in a training
-        plan still fails earlier as a planner `ConnectivityError`, so this guard
-        cannot mask a real training-mode wiring bug.
-
-        Raises
-        ------
-        ConfigError
-            If a requested regression component has mismatched pred/target widths.
+        Skips silently when either key is absent from ``schema.widths`` (a
+        TEST/ONNX-only bind schema, where this FIT|VAL-only loss has no keys).
         """
         if "regression" not in self.components:
             return
@@ -269,16 +255,9 @@ class MaskFormerMatchedLoss(nn.Module):
     def _matched_regression_loss(
         self, reg_pred: Tensor, reg_tgt: Tensor, object_class: Tensor
     ) -> Tensor:
-        """The matched object-regression L1 over valid (non-null) objects.
+        """The matched object-regression L1 over valid objects (``object_class != num_classes``).
 
-        The matcher-permuted regression predictions are aligned to the truth-order
-        targets, and the L1 is averaged over the valid objects only
-        (``object_class != num_classes``).
-
-        Returns
-        -------
-        Tensor
-            A scalar matched-regression L1 (0.0 if no valid object in the batch).
+        Returns 0.0 if no valid object in the batch.
         """
         valid = object_class != self.num_classes  # [B, M]
         if not valid.any():
@@ -290,15 +269,8 @@ class MaskFormerMatchedLoss(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Match queries to truth, then emit the matched predictions + the loss components.
 
-        Solves the assignment on the scaled preds/targets, gathers the permuted
-        predictions into new ``matched.*`` keys (no in-place permute), and computes
-        the classification/mask losses via the composed v1 methods plus the matched
-        regression L1.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The new ``matched.objects.*`` + ``losses.*`` keys only.
+        Gathers the matcher-permuted predictions into new ``matched.*`` keys
+        (no in-place permute).
         """
         del mode
         class_logits = b.get(f"{self.input_stream}.class_logits")

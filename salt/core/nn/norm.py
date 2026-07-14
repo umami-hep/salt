@@ -24,7 +24,7 @@ from salt.core.nn.stream_embed import _stream_len
 
 
 class Normaliser(nn.Module):
-    """Config-constructed input normalisation, replacing v1 `InputNorm`.
+    """Config-constructed input normalisation.
 
     The DEFAULT input normaliser: loads a precomputed ``norm_dict.yaml``
     (fixed per-stream, per-variable ``{mean, std}``). For a self-normalising
@@ -78,14 +78,7 @@ class Normaliser(nn.Module):
         self._bound = False
 
     def _spec(self, stream: str) -> TensorSpec:
-        """Build the shared spec for ``inputs.<stream>`` / ``normed.<stream>``.
-
-        Returns
-        -------
-        TensorSpec
-            ``("B", F)`` for the global object, ``("B", "T:<stream>", F)``
-            for sequence streams.
-        """
+        """Shared spec for ``inputs``/``normed``: global ``(B, F)`` or sequence ``(B, T, F)``."""
         width = sym_dim("F", f"{self.name}.{stream}")
         shape: tuple[int | str, ...] = (
             ("B", width) if stream == self.global_object else ("B", _stream_len(stream), width)
@@ -103,13 +96,8 @@ class Normaliser(nn.Module):
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate normalisation buffers (means/stds per stream) from the resolved schema.
 
-        The boolean ``materialised`` buffer guards against silently training
-        on un-normalised values.
-
-        Raises
-        ------
-        RuntimeError
-            If called twice (rebinding would discard loaded values).
+        The ``materialised`` buffer guards against silently training on
+        un-normalised values. Raises `RuntimeError` if called twice.
         """
         if self._bound:
             raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
@@ -243,11 +231,7 @@ class Normaliser(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Produce ``normed.<stream> = (inputs.<stream> - means) / stds``.
 
-        Raises
-        ------
-        RuntimeError
-            If the buffers were never materialised (fresh fit without
-            `materialise`) — identity values would silently train un-normalised.
+        Raises `RuntimeError` if the buffers were never materialised.
         """
         del mode
         # skip under tracing: the tensor->bool read would emit a spurious
@@ -270,19 +254,13 @@ class Normaliser(nn.Module):
 class MaskedInputNormaliser(nn.Module):
     """Self-normalising input layer with online masked running statistics.
 
-    OPT-IN alternative to the default fixed-norm-dict `Normaliser`: learns its
-    own mean/var online from the valid (non-padded) objects of every training
-    batch, instead of reading a precomputed ``norm_dict.yaml``. No file I/O.
-
-    Unlike ``nn.BatchNorm``, this layer ALWAYS applies the running buffers, even
-    in train mode (``normed = (x - running_mean) / sqrt(running_var + eps)``);
-    the running stats are updated from masked batch moments separately, only
-    when training and off tracing. In eval/inference/ONNX this reduces to a
-    frozen affine transform with no mask dependency. Produces NEW
-    ``normed.<stream>`` keys; never mutates ``inputs.*``.
-
-    The legacy ``norm_dict`` constructor arg is accepted for config
-    compatibility but ignored (no file is ever read).
+    OPT-IN alternative to the fixed-norm-dict `Normaliser`: learns mean/var
+    online from valid (non-padded) objects, no file I/O. ALWAYS applies the
+    frozen running buffers (even in train mode); the buffers are updated from
+    masked batch moments separately, only when training and off tracing —
+    so eval/inference/ONNX is a pure affine transform with no mask
+    dependency. The legacy ``norm_dict`` constructor arg is accepted for
+    config compatibility but ignored.
     """
 
     def __init__(
@@ -295,29 +273,8 @@ class MaskedInputNormaliser(nn.Module):
     ) -> None:
         """Capture config only (no file I/O here).
 
-        Parameters
-        ----------
-        streams : Sequence[str]
-            Streams to normalise.
-        global_object : str | None, optional
-            The stream that is a per-object vector (``[B, F]``) rather than
-            a padded sequence (``[B, T, F]``), by default None. The global
-            object has no pad mask — every row is valid.
-        norm_dict : str | Path | None, optional
-            DEPRECATED / IGNORED. Kept only for config compatibility, by default None.
-        momentum : float | None, optional
-            EMA momentum for the running-stat update (BatchNorm default ``0.1``):
-            ``running = (1 - momentum) * running + momentum * batch``. Pass
-            ``None`` for a cumulative moving average that converges to the true
-            masked dataset mean/var, by default 0.1.
-        eps : float, optional
-            Added under the sqrt for numerical stability, by default 1e-5.
-
-        Raises
-        ------
-        ConfigError
-            If `streams` is empty, contains duplicates, `global_object` is
-            not one of them, or `momentum`/`eps` are out of range.
+        ``norm_dict`` is deprecated/ignored. ``momentum=None`` gives a
+        cumulative moving average instead of an EMA.
         """
         super().__init__()
         self.name = _UNNAMED
@@ -346,17 +303,10 @@ class MaskedInputNormaliser(nn.Module):
         self._bound = False
 
     def _spec(self, stream: str) -> TensorSpec:
-        """Build the shared spec for ``inputs.<stream>`` / ``normed.<stream>``.
+        """Shared spec for ``inputs``/``normed``: global ``(B, F)`` or sequence ``(B, T, F)``.
 
         The last dim is the instance-scoped symbol ``F:<name>.<stream>`` on
-        BOTH sides, so the concrete width declared by the dataset boundary
-        propagates to ``normed.<stream>`` through unification (bind.py).
-
-        Returns
-        -------
-        TensorSpec
-            ``("B", F)`` for the global object, ``("B", "T:<stream>", F)``
-            for sequence streams.
+        both sides, so the dataset-declared width unifies onto ``normed``.
         """
         width = sym_dim("F", f"{self.name}.{stream}")
         shape: tuple[int | str, ...] = (
@@ -365,14 +315,11 @@ class MaskedInputNormaliser(nn.Module):
         return TensorSpec(shape=shape, dtype="float32")
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``inputs.<stream>`` (+ training ``masks.<stream>``) -> ``normed.<stream>``.
+        """Declare ``inputs.<stream>`` (+ optional training ``masks.<stream>``) -> ``normed``.
 
-        Sequence streams also require ``masks.<stream>`` (``True == padded``),
-        but only as an OPTIONAL, training-mode port — the mask is read only
-        when updating the running statistics, and a stream without a
-        pad-mask producer treats every object as valid. Gating to
-        ``Mode.TRAINING`` (rather than FIT alone) keeps TEST/ONNX free of any
-        mask dependency, so the exported graph is a pure affine transform.
+        Sequence streams' mask port is optional and TRAINING-only (a
+        mask-less stream treats every object as valid); TEST/ONNX stay a
+        pure affine transform with no mask dependency.
         """
         del mode
         requires: dict[str, TensorSpec] = {f"inputs.{s}": self._spec(s) for s in self.streams}
@@ -394,10 +341,7 @@ class MaskedInputNormaliser(nn.Module):
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate the running-statistic buffers (identity init: mean 0 / var 1) from the schema.
 
-        Raises
-        ------
-        RuntimeError
-            If called twice (rebinding would discard learned values).
+        Raises `RuntimeError` if called twice.
         """
         if self._bound:
             raise RuntimeError(
@@ -416,17 +360,7 @@ class MaskedInputNormaliser(nn.Module):
 
     @staticmethod
     def _masked_moments(x: Tensor, valid: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute per-feature ``(sum, sumsq, count)`` over valid objects.
-
-        `x` is ``[B, T, F]`` (sequence) or ``[B, F]`` (global); `valid` is the
-        ``[B, T]`` keep-mask (``True == valid``), or None for the global
-        object (all rows kept).
-
-        Returns
-        -------
-        tuple[Tensor, Tensor, Tensor]
-            ``(sum_[F], sumsq_[F], count_scalar)``.
-        """
+        """Per-feature ``(sum, sumsq, count)`` over valid objects (``valid=None`` -> all rows)."""
         # valid is None for the global object (all rows valid); otherwise gather
         # the valid (non-padded) rows of the sequence stream.
         flat = x.reshape(-1, x.shape[-1]) if valid is None else x[valid]
@@ -435,12 +369,11 @@ class MaskedInputNormaliser(nn.Module):
 
     @torch.no_grad()
     def _update_running_stats(self, stream: str, x: Tensor, valid: Tensor | None) -> None:
-        """EMA-update the running stats for one stream from masked batch moments.
+        """Update the running stats for one stream from masked batch moments.
 
-        All-reduces the per-feature sum/sumsq/count across DDP ranks before
-        deriving the batch mean/var (never averaging per-rank mean/var
-        directly, which is wrong when counts differ across ranks). Skips an
-        all-padded (global count 0) stream.
+        All-reduces sum/sumsq/count across DDP ranks before deriving batch
+        mean/var (never averages per-rank mean/var directly). No-op if the
+        stream is all-padded (count 0) for this batch.
         """
         s_sum, s_sumsq, count = self._masked_moments(x, valid)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -477,18 +410,10 @@ class MaskedInputNormaliser(nn.Module):
             running_var.mul_(1 - mom).add_(batch_var, alpha=mom)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Apply running-stat normalisation; update the stats in train mode.
+        """Apply frozen running-stat normalisation; also update the stats when training.
 
-        Always applies the frozen running buffers:
-        ``normed.<stream> = (inputs.<stream> - running_mean) / sqrt(running_var + eps)``.
-        The running stats update only when ``self.training``, the plan mode is
-        training, and the graph is not being traced — so a TEST/ONNX plan
-        never reads a mask even if the module is left in ``training=True``.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced ``normed.<stream>`` keys only.
+        Updates only when ``self.training``, the plan mode is training, and
+        the graph is not being traced — so a TEST/ONNX plan never reads a mask.
         """
         updating = self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing()
         if updating:

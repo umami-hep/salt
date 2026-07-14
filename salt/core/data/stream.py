@@ -93,12 +93,7 @@ class StreamConfig:
 
     @property
     def engages_pipeline(self) -> bool:
-        """Whether cut/sort are configured (the additive path engages).
-
-        The parity-protecting predicate: ``False`` means `_cut_sort_truncate_pad`
-        runs the byte-identical contiguous truncate+pad+valid path; ``True`` means
-        the drop-then-pad / sort machinery engages.
-        """
+        """Whether cut/sort are configured (``True`` engages the drop-then-pad / sort machinery)."""
         return bool(self.cuts) or self.sort is not None
 
 
@@ -138,53 +133,16 @@ def _cut_sort_truncate_pad(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cut -> sort -> truncate -> pad a jagged stream into a structured ``(B, T)`` array.
 
-    The shared assembly factored out of the per-reader ``_assemble_jagged``
-    methods. The pipeline, in order:
+    1. cut: AND of ``stream_cfg.cuts``, drop-then-pad — failing constituents
+       are REMOVED (never waste a ``pad_max`` slot).
+    2. sort: per-row argsort of the sort field; permutation applied to fields
+       AND labels.
+    3. truncate: keep the leading ``pad_max`` constituents.
+    4. pad: ``valid`` computed from the post-cut/sort/truncate state; each
+       field ``ak.pad_none`` + ``ak.fill_none`` per dtype (`pad_fill`), cast
+       to the schema dtype, with a trailing ``valid`` bool field.
 
-    1. **cut (drop-then-pad).** When ``stream_cfg.cuts`` is non-empty, a
-       per-constituent keep mask is built (AND of every `Cut` evaluated against
-       the jagged columns) and applied to all fields + labels — a failing
-       constituent is removed (not masked in place), so it never wastes a
-       ``pad_max`` slot. With no cuts this step is a no-op.
-    2. **sort.** When ``stream_cfg.sort`` is set, an argsort of the sort field
-       per row gives a permutation applied to every field + label (so features
-       and labels stay aligned). With no sort the file order is kept.
-    3. **truncate.** Keep the leading ``pad_max`` constituents (``arr[:, :T]``).
-    4. **pad + valid.** ``valid`` is computed first from the post-cut/sort
-       per-row counts (clipped to ``T``); each field is ``ak.pad_none`` +
-       ``ak.fill_none`` per dtype (`pad_fill`), densified, cast to the schema
-       dtype, and assembled into a structured ``(B, T)`` array with a trailing
-       ``valid`` bool field.
-
-    With ``stream_cfg.engages_pipeline`` False (no cuts/sort — the default)
-    steps 1-2 are skipped and steps 3-4 reproduce the readers' previous
-    contiguous path byte-for-byte.
-
-    Parameters
-    ----------
-    cols : dict[str, Any]
-        ``{field: jagged awkward array}`` of length ``b`` (depth-1 ``[row][const]``).
-    fields : list[str]
-        The served field names, in config order (the structured-array field order).
-    stream_cfg : StreamConfig
-        The cut/sort/pad spec for this stream (``pad_max`` resolved).
-    b : int
-        The number of rows (batch size) — the output's leading dim.
-    gschema : GroupSchema | None, optional
-        The stream's schema group (field -> dtype). When given each field is cast to
-        its schema dtype (the readers' existing ``block.astype(dt)``); when ``None``
-        the awkward-inferred dtype is kept.
-    labels : dict[str, Any] | None, optional
-        Additional jagged columns aligned to ``cols`` (e.g. constituent labels) that
-        must be permuted/cut IN LOCKSTEP but are NOT emitted as structured fields.
-        Primarily for future cut/sort callers that carry labels separately; the
-        retrofitted readers pass label fields inside ``cols`` and leave this ``None``.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        ``(structured (B, T) array, valid (B, T) bool)``. Propagates `KeyError`
-        from `_apply_cut_and_sort` when a configured cut / sort field is absent.
+    Returns ``(structured (B, T) array, valid (B, T) bool)``.
     """
     import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
@@ -232,16 +190,6 @@ def _apply_cut_and_sort(
     A maximal-lockstep permutation: the keep mask (cuts) and the argsort (sort) are
     BOTH applied to every entry of ``work`` and ``aligned`` so features and labels
     never desynchronise.
-
-    Returns
-    -------
-    tuple[dict[str, Any], dict[str, Any]]
-        The cut+sorted ``(work, aligned)`` column dicts.
-
-    Raises
-    ------
-    KeyError
-        If a cut field or the sort field is missing from the columns.
     """
     import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
 
@@ -285,10 +233,6 @@ def _apply_cut_and_sort(
 @dataclass
 class OffsetIndex:
     """Cumulative row offsets across a file list + covering-range mapping.
-
-    Factored from the readers' file-table offset bookkeeping: the easyjet/H5
-    simple cumulative ``(start, n)`` table and the ftag1lite event->jet
-    covering search live here as one helper.
 
     The simple flavour (``offsets`` only) maps a contiguous global row slice to
     the ``(file_index, local_start, local_stop)`` runs that cover it — the

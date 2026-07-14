@@ -211,23 +211,11 @@ def _back_bind_symbols(
 def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None:
     """Let plan-step modules contribute widths derived from resolved input widths.
 
-    Each unique plan-step module exposing a callable ``derived_widths`` is asked
-    for ``{produced_key: int}`` given the widths resolved so far. The hook
-    returns an empty dict when its inputs are not yet resolvable, so this is
-    order-insensitive across the supplied plans.
-
-    Run to a FIXPOINT (re-sweep until no width changes), so a CHAIN of derived
-    widths — module B's input width is itself derived by module A — resolves
-    regardless of plan order: if B is visited before A on the first sweep its
-    inputs aren't bound yet, but a later sweep (after A bound them) re-runs B.
-    Termination: each productive sweep binds >=1 new width and widths are never
-    unbound, so the loop runs at most ``num modules + 1`` times.
-
-    Raises
-    ------
-    BindError
-        When a derived width disagrees with an already-resolved width for the
-        same key.
+    Each module exposing a callable ``derived_widths`` is asked for
+    ``{produced_key: int}`` given the widths resolved so far (empty dict if
+    not yet resolvable). Runs to a FIXPOINT so a chain of derived widths
+    resolves regardless of plan order. Raises `BindError` when a derived
+    width disagrees with an already-resolved one.
     """
     modules = _unique_derived_modules(plans)
     max_sweeps = len(modules) + 1
@@ -308,13 +296,7 @@ class _DimBindings:
         return root
 
     def bind(self, dim: str, size: int, where: str) -> None:
-        """Bind a symbolic dim to a concrete size; conflicts raise `BindError`.
-
-        Raises
-        ------
-        BindError
-            Naming both observation sites and the conflicting sizes.
-        """
+        """Bind a symbolic dim to a concrete size; conflicts raise `BindError`."""
         root = self._find(dim)
         previous = self._size.get(root)
         if previous is not None and previous[0] != size:
@@ -326,13 +308,7 @@ class _DimBindings:
             self._size[root] = (size, where)
 
     def union(self, a: str, b: str, where: str) -> None:
-        """Unify two symbolic dims; conflicting concrete bindings raise `BindError`.
-
-        Raises
-        ------
-        BindError
-            Naming both binding sites and the conflicting sizes.
-        """
+        """Unify two symbolic dims; conflicting concrete bindings raise `BindError`."""
         root_a, root_b = self._find(a), self._find(b)
         if root_a == root_b:
             return
@@ -348,12 +324,6 @@ class _DimBindings:
             self._size[root_a] = size_b
 
     def size_of(self, dim: str) -> int | None:
-        """Return the resolved concrete size of a symbolic dim, if bound.
-
-        Returns
-        -------
-        int | None
-            The size, or None when the dim never bound to a concrete value.
-        """
+        """Return the resolved concrete size of a symbolic dim, or None if unbound."""
         entry = self._size.get(self._find(dim))
         return entry[0] if entry is not None else None

@@ -54,8 +54,7 @@ class TransformerEncoder(nn.Module):
     ``mup.MuReadout`` (weight+bias zeroed). The attention softmax scale, the
     attention muP init, and the GLU/dense muP init are all NOT engaged by
     this flag — those live on ``Attention(mup=True)``/``Dense(mup=True)``
-    directly (see `StreamEmbed`). This is a faithful port of v1's actual
-    (narrower) encoder-mup behaviour, not a bug.
+    directly (see `StreamEmbed`). This narrower scope is intentional, not a bug.
 
     At export (`set_export_mode`), a `MuReadout` out-proj is FOLDED into a
     plain `nn.Linear` with the output multiplier baked into the weights —
@@ -252,12 +251,7 @@ class TransformerEncoder(nn.Module):
 
     @property
     def edge_stream(self) -> str | None:
-        """The stream the edge port belongs to, or None when no edge path.
-
-        ``"edges.tracks_emb"`` -> ``"tracks"``. Used by the bind-time
-        edge-stream-first validator to check the edge stream is
-        `Concat.streams[0]`.
-        """
+        """The edge port's stream (``"edges.tracks_emb"`` -> ``"tracks"``), or None."""
         if self.edges_key is None:
             return None
         # "edges.<stream>_emb" -> "<stream>": strip the namespace + _emb suffix
@@ -267,14 +261,8 @@ class TransformerEncoder(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``seq.x``/``seq.mask`` (+ ``edges.<stream>_emb``) -> ``encoded.seq``.
 
-        ``masks.registers`` is produced ONLY when ``drop_registers`` is False —
-        with registers dropped there are no register rows left to mask, and
-        `GlobalAttentionPooling` treats ``masks.registers`` as OPTIONAL.
-
-        When an `edges` port is configured, the encoder additionally REQUIRES
-        the edge-embed tensor ``[B, T, T, D_e]`` whose BOTH token axes share
-        the stream's ``T:<stream>`` symbol. Updated edges stay INTERNAL — this
-        module still produces only ``encoded.seq`` (+ optional register mask).
+        With an `edges` port, additionally requires the edge-embed tensor
+        ``[B, T, T, D_e]`` whose both token axes share ``T:<stream>``.
         """
         del mode
         produces: dict[str, TensorSpec] = {
@@ -307,23 +295,10 @@ class TransformerEncoder(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Cross-check the edge-embed width against the configured ``edge_embed_dim``.
+        """Validate the resolved edge-embed width against ``edge_embed_dim`` (no-op if no edges).
 
-        The composed v1 `Transformer` already built its `EdgeAttention`
-        projections from ``edge_embed_dim`` at ``__init__``, so this only
-        VALIDATES that the resolved edge-embed width matches — a mismatch is a
-        named `ConfigError` here rather than a silent runtime shape error.
-        No-op when no edge port is configured.
-
-        Also builds the optional encoder/global FiLM: per-layer encoder FiLMs
-        are sized to the encoder embed width and populated into the composed
-        `Transformer`'s ``featurewise`` ModuleList; the global FiLM is sized to
-        the encoder output width.
-
-        Raises
-        ------
-        ConfigError
-            When the resolved edge-embed width differs from ``edge_embed_dim``.
+        Also builds the optional encoder/global FiLM modules, sized from the
+        resolved schema widths.
         """
         if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
             num_params = schema.width(self.params_key)
@@ -354,13 +329,9 @@ class TransformerEncoder(nn.Module):
             )
 
     def set_export_mode(self) -> None:
-        """Prepare the encoder for tracing: torch-math backend + MuReadout fold.
+        """Prepare for tracing: force the torch-math attention backend and fold MuReadout.
 
-        `MuReadout`'s forward applies an output multiplier before the linear —
-        a non-``nn.Linear`` op that traces to an unsupported/incorrect graph.
-        `_fold_mu_readout` swaps it for a plain `nn.Linear` with the
-        multiplier baked into the weights (numerically equal to the MuReadout
-        forward). Idempotent — a second call no-ops.
+        Idempotent — a second call no-ops.
         """
         # EdgeAttention has no pluggable backend — it is ALWAYS raw torch
         # attention (set_backend just warns) and already trace-safe; only
@@ -371,11 +342,7 @@ class TransformerEncoder(nn.Module):
             self._fold_mu_readout()
 
     def _fold_mu_readout(self) -> None:
-        """Fold the composed v1 `MuReadout` out-proj into a plain `nn.Linear` for export.
-
-        No-op unless the encoder has a `MuReadout` out projection (a non-mup
-        or already-folded encoder is left untouched — idempotent).
-        """
+        """Fold the `MuReadout` out-proj into a plain `nn.Linear`; no-op if already folded."""
         from mup import MuReadout  # noqa: PLC0415
 
         proj = getattr(self.encoder, "out_proj", None)
@@ -395,14 +362,7 @@ class TransformerEncoder(nn.Module):
         self.encoder.out_proj = folded
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Encode the sequence; publish the register mask as a NEW key.
-
-        With ``drop_registers`` only ``encoded.seq`` is produced (no
-        ``masks.registers``, gated out in `declare_io`). When an `edges` port
-        is configured, the edge-embed tensor is passed as the ``edge_x``
-        kwarg; the per-layer edge update stays internal — only ``encoded.seq``
-        (+ optional register mask) is published.
-        """
+        """Encode the sequence; publishes the register mask too unless ``drop_registers``."""
         del mode
         # FRESH dicts: _add_registers INSERTS a "REGISTERS" key into both —
         # never hand it bundle-owned dicts.

@@ -113,13 +113,8 @@ class GraphDataset(Dataset):
         self._build_caches()
 
     def _compile(self) -> Plan:
-        """Compile the dataset plan and statically validate raw-field demands.
-
-        Raises
-        ------
-        SchemaError
-            When a step demands a raw field absent from the schema artifact
-            (nearest-name suggestions included).
+        """Compile the dataset plan and statically validate raw-field demands against the
+        schema (raises `SchemaError` with nearest-name suggestions).
         """
         universe = self._reader.label_universe()
         plan = compile_plan(
@@ -157,11 +152,6 @@ class GraphDataset(Dataset):
         Label fields carry their model-side demand provenance when known
         (`sink_origins`), so a reader bind error names the task module the
         user configured, not just the `Labels` relay.
-
-        Returns
-        -------
-        dict[str, dict[str, str]]
-            ``{stream: {field: demanding module}}``, in plan/demand order.
         """
         out: dict[str, dict[str, str]] = {}
         for step in self._plan.steps:
@@ -182,11 +172,8 @@ class GraphDataset(Dataset):
     def _build_caches(self) -> None:
         """Precompute the per-batch loop state from the frozen plan (hot path).
 
-        The plan is static, so the step sequence (module, reader flag,
-        declared key set) and the model-visible boundary keys are computed
-        once here instead of being rebuilt every ``__getitem__`` (`Bundle.merge`
-        enforces produced == declared, so the boundary key list is exact).
-        Rebuilt after unpickling (`__setstate__` recompiles the plan).
+        Static plan -> step sequence + model-visible boundary keys computed
+        once here instead of every ``__getitem__``. Rebuilt after unpickling.
         """
         self._exec_steps = tuple(
             (step.name, step.module, isinstance(step.module, Reader), frozenset(step.produces))
@@ -238,12 +225,7 @@ class GraphDataset(Dataset):
         return out
 
     def _maybe_bind(self) -> None:
-        """Bind all plan modules once per worker process (pid-guarded).
-
-        The pid guard covers fork inheritance: a dataset forked into a
-        dataloader worker re-binds there, giving each worker its own lazy H5
-        handles and reusable buffers.
-        """
+        """Bind all plan modules once per worker process (pid-guarded for fork inheritance)."""
         pid = os.getpid()
         if self._bound_pid == pid:
             return
@@ -268,25 +250,9 @@ class GraphDataset(Dataset):
     def __getitem__(self, rows: slice) -> dict[str, Any]:
         """Run the dataset plan for one contiguous batch slice.
 
-        Parameters
-        ----------
-        rows : slice
-            Contiguous row range with ``start`` and ``stop`` set (the
-            `RandomBatchSampler` contract).
-
-        Returns
-        -------
-        dict[str, Any]
-            The model-visible nested dict (``inputs`` / ``masks`` /
-            ``labels`` / ``meta``) with torch tensors at the leaves —
-            ``raw.*`` never crosses the boundary.
-
-        Raises
-        ------
-        TypeError
-            If `rows` is not a slice with start and stop. (Under
-            ``debug=True``, `_to_torch` additionally raises `MutationError`
-            on a boundary leaf aliasing a reusable reader buffer.)
+        `rows` must be a slice with start/stop set (the `RandomBatchSampler`
+        contract); returns the model-visible nested dict with torch tensors
+        at the leaves — ``raw.*`` never crosses the boundary.
         """
         if not isinstance(rows, slice) or rows.start is None or rows.stop is None:
             raise TypeError(
@@ -308,12 +274,8 @@ class GraphDataset(Dataset):
         return self._to_torch(bundle)
 
     def _to_torch(self, bundle: Bundle) -> dict[str, Any]:
-        """Convert model-visible bundle leaves to torch (the framework boundary).
-
-        Raises
-        ------
-        MutationError
-            Under ``debug=True``, when a leaf aliases a reader buffer.
+        """Convert model-visible bundle leaves to torch (the framework boundary); under
+        ``debug=True`` raises `MutationError` when a leaf aliases a reader buffer.
         """
         out: dict[str, Any] = {}
         # `_boundary_keys` is the plan-exact model-visible key list, precomputed
@@ -335,10 +297,8 @@ class GraphDataset(Dataset):
         return out
 
     def __getstate__(self) -> dict[str, Any]:
-        """Drop the compiled plan (holds MappingProxyType — not picklable).
-
-        The plan is recompiled in `__setstate__` (deterministic: same config
-        -> same plan and plan_hash).
+        """Drop the compiled plan (holds MappingProxyType — not picklable); recompiled in
+        `__setstate__` (deterministic: same config -> same plan/plan_hash).
         """
         state = self.__dict__.copy()
         state["_plan"] = None

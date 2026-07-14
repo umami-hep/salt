@@ -315,9 +315,8 @@ def dump_schema(h5_path: str | Path) -> Schema:
 
 
 def _dtype_name(dtype: np.dtype) -> str:
-    """Human-readable, reconstructible name for a structured-array field dtype.
-
-    Subarray fields fall back to ``str(dtype)``; others use ``dtype.name``.
+    """Human-readable, reconstructible dtype name: subarray fields fall back to
+    ``str(dtype)``, others use ``dtype.name``.
     """
     if dtype.subdtype is not None:
         return str(dtype)

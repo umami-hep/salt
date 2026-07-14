@@ -64,12 +64,9 @@ class TaskOutput(nn.Module):
         self.output_key = f"outputs.{stream}.{self.output_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``preds.<stream>.<task>`` (+ op extras) -> ``outputs.<stream>.<name>``.
-
-        Both ports are active in every mode (``modes=ALL``): the producer is
-        gated by demand, not a hard mode flag, so FIT/VAL drop it via the
-        planner's demand closure. ``kind="data"`` (the default) so the
-        producer<-task edge kind-unifies.
+        """Requires ``preds.<stream>.<task>`` (+ op extras); produces
+        ``outputs.<stream>.<name>``. ``modes=ALL``, gated by demand (not a
+        hard mode flag), so FIT/VAL drop it via the planner's demand closure.
         """
         del mode
         pred_spec = TensorSpec(shape=None, dtype="float32")

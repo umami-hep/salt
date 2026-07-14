@@ -62,10 +62,10 @@ OBJECT_INDEX = ModeSplitSuffix(
 def pascal_case(name: str) -> str:
     """Snake-case to Pascal-case — the default ONNX aux-output suffix rule.
 
-    Reproduces v1's hand-built aux names: ``track_origin -> TrackOrigin``,
-    ``track_type -> TrackType``. Overridable per task via the `TaskWriter`
-    ``onnx_names:`` mapping. Each ``_``-separated part is upper-cased at its
-    first letter only, so e.g. ``track_pVtx`` stays ``TrackPVtx``-free
-    (that would require an explicit ``onnx_names`` entry).
+    E.g. ``track_origin -> TrackOrigin``, ``track_type -> TrackType``.
+    Overridable per task via the `TaskWriter` ``onnx_names:`` mapping. Each
+    ``_``-separated part is upper-cased at its first letter only, so e.g.
+    ``track_pVtx`` stays ``TrackPVtx``-free (that would require an explicit
+    ``onnx_names`` entry).
     """
     return "".join(part[:1].upper() + part[1:] for part in name.split("_"))

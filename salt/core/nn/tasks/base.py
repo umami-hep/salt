@@ -83,62 +83,30 @@ class _TaskModuleBase(nn.Module):
         ).bool()
 
     def _pred_spec(self, spec: TensorSpec) -> TensorSpec:
-        """Restrict a prediction port spec to the configured ``expose`` modes.
-
-        Returns
-        -------
-        TensorSpec
-            `spec` re-stamped to the exposed modes (its kind/shape/dtype kept).
-        """
+        """Re-stamp `spec` to the configured ``expose`` modes (kind/shape/dtype kept)."""
         if self.expose_modes == Mode.ALL:
             return spec
         return replace(spec, modes=spec.modes & self.expose_modes)
 
     @property
     def pred_key(self) -> str:
-        """The published prediction key.
-
-        Returns
-        -------
-        str
-            ``preds.<stream>.<instance-name>``.
-        """
+        """``preds.<stream>.<instance-name>``."""
         return f"preds.{self.stream}.{self.name}"
 
     @property
     def loss_key(self) -> str:
-        """The published loss key, auto-collected by `LossSum`.
-
-        Returns
-        -------
-        str
-            ``losses.<instance-name>``.
-        """
+        """``losses.<instance-name>``, auto-collected by `LossSum`."""
         return f"losses.{self.name}"
 
     @property
     def label_key(self) -> str:
-        """The declared label dependency.
-
-        Returns
-        -------
-        str
-            ``labels.<stream>.<label>``.
-        """
+        """``labels.<stream>.<label>``."""
         return f"labels.{self.stream}.{self.label}"
 
     @property
     def has_pad_mask(self) -> bool:
-        """Whether this (sequence) head consumes a per-stream pad mask.
-
-        True for a normal variable-length constituent stream; False for a
-        non-sequence head or a fixed-count query bank (e.g. MaskFormer
-        ``objects``, which has no padding).
-
-        Returns
-        -------
-        bool
-            ``self.sequence and self.stream not in _NO_PAD_MASK_STREAMS``.
+        """True for a variable-length sequence stream; False for a non-sequence head
+        or a fixed-count query bank (e.g. MaskFormer ``objects``).
         """
         return self.sequence and self.stream not in _NO_PAD_MASK_STREAMS
 
@@ -289,12 +257,8 @@ class _TaskModuleBase(nn.Module):
         return []
 
     def _no_render_msg(self, what: str) -> str:
-        """The unsupported-family error message.
-
-        Returns
-        -------
-        str
-            Naming the task instance, its type, and the missing rendering.
+        """The unsupported-family error message, naming the instance, type, and
+        missing rendering.
         """
         return (
             f"task {self.name!r} ({type(self).__name__}) ships no {what} rendering — "
@@ -307,20 +271,11 @@ class _TaskModuleBase(nn.Module):
 def _parse_expose(expose: Sequence[str] | None, cls: str) -> Mode:
     """Parse a task ``expose:`` mode-name list into a `Mode` flag.
 
-    ``None`` (the default) means all modes. A list of mode names
-    (case-insensitive, ``fit``/``val``/``test``/``onnx``) gates the prediction
-    port to exactly those modes: a train-only aux task uses
-    ``expose: [fit, val]`` so its prediction is pruned from the TEST/ONNX plans.
-
-    Returns
-    -------
-    Mode
-        The exposed-modes flag (``Mode.ALL`` for the default).
-
-    Raises
-    ------
-    ConfigError
-        On a non-list value, an empty list, or an unknown mode name.
+    ``None`` means all modes (``Mode.ALL``); a case-insensitive list of
+    ``fit``/``val``/``test``/``onnx`` gates the prediction port to exactly
+    those modes (e.g. ``expose: [fit, val]`` prunes a train-only aux task's
+    prediction from the TEST/ONNX plans). Raises `ConfigError` on a non-list,
+    empty list, or unknown mode name.
     """
     if expose is None:
         return Mode.ALL
@@ -347,18 +302,7 @@ def _parse_expose(expose: Sequence[str] | None, cls: str) -> Mode:
 
 
 def _checked_weight_source(weight_source: Mapping[str, str] | None) -> dict[str, str] | None:
-    """Validate a ``weight_source`` mapping.
-
-    Returns
-    -------
-    dict[str, str] | None
-        The validated mapping, or None.
-
-    Raises
-    ------
-    ConfigError
-        If the mapping is not exactly ``{"from_class_dict": <path>}``.
-    """
+    """Validate a ``weight_source`` mapping is exactly ``{"from_class_dict": <path>}``, or None."""
     if weight_source is None:
         return None
     if set(weight_source) != {"from_class_dict"} or not isinstance(
@@ -372,17 +316,8 @@ def _checked_weight_source(weight_source: Mapping[str, str] | None) -> dict[str,
 
 
 def _loss_cfg(loss: str | dict[str, Any] | None, default: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a loss config to ``{class_path, init_args}`` form.
-
-    Returns
-    -------
-    dict[str, Any]
-        The normalised config (a fresh dict).
-
-    Raises
-    ------
-    ConfigError
-        On malformed configs.
+    """Normalise a loss config to ``{class_path, init_args}`` form; raises
+    `ConfigError` if malformed.
     """
     if loss is None:
         cfg: dict[str, Any] = {k: dict(v) if isinstance(v, dict) else v for k, v in default.items()}
@@ -400,18 +335,7 @@ def _loss_cfg(loss: str | dict[str, Any] | None, default: dict[str, Any]) -> dic
 
 
 def _loss_class(cfg: Mapping[str, Any]) -> type[nn.Module]:
-    """Resolve a loss ``class_path`` to its class (config-only, no instantiation).
-
-    Returns
-    -------
-    type[nn.Module]
-        The loss class.
-
-    Raises
-    ------
-    ConfigError
-        If the path does not resolve to an ``nn.Module`` subclass.
-    """
+    """Resolve a loss ``class_path`` to its `nn.Module` subclass (config-only, no instantiation)."""
     path = cfg["class_path"]
     module_path, _, cls_name = path.rpartition(".")
     try:

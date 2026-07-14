@@ -23,9 +23,6 @@ class InputCopyWriter(OutputSectionWriter):
 
     It produces no graph leaf (the copy data never flows through the bundle —
     the sink reads it from the file). It is a manifest-only section writer.
-    Matches the legacy ``salt.core.writers.InputCopyWriter`` semantics byte-for-
-    byte (copies re-read from the source H5 by absolute rows, all source fields
-    by default).
 
     Parameters
     ----------
@@ -33,8 +30,8 @@ class InputCopyWriter(OutputSectionWriter):
         Streams to copy. ``None`` (default) = every stream the sink resolves with a
         configured task. An explicit list overrides.
     variables : Mapping[str, Sequence[str]] | None, optional
-        Per-stream narrowing of the copied fields (v1 ``extra_vars``); a stream not
-        listed copies all source fields, by default None.
+        Per-stream narrowing of the copied fields; a stream not listed
+        copies all source fields, by default None.
     """
 
     name = "inputs_copy"
@@ -61,12 +58,9 @@ class InputCopyWriter(OutputSectionWriter):
         return True
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the ``meta.rows`` row anchor (TEST); produce nothing.
-
-        Input copies are re-read from the source H5 by the sink (by absolute
-        rows from ``meta.rows``), not the graph — so this writer requires only
-        the row anchor in TEST and produces no graph leaf. Demand-gated:
-        FIT/VAL/ONNX prune it (input copies are eval-H5-only, v1).
+        """Requires the ``meta.rows`` row anchor in TEST (input copies are
+        re-read by the sink, not the graph); produces nothing. FIT/VAL/ONNX
+        prune it (input copies are eval-H5-only).
         """
         if not (mode & Mode.TEST):
             return IO(requires={}, produces={})
@@ -74,10 +68,8 @@ class InputCopyWriter(OutputSectionWriter):
         return IO(requires=unflatten_spec(req), produces={})
 
     def copy_spec(self) -> dict[str, Any]:
-        """The input-copy intent the dumb H5 sink consumes.
-
-        Returns ``{"streams": <list|None>, "variables": {stream: [vars]}}`` —
-        the same knobs the legacy InputCopyWriter took; the sink resolves the
+        """The input-copy intent the dumb H5 sink consumes: ``{"streams":
+        <list|None>, "variables": {stream: [vars]}}``; the sink resolves the
         file read.
         """
         return {"streams": list(self.streams) if self.streams is not None else None,

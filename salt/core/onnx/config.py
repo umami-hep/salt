@@ -376,13 +376,9 @@ def attach_manifest(export: ExportConfig, outputs: Sequence[ExportOutput]) -> Ex
 def _apply_rename(outputs: list[ExportOutput], rename: dict[str, str]) -> list[ExportOutput]:
     """Apply ``export.rename`` suffix renames to the manifest.
 
-    Every old suffix must exist; renames run BEFORE combines so combine inputs can
-    reference renamed suffixes.
-
-    Raises
-    ------
-    ConfigError
-        When an old suffix matches no manifest entry.
+    Every old suffix must exist; renames run BEFORE combines so combine
+    inputs can reference renamed suffixes. Raises `ConfigError` when an
+    old suffix matches no manifest entry.
     """
     if not rename:
         return outputs
@@ -414,12 +410,8 @@ def _check_combines(outputs: list[ExportOutput], combines: list[ExportCombine]) 
     Combine inputs must be GLOBAL float suffixes (``split_scalars`` entries) —
     combined values are linear combinations of the global outputs, checked before
     the aux entries are appended. Combined names must not collide with the manifest
-    or each other.
-
-    Raises
-    ------
-    ConfigError
-        Naming the offending combine entry and the rule it breaks.
+    or each other. Raises `ConfigError` naming the offending combine entry and the
+    rule it breaks.
     """
     global_suffixes = {
         suffix for entry in outputs if entry.names is not None for suffix in entry.names
@@ -513,12 +505,8 @@ def manifest_table(export: ExportConfig) -> str:
 
 
 def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
-    """Validate one input entry and fill its defaults.
-
-    Raises
-    ------
-    ConfigError
-        On alias/sequence/name rule violations.
+    """Validate one input entry and fill its defaults; raises `ConfigError`
+    on alias/sequence/name rule violations.
     """
     stream = stream_of_input_port(entry.port)
     if entry.alias is not None:
@@ -551,12 +539,8 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
 
 
 def _resolve_output(entry: ExportOutput) -> ExportOutput:
-    """Validate one output entry and fill its defaults.
-
-    Raises
-    ------
-    ConfigError
-        On name/names/reduce/dtype rule violations.
+    """Validate one output entry and fill its defaults; raises `ConfigError`
+    on name/names/reduce/dtype rule violations.
     """
     try:
         split_key(entry.port)
@@ -622,12 +606,8 @@ def _resolve_output(entry: ExportOutput) -> ExportOutput:
 
 
 def _check_input_uniqueness(inputs: list[ExportInput]) -> None:
-    """Reject duplicate input ports or graph tensor names.
-
-    Raises
-    ------
-    ConfigError
-        Naming the duplicate.
+    """Reject duplicate input ports or graph tensor names; raises
+    `ConfigError` naming the duplicate.
     """
     seen_ports: set[str] = set()
     seen_names: set[str] = set()
@@ -648,12 +628,8 @@ def _check_input_uniqueness(inputs: list[ExportInput]) -> None:
 
 
 def _check_output_uniqueness(outputs: list[ExportOutput]) -> None:
-    """Reject duplicate output ports or name suffixes.
-
-    Raises
-    ------
-    ConfigError
-        Naming the duplicate.
+    """Reject duplicate output ports or name suffixes; raises `ConfigError`
+    naming the duplicate.
     """
     seen_ports: set[str] = set()
     seen_names: set[str] = set()

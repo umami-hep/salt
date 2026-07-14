@@ -18,30 +18,9 @@ _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
 class FeaturewiseTransformation(nn.Module):
     """Feature-wise (FiLM) scale/bias from per-event ``parameters``.
 
-    https://distill.pub/2018/feature-wise-transformations/.
-
-    Parameters
-    ----------
-    layer : str
-        Which pipeline stage to scale/bias — one of ``{"input", "encoder", "global"}``.
-    num_params : int
-        Number of per-event conditioning parameters (the FiLM net input width).
-    num_features : int
-        Output width of the FiLM scale/bias nets (the embed/encoder width).
-    dense_config_scale : dict | None, optional
-        Extra `salt.core.nn.Dense` kwargs for the scaling net; must not set
-        width keys. When None (and ``dense_config_bias`` is set), bias-only.
-    dense_config_bias : dict | None, optional
-        Extra `salt.core.nn.Dense` kwargs for the biasing net. When None (and
-        ``dense_config_scale`` is set), scale-only.
-    apply_norm : bool, optional
-        Apply a `torch.nn.LayerNorm` to the transformed features, by default False.
-
-    Raises
-    ------
-    ConfigError
-        If `layer` is invalid, a dense config sets width keys, or neither
-        scale nor bias net is configured.
+    https://distill.pub/2018/feature-wise-transformations/. ``layer`` is one
+    of ``{"input", "encoder", "global"}``; a scale/bias net is built iff its
+    ``dense_config_*`` is truthy — at least one of the two is required.
     """
 
     def __init__(
@@ -112,16 +91,7 @@ class FeaturewiseTransformation(nn.Module):
         self._built = True
 
     def forward(self, params: Tensor, features: Tensor) -> Tensor:
-        """Apply the FiLM scale/bias (and optional norm) to ``features``.
-
-        Parameters
-        ----------
-        params : Tensor
-            Per-event conditioning parameters ``[B, n_params]``.
-        features : Tensor
-            Features to transform ``[B, T, num_features]`` (or ``[B, num_features]``
-            for the global layer).
-        """
+        """Apply the FiLM scale/bias (and optional norm) to ``features``."""
         assert self._built, "FeaturewiseTransformation.forward before build()"
         if self.scale_net is not None:
             features = self.scale_net(params).unsqueeze(1) * features

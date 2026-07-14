@@ -27,11 +27,10 @@ _OPERATORS: dict[str, Callable[[Any, Any], Any]] = {
 class MultiTarget(Processor):
     """Conditional row-wise target replacement.
 
-    Ports v1's ``multi_target`` feature: for each configured rule, the
-    per-row value of an output label is replaced by a ``source`` label
-    wherever a ``sel_label`` satisfies an operator comparison against a
-    literal ``value`` — ``np.where(op(sel, value), source, running)`` (v1's
-    ``torch.where``). Two output modes, exactly as v1:
+    For each configured rule, the per-row value of an output label is
+    replaced by a ``source`` label wherever a ``sel_label`` satisfies an
+    operator comparison against a literal ``value`` —
+    ``np.where(op(sel, value), source, running)``. Two output modes:
 
     - ``target:`` — REPLACE an existing label. The base (pre-replacement)
       values are read from the raw stream (the column the task would
@@ -43,26 +42,24 @@ class MultiTarget(Processor):
       placeholder, then fill it where the condition holds.
 
     Multiple rules MAY name the same output — they apply SEQUENTIALLY over
-    a running array, exactly as v1 mutates the labels dict in place. The
-    shipped ``regression_multi_target.yaml`` uses this: two rules both
-    write ``pt_label_handle`` (one ``ID==15``, one ``ID!=15``). All rules
-    for one output must agree on the mode (all ``custom_target`` or all
-    ``target``) — the base is established once (NaN placeholder or the raw
-    column) and each rule layers a ``np.where`` on top.
+    a running array. The shipped ``regression_multi_target.yaml`` uses
+    this: two rules both write ``pt_label_handle`` (one ``ID==15``, one
+    ``ID!=15``). All rules for one output must agree on the mode (all
+    ``custom_target`` or all ``target``) — the base is established once
+    (NaN placeholder or the raw column) and each rule layers a
+    ``np.where`` on top.
 
     Each rule declares its own ``labels.<stream>.<sel_label>`` and
     ``labels.<stream>.<source>`` dependencies (produced by `Labels`, so the
     sel/source casting policy stays in ONE place). A ``sel_label``/``source``
-    may not be a MultiTarget output (no producer->producer chaining — v1
-    reads sel/source from the file-loaded labels, never from a replaced
-    target).
+    may not be a MultiTarget output (no producer->producer chaining).
 
     Parameters
     ----------
     replacements : Sequence[Mapping[str, Any]]
         Ordered replacement rules. Each rule is a mapping with keys:
 
-        - ``stream`` (v1 ``input_name``) — the labelled stream;
+        - ``stream`` — the labelled stream;
         - ``sel_label`` — the selection label compared against ``value``;
         - ``op`` — one of ``== != >= <= > <``;
         - ``value`` — the literal compared against ``sel_label``;
@@ -110,14 +107,7 @@ class MultiTarget(Processor):
 
     @staticmethod
     def _checked_rule(rule: dict[str, Any]) -> dict[str, Any]:
-        """Validate one replacement rule and normalise it to a flat dict.
-
-        Raises
-        ------
-        ConfigError
-            On a missing field, unknown operator, or a both/neither
-            target/custom_target mistake.
-        """
+        """Validate one replacement rule and normalise it to a flat dict."""
         has_target = "target" in rule and rule["target"] is not None
         has_custom = "custom_target" in rule and rule["custom_target"] is not None
         if has_target and has_custom:
@@ -152,14 +142,8 @@ class MultiTarget(Processor):
         }
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``labels.<s>.{sel,source}`` (+ raw target) -> ``labels.<s>.<out>``.
-
-        ``target:`` outputs also require the raw target column (the
-        pre-replacement base values), declared via ``raw.<stream>`` fields
-        so the reader narrows to it; ``custom_target:`` outputs need no
-        base column (the placeholder is NaN). Every produced output is a
-        TRAINING-gated label leaf — the conditional targets feed only the
-        loss.
+        """Declare ``labels.<s>.{sel,source}`` (+ raw target for ``target:`` outputs) ->
+        ``labels.<s>.<out>``, TRAINING-only; ``custom_target:`` outputs need no base column.
         """
         del mode
         requires: dict[str, TensorSpec] = {}
@@ -186,18 +170,8 @@ class MultiTarget(Processor):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Apply each conditional replacement over a per-output running array.
-
-        ``np.where`` is the v1 ``torch.where``: keep ``source`` where
-        ``op(sel, value)`` holds, else the running value. The base is
-        established once per output (raw target column, or a NaN
-        placeholder for ``custom_target``); rules layer in declaration
-        order (v1 in-place mutation semantics).
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            ``{labels.<stream>.<output>: fresh array}`` — one per output.
+        """Apply each conditional replacement: keep ``source`` where ``op(sel, value)``
+        holds, else the running value, established once per output then layered per rule.
         """
         del rows, mode
         running: dict[tuple[str, str], np.ndarray] = {}

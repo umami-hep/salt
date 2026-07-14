@@ -1,5 +1,5 @@
-"""Core-local copies of the v1 mask helpers used by production ``salt.core``
-code (``indices_from_mask``, the ``mask_from_logits`` chain, ``reco_metrics``).
+"""Mask helpers used by production ``salt.core`` code (``indices_from_mask``,
+the ``mask_from_logits`` chain, ``reco_metrics``).
 """
 
 import torch

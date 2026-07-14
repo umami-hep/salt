@@ -58,10 +58,10 @@ class RunTaskOutput(OutputSectionWriter):
     Parameters
     ----------
     tasks : Sequence[str]
-        The task instance names to serialise, in the order their columns appear
-        in the eval H5 (the v1 model-declaration order). Each must resolve to a
-        task carrying ``get_output`` / ``output_time_requires`` / ``pred_key`` /
-        ``stream`` at compile time.
+        The task instance names to serialise, in the order their columns
+        appear in the eval H5 (the model-declaration order). Each must
+        resolve to a task carrying ``get_output`` / ``output_time_requires``
+        / ``pred_key`` / ``stream`` at compile time.
 
     Raises
     ------
@@ -102,13 +102,9 @@ class RunTaskOutput(OutputSectionWriter):
         self._model_modules = model_modules
 
     def _resolved_tasks(self) -> dict[str, Any]:
-        """The live task objects this writer orchestrates, in declaration order.
-
-        Raises
-        ------
-        ConfigError
-            When the module dict was not bound, or a named task is absent / does
-            not expose the ``get_output`` surface.
+        """The live task objects this writer orchestrates, in declaration order;
+        raises `ConfigError` when unbound or a named task lacks the
+        ``get_output`` surface.
         """
         if self._model_modules is None:
             raise ConfigError(
@@ -150,14 +146,10 @@ class RunTaskOutput(OutputSectionWriter):
     # -- graph node surface -------------------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare each task's ``preds.*`` (+ deps) -> per-field ``outputs.*`` leaves.
-
-        Requires, per orchestrated task: its raw ``preds.<stream>.<task>`` leaf
-        (``kind=data``) plus each ``task.output_time_requires(mode)`` key (e.g.
-        ``masks.<stream>`` for a padded seq head, ``kind=pad_mask``). Produces
-        one ``outputs.<stream>.<task>.<col>`` leaf per field the task's
-        ``get_output_manifest(mode, ...)`` declares. All ports ``modes=ALL``,
-        demand-gated. Shapes are ``None`` (rank-agnostic).
+        """Per orchestrated task: requires its raw ``preds.*`` leaf plus each
+        ``output_time_requires(mode)`` key; produces one ``outputs.*`` leaf per
+        field its ``get_output_manifest(mode, ...)`` declares. ``modes=ALL``,
+        demand-gated.
         """
         requires: dict[str, TensorSpec] = {}
         produces: dict[str, TensorSpec] = {}
@@ -172,15 +164,9 @@ class RunTaskOutput(OutputSectionWriter):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run each task's ``get_output`` and write one leaf per field.
-
-        The mode split (probs vs argmax index) is owned by ``get_output``, so
-        the produced leaf set matches ``declare_io(mode)``.
-
-        Raises
-        ------
-        ConfigError
-            When a task's ``get_output`` field carries no torch ``value``.
+        """Run each task's ``get_output`` and write one leaf per field (the mode
+        split is owned by ``get_output``, matching ``declare_io(mode)``); raises
+        `ConfigError` if a field carries no torch value.
         """
         produced: dict[str, Tensor] = {}
         for task in self._resolved_tasks().values():
@@ -245,13 +231,9 @@ def _dep_spec(dep: str) -> TensorSpec:
 def _task_manifest(task: Any, mode: Mode) -> list[OutputField]:
     """The value-free serialisation-leaf metadata for a task in `mode`.
 
-    Prefers the task's own ``get_output_manifest(mode, run_name)`` (the value-
-    free twin of ``get_output``); the run name is cosmetic (the sink prefixes).
-
-    Raises
-    ------
-    ConfigError
-        When the task exposes no manifest surface.
+    Uses ``get_output_manifest(mode, run_name)`` (the value-free twin of
+    ``get_output``; the run name is cosmetic, the sink prefixes). Raises
+    `ConfigError` when the task exposes no manifest surface.
     """
     manifest = getattr(task, "get_output_manifest", None)
     if not callable(manifest):

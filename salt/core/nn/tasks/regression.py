@@ -203,17 +203,9 @@ class RegressionTaskModule(_TaskModuleBase):
     def _checked_norm_params(
         norm_params: Mapping[str, Any] | None,
     ) -> dict[str, list[float]] | None:
-        """Normalise + validate the ``norm_params`` mapping.
-
-        Returns
-        -------
-        dict[str, list[float]] | None
-            ``{"mean": [...], "std": [...]}`` with both listified, or None.
-
-        Raises
-        ------
-        ConfigError
-            If the mapping is present but lacks ``mean``/``std``.
+        """Normalise ``norm_params`` to ``{"mean": [...], "std": [...]}``
+        (listified), or None; raises `ConfigError` if present but missing
+        either key.
         """
         if norm_params is None:
             return None
@@ -443,17 +435,9 @@ class RegressionTaskModule(_TaskModuleBase):
 
     @property
     def output_suffixes(self) -> tuple[str, ...]:
-        """Per-output column suffixes (custom names override the targets).
-
-        For a gaussian head the suffix list is doubled — the R mean suffixes
-        followed by the R ``<suffix>_stddev`` suffixes, index-aligned with the
-        published ``[B, 2R]`` array.
-
-        Returns
-        -------
-        tuple[str, ...]
-            R suffixes (plain regression) or 2R suffixes (gaussian: means then
-            ``_stddev``), in column order.
+        """Per-output column suffixes (custom names override targets); doubled for
+        a gaussian head — R means then R ``<suffix>_stddev``, index-aligned with
+        the ``[B, 2R]`` array.
         """
         base = self.custom_output_names if self.custom_output_names is not None else self.targets
         if self.gaussian:
@@ -462,78 +446,39 @@ class RegressionTaskModule(_TaskModuleBase):
 
     @property
     def target_label_keys(self) -> tuple[str, ...]:
-        """The declared target-label dependencies (one per target).
-
-        Returns
-        -------
-        tuple[str, ...]
-            ``labels.<stream>.<target>`` keys, in target order.
-        """
+        """``labels.<stream>.<target>`` keys, in target order."""
         return tuple(f"labels.{self.stream}.{t}" for t in self.targets)
 
     @property
     def denom_label_keys(self) -> tuple[str, ...]:
-        """The declared ratio-denominator label dependencies (FIT|VAL|TEST source).
-
-        Returns
-        -------
-        tuple[str, ...]
-            ``labels.<stream>.<denom>`` keys, in target order, or empty when
-            there are no ratio denominators.
-        """
+        """``labels.<stream>.<denom>`` keys (FIT|VAL|TEST source), in target order, or empty."""
         if self.target_denominators is None:
             return ()
         return tuple(f"labels.{self.stream}.{d}" for d in self.target_denominators)
 
     @property
     def input_feature_key(self) -> str:
-        """The raw-input key carrying the ONNX denominator columns.
-
-        Returns
-        -------
-        str
-            ``inputs.<stream>``.
-        """
+        """``inputs.<stream>`` — the raw-input key carrying the ONNX denominator columns."""
         return f"inputs.{self.stream}"
 
     @property
     def weight_label_key(self) -> str:
-        """The declared per-sample weight dependency (FIT|VAL only).
-
-        Returns
-        -------
-        str
-            ``labels.<stream>.<sample_weight>`` (only meaningful when
-            ``sample_weight`` is set).
+        """``labels.<stream>.<sample_weight>`` (FIT|VAL only; meaningful iff
+        `sample_weight` set).
         """
         return f"labels.{self.stream}.{self.sample_weight}"
 
     @property
     def targets_key(self) -> str:
-        """The published scaled-targets key (``publish_targets``, FIT|VAL only).
-
-        Returns
-        -------
-        str
-            ``targets.<stream>.<instance-name>`` — the matched-loss matcher's
-            scaled-space target source.
+        """``targets.<stream>.<instance-name>`` — the published scaled-targets key
+        (``publish_targets``, FIT|VAL only).
         """
         return f"targets.{self.stream}.{self.name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare input/context/masks (+ target/denominator deps) -> preds (+ loss).
-
-        Mode-split denominator dependency: FIT|VAL|TEST demand the
-        denominators from ``labels.<stream>.<denom>``; ONNX demands the raw
-        ``inputs.<stream>`` Feature tensor. Targets, the per-sample weight,
-        and the FIT|VAL loss are TRAINING-gated; predictions are produced in
-        ALL modes. A gaussian head publishes a ``2R``-wide prediction (means
-        then stddevs).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        """Denominator dep is mode-split: labels in FIT|VAL|TEST, the raw ``inputs.<stream>``
+        Feature in ONNX. Targets/sample-weight/loss are TRAINING-gated; a gaussian head
+        publishes a ``2R``-wide prediction (means then stddevs).
         """
         n_outputs = 2 * len(self.targets) if self.gaussian else len(self.targets)
         width = sym_dim("D", self.name)
@@ -597,23 +542,9 @@ class RegressionTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the head layers + resolve the ONNX denominator source.
-
-        ``output_size = len(targets)`` (``2 * len(targets)`` for a gaussian
-        head). When ``target_denominators`` is set, every denominator must be
-        a declared column of ``inputs.<stream>`` so the ONNX graph can gather
-        it by name — otherwise the ONNX de-scaling has no source and `bind`
-        raises. A gaussian head with neither ``norm_params`` nor
-        ``target_denominators`` also raises here.
-
-        Raises
-        ------
-        ConfigError
-            If a ratio denominator is not a declared input Feature, or a
-            gaussian head has no scaling method for inference de-scaling.
-        ValueError
-            If ``norm_params`` carries a mean/std count that does not match
-            the target count.
+        """``output_size = len(targets)`` (doubled for gaussian); when `target_denominators` is
+        set, every denominator must be a declared column of ``inputs.<stream>`` (else `bind`
+        raises) so the ONNX graph can gather it by name.
         """
         if self.gaussian and self.norm_params is None and self.target_denominators is None:
             raise ConfigError(
@@ -663,21 +594,9 @@ class RegressionTaskModule(_TaskModuleBase):
                 )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the head; publishes RAW (scaled) preds in EVERY non-training mode.
-
-        The head is handed a single-stream targets dict; the per-sample weight
-        (when configured) rides in that dict so ``nan_loss`` finds it.
-
-        The eval de-scaling (incl. the gaussian means‖stddev concat) is owned
-        by ``get_output`` on the live path and by ``get_h5`` on the oracle
-        path, both of which read this raw leaf and de-scale exactly once. The
-        mode-split denominator source (labels in TEST, the input Feature by
-        name in ONNX) lives on ``get_output``/``get_h5``.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only.
+        """Publishes RAW (scaled) preds in every non-training mode; de-scaling
+        happens exactly once downstream in `get_h5`/`get_output`. A
+        `publish_targets` head returns scaled targets instead of a loss.
         """
         assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -711,17 +630,9 @@ class RegressionTaskModule(_TaskModuleBase):
         return {self.pred_key: preds}
 
     def _descale_source(self, b: Bundle, mode: Mode) -> dict[str, dict[str, Tensor]]:
-        """Build the per-denominator de-scaling source dict (mode-split).
-
-        ``run_inference`` reads ``labels[input_name][denom]``, so this returns
-        that exact nesting — sourced from the label group in TEST and gathered
-        by name from the raw input Feature tensor in ONNX (the only
-        export-time source).
-
-        Returns
-        -------
-        dict[str, dict[str, Tensor]]
-            ``{stream: {denom: tensor}}`` for every ratio denominator.
+        """``{stream: {denom: tensor}}`` in the nesting `run_inference` expects:
+        from the label group in TEST, gathered by name from the raw input
+        Feature tensor in ONNX.
         """
         assert self.target_denominators is not None
         if mode & Mode.ONNX:
@@ -740,21 +651,9 @@ class RegressionTaskModule(_TaskModuleBase):
         }
 
     def _descaled_preds(self, b: Bundle, mode: Mode) -> Tensor:
-        """De-scale the RAW ``preds.*`` leaf to physical values.
-
-        Reads the RAW ``preds.*`` leaf + the mode-split denominator source
-        (labels in TEST, the input Feature by name in ONNX) + the pad mask,
-        and runs ``self.run_inference``. A gaussian head's
-        ``run_inference`` returns a ``(means, stds)`` tuple, re-concatenated
-        here to ONE ``[..., 2R]`` array. Both ``get_h5`` and ``get_output``
-        call this so the de-scaling happens exactly once and is identical
-        between the two.
-
-        Returns
-        -------
-        Tensor
-            The de-scaled physical predictions: ``[..., R]`` (plain) or
-            ``[..., 2R]`` (gaussian, means ‖ stds).
+        """De-scale the RAW ``preds.*`` leaf via `run_inference` to ``[..., R]`` (plain) or
+        ``[..., 2R]`` means-then-stds (gaussian); shared by `get_h5`/`get_output` so de-scaling
+        happens exactly once.
         """
         assert self.net is not None, "de-scale before bind()"
         # clone before the in-place de-scale: run_inference mutates preds[..., i]
@@ -774,43 +673,18 @@ class RegressionTaskModule(_TaskModuleBase):
     # -- output rendering ---------------------------------------------------
 
     def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """One ``f4`` column per output, named ``{run_name}_{suffix}``.
-
-        The suffixes ARE `output_suffixes` (``custom_output_names`` else the
-        targets; doubled for a gaussian head — R means then R ``_stddev``),
-        the same suffixes the ONNX manifest carries.
-
-        Returns
-        -------
-        list[tuple[str, str]]
-            ``(column, "f4")`` pairs, one per output, in column order.
-        """
+        """One ``f4`` column per `output_suffixes` entry, named ``{run_name}_{suffix}``."""
         return [(f"{run_name}_{suffix}", "f4") for suffix in self.output_suffixes]
 
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """The de-scaled values as ``f4`` columns.
-
-        Returns
-        -------
-        np.ndarray
-            ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
-        """
+        """The de-scaled values as ``f4`` columns."""
         preds = self._descaled_preds(b, Mode.TEST)
         dtype = np.dtype(self.output_names(run_name))
         return u2s(preds.float().cpu().numpy(), dtype)
 
     def onnx_outputs(self) -> list[ExportOutput]:
-        """The legacy ``split_scalars`` manifest entry — retired on the export path.
-
-        No longer drives a real ONNX export (the live ONNX de-scale lives on
-        ``get_output`` instead, wired via an ``OnnxExportSink``); a regression
-        config without an ``OnnxExportSink`` cannot ONNX-export at all. Kept
-        for manifest-gate assertions only.
-
-        Returns
-        -------
-        list[ExportOutput]
-            One ``split_scalars`` entry (the legacy manifest API; export-retired).
+        """The legacy ``split_scalars`` manifest entry, kept for manifest-gate assertions only —
+        the live ONNX de-scale runs on `get_output` via an `OnnxExportSink`, not this.
         """
         return [
             ExportOutput(
@@ -821,21 +695,9 @@ class RegressionTaskModule(_TaskModuleBase):
         ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
-        """The non-pred deps `get_output` reads: denom source(s) + pad mask, mode-aware.
-
-        - a ratio head (``target_denominators``) reads its denominator source —
-          ``labels.<stream>.<denom>`` in FIT|VAL|TEST, the raw input Feature
-          ``inputs.<stream>`` (gathered by name) in ONNX.
-        - a padded sequence head reads the stream pad mask ``masks.<stream>``
-          (the ``run_inference`` NaN-fill). A global / objects-stream head
-          needs no pad mask.
-
-        ``norm_params`` / ``scaler`` need no external source (mode-independent).
-
-        Returns
-        -------
-        list[str]
-            The dotted bundle keys `get_output` reads at output time, in order.
+        """A ratio head's denominator source (labels in FIT|VAL|TEST, ``inputs.<stream>`` in
+        ONNX) plus the pad mask for a padded sequence head; ``norm_params``/``scaler`` need
+        no external source.
         """
         deps: list[str] = []
         if self.target_denominators is not None:
@@ -848,28 +710,9 @@ class RegressionTaskModule(_TaskModuleBase):
         return deps
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
-        """De-scale the RAW preds into graph-visible `OutputField`s.
-
-        Reads the RAW ``preds.*`` leaf + the mode-split denominator source +
-        the pad mask, and de-scales in TRACEABLE torch ops via
-        ``_descaled_preds``. Mints ONE ``f4`` `OutputField` per output column
-        (``output_suffixes``, doubled for a gaussian head). H5 and ONNX share
-        the same suffixes (``onnx_name`` defaults to ``h5_name``). The
-        per-column value shape is mode-faithful to the live sink:
-
-        - **H5 modes** (TEST): the per-column ``[B]`` (global) / ``[B, L]``
-          (seq) value. No squeeze.
-        - **ONNX**: squeezed to drop the size-1 batch dim — a global head's
-          ``[1, R]`` de-scaled preds give a rank-0 scalar per column; a
-          per-token head's ``[1, L, R]`` gives a ``[L]`` per-token vector.
-
-        ``run_name`` is not baked in (the sink prefixes it).
-
-        Returns
-        -------
-        list[OutputField]
-            One ``f4`` field per output column (de-scaled physical value), in
-            column order.
+        """One ``f4`` field per `output_suffixes` column, de-scaled via `_descaled_preds`.
+        H5 modes keep the per-column ``[B]``/``[B, L]`` value; ONNX squeezes the size-1
+        batch dim to a rank-0 scalar (global) or ``[L]`` vector (per-token).
         """
         del run_name
         preds = self._descaled_preds(b, mode)
@@ -887,16 +730,7 @@ class RegressionTaskModule(_TaskModuleBase):
         ]
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``).
-
-        One ``f4`` field per ``output_suffixes`` entry (gaussian-doubled);
-        H5/ONNX suffixes are identical, so each field carries both.
-
-        Returns
-        -------
-        list[OutputField]
-            The value-free serialisation fields, in column order.
-        """
+        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
         del run_name, mode
         axis = "per_token" if self.sequence else "global"
         return [
@@ -906,13 +740,7 @@ class RegressionTaskModule(_TaskModuleBase):
 
 
 def _opt_tuple(value: str | Sequence[str] | None) -> tuple[str, ...] | None:
-    """Listify a scalar-or-list config value to a tuple, preserving ``None``.
-
-    Returns
-    -------
-    tuple[str, ...] | None
-        The listified tuple, or None when the input is None.
-    """
+    """Listify a scalar-or-list config value to a tuple, preserving ``None``."""
     if value is None:
         return None
     return tuple(listify(value))

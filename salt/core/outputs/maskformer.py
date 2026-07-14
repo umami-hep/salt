@@ -23,47 +23,37 @@ __all__ = ["MaskFormerObjectWriter"]
 
 
 class MaskFormerObjectWriter(Writer):
-    """Persist MaskFormer object predictions + truth, and declare the ONNX object outputs.
+    """Persist MaskFormer object predictions + truth (TEST), and declare the
+    two object ONNX outputs (ONNX) — one writer, both modes.
 
-    Reproduces v1's object-writing block byte-for-byte in TEST and declares
-    v1's two object ONNX outputs in ONNX — a single output manifest for both
-    modes. The decoder's ``<object_stream>.*`` keys and the
-    ``MaskFormerTargets`` truth labels are its TEST demand; the
+    TEST demand: the decoder's ``<object_stream>.*`` keys and the
+    `MaskFormerTargets` truth labels. ONNX manifest ports: the
     object-regression ``preds.<object_stream>.regression`` and the decoder
-    ``<object_stream>.masks`` are its ONNX manifest ports.
+    ``<object_stream>.masks``.
 
     Parameters
     ----------
     object_classes : Sequence[str]
-        All object class names, including the trailing ``null`` (v1
-        ``object.class_names``; e.g. ``["b", "c", "null"]``). The
-        class-probability columns are ``{run_name}_p{name}`` per class — a
-        plain ``p`` prefix with no `Flavours` resolution (objects are not jet
-        flavours). The list length must equal the decoder's published
-        ``<object_stream>.class_probs`` column count (``num_classes + 1``).
+        All object class names, including the trailing ``null`` (e.g.
+        ``["b", "c", "null"]``). Columns are ``{run_name}_p{name}`` per class
+        (plain ``p`` prefix, no `Flavours` resolution). Length must equal the
+        decoder's published ``<object_stream>.class_probs`` column count
+        (``num_classes + 1``).
     object_stream : str, optional
-        The decoder's object bundle stream (the `MaskDecoder` ``out_stream`` and
-        the `MaskFormerTargets` object stream), by default ``objects``. The
+        The decoder's object bundle stream, by default ``objects``; the
         ``objects``/``object_masks`` H5 groups derive from it.
     constituent_stream : str, optional
-        The constituent reader stream the masks span, by default ``tracks``.
-        The ``MaskIndex`` column lands on this stream.
+        The constituent reader stream the masks span (``MaskIndex`` lands
+        here), by default ``tracks``.
     regression_task : str, optional
-        The object-regression task instance name (its
-        ``preds.<object_stream>.<regression_task>`` port is the
-        ``leading_object`` ONNX entry), by default ``regression``. For ONNX
-        export (``onnx: true``) it must be ``"regression"``: the
-        ``object_index`` reduce is declared on the masks port and reads the
-        fixed ``preds.<object_stream>.regression`` key, so a non-default name
-        raises a `ConfigError` at `onnx_outputs` (eval-only ``onnx: false``
-        writers may use any name).
+        The object-regression task instance name, by default ``regression``.
+        For ONNX export it must be ``"regression"`` (see `onnx_outputs`);
+        eval-only (``onnx: false``) writers may use any name.
     leading_prefix : str, optional
-        The leading-object ONNX suffix template; each regression target ``t``
-        becomes ``{leading_prefix}_{object_stream}_{t}``, by default
-        ``leading``.
+        The leading-object ONNX suffix template
+        (``{leading_prefix}_{object_stream}_{t}``), by default ``leading``.
     onnx : bool, optional
-        Participate in the ONNX manifest, by default True. ``False`` makes the
-        writer eval-only.
+        Participate in the ONNX manifest, by default True.
 
     Raises
     ------
@@ -130,16 +120,9 @@ class MaskFormerObjectWriter(Writer):
     # -- TEST role (executes) -----------------------
 
     def requires(self, ctx: WriterDeclareCtx) -> dict[str, TensorSpec]:
-        """Declare the consumed decoder predictions + truth labels (TEST demand).
-
-        The decoder's ``<object_stream>.{class_probs,masks}`` and the
-        `MaskFormerTargets` truth labels ``labels.<object_stream>.{object_class,
-        masks}`` — the truth requires keep `MaskFormerTargets` alive in the TEST
-        plan. Truth labels are TEST-only (the matched loss owns the FIT|VAL
-        truth demand). The constituent pad mask ``masks.<constituent_stream>``
-        is also declared (TEST-only, ``kind="pad_mask"``): `write` consumes it
-        to set padded constituents' ``MaskIndex`` to ``-1``, so the plan must
-        provide it rather than relying on incidental availability.
+        """Decoder ``<object_stream>.{class_probs,masks}`` + `MaskFormerTargets`
+        truth labels (TEST-only, keeps targets alive) + the constituent pad
+        mask (TEST-only; `write` uses it to set padded ``MaskIndex`` to -1).
         """
         del ctx
         return {
@@ -157,19 +140,10 @@ class MaskFormerObjectWriter(Writer):
         }
 
     def extra_groups(self, ctx: WriteCtx) -> dict[str, tuple[int, ...]]:
-        """The two non-reader output groups: ``objects`` and ``object_masks``.
-
-        ``objects`` is ``[total, M]`` (the object axis) and ``object_masks`` is
-        ``[total, M, T]`` (object x constituent), where ``M`` is read from the
-        decoder's published object axis and ``T`` from the constituent stream's
-        file sequence length. The constituent ``MaskIndex`` column rides on the
-        reader stream itself, so it needs no extra group.
-
-        Raises
-        ------
-        ConfigError
-            When the constituent stream has no file sequence length (it must be a
-            sequence stream — the masks span its tokens).
+        """``objects`` ``[total, M]`` and ``object_masks`` ``[total, M, T]``, M from
+        the decoder's object axis, T from the constituent stream's file
+        sequence length (raises `ConfigError` if it's not a sequence stream).
+        ``MaskIndex`` rides the reader stream itself — no extra group needed.
         """
         num_objects = self._num_objects(ctx.model_modules)
         if self.constituent_stream not in ctx.seq_lengths:
@@ -267,16 +241,9 @@ class MaskFormerObjectWriter(Writer):
         return out
 
     def _num_objects(self, model_modules: Mapping[str, GraphModule]) -> int:
-        """The decoder's object-query count ``M`` (the ``objects`` group axis).
-
-        Read from the decoder module producing ``<object_stream>.masks`` (its
-        ``num_objects`` attribute) so the H5 object axis matches the model.
-
-        Raises
-        ------
-        ConfigError
-            When no configured module exposes ``num_objects`` for the object
-            stream.
+        """The decoder's object-query count ``M`` (read from the module producing
+        ``<object_stream>.masks``); raises `ConfigError` if none exposes
+        ``num_objects`` for the stream.
         """
         for module in model_modules.values():
             num = getattr(module, "num_objects", None)
@@ -292,35 +259,12 @@ class MaskFormerObjectWriter(Writer):
     # -- ONNX role (declares) --------------------------------
 
     def onnx_outputs(self, ctx: WriterDeclareCtx) -> list[ExportOutput]:
-        """Declare the two object ONNX outputs, in v1 emission order (leading-object scalars
-        then the per-constituent index).
+        """The two object ONNX outputs: leading-object regression scalars first,
+        then the per-constituent object index. ``[]`` when ``onnx: false``.
 
-        ``preds.<object_stream>.regression`` -> the ``leading_object`` reduce (R
-        global float32 leading-object regression scalars, suffixed
-        ``{leading_prefix}_{object_stream}_{t}`` per target) and
-        ``<object_stream>.masks`` -> the ``object_index`` reduce (one int8
-        per-constituent index named `OBJECT_INDEX.onnx` = ``HadronIndex``).
-        Truth columns never appear: `requires` is TEST-only, so the labels
-        demand never reaches the ONNX plan. The leading suffixes derive from
-        the object-regression task's ``output_suffixes`` — one owner, both
-        modes.
-
-        Returns ``[]`` with ``onnx: false``. Propagates the
-        `_regression_suffixes` `ConfigError` when the object-regression task is
-        not a configured module with ``output_suffixes``.
-
-        Raises
-        ------
-        ConfigError
-            When ``regression_task`` is not ``"regression"``: the
-            ``object_index`` reduce reorders constituents by the leading
-            object's regression and is declared on ``<object_stream>.masks``,
-            so it cannot carry the regression task name in its own port and
-            reads the fixed ``preds.<object_stream>.regression`` key. A
-            non-default ``regression_task`` would make the writer declare
-            ``preds.<object_stream>.<other>`` while the reduce fetches
-            ``preds.<object_stream>.regression`` at trace time — this loud
-            config-resolution error replaces that latent trace-time KeyError.
+        Raises `ConfigError` when ``regression_task`` isn't ``"regression"`` —
+        the ``object_index`` reduce always reads the fixed
+        ``preds.<object_stream>.regression`` key regardless of task name.
         """
         if not self.onnx:
             return []
@@ -352,15 +296,9 @@ class MaskFormerObjectWriter(Writer):
         ]
 
     def _regression_suffixes(self, model_modules: Mapping[str, GraphModule]) -> tuple[str, ...]:
-        """The object-regression task's per-target suffixes (the leading entry names):
-        ``output_suffixes`` of the configured object-regression task (its
-        ``custom_output_names`` else its targets — one owner, both modes).
-
-        Raises
-        ------
-        ConfigError
-            When the object-regression task is not configured / carries no
-            ``output_suffixes``.
+        """The object-regression task's per-target suffixes (its
+        ``output_suffixes``); raises `ConfigError` if the task isn't
+        configured or carries none.
         """
         module = model_modules.get(self.regression_task)
         suffixes = getattr(module, "output_suffixes", None)

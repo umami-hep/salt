@@ -1,4 +1,4 @@
-"""Edge-feature construction helpers (v1 salt/utils/edge_features.py absorption)."""
+"""Edge-feature construction helpers."""
 
 from __future__ import annotations
 
@@ -12,13 +12,7 @@ def check_edge_config(
     edge_features: list[str],
     available_vars: list[str],
 ) -> None:
-    """Check the requested edge features are recognized and have the required input variables.
-
-    Raises
-    ------
-    ValueError
-        If an edge feature is not recognized or if required indices are missing.
-    """
+    """Check the requested edge features are recognized and have the required input variables."""
     req_vars: list[str] = []
     for variable in edge_features:
         if variable == "dR":
@@ -48,13 +42,7 @@ def calculate_edge_features(
     indices_map: dict[str, int],
     variables: list[str],
 ) -> Tensor:
-    """Compute pairwise dR/kt/z/subjetIndex/isSelfLoop/mass edge features.
-
-    Returns
-    -------
-    Tensor
-        Edge features of shape ``[B, N, N, num_edge_features]``.
-    """
+    """Compute pairwise dR/kt/z/subjetIndex/isSelfLoop/mass edge features -> ``[B, N, N, F]``."""
     ebatch = torch.zeros(
         (batch.shape[0], batch.shape[1], batch.shape[1], len(variables)),
         dtype=batch.dtype,

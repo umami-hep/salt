@@ -90,20 +90,10 @@ class Concat(nn.Module):
         )
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Contribute the ``seq.x`` last-dim width from the per-stream embed widths.
+        """Contribute the ``seq.x`` last-dim width from the first resolved per-stream embed width.
 
-        `StreamEmbed` produces ``embed.<stream>`` with ``shape=None`` (rank
-        inferred from the bound input), so there is no concrete shape for the
-        dim table to bind ``embed_dim`` from directly — this hook forwards the
-        resolved embed width to ``seq.x`` (needed on the encoderless-pool path,
-        which has no encoder require to bind it otherwise). The per-stream
-        embeds share one width, so the FIRST resolved input width is used.
-
-        Returns
-        -------
-        dict[str, int]
-            ``{"seq.x": embed_width}`` once an ``embed.<stream>`` width is
-            resolved, otherwise ``{}``.
+        Needed because `StreamEmbed`'s ``shape=None`` output gives the dim
+        table nothing concrete to bind ``embed_dim`` from directly.
         """
         for stream in self.streams:
             width = widths.get(f"embed.{stream}")

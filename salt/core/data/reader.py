@@ -160,13 +160,7 @@ class H5StructuredReader(Reader):
 
     @staticmethod
     def _parse_group(stream: str, cfg: GroupConfig | Mapping[str, Any] | None) -> GroupConfig:
-        """Normalise one group config entry to a `GroupConfig` (dataset defaults to stream name).
-
-        Raises
-        ------
-        ConfigError
-            On unknown keys or a non-mapping entry.
-        """
+        """Normalise one group config entry to a `GroupConfig` (dataset defaults to stream name)."""
         if isinstance(cfg, GroupConfig):
             if cfg.dataset is None:
                 return GroupConfig(
@@ -187,16 +181,7 @@ class H5StructuredReader(Reader):
         )
 
     def _validate_against_schema(self) -> None:
-        """Resolve per-group ``global_object`` flags and statically validate config fields.
-
-        Raises
-        ------
-        ConfigError
-            If ``global_object`` is unset for a group and no schema is available.
-        SchemaError
-            If the schema lacks a configured group/field, or a group is
-            declared (or inferred) non-global_object without a ``valid`` field.
-        """
+        """Resolve per-group ``global_object`` flags and statically validate config fields."""
         resolved: dict[str, GroupConfig] = {}
         for stream, cfg in self.groups.items():
             gschema = self.schema.groups.get(cfg.dataset) if self.schema is not None else None
@@ -247,21 +232,14 @@ class H5StructuredReader(Reader):
         return tuple(self.groups)
 
     def sources(self) -> list[Path]:
-        """The single H5 source file (the multi-file staging surface).
-
-        One configured ``filename`` per stage is the H5 reader's data. A
-        wildcard ``filename`` is returned verbatim — the literal pattern, not
-        the matched members — so the base `Reader.restage` (which copies one
-        file) is only used on the resolved single-file staging path. Returns
-        ``[]`` when no source is bound yet.
+        """The single H5 source file (the multi-file staging surface); a wildcard
+        `filename` is returned verbatim (not its matched members). Empty when unbound.
         """
         return [self.filename] if self.filename is not None else []
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        """The schema artifact's group for one served stream.
-
-        Looked up via the stream's ``dataset`` name; None when no schema
-        artifact is configured or the stream is unknown.
+        """The schema artifact's group for one served stream, looked up via its ``dataset``
+        name; None when no schema is configured or the stream is unknown.
         """
         if self.schema is None:
             return None
@@ -271,10 +249,8 @@ class H5StructuredReader(Reader):
         return self.schema.groups.get(cfg.dataset)
 
     def label_universe(self) -> tuple[str, ...] | None:
-        """The ``labels.<stream>.<field>`` universe for wildcard narrowing.
-
-        None when no schema artifact is configured (validation falls back to
-        the bind-time check).
+        """The ``labels.<stream>.<field>`` universe for wildcard narrowing; None
+        when no schema is configured.
         """
         if self.schema is None:
             return None
@@ -285,14 +261,8 @@ class H5StructuredReader(Reader):
         )
 
     def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None.
-
-        The H5 reader reads dense, already-padded structured arrays, so its only
-        `StreamConfig` knob is the ``truncate`` leading-keep (``pad_max``).
-        Streams with no ``truncate`` return None; a configured ``truncate``
-        applies to the leading axis whether or not the stream is
-        ``global_object``. The H5 read path has no per-constituent cuts/sort
-        surface, so this config never carries cuts/sort.
+        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None —
+        the H5 read path has no per-constituent cuts/sort surface.
         """
         cfg = self.groups[stream]
         if cfg.truncate is None:
@@ -306,12 +276,8 @@ class H5StructuredReader(Reader):
         vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> H5StructuredReader:
-        """Clone this reader for another source file.
-
-        Config-only (no file I/O): the loaded schema artifact, group configs,
-        selections and transforms are shared; only the file binding changes.
-        ``stage`` is accepted for the stage-sourcing contract and ignored here
-        (a single-source reader's one ``filename`` per stage is its data).
+        """Clone onto another source file (config-only: schema, group configs, selections,
+        and transforms are shared); `stage` is accepted and ignored (single source).
         """
         del stage  # single-source reader: the per-stage filename is the data
         clone = H5StructuredReader(
@@ -327,10 +293,8 @@ class H5StructuredReader(Reader):
         return clone
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``raw.* / masks.* / meta.rows`` produces (source node, requires={}).
-
-        Sequence dims are concrete when ``truncate`` is set, else symbolic
-        ``T:<stream>``; ``meta.rows`` is TEST-only.
+        """Declare ``raw.<stream>``/``masks.<stream>``/``meta.rows`` (source node,
+        requires={}); sequence dims concrete when `truncate` is set, else symbolic.
         """
         del mode
         flat: dict[str, TensorSpec] = {}
@@ -344,20 +308,7 @@ class H5StructuredReader(Reader):
         return IO(produces=unflatten_spec(flat))
 
     def prepare(self) -> None:
-        """Resolve the source file (VDS for wildcards) and probe row counts.
-
-        Idempotent.
-
-        Raises
-        ------
-        ConfigError
-            If no filename is bound, or ``truncate`` exceeds the file's
-            constituent dimension.
-        ValueError
-            If ``num`` requests more rows than available.
-        SchemaError
-            If a configured dataset is missing or not a structured array.
-        """
+        """Resolve the source file (VDS for wildcards) and probe row counts (idempotent)."""
         if self._resolved is not None:
             return
         if self.filename is None:
@@ -399,11 +350,7 @@ class H5StructuredReader(Reader):
 
     @property
     def source_path(self) -> Path:
-        """The resolved source file (the VDS for wildcard filenames).
-
-        Resolves on first access (`prepare` is idempotent). Writers re-read
-        input copies from this path by absolute rows.
-        """
+        """The resolved source file (the VDS for wildcard filenames); resolves on first access."""
         self.prepare()
         assert self._resolved is not None
         return self._resolved
@@ -419,18 +366,9 @@ class H5StructuredReader(Reader):
             self._pid = pid
 
     def bind(self, ctx: WorkerCtx) -> None:
-        """Per-worker setup: open the handle, allocate demand-narrowed buffers.
-
-        Each group's buffer dtype covers ``demanded union selection/transform
-        fields`` only (file field order, ``as_half``, ``valid`` auto-appended —
-        `get_dtype`). Demanded fields absent from the live file raise before any
-        training step.
-
-        Raises
-        ------
-        SchemaError
-            Naming the demanding module and the nearest field, when a
-            demanded field is not in the H5 group.
+        """Open the handle and allocate demand-narrowed buffers per group (dtype covers
+        demanded + selection/transform fields via `get_dtype`); raises `SchemaError`
+        naming the demanding module for a field absent from the live file.
         """
         self.prepare()
         self._ensure_open()
@@ -467,12 +405,9 @@ class H5StructuredReader(Reader):
         self._rng = np.random.default_rng(ctx.seed)
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one contiguous batch slab.
-
-        Per group: resize the reusable buffer + ``read_direct``, apply
+        """Read one contiguous batch slab: resize buffer + ``read_direct``, apply
         selections, truncate, apply transforms (FIT-only, seeded), then derive
-        ``masks.<stream> = ~valid``. ``raw.*`` values may alias the reusable
-        buffers; masks are fresh arrays. ``meta.rows`` is produced in TEST.
+        ``masks.<stream> = ~valid``; ``raw.*`` values may alias the reusable buffers.
         """
         out: dict[str, np.ndarray] = {}
         for stream, cfg in self.groups.items():
@@ -506,9 +441,8 @@ class H5StructuredReader(Reader):
         return out
 
     def aliases(self, array: np.ndarray) -> bool:
-        """Check whether `array` shares memory with a reusable read buffer.
-
-        The debug-boundary non-aliasing assertion.
+        """Check whether `array` shares memory with a reusable read buffer (the
+        debug-boundary check).
         """
         return any(np.may_share_memory(array, buf) for buf in self._buffers.values())
 

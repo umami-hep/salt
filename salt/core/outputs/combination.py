@@ -82,13 +82,7 @@ class Combination(nn.Module):
 
     @staticmethod
     def _checked_index(index: Any, name: str) -> int:
-        """Validate a source channel index is a non-negative int.
-
-        Raises
-        ------
-        ConfigError
-            For a non-int or negative index.
-        """
+        """Validate a source channel index is a non-negative int; raises `ConfigError` otherwise."""
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise ConfigError(
                 f"Combination {name!r}: source channel index {index!r} must be a non-negative "

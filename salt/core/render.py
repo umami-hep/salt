@@ -84,12 +84,8 @@ def plan_table(plan: Plan) -> str:
 
 
 def _esc(text: str) -> str:
-    """Escape a string for a double-quoted DOT identifier.
-
-    Returns
-    -------
-    str
-        The escaped text (without surrounding quotes).
+    """Escape a string for a double-quoted DOT identifier (without surrounding
+    quotes).
     """
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -126,10 +122,8 @@ _PRUNED_FILL = "#dddddd"
 
 
 def _row_colour(key: str, spec: TensorSpec | None) -> str:
-    """Kind-based row font colour for a signature-card row.
-
-    Labels orange, losses red, ``preds.*`` blue; everything else the neutral
-    default.
+    """Kind-based row font colour: labels orange, losses red, ``preds.*`` blue,
+    else the neutral default.
     """
     if spec is not None and spec.kind in _KIND_COLOURS:
         return _KIND_COLOURS[spec.kind]
@@ -144,11 +138,8 @@ def _html_esc(text: str) -> str:
 
 
 def _is_feature_dim(dim: int | str) -> bool:
-    """Whether a shape entry is a symbolic feature dim (resolvable to a width).
-
-    Batch ``B`` and the sequence/token families ``T``/``L``/``S`` stay symbolic;
-    every other symbolic family is a config-fixed feature width that
-    `resolve_bind_schema` resolves. Concrete ints are not feature dims.
+    """Whether a shape entry is a symbolic feature dim (resolvable to a width)
+    — true for any symbolic family except the data-dependent ``B``/``T``/``L``/``S``.
     """
     if not is_symbolic_dim(dim):
         return False
@@ -157,12 +148,9 @@ def _is_feature_dim(dim: int | str) -> bool:
 
 
 def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | None) -> str:
-    """Shape string for a card row, resolving the symbolic feature dim statically.
-
-    Substitutes the concrete int for the shape's last dim when `widths` carries a
-    statically resolved width for `key` and that last dim is a symbolic feature
-    dim. Data-dependent dims (batch, sequence/token) stay symbolic — so
-    ``encoded.tracks`` renders ``(B, T:tracks, 16)``.
+    """Shape string for a card row: substitutes the concrete int for the shape's
+    last dim when `widths` resolves `key` and that dim is a symbolic feature
+    dim, e.g. ``encoded.tracks`` renders ``(B, T:tracks, 16)``.
     """
     if spec is None or not spec.shape:
         return ""
@@ -199,11 +187,9 @@ def _card_node(
     ins: list[tuple[str, str, str]],
     outs: list[tuple[str, str, str]],
 ) -> str:
-    """Assemble one HTML-like signature-card node line.
-
-    `ins`/`outs` are ``(key, shape, colour)`` triples for the consumed and
-    produced rows; the header carries `title` + optional `cls` over a `fill`
-    background.
+    """Assemble one HTML-like signature-card node line: `ins`/`outs` are
+    ``(key, shape, colour)`` row triples; the header carries `title` +
+    optional `cls` over a `fill` background.
     """
     sub = (
         f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>'

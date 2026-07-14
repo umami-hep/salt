@@ -295,24 +295,10 @@ class SaltModule(lightning.LightningModule):
         return {mode: origins for mode, (_demand, origins) in self._boundary_demand().items()}
 
     def _boundary_demand(self) -> dict[Mode, tuple[list[str], dict[str, str]]]:
-        """Compute per-mode boundary demand plus per-key demander descriptions.
-
-        In TEST, an attached `WriterCallback`'s declared requires extend the
-        demand: writer-demanded dataset-namespace keys (labels, masks,
-        ``meta.rows``) keep their demand-gated producers alive.
-
-        Returns
-        -------
-        dict[Mode, tuple[list[str], dict[str, str]]]
-            ``{mode: (demanded keys, {key: demander description})}``.
-
-        Raises
-        ------
-        ConfigError
-            On wildcard demand keys, or when an unproduced require lies
-            outside the dataset-served namespaces (``inputs``/``masks``/
-            ``labels``/``meta``) — that means a model-side producer is
-            missing (e.g. deleted by a ``null`` override).
+        """Per-mode boundary demand + per-key demander descriptions; in TEST, an
+        attached `WriterCallback`'s requires extend the demand so writer-demanded
+        dataset keys keep their producers alive. Raises `ConfigError` on wildcard
+        demand keys or a demand key outside the dataset-served namespaces.
         """
         out: dict[Mode, tuple[list[str], dict[str, str]]] = {}
         for mode in _DEMAND_MODES:
@@ -396,25 +382,11 @@ class SaltModule(lightning.LightningModule):
         return out
 
     def _attached_writer(self) -> tuple[Any, Any]:
-        """The attached TEST writer/sink callback + reader, if both exist.
-
-        Duck-typed (a callback exposing ``writer_demand``) so the model side
-        stays free of a writers import.
-
-        Order-independent TEST-sink selection: an ONNX-only sink
-        (`OnnxExportSink`) also exposes ``writer_demand`` but its
-        ``declare_io(Mode.TEST)`` is empty — it must never be chosen as the
-        TEST persistence sink (choosing it would empty the TEST sinks and
-        trip ``_assert_no_dead_preds`` on every ``preds.*``). The
-        ``is_test_sink()`` discriminator skips it regardless of callback
-        order. A plain duck-typed sink without ``is_test_sink`` (e.g.
-        `CollectOutputs`) is treated as a TEST sink.
-
-        Returns
-        -------
-        tuple[Any, Any]
-            ``(callback, reader)`` or ``(None, None)`` when no TEST writer
-            callback (or no datamodule boundary) is attached.
+        """The attached TEST writer/sink callback + reader, duck-typed on
+        ``writer_demand``. Order-independent: an ONNX-only sink's
+        ``is_test_sink()`` discriminator skips it so it is never chosen as the
+        TEST persistence sink; a plain duck-typed sink without ``is_test_sink``
+        counts as one. ``(None, None)`` when none is attached.
         """
         trainer = self._trainer
         callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
@@ -434,17 +406,10 @@ class SaltModule(lightning.LightningModule):
         return callback, reader
 
     def _attached_sink_node(self) -> GraphModule | None:
-        """The attached TEST sink NODE, if one is wired as a callback.
-
-        A sink node is a `GraphModule` that also marks itself a terminal sink
-        via ``is_sink() -> True`` (e.g. `H5OutputSink`). `compile_mode` folds
-        it into the planning module dict so it renders its own card and
-        anchors demand via its declared requires.
-
-        Returns
-        -------
-        GraphModule | None
-            The sink node, or None when no sink-node callback is attached.
+        """The attached TEST sink NODE (a `GraphModule` with ``is_sink() -> True``,
+        e.g. `H5OutputSink`), or None. `compile_mode` folds it into the planning
+        module dict so it renders its own card and anchors demand via its
+        declared requires.
         """
         callback, _reader = self._attached_writer()
         if callback is None:
@@ -476,21 +441,9 @@ class SaltModule(lightning.LightningModule):
     def _fold_sink_node(
         modules: dict[str, GraphModule], sink_node: GraphModule
     ) -> dict[str, GraphModule]:
-        """Add a sink NODE to a planning module dict under its instance name.
-
-        The planner requires ``module.name == config_key``; the sink's
-        ``name`` is used as the key. A name collision with a model module is
-        a config error (instance names are unique across the pipeline graph).
-
-        Returns
-        -------
-        dict[str, GraphModule]
-            A fresh dict including the sink node.
-
-        Raises
-        ------
-        ConfigError
-            If the sink node's name collides with an existing model module.
+        """Add a sink NODE to a planning module dict under its instance name (the
+        planner requires ``module.name == config_key``). Returns a fresh dict;
+        raises `ConfigError` on a name collision with an existing model module.
         """
         name = sink_node.name
         if name in modules:
@@ -503,25 +456,11 @@ class SaltModule(lightning.LightningModule):
         return folded
 
     def _assert_no_dead_preds(self, plan: Plan) -> None:
-        """Hard-error on a produced ``preds.*`` key consumed by no plan edge.
-
-        With a sink NODE folded (`compile_mode`), the sink demands
-        ``outputs.*``, not ``preds.*``, so a genuinely-dead ``preds.*`` (one
-        the model computes every TEST batch but no producer feeds into a
-        demanded ``outputs.*`` leaf) would otherwise ship silently — a
-        computed prediction that is never persisted. Every ``preds.*`` the
-        model produces (active in TEST) must be consumed by some edge in the
-        compiled plan; an unconsumed one raises `_dead_preds_message`.
-
-        Parameters
-        ----------
-        plan : Plan
-            The compiled TEST plan (with the sink folded in).
-
-        Raises
-        ------
-        ConfigError
-            When a produced ``preds.*`` key is consumed by no plan edge.
+        """Hard-error on a produced ``preds.*`` key consumed by no plan edge in the
+        compiled TEST plan. With a sink NODE folded (`compile_mode`), the sink
+        demands ``outputs.*`` not ``preds.*``, so a genuinely-dead ``preds.*``
+        would otherwise ship silently; raises `ConfigError` via
+        `_dead_preds_message`.
         """
         produced: dict[str, str] = {}
         for name, module in self._graph_modules.items():
@@ -535,16 +474,9 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(_dead_preds_message(dead, produced, writers=None))
 
     def _writer_demand(self) -> dict[str, str] | None:
-        """Merged writer-declared TEST demand from an attached `WriterCallback`.
-
-        Returns None when no writer callback (or no datamodule boundary) is
-        attached: programmatic ``Trainer.test`` without writers keeps the
-        anchor-on-all-preds behaviour.
-
-        Returns
-        -------
-        dict[str, str] | None
-            ``{demanded key: demander description}``, or None.
+        """Merged writer-declared TEST demand from the attached `WriterCallback`,
+        or None when none is attached (programmatic ``Trainer.test`` without
+        writers keeps the anchor-on-all-preds behaviour).
         """
         callback, reader = self._attached_writer()
         if callback is None:
@@ -552,49 +484,22 @@ class SaltModule(lightning.LightningModule):
         return callback.writer_demand(self._graph_modules, reader)
 
     def _attached_callbacks(self) -> list[Any]:
-        """Attached callbacks declaring FIT/VAL plan sinks.
-
-        Duck-typed (any callback exposing a callable ``fit_val_demand``) so
-        the model side stays free of a callbacks import, for the
-        TRAINING-mode metrics family (e.g. `ConfusionMatrix`). The surface is
-        static (config-only, taking the model-module dict): it does not
-        depend on the callback's ``setup`` having run, so ``salt2 graph``
-        sees the same FIT/VAL sinks a real ``trainer.fit`` does.
-
-        Returns
-        -------
-        list[Any]
-            The attached FIT/VAL-sink callbacks in trainer order (empty when
-            none, or when no trainer is attached).
+        """Attached callbacks declaring FIT/VAL plan sinks, duck-typed on a
+        callable ``fit_val_demand`` (e.g. `ConfusionMatrix`). Static/config-only
+        so ``salt2 graph`` sees the same sinks a real ``trainer.fit`` would.
+        Empty list when none are attached.
         """
         trainer = self._trainer
         callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
         return [cb for cb in callbacks or [] if callable(getattr(cb, "fit_val_demand", None))]
 
     def _callback_demand(self, mode: Mode, callbacks: Any = None) -> dict[str, str]:
-        """Merged callback-declared FIT/VAL demand.
-
-        The TRAINING-mode mirror of `_writer_demand` (TEST): configured
-        metrics-family callbacks declare the bundle keys they read each VAL
-        epoch, and those keys become FIT/VAL plan sinks so their producers
-        survive demand pruning. Empty outside TRAINING modes.
-
-        Parameters
-        ----------
-        mode : Mode
-            A primary mode. Non-TRAINING modes return ``{}``.
-        callbacks : Any, optional
-            An explicit iterable of FIT/VAL-sink callbacks (the static
-            `salt.core.cli` path passes what it parses from the
-            ``trainer.callbacks`` block, so ``salt2 graph`` sees the same
-            sinks a real ``salt2 fit`` run would). None → discovered from
-            the attached trainer.
-
-        Returns
-        -------
-        dict[str, str]
-            ``{demanded key: demander description}`` in callback (config)
-            order.
+        """Merged callback-declared FIT/VAL demand — the TRAINING-mode mirror of
+        `_writer_demand` (TEST): metrics-family callbacks declare the bundle
+        keys they read each VAL epoch, becoming FIT/VAL plan sinks so their
+        producers survive demand pruning. Empty outside TRAINING modes.
+        ``callbacks=None`` discovers from the attached trainer; explicit is the
+        static `salt.core.cli` path.
         """
         if not (mode & Mode.TRAINING):
             return {}
@@ -612,52 +517,13 @@ class SaltModule(lightning.LightningModule):
     ) -> list[str]:
         """The model-plan sink anchors for one mode.
 
-        FIT/VAL sinks: ``loss.total`` plus the declared requires of any
-        configured training callback — the TRAINING-mode mirror of the TEST
-        writer-demand mechanism. A metrics-family callback declares the
-        bundle keys it reads each VAL epoch (`_callback_demand`); those keys
-        anchor the FIT/VAL plan so a callback-consumed ``preds.*`` key with
-        no loss survives demand pruning. Unlike TEST, an unconsumed
-        ``preds.*`` in FIT/VAL is not a dead-preds error: callback demand
-        only adds sinks, never narrows.
-
-        Parameters
-        ----------
-        mode : Mode
-            A primary mode.
-        writers : Any, optional
-            An explicit writer callback (the `WriterCallback` duck-typed
-            surface: ``writer_demand`` + ``writers``), by default None —
-            discovered from the attached trainer. The static tooling
-            (`salt.core.cli`) passes the callback it builds from the parsed
-            ``writers:`` block so ``salt2 graph`` sees the same TEST sinks
-            and dead-preds errors as a real ``salt2 test`` run.
-        reader : Any, optional
-            The reader prototype matching `writers` (static path only), by
-            default None — the attached datamodule's reader.
-        callbacks : Any, optional
-            An explicit iterable of FIT/VAL-sink callbacks (the static
-            `salt.core.cli` path passes what it parses from the
-            ``trainer.callbacks`` block), by default None — discovered from
-            the attached trainer. Consulted in TRAINING modes only.
-
-        Returns
-        -------
-        list[str]
-            ``["loss.total"]`` plus the callback-declared FIT/VAL demand
-            keys in FIT/VAL. In TEST with a writer callback, the
-            writer-demanded model-produced keys. In ONNX, the folded
-            `OnnxExportSink` terminal node anchors its own conversion-leaf
-            demand once folded into the planning module dict, so this
-            falls through to every declared ``preds.*`` key in declaration
-            order when no export-sink demand is present.
-
-        Raises
-        ------
-        ConfigError
-            When no module produces the mode's anchor keys, or — TEST with
-            writers — when a produced ``preds.*`` key is consumed by no
-            writer (a computed prediction would never be persisted).
+        FIT/VAL: ``loss.total`` plus callback-declared demand
+        (`_callback_demand`) — callback demand only ADDS sinks, never
+        narrows: an unconsumed ``preds.*`` in FIT/VAL is not a dead-preds
+        error, unlike TEST (writer demand, where it raises `ConfigError`).
+        ONNX with no export-sink demand falls through to every declared
+        ``preds.*`` key. Explicit writers/reader/callbacks are the static
+        `salt.core.cli` path; default None discovers from the trainer.
         """
         produced: dict[str, str] = {}
         for name, module in self._graph_modules.items():
@@ -775,19 +641,9 @@ class SaltModule(lightning.LightningModule):
         return plan
 
     def setup(self, stage: str) -> None:
-        """Compile the stage's plans and run the two-phase bind.
-
-        Lightning calls the datamodule's ``setup`` first, so the per-stage
-        `GraphDataset` instances (and their config-derived boundary specs)
-        already exist. Binding happens at most once per instance and always
-        before any checkpoint state-dict load (Lightning restores after the
-        setup hook).
-
-        Raises
-        ------
-        ConfigError
-            For unsupported stages, a missing/foreign datamodule, or any
-            compile/bind error.
+        """Compile the stage's plans and run the two-phase bind, after the
+        datamodule's own ``setup``; binds at most once, before any checkpoint
+        state-dict load.
         """
         if stage not in {"fit", "test"}:
             raise ConfigError(
@@ -830,16 +686,11 @@ class SaltModule(lightning.LightningModule):
         writers.validate_specs(self._graph_modules, reader, producer_specs)
 
     def _run_preflights(self) -> None:
-        """Fail-fast data-free checks of file-backed `materialise` sources.
-
-        Duck-typed: every graph module exposing a callable ``preflight()``
-        (e.g. `Normaliser` — norm-dict existence/streams/values) is checked
-        BEFORE any `materialise` writes buffers, so a wrong path/content
-        fails with one `ConfigError` covering all modules instead of a
-        per-module mid-materialise crash. Called from ``on_fit_start`` on
-        fresh fits only — on resume the values arrive via the state_dict and
-        the files are never read. A failing module preflight propagates as
-        `ConfigError`.
+        """Fail-fast data-free checks of file-backed `materialise` sources: every
+        module exposing a callable ``preflight()`` (e.g. `Normaliser`) is
+        checked before any `materialise` writes buffers, so a bad path/content
+        raises one `ConfigError` instead of a per-module mid-materialise crash.
+        Called from ``on_fit_start`` on fresh fits only.
         """
         for module in self._graph_modules.values():
             preflight = getattr(module, "preflight", None)
@@ -847,16 +698,9 @@ class SaltModule(lightning.LightningModule):
                 preflight()
 
     def _assert_fit_val_identical(self) -> None:
-        """Assert the VAL plan is structurally identical to the FIT plan.
-
-        The plan hash is deliberately mode-independent, so this is a cheap
-        hash comparison. Modules that genuinely declare VAL-divergent ports
-        are not yet supported — divergence is a config error.
-
-        Raises
-        ------
-        ConfigError
-            When the FIT and VAL plans differ structurally.
+        """Assert the VAL plan is structurally identical to the FIT plan (a cheap
+        hash comparison — the hash is mode-independent). VAL-divergent module
+        ports are not yet supported; raises `ConfigError` on mismatch.
         """
         fit_hash = self.plans[Mode.FIT].plan_hash
         val_hash = self.plans[Mode.VAL].plan_hash
@@ -868,18 +712,8 @@ class SaltModule(lightning.LightningModule):
             )
 
     def _graph_datamodule(self) -> GraphDataModule:
-        """The attached `GraphDataModule` (model plans need its boundary).
-
-        Returns
-        -------
-        GraphDataModule
-            The trainer's datamodule.
-
-        Raises
-        ------
-        ConfigError
-            When no trainer/datamodule is attached, or it is not a
-            `GraphDataModule`.
+        """The attached `GraphDataModule` (model plans need its boundary); raises
+        `ConfigError` when none is attached or it is not a `GraphDataModule`.
         """
         dm = getattr(self._trainer, "datamodule", None) if self._trainer is not None else None
         if not isinstance(dm, GraphDataModule):
@@ -892,17 +726,8 @@ class SaltModule(lightning.LightningModule):
 
     @staticmethod
     def _boundary(dset: GraphDataset | None, stage: str) -> dict[str, TensorSpec]:
-        """A stage dataset's model-visible boundary specs.
-
-        Returns
-        -------
-        dict[str, TensorSpec]
-            The flat boundary spec mapping.
-
-        Raises
-        ------
-        ConfigError
-            If the stage dataset was never built.
+        """A stage dataset's model-visible boundary specs; raises `ConfigError`
+        if the stage dataset was never built.
         """
         if dset is None:
             raise ConfigError(
@@ -912,12 +737,8 @@ class SaltModule(lightning.LightningModule):
         return dset.boundary_specs()
 
     def _ensure_bound(self) -> None:
-        """Resolve the bind schema from the compiled plans and bind once.
-
-        Raises
-        ------
-        ConfigError
-            If no plan was compiled yet.
+        """Resolve the bind schema from the compiled plans and bind once; raises
+        `ConfigError` if no plan was compiled yet.
         """
         if self._bound:
             return
@@ -926,13 +747,8 @@ class SaltModule(lightning.LightningModule):
         self._bind(resolve_bind_schema(self.plans.values()))
 
     def _bind(self, schema: ResolvedSchema) -> None:
-        """Bind all modules to a resolved schema — exactly once.
-
-        Raises
-        ------
-        ConfigError
-            On a second bind: rebinding re-initialises width-dependent
-            layers and would silently discard loaded values.
+        """Bind all modules to a resolved schema, exactly once; raises
+        `ConfigError` on a second bind (would silently discard loaded values).
         """
         if self._bound:
             raise ConfigError(
@@ -945,23 +761,11 @@ class SaltModule(lightning.LightningModule):
         self._bound = True
 
     def _apply_mup_shapes(self) -> None:
-        """Apply the muP base shapes over the whole ``net`` tree.
-
-        After `bind_all` builds the width-dependent layers (incl. the
-        `MuReadout` out-proj), sets the base shapes from ``mup.shape_path``
-        over the whole ``net`` so `MuReadout.width_mult()` resolves against
-        the real base widths and `MuAdamW` sees per-parameter infshapes.
-        ``rescale_params=False`` because the parameters already carry their
-        muP init from the architectural port; this call only attaches the
-        infshapes used by `MuReadout.forward`/`MuAdamW`.
-
-        No-op when no muP is configured or no ``shape_path`` was supplied
-        (the per-module width-1 base shapes set at construction stand).
-
-        Raises
-        ------
-        ConfigError
-            When ``shape_path`` is set but the file does not exist.
+        """Apply the muP base shapes from ``mup.shape_path`` over the whole
+        ``net`` (after `bind_all`) so `MuReadout.width_mult()`/`MuAdamW` resolve
+        against real base widths; ``rescale_params=False`` since params already
+        carry their muP init. No-op with no muP / no ``shape_path``; raises
+        `ConfigError` if the shape file is missing.
         """
         if self.mup_cfg is None or not self.mup_cfg.get("shape_path"):
             return
@@ -999,23 +803,9 @@ class SaltModule(lightning.LightningModule):
     # -- steps ---------------------------------------------------------------------
 
     def forward(self, batch: Mapping[str, Any] | Bundle, mode: Mode = Mode.TEST) -> Bundle:
-        """Run the compiled plan for `mode` over a batch.
-
-        Parameters
-        ----------
-        batch : Mapping[str, Any] | Bundle
-            The nested batch dict from `GraphDataset` (adopted into a fresh
-            `Bundle`), or an existing bundle.
-
-        Returns
-        -------
-        Bundle
-            The bundle with every step's produces merged in (write-once).
-
-        Raises
-        ------
-        ConfigError
-            If no plan was compiled for `mode`.
+        """Run the compiled plan for `mode` over a batch: adopts a dict batch into
+        a `Bundle` (or reuses one), and returns the bundle with the mode's
+        produces merged in. Raises `ConfigError` if `mode`'s plan wasn't compiled.
         """
         executor = self._executors.get(mode)
         if executor is None:
@@ -1027,17 +817,8 @@ class SaltModule(lightning.LightningModule):
         return executor.run(bundle, debug=self.debug)
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> dict[str, Any]:
-        """One FIT step: execute the plan, log losses, return loss + bundle.
-
-        Returns
-        -------
-        dict[str, Any]
-            ``{"loss": total, "bundle": Bundle}`` — callbacks read the bundle.
-
-        Raises
-        ------
-        RuntimeError
-            If the total loss is NaN.
+        """One FIT step: run the plan, log losses, return ``{"loss": total,
+        "bundle": Bundle}``; raises `RuntimeError` on a NaN total loss.
         """
         del batch_idx
         bundle = self(batch, Mode.FIT)
@@ -1051,25 +832,15 @@ class SaltModule(lightning.LightningModule):
         return {"loss": total, "bundle": bundle}
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> dict[str, Any]:
-        """One VAL step (mirrors `training_step` with the VAL plan).
-
-        Returns
-        -------
-        dict[str, Any]
-            ``{"loss": total, "bundle": Bundle}``.
-        """
+        """One VAL step — mirrors `training_step` with the VAL plan."""
         del batch_idx
         bundle = self(batch, Mode.VAL)
         self._log_losses(bundle, stage="val")
         return {"loss": bundle.get("loss.total"), "bundle": bundle}
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> Bundle:
-        """One TEST step: run the TEST plan and return the bundle.
-
-        Returns
-        -------
-        Bundle
-            The executed bundle (``preds.*`` + ``meta.rows`` for writers).
+        """One TEST step: runs the TEST plan, returning the executed bundle
+        (``preds.*`` + ``meta.rows`` for writers).
         """
         del batch_idx
         return self(batch, Mode.TEST)
@@ -1089,25 +860,11 @@ class SaltModule(lightning.LightningModule):
     # -- optimizer -----------------------------------------------------------------
 
     def _get_optimizer_class(self) -> type[Optimizer]:
-        """Resolve the optimizer class (with the muP ``MuAdamW`` swap).
-
-        When `mup` is configured the optimizer is ``mup.optim.MuAdamW``
-        regardless of the ``optimizer`` name — muP's per-parameter learning
-        rates require the muP-aware AdamW. MuAdamW needs the base shapes set
-        on the parameters (done at bind via `_apply_mup_shapes`), so the
-        swap and the shape application are coupled.
-
-        Returns
-        -------
-        type[Optimizer]
-            The optimizer class to instantiate.
-
-        Raises
-        ------
-        ImportError
-            If lion is requested but lion-pytorch is not installed.
-        ConfigError
-            For unsupported names (also rejected at construction).
+        """Resolve the optimizer class, with the muP ``MuAdamW`` swap: when `mup`
+        is configured the optimizer is always ``mup.optim.MuAdamW`` (coupled to
+        the base shapes set at bind via `_apply_mup_shapes`). Raises
+        `ImportError` for lion without lion-pytorch, `ConfigError` for an
+        unsupported name.
         """
         if self.mup_cfg is not None:
             from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional, muP-only path
@@ -1127,13 +884,7 @@ class SaltModule(lightning.LightningModule):
         raise ConfigError(f"Optimizer '{self.optimizer}' is not supported.")
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
-        """Build the optimizer + OneCycleLR scheduler.
-
-        Returns
-        -------
-        tuple[list[Optimizer], list[dict]]
-            One optimizer and one step-interval scheduler config.
-        """
+        """Build the optimizer + a step-interval OneCycleLR scheduler."""
         optimizer_class = self._get_optimizer_class()
         optimizer_kwargs = {
             "lr": self.lrs["initial"],
@@ -1158,14 +909,8 @@ class SaltModule(lightning.LightningModule):
     # -- checkpoints: schema + plan hashes, never Plan objects --------------------
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Serialise the resolved schema and per-mode plan hashes.
-
-        Plans hold ``MappingProxyType`` views and live module references —
-        they are deliberately NOT picklable; the hash is the integrity
-        check, and the schema alone suffices to bind on a data-less machine.
-        The payload lives under the top-level checkpoint key `CKPT_KEY`
-        (``'salt_core'``), keeping ``checkpoint['hyper_parameters']``
-        purely user config.
+        """Serialise the resolved schema + per-mode plan hashes under `CKPT_KEY`
+        (Plans themselves aren't picklable; the hash is the integrity check).
         """
         if self.schema is None:
             warnings.warn(
@@ -1182,33 +927,12 @@ class SaltModule(lightning.LightningModule):
         }
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Verify plan hashes and (if needed) bind from the stored schema.
-
-        Runs BEFORE the state-dict load on both restore paths (trainer
-        ``ckpt_path`` and ``load_from_checkpoint``). FIT hash mismatches are
-        fatal, other modes warn. When the modules are not yet bound (the
-        data-less ``load_from_checkpoint`` path, where ``setup`` never ran)
-        they are bound from the checkpoint's schema so the subsequent strict
-        load finds every key. Also marks the instance as checkpoint-loaded,
-        which disables `materialise`. A FIT plan-hash mismatch propagates as
-        `ConfigError` from `_verify_ckpt_hash`.
-
-        Training with ``--compile`` wraps the model in
-        ``torch._dynamo.OptimizedModule``, which prepends ``_orig_mod.`` to
-        every state_dict key. Strip that prefix in-place before Lightning's
-        strict ``load_state_dict`` so a compile-trained checkpoint loads
-        into a non-compiled eval module. No-op on checkpoints written
-        without ``--compile``.
-
-        v1 (``ModelWrapper``) checkpoints are detected by their signature key
-        layout and rejected with an explicit `ConfigError` — failing early and
-        clearly instead of cascading into hundreds of missing-key errors.
-
-        Raises
-        ------
-        ConfigError
-            If the checkpoint carries the v1 (``ModelWrapper``) state-dict
-            layout, or (via `_verify_ckpt_hash`) on a FIT plan-hash mismatch.
+        """Runs before the state-dict load on both restore paths: verifies plan
+        hashes (fatal on FIT mismatch via `_verify_ckpt_hash`), binds from the
+        checkpoint's stored schema if not yet bound, strips a ``--compile``-added
+        ``_orig_mod.`` state_dict prefix, and rejects the v1 (``ModelWrapper``)
+        state-dict layout with `ConfigError`. Marks the instance checkpoint-loaded
+        (disables `materialise`).
         """
         state_dict = checkpoint.get("state_dict")
         if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
@@ -1246,12 +970,8 @@ class SaltModule(lightning.LightningModule):
             )
 
     def _verify_ckpt_hash(self, mode: Mode, plan: Plan) -> None:
-        """Compare a compiled plan's hash with the checkpoint's stored hash.
-
-        Raises
-        ------
-        ConfigError
-            On a FIT mismatch; other modes warn and continue.
+        """Compare a compiled plan's hash with the checkpoint's stored hash;
+        raises `ConfigError` on a FIT mismatch, other modes warn and continue.
         """
         stored = self._ckpt_plan_hashes.get(mode.name)
         if stored is None or stored == plan.plan_hash:
@@ -1267,30 +987,10 @@ class SaltModule(lightning.LightningModule):
 
 
 def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: Any) -> str:
-    """Build the TEST dead-preds hard error.
-
-    Names, per dead key, the producing task module and its config address;
-    attributes the culprit when a configured writer's explicit ``tasks``
-    list excludes the dead tasks; and offers the per-task
-    ``expose: [fit, val]`` opt-out (keeps the task training while pruning
-    its prediction from the TEST/ONNX plans) as the first fix for
-    train-only aux tasks, with the heavier ``--model.modules.X=null``
-    deletion as the alternative.
-
-    Parameters
-    ----------
-    dead : list[str]
-        The produced ``preds.*`` keys no writer consumes.
-    produced : Mapping[str, str]
-        Produced key -> producing module instance name.
-    writers : Any
-        The writer callback (duck-typed ``writers`` mapping for the
-        tasks-narrowing hint; absent attributes degrade gracefully).
-
-    Returns
-    -------
-    str
-        The multi-line error message.
+    """Build the TEST dead-preds hard error: names each dead key's producing
+    module, attributes the culprit when a writer's ``tasks`` list excludes
+    it, and offers ``expose: [fit, val]`` (keep training, prune from
+    TEST/ONNX) or ``--model.modules.X=null`` as fixes.
     """
     lines = ["[mode=TEST] prediction keys consumed by NO writer:"]
     for key in dead:
@@ -1459,26 +1159,13 @@ def validate_mup_routing(
 def _validate_mup(
     mup: Mapping[str, Any] | None, modules: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    """`SaltModule.__init__` wrapper around `validate_mup_routing` (module-private alias).
-
-    Returns
-    -------
-    dict[str, Any] | None
-        The normalised mup config or None.
-    """
+    """`SaltModule.__init__` wrapper around `validate_mup_routing`."""
     return validate_mup_routing(mup, modules)
 
 
 def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
-    """The encoder modules that declare an edge port (duck-typed on ``edges_key``).
-
-    A `TransformerEncoder` with ``edges:`` configured carries a non-None
-    ``edges_key`` attribute; duck-typed so user encoder modules participate too.
-
-    Returns
-    -------
-    list[tuple[str, Any]]
-        ``(instance name, module)`` pairs for edge-bearing encoders.
+    """The encoder modules that declare an edge port (duck-typed on a non-None
+    ``edges_key`` attribute — a `TransformerEncoder` with ``edges:`` configured).
     """
     return [
         (name, module)
@@ -1488,20 +1175,11 @@ def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
 
 
 def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
-    """The `Concat`'s first stream (the edge-stream-first reference).
-
-    Identifies the `Concat` precisely by its produced ``seq.x`` key rather
-    than by an attribute name — `Normaliser`/`Split` also carry a
-    ``streams`` attr, so an attribute test would be ambiguous. Returns the
-    concat's ``(instance name, streams[0])`` — the edge tensor's stream must
-    equal this so the ``[B, T, T, D_e]`` edge matrix aligns with the
-    leading ``T`` rows/cols of the concatenated ``[B, S, D]`` sequence the
-    encoder receives.
-
-    Returns
-    -------
-    tuple[str, str] | None
-        ``(concat name, first stream)``, or None when no `Concat` is configured.
+    """The `Concat`'s first stream (the edge-stream-first reference), identified
+    by its produced ``seq.x`` key (not by attribute, since `Normaliser`/`Split`
+    also carry ``streams``). The edge tensor's stream must equal this so the
+    ``[B, T, T, D_e]`` edge matrix aligns with the encoder's leading sequence
+    rows. None when no `Concat` is configured.
     """
     for name, module in modules.items():
         streams = getattr(module, "streams", None)
@@ -1600,13 +1278,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
 
 
 def _validate_edge_port(modules: Mapping[str, Any]) -> int:
-    """`SaltModule.__init__` wrapper around `validate_edge_port` (module-private alias).
-
-    Returns
-    -------
-    int
-        The number of edge-bearing encoders validated.
-    """
+    """`SaltModule.__init__` wrapper around `validate_edge_port`."""
     return validate_edge_port(modules)
 
 

@@ -50,15 +50,10 @@ class Executor:
 
         `modules` (e.g. the config's full instance dict) may be a superset
         of the plan's modules — pruned or mode-inactive entries are
-        ignored. When omitted, the live instances frozen into the plan
-        steps are used.
-
-        Raises
-        ------
-        ConfigError
-            If a plan module is missing from `modules`, does not implement
-            the `GraphModule` protocol, is not callable, or declares a name
-            that differs from its plan-step name.
+        ignored; when omitted, the live instances frozen into the plan
+        steps are used. Raises `ConfigError` if a plan module is missing
+        from `modules`, doesn't implement `GraphModule`, isn't callable, or
+        its declared name mismatches its plan-step name.
         """
         self.plan = plan
         self._modules: dict[str, GraphModule] = {}
@@ -101,26 +96,16 @@ class Executor:
         """Execute the plan's steps in order over `bundle` and return it.
 
         The caller provides every non-optional plan source leaf in
-        `bundle`. With ``debug=True`` each module receives a read-tracking
-        bundle view: any access outside its declared requires raises
-        `UndeclaredAccessError` naming the module, the key, and the
-        declaration to amend, and in-place mutation of existing bundle
-        tensors is detected via ``torch.Tensor._version`` snapshots around
-        each step and raises `MutationError` (non-tensor leaves such as
-        numpy arrays are not covered). The returned-keys-vs-declaration
-        check is always on, debug or not; write-once collisions propagate
-        from `Bundle.merge` as `KeyCollisionError`.
+        `bundle`. With ``debug=True`` each module gets a read-tracking
+        bundle view: an access outside its declared requires raises
+        `UndeclaredAccessError`, and in-place mutation of an existing
+        tensor (detected via ``torch.Tensor._version`` snapshots) raises
+        `MutationError` (non-tensor leaves aren't covered). The
+        returned-keys-vs-declaration check is always on; write-once
+        collisions propagate from `Bundle.merge` as `KeyCollisionError`.
 
-        Raises
-        ------
-        KeyError
-            If the input bundle is missing a non-optional plan source leaf.
-        DeclarationError
-            If a module's return value is not a dict, contains malformed /
-            duplicate / overlapping keys, or its key set does not match the
-            declared produces.
-        MutationError
-            Under ``debug=True``, if a module mutated a bundle tensor in place.
+        Raises `KeyError` if the input bundle is missing a non-optional
+        source leaf, `DeclarationError` on a malformed/mismatched return.
         """
         missing = sorted(
             key
@@ -201,12 +186,10 @@ def _declared_reads(module: GraphModule, step: PlanStep, mode: Mode) -> frozense
 class _ReadTrackedBundle:
     """Read-tracking bundle view handed to modules under ``run(debug=True)``.
 
-    Duck-types the read surface of `Bundle` (``get`` / ``subtree`` /
-    ``keys`` / ``in`` / ``len``). Any access outside the module's declared
-    requires raises `UndeclaredAccessError` naming the module, the key, and
-    the declaration to amend; declared-but-absent optional keys behave
-    exactly as on the plain bundle. Mutation and raw payload access are
-    blocked — modules return their produces; only the executor merges.
+    Duck-types `Bundle`'s read surface (``get``/``subtree``/``keys``/``in``/
+    ``len``). Access outside the module's declared requires raises
+    `UndeclaredAccessError`; mutation and raw payload access are blocked —
+    modules return their produces, only the executor merges.
     """
 
     __slots__ = ("_allowed", "_bundle", "_mode", "_who")
@@ -220,12 +203,8 @@ class _ReadTrackedBundle:
 
     @property
     def data(self) -> NoReturn:
-        """Blocked: raw payload access bypasses read tracking.
-
-        Raises
-        ------
-        UndeclaredAccessError
-            Always.
+        """Blocked: raw payload access bypasses read tracking; always raises
+        `UndeclaredAccessError`.
         """
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} accessed Bundle.data directly under "
@@ -234,11 +213,9 @@ class _ReadTrackedBundle:
         )
 
     def get(self, key: str) -> Any:
-        """Return the leaf value at a declared dotted key (see `Bundle.get`).
-
-        An undeclared `key` raises `UndeclaredAccessError`; a declared but
-        absent key (e.g. an optional port not produced in this mode) raises
-        `KeyError` exactly like the plain bundle.
+        """Return the leaf value at a declared dotted key (see `Bundle.get`);
+        raises `UndeclaredAccessError` if `key` is undeclared, else behaves
+        exactly like the plain bundle (including `KeyError` if absent).
         """
         if key not in self._allowed:
             self._undeclared(key)
@@ -247,15 +224,9 @@ class _ReadTrackedBundle:
     def subtree(self, prefix: str) -> dict[str, Any]:
         """Return the nested dict under `prefix`, checking every leaf is declared.
 
-        Raises `UndeclaredAccessError` if the module declares nothing under
-        `prefix` or the subtree contains a leaf outside the declared
-        requires; an unknown or leaf-valued `prefix` raises `KeyError` like
-        the plain bundle.
-
-        Returns
-        -------
-        dict[str, Any]
-            A fresh nested dict; leaf values are shared with the bundle.
+        Raises `UndeclaredAccessError` if nothing is declared under
+        `prefix` or a leaf in the subtree is undeclared; an unknown or
+        leaf-valued `prefix` raises `KeyError` like the plain bundle.
         """
         head = prefix + KEY_SEP
         if prefix not in self._allowed and not any(k.startswith(head) for k in self._allowed):
@@ -289,12 +260,8 @@ class _ReadTrackedBundle:
         return f"ReadTrackedBundle(module={self._who!r}, keys={self.keys()})"
 
     def set(self, key: str, value: Any) -> NoReturn:
-        """Blocked: modules return produced keys; only the executor writes.
-
-        Raises
-        ------
-        UndeclaredAccessError
-            Always.
+        """Blocked: modules return produced keys; only the executor writes;
+        always raises `UndeclaredAccessError`.
         """
         del value
         raise UndeclaredAccessError(
@@ -304,13 +271,7 @@ class _ReadTrackedBundle:
         )
 
     def merge(self, produced: dict[str, Any], who: str = "", expected: Any = None) -> NoReturn:
-        """Blocked: merging is executor-only.
-
-        Raises
-        ------
-        UndeclaredAccessError
-            Always.
-        """
+        """Blocked: merging is executor-only; always raises `UndeclaredAccessError`."""
         del produced, who, expected
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} called merge() on its bundle view "
@@ -318,12 +279,8 @@ class _ReadTrackedBundle:
         )
 
     def _undeclared(self, key: str, verb: str = "read") -> NoReturn:
-        """Raise the undeclared-access error for `key`.
-
-        Raises
-        ------
-        UndeclaredAccessError
-            Always — naming the module, the key, and the declaration to amend.
+        """Raise `UndeclaredAccessError` for `key`, naming the module, the
+        key, and the declaration to amend.
         """
         declared = ", ".join(sorted(self._allowed)) or "<none>"
         raise UndeclaredAccessError(
@@ -350,11 +307,9 @@ def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -
     (`salt.core.data.dataset`) merges module returns under the same
     convention.
 
-    Raises
-    ------
-    DeclarationError
-        On malformed keys, duplicate keys (e.g. both spellings of one key),
-        or keys that are simultaneously a leaf and a subtree.
+    Raises `DeclarationError` on malformed/duplicate keys (e.g. both
+    spellings of one key), or keys that are simultaneously a leaf and a
+    subtree.
     """
     flat: dict[str, Any] = {}
     _flatten_returned(produced, expected, who, "", flat)
@@ -388,12 +343,8 @@ def _flatten_returned(
 
     Mirrors `Bundle.merge`'s flattening (dict values are structure unless
     their dotted path is declared), but additionally accepts dotted keys at
-    any nesting level.
-
-    Raises
-    ------
-    DeclarationError
-        On non-string / malformed keys, or a key produced more than once.
+    any nesting level. Raises `DeclarationError` on non-string/malformed
+    keys, or a key produced more than once.
     """
     for name, value in produced.items():
         if not isinstance(name, str):

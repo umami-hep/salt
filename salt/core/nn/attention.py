@@ -1,4 +1,4 @@
-"""Attention/EdgeAttention and SDPA helpers (v1 salt/models/attention.py absorption)."""
+"""Attention/EdgeAttention and SDPA helpers."""
 
 from __future__ import annotations
 
@@ -19,13 +19,7 @@ except ImportError:
 
 
 def check_flash_attn() -> str:
-    """Check if Flash Attention is available and compatible.
-
-    Returns
-    -------
-    str
-        Empty string if Flash Attention is available, otherwise a reason why not.
-    """
+    """Check if Flash Attention is available; empty string if so, else a reason why not."""
     if not torch.cuda.is_available():
         return "No GPU available."
 
@@ -57,16 +51,7 @@ def merge_masks(
     attn_mask: BoolTensor | None,
     q_shape: Size,
 ) -> BoolTensor | None:
-    """Create a full attention mask which incorporates padding information.
-
-    Padded tokens can't **send** information but can **receive** it (prevents
-    softmax NaNs).
-
-    Returns
-    -------
-    BoolTensor | None
-        Combined mask of shape ``[B, 1, L_q, L_kv]`` (broadcastable over heads), or ``None``.
-    """
+    """Merge kv-pad + attn masks into ``[B,1,L_q,L_kv]``; padded tokens receive but never send."""
     mask = None
 
     if kv_mask is not None:
@@ -83,13 +68,7 @@ def merge_masks(
 
 
 def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
-    """Repeat keys and values along a dimension.
-
-    Returns
-    -------
-    tuple[Tensor, Tensor]
-        Repeated ``(keys, values)`` tensors.
-    """
+    """Repeat keys and values along a dimension."""
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
     values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
     return keys, values
@@ -101,13 +80,7 @@ def projection_packed(
     weight: Tensor,
     bias: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Efficient input projection for MHA using a single packed linear layer.
-
-    Returns
-    -------
-    tuple[Tensor, Tensor, Tensor]
-        Projected queries, keys, and values: ``(Q, K, V)``.
-    """
+    """Efficient input projection for MHA using a single packed linear layer -> ``(Q, K, V)``."""
     if kv is None:
         return functional.linear(q, weight, bias).chunk(3, dim=-1)
 
@@ -129,13 +102,7 @@ def torch_attn(
     softmax_scale: float,
     backend: str,
 ) -> Tensor:
-    """Scaled dot-product attention with a switchable torch backend.
-
-    Returns
-    -------
-    Tensor
-        Attention output of shape ``[B, H, L_q, D_h]``.
-    """
+    """Scaled dot-product attention with a switchable torch backend; returns ``[B,H,L_q,D_h]``."""
     backends = [SDPBackend.MATH]
     if backend == "torch-flash":
         backends += [SDPBackend.FLASH_ATTENTION]
@@ -148,29 +115,10 @@ def torch_attn(
 
 
 class Attention(nn.Module):
-    """Multihead attention module with optional differential attention and norms.
+    """Multihead attention: packed QKV projection, switchable backend, optional Q/K/V norms.
 
-    Parameters
-    ----------
-    embed_dim : int
-        Input (and output) embedding dimension.
-    num_heads : int, optional
-        Number of attention heads. The default is ``1``.
-    attn_type : str, optional
-        Backend kernel to use. One of ``{"torch-math", "torch-flash", "torch-meff",
-        "flash-varlen"}``. The default is ``"torch-meff"``.
-    dropout : float, optional
-        Dropout rate applied in attention. The default is ``0.0``.
-    bias : bool, optional
-        Whether to include bias terms in projections. The default is ``True``.
-    do_qk_norm : bool, optional
-        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
-    do_v_norm : bool, optional
-        Whether to apply RMSNorm to V per head. The default is ``False``.
-    mup: bool, optional
-        Whether to use the muP parametrisation. The default is ``False``.
-        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
-        Ref: https://arxiv.org/abs/2203.03466
+    ``mup=True`` rescales the dot-product scale ``sqrt(head_dim) -> head_dim``
+    and changes init (https://arxiv.org/abs/2203.03466).
     """
 
     def __init__(
@@ -214,13 +162,7 @@ class Attention(nn.Module):
         self.set_backend(attn_type)
 
     def set_backend(self, attn_type: str) -> str:
-        """Set and validate the attention backend.
-
-        Returns
-        -------
-        str
-            Effective backend set (may fall back to ``"torch-math"``).
-        """
+        """Set the attention backend; falls back to ``"torch-math"`` (warns) if unavailable."""
         self.attn_type = attn_type
         if self.attn_type == "flash-varlen":
             why_not_flash = check_flash_attn()
@@ -252,13 +194,7 @@ class Attention(nn.Module):
             nn.init.constant_(self.in_proj_bias, 0.0)
 
     def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
-        """FlashAttention backend.
-
-        Returns
-        -------
-        Tensor
-            Output of shape ``[N_total, D]``.
-        """
+        """FlashAttention backend; returns ``[N_total, D]``."""
         qkv = functional.linear(x, self.in_proj_weight, self.in_proj_bias)
         qkv = qkv.view(-1, 3, self.num_heads, self.head_dim)
 
@@ -281,13 +217,7 @@ class Attention(nn.Module):
     def _torch_forward(
         self, x: Tensor, kv: Tensor, mask: BoolTensor, kv_mask: BoolTensor, attn_mask: BoolTensor
     ) -> Tensor:
-        """Attention using PyTorch SDPA backends.
-
-        Returns
-        -------
-        Tensor
-            Output of shape ``[B, L_q, D]``.
-        """
+        """Attention using PyTorch SDPA backends; returns ``[B, L_q, D]``."""
         b, s, d = x.shape
 
         q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
@@ -321,13 +251,7 @@ class Attention(nn.Module):
         culens: Tensor | None = None,
         maxlen: int | None = None,
     ) -> Tensor:
-        """Attention forward pass, dispatching to the appropriate backend.
-
-        Returns
-        -------
-        Tensor
-            Output of shape ``[B, L_q, D]``.
-        """
+        """Attention forward pass, dispatching to the flash or torch-SDPA backend."""
         if self.attn_type == "flash-varlen":
             assert kv is None, "flash-varlen only supports self attention!"
             assert attn_mask is None, "flash-varlen does not support attention masks!"
@@ -339,30 +263,11 @@ class Attention(nn.Module):
 
 
 class EdgeAttention(nn.Module):
-    """Multihead attention module with optional norms, including edge features.
+    """Multihead attention with edge features biasing the scores and gating the output.
 
-    Parameters
-    ----------
-    embed_dim : int
-        Input (and output) embedding dimension.
-    edge_embed_dim : int
-        Model embedding dimension for edge features.
-    num_heads : int, optional
-        Number of attention heads. The default is ``1``.
-    dropout : float, optional
-        Dropout rate applied in attention. The default is ``0.0``.
-    bias : bool, optional
-        Whether to include bias terms in projections. The default is ``True``.
-    do_qk_norm : bool, optional
-        Whether to apply RMSNorm to Q and K per head. The default is ``False``.
-    do_v_norm : bool, optional
-        Whether to apply RMSNorm to V per head. The default is ``False``.
-    update_edges : bool, optional
-        Indicate whether to update edge features, by default False
-    mup: bool, optional
-        Whether to use the muP parametrisation. The default is ``False``.
-        Impacts init and scale of dot product sqrt(head_dim) -> head_dim.
-        Ref: https://arxiv.org/abs/2203.03466
+    No pluggable backend (always raw torch attention — see `set_backend`).
+    ``update_edges`` also emits updated edge features. ``mup=True`` rescales
+    the dot-product scale and init (https://arxiv.org/abs/2203.03466).
     """
 
     def __init__(
@@ -463,11 +368,7 @@ class EdgeAttention(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         """Attention with edge features biasing the scores and gating the output.
 
-        Returns
-        -------
-        tuple[Tensor, Tensor]
-            Output of shape ``[B, L_q, D]`` and updated edge features of shape
-            ``[B, L_q, L_kv, E]``.
+        Returns ``(out [B, L_q, D], edge_out [B, L_q, L_kv, E])``.
         """
         b, s, d = x.shape
         q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)

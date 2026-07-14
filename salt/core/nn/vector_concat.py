@@ -22,15 +22,14 @@ from salt.core.graph.spec import (
 class VectorConcat(nn.Module):
     """Ordered concatenation of ``[B, D_i]`` vectors into one ``[B, Dsum]`` key.
 
-    Replaces v1's post-pooling ``'global'`` magic key: GN3's 2-feature
-    ``global`` stream is fed past the encoder and concatenated onto the pooled
-    representation (``pooled_dim = 256 + 2``, the width every GN3 task
-    consumes). Concat ORDER is the config list — for converted GN3
-    checkpoints, ``inputs: [pooled.global, normed.global]`` (pooled first)
-    matches v1's task first-layer weight layout. Output width ``Dsum =
-    sum(D_i)`` is resolved at bind via `derived_widths`. ONNX uses the
-    ``export.inputs`` ``alias:`` mechanism (`OnnxAdapter`), not this module;
-    VectorConcat itself is mode-agnostic.
+    GN3's 2-feature ``global`` stream is fed past the encoder and
+    concatenated onto the pooled representation (``pooled_dim = 256 + 2``,
+    the width every GN3 task consumes). Concat ORDER is the config list —
+    for converted GN3 checkpoints, ``inputs: [pooled.global, normed.global]``
+    (pooled first) matches the task's first-layer weight layout. Output
+    width ``Dsum = sum(D_i)`` is resolved at bind via `derived_widths`. ONNX
+    uses the ``export.inputs`` ``alias:`` mechanism (`OnnxAdapter`), not this
+    module; VectorConcat itself is mode-agnostic.
     """
 
     def __init__(self, inputs: Sequence[str], out: str = "pooled.global") -> None:
@@ -42,8 +41,8 @@ class VectorConcat(nn.Module):
             Dotted bundle keys to concatenate, in the EXACT order they appear
             in the output. Must be non-empty with no duplicates.
         out : str, optional
-            The produced concatenated key, by default ``"pooled.global"`` (the
-            v1 ``global_rep`` slot every GN3 task reads).
+            The produced concatenated key, by default ``"pooled.global"``
+            (the slot every GN3 task reads).
 
         Raises
         ------
@@ -85,14 +84,7 @@ class VectorConcat(nn.Module):
         )
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Contribute ``Dsum = sum(D_i)`` once every input width is resolved.
-
-        Returns
-        -------
-        dict[str, int]
-            ``{out: sum(widths[input])}`` when every input width is resolved,
-            otherwise ``{}``.
-        """
+        """Contribute ``Dsum = sum(D_i)`` once every input width is resolved."""
         if all(key in widths for key in self.inputs):
             return {self.out_key: sum(widths[key] for key in self.inputs)}
         return {}

@@ -119,13 +119,7 @@ class EasyjetReader(Reader):
     def _parse_group(
         stream: str, cfg: EasyjetGroupConfig | Mapping[str, Any] | Any
     ) -> EasyjetGroupConfig:
-        """Normalise one group config entry to an `EasyjetGroupConfig`.
-
-        Raises
-        ------
-        ConfigError
-            On unknown keys or a missing/empty ``branches`` mapping.
-        """
+        """Normalise one group config entry to an `EasyjetGroupConfig`."""
         if isinstance(cfg, EasyjetGroupConfig):
             return cfg
         cfg = dict(cfg or {})
@@ -166,30 +160,9 @@ class EasyjetReader(Reader):
             return []
 
     def restage(self, root: str | Path) -> EasyjetReader:
-        """Stage all resolved ROOT files into `root` and re-source onto the staged set.
-
-        Every member returned by `sources` is copied via the FileLock-coordinated
-        `stage_file`, then a clone is re-sourced onto the staged set. So a
-        single-file, a directory, and a glob source all stage and re-read
-        uniformly; a reader with no resolvable source clones unchanged.
-
-        Members are staged into a per-reader subdirectory ``root/<digest>/`` keyed
-        by a stable digest of this reader's absolute source paths — so when
-        several easyjet sub-readers of a `MultiSampleReader` share one staging
-        root, each re-globs only its own members (re-sourcing onto a shared
-        ``root`` would make every sub-reader glob every other sub-reader's
-        files). A single staged file re-sources onto that file directly; multiple
-        onto their subdirectory.
-
-        Parameters
-        ----------
-        root : str | Path
-            The staging root directory (created if missing).
-
-        Returns
-        -------
-        EasyjetReader
-            A fresh, unbound reader reading the staged copies under ``root``.
+        """Stage all resolved ROOT files into `root`, keyed by a digest of this reader's
+        source paths (isolates sibling sub-readers sharing one root from globbing each
+        other's members); re-sources onto the staged file (single) or subdirectory (many).
         """
         import hashlib  # noqa: PLC0415 - opt-in staging path only
 
@@ -211,10 +184,8 @@ class EasyjetReader(Reader):
         return self.with_source(filename=new_src)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``raw.* / masks.* / meta.rows`` produces (source node, requires={}).
-
-        Sequence dims are concrete when ``truncate`` is set, else symbolic
-        ``T:<stream>``; ``meta.rows`` is TEST-only (mirrors `H5StructuredReader`).
+        """Declare ``raw.<stream>``/``masks.<stream>``/``meta.rows`` (source node,
+        requires={}); sequence dims concrete when `truncate` is set, else symbolic.
         """
         del mode
         flat: dict[str, TensorSpec] = {}
@@ -233,13 +204,7 @@ class EasyjetReader(Reader):
         return IO(produces=unflatten_spec(flat))
 
     def _resolve_files(self) -> list[Path]:
-        """Glob the source into a deterministic, sorted list of ROOT files.
-
-        Raises
-        ------
-        ConfigError
-            If no source is bound or the glob matches nothing.
-        """
+        """Glob the source into a deterministic, sorted list of ROOT files."""
         if self.filename is None:
             raise ConfigError(
                 f"reader {self.name!r} has no source file — pass filename= or use "
@@ -259,20 +224,10 @@ class EasyjetReader(Reader):
         return matches
 
     def prepare(self) -> None:
-        """Resolve the source files, probe entry counts, and build the schema.
+        """Resolve source files, probe entry counts, and build the schema (idempotent).
 
-        Idempotent. Builds the deterministic file table (cumulative offsets),
-        resolves each jagged stream's served multiplicity ``T`` (``truncate`` or
-        the file-wide max), and constructs the `Schema` from the first file's
-        branch dtypes (+ the auto ``valid`` field on jagged streams).
-
-        Raises
-        ------
-        ValueError
-            If ``num`` requests more rows than available.
-        SchemaError
-            If a configured branch is missing, or a jagged branch reads as scalar
-            (or vice versa).
+        Resolves each jagged stream's served multiplicity ``T`` (`truncate` or the
+        file-wide max) and builds the `Schema` from the first file's branch dtypes.
         """
         if self._table is not None:
             return
@@ -346,12 +301,8 @@ class EasyjetReader(Reader):
 
     @staticmethod
     def _array_dtype_name(arr: Any, is_jagged: bool) -> str:
-        """Native-endian numpy dtype name for a (possibly jagged) awkward array.
-
-        ROOT stores big-endian; the structured array uses native byte order
-        (``>f4`` -> ``float32``) so the rest of the pipeline sees ordinary arrays.
-        For a jagged field the inner content dtype is taken (the per-jet scalar
-        type).
+        """Native-endian numpy dtype name for a (possibly jagged) awkward array (ROOT is
+        big-endian; a jagged field uses its inner content dtype).
         """
         _require_root_deps("EasyjetReader", "easyjet")
         import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
@@ -401,13 +352,8 @@ class EasyjetReader(Reader):
         vds_path: str | Path | None = None,  # accepted for API parity; ROOT has no VDS
         stage: str | None = None,
     ) -> EasyjetReader:
-        """Clone this reader for another source.
-
-        Config-only (no file I/O): the group configs are shared; only the source
-        binding and ``num`` change. ``vds_path`` is accepted for `Reader` API
-        parity but unused (ROOT files need no VDS). ``stage`` is accepted for the
-        stage-sourcing contract and ignored here (a single-source reader's one
-        ``filename`` per stage is its data).
+        """Clone onto another source (config-only, group configs shared); `vds_path` is
+        accepted for API parity only (ROOT has no VDS), `stage` is ignored.
         """
         del vds_path, stage
         clone = EasyjetReader(
@@ -417,16 +363,8 @@ class EasyjetReader(Reader):
         return clone
 
     def bind(self, ctx: WorkerCtx) -> None:
-        """Per-worker setup: resolve files + record the demand-narrowed read set.
-
-        The per-stream read set is the demanded fields intersected with the
-        configured branches; an empty demand falls back to all configured
-        branches. Demanded fields absent from the config raise before any step.
-
-        Raises
-        ------
-        SchemaError
-            When a demanded field is not in the group's configured branches.
+        """Resolve files and record the demand-narrowed read set per stream (demanded
+        fields intersected with configured branches; empty demand -> all configured).
         """
         self.prepare()
         assert self._table is not None
@@ -442,14 +380,10 @@ class EasyjetReader(Reader):
             self._read_fields[stream] = demanded
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one contiguous batch slab, translating the global slice per file.
+        """Read one batch slab, translating the global slice into per-file reads.
 
-        For each stream the demanded branches are read over the global row range
-        (split into per-file ``entry_start``/``entry_stop`` reads, stitched in
-        file order). A jagged stream is padded to the served multiplicity ``T``
-        (structured ``(B, T)`` + ``valid`` field, ``masks.<stream> = ~valid``); a
-        scalar stream is a structured ``(B,)`` array. ``meta.rows`` is produced
-        in TEST.
+        A jagged stream is padded to ``T`` (structured ``(B, T)`` +
+        ``masks.<stream> = ~valid``); a scalar stream is ``(B,)``.
         """
         if self._table is None:
             self.bind(WorkerCtx(mode=mode, read_fields={}, seed=0))  # standalone (tests)
@@ -507,22 +441,16 @@ class EasyjetReader(Reader):
         return cols
 
     def _stream_config(self, stream: str) -> StreamConfig:
-        """The `StreamConfig` for a jagged stream (resolved ``pad_max``, no cuts/sort).
-
-        easyjet has no per-constituent cut/sort surface (its cuts are jet-level),
-        so the config carries only the resolved served multiplicity.
+        """The `StreamConfig` for a jagged stream (resolved ``pad_max``; no cuts/sort —
+        easyjet cuts are jet-level).
         """
         return StreamConfig(pad_max=self._mult[stream], jagged=True)
 
     def _assemble_jagged(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Pad jagged columns to ``T`` via the shared `Reader.assemble_jagged` helper.
-
-        Delegates to the `Reader`-base cut -> sort -> truncate -> pad assembly.
-        With no cuts/sort (easyjet's default) this is the contiguous path:
-        ``valid`` first, leading truncate, per-dtype fill,
-        schema-cast, structured ``(B, T)`` + ``valid`` field.
+        """Pad jagged columns to ``T`` via `Reader.assemble_jagged` (no cuts/sort
+        configured, so the contiguous truncate+pad+valid path).
         """
         gschema = self.schema.groups[stream] if self.schema is not None else None
         return self.assemble_jagged(cols, fields, self._stream_config(stream), b, gschema)

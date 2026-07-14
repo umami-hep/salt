@@ -15,21 +15,7 @@ __all__ = ["MaskFormerLoss"]
 
 @torch.jit.script
 def dice_loss(inputs: Tensor, labels: Tensor):
-    """Compute the DICE loss, similar to generalized IOU for masks.
-
-    Parameters
-    ----------
-    inputs : Tensor
-        The predictions for each example.
-    labels : Tensor
-        A float tensor with the same shape as inputs. Stores the binary classification label
-        for each element in inputs (0 for the negative class and 1 for the positive class).
-
-    Returns
-    -------
-    Tensor
-        Single-element loss tensor
-    """
+    """DICE loss (similar to generalized IOU for masks); returns a scalar."""
     inputs = inputs.sigmoid()
     numerator = 2 * (inputs * labels).sum(-1)
     denominator = inputs.sum(-1) + labels.sum(-1)
@@ -39,21 +25,7 @@ def dice_loss(inputs: Tensor, labels: Tensor):
 
 @torch.jit.script
 def mask_ce_loss(inputs: Tensor, labels: Tensor):
-    """Computes cross entropy loss for masks.
-
-    Parameters
-    ----------
-    inputs: Tensor
-            A float tensor of arbitrary shape representing the predictions for each example.
-    labels: Tensor
-        A float tensor with the same shape as inputs. Stores the binary classification label
-        for each element in inputs (0 for the negative class and 1 for the positive class).
-
-    Returns
-    -------
-    Tensor
-        Single-element loss tensor
-    """
+    """Binary cross-entropy loss for masks, mean-reduced per example; returns a scalar."""
     loss = functional.binary_cross_entropy_with_logits(inputs, labels, reduction="none")
     loss = loss.mean(1)
     return loss.sum() / len(inputs)
@@ -61,25 +33,9 @@ def mask_ce_loss(inputs: Tensor, labels: Tensor):
 
 @torch.jit.script
 def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
-    """Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    """Sigmoid focal loss (RetinaNet, https://arxiv.org/abs/1708.02002); returns a scalar.
 
-    Parameters
-    ----------
-    inputs: Tensor
-        A float tensor of arbitrary shape representing the predictions for each example.
-    targets: Tensor
-        A float tensor with the same shape as inputs. Stores the binary classification label for
-        each element in inputs (0 for the negative class and 1 for the positive class).
-    alpha: float, optional
-        Weighting factor in range (0,1) to balance positive vs negative examples.
-        Default = -1 (no weighting).
-    gamma: float, optional
-        Exponent of the modulating factor (1 - p_t) to balance easy vs hard examples. Default is 2
-
-    Returns
-    -------
-    Tensor
-        Single-element loss tensor
+    ``alpha<0`` disables the positive/negative balance weighting.
     """
     prob = inputs.sigmoid()
     ce_loss = functional.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
@@ -94,36 +50,11 @@ def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma
 
 
 class MaskFormerLoss(nn.Module):
-    """Compute the loss of MaskFormer, based on DETR.
+    """MaskFormer (DETR-style) loss: Hungarian-match preds to truth, then supervise the pair.
 
-    The process happens in two steps:
-        1) we compute hungarian assignment between ground truth boxes and the preds of the model
-        2) we supervise each pair of matched ground-truth / prediction (supervise class and box).
-
-    Parameters
-    ----------
-    num_classes: int
-        Number of object categories, omitting the special no-object category
-    num_objects: int
-        Number of objects to detect
-    loss_weights: dict
-        Dict containing as key the names of the losses and as values their relative weight
-    matcher_weights: dict | None, optional
-        Same as loss_weights but for the matching cost, by default None
-    null_class_weight: float, optional
-        Relative classification weight applied to the no-object category, by default 0.5
-    class_weights: list[float] | None, optional
-        Optional per-class weights folded into the ``empty_weight`` CE balance buffer.
-        May be of length ``num_classes`` (the null weight is appended) or
-        ``num_classes + 1`` (used as-is), by default None.
-    losses: list[str] | None, optional
-        List of all the losses to be applied. See get_loss for list of available losses,
-        by default None
-
-    Raises
-    ------
-    ValueError
-        If ``class_weights`` has an invalid length.
+    ``class_weights`` may be length ``num_classes`` (null weight appended) or
+    ``num_classes + 1`` (used as-is). ``matcher_weights`` defaults to
+    ``loss_weights``. ``losses`` defaults to ``["labels", "masks"]``.
     """
 
     def __init__(
@@ -175,22 +106,9 @@ class MaskFormerLoss(nn.Module):
         preds: dict[str, torch.Tensor],
         labels: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        """Compute the classification (NLL) loss on object classes.
+        """Classification (NLL) loss on object classes -> ``{"object_class_ce": loss}``.
 
-        Parameters
-        ----------
-        preds : dict[str, torch.Tensor]
-            Dictionary of prediction tensors. Must contain a key
-            ``"class_logits"`` of shape ``(batch, n_queries, n_classes)``.
-        labels : dict[str, torch.Tensor]
-            Dictionary of label tensors. Must contain a key
-            ``"object_class"`` of shape ``(batch, n_queries)``.
-
-        Returns
-        -------
-        dict[str, torch.Tensor]
-            A single-key dictionary ``{"object_class_ce": loss}`` containing
-            the cross-entropy or binary cross-entropy loss.
+        Binary cross-entropy when there's a single class logit, else cross-entropy.
         """
         flav_pred_logits = preds["class_logits"].flatten(0, 1)
         flavour_labels = labels["object_class"].flatten(0, 1)
@@ -207,26 +125,9 @@ class MaskFormerLoss(nn.Module):
         preds: dict[str, torch.Tensor],
         labels: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        """Compute the mask-related losses: dice, focal and cross-entropy.
+        """Mask losses (``mask_dice``/``mask_focal``/``mask_ce``) over valid (non-null) objects.
 
-        Parameters
-        ----------
-        preds : dict[str, torch.Tensor]
-            Dictionary of prediction tensors. Must contain a key
-            ``"masks"`` of shape ``(batch, n_queries, h, w)``.
-        labels : dict[str, torch.Tensor]
-            Dictionary of label tensors. Must contain keys:
-
-            * ``"object_class"``: class indices of shape ``(batch, n_queries)``.
-            * ``"masks"``: ground-truth masks of shape
-            ``(batch, n_queries, h, w)``.
-
-        Returns
-        -------
-        dict[str, torch.Tensor]
-            Dictionary of the requested mask losses. Keys may include
-            ``"mask_dice"``, ``"mask_focal"``, ``"mask_ce"`` depending on
-            ``self.loss_weights``.
+        Only the components present with a truthy ``self.loss_weights`` entry are computed.
         """
         valid_idx = labels["object_class"] != self.num_classes
         target_masks = labels["masks"][valid_idx].float()
@@ -247,40 +148,16 @@ class MaskFormerLoss(nn.Module):
         preds: dict[str, Any],
         labels: dict[str, Any],
     ) -> dict[str, torch.Tensor]:
-        """Select and compute one type of loss on the given predictions.
+        """Dispatch to ``loss_labels``/``loss_masks`` on ``preds["objects"]``/``labels["objects"]``.
 
-        Parameters
-        ----------
-        loss : str
-            Name of the loss to compute (``"labels"`` or ``"masks"``).
-        preds : dict[str, Any]
-            Predictions, typically ``preds["objects"]`` from the model.
-        labels : dict[str, Any]
-            Labels, typically ``labels["objects"]`` corresponding to ``preds``.
-
-        Returns
-        -------
-        dict[str, torch.Tensor]
-            Loss dictionary returned by the underlying loss function,
-            with weights applied via :meth:`weight_loss`.
+        Weights the result via `weight_loss`.
         """
         loss_map = {"labels": self.loss_labels, "masks": self.loss_masks}
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return self.weight_loss(loss_map[loss](preds["objects"], labels["objects"]))
 
     def weight_loss(self, losses: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Apply the configured loss weights to a loss dictionary.
-
-        Parameters
-        ----------
-        losses : dict[str, torch.Tensor]
-            Dictionary mapping loss names to loss tensors.
-
-        Returns
-        -------
-        dict[str, torch.Tensor]
-            Same dictionary with each loss scaled by ``self.loss_weights``.
-        """
+        """Scale each loss in-place by ``self.loss_weights``."""
         for k in list(losses.keys()):
             losses[k] *= self.loss_weights[k]
         return losses
@@ -291,29 +168,9 @@ class MaskFormerLoss(nn.Module):
         tasks: list[Any],
         labels: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, torch.Tensor]]:
-        """Calculate the full MaskFormer loss via optimal assignment.
+        """Match + supervise the final layer, and each ``intermediate_outputs`` aux layer.
 
-        Parameters
-        ----------
-        preds : dict[str, Any]
-            Model predictions. May contain key ``"intermediate_outputs"`` for
-            auxiliary layers and key ``"objects"`` for the final layer.
-        tasks : list[Any]
-            A list of task objects that can be applied to ``preds["objects"]``
-            and ``labels["objects"]`` to generate additional predictions and
-            targets (e.g. regression tasks).
-        labels : dict[str, Any]
-            Ground truth labels corresponding to the predictions.
-
-        Returns
-        -------
-        tuple
-            ``(preds, labels, losses)`` where:
-
-            * ``preds`` : dict — predictions with any updated tasks included.
-            * ``labels`` : dict — labels with any task targets added.
-            * ``losses`` : dict[str, torch.Tensor] — combined losses from
-            all requested loss functions.
+        Returns ``(preds, labels, losses)`` with task predictions/targets folded in.
         """
         losses: dict[str, torch.Tensor] = {}
 

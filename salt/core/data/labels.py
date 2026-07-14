@@ -24,12 +24,11 @@ class Labels(Processor):
     CLI mutation hook. The narrowed key set is learned at bind time from the
     module's own plan step.
 
-    v1 dtype semantics kept: integer labels become int64
-    (``dtype_policy: int64-for-int``), everything else keeps the file
-    dtype; sentinel values (-1 padding, -2/-3 type codes) pass through
-    untouched. The v1 ``ftagTruthOriginLabel`` malformed-recovery becomes
-    the opt-in ``valid_ranges`` config with explicit ranges — no longer
-    heuristically triggered.
+    Integer labels become int64 (``dtype_policy: int64-for-int``), everything
+    else keeps the file dtype; sentinel values (-1 padding, -2/-3 type codes)
+    pass through untouched. Malformed-value recovery (e.g.
+    ``ftagTruthOriginLabel``) is the opt-in ``valid_ranges`` config with
+    explicit ranges.
 
     In a mode where no label is demanded the module narrows to nothing and
     runs as a no-op (the kernel keeps wildcard producers with bound
@@ -52,8 +51,8 @@ class Labels(Processor):
         calls `bind_streams` with the reader's stream list before plan
         compilation (config-derived, static).
     dtype_policy : Literal["int64-for-int", "file"], optional
-        ``int64-for-int`` (v1, default) casts integer labels to int64;
-        ``file`` keeps the on-disk dtype for everything.
+        ``int64-for-int`` (default) casts integer labels to int64; ``file``
+        keeps the on-disk dtype for everything.
     valid_ranges : Mapping[str, Sequence[int]] | None, optional
         Label name -> inclusive ``[lo, hi]`` valid range (e.g.
         ``{ftagTruthOriginLabel: [-1, 7]}``). Out-of-range values raise, or
@@ -106,13 +105,8 @@ class Labels(Processor):
             self._streams = tuple(streams)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``raw.<s>`` requires plus the ``labels.**`` wildcard produce.
-
-        Raises
-        ------
-        ConfigError
-            If the served streams are still unresolved (set ``streams`` or
-            compile through `GraphDataset`).
+        """Declare ``raw.<s>`` requires plus the ``labels.**`` wildcard produce (raises
+        `ConfigError` if streams are still unresolved).
         """
         del mode
         if self._streams is None:
@@ -125,14 +119,7 @@ class Labels(Processor):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def _parse_targets(self, step: PlanStep) -> tuple[tuple[str, str, str], ...]:
-        """Parse the narrowed produces into ``(key, stream, label)`` triples.
-
-        Raises
-        ------
-        ConfigError
-            On a narrowed key not of the ``labels.<stream>.<label>`` form,
-            or a stream outside the served set.
-        """
+        """Parse the narrowed produces into ``(key, stream, label)`` triples."""
         targets: list[tuple[str, str, str]] = []
         for key in step.produces:
             parts = key.split(KEY_SEP)
@@ -156,16 +143,8 @@ class Labels(Processor):
         self._targets = self._parse_targets(ctx.step)
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
-        """Demand exactly the narrowed label fields from the reader.
-
-        The demanded field IS the label name — each narrowed
+        """Demand exactly the narrowed label fields from the reader: each narrowed
         ``labels.<stream>.<label>`` maps to a ``raw.<stream>.<label>`` read.
-
-        Returns
-        -------
-        dict[str, dict[str, str]]
-            ``{stream: {field: this module}}`` from the narrowed produces —
-            the wildcard-producer override of the default requires-fields rule.
         """
         out: dict[str, dict[str, str]] = {}
         for _key, stream, label in self._parse_targets(step):
@@ -173,20 +152,8 @@ class Labels(Processor):
         return out
 
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Extract, range-check and cast the demanded labels.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            ``{narrowed_key: fresh array}`` — exactly the narrowed key set
-            (`Bundle.merge` enforces it); copies never alias the reader
-            buffers (field extraction + ``astype``/``copy``).
-
-        Raises
-        ------
-        ValueError
-            On out-of-range values for a ``valid_ranges`` label when
-            ``recover_malformed`` is off.
+        """Extract, range-check, and cast the demanded labels; raises `ValueError` on
+        out-of-range ``valid_ranges`` values unless `recover_malformed` (then mapped to -1).
         """
         del rows, mode
         assert self._targets is not None, "Labels.process called before bind()"

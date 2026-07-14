@@ -1,4 +1,4 @@
-"""Gated linear unit block (v1 salt/models/transformer.py GLU absorption)."""
+"""Gated linear unit block."""
 
 from __future__ import annotations
 
@@ -8,22 +8,8 @@ from torch import Tensor, nn
 class GLU(nn.Module):
     """Dense update with a (gated) linear unit. See https://arxiv.org/abs/2002.05202.
 
-    Parameters
-    ----------
-    embed_dim : int
-        Input/output embedding dimension.
-    hidden_dim : int | None, optional
-        Hidden dimension. If ``None``, defaults to ``2 * embed_dim``.
-    activation : str, optional
-        Name of the activation class in ``torch.nn`` (e.g., ``"SiLU"``).
-    dropout : float, optional
-        Dropout probability. The default is ``0.0``.
-    bias : bool, optional
-        Whether to include bias terms. The default is ``True``.
-    gated : bool, optional
-        If ``True``, uses a gated branch (splits hidden in two). The default is ``False``.
-    mup : bool, optional
-        Whether to use μP parameterization. The default is ``False``.
+    ``hidden_dim`` defaults to ``2 * embed_dim``; ``gated=True`` splits the
+    hidden layer in two (one half gates the other).
     """
 
     def __init__(
@@ -56,13 +42,7 @@ class GLU(nn.Module):
                     nn.init.zeros_(proj.bias)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Apply the GLU block.
-
-        Returns
-        -------
-        Tensor
-            Output tensor of shape ``[B, L, D]``.
-        """
+        """Apply the GLU block; returns ``[B, L, D]``."""
         x = self.in_proj(x)
         if self.gated:
             x1, x2 = x.chunk(2, dim=-1)

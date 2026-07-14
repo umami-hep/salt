@@ -60,18 +60,9 @@ class ConfusionMatrix(Callback):
         self.last_ignored: int = 0
 
     def _resolve_task(self, modules: Any) -> tuple[str, str, list[str]]:
-        """Resolve ``(stream, label, class_names)`` from the named task module.
-
-        Returns
-        -------
-        tuple[str, str, list[str]]
-            The task's stream, label name, and class names.
-
-        Raises
-        ------
-        ConfigError
-            When `modules` is not a graph-module dict, or `task_name` does
-            not resolve to a classification-task module (candidates listed).
+        """Resolve ``(stream, label, class_names)`` from the named task module; raises
+        `ConfigError` (candidates listed) when `modules` isn't a graph-module dict or
+        `task_name` doesn't name a classification task.
         """
         if not isinstance(modules, dict):
             raise ConfigError(

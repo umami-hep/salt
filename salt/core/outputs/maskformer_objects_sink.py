@@ -16,13 +16,12 @@ from salt.core.outputs.writer_base import WriterDeclareCtx
 
 
 class _MFWriteCtxShim:
-    """Minimal stand-in for the legacy `WriteCtx`, carrying only the two fields
+    """Minimal stand-in for `WriteCtx`, carrying only the two fields
     `MaskFormerObjectWriter.write` reads — ``run_name`` + ``precision``.
 
-    The host `H5OutputSink` owns the run name and the f4/f2 float policy, so the
-    relocated writer needs nothing else; the object axis ``M`` rides the node
-    (``bind_model_modules``), the constituent token length rides the sink-
-    supplied `_ExtraGroupCtx`.
+    The host `H5OutputSink` owns those; the object axis ``M`` rides the node
+    (``bind_model_modules``), the constituent token length rides the sink's
+    `_ExtraGroupCtx`.
     """
 
     __slots__ = ("precision", "run_name")
@@ -35,9 +34,9 @@ class _MFWriteCtxShim:
 class MaskFormerObjectsSink(OutputSectionWriter):
     """Sink-hosted MaskFormer object writer.
 
-    Relocates the legacy `salt.core.writers.MaskFormerObjectWriter` TEST role
-    onto the `H5OutputSink` ``extra_groups`` seam so MaskFormer's eval-H5 object
-    columns are produced on the sink path, not the legacy `WriterCallback`.
+    Hosts the `MaskFormerObjectWriter` TEST role on the `H5OutputSink`
+    ``extra_groups`` seam, so MaskFormer's eval-H5 object columns are
+    produced on the sink path, not `WriterCallback`.
 
     Like `InputCopyWriter` this is a manifest-only section node
     (``is_manifest_only`` -> not graph-folded; it mints no ``outputs.*`` leaf).
@@ -69,7 +68,7 @@ class MaskFormerObjectsSink(OutputSectionWriter):
     ----------
     object_classes : Sequence[str]
         All object class names including the trailing ``null`` (the per-object
-        probability columns ``{run_name}_p{name}``; v1 ``object.class_names``).
+        probability columns ``{run_name}_p{name}``).
     object_stream : str, optional
         The decoder object stream (the ``objects`` / ``object_masks`` H5 groups
         derive from it), by default ``objects``.
@@ -163,14 +162,8 @@ class MaskFormerObjectsSink(OutputSectionWriter):
         return {self.object_stream: (self._num_objects,), "object_masks": (self._num_objects, tok)}
 
     def columns(self, ctx: Any) -> dict[str, np.dtype]:
-        """The per-group object columns — delegated verbatim to the legacy writer.
-
-        `MaskFormerObjectWriter.columns` reads only ``ctx.run_name`` +
-        ``ctx.precision`` (both carried by the sink's `_ExtraGroupCtx`), so the
-        byte-identical column schema (``{run_name}_p{class}`` f4 + ``class_label``
-        i8 on ``objects``; the ``MaskIndex`` i8 on the constituent stream;
-        ``truth_mask`` i8 + ``mask_logits`` f4 on ``object_masks``) is produced
-        by the same code the legacy writer ships.
+        """Per-group object columns, delegated verbatim to `MaskFormerObjectWriter`
+        (reads only ``ctx.run_name``/``ctx.precision``) for a byte-identical schema.
         """
         return self._writer.columns(ctx)
 
@@ -196,13 +189,9 @@ class MaskFormerObjectsSink(OutputSectionWriter):
     def write(
         self, bundle: Bundle, rows: slice, run_name: str, precision: str
     ) -> dict[str, np.ndarray]:
-        """One batch of structured arrays — delegated verbatim to the legacy writer.
-
-        The host sink supplies ``run_name`` + ``precision`` (it owns the column
-        prefix + float policy); a `_MFWriteCtxShim` carries them to
-        `MaskFormerObjectWriter.write`, which packs the exact legacy columns.
-        The sink then re-expands the per-token ``MaskIndex`` to the file token
-        length and merges the ``objects`` / ``object_masks`` extra groups.
+        """One batch of structured arrays, delegated to `MaskFormerObjectWriter.write`
+        via a `_MFWriteCtxShim` carrying ``run_name``/``precision``; the sink then
+        re-expands ``MaskIndex`` and merges the ``objects``/``object_masks`` groups.
         """
         self._writer.ctx = _MFWriteCtxShim(run_name, precision)
         return self._writer.write(bundle, rows)

@@ -37,18 +37,11 @@ __all__ = ["CONFIG_DIR", "Salt2CLI", "main"]
 
 
 def _patch_jsonargparse_sys_modules_race() -> None:
-    """Make jsonargparse's forward-ref ``sys.modules`` walk safe under live threads.
-
-    jsonargparse resolves string forward refs in Protocol method signatures by
-    scanning ``sys.modules.values()``. A live background thread that imports
-    modules (e.g. Comet's upload threads, started by ``CometLogger.__init__``)
-    can mutate ``sys.modules`` mid-walk and raise ``RuntimeError: dictionary
-    changed size during iteration``. Retries the enrichment on that race
-    signature — additive/idempotent, so re-running after a lost race is safe.
-
-    No-ops gracefully if jsonargparse renames the private helper (pinned to
-    ``jsonargparse>=4.49.0``); idempotent across repeat imports via the
-    ``_salt_race_safe`` marker.
+    """Make jsonargparse's forward-ref ``sys.modules`` walk safe under live
+    threads (e.g. Comet's upload threads mutating ``sys.modules`` mid-walk
+    raises ``RuntimeError: ... changed size during iteration``): retries the
+    enrichment on that race signature. No-op if jsonargparse renames the
+    private helper; idempotent via the ``_salt_race_safe`` marker.
     """
     from jsonargparse import _postponed_annotations as _pa  # noqa: PLC0415, PLC2701 - patch site
 
@@ -93,13 +86,10 @@ def _needs_logger(callback: Any) -> bool:
 
 
 def _comet_accepts_dict_kwargs() -> bool:
-    """Whether this Lightning `CometLogger` still accepts the ``dict_kwargs`` kwarg.
-
-    Introspects the constructor since newer Lightning `CometLogger` versions
-    drop the kwarg (the run label flows through ``experiment_name`` instead).
-    A bare ``**kwargs`` does NOT count: the modern logger forwards it to a
-    Comet ``ExperimentConfig`` that rejects the old ``dict_kwargs`` name, so
-    only an explicit parameter is a safe signal.
+    """Whether this Lightning `CometLogger` still declares ``dict_kwargs``
+    explicitly (newer versions drop it; a bare ``**kwargs`` does NOT count —
+    the modern logger forwards it to a Comet ``ExperimentConfig`` that rejects
+    the old name).
     """
     import inspect  # noqa: PLC0415 - one-shot introspection, wiring-only
 
@@ -111,14 +101,10 @@ def _comet_accepts_dict_kwargs() -> bool:
 
 
 def _comet_accepts_experiment_name() -> bool:
-    """Whether this Lightning `CometLogger` declares ``experiment_name`` explicitly.
-
-    Newer Lightning `CometLogger` drops ``experiment_name`` from its signature
-    (the run label flows through ``**kwargs`` instead); jsonargparse instantiates
-    by the DECLARED signature, so setting it as an ``init_arg`` on the newer
-    logger crashes with "Option 'experiment_name' is not accepted". When absent,
-    the caller routes the name through the ``COMET_EXPERIMENT_NAME`` env var
-    instead.
+    """Whether this Lightning `CometLogger` declares ``experiment_name``
+    explicitly (jsonargparse instantiates by the declared signature, so
+    setting it when absent crashes with "Option not accepted"). When absent,
+    the caller routes the name through ``COMET_EXPERIMENT_NAME`` instead.
     """
     import inspect  # noqa: PLC0415 - one-shot introspection, wiring-only
 
@@ -130,17 +116,10 @@ def _comet_accepts_experiment_name() -> bool:
 
 
 def _best_checkpoint(config_path: Path) -> str:
-    """Best-epoch selection: lowest ``loss=`` next to the saved config.
-
-    Scans both ``<config dir>/ckpts/*.ckpt`` and ``<config dir>/checkpoints/*.ckpt``
-    (Lightning's `ModelCheckpoint` default dirname — keep in sync with
-    ``base2.yaml``'s ``epoch={epoch:03d}-loss={val/loss:.5f}.ckpt`` naming) and
-    picks the smallest ``loss=<value>`` embedded in any filename.
-
-    Raises
-    ------
-    ConfigError
-        When no ``loss=``-named checkpoint exists next to the config.
+    """Best-epoch selection: lowest ``loss=`` next to the saved config. Scans
+    both ``ckpts/*.ckpt`` and ``checkpoints/*.ckpt`` (Lightning's
+    `ModelCheckpoint` default dirname) and picks the smallest embedded
+    ``loss=<value>``. Raises `ConfigError` when none exist.
     """
     ckpt_dirs = [config_path.parent / name for name in ("ckpts", "checkpoints")]
     print(
@@ -220,18 +199,10 @@ def _instantiate_class_config(cfg: Any) -> Any:
 
 
 def _is_persistence_sink(class_path: str) -> bool:
-    """Whether a callback ``class_path`` names a TEST persistence sink.
-
-    A config can wire the persistence sink at the ``callbacks:`` level instead
-    of ``writers.modules`` — an `H5OutputWriter` (or a subclass, or any callback
-    exposing the duck-typed ``writer_demand`` surface) — so this resolves the
-    class at the pre-instantiate point to let the writer-less refusal accept it.
-    `OnnxExportSink` also exposes ``writer_demand`` but persists NOTHING in TEST,
-    so it is explicitly excluded — a config wiring only an `OnnxExportSink` must
-    still fail the writer-less check.
-
-    Returns ``False`` for an unimportable path (treated as not-a-sink), an
-    ONNX-only sink, or a plain callback.
+    """Whether a callback ``class_path`` names a TEST persistence sink: an
+    `H5OutputWriter` (or subclass, or any callback exposing duck-typed
+    ``writer_demand``), EXCLUDING `OnnxExportSink` (ONNX-only, persists
+    nothing in TEST). False for an unimportable path or a plain callback.
     """
     import importlib  # noqa: PLC0415 - local, only on the test path
 
@@ -255,12 +226,9 @@ def _is_persistence_sink(class_path: str) -> bool:
 
 
 def _has_callback_persistence_sink(callbacks: Any) -> bool:
-    """Whether the ``callbacks:`` config carries a TEST persistence sink.
-
-    Inspects the dict-keyed ``callbacks:`` config at the pre-instantiate point
-    and returns ``True`` when any non-``None`` entry is an `H5OutputWriter`-style
-    persistence sink (`_is_persistence_sink`). Used by the ``salt2 test``
-    writer-less check.
+    """Whether the pre-instantiate ``callbacks:`` config carries a TEST
+    persistence sink (any non-None entry passing `_is_persistence_sink`); used
+    by the ``salt2 test`` writer-less check.
     """
     items = (callbacks or {}).items() if hasattr(callbacks, "items") else ()
     for entry in (val for _, val in items if val is not None):
@@ -271,28 +239,13 @@ def _has_callback_persistence_sink(callbacks: Any) -> bool:
 
 
 def _fan_out_artifacts(cfg: Any) -> Any:
-    """Fan ``--class_dict`` out onto the model-side consumers.
-
-    The top-level convenience arg reproduces the verbose per-task
-    ``weight_source`` override block from one flag: for every module under
-    ``model.init_args.modules``, a `ClassificationTaskModule` whose
-    ``init_args.weight_source`` is unset/null gets
-    ``weight_source := {"from_class_dict": <--class_dict>}`` (validated through
-    the same `_checked_weight_source` validator the task's ``__init__`` uses). A
-    task that already sets ``weight_source`` (e.g. on resume, or an explicit
-    per-task override) is LEFT ALONE.
-
-    The mutation lands on `cfg` in place, BEFORE validation and any
-    ``--print_config`` dump, so the resolved values are frozen into the saved
-    run-dir config exactly like the verbose form. A no-op when the flag is not
-    set.
-
-    Parameters
-    ----------
-    cfg : Any
-        The parsed namespace. For ``salt2 fit``/``test`` the model block lives
-        under ``cfg.<subcommand>.model``; on the run-free surface it is
-        ``cfg.model``. Both are handled.
+    """Fan ``--class_dict`` out onto the model-side consumers: for every module
+    under ``model.init_args.modules``, a `ClassificationTaskModule` whose
+    ``weight_source`` is unset/null gets
+    ``weight_source := {"from_class_dict": <--class_dict>}`` (validated via
+    `_checked_weight_source`); a task that already sets ``weight_source`` is
+    left alone. Mutates `cfg` in place before validation/``--print_config``, so
+    resolved values land in the saved run-dir config. No-op when unset.
     """
     from salt.core.nn.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
 
@@ -324,11 +277,8 @@ def _fan_out_artifacts(cfg: Any) -> Any:
 
 
 def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
-    """Pair each ``model`` namespace with the scope its ``--class_dict`` lives in.
-
-    The convenience flag is scoped like ``--name``: top-level on the run-free
-    surface (``cfg.class_dict`` ↔ ``cfg.model``), subcommand-scoped on a trainer
-    run (``cfg.fit.class_dict`` ↔ ``cfg.fit.model``).
+    """Pair each ``model`` namespace with the scope its ``--class_dict`` lives in
+    — top-level on the run-free surface, subcommand-scoped on a trainer run.
     """
     blocks: list[tuple[Any, Any]] = []
     direct = cfg.get("model")
@@ -406,24 +356,11 @@ class Salt2CLI(LightningCLI):
         }
 
     def _parse_ckpt_path(self) -> None:
-        """No-op override of lightning's checkpoint hyper-parameter re-parse.
-
-        Lightning's ``LightningCLI._parse_ckpt_path`` loads
-        ``checkpoint['hyper_parameters']`` whenever ``--ckpt_path`` is set at
-        parse time and re-parses them onto the config as ``{model: <hparams>}``.
-        `SaltModule` saves its hyper-parameters with ``ignore=["modules"]``
-        (modules are runtime graph objects, never reconstructable from
-        hparams), so the re-parse presents a modules-less model spec and
-        jsonargparse REPLACES the saved config's model block, dying with
-        "the following arguments are required: modules".
-
-        The config-driven contract here is: the run's saved ``config.yaml`` is
-        the single source of the model architecture; the checkpoint carries
-        weights only, loaded unchanged via ``trainer.fit/test(ckpt_path=...)``.
-        The hparams re-parse can never contribute information — at best it
-        re-applies values already in the config, at worst it wipes the model —
-        so it is disabled wholesale, matching the already-disabled
-        ``load_from_checkpoint_support=False`` half of the same feature.
+        """No-op override disabling Lightning's ckpt-hparams re-parse:
+        `SaltModule` saves hparams with ``ignore=["modules"]``, so re-parsing
+        them would replace the saved config's modules-bearing model block and
+        crash. The saved ``config.yaml`` is the sole source of model
+        architecture; the checkpoint carries weights only.
         """
 
     def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
@@ -496,17 +433,10 @@ class Salt2CLI(LightningCLI):
         # composed onto the instantiated model in `instantiate_classes` below.
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
-        """Assemble ``callbacks:`` dict values and the writers block into the trainer.
-
-        Dict values come first (YAML insertion order), then any stock Lightning
-        entries from the raw ``trainer.callbacks`` list; ``None`` values are
-        filtered — the assembly-time half of null-deletion.
-
-        The ``base2.yaml`` default ``callbacks.lr_monitor`` LearningRateMonitor
-        is dropped when no experiment logger is attached: the stock
-        LearningRateMonitor hard-raises a ``MisconfigurationException`` on a
-        logger-less trainer, so it is kept only when a logger is attached
-        (``--trainer.logger false`` opt-out runs drop it).
+        """Assemble ``callbacks:`` dict values (YAML order, ``None`` filtered)
+        ahead of the stock ``trainer.callbacks`` list. Drops the default
+        ``lr_monitor`` LearningRateMonitor when no experiment logger is
+        attached (it hard-raises on a logger-less trainer).
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
@@ -521,20 +451,12 @@ class Salt2CLI(LightningCLI):
         return super().instantiate_trainer(**kwargs)
 
     def instantiate_classes(self) -> None:
-        """Instantiate, then compose the top-level ``outputs:`` section onto the model.
-
-        The top-level ``outputs:`` namespace is instantiated by jsonargparse into
-        ``config_init["outputs"]`` (a dict of section writers built from their
-        ``class_path``); after the standard instantiation this composes that
-        section onto the `SaltModule` (folding the section writers into the
-        planning module dict, binding RunTaskOutput's tasks). Done here — NOT via
-        ``link_arguments`` — because a subclass-mode model link target grabs the
-        whole namespace (jsonargparse pitfall).
-
-        A migration error fires first if the config carries a live ``writers:``
-        block (non-null entries under ``writers.modules``): WriterCallback
-        assembly was removed — migrate to an ``outputs:``/``callbacks:`` sink
-        (see gn2v2-dummy.yaml).
+        """Instantiate, then compose the top-level ``outputs:`` section onto the
+        model (folding section writers into the planning module dict) — done
+        here rather than via ``link_arguments`` since a subclass-mode model
+        link target grabs the whole namespace. Raises `ConfigError` if a live
+        ``writers:`` block remains (removed; migrate to
+        ``outputs:``/``callbacks:``).
         """
         # writers: block with live modules is no longer supported. Null-delete
         # overrides (writers.modules.X: null) are exempt — they produce an empty
@@ -578,14 +500,11 @@ class Salt2CLI(LightningCLI):
                     cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
 
     def _detach_fit_logger(self) -> Any:
-        """Stash + null the fit-stage ``trainer.logger`` block ahead of the parser pass.
-
-        Returns the un-instantiated logger config and sets ``trainer.logger =
-        False`` in the fit config so jsonargparse's ``instantiate_classes`` pass
-        builds a logger-less trainer, keeping the eager-comet-thread
-        `CometLogger.__init__` out of the racy model-block validation window
-        (see ``instantiate_classes``). Returns ``None`` outside ``fit`` or when
-        no live logger is configured.
+        """Stash + null the fit-stage ``trainer.logger`` ahead of the parser pass,
+        so `instantiate_classes` builds a logger-less trainer and keeps the
+        eager comet-thread `CometLogger.__init__` out of the racy validation
+        window. Returns the un-instantiated logger config, or None outside
+        ``fit``/with no logger configured.
         """
         if getattr(self.config, "subcommand", None) != "fit":
             return None
@@ -597,11 +516,9 @@ class Salt2CLI(LightningCLI):
         return logger
 
     def _reattach_fit_logger(self, logger_cfg: Any) -> None:
-        """Instantiate the deferred logger and attach it to the trainer post-validation.
-
-        Called after ``super().instantiate_classes()`` — the racy ``sys.modules``
-        walk is done, so building the `CometLogger` (and starting its comet
-        threads) is now safe.
+        """Instantiate the deferred logger and attach it to the trainer, after
+        the racy ``sys.modules`` walk in ``super().instantiate_classes()`` is
+        done.
         """
         if logger_cfg is None:
             return
@@ -611,27 +528,14 @@ class Salt2CLI(LightningCLI):
         trainer.logger = _instantiate_class_config(logger_cfg)
 
     def before_instantiate_classes(self) -> None:
-        """Per-stage config patches — fit-stage Comet wiring and test-stage eval ergonomics.
-
-        On ``fit`` a configured experiment logger is wired: the run ``--name``
-        drives ``experiment_name`` and ``dict_kwargs: {name}``, ``online`` is
-        forced ``false`` when ``COMET_API_KEY`` is absent or under
-        ``fast_dev_run``, and ``COMET_OFFLINE_DIRECTORY`` is set + created
-        alongside the trainer log dir. ``base2.yaml`` ships ``logger: false``,
-        so this is a no-op unless the user opts into a logger.
-
-        On ``test``: no resolved-config dump and no experiment logger on eval
-        runs; a missing ``--ckpt_path`` triggers the best-checkpoint glob
-        (requires exactly one user ``--config``); multi-device eval is
-        rejected/forced to one device; a sink-less eval is refused up front
-        (TEST predictions would be computed and never persisted).
-
-        Raises
-        ------
-        ConfigError
-            On a sink-less test config (no callbacks-level persistence sink),
-            an ambiguous config list without ``--ckpt_path``, or an explicit
-            multi-device list.
+        """Per-stage config patches. On ``fit``: wires a configured experiment
+        logger (name, offline mode, log dir); a no-op unless the user opts
+        into a logger. On ``test``: disables the config dump + logger, globs
+        the best checkpoint when ``--ckpt_path`` is unset, forces
+        single-device eval, and refuses a sink-less config (TEST predictions
+        would never be persisted). Raises `ConfigError` on a sink-less test
+        config, an ambiguous config list without ``--ckpt_path``, or an
+        explicit multi-device list.
         """
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
@@ -678,15 +582,11 @@ class Salt2CLI(LightningCLI):
 
     @staticmethod
     def _wire_experiment_logger(cfg: Any) -> None:
-        """Wire a configured fit-stage experiment logger.
-
-        A no-op unless ``trainer.logger`` is a configured logger block. For a
-        `CometLogger` block the run ``--name`` is threaded into
-        ``experiment_name`` and ``dict_kwargs: {name}``, ``online`` is forced
-        ``false`` when ``COMET_API_KEY`` is absent or under ``fast_dev_run`` (so
-        a key-less / smoke run never blocks on the Comet API), and
-        ``COMET_OFFLINE_DIRECTORY`` is set to — and created at — the trainer log
-        dir. Non-Comet loggers are left untouched.
+        """Wire a configured fit-stage `CometLogger`: threads ``--name`` into
+        ``experiment_name``/``dict_kwargs``, forces ``online=false`` with no
+        ``COMET_API_KEY`` or under ``fast_dev_run``, and sets/creates
+        ``COMET_OFFLINE_DIRECTORY`` at the trainer log dir. No-op for a
+        non-Comet or unconfigured logger.
         """
         logger = cfg.trainer.logger
         # a bare False/None (the --trainer.logger false opt-out) means no tracking

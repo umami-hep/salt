@@ -124,11 +124,9 @@ class MaskFormerObjects(nn.Module):
         self.vertices_regression_key = f"outputs.{stream}.{vertices_regression_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare all three maskformer reads -> the leading-regression + object-index leaves.
-
-        The index width has no recoverable last dim in a bind (width 1); the
-        leading width follows the regression port (or `n_reg`) — both
-        re-emitted via `derived_widths`.
+        """Requires the three maskformer reads; produces the leading-regression,
+        object-index, and per-vertex leaves. Widths are re-emitted via
+        `derived_widths` (the index has no recoverable last dim from a bind).
         """
         del mode
         # ONNX-only ports (same gate as `VertexUnionFind`): the null-suppression

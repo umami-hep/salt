@@ -47,8 +47,7 @@ _HADRON_FIELDS = [
 # Contract / ordering
 # --------------------------------------------------------------------------- #
 def test_inserter_before_tracks_raises(tmp_path):
-    """The done-criterion: a mis-ordered recipe (inserter before Tracks) is
-    rejected at ``Pipeline.__init__`` with a clear error."""
+    """A mis-ordered recipe (inserter before Tracks) is rejected at ``Pipeline.__init__``."""
     modules = [
         Jets(fields=_JET_FIELDS),
         TruthHadronInserter(hadron_fields=_HADRON_FIELDS),  # requires "tracks"
@@ -72,8 +71,7 @@ def test_inserter_after_tracks_validates(tmp_path):
 
 
 def test_field_level_requires_satisfied_by_group_producer(tmp_path):
-    """A field-level ``requires`` (``tracks.valid``) is satisfied by the group
-    producer (``Tracks`` produces ``tracks`` + ``tracks.valid``)."""
+    """A field-level ``requires`` (``tracks.valid``) is satisfied by the group producer."""
 
     class _NeedsValid(H5Writer):
         def __init__(self, path):
@@ -218,7 +216,8 @@ def test_run_is_deterministic():
 )
 def test_load_pipeline_runs_end_to_end(tmp_path, recipe_name):
     """A recipe loads via jsonargparse (class_path/init_args) and runs end-to-end
-    to a written HDF5 file."""
+    to a written HDF5 file.
+    """
     pipe = load_pipeline(str(_RECIPES_DIR / f"{recipe_name}.yaml"))
     pipe.set_output_dir(tmp_path)
     data = pipe.run()
@@ -240,9 +239,8 @@ def test_load_pipeline_modules_are_an_ordered_list():
 
 
 def test_maskformer_link_corruption_free(tmp_path):
-    """Inserter done-criterion: every valid track's ftagTruthParentBarcode is
-    in the SAME jet's valid hadron barcodes (or the -1 unmatched sentinel),
-    with zero cross-jet leakage and no -1 masquerading as a valid hadron id."""
+    """Every valid track's ftagTruthParentBarcode is in the SAME jet's valid
+    hadron barcodes (or -1), with zero cross-jet leakage."""
     pipe = load_pipeline(str(_RECIPES_DIR / "maskformer_truth_hadron.yaml"))
     pipe.set_output_dir(tmp_path)
     data = pipe.run()

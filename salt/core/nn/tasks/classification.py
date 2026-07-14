@@ -110,13 +110,8 @@ class ClassificationTaskModule(_TaskModuleBase):
             )
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare input/context/masks (+ FIT|VAL labels) -> preds (+ FIT|VAL loss).
-
-        Returns
-        -------
-        IO
-            The declared requires/produces; label and loss ports carry
-            ``modes=TRAINING``.
+        """Global or per-token pred spec depending on `sequence`; label/loss ports
+        are TRAINING-only.
         """
         del mode
         n_classes = len(self.class_names)
@@ -151,11 +146,8 @@ class ClassificationTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the head layers with inferred widths.
-
-        When `weight_source` is set, the loss is constructed with a
-        ones-initialised ``weight`` buffer sized ``len(class_names)`` so it
-        lives in the state_dict; `materialise` fills it on fresh fits.
+        """Builds the head; when `weight_source` is set, allocates a ones-initialised
+        loss ``weight`` buffer for `materialise` to fill on fresh fits.
         """
         init_args = dict(self.loss_cfg.get("init_args", {}))
         if self.weight_source is not None:
@@ -285,17 +277,8 @@ class ClassificationTaskModule(_TaskModuleBase):
             self.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the head; publishes RAW logits in EVERY non-training mode.
-
-        The eval conversion (softmax / masked softmax) is owned by the
-        `ClassProbs`/`SeqClassProbs`/`SeqClassIndex` producers and by `get_h5`,
-        both of which read this raw leaf and convert exactly once — so there is
-        no double-softmax.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only.
+        """Publishes RAW logits in every non-training mode; conversion happens
+        exactly once downstream in `get_h5`/`get_output`.
         """
         assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -314,13 +297,7 @@ class ClassificationTaskModule(_TaskModuleBase):
 
     @property
     def class_suffixes(self) -> list[str]:
-        """Per-class logical suffixes — ``Flavours[c].px`` else ``p{c}``.
-
-        Returns
-        -------
-        list[str]
-            One suffix per ``class_names`` entry, in class order.
-        """
+        """Per-class logical suffixes, in class order — ``Flavours[c].px`` else ``p{c}``."""
         # Must stay a LOCAL import: `Flavours` (ftag LabelContainer) raises
         # KeyError (not AttributeError) from __getattr__ on unknown names, which
         # breaks jsonargparse's hasattr(value, "__args__") protocol walk over
@@ -331,23 +308,11 @@ class ClassificationTaskModule(_TaskModuleBase):
         return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
 
     def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """One ``f4`` column per class, named ``{run_name}_{px}``.
-
-        Returns
-        -------
-        list[tuple[str, str]]
-            ``(column, "f4")`` pairs, one per class, in class order.
-        """
+        """One ``f4`` column per class, named ``{run_name}_{px}``."""
         return [(f"{run_name}_{px}", "f4") for px in self.class_suffixes]
 
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """Softmax the RAW TEST logits then pack as ``f4`` columns (padded positions read 0.0).
-
-        Returns
-        -------
-        np.ndarray
-            ``[B]`` (global) or ``[B, L]`` (sequence) structured array.
-        """
+        """Softmax the RAW TEST logits then pack as ``f4`` columns (padded positions read 0.0)."""
         assert self.net is not None, "get_h5 before bind()"
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
         preds = self.run_inference(b.get(self.pred_key), mask)
@@ -355,16 +320,8 @@ class ClassificationTaskModule(_TaskModuleBase):
         return u2s(preds.float().cpu().numpy(), dtype)
 
     def onnx_outputs(self) -> list[ExportOutput]:
-        """Global -> per-class ``split_scalars``; sequence -> one ``argmax`` int8.
-
-        A global (pooled) head emits one float32 scalar per class (suffixes =
-        `class_suffixes`); a per-token sequence head emits a single int8 argmax
-        entry named by the Pascal-case task name (``track_origin -> TrackOrigin``).
-
-        Returns
-        -------
-        list[ExportOutput]
-            One entry (per-class scalars, or a single argmax).
+        """Global head -> per-class ``split_scalars``; sequence head -> one int8
+        argmax named by the Pascal-case task name.
         """
         if not self.sequence:
             return [ExportOutput(port=self.pred_key, names=list(self.class_suffixes))]
@@ -378,15 +335,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
-        """The non-pred deps `get_output` reads: the stream pad mask for a seq head.
-
-        Mode-independent for this family.
-
-        Returns
-        -------
-        list[str]
-            ``["masks.<stream>"]`` for a padded seq head, else ``[]``.
-        """
+        """``["masks.<stream>"]`` for a padded seq head, else ``[]`` (mode-independent)."""
         del mode
         # has_pad_mask already implies sequence, so this covers all three cases:
         # global [] / no-pad-mask seq [] / padded seq [masks.<stream>]
@@ -395,26 +344,9 @@ class ClassificationTaskModule(_TaskModuleBase):
         return []
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
-        """Softmax/argmax the RAW logits into graph-visible `OutputField`s.
-
-        Reads the RAW ``preds.*`` logits + the stream pad mask (seq head) and
-        runs the eval conversion in TRACEABLE torch ops. Per mode:
-
-        - **Global (pooled) head**: ``sigmoid`` (BCE) else ``softmax(dim=-1)``.
-          One ``f4`` field per class (``class_suffixes``). H5 modes keep the
-          per-class column ``[B]`` unsqueezed; ONNX squeezes to the rank-0
-          scalar the export sink expects.
-        - **Sequence (per-token) head**: masked softmax (padded tokens -> 0.0).
-          H5 modes emit one ``f4`` field per class (``[B, L]``, H5-only). ONNX
-          instead emits a single int8 argmax field named ``pascal_case(name)``.
-
-        ``run_name`` is not baked into the field names (the sink prefixes it).
-
-        Returns
-        -------
-        list[OutputField]
-            Per-class probability fields (H5 modes), or a single argmax-index
-            field (ONNX seq head); each carries a torch ``value``.
+        """Global head: sigmoid (BCE) or softmax, one ``f4`` field per class (ONNX squeezes to
+        rank-0 scalars). Sequence head: masked softmax, one ``f4`` field per class in H5 modes;
+        ONNX instead emits a single int8 argmax field named ``pascal_case(name)``.
         """
         del run_name
         assert self.net is not None, "get_output before bind()"
@@ -472,13 +404,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         ]
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``).
-
-        Returns
-        -------
-        list[OutputField]
-            The value-free serialisation fields, in field order.
-        """
+        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
         del run_name
         if not self.sequence:
             return [

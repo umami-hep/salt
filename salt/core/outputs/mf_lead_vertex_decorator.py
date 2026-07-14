@@ -48,8 +48,7 @@ class MFLeadVertexDecorator(nn.Module):
     "no object exceeds the null threshold" dummy path, it returns an all-NaN
     ``vertices_regression`` while ``vertices_class_probs`` flows through
     real — so the decorator's qualify mask can pass vertices whose
-    regression is undefined, and the jet-level scalars end up NaN. This
-    matches v1's "no predicted objects -> dummy NaN" semantics.
+    regression is undefined, and the jet-level scalars end up NaN.
 
     Parameters
     ----------
@@ -145,13 +144,7 @@ class MFLeadVertexDecorator(nn.Module):
 
     @staticmethod
     def _checked_index(index: Any, what: str) -> int:
-        """Validate an index is a non-negative int.
-
-        Raises
-        ------
-        ConfigError
-            For a non-int or negative index.
-        """
+        """Validate an index is a non-negative int; raises `ConfigError` otherwise."""
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise ConfigError(
                 f"MFLeadVertexDecorator: {what} index {index!r} must be a non-negative int"
@@ -159,11 +152,9 @@ class MFLeadVertexDecorator(nn.Module):
         return index
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the two per-vertex source leaves -> the jet-level scalar leaves.
-
-        Both ports are active in every mode (``modes=ALL``, gated by demand).
-        The requires are the leaves `MaskFormerObjects` mints — a node->node
-        edge whose demand keeps that node alive.
+        """Requires the two `MaskFormerObjects`-minted per-vertex leaves (a
+        node->node edge keeping that node alive); produces the jet-level
+        scalars. Active in every mode (``modes=ALL``, gated by demand).
         """
         del mode
         requires = {
@@ -183,11 +174,10 @@ class MFLeadVertexDecorator(nn.Module):
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Select the lead vertex (highest-pT, non-null, non-PV) and emit jet-level scalars.
 
-        Trace-safe, no data-dependent control flow: build the per-vertex
-        qualify mask (not-null AND not-PV AND real-vertex-class), masked-
-        argmax the pT column to find the lead index per jet, then gather
-        each configured regression channel at that index (NaN where no
-        vertex qualifies).
+        Trace-safe (no data-dependent control flow): masked-argmax the pT
+        column over the qualify mask (not-null AND not-PV AND
+        real-vertex-class), then gather each regression channel at that
+        index (NaN where no vertex qualifies).
         """
         del mode
         class_probs = b.get(self.source)  # [B, M, C]

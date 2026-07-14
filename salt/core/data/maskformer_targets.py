@@ -17,23 +17,8 @@ from salt.core.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, 
 class _ObjectCut:
     """A single field-bound cut on MaskFormer truth objects: ``min <= batch[field] <= max``.
 
-    Lightweight v2 port of v1 ``salt.utils.configs.ObjectCut``. Carried on
-    the processor for object selection (below); NaN handling / PV exemption
-    / drop semantics live in `MaskFormerTargets._select_objects`.
-
-    Parameters
-    ----------
-    field : str
-        Object-group field the cut bounds.
-    min : float | None, optional
-        Inclusive lower bound; ``None`` disables it, by default None.
-    max : float | None, optional
-        Inclusive upper bound; ``None`` disables it, by default None.
-
-    Raises
-    ------
-    ConfigError
-        When both ``min`` and ``max`` are ``None``.
+    NaN handling / PV exemption / drop semantics live in
+    `MaskFormerTargets._select_objects`.
     """
 
     field: str
@@ -51,113 +36,93 @@ class _ObjectCut:
 class MaskFormerTargets(Processor):
     """MaskFormer object targets: ``object_class`` + per-constituent ``masks``.
 
-    Ports the v1 object-target construction into a single demand-gated
-    processor. From the truth-object group it produces, under the
-    ``objects`` bundle stream:
+    A single demand-gated processor producing, under the ``objects`` bundle
+    stream, from the truth-object group:
 
     - ``labels.objects.object_class`` ``[B, M]`` int64 — the raw object
-      class label remapped through ``class_map`` (the v1 ``x[x == k] = v``
-      loop), with the **null class validated LAST** (v1
-      ``MaskformerObjectConfig`` ``__post_init__``).
+      class label remapped through ``class_map``, with the **null class
+      validated LAST**.
     - ``labels.objects.masks`` ``[B, M, T]`` bool — the per-object-by-
-      constituent truth mask: ``constituent_id == object_id`` (the v1
-      `build_target_masks` equality) over the truncated constituent stream.
+      constituent truth mask: ``constituent_id == object_id`` over the
+      truncated constituent stream.
     - ``labels.objects.<target>`` ``[B, M]`` float32 per
       ``regression_targets`` entry — the raw per-object regression labels
       the object-regression task stacks + scales.
 
-    Two v1 IN-PLACE id mutations are eliminated:
-
-    - v1's class remap mutates the loaded tensor sequentially
-      (``x[x == k] = v``) — order-dependent and silently corrupting
-      whenever a ``mapped`` value collides with a not-yet-visited ``raw``
-      value. v2 builds the mapped column from the ORIGINAL raw values via a
-      single vectorised ``np.select`` against a copy, so the mapping is
-      atomic and collision-proof.
-    - v1's `build_target_masks` mutates the object-id tensor in place
-      (``object_ids[object_ids == -1] = -999``) before the equality,
-      leaking a sentinel back into the caller's labels dict. v2 computes
-      the equality on a private sentinel-substituted COPY, so the
-      published ``object_class`` / id columns are never touched.
+    Class remapping is atomic and collision-proof: the mapped column is
+    built from a single vectorised ``np.select`` against the ORIGINAL raw
+    values (not a sequential in-place walk). Mask construction never
+    mutates the published id columns: the sentinel substitution needed for
+    the equality runs on a private copy.
 
     DEMAND-gated, not mode-gated: all three product families are declared
     in ALL modes; ordinary sink pruning removes the module from a plan only
     when nothing demands its outputs. The `MaskFormerObjectWriter` demands
     ``labels.objects.{object_class,masks}`` in TEST (truth columns), so
-    this module IS in the test plan — matching v1, where the object labels
-    are built stage-independently. It is pruned from ONNX (nothing demands
-    truth there).
+    this module IS in the test plan. It is pruned from ONNX (nothing
+    demands truth there).
 
     Parameters
     ----------
     object_class : str
-        Object class label field in the object group (v1
-        ``object.class_label``; e.g. ``flavour``). Remapped through
-        ``class_map`` to ``object_class``.
+        Object class label field in the object group (e.g. ``flavour``).
+        Remapped through ``class_map`` to ``object_class``.
     object_id : str
-        Object identity field used to build masks (v1 ``object.id_label``;
-        e.g. ``barcode``).
+        Object identity field used to build masks (e.g. ``barcode``).
     constituent_id : str
         Constituent identity field tested against ``object_id`` to build
-        masks (v1 ``constituent.id_label``; e.g. ``ftagTruthParentBarcode``).
+        masks (e.g. ``ftagTruthParentBarcode``).
     class_map : Mapping[str, Mapping[str, Any]]
-        ``{name: {raw: int | list[int], mapped: int, weight?: float}}`` (v1
-        ``object.object_classes``). MUST contain a ``null`` entry mapped
-        LAST (``mapped == len(class_map) - 1``), and the ``mapped`` values
-        MUST be exactly ``range(len(class_map))``. jsonargparse may parse
-        the YAML ``null:`` key as a Python ``None`` — both spellings are
+        ``{name: {raw: int | list[int], mapped: int, weight?: float}}``.
+        MUST contain a ``null`` entry mapped LAST
+        (``mapped == len(class_map) - 1``), and the ``mapped`` values MUST
+        be exactly ``range(len(class_map))``. jsonargparse may parse the
+        YAML ``null:`` key as a Python ``None`` — both spellings are
         accepted, normalised to ``"null"``. ``raw`` may be a single int
         (the common case) or a list/tuple of ints that all map to the same
-        ``mapped`` index — a class *merge* (v1 ``class_map`` tuple keys).
-        An optional scalar ``weight`` per class feeds
-        :attr:`object_weights` (v1, default ``1.0``).
+        ``mapped`` index — a class *merge*. An optional scalar ``weight``
+        per class feeds :attr:`object_weights` (default ``1.0``).
     object_stream : str
-        File group holding the object features (v1 ``object.name``; e.g.
-        ``truth_hadrons``). The reader serves it as ``raw.<object_stream>``.
+        File group holding the object features (e.g. ``truth_hadrons``).
+        The reader serves it as ``raw.<object_stream>``.
     constituent_stream : str
-        File group holding the constituent features (v1
-        ``constituent.name``; e.g. ``tracks``). The mask's last dim aligns
-        with this stream's token count.
+        File group holding the constituent features (e.g. ``tracks``). The
+        mask's last dim aligns with this stream's token count.
     regression_targets : Sequence[str] | None, optional
         Per-object regression label fields published under
-        ``labels.objects.<target>`` (v1 reads them via the
-        object-regression task's ``get_targets``), by default None (no
-        regression labels).
+        ``labels.objects.<target>``, by default None (no regression labels).
     num_objects : int | None, optional
-        The number of object queries ``M`` (v1 ``num_objects``,
-        MaskFormer.yaml:36). When set, the produced shapes carry it as a
-        concrete dim (a static check that the file's object count matches
-        the decoder's query bank); None leaves ``M`` symbolic. Doubles as
-        the legacy alias bridged to ``max_objects`` (see below).
+        The number of object queries ``M``. When set, the produced shapes
+        carry it as a concrete dim (a static check that the file's object
+        count matches the decoder's query bank); None leaves ``M``
+        symbolic. Bridged to ``max_objects`` when only one is set (see
+        below).
     cuts : Sequence[_ObjectCut | Mapping[str, Any]] | None, optional
-        Per-jet field cuts for object selection (v1 ``object.cuts``).
-        dicts are coerced to :class:`_ObjectCut`. Default None.
+        Per-jet field cuts for object selection; dicts are coerced to
+        :class:`_ObjectCut`. Default None.
     sort_by : str | None, optional
-        Object-group field to sort survivors by before truncation (v1
-        ``object.sort_by``). Default None (file slot order).
+        Object-group field to sort survivors by before truncation. Default
+        None (file slot order).
     sort_descending : bool, optional
-        Sort direction for ``sort_by`` (v1 ``object.sort_descending``).
-        Default True.
+        Sort direction for ``sort_by``. Default True.
     pv_class : int | None, optional
         Mapped class index identifying the primary vertex pinned at slot 0
-        (v1 ``object.pv_class``). Validated to a non-null mapped index.
-        ``None`` disables PV pinning. Default 0.
+        (validated to a non-null mapped index); ``None`` disables PV
+        pinning. Default 0.
     max_objects : int | None, optional
-        Max object slots retained per jet after selection (v1
-        ``object.max_objects``). ``None`` auto-links to ``num_objects``
-        (the decoder query bank) via the legacy bridge.
+        Max object slots retained per jet after selection. ``None``
+        auto-links to ``num_objects`` (the decoder query bank).
     max_lxy_mm : float | None, optional
-        |Lxy| threshold (mm) above which a vertex is re-labelled to null
-        (v1 ``object.max_lxy_mm``). Default None (disabled).
+        |Lxy| threshold (mm) above which a vertex is re-labelled to null.
+        Default None (disabled).
     lxy_field : str, optional
-        Name of the Lxy field used by ``max_lxy_mm`` (v1
-        ``object.lxy_field``). Default ``"Lxy"``.
+        Name of the Lxy field used by ``max_lxy_mm``. Default ``"Lxy"``.
 
     Attributes
     ----------
     object_weights : list[float]
         Per-class loss weights ordered by mapped index, derived from each
-        class's optional ``weight`` (v1 ``object_weights``).
+        class's optional ``weight``.
 
     Raises
     ------
@@ -292,28 +257,11 @@ class MaskFormerTargets(Processor):
     def _checked_class_map(class_map: Mapping[str, Mapping[str, Any]]) -> dict[int, int]:
         """Validate the class map (null LAST, mapped == range) and return raw->mapped.
 
-        Reproduces the v1 ``MaskformerObjectConfig`` invariants WITHOUT
-        mutating the loaded ids: ``null`` present (``None`` or the string
-        ``"null"`` accepted, jsonargparse may cast the YAML ``null:`` key
-        to ``None``), null mapped LAST, and the ``mapped`` set exactly
-        ``range(len(class_map))``.
-
-        A class entry's ``raw`` may be a single int OR a list/tuple of ints
-        that all map to the SAME ``mapped`` index — a class *merge* (v1
-        ``MaskformerObjectConfig.class_map`` property, which keys the map
-        by a tuple of raws). The returned flat ``{raw: mapped}`` dict
-        expands each merged raw to its shared mapped index, so
-        ``process()``'s ``np.select`` over the dict keys handles merges
-        with NO logic change. A single-int ``raw`` produces the IDENTICAL
-        dict as before. Merged raw values MUST be disjoint across classes
-        (no raw maps to two mapped indices).
-
-        Raises
-        ------
-        ConfigError
-            On a missing null, a null not mapped last, a malformed mapped
-            set, an empty raw list, or a raw value shared across two
-            mapped indices.
+        ``null`` present (``None`` or the string ``"null"`` accepted), null
+        mapped LAST, and the ``mapped`` set exactly ``range(len(class_map))``.
+        A class entry's ``raw`` may be a single int or a list/tuple of ints
+        that all map to the SAME ``mapped`` index — a class *merge*; merged
+        raw values MUST be disjoint across classes.
         """
         if not class_map:
             raise ConfigError("MaskFormerTargets: class_map must not be empty (FD 1108)")
@@ -372,18 +320,9 @@ class MaskFormerTargets(Processor):
 
     @staticmethod
     def _class_weights(class_map: Mapping[str, Mapping[str, Any]]) -> list[float]:
-        """Per-class loss weights ordered by mapped index (v1 object_weights).
-
-        Ports v1 ``MaskformerObjectConfig.object_weights``: each class
-        carries an optional scalar ``weight`` (default ``1.0``). v1
-        returns them in dict-iteration order; v2 orders explicitly by
-        ``mapped`` index so the list index aligns with the class index the
-        loss expects.
-
-        Raises
-        ------
-        ConfigError
-            When a class ``weight`` is a list (must be a scalar; v1 assert).
+        """Per-class loss weights ordered by mapped index; each class carries an optional
+        scalar ``weight`` (default ``1.0``), ordered so the list index aligns with the
+        class index the loss expects.
         """
         names = {
             ("null" if name is None else str(name)): dict(spec) for name, spec in class_map.items()
@@ -401,24 +340,14 @@ class MaskFormerTargets(Processor):
 
     @property
     def null_index(self) -> int:
-        """The mapped index of the null/no-object class (== num_classes).
-
-        Uses the max mapped value (not the count of raw keys) so it stays
-        correct when classes merge multiple raws.
+        """The mapped index of the null/no-object class (max mapped value; correct
+        under class merges).
         """
         return max(self._raw_to_mapped.values())
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare the raw object/constituent fields -> ``labels.objects.*`` (ALL modes).
-
-        Requires the object class + id + regression fields from
-        ``raw.<object_stream>`` and the constituent id from
-        ``raw.<constituent_stream>``; produces
-        ``labels.objects.object_class`` ``[B, M]``,
-        ``labels.objects.masks`` ``[B, M, T]`` and one
-        ``labels.objects.<target>`` ``[B, M]`` per regression target. Every
-        product is declared in ALL modes — the gate is DEMAND, not mode;
-        the planner prunes the module from a plan that demands none.
+        """Declare object/constituent fields -> ``labels.objects.*`` (declared in ALL
+        modes — demand-gated, not mode-gated; the planner prunes an unused module).
         """
         del mode
         # base fields always read. When selection is active, the cut/sort
@@ -458,53 +387,20 @@ class MaskFormerTargets(Processor):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def _select_objects(self, obj: np.ndarray) -> np.ndarray:
-        """Per-jet cuts -> PV-pin -> sort -> truncate (faithful port of v1 _select_objects).
+        """Per-jet object selection: cuts -> PV-pin -> sort -> truncate.
 
-        Four per-jet phases:
-
-        1. **CUTS** — drop vertices failing any :class:`_ObjectCut`
-           (``min <= field <= max``); NaN (float) FAILS the cut (strict);
-           AND across cuts. PV is exempt.
-        2. **PV-PIN** — vertices whose raw class is in
-           :attr:`_pv_raw_values` (raws mapping to ``pv_class``) go to slot
-           0 in input order, EXEMPT from cuts/sorts.
-        3. **SORT** — surviving non-PV vertices sorted by :attr:`sort_by`
-           (``np.argsort`` ``kind="stable"``; reversed if
+        1. CUTS — drop vertices failing any :class:`_ObjectCut`
+           (``min <= field <= max``); NaN FAILS the cut; AND across cuts;
+           PV exempt.
+        2. PV-PIN — vertices whose raw class maps to ``pv_class`` go to
+           slot 0 in input order, exempt from cuts/sorts.
+        3. SORT — stable ``np.argsort`` of :attr:`sort_by` (reversed if
            :attr:`sort_descending`).
-        4. **TRUNCATE** — keep ``concat([pv, non_pv])[:n_out]``,
-           ``n_out = max_objects``.
+        4. TRUNCATE — ``concat([pv, non_pv])[:max_objects]``.
 
-        **Pad convention.** The production v2 reader appends an
-        authoritative ``valid`` bool field to every assembled stream, keyed
-        exactly as upstream's ``valid``; it is used directly when present.
-        The hand-built unit fixtures omit ``valid``, so the code falls back
-        to the v2 pad sentinel: signed-int label fields — INCLUDING
-        ``object_id`` — are padded with ``INT_PAD_SENTINEL = -1``, so
-        ``object_id == -1`` <=> ``~valid``. Either source feeds
-        cut-candidate masking and the PV partition uniformly. A NEW
-        ``[B, n_out]`` structured array is built (pad slots default to
-        0/False), then pad slots are sentinel-filled: ``id -> -1`` (so
-        ``build_target_masks`` treats them as invalid) and the class field
-        ``-> _null_raw_value`` (so the np.select class-map maps them to
-        ``null_index``).
-
-        Parameters
-        ----------
-        obj : np.ndarray
-            Structured object array ``[B, M_in]`` from ``raw.<object_stream>``.
-
-        Returns
-        -------
-        np.ndarray
-            A NEW structured ``[B, n_out]`` array of the same dtype, with
-            all fields permuted/truncated in lockstep and pad slots
-            sentinel-filled.
-
-        Raises
-        ------
-        SchemaError
-            If a configured cut/sort field (or the class field needed for
-            PV) is absent from the object dtype.
+        Pad convention: ``valid`` is used when present, else the pad
+        sentinel ``object_id == -1``; output pad slots are sentinel-filled
+        (``id -> -1``, class field -> ``_null_raw_value`` -> ``null_index``).
         """
         n_jets, n_in = obj.shape
         n_out = self.max_objects if self.max_objects is not None else n_in
@@ -581,20 +477,9 @@ class MaskFormerTargets(Processor):
         return out
 
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Build the object class, the truth masks, and the raw regression labels.
-
-        ``object_class`` is mapped from the ORIGINAL raw values via a
-        single vectorised ``np.select`` (no sequential in-place remap);
-        ``masks`` is the ``constituent_id == object_id`` broadcast over a
-        private sentinel-substituted COPY of the ids (no in-place id
-        mutation). Regression labels are copied out verbatim as float32.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            ``labels.objects.object_class`` ``[B, M]`` int64,
-            ``labels.objects.masks`` ``[B, M, T]`` bool, and one
-            ``labels.objects.<target>`` ``[B, M]`` float32 per regression target.
+        """Build the object class (atomic ``np.select`` over original raw values), the
+        truth masks (``constituent_id == object_id`` on a private id copy), and the raw
+        regression labels.
         """
         del rows, mode
         obj = batch.get(f"raw.{self.object_stream}")

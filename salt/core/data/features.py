@@ -18,13 +18,12 @@ class Features(Processor):
 
     THE documented one-copy-per-batch aliasing boundary: the
     ``structured_to_unstructured`` conversion is the mandatory copy that
-    separates reusable reader buffers from anything handed to the trainer —
-    enforced here with an explicit ``may_share_memory`` guard instead of
-    v1's implicit reliance on ``s2u``+``maybe_copy``.
+    separates reusable reader buffers from anything handed to the trainer,
+    enforced here with an explicit ``may_share_memory`` guard.
 
     Column order = the configured list order — the ONE place column order is
     defined; the produced specs carry ``fields`` metadata so downstream
-    column lookups resolve by name. v1 semantics kept in order: ``s2u`` ->
+    column lookups resolve by name. Applied in order: ``s2u`` ->
     ``nan_to_num`` (optional) -> zero padded rows via the pad mask -> finite
     check.
 
@@ -64,10 +63,8 @@ class Features(Processor):
         self.ignore_finite_checks = ignore_finite_checks
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``raw.<s> (+ optional masks.<s>) -> inputs.<s>`` per stream.
-
-        The mask require is optional: ``global_object`` streams have no
-        mask producer and the planner drops the port.
+        """Declare ``raw.<s>`` (+ optional ``masks.<s>``) -> ``inputs.<s>`` per stream; the
+        mask require is optional (``global_object`` streams have no mask producer).
         """
         del mode
         requires: dict[str, TensorSpec] = {}
@@ -80,18 +77,8 @@ class Features(Processor):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Materialise float32 input arrays from the structured raws.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            ``{"inputs.<stream>": [B, F] / [B, T, F] float32}`` — fresh
-            arrays, guaranteed not to alias the reader buffers.
-
-        Raises
-        ------
-        ValueError
-            On non-finite inputs (unless ``ignore_finite_checks``).
+        """Materialise float32 input arrays: ``s2u`` -> optional ``nan_to_num`` -> zero
+        padded rows -> finite check (raises `ValueError` unless `ignore_finite_checks`).
         """
         del rows, mode
         out: dict[str, np.ndarray] = {}

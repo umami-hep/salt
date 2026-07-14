@@ -272,11 +272,10 @@ class HybridMuonAdamW(Optimizer):
 
     @staticmethod
     def _warn_dead_routing(policy: MuonParamPolicy, names: Sequence[str]) -> None:
-        """Warn when an explicit ``include`` / ``exclude`` token matches no parameter.
-
-        A token matching zero parameter names is likely a typo or renamed module.
-        A staticmethod so the validator can be exercised without constructing the
-        optimizer (whose internal ``torch.optim.Muon`` needs torch >= 2.9).
+        """Warn when an explicit ``include``/``exclude`` token matches no parameter
+        name (likely a typo/renamed module). Staticmethod so it's testable
+        without constructing the optimizer (whose ``torch.optim.Muon`` needs
+        torch>=2.9).
         """
         for label, tokens in (("include", policy.include), ("exclude", policy.exclude)):
             for token in tokens:
@@ -289,12 +288,9 @@ class HybridMuonAdamW(Optimizer):
                     )
 
     def _sync_lrs_from_wrapper(self) -> None:
-        """Synchronize internal optimizer learning rates from wrapper param groups.
-
-        Torch schedulers update ``self.param_groups[0]["lr"]`` on this wrapper; this
-        propagates it to Muon/AdamW as ``base_lr * self._lr_ratio_{muon,adamw}``, so
-        schedulers like OneCycleLR work unchanged while preserving the fixed ratio
-        between the two learning rates.
+        """Propagate the wrapper's scheduler-driven ``param_groups[0]["lr"]`` to
+        Muon/AdamW as ``base_lr * self._lr_ratio_{muon,adamw}``, preserving the
+        fixed ratio so schedulers like OneCycleLR work unchanged.
         """
         base_lr = float(self.param_groups[0]["lr"])
         lr_muon = base_lr * self._lr_ratio_muon
@@ -307,10 +303,8 @@ class HybridMuonAdamW(Optimizer):
 
     @torch.no_grad()
     def step(self, closure: Callable[[], Any] | None = None) -> Any:
-        """Perform a single optimization step.
-
-        ``closure``, if provided, is executed once under ``enable_grad()`` and its
-        return value is propagated (typically the loss).
+        """One optimization step across both internal optimizers; `closure`, if
+        given, runs once under ``enable_grad()``.
         """
         loss: Any = None
         if closure is not None:

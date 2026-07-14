@@ -26,8 +26,7 @@ def task_modules(model_modules: Mapping[str, GraphModule]) -> dict[str, GraphMod
     A "task module" is any model module exposing string ``pred_key`` and
     ``stream`` attributes (`salt.core.nn.tasks._TaskModuleBase`; duck-typed so
     user task modules participate too). Order is the module-dict order — the
-    config declaration order, which is also the v1 ``model.tasks`` order for
-    converted configs.
+    config declaration order.
 
     The conversion producers (`salt.core.outputs.TaskOutput` and its
     `ClassProbs`/`SeqClassIndex`/`Regression` subclasses) also expose
@@ -80,7 +79,7 @@ class WriteCtx:
     total : int
         Number of rows that will be written (the H5Writer fixed-mode size).
     run_name : str
-        The run name (`SaltModule.name`) — the v1 ``model_name`` column prefix.
+        The run name (`SaltModule.name`) — used as the output column prefix.
     source_path : Path
         The resolved test source file (VDS for wildcards) — input copies
         re-read from here by ``meta.rows``.
@@ -89,12 +88,11 @@ class WriteCtx:
     sequence_streams : tuple[str, ...]
         Streams carrying a pad mask.
     group_datasets : Mapping[str, str]
-        Stream -> H5 dataset name (the v1 ``input_map``; output groups are
-        named after the *file* datasets).
+        Stream -> H5 dataset name; output groups are named after the *file*
+        datasets.
     seq_lengths : Mapping[str, int]
         Sequence stream -> the file's constituent dimension. Per-token writer
-        fragments are zero-padded to this length (v1 ``maybe_pad`` truncation
-        re-expansion).
+        fragments are zero-padded to this length.
     model_modules : Mapping[str, GraphModule]
         The model-side module dict.
     batch_size : int
@@ -307,7 +305,4 @@ class ExportOnlyWriter(Writer):
 
     @abstractmethod
     def onnx_outputs(self, ctx: WriterDeclareCtx) -> list[ExportOutput]:
-        """The export-manifest entries — the writer's single role.
-
-        Must be non-empty (a both-empty writer is invalid).
-        """
+        """The export-manifest entries — the writer's single role; must be non-empty."""

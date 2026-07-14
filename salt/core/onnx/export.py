@@ -130,11 +130,8 @@ def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
     legacy reduce outputs (union_find/maskformer) still ride ``export.outputs``.
     A config with no such node is the pure legacy path (unchanged).
 
-    Raises
-    ------
-    ConfigError
-        When more than one `OnnxExportSink` is configured (the Athena tuple has
-        one ordering authority).
+    Raises `ConfigError` if more than one `OnnxExportSink` is configured
+    (the Athena tuple has a single ordering authority).
     """
     from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
@@ -426,19 +423,11 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     """Parse the run config(s) through the REAL salt2 surface, run-free.
 
     Multiple configs deep-merge left-to-right (the ``salt2 fit`` stacking
-    semantics) — the supported way to add an ``export:`` block to a run config
-    trained without one.
-
-    Returns
-    -------
-    Salt2CLI
-        The run-free CLI (``cli.model``/``cli.datamodule`` constructed, nothing
-        executed, no data touched).
-
-    Raises
-    ------
-    ConfigError
-        When the parse fails (with the ``--set`` hint, mirroring ``salt2 graph``).
+    semantics) — the supported way to add an ``export:`` block to a run
+    config trained without one. Returns the run-free `Salt2CLI`
+    (``cli.model``/``cli.datamodule`` constructed, nothing executed, no
+    data touched). Raises `ConfigError` when the parse fails (with the
+    ``--set`` hint, mirroring ``salt2 graph``).
     """
     from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
     from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
@@ -474,15 +463,8 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
 def _features_variables(cli: Any) -> dict[str, list[str]]:
     """The `Features` variable declaration from the parsed data modules.
 
-    Returns
-    -------
-    dict[str, list[str]]
-        Stream -> ordered variable list.
-
-    Raises
-    ------
-    ConfigError
-        When the config has no `Features` processor.
+    Returns ``{stream: ordered variable list}``. Raises `ConfigError` when
+    the config has no `Features` processor.
     """
     from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
 
@@ -500,12 +482,8 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
 
     The checkpoint's ``salt_core`` payload bound the modules; a config whose
     `Features` lists drifted from the trained widths must fail loudly here
-    instead of tracing a width-mismatched graph.
-
-    Raises
-    ------
-    ConfigError
-        Naming the drifted stream and both widths.
+    instead of tracing a width-mismatched graph. Raises `ConfigError`
+    naming the drifted stream and both widths.
     """
     schema = getattr(model, "schema", None)
     if schema is None:
@@ -598,17 +576,10 @@ def main(args: Sequence[str] | None = None) -> int:
 def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     """The run-config stack: explicit ``-c`` files, or the sibling inference.
 
-    Returns
-    -------
-    list[Path]
-        At least one config path; the FIRST is the run config (it anchors the
-        default output path, ``metadata.yaml`` lookup and the embedded
-        ``config.yaml`` payload).
-
-    Raises
-    ------
-    ConfigError
-        When no config is given and none can be inferred.
+    Returns at least one config path; the FIRST is the run config (it
+    anchors the default output path, ``metadata.yaml`` lookup and the
+    embedded ``config.yaml`` payload). Raises `ConfigError` when no config
+    is given and none can be inferred.
     """
     config_paths: list[Path] = list(parsed.config or [])
     if config_paths:
@@ -628,10 +599,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
 def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
     """``salt2 export --manifest``: print the assembled output manifest and exit.
 
-    Returns
-    -------
-    int
-        0 on success (errors raise `GraphError`, handled by `main`).
+    Returns 0 on success (errors raise `GraphError`, handled by `main`).
     """
     from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
 
@@ -664,18 +632,10 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
 def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdapter]:
     """The CLI export flow: parse config, derive manifest, load checkpoint, export.
 
-    Returns
-    -------
-    tuple[ExportResult, OnnxAdapter]
-        The export result and the eager checker reference.
-
-    Raises
-    ------
-    ConfigError
-        On a missing config/export block, a config-declared ``export.outputs``,
-        or schema drift.
-    FileExistsError
-        On an existing output without ``--overwrite``.
+    Returns the export result and the eager checker reference. Raises
+    `ConfigError` on a missing config/export block, a config-declared
+    ``export.outputs``, or schema drift; `FileExistsError` on an existing
+    output without ``--overwrite``.
     """
     from salt.core.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
 

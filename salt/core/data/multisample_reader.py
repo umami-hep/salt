@@ -137,13 +137,7 @@ class MultiSampleReader(Reader):
 
     @staticmethod
     def _parse_sample(cfg: SampleConfig | Mapping[str, Any]) -> SampleConfig:
-        """Normalise one sample entry to a `SampleConfig`.
-
-        Raises
-        ------
-        ConfigError
-            On unknown keys or a missing required field.
-        """
+        """Normalise one sample entry to a `SampleConfig`."""
         if isinstance(cfg, SampleConfig):
             return cfg
         cfg = dict(cfg or {})
@@ -174,27 +168,16 @@ class MultiSampleReader(Reader):
 
     @property
     def groups(self) -> Any:
-        """Delegate the per-stream group config surface to the first sub-reader.
-
-        All sub-readers share an identical produced schema, so the first
-        sub-reader's ``groups`` is representative (the injected ``label_field``
-        lands on an existing scalar stream, adding no new group).
+        """Delegate the per-stream group config surface to the first sub-reader (all
+        sub-readers share an identical schema).
         """
         return getattr(self.samples[0].reader, "groups", None)
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare the merged sub-reader produces + the injected label field.
 
-        The produces mirror the (identical) sub-readers' ``raw.* / masks.* /
-        meta.rows``; the injected ``raw.<label_stream>`` gains the ``label_field``
-        scalar (so ``Labels`` can expose ``labels.<label_stream>.<label_field>``).
-
-        Raises
-        ------
-        ConfigError
-            If the injected ``label_field`` collides with an existing field.
-        SchemaError
-            If ``label_stream`` is not a produced scalar (global_object) stream.
+        Mirrors the (identical) sub-readers' ``raw.*``/``masks.*``/``meta.rows``;
+        the injected ``raw.<label_stream>`` gains the ``label_field`` scalar.
         """
         base = self.samples[0].reader.declare_io(mode)
         flat = dict(flatten_spec(base.produces))
@@ -228,13 +211,7 @@ class MultiSampleReader(Reader):
         return IO(produces=unflatten_spec(flat))
 
     def prepare(self) -> None:
-        """Prepare every sub-reader, validate schema-compat, build the interleave.
-
-        Idempotent. Prepares each sub-reader, asserts every sub-reader produces an
-        identical stream schema, builds the merged `Schema` (with the injected
-        label field), and constructs the proportional round-robin interleaved
-        combined index.
-        """
+        """Prepare every sub-reader, validate schema-compat, build the interleave (idempotent)."""
         if self._sample_of is not None:
             return
         for s in self.samples:
@@ -243,10 +220,8 @@ class MultiSampleReader(Reader):
         self._build_index()
 
     def _produced_signature(self, reader: Reader) -> dict[str, Any]:
-        """The reader's produced-stream signature for schema-compat comparison.
-
-        ``{stream: (jagged, (field, dtype) pairs sorted by field)}`` — must be
-        identical across samples so the per-sample blocks concatenate.
+        """The reader's produced-stream signature for schema-compat comparison:
+        ``{stream: (jagged, (field, dtype) pairs sorted by field)}``.
         """
         io = reader.declare_io(Mode.FIT)
         flat = flatten_spec(io.produces)
@@ -268,15 +243,8 @@ class MultiSampleReader(Reader):
         return sig
 
     def _validate_schema_compat(self) -> None:
-        """Assert all sub-readers produce identical streams/fields/jaggedness.
-
-        Raises
-        ------
-        ConfigError
-            If the injected ``label_field`` collides with an existing schema field.
-        SchemaError
-            On any divergence (different stream set, field set, dtype, or
-            jaggedness) — with a clear message naming the divergent samples.
+        """Assert all sub-readers produce identical streams/fields/jaggedness (raises
+        `SchemaError` on divergence, `ConfigError` if the injected label collides).
         """
         ref = self.samples[0]
         ref_sig = self._produced_signature(ref.reader)
@@ -325,14 +293,9 @@ class MultiSampleReader(Reader):
             self.schema = Schema(groups=groups)
 
     def _build_index(self) -> None:
-        """Build the proportional round-robin interleaved combined index.
-
-        Largest-remainder (Hamilton) apportionment: walk global positions
-        ``j = 0..N-1``; at each ``j`` emit the sample whose deficit
-        ``(j+1)·n_i/N - emitted_i`` is largest (ties → lowest id). The local row
-        for each sample increments in its own order. Result: ``_sample_of[j]`` and
-        ``_local_of[j]`` map every global position to ``(sample_id, local_row)``,
-        with every prefix's per-sample counts within ``±1`` of the ideal.
+        """Build the proportional round-robin interleaved combined index (largest-remainder
+        apportionment): at each step, emit the sample with the largest deficit
+        ``(j+1)*n_i/N - emitted_i``; every prefix's per-sample counts stay within ±1 of ideal.
         """
         assert self._streams is not None
         lens = [len(s.reader) for s in self.samples]
@@ -398,30 +361,9 @@ class MultiSampleReader(Reader):
         vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> MultiSampleReader:
-        """Clone for a stage, re-sourcing EACH sub-reader from its per-stage source.
-
-        ``filename`` is ignored — meaningless for N samples. Each sub-reader is
-        re-sourced from ``sample.sources[stage]`` when present; otherwise it keeps
-        its already-configured source.
-
-        Parameters
-        ----------
-        filename : str | Path
-            Ignored (see above).
-        num : int, optional
-            Per-sample row cap (``-1`` = all), by default -1.
-        vds_path : str | Path | None, optional
-            Forwarded to sub-readers' ``with_source`` (H5 VDS path); ignored by
-            ROOT sub-readers.
-        stage : str | None, optional
-            The stage key (``"train"``/``"val"``/``"test"``) the datamodule binds;
-            selects each sample's ``sources[stage]``. None keeps each sub-reader's
-            configured source.
-
-        Returns
-        -------
-        MultiSampleReader
-            A fresh, unbound multi-sample reader for the stage.
+        """Clone for a stage, re-sourcing EACH sub-reader from its per-stage source
+        (``filename`` is ignored — meaningless for N samples). A sample with no
+        per-stage source but a requested `num` re-sources onto its own current file.
         """
         del filename
         new_samples: list[SampleConfig] = []
@@ -467,23 +409,8 @@ class MultiSampleReader(Reader):
         return list(seen.values())
 
     def restage(self, root: str | Path) -> MultiSampleReader:
-        """Restage by delegating to EACH sub-reader recursively.
-
-        There is no single file to copy, so each sample's sub-reader is restaged
-        into ``root`` independently, and a fresh `MultiSampleReader` is built over
-        the restaged sub-readers. The injected label / interleave config is
-        preserved.
-
-        Parameters
-        ----------
-        root : str | Path
-            The staging root directory (created per sub-reader as needed).
-
-        Returns
-        -------
-        MultiSampleReader
-            A fresh, unbound multi-sample reader over the staged sub-readers (same
-            instance ``name``).
+        """Restage by delegating to EACH sub-reader recursively (no single file to copy);
+        a fresh `MultiSampleReader` is built over the restaged sub-readers.
         """
         root = Path(root)
         new_samples = [
@@ -505,11 +432,8 @@ class MultiSampleReader(Reader):
         return clone
 
     def bind(self, ctx: WorkerCtx) -> None:
-        """Per-worker setup: prepare + forward demand-narrowing to every sub-reader.
-
-        Each sub-reader is bound with the same `WorkerCtx`. The injected
-        ``label_field`` is not a disk field, so it is stripped from the demand
-        forwarded for the ``label_stream``.
+        """Prepare + forward demand-narrowing to every sub-reader (the injected
+        ``label_field`` is stripped, since it is not a disk field).
         """
         self.prepare()
         # strip the injected (non-disk) label field from the demand we forward,
@@ -532,11 +456,7 @@ class MultiSampleReader(Reader):
             s.reader.bind(sub_ctx)
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
-        """Per-stream raw fields demanded — drop the injected label field.
-
-        The injected ``label_field`` is produced by this layer (not on disk), so
-        it must not be forwarded as a sub-reader read demand.
-        """
+        """Per-stream raw fields demanded, minus the injected (non-disk) label field."""
         out = super().read_fields(step)
         if self.label_stream in out:
             out[self.label_stream] = {
@@ -547,13 +467,10 @@ class MultiSampleReader(Reader):
         return out
 
     def _runs(self, rows: slice) -> list[tuple[int, slice, int, int]]:
-        """Decompose a global contiguous window into ordered per-sample runs.
-
-        A run is a maximal stretch of consecutive global positions mapped to the
-        same sample with consecutive local rows (so the sub-reader receives a
-        contiguous ``read(slice)``, never a scattered index array). Returns runs
-        in global (batch) order, each as ``(sample_id, local_slice, out_lo,
-        out_hi)`` where ``[out_lo, out_hi)`` is the run's span in the output batch.
+        """Decompose a global contiguous window into ordered per-sample runs (maximal
+        stretches of consecutive positions mapped to the same sample with consecutive
+        local rows, so each sub-read is contiguous); each run is
+        ``(sample_id, local_slice, out_lo, out_hi)``.
         """
         assert self._sample_of is not None
         assert self._local_of is not None
@@ -578,11 +495,7 @@ class MultiSampleReader(Reader):
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one combined contiguous window: per-run sub-reads, reorder, inject label.
 
-        Decomposes ``[rows.start, rows.stop)`` into ordered per-sample contiguous
-        runs (`_runs`), reads each run via its sub-reader, and concatenates the
-        per-run blocks into combined batch order. Jagged streams may have
-        different served multiplicities ``T`` per sub-reader; the combined block
-        uses the max ``T`` across the runs in this window and pads shorter blocks.
+        Jagged streams pad to the max served ``T`` across the runs in this window.
         """
         if self._sample_of is None:
             self.bind(WorkerCtx(mode=mode, read_fields={}, seed=0))  # standalone (tests)
@@ -616,10 +529,8 @@ class MultiSampleReader(Reader):
     def _combine_scalar(
         self, blocks: list[tuple[int, int, int, np.ndarray]], b: int, stream: str
     ) -> np.ndarray:
-        """Concatenate scalar ``(b_i,)`` blocks into a combined ``(B,)`` array, in order.
-
-        For the ``label_stream`` an integer ``label_field`` is appended to the
-        structured dtype and filled per run with that sample's label.
+        """Concatenate scalar ``(b_i,)`` blocks into a combined ``(B,)`` array, in order;
+        for the ``label_stream`` an integer ``label_field`` is appended and filled per run.
         """
         inject = stream == self.label_stream
         # field/dtype layout from the first block (identical across samples)
@@ -639,11 +550,8 @@ class MultiSampleReader(Reader):
     def _combine_jagged(
         self, blocks: list[tuple[int, int, int, np.ndarray]], b: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Concatenate jagged ``(b_i, T_i)`` blocks into a combined ``(B, T)`` array.
-
-        ``T`` = max served multiplicity across the runs in this window; shorter
-        blocks are pad-extended (float->0.0, int->-1 sentinel, bool/valid->False).
-        Returns the combined structured ``(B, T)`` array and its ``valid`` bool.
+        """Concatenate jagged ``(b_i, T_i)`` blocks into a combined ``(B, T)`` array (T = max
+        served multiplicity across runs; shorter blocks pad-extended via `pad_fill`).
         """
         ref = blocks[0][3]
         names = list(ref.dtype.names or ())

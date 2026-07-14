@@ -38,20 +38,9 @@ __all__ = [
 
 
 def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
-    """Parse a trainer config stack through the real salt2 surface, run-free.
-
-    Returns the constructed (un-setup) `Salt2CLI` so both ``cli.model`` and
-    ``cli.datamodule`` are available.
-
-    Returns
-    -------
-    Salt2CLI
-        The run-free CLI.
-
-    Raises
-    ------
-    ConfigError
-        When the parse fails (with the ``--set`` hint).
+    """Parse a trainer config stack through the real salt2 surface, run-free,
+    returning the constructed (un-setup) `Salt2CLI` (``cli.model`` +
+    ``cli.datamodule``). Raises `ConfigError` on a parse failure.
     """
     import warnings  # noqa: PLC0415 - local, parse-time only
 
@@ -85,32 +74,14 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
 
 
 def _parse_model(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
-    """Parse and return just the constructed `SaltModule` (the apply_to-width probe).
-
-    Returns
-    -------
-    SaltModule
-        ``cli.model``.
-    """
+    """Parse and return just the constructed `SaltModule` (the apply_to-width probe)."""
     return _parse_cli(configs, set_overrides).model
 
 
 def _width_overrides(model: Any, width: int) -> list[str]:
-    """``--set`` width overrides for every ``apply_to`` module's ``MUP_WIDTH_ARG``.
-
-    Each configured ``apply_to`` module declares its own width init_arg
-    (e.g. `StreamEmbed.MUP_WIDTH_ARG == "out_dim"`); every one is set to the
-    same `width`.
-
-    Returns
-    -------
-    list[str]
-        ``model.modules.<name>.init_args.<widtharg>=<width>`` overrides.
-
-    Raises
-    ------
-    ConfigError
-        When a module lacks a declared ``MUP_WIDTH_ARG`` (it cannot be swept).
+    """``--set`` width overrides for every ``apply_to`` module's declared
+    ``MUP_WIDTH_ARG`` (e.g. `StreamEmbed.MUP_WIDTH_ARG == "out_dim"`), all set
+    to `width`. Raises `ConfigError` if a module declares none.
     """
     cfg = _require_mup_cfg(model)
     overrides: list[str] = []
@@ -128,17 +99,8 @@ def _width_overrides(model: Any, width: int) -> list[str]:
 
 
 def _require_mup_cfg(model: Any) -> dict[str, Any]:
-    """Return the model's validated mup config or raise a helpful error.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"apply_to": [...], "shape_path": ...}``.
-
-    Raises
-    ------
-    ConfigError
-        When the config declares no ``model.init_args.mup`` block.
+    """The model's validated mup config; raises `ConfigError` when the config
+    declares no ``model.init_args.mup`` block.
     """
     cfg = getattr(model, "mup_cfg", None)
     if cfg is None:
@@ -220,23 +182,10 @@ def build_model_at_widths(
 
 
 def _model_boundary_sources(cli: Any) -> Any:
-    """Build the MODEL-side boundary sources (``inputs.*``/``masks.*``/``labels.*``).
-
-    The coord-check runs the model-side plan only (the dataset modules touch
-    a file at materialise/read), so it needs the post-data boundary the
-    model consumes. Derived data-free from the `Features` variables (field
-    counts), the reader's per-stream ``global_object`` flag, and the
-    model's FIT-mode label demand (`SaltModule.sink_demand`).
-
-    Returns
-    -------
-    NestedSpec
-        The nested source spec for `compile_plan` over the model graph.
-
-    Raises
-    ------
-    ConfigError
-        When the config declares no `Features` module to derive field counts.
+    """The MODEL-side boundary sources (``inputs.*``/``masks.*``/``labels.*``) the
+    coord-check needs, derived data-free from `Features` variables, the
+    reader's ``global_object`` flag, and the model's FIT label demand.
+    Raises `ConfigError` when no `Features` module is configured.
     """
     from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
     from salt.core.graph.spec import TensorSpec, sym_dim, unflatten_spec  # noqa: PLC0415
@@ -277,15 +226,8 @@ def _model_boundary_sources(cli: Any) -> Any:
 
 
 def _combined_graph(cli: Any) -> dict[str, Any]:
-    """The combined data + model module dict.
-
-    Binds the dataset `Labels` processors to the reader streams so their
-    label-key universe resolves.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{**data_modules, **model_modules}`` in pipeline order.
+    """The combined data + model module dict; binds the dataset `Labels`
+    processors to the reader streams so their label-key universe resolves.
     """
     from salt.core.data.labels import Labels  # noqa: PLC0415 - heavy/circular
 
@@ -382,12 +324,8 @@ def generate_shapes(
 
 
 def _record_l1_hook(records: list[dict[str, Any]], width: int, name: str, step: int):
-    """Forward hook recording the output L1 coordinate norm.
-
-    Returns
-    -------
-    Callable
-        A forward hook appending ``{width, module, t, l1}`` per output tensor.
+    """Forward hook recording the output L1 coordinate norm as
+    ``{width, module, t, l1}`` per output tensor.
     """
 
     def hook(_module: Any, _inp: Any, output: Any) -> None:
@@ -513,35 +451,12 @@ def _resolve_coord_shape_file(
     shape_file: str | Path | None,
     set_overrides: Sequence[str],
 ) -> Path:
-    """Resolve the SHARED base/delta infshape file the coord-check applies at every width.
-
-    When `shape_file` is given it is used as-is; otherwise base/delta
-    infshapes are generated ONCE via :func:`generate_shapes` — base = the
-    narrowest swept width, delta = a strictly-wider reference (the widest
-    swept width, or ``2 * base`` for a single-width sweep) — into a temp
-    file. Wider models then resolve ``width_mult = width / base_width > 1``
-    and the readout is damped.
-
-    Parameters
-    ----------
-    configs : Sequence[str | Path]
-        The trainer config stack.
-    widths : Sequence[int]
-        The swept ``apply_to`` widths.
-    shape_file : str | Path | None
-        An explicit infshape file, or None to generate one.
-    set_overrides : Sequence[str]
-        Extra ``--set`` overrides (e.g. the data-free norm_dict).
-
-    Returns
-    -------
-    Path
-        The shared infshape file path (existing).
-
-    Raises
-    ------
-    ConfigError
-        When `widths` is empty, or a generated file's base/delta would be equal.
+    """Resolve the SHARED base/delta infshape file the coord-check applies at
+    every width: `shape_file` used as-is if given, else generated once via
+    :func:`generate_shapes` (base = narrowest swept width, delta = a
+    strictly-wider reference) into a temp file — so wider models resolve
+    ``width_mult > 1`` and the readout is damped. Raises `ConfigError` when
+    `widths` is empty.
     """
     if shape_file is not None:
         path = Path(shape_file)
@@ -576,12 +491,8 @@ def _resolve_coord_shape_file(
 def _attach_apply_to_hooks(
     model: Any, apply_to: Sequence[str], records: list[dict[str, Any]], width: int, step: int = 1
 ) -> list[Any]:
-    """Register output-L1 forward hooks on every ``apply_to`` submodule subtree.
-
-    Returns
-    -------
-    list[Any]
-        The registered hook handles.
+    """Register output-L1 forward hooks on every ``apply_to`` submodule subtree,
+    returning the handles.
     """
     handles: list[Any] = []
     for name in apply_to:
@@ -595,17 +506,9 @@ def _attach_apply_to_hooks(
 
 
 def _coord_batch(plan: Any) -> Bundle:
-    """Synthesise a random FIT batch from the plan's boundary sources (smoke path).
-
-    Used when the real coord-check data batch (via ``--train-file``) isn't
-    available. Tensors match the plan's source specs: B=4, T=5 for sequence
-    streams; ``pad_mask`` all-valid (zeros), ``label`` random class ids,
-    everything else random float.
-
-    Returns
-    -------
-    Bundle
-        A bundle with random ``inputs.*``/``masks.*``/``labels.*`` tensors.
+    """Synthesise a random FIT batch from the plan's boundary sources (smoke
+    path, used when no real ``--train-file`` batch is given): B=4, T=5;
+    ``pad_mask`` all-valid, ``label`` random class ids, else random float.
     """
     b = Bundle()
     n_batch, n_tracks = 4, 5
@@ -624,14 +527,9 @@ def _coord_batch(plan: Any) -> Bundle:
 
 
 def _clone_batch(batch: Bundle) -> Bundle:
-    """Deep-clone a bundle so a fixed batch survives in-place forward mutation.
-
-    ``copy.deepcopy`` is not enough for the nested-dict-of-tensors batch.
-
-    Returns
-    -------
-    Bundle
-        A fresh bundle with cloned tensors.
+    """Deep-clone a bundle (``copy.deepcopy`` is not enough for the
+    nested-dict-of-tensors batch) so a fixed batch survives in-place forward
+    mutation.
     """
     clone = Bundle()
     for key in batch.keys():  # noqa: SIM118 - Bundle.keys() is the public flat-key API, not a dict
@@ -725,13 +623,7 @@ def setup_mup(args: Sequence[str] | None = None) -> int:
 
 
 def cmd_mup_shapes(args: Any) -> int:
-    """``salt2 mup-shapes`` handler: generate base/delta infshapes.
-
-    Returns
-    -------
-    int
-        0 on success.
-    """
+    """``salt2 mup-shapes`` handler: generate base/delta infshapes."""
     generate_shapes(
         args.config,
         save_path=args.save_path,
@@ -743,13 +635,7 @@ def cmd_mup_shapes(args: Any) -> int:
 
 
 def cmd_mup_coord_check(args: Any) -> int:
-    """``salt2 mup-coord-check`` handler: coord-data + plot.
-
-    Returns
-    -------
-    int
-        0 on success.
-    """
+    """``salt2 mup-coord-check`` handler: writes coord-check data (CSV) + plot."""
     widths = [int(w) for w in args.widths]
     df = coord_check(
         args.config,

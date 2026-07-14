@@ -32,12 +32,8 @@ _DEFAULT_VTX_LOSS: dict[str, Any] = {
 # convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
 @torch.jit.script
 def _mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
-    """Unflatten a per-node array back to a batch-shaped tensor; padded positions read -inf.
-
-    Returns
-    -------
-    Tensor
-        Filled tensor of shape ``[B, L, F]``.
+    """Unflatten a per-node array back to a ``[B, L, F]`` batch-shaped tensor;
+    padded positions read -inf.
     """
     filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
     mask = mask.to(torch.bool)
@@ -149,13 +145,7 @@ class VertexingTaskModule(_TaskModuleBase):
 
     @property
     def origin_label_key(self) -> str:
-        """The declared origin-label dependency.
-
-        Returns
-        -------
-        str
-            ``labels.<stream>.<origin_label>``.
-        """
+        """``labels.<stream>.<origin_label>``."""
         return f"labels.{self.stream}.{self.origin_label}"
 
     def resolve_origin_names(self, reader: Any) -> bool:
@@ -211,17 +201,9 @@ class VertexingTaskModule(_TaskModuleBase):
     def _resolve_names(
         self, role: str, names: Sequence[Any], index: Mapping[str, int], classes: Sequence[str]
     ) -> tuple[int, ...]:
-        """Map one heavy/fake class-name list to integer origin ids.
-
-        Returns
-        -------
-        tuple[int, ...]
-            The resolved integer ids, in config order.
-
-        Raises
-        ------
-        ConfigError
-            On any name absent from the schema's origin classes.
+        """Map one heavy/fake class-name list to integer origin ids, in config
+        order; raises `ConfigError` on a name absent from the schema's origin
+        classes.
         """
         ids: list[int] = []
         for name in names:
@@ -235,16 +217,9 @@ class VertexingTaskModule(_TaskModuleBase):
         return tuple(ids)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare input/context/mask (+ FIT|VAL vertex AND origin labels) -> preds/loss.
-
-        The prediction spec is shape-unconstrained: the edge count is
-        data-dependent in FIT|VAL|ONNX (``[E, 1]`` raw scores) and the TEST
-        assignments are per-node.
-
-        Returns
-        -------
-        IO
-            The declared requires/produces.
+        """Requires both vertex and origin labels (FIT|VAL); the shape-unconstrained
+        pred spec covers data-dependent ``[E, 1]`` edge scores and per-node TEST
+        assignments.
         """
         del mode
         width = sym_dim("D", self.name)
@@ -273,16 +248,9 @@ class VertexingTaskModule(_TaskModuleBase):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Build the head layers with inferred widths.
-
-        ``input_size = 2 * width(input)`` (pair concat); ``context_size = width(context)``.
-
-        Raises
-        ------
-        ConfigError
-            If the configured loss does not use ``reduction="none"`` (per-edge
-            weighting requires the unreduced loss), or name-based
-            ``origin_weighting`` was never resolved before bind.
+        """``input_size = 2 * width(input)`` (edge-pair concat); requires the
+        loss's ``reduction="none"`` and origin ids already resolved
+        (`resolve_origin_names`).
         """
         if self._names_pending or self.heavy_ids is None or self.fake_ids is None:
             raise ConfigError(
@@ -420,20 +388,9 @@ class VertexingTaskModule(_TaskModuleBase):
         return _mask_fill_flattened(preds, pad_mask)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run the head; publishes RAW ``[E, 1]`` edge scores in EVERY non-training mode.
-
-        The labels dict carries the origin labels under the derived key
-        (``label.replace("VertexIndex", "OriginLabel")``) so ``calculate_loss``
-        finds them — the graph dependency is the declared ``origin_label`` port.
-
-        The union-find conversion (edge scores -> per-node assignments) is
-        owned by ``get_output`` on the live path and by ``get_h5`` on the
-        oracle path, both of which read this raw leaf and convert exactly once.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The newly produced keys only.
+        """Publishes RAW ``[E, 1]`` edge scores in every non-training mode; the
+        union-find conversion happens exactly once downstream in
+        `get_h5`/`get_output`.
         """
         assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -456,30 +413,15 @@ class VertexingTaskModule(_TaskModuleBase):
     # -- output rendering ---------------------------------------------------
 
     def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """A single ``('VertexIndex', 'i8')`` column.
-
-        Bare ``VertexIndex`` by default; with ``prefix_vertex_column`` it is
-        ``{run_name}_VertexIndex``.
-
-        Returns
-        -------
-        list[tuple[str, str]]
-            One ``(column, "i8")`` pair.
+        """A single ``('VertexIndex', 'i8')`` column (``{run_name}_VertexIndex`` if
+        `prefix_vertex_column`).
         """
         column = f"{run_name}_{VERTEX_INDEX}" if self.prefix_vertex_column else VERTEX_INDEX
         return [(column, "i8")]
 
     def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """Per-node vertex assignments as one ``i8`` column.
-
-        Union-finds the raw ``preds.*`` edge scores (``get_node_assignment_jit``
-        -> ``_mask_fill_flattened``) then casts to int. Padded positions read
-        the int32 cast of ``-inf`` (-2147483648).
-
-        Returns
-        -------
-        np.ndarray
-            ``[B, L]`` structured array with one ``i8`` field.
+        """Union-finds the raw edge scores to per-node vertex assignments, one
+        ``i8`` column (padded positions read int32 ``-2147483648``).
         """
         assert self.net is not None, "get_h5 before bind()"
         mask = b.get(f"masks.{self.stream}")
@@ -488,17 +430,8 @@ class VertexingTaskModule(_TaskModuleBase):
         return u2s(preds.int().cpu().numpy(), dtype)
 
     def onnx_outputs(self) -> list[ExportOutput]:
-        """One ``vertex_union_find`` int8 entry on the shared `VERTEX_INDEX` suffix.
-
-        The export suffix is the same `VERTEX_INDEX` constant the TEST column
-        uses (the exporter prepends ``{model_name}_``). The in-graph union-find
-        lives in the shipped ``vertex_union_find`` reduce; ONNX publishes raw
-        edge scores that the reduce consumes.
-
-        Returns
-        -------
-        list[ExportOutput]
-            One ``vertex_union_find`` int8 entry.
+        """One ``vertex_union_find`` int8 entry on the shared `VERTEX_INDEX` suffix;
+        ONNX publishes raw edge scores that the reduce consumes.
         """
         return [
             ExportOutput(
@@ -510,38 +443,15 @@ class VertexingTaskModule(_TaskModuleBase):
         ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
-        """The non-pred dep `get_output` reads: the stream pad mask.
-
-        A vertexing head always has a pad mask (its ``forward`` requires
-        ``masks.<stream>`` unconditionally), so this is mode-independent.
-
-        Returns
-        -------
-        list[str]
-            ``["masks.<stream>"]``.
+        """``["masks.<stream>"]`` — a vertexing head always requires a pad mask
+        (mode-independent).
         """
         del mode
         return [f"masks.{self.stream}"]
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
-        """Union-find the RAW edge scores into a graph-visible int8 leaf.
-
-        Reads the RAW ``preds.*`` ``[E, 1]`` edge scores + the stream pad mask
-        and runs the union-find conversion in TRACEABLE torch ops. Per mode:
-
-        - **ONNX**: ``get_node_assignment_jit`` -> ``mask_fill_flattened`` ->
-          ``.reshape(-1).char()`` -> one int8 ``[L]`` per-token field under the
-          shared `VERTEX_INDEX` suffix.
-        - **H5 modes** (TEST): ``run_inference`` -> ``.int()`` — the exact value
-          ``get_h5`` packs. One int8 per-token field, ``onnx_name=None``. The
-          column ``prefix`` follows ``prefix_vertex_column``.
-
-        ``run_name`` is not baked in (the sink prefixes it).
-
-        Returns
-        -------
-        list[OutputField]
-            One int8 vertex-index field (the per-token union-find assignment).
+        """ONNX: union-find -> flatten -> int8 ``[L]`` field under `VERTEX_INDEX`. H5 modes:
+        the same value `get_h5` packs, ``onnx_name=None``, prefix follows `prefix_vertex_column`.
         """
         del run_name
         assert self.net is not None, "get_output before bind()"
@@ -575,13 +485,7 @@ class VertexingTaskModule(_TaskModuleBase):
         ]
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``).
-
-        Returns
-        -------
-        list[OutputField]
-            The value-free serialisation field.
-        """
+        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
         del run_name
         if mode & Mode.ONNX:
             return [
@@ -606,21 +510,9 @@ class VertexingTaskModule(_TaskModuleBase):
 
 
 def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
-    """Whether an ``origin_weighting`` config is class-name based.
-
-    Name-based iff ANY heavy/fake entry is a string. A list mixing strings and
-    ints is rejected here so the caller fails at construction, not silently
-    half-resolved.
-
-    Returns
-    -------
-    bool
-        True for a (consistent) name-based config; False for all-integer ids.
-
-    Raises
-    ------
-    ConfigError
-        If any single role list mixes integer ids with class names.
+    """Name-based iff ANY heavy/fake entry is a string; raises `ConfigError` if a
+    single role list mixes ids and names (fail at construction, not silently
+    half-resolved).
     """
     for role, entries in (("heavy", heavy), ("fake", fake)):
         has_name = any(isinstance(e, str) for e in entries)
@@ -634,18 +526,8 @@ def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
 
 
 def _coerce_origin_ids(entries: Sequence[Any], role: str) -> tuple[int, ...]:
-    """Coerce an all-integer ``origin_weighting`` role list to a tuple of ids.
-
-    Returns
-    -------
-    tuple[int, ...]
-        The integer origin ids, in config order.
-
-    Raises
-    ------
-    ConfigError
-        On a non-integer entry (e.g. a float) — bool is rejected too (an origin
-        id is never True/False).
+    """Coerce an all-integer ``origin_weighting`` role list to a tuple of ids, in
+    config order; raises `ConfigError` on any non-int entry (bool included).
     """
     ids: list[int] = []
     for e in entries:

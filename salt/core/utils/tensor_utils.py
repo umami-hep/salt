@@ -1,4 +1,4 @@
-"""Shared tensor-shape helpers inlined from v1 salt/utils/tensor_utils.py."""
+"""Shared tensor-shape helpers."""
 
 from __future__ import annotations
 

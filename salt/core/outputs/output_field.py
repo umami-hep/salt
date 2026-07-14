@@ -42,7 +42,7 @@ class OutputField:
         written/exported leaf.
     prefix : bool
         Whether the H5 column is ``{run_name}_{h5_name}`` or the bare
-        `h5_name` (e.g. the v1 ``VertexIndex`` byte-parity column).
+        `h5_name` (e.g. an unprefixed ``VertexIndex`` column).
     value : Tensor | None
         The graph-visible converted tensor. ``None`` for the static manifest
         path (name/dtype/axis minted before any forward); filled by the
@@ -80,12 +80,8 @@ class OutputField:
 
 
 def _resolve_task(model_modules: Mapping[str, Any], task_name: str, who: str) -> Any:
-    """Look up the wrapped task module by name in the model module dict.
-
-    Raises
-    ------
-    ConfigError
-        When the named task is absent from the model module dict.
+    """Look up the wrapped task module by name in the model module dict;
+    raises `ConfigError` when absent.
     """
     task = model_modules.get(task_name)
     if task is None:

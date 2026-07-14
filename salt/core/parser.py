@@ -50,16 +50,10 @@ class DeepMergeParser(LightningArgumentParser):
         return super().merge_config(cfg_from, cfg_to)
 
     def parse_args(self, args: Sequence[str] | None = None, *pargs: Any, **kwargs: Any) -> Any:
-        """Parse args with ``--…modules.X=null`` normalised + the class_dict fan-out.
-
-        Two pre-validation steps ride on the standard parse: (1) ``--…modules.X=null``
-        is rewritten to the JSON-block form, and (2) ``--class_dict`` is fanned out
-        onto the model-side consumers (`_fan_out_artifacts`) — the only point that
-        runs AFTER the config-file deep-merge but BEFORE validation and any
-        ``--print_config`` dump, so the resolved values are frozen into the saved
-        run-dir config. Cannot be a `link_arguments` compute: its targets are dict
-        elements of the single ``model.init_args.modules`` action, and a whole-dict
-        self-link would destroy that action's deep-merge of ``base2.yaml``.
+        """Parse args with ``--…modules.X=null`` normalised to the JSON-block form,
+        then fan out ``--class_dict`` onto model-side consumers
+        (`_fan_out_artifacts`) after the deep-merge but before validation/
+        ``--print_config``, so resolved values freeze into the saved run config.
         """
         # W45.2c import-placement fix: _fan_out_artifacts stays in salt.core.main
         # (it resolves Salt2CLI subcommand scopes) and main imports this parser,
@@ -96,9 +90,8 @@ class DeepMergeParser(LightningArgumentParser):
 
 
 def _normalise_module_null(arg: str) -> str:
-    """Rewrite ``--…modules.X=null`` to the JSON-block form (see `_MODULE_DICT_NULL`).
-
-    Returns `arg` unchanged when it is not a module-dict null deletion.
+    """Rewrite ``--…modules.X=null`` to the JSON-block form (see
+    `_MODULE_DICT_NULL`); returns `arg` unchanged otherwise.
     """
     match = _MODULE_DICT_NULL.match(arg)
     if match is None:
@@ -112,16 +105,9 @@ _PRINT_CONFIG_FLAGS = {"skip_default": "skip_default", "skip_null": "skip_none"}
 
 
 def _dump_kwargs(flags: str) -> dict[str, bool]:
-    """Translate a ``--print_config=<flags>`` value to `ArgumentParser.dump` kwargs.
-
-    Mirrors `jsonargparse`'s ``_ActionPrintConfig`` flag handling so the
-    fan-out's manual dump (intercepted in `DeepMergeParser.parse_args`) honours
-    the same ``skip_default`` / ``skip_null`` keywords as the native action.
-
-    Raises
-    ------
-    ConfigError
-        On an unrecognised flag (parallels the native action's error).
+    """Translate a ``--print_config=<flags>`` value to `ArgumentParser.dump`
+    kwargs, mirroring jsonargparse's ``_ActionPrintConfig`` flag handling.
+    Raises `ConfigError` on an unrecognised flag.
     """
     kwargs: dict[str, bool] = {}
     for flag in (f for f in flags.split(",") if f):

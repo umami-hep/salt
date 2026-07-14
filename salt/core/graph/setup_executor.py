@@ -16,31 +16,17 @@ def run_setup_plan(plan: Plan, stage: SetupStage, ctx: Bundle | None = None) -> 
     """Execute a compiled setup `plan` for `stage`, threading one write-once ctx.
 
     Walks ``plan.steps`` in topological order, calling
-    ``module.setup(ctx, stage)`` on each module's live instance and merging its
-    produced keys into `ctx` under write-once + declaration checks (the setup
-    analogue of `Executor.run`).
+    ``module.setup(ctx, stage)`` and merging its produced keys into `ctx`
+    under write-once + declaration checks (the setup analogue of
+    `Executor.run`). A module may either merge into `ctx` itself and return
+    it (detected by identity, nothing to add), or return only its newly
+    produced dict, merged here against the step's declared ``produces`` as
+    the expected key set. `ctx` defaults to a fresh `Bundle`; passing an
+    existing one is how ``setup("fit")`` accumulates both ``"train"`` and
+    ``"val"`` into one ctx.
 
-    A module may either (a) merge into `ctx` itself and ``return ctx``, in
-    which case this loop adds nothing, or (b) ``return`` only its newly
-    produced dict, which this loop merges. Case (a) is detected by identity
-    (``produced is ctx``); case (b) is merged with the step's declared
-    ``produces`` as the ``expected`` key set — so a module that produces an
-    extra/missing key fails loudly with its name, exactly like the per-batch
-    executor.
-
-    Parameters
-    ----------
-    ctx : Bundle | None, optional
-        The shared write-once setup bundle to populate. A fresh `Bundle` is
-        created when None; passing an existing one is how ``setup("fit")``
-        accumulates both ``"train"`` and ``"val"`` into one ctx.
-
-    Raises
-    ------
-    KeyCollisionError
-        If a setup module writes a key already present (write-once).
-    DeclarationError
-        If a module's returned dict does not match its declared setup-produces.
+    Raises `KeyCollisionError` on a write-once violation, `DeclarationError`
+    on a produces mismatch.
     """
     if ctx is None:
         ctx = Bundle()

@@ -29,7 +29,7 @@ class OnnxExportLeaf:
     - **split_scalars** (``names`` plural, float32 global): one converted
       prob leaf (``ClassProbs`` already softmaxed) -> N named scalars. The
       split is a naming concern owned here (``torch.split(probs, 1, -1)`` +
-      squeeze, the v1 ``task.py:301`` math), not a new conversion node.
+      squeeze), not a new conversion node.
     - **single per-token leaf** (``name`` singular, int8, ``per_token=True``):
       the conversion node (e.g. ``SeqClassIndex``'s ONNX branch) already
       produced the int8 ``[L]`` leaf — the sink passes it through under its
@@ -155,8 +155,8 @@ class OnnxExportSink(_SinkCallback):
     ----------
     outputs : Sequence[OnnxExportLeaf | Mapping[str, Any]]
         The export outputs, in flat Athena tuple order — globals, then
-        combines, then per-token aux (the v1 order; the export node's list
-        is the authority, not executor topo order). Each entry is an
+        combines, then per-token aux (the export node's list is the
+        authority, not executor topo order). Each entry is an
         `OnnxExportLeaf` (or a mapping jsonargparse builds into one).
     model_name : str | None, optional
         The Athena output-name prefix (``{model_name}_{suffix}``). When None
@@ -204,13 +204,7 @@ class OnnxExportSink(_SinkCallback):
 
     @staticmethod
     def _validate_leaves(leaves: Sequence[OnnxExportLeaf]) -> None:
-        """Reject a duplicate leaf key or a duplicate flat Athena suffix (static dup guard).
-
-        Raises
-        ------
-        ConfigError
-            For a duplicate leaf key or a duplicate flat ONNX output name.
-        """
+        """Reject a duplicate leaf key or duplicate flat Athena suffix; raises `ConfigError`."""
         seen_keys: set[str] = set()
         seen_suffixes: set[str] = set()
         for leaf in leaves:
@@ -235,9 +229,8 @@ class OnnxExportSink(_SinkCallback):
         section's `RunTaskOutput` mints (in section declaration order, the
         canonical globals -> combines -> per-token tuple order, not executor
         topo order). It does no math and no ``torch.split`` / ``.squeeze`` —
-        ``get_output`` already squeezed each global per-class value to the
-        0-dim scalar v1 mints, so the dumb sink only names the already-scalar
-        values.
+        ``get_output`` already squeezed each global per-class value to a
+        0-dim scalar, so the dumb sink only names the already-scalar values.
         """
         self._output_section = section
         self._leaves_resolved = False
@@ -259,22 +252,12 @@ class OnnxExportSink(_SinkCallback):
     def _resolve_section_leaves(self) -> tuple[OnnxExportLeaf, ...]:
         """Resolve ONNX export leaves from the bound ``outputs:`` section.
 
-        Walks each section `RunTaskOutput`'s ``manifest_fields(Mode.ONNX)``
-        (value-free `OutputField` metadata) in SECTION DECLARATION ORDER,
-        keeps the FINAL fields with an ``onnx_name``, and mints ONE
-        `OnnxExportLeaf` per field — a single ``name`` (not a plural
-        ``names`` split, since each per-field leaf is already the single
-        scalar / index `get_output` minted). Orders them per the canonical
-        Athena tuple contract: GLOBAL float scalars first, then PER-TOKEN
-        aux (argmax / index) — independent of executor topo order, so the v1
-        tuple order is preserved. A static dup guard rejects two fields
-        minting the same flat suffix.
-
-        Raises
-        ------
-        ConfigError
-            When the section mints no ONNX leaf, or two fields mint the same
-            suffix.
+        Walks each `RunTaskOutput`'s ``manifest_fields(Mode.ONNX)`` in
+        SECTION DECLARATION ORDER, keeps FINAL fields with an ``onnx_name``,
+        and mints one single-``name`` `OnnxExportLeaf` per field. Ordered
+        GLOBAL scalars first then PER-TOKEN aux (independent of executor
+        topo order). Raises `ConfigError` when the section mints no ONNX
+        leaf or two fields mint the same suffix.
         """
         globals_block: list[OnnxExportLeaf] = []
         per_token_block: list[OnnxExportLeaf] = []
@@ -316,18 +299,9 @@ class OnnxExportSink(_SinkCallback):
         return ordered
 
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """Resolve the export leaves — explicit, or from the bound ``outputs:`` section.
-
-        With explicit leaves returns them unchanged. With a bound dumb
-        ``outputs:`` section the tuple comes from the section's
-        ``RunTaskOutput`` fields in section declaration order. With neither
-        it is a config error.
-
-        Raises
-        ------
-        ConfigError
-            When neither explicit leaves nor an ``outputs:`` section is
-            configured.
+        """Resolve the export leaves — explicit, or from the bound ``outputs:``
+        section (the section's `RunTaskOutput` fields in declaration order);
+        raises `ConfigError` when neither is configured.
         """
         if self._leaves_resolved:
             return self._leaves
@@ -352,15 +326,10 @@ class OnnxExportSink(_SinkCallback):
     # -- graph node surface -------------------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
-        """ONNX requires the conversion leaves (``kind=data``); empty produces. Prunes elsewhere.
-
-        In ``Mode.ONNX`` the sink requires every declared ``outputs.*``
-        conversion leaf (``kind=data``, ``shape``/``dtype`` None — the sink
-        consumes whatever the folded node emits and names it) and produces
-        nothing — a terminal node the demand-closure keeps so the folded
-        conversion nodes are pulled into the ONNX plan by genuine graph
-        demand. In FIT/VAL/TEST it declares empty requires AND produces, so
-        the planner prunes it (the FIT ``plan_hash`` is unperturbed).
+        """ONNX: requires every declared ``outputs.*`` conversion leaf
+        (``kind=data``, shape/dtype None), produces nothing (a terminal node
+        keeping the folded conversion nodes demanded). FIT/VAL/TEST: empty
+        requires/produces (pruned).
         """
         if mode is not Mode.ONNX:
             return IO(requires={}, produces={})
@@ -421,9 +390,9 @@ class OnnxExportSink(_SinkCallback):
         The declare-only sink's ONE realisation step: no conversion math
         (that ran in the trace) — only the ``split_scalars`` naming split.
         For a plural-``names`` leaf the converted prob vector is split into
-        per-class scalars (``torch.split(probs, 1, -1)`` + squeeze, v1
-        ``task.py:301``); single-name leaves (the int8 index leaf, a
-        combination scalar) pass through under their Athena name. The
+        per-class scalars (``torch.split(probs, 1, -1)`` + squeeze);
+        single-name leaves (the int8 index leaf, a combination scalar) pass
+        through under their Athena name. The
         `OnnxAdapter` calls this to source the folded outputs from the
         bundle instead of running a ``reduce.fn`` loop.
 

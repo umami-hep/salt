@@ -110,14 +110,8 @@ class GraphArtifacts(Callback):
 
     @staticmethod
     def _default_dir(trainer: Trainer, stage: str) -> Path:
-        """The stage's default artifact directory.
-
-        Returns
-        -------
-        Path
-            Test: the checkpoint's directory (where the eval H5 goes) when
-            ``trainer.ckpt_path`` is known; otherwise — and always on the
-            fit path — the trainer log dir.
+        """Test: the checkpoint's directory when ``trainer.ckpt_path`` is known;
+        otherwise (and always on fit) the trainer log dir.
         """
         ckpt_path = getattr(trainer, "ckpt_path", None)
         if stage == "test" and ckpt_path:
@@ -126,14 +120,8 @@ class GraphArtifacts(Callback):
 
     @staticmethod
     def _writer_sinks(trainer: Trainer, pl_module: LightningModule) -> list[str] | None:
-        """Per-writer consumed-keys lines for the TEST plan table.
-
-        Returns
-        -------
-        list[str] | None
-            ``"name (Class): key, key"`` lines from the attached writer
-            callback's `per_writer_demand`, or None when no writer callback
-            / reader / graph-module dict is attached.
+        """``"name (Class): key, key"`` lines from the attached writer callback's
+        `per_writer_demand`, or None when no writer/reader/module dict is attached.
         """
         callbacks = getattr(trainer, "callbacks", None) or []
         cb = next((c for c in callbacks if callable(getattr(c, "per_writer_demand", None))), None)
@@ -154,13 +142,8 @@ class GraphArtifacts(Callback):
     def _plan_text(
         plan: Plan, dataset: GraphDataset | None, writer_sinks: list[str] | None = None
     ) -> str:
-        """Build one ``plan_<mode>.txt`` payload: dataset plan + model plan.
-
-        Returns
-        -------
-        str
-            The artifact text; `writer_sinks` lines (TEST only) append as
-            the writer-sinks section.
+        """Build one ``plan_<mode>.txt`` payload: dataset plan + model plan, with
+        `writer_sinks` lines (TEST only) appended as a writer-sinks section.
         """
         sections: list[str] = []
         if dataset is not None:
@@ -181,14 +164,9 @@ class GraphArtifacts(Callback):
     def _resolved_io(
         self, trainer: Trainer, plans: Mapping[Mode, Plan], mode_names: tuple[str, ...]
     ) -> str:
-        """Build the ``resolved_io.yaml`` payload.
-
-        Returns
-        -------
-        str
-            YAML: per mode, the plan ``sources`` and each module's flattened
-            ``requires``/``produces`` with resolved specs — dataset-plan
-            modules included when a `GraphDataModule` stage dataset exists.
+        """The ``resolved_io.yaml`` YAML payload: per mode, plan ``sources`` + each
+        module's flattened requires/produces, plus dataset-plan modules when a
+        `GraphDataModule` stage dataset exists.
         """
         payload: dict[str, Any] = {}
         for mode_name in mode_names:
@@ -214,10 +192,8 @@ class GraphArtifacts(Callback):
         pruned: list[str],
         base: Path,
     ) -> None:
-        """Write DOT + image for one plan via the `dot` binary; degrade to DOT-only.
-
-        Best-effort: a missing/failing ``dot`` degrades to a DOT-only hint
-        and never crashes a training run.
+        """Write DOT + image for one plan via the `dot` binary; a missing/failing ``dot``
+        degrades to a DOT-only hint (never crashes the run).
         """
         dot_path = base.with_suffix(".dot")
         dot_path.write_text(dot_source(plan, modules, pruned))
@@ -241,13 +217,8 @@ class GraphArtifacts(Callback):
 
     @staticmethod
     def _stage_dataset(trainer: Trainer, mode_name: str) -> GraphDataset | None:
-        """The stage's `GraphDataset` from the attached datamodule, if any.
-
-        Returns
-        -------
-        GraphDataset | None
-            The dataset whose plan matches `mode_name`, or None for
-            non-Graph datamodules.
+        """The stage's `GraphDataset` from the attached datamodule matching `mode_name`,
+        or None for non-Graph datamodules.
         """
         dm = getattr(trainer, "datamodule", None)
         attr = {"fit": "train_dset", "val": "val_dset", "test": "test_dset"}[mode_name]
@@ -256,12 +227,8 @@ class GraphArtifacts(Callback):
 
 
 def _spec_dict(spec: TensorSpec) -> dict[str, Any]:
-    """A `TensorSpec` as plain YAML-able data (for ``resolved_io.yaml``).
-
-    Returns
-    -------
-    dict[str, Any]
-        ``shape``/``dtype``/``kind`` always; ``fields`` when declared.
+    """A `TensorSpec` as plain YAML-able data: ``shape``/``dtype``/``kind`` always,
+    ``fields`` when declared.
     """
     out: dict[str, Any] = {
         "shape": list(spec.shape) if spec.shape is not None else None,
@@ -274,13 +241,8 @@ def _spec_dict(spec: TensorSpec) -> dict[str, Any]:
 
 
 def _plan_io(plan: Plan) -> dict[str, Any]:
-    """One plan's sources + per-module resolved requires/produces.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"sources": {key: spec}, "modules": {name: {"class", "requires",
-        "produces"}}}`` in plan (topological) order.
+    """One plan's ``{"sources": {key: spec}, "modules": {name: {"class", "requires",
+    "produces"}}}``, in plan (topological) order.
     """
     return {
         "sources": {key: _spec_dict(spec) for key, spec in plan.sources.items()},

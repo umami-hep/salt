@@ -317,18 +317,12 @@ def _validate(schema: Schema) -> None:
 def _propagate_required_match_min_valid(schema: Schema) -> None:
     """Guarantee a genuine referent exists in phase 1 for every required_match link.
 
-    A ``link`` field with ``required_match: true`` that references a CONSTITUENT
-    group ``G`` raises the effective ``G.min_valid`` to ``max(G.min_valid, 1)``.
-    This forces phase 1 to generate at least one genuinely-valid referent (real
-    id from the id field's range, real payload) in every sample, so the phase-2
-    resolver always finds a non-empty pool. The alternative -- promoting an
-    already-invalid-filled slot to ``valid`` at phase 2 -- is wrong: that slot's
-    id has already been set to the int fill sentinel, producing a "valid"
-    referent with a sentinel id.
-
-    Global references are handled separately by ``_validate_link`` (rejected at
-    load time), since a global id cannot be forced valid without changing the
-    sample's identity.
+    A ``required_match: true`` link to a CONSTITUENT group ``G`` raises the
+    effective ``G.min_valid`` to ``max(G.min_valid, 1)`` — phase 1 must
+    generate at least one genuinely-valid referent (real id, real payload)
+    so the phase-2 resolver always finds a non-empty pool (promoting an
+    already-invalid-filled slot at phase 2 would carry a sentinel id).
+    Global references are rejected separately by `_validate_link`.
     """
     for g in schema.groups:
         if g.alias_of is not None:

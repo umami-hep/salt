@@ -126,13 +126,8 @@ def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> 
 
 
 def _is_trainer_format(raw: Mapping[str, Any]) -> bool:
-    """Check whether a parsed YAML mapping is a trainer config.
-
-    Returns
-    -------
-    bool
-        True for a top-level ``model:``/``data:`` mapping without the toy
-        ``modules:`` key.
+    """Whether a parsed YAML mapping is a trainer config: a top-level
+    ``model:``/``data:`` mapping without the toy ``modules:`` key.
     """
     return "modules" not in raw and ("model" in raw or "data" in raw)
 
@@ -231,34 +226,14 @@ def load_config(
 
 
 def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
-    """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`.
-
-    Parses the config(s) through the real `Salt2CLI` surface in run-free
-    mode (``base2.yaml`` auto-loaded, deep-merge/null-deletion semantics
-    intact), then builds the combined dataset + model graph: ``data.modules``
-    and ``model.modules`` form one module dict (the reader is the source
-    node, so ``sources`` is empty), the per-mode sinks are the model's
-    declared anchors (``loss.total`` / ``preds.*`` + TEST ``meta.rows``), and
-    the wildcard-narrowing universe comes from the reader's schema artifact.
-    Everything stays config-only — no data file is touched.
-
-    The TEST sinks are driven by the callbacks-level sink path
-    (``_static_writer_sink_callback`` / ``_as_sink_node``), which replaced the
-    ``writers:`` block. The resulting per-mode errors are carried in
-    `GraphConfig.mode_errors` (see its docstring).
-
-    Returns
-    -------
-    GraphConfig
-        The adapted config, with `reader` set for the validate-time
-        class-names check.
-
-    Raises
-    ------
-    ConfigError
-        When the trainer parse fails (with the ``--set`` hint — required
-        init_args like ``norm_dict`` can be supplied data-free), or when a
-        module name appears in both ``data.modules`` and ``model.modules``.
+    """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`:
+    parses through `Salt2CLI` run-free, combines ``data.modules`` +
+    ``model.modules`` into one module dict (the reader is the source node,
+    so ``sources`` is empty), and derives per-mode sinks from the model's
+    declared anchors plus the callbacks-level sink path (TEST H5/ONNX export
+    sinks, FIT/VAL metrics callbacks) — errors go to `GraphConfig.mode_errors`
+    rather than raising. Raises `ConfigError` on a trainer-parse failure or a
+    module-name collision between ``data.modules`` and ``model.modules``.
     """
     # local import: the trainer surface (lightning/jsonargparse) is heavy
     # and circular with this module (salt.core.main dispatches to cli.main)
@@ -412,22 +387,10 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
 
 def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> Any:
-    """Parse a trainer config (stack) through the real salt2 surface, run-free.
-
-    Repeated configs deep-merge left-to-right (the ``salt2 fit`` /
-    ``salt2 export`` stacking semantics) — the static tooling accepts the
-    same base + override pattern the trainer surface does.
-
-    Returns
-    -------
-    Salt2CLI
-        The run-free CLI (``cli.model``/``cli.datamodule`` constructed,
-        nothing executed, no data touched).
-
-    Raises
-    ------
-    ConfigError
-        When the parse fails (with the documented ``--set`` hint).
+    """Parse a trainer config (stack) through the real salt2 surface, run-free
+    (repeated configs deep-merge left-to-right, as `salt2 fit`/`salt2 export`
+    do). Returns the constructed `Salt2CLI` (nothing executed, no data
+    touched); raises `ConfigError` on a parse/instantiate failure.
     """
     from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
     from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (module docstring)
@@ -474,19 +437,10 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
 
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
-    """The configured callbacks-level TEST persistence sink, if any.
-
-    Wired at the ``callbacks:`` level — an `H5OutputWriter` (or any callback
-    exposing the duck-typed ``writer_demand`` surface). At runtime
-    `SaltModule._attached_writer`/`_writer_demand` fold its demand into the
-    TEST sinks; this static half lets ``salt2 graph`` resolve the same TEST
-    sinks so the in-graph conversion producers (``outputs.*``) stay alive in
-    the render instead of pruning dead.
-
-    Returns
-    -------
-    Any | None
-        The callbacks-level writer sink in trainer order (first match), or None.
+    """The configured callbacks-level TEST persistence sink (duck-typed on
+    ``writer_demand``, e.g. `H5OutputWriter`), or None — the static mirror of
+    `SaltModule._attached_writer` so ``salt2 graph`` resolves the same TEST
+    sinks.
     """
     from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
@@ -506,19 +460,10 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
 
 
 def _static_onnx_export_sink(cli: Any) -> Any | None:
-    """The configured callbacks-level `OnnxExportSink`, if any.
-
-    The folded ONNX counterpart to `_static_writer_sink_callback`: an
-    `OnnxExportSink` wired at the ``callbacks:`` level names the conversion
-    ``outputs.*`` leaves the folded nodes (argmax/split/combine) mint. Folding
-    it into the planning module dict lets ``salt2 graph plot --mode onnx``
-    render its own ``onnx_export`` card and keep the folded conversion nodes
-    alive.
-
-    Returns
-    -------
-    Any | None
-        The first `OnnxExportSink` in trainer order, or None.
+    """The configured callbacks-level `OnnxExportSink`, or None — the ONNX
+    counterpart to `_static_writer_sink_callback`, folded into the planning
+    module dict so ``salt2 graph plot --mode onnx`` renders it and keeps the
+    folded conversion nodes alive.
     """
     from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
@@ -528,17 +473,9 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
 
 
 def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
-    """The Athena output prefix for the static folded ONNX render.
-
-    Defaults exactly as `salt2 export`: the export block's ``model_name`` when
-    set, else the sanitised run name (``_``/``-`` stripped). Used only to name
-    the folded export sink's outputs in the static render (the runtime export
-    re-derives it from the resolved config).
-
-    Returns
-    -------
-    str
-        The model-name prefix.
+    """The Athena output prefix for the static folded ONNX render: the export
+    block's ``model_name`` if set, else the sanitised run name — matching
+    `salt2 export`'s own default.
     """
     from salt.core.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
 
@@ -547,19 +484,10 @@ def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
 
 
 def _as_sink_node(callback: Any) -> Any | None:
-    """The callback as a renderable sink NODE, if it is one.
-
-    A sink node is a `GraphModule` (``name`` + ``declare_io``) that marks
-    itself a terminal sink via ``is_sink() -> True`` (e.g. `H5OutputSink`).
-    Folding it into the planning module dict makes it render its own card
-    and anchor demand via its declared requires. A non-node persistence sink
-    (duck-typed ``writer_demand`` only, e.g. `CollectOutputs`) returns None
-    and keeps the legacy flat-``<sinks>`` folding.
-
-    Returns
-    -------
-    Any | None
-        The sink node, or None when `callback` is not a renderable sink node.
+    """`callback` as a renderable sink NODE (a `GraphModule` with
+    ``is_sink() -> True``, e.g. `H5OutputSink`), or None for a non-node
+    persistence sink (duck-typed ``writer_demand`` only, e.g.
+    `CollectOutputs`), which keeps the legacy flat-``<sinks>`` folding.
     """
     if callback is None:
         return None
@@ -571,20 +499,9 @@ def _as_sink_node(callback: Any) -> Any | None:
 
 
 def _static_fitval_callbacks(cli: Any) -> list[Any]:
-    """The configured FIT/VAL-sink callbacks from the run-free CLI.
-
-    The static-tooling half of the FIT/VAL-sink contract: any assembled
-    ``trainer.callbacks`` entry exposing a callable ``fit_val_demand`` (the
-    metrics family, e.g. `ConfusionMatrix`) is fed into
-    `SaltModule._model_sinks` so FIT/VAL sink derivation matches the runtime
-    path. Config-only: the callbacks are instantiated by the parse but never
-    ``setup``, and `fit_val_demand` resolves from the model module dict, not
-    from `setup` state.
-
-    Returns
-    -------
-    list[Any]
-        The FIT/VAL-sink callbacks in trainer order (empty when none).
+    """The configured FIT/VAL-sink callbacks (duck-typed on ``fit_val_demand``,
+    e.g. `ConfusionMatrix`) from the run-free CLI — the static-tooling mirror
+    of the runtime FIT/VAL-sink contract; config-only, never ``setup``.
     """
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
@@ -592,17 +509,8 @@ def _static_fitval_callbacks(cli: Any) -> list[Any]:
 
 
 def _parse_mode(name: str) -> Mode:
-    """Parse a mode name (``fit``/``training``/``all``/...) to a `Mode` flag.
-
-    Returns
-    -------
-    Mode
-        The parsed flag (may be composite for sinks mappings).
-
-    Raises
-    ------
-    ConfigError
-        On unknown mode names.
+    """Parse a mode name to a `Mode` flag (may be composite for sinks
+    mappings); raises `ConfigError` on an unknown name.
     """
     if isinstance(name, str) and name.upper() in Mode.__members__:
         return Mode[name.upper()]
@@ -611,17 +519,9 @@ def _parse_mode(name: str) -> Mode:
 
 
 def _parse_spec(key: str, node: Mapping[str, Any] | None) -> TensorSpec:
-    """Build a `TensorSpec` for source `key` from a plain YAML mapping.
-
-    Returns
-    -------
-    TensorSpec
-        The parsed spec; an empty/absent mapping gives the default spec.
-
-    Raises
-    ------
-    ConfigError
-        On unknown spec keys or invalid spec values.
+    """Build a `TensorSpec` for source `key` from a plain YAML mapping (empty/
+    absent -> the default spec); raises `ConfigError` on an unknown/invalid
+    spec key.
     """
     kwargs = dict(node or {})
     if unknown := set(kwargs) - _SPEC_KEYS:
@@ -642,17 +542,8 @@ def _parse_spec(key: str, node: Mapping[str, Any] | None) -> TensorSpec:
 
 
 def _parse_sources(raw: Any, path: Path) -> NestedSpec:
-    """Parse the ``sources:`` section to a `NestedSpec`.
-
-    Returns
-    -------
-    NestedSpec
-        The nested source spec tree (empty when the section is absent).
-
-    Raises
-    ------
-    ConfigError
-        On malformed entries or clashing dotted keys.
+    """Parse the ``sources:`` section to a `NestedSpec` (empty when absent);
+    raises `ConfigError` on malformed entries or clashing dotted keys.
     """
     if raw is None:
         return {}
@@ -684,18 +575,9 @@ def _parse_sources(raw: Any, path: Path) -> NestedSpec:
 
 
 def _parse_sinks(raw: Any, path: Path) -> Sinks:
-    """Parse the ``sinks:`` section to the planner `Sinks` type.
-
-    Returns
-    -------
-    Sinks
-        ``None`` when absent, a key list (flat form, compiled mode only), or
-        a ``{Mode: keys}`` mapping for full per-mode demand analysis.
-
-    Raises
-    ------
-    ConfigError
-        On malformed entries.
+    """Parse the ``sinks:`` section to the planner `Sinks` type: None when
+    absent, a flat key list, or a ``{Mode: keys}`` per-mode mapping. Raises
+    `ConfigError` on malformed entries.
     """
     if raw is None:
         return None
@@ -716,17 +598,9 @@ def _parse_sinks(raw: Any, path: Path) -> Sinks:
 
 
 def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
-    """Parse the ``schema:`` section to a flat key universe.
-
-    Returns
-    -------
-    tuple[str, ...] | None
-        Dotted ``group.field`` keys, or None when no schema is configured.
-
-    Raises
-    ------
-    ConfigError
-        On malformed entries (a bad schema *file* raises `SchemaError`).
+    """Parse the ``schema:`` section to a flat ``group.field`` key tuple, or
+    None when unconfigured. Raises `ConfigError` on malformed entries (a bad
+    schema file raises `SchemaError`).
     """
     if raw is None:
         return None
@@ -743,12 +617,8 @@ def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
 
 
 def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:
-    """Resolve the requested primary mode(s) from ``--mode``.
-
-    Returns
-    -------
-    tuple[Mode, ...]
-        A single mode if ``--mode`` was given, else all primary modes.
+    """The requested primary mode(s) from ``--mode`` (all primary modes if
+    unset).
     """
     if getattr(args, "mode", None) is None:
         return PRIMARY_MODES
@@ -756,24 +626,14 @@ def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:
 
 
 def _fail(message: str) -> int:
-    """Print an error to stderr and return exit code 1.
-
-    Returns
-    -------
-    int
-        Always 1.
-    """
+    """Print an error to stderr and return exit code 1."""
     print(message, file=sys.stderr)
     return 1
 
 
 def _format_graph_error(err: GraphError) -> str:
-    """Format a kernel error with its class prefixed.
-
-    Returns
-    -------
-    str
-        E.g. ``"salt.core.graph.ConnectivityError: ..."``.
+    """Format a kernel error with its class prefixed, e.g.
+    ``"salt.core.graph.ConnectivityError: ..."``.
     """
     return f"salt.core.graph.{type(err).__name__}: {err}"
 
@@ -786,22 +646,11 @@ def _format_graph_error(err: GraphError) -> str:
 def _cmd_validate(args: argparse.Namespace) -> int:
     """``salt2 graph validate``: compile every requested mode; report findings.
 
-    Graph errors are always fatal, as are error-level deadcode findings (an
-    unconsumed ``preds.*`` port in TEST) and stored per-mode sink errors
-    (`GraphConfig.mode_errors`); warnings (no schema configured,
-    warning-level dead outputs) are promoted to errors under ``--strict``.
-    Info-level findings (unconsumed FIT/VAL preds — the normal
-    no-metric-callback case) are report-only and never promoted, so
-    ``--strict`` stays usable as the CI default on standard tagger configs.
-
-    For TEST, the sink-path callbacks (``outputs:``/``callbacks:`` H5 sink)
-    drive the TEST sinks — the former ``writers:`` block and `WriterCallback`
-    were removed.
-
-    Returns
-    -------
-    int
-        0 on success, 1 on error (or warnings under ``--strict``).
+    Graph errors, error-level deadcode findings (an unconsumed ``preds.*``
+    port in TEST), and stored per-mode sink errors (`GraphConfig.mode_errors`)
+    are always fatal; warnings (no schema, warning-level dead outputs) promote
+    to errors under ``--strict``. Info-level findings (unconsumed FIT/VAL
+    preds — the normal no-metric-callback case) are report-only.
     """
     cfg = load_config(args.config, args.set)
     infos: list[str] = []
@@ -917,22 +766,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_deadcode(args: argparse.Namespace) -> int:
-    """``salt2 graph deadcode``: mode-aware dead-output report.
-
-    Findings carry severity levels: an unconsumed ``preds.*`` port in TEST is
-    an error by default and makes the command exit 1, as does a stored
-    per-mode sink error (the writers-block dead-preds error,
-    `GraphConfig.mode_errors`); unconsumed FIT/VAL preds are info (the
-    normal no-metric-callback case); the rest are warnings (report-only). A
-    per-task ``expose: [fit, val]`` opt-out gates the prediction port out of
-    TEST before this runs, so an opted-out task surfaces here as a
-    (warning-level) whole-module pruning rather than a TEST preds error.
-
-    Returns
-    -------
-    int
-        0 when no error-level finding exists; 1 on error-level findings or
-        if the graph itself fails to resolve.
+    """``salt2 graph deadcode``: mode-aware dead-output report. An unconsumed
+    ``preds.*`` port in TEST (or a stored per-mode sink error) is an error
+    (exit 1); unconsumed FIT/VAL preds are info; the rest are warnings. A
+    per-task ``expose: [fit, val]`` opt-out surfaces here as warning-level
+    module pruning instead of a TEST preds error.
     """
     cfg = load_config(args.config, args.set)
     rc = 0
@@ -964,15 +802,8 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
-    """``salt2 graph plan``: print the ordered plan table for one mode.
-
-    Shows each step's binding constraint (the latest predecessor forced by a
-    key edge) and the narrowed wildcard results.
-
-    Returns
-    -------
-    int
-        0 on success, 1 on graph errors.
+    """``salt2 graph plan``: print the ordered plan table for one mode — each
+    step's binding constraint and narrowed wildcard results.
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
@@ -991,14 +822,8 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 
 
 def _require_mode_ok(cfg: GraphConfig, mode: Mode) -> None:
-    """Raise the stored per-mode sink error when the requested mode is broken.
-
-    Raises
-    ------
-    ConfigError
-        The `GraphConfig.mode_errors` entry for `mode` (e.g. the TEST
-        dead-preds error derived from the parsed ``writers:`` block, or the
-        ONNX export-block resolution error).
+    """Raise the stored `GraphConfig.mode_errors` entry for `mode` (e.g. a TEST
+    dead-preds or ONNX export-block error) when the requested mode is broken.
     """
     if stored := cfg.mode_errors.get(mode):
         raise ConfigError(stored)
@@ -1028,21 +853,11 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
 
 
 def _cmd_plot(args: argparse.Namespace) -> int:
-    """``salt2 graph plot``: render the mode graph.
-
-    Emits Graphviz DOT (port-card layout, one signature card per module)
-    next to the requested output, then shells out to the ``dot``
-    binary — baked into the salt container — to rasterise it: a PNG at the
-    requested output path and a sibling PDF. This is the authoritative graph
-    image; there is no matplotlib path. When ``dot`` is absent, raises a clear
-    actionable error rather than silently degrading.
-
-    Returns
-    -------
-    int
-        0 on success, 1 on graph errors. A missing/failing ``dot`` binary
-        surfaces as a `GraphError` (raised by `_render_with_dot`), caught at
-        the CLI top level and reported as exit 1.
+    """``salt2 graph plot``: render the mode graph. Emits Graphviz DOT
+    (port-card layout) next to the requested output, then shells out to
+    ``dot`` (baked into the salt container) to rasterise a PNG + sibling PDF
+    — the authoritative graph image, no matplotlib path. A missing/failing
+    ``dot`` raises `GraphError` (via `_render_with_dot`).
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
@@ -1073,26 +888,12 @@ def _cmd_plot(args: argparse.Namespace) -> int:
 
 
 def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
-    """Resolve concrete feature widths statically for the plot.
-
-    Compiles every inspectable primary-mode plan and feeds them to
-    `resolve_bind_schema` — the same static resolution that builds the
-    width-dependent nn.Linear layers, with no data file and no batch run. The
-    resulting per-key last-dim widths let `dot_source` show the concrete
-    feature/embedding dim on each port-card row (``encoded.tracks (B, T:tracks,
-    16)``) while the data-dependent batch/sequence dims stay symbolic.
-
-    All compilable modes are unified (widths are config-fixed, so resolving
-    across modes is sound and gives the requested mode every cross-mode width):
-    a mode that legitimately fails to compile (`GraphConfig.mode_errors`, or a
-    planner error on a non-requested mode) is skipped rather than aborting the
-    plot — the requested mode is guaranteed present (the caller already compiled
-    it).
-
-    Returns
-    -------
-    dict[str, int]
-        ``{dotted_key: concrete_last_dim}`` for every statically resolvable key.
+    """Resolve concrete feature widths statically for the plot: compiles every
+    inspectable primary-mode plan and feeds them to `resolve_bind_schema` —
+    the same static resolution that builds the width-dependent nn.Linear
+    layers, data-free. All compilable modes are unified (widths are
+    config-fixed); a mode that fails to compile is skipped rather than
+    aborting the plot.
     """
     plans: list[Plan] = []
     for plan_mode in PRIMARY_MODES:
@@ -1118,19 +919,9 @@ def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
 
 
 def _render_with_dot(dot_path: Path, out_path: Path) -> None:
-    """Rasterise the DOT sidecar to PNG (``out_path``) and a sibling PDF via ``dot``.
-
-    Shells out to the Graphviz ``dot`` binary (baked into the salt container):
-    ``dot -Tpng -Gdpi=150 <dot> -o <out>.png`` and ``dot -Tpdf <dot> -o
-    <out>.pdf``. The PNG goes to the requested ``out_path``; the PDF takes the
-    same stem with a ``.pdf`` suffix.
-
-    Raises
-    ------
-    GraphError
-        When ``dot`` is not on PATH (actionable: rebuild/use the salt
-        container, which bakes in Graphviz), or when a ``dot`` invocation
-        fails (non-zero exit) — the stderr is surfaced in the message.
+    """Rasterise the DOT sidecar to a PNG (``out_path``) and a sibling PDF via
+    the ``dot`` binary. Raises `GraphError` when ``dot`` is not on PATH, or a
+    ``dot`` invocation fails (stderr surfaced in the message).
     """
     dot_bin = shutil.which("dot")
     if dot_bin is None:
@@ -1164,22 +955,10 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
 
 
 def _cmd_why(args: argparse.Namespace) -> int:
-    """``salt2 graph why``: explain one key's producer/consumers.
-
-    For a key in the plan: prints producer, spec, and consumers. For a key
-    absent from the plan: explains *why* (demand-pruned producer, mode-gated
-    port, or an undemanded wildcard match). Unknown keys exit 1 with
-    nearest-key suggestions.
-
-    Returns
-    -------
-    int
-        0 when the key exists or is explained; 1 when it is unknown.
-
-    Raises
-    ------
-    ConfigError
-        If ``--key`` is not a valid dotted bundle key.
+    """``salt2 graph why``: explain one key's producer/consumers. For a present
+    key: producer, spec, consumers. For an absent key: why (demand-pruned,
+    mode-gated, or an undemanded wildcard) — unknown keys exit 1 with
+    nearest-key suggestions. Raises `ConfigError` for an invalid ``--key``.
     """
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
@@ -1204,12 +983,8 @@ def _cmd_why(args: argparse.Namespace) -> int:
 
 
 def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
-    """Print producer/spec/consumers for a key that is in the plan.
-
-    Returns
-    -------
-    bool
-        True if the key was found (and explained), False otherwise.
+    """Print producer/spec/consumers for a key that is in the plan; True if
+    found (and explained).
     """
     producer: str | None = None
     spec: TensorSpec | None = None
@@ -1238,13 +1013,8 @@ def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
 
 
 def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
-    """Explain why `key` is absent from the mode's plan.
-
-    Returns
-    -------
-    int
-        0 if a definite explanation was printed (pruned / mode-gated /
-        undemanded wildcard), 1 if the key is unknown everywhere.
+    """Explain why `key` is absent from the mode's plan (pruned / mode-gated /
+    undemanded wildcard); 1 if the key is unknown everywhere.
     """
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = {finding.module: finding.reason for finding in findings if finding.key == "*"}
@@ -1334,18 +1104,9 @@ MANIFEST_END = "# === end salt2 output manifest ==="
 
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """``salt2 graph resolve``: the writer-derived output manifest, eval + ONNX.
-
-    Prints the assembled manifest (the answer to "what columns does eval
-    write / what does Athena see" for the unified-writer config); with
-    ``--annotate``, additionally writes it into the config file as a
-    refreshable comment block (replaced in place when already present).
-    With repeated ``-c`` the configs deep-merge left-to-right and the
+    Prints the assembled manifest; with ``--annotate``, writes it into the
+    config as a refreshable comment block. Repeated ``-c`` deep-merges and the
     annotation goes into the last (most specific) file.
-
-    Returns
-    -------
-    int
-        0 on success; 1 on a non-trainer config or a manifest error.
     """
     paths = [Path(p) for p in args.config]
     raws = []
@@ -1371,18 +1132,9 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
 def _manifest_block(
     cli: Any, writer_cb: Any, paths: Sequence[Path], set_overrides: Sequence[str] | None
 ) -> str:
-    """Render the eval + ONNX manifest as a config comment block.
-
-    The embedded refresh hint reproduces the full generating command —
-    every ``-c`` file and every ``--set`` override — so the printed
-    command re-runs verbatim on configs whose required init_args (e.g.
-    ``norm_dict``) are supplied data-free.
-
-    Returns
-    -------
-    str
-        Lines between `MANIFEST_BEGIN` and `MANIFEST_END`, all
-        ``#``-prefixed (safe to append to any YAML file).
+    """Render the eval + ONNX manifest as a ``#``-prefixed config comment block
+    (lines between `MANIFEST_BEGIN`/`MANIFEST_END`), with an embedded refresh
+    hint reproducing the full generating command.
     """
     model, dm = cli.model, cli.datamodule
     modules = model._graph_modules  # noqa: SLF001 - same-package adapter
@@ -1441,12 +1193,9 @@ def _manifest_block(
 
 
 def _write_annotation(path: Path, block: str) -> None:
-    """Insert or refresh the manifest comment block in a config file.
-
-    A previous generated block (between `MANIFEST_BEGIN` and
-    `MANIFEST_END`) is replaced in place; otherwise the block is appended
-    at the end of the file — comments are inert YAML, so the config parses
-    identically.
+    """Insert or refresh the manifest comment block in a config file: a
+    previous generated block is replaced in place, else appended at the end
+    (comments are inert YAML).
     """
     text = path.read_text()
     new_lines: list[str] = []
@@ -1476,13 +1225,7 @@ def _write_annotation(path: Path, block: str) -> None:
 
 
 def _cmd_schema_dump(args: argparse.Namespace) -> int:
-    """``salt2 schema dump``: scrape an H5 file into a schema artifact.
-
-    Returns
-    -------
-    int
-        0 on success, 1 on unreadable input.
-    """
+    """``salt2 schema dump``: scrape an H5 file into a schema artifact."""
     h5_path = Path(args.file)
     if not h5_path.is_file():
         return _fail(f"input file not found: {h5_path}")
@@ -1532,13 +1275,7 @@ def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``salt2`` argument parser.
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        The configured parser; each subcommand sets ``func``.
-    """
+    """Build the ``salt2`` argument parser; each subcommand sets ``func``."""
     parser = argparse.ArgumentParser(
         prog="salt2", description="salt v2 static graph tooling (M1 kernel CLI, design §4)"
     )

@@ -113,23 +113,14 @@ class InputSamples(DatasetModule):
         self._num_stage = next((s for s in stages if s in self._stages), None)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Empty per-batch interface — `InputSamples` never produces tensors.
-
-        The empty default (no requires, no produces): this module is
-        setup-only and is partitioned into ``_setup_modules``.
+        """Empty per-batch interface — `InputSamples` never produces tensors;
+        setup-only, partitioned into `_setup_modules`.
         """
         del mode
         return IO()
 
     def _reader_name(self) -> str:
-        """The wired reader name, or raise if assembly never poked it.
-
-        Raises
-        ------
-        RuntimeError
-            If `_reader` was never wired (InputSamples used outside a
-            GraphDataModule, or before assembly).
-        """
+        """The wired reader name, or raise `RuntimeError` if assembly never wired `_reader`."""
         if self._reader is None:
             raise RuntimeError(
                 f"InputSamples {self.name!r} has no reader name wired — it must be assembled "
@@ -141,16 +132,9 @@ class InputSamples(DatasetModule):
     def declare_setup_io(self, stage: SetupStage) -> SetupIO:
         """Declare the per-stage path produce (+ the whole-dict num scalar once).
 
-        Source node: ``requires = {}`` always (a topo-sort root). For an active
-        stage it produces ``source.<reader>.<stage>.pattern`` (path); the
-        ``artifacts.<reader>.num`` whole-dict scalar leaf is produced once, on
-        the first active stage, so the ``setup("fit")`` train+val passes into one
-        write-once ctx never collide on it.
-
-        Returns
-        -------
-        SetupIO
-            Empty for an inactive stage; otherwise the per-stage produces.
+        Source node (``requires={}``); an active stage produces
+        ``source.<reader>.<stage>.pattern``, and the ``artifacts.<reader>.num``
+        whole-dict scalar is produced once, on the first active stage.
         """
         if stage not in self._stages:
             return SetupIO()
@@ -167,21 +151,9 @@ class InputSamples(DatasetModule):
     def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
         """Resolve ``files[stage]`` onto the ctx (pure path arithmetic, no FS I/O).
 
-        Writes ``source.<reader>.<stage>.pattern`` = ``str(files[stage])`` and,
-        on the run's num-stage, the whole-dict ``artifacts.<reader>.num`` scalar
-        leaf. A wildcard passes through verbatim — `InputSamples` never globs;
-        the reader or the `VDS` module resolves it.
-
-        This module owns the merge into `ctx` and returns `ctx`, so the flat
-        dotted produces must be canonicalised to nested single-component form
-        (`canonical_produced` — the same canonicalisation the per-batch
-        executor applies) before `Bundle.merge`, whose component validator
-        rejects bare dotted keys.
-
-        Returns
-        -------
-        SetupBundle
-            The same `ctx`, with this stage's produces merged in (write-once).
+        Writes ``source.<reader>.<stage>.pattern`` and, on the run's num-stage,
+        the whole-dict ``artifacts.<reader>.num`` scalar; a wildcard passes
+        through verbatim (InputSamples never globs — the reader or `VDS` resolves it).
         """
         if stage not in self._stages:
             return ctx
@@ -194,12 +166,8 @@ class InputSamples(DatasetModule):
         return ctx
 
     def _num_dict(self) -> dict[str, int]:
-        """The whole-dict row-cap leaf, defaulting each active stage to ``-1``.
-
-        Returns
-        -------
-        dict[str, int]
-            ``{stage: num}`` for every active stage; ``-1`` (all) when unset.
+        """The whole-dict row-cap leaf (``{stage: num}``), defaulting each active
+        stage to ``-1``.
         """
         return {stage: self._num.get(stage, -1) for stage in self._stages}
 
@@ -210,33 +178,9 @@ SOURCE_REGISTRY: tuple[str, ...] = ("pattern", "vds_path", "staged_path")
 
 
 def deepest_source_path(ctx: SetupBundle, reader: str, stage: SetupStage) -> str:
-    """Walk the fixed registry over the resolved ctx and return the deepest path.
-
-    The datamodule handoff glue: after the setup pass completes, the reader
-    binds the deepest present key of the ``pattern -> vds_path -> staged_path``
-    chain for ``(reader, stage)``. The reader is not a declared consumer of
-    this chain — deepest-resolution is glue over the producer chain's
-    already-completed write-once ctx, not a topo edge (so the reader's
-    `declare_setup_io` need not vary with sibling-module presence).
-
-    Parameters
-    ----------
-    ctx : SetupBundle
-        The resolved setup bundle (post setup pass).
-    reader : str
-        The reader instance name.
-    stage : SetupStage
-        The setup stage to resolve.
-
-    Returns
-    -------
-    str
-        The deepest present PATH value for ``(reader, stage)``.
-
-    Raises
-    ------
-    KeyError
-        If no key of the chain is present (InputSamples never ran for `stage`).
+    """Walk the fixed ``pattern -> vds_path -> staged_path`` registry over the resolved
+    ctx and return the deepest present path for ``(reader, stage)`` (raises `KeyError`
+    if none of the chain is present).
     """
     check_key_component(reader)
     found: str | None = None
@@ -253,22 +197,8 @@ def deepest_source_path(ctx: SetupBundle, reader: str, stage: SetupStage) -> str
 
 
 def source_num(ctx: SetupBundle, reader: str, stage: SetupStage) -> int:
-    """Read the per-stage row cap off the whole-dict ``artifacts.<reader>.num`` leaf.
-
-    Parameters
-    ----------
-    ctx : SetupBundle
-        The resolved setup bundle.
-    reader : str
-        The reader instance name.
-    stage : SetupStage
-        The setup stage.
-
-    Returns
-    -------
-    int
-        The row cap for `stage` (``-1`` = all). Defaults to ``-1`` when the
-        whole-dict leaf is absent or omits `stage`.
+    """The per-stage row cap from the whole-dict ``artifacts.<reader>.num`` leaf
+    (``-1`` = all; defaults to ``-1`` when the leaf is absent or omits `stage`).
     """
     check_key_component(reader)
     key = f"artifacts.{reader}.num"

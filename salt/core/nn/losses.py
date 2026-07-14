@@ -59,13 +59,7 @@ class LossSum(nn.Module):
             self._check_weight_keys()
 
     def _check_weight_keys(self) -> None:
-        """Reject weight entries that name no summed loss key.
-
-        Raises
-        ------
-        ConfigError
-            Naming the unknown weight keys and the known loss keys.
-        """
+        """Reject weight entries that name no summed loss key."""
         assert self._loss_keys is not None
         if unknown := sorted(set(self.weights) - set(self._loss_keys)):
             raise ConfigError(
@@ -84,10 +78,7 @@ class LossSum(nn.Module):
     ) -> tuple[str, ...]:
         """Scan sibling modules (LossSum instances skipped) for declared ``losses.*`` produces.
 
-        Returns
-        -------
-        tuple[str, ...]
-            All declared loss keys, in module-dict declaration order.
+        Returns all declared loss keys, in module-dict declaration order.
         """
         keys: list[str] = []
         for module in modules.values():
@@ -123,11 +114,7 @@ class LossSum(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only, empty in TEST/ONNX).
 
-        Raises
-        ------
-        ConfigError
-            If the loss keys were never fixed (no ``losses:`` config and no
-            `narrow` call).
+        Raises `ConfigError` if the loss keys were never fixed.
         """
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
@@ -208,13 +195,8 @@ class LossGLS(LossSum):
         Called by `SaltModule.__init__` when a `LossGLS` is present, BEFORE
         any `declare_io`/compile, so a weighted task under GLS fails loudly at
         assembly rather than silently rescaling the geometric mean. Modules
-        without a numeric ``weight`` attribute (`Normaliser`, `Concat`,
-        `LossSum`/`LossGLS`, ...) are ignored — only the loss producers carry it.
-
-        Raises
-        ------
-        ConfigError
-            Naming each task whose ``weight`` is not 1.0.
+        without a numeric ``weight`` attribute are ignored. Raises
+        `ConfigError` naming each offending task.
         """
         offenders = {
             name: float(module.weight)

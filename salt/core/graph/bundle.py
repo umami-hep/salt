@@ -40,28 +40,14 @@ class Bundle:
 
     @property
     def data(self) -> dict[str, Any]:
-        """The underlying plain nested dict (live reference — do not mutate).
-
-        Returns
-        -------
-        dict[str, Any]
-            The nested payload dict.
-        """
+        """The underlying plain nested dict (live reference — do not mutate)."""
         return self._data
 
     def get(self, key: str) -> Any:
         """Return the leaf value at a dotted key, e.g. ``b.get("preds.jets.cls")``.
 
-        Returns
-        -------
-        Any
-            The leaf value (tensor, ndarray, or other plain payload).
-
-        Raises
-        ------
-        KeyError
-            If the key is missing, names a subtree rather than a leaf, or
-            descends through an existing leaf.
+        Raises `KeyError` if the key is missing, names a subtree rather
+        than a leaf, or descends through an existing leaf.
         """
         split_key(key)
         value = self._leaves.get(key, _MISSING)
@@ -77,18 +63,9 @@ class Bundle:
     def subtree(self, prefix: str) -> dict[str, Any]:
         """Return a copy of the nested dict under `prefix` (leaf values shared).
 
-        The returned structure is freshly built, so mutating it cannot bypass
-        the bundle's write-once semantics.
-
-        Returns
-        -------
-        dict[str, Any]
-            A fresh nested dict; leaf values are shared with the bundle.
-
-        Raises
-        ------
-        KeyError
-            If `prefix` is unknown or names a leaf rather than a subtree.
+        Freshly built, so mutating the result cannot bypass the bundle's
+        write-once semantics. Raises `KeyError` if `prefix` is unknown or
+        names a leaf rather than a subtree.
         """
         split_key(prefix)
         if prefix in self._leaves:
@@ -108,13 +85,7 @@ class Bundle:
         return out
 
     def keys(self) -> list[str]:
-        """Return all flattened dotted leaf keys.
-
-        Returns
-        -------
-        list[str]
-            Dotted leaf keys, in insertion order.
-        """
+        """Return all flattened dotted leaf keys, in insertion order."""
         return list(self._leaves)
 
     def __contains__(self, key: str) -> bool:
@@ -133,10 +104,8 @@ class Bundle:
     # -- write access (write-once) ------------------------------------------
 
     def set(self, key: str, value: Any) -> None:
-        """Set a leaf at a dotted key; raises KeyCollisionError if the key exists.
-
-        Write-once: collisions with existing leaves, existing subtrees, or
-        leaf prefixes of `key` all raise KeyCollisionError.
+        """Set a leaf at a dotted key; write-once: raises `KeyCollisionError`
+        on collision with an existing leaf, subtree, or leaf prefix of `key`.
         """
         parts = split_key(key)
         self._check_writable(key, who=None)
@@ -145,17 +114,12 @@ class Bundle:
     def merge(self, produced: dict[str, Any], who: str, expected: AbstractSet[str]) -> None:
         """Merge a module's produced nested dict into the bundle (executor-only).
 
-        Write-once enforced, and the produced key set is checked against the
-        producing module's declaration on EVERY merge — the executor passes
-        the declared key set as `expected` (Bundle stays decoupled from
-        planner types). The check-then-insert order makes the merge atomic:
-        on error, no produced key has been written. A produced key colliding
-        with the bundle raises KeyCollisionError.
-
-        Raises
-        ------
-        DeclarationError
-            If the produced key set does not equal `expected`.
+        Write-once enforced; the produced key set is checked against
+        `expected` (the executor passes the declared key set, keeping
+        Bundle decoupled from planner types) on EVERY merge. Check-then-
+        insert makes the merge atomic: on error, nothing has been written.
+        Raises `KeyCollisionError` on a colliding key, `DeclarationError`
+        if the produced set doesn't equal `expected`.
         """
         expected_set = set(expected)
         flat = _flatten_produced(produced, expected_set, prefix="")
@@ -188,13 +152,7 @@ class Bundle:
                 self._insert(tuple(key.split(KEY_SEP)), key, value)
 
     def _leaf_prefix_of(self, key: str) -> str | None:
-        """Return the existing leaf that is a proper dotted prefix of `key`, if any.
-
-        Returns
-        -------
-        str | None
-            The blocking leaf key, or None.
-        """
+        """Return the existing leaf that is a proper dotted prefix of `key`, or None."""
         parts = key.split(KEY_SEP)
         for depth in range(1, len(parts)):
             prefix = KEY_SEP.join(parts[:depth])
@@ -203,12 +161,9 @@ class Bundle:
         return None
 
     def _check_writable(self, key: str, who: str | None) -> None:
-        """Check that writing `key` would not violate write-once.
-
-        Raises
-        ------
-        KeyCollisionError
-            If `key`, a subtree at `key`, or a leaf prefix of `key` exists.
+        """Check that writing `key` would not violate write-once; raises
+        `KeyCollisionError` if `key`, a subtree at `key`, or a leaf prefix
+        of `key` exists.
         """
         via = f" (while merging from module {who!r})" if who is not None else ""
         if key in self._leaves:
@@ -242,11 +197,6 @@ def _flatten_produced(produced: dict[str, Any], expected: set[str], prefix: str)
     are treated as structure and descended for precise mismatch reporting.
     Empty undeclared dicts are recorded as leaves so they surface as
     unexpected keys rather than vanishing silently.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{dotted_key: value}`` in nested-dict iteration order.
     """
     flat: dict[str, Any] = {}
     for name, value in produced.items():

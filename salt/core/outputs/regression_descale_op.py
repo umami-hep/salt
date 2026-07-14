@@ -117,12 +117,8 @@ class RegressionDescaleOp(ConversionOp):
     def _checked_norm_params(
         norm_params: Mapping[str, Any] | None,
     ) -> dict[str, list[float]] | None:
-        """Normalise + validate the ``norm_params`` mapping.
-
-        Raises
-        ------
-        ConfigError
-            If the mapping is present but lacks ``mean``/``std``.
+        """Normalise + validate the ``norm_params`` mapping; raises `ConfigError`
+        if present but lacking ``mean``/``std``.
         """
         if norm_params is None:
             return None
@@ -151,11 +147,9 @@ class RegressionDescaleOp(ConversionOp):
         ]
 
     def extra_requires(self, stream: str) -> dict[str, TensorSpec]:
-        """Demand the ratio-denominator sources (+ pad mask for a sequence head).
-
-        FIT|VAL|TEST read each denominator from ``labels.<stream>.<denom>``;
-        ONNX gathers them by name from the raw ``inputs.<stream>`` Feature
-        tensor. norm_params / scaler need no external source.
+        """Demand the ratio-denominator sources (+ pad mask for a sequence head):
+        FIT/VAL/TEST from ``labels.<stream>.<denom>``, ONNX from the raw
+        ``inputs.<stream>`` Feature tensor (by name); norm_params/scaler need none.
         """
         out: dict[str, TensorSpec] = {}
         if self.sequence:
@@ -179,15 +173,9 @@ class RegressionDescaleOp(ConversionOp):
         return out
 
     def bind(self, fields: tuple[str, ...]) -> None:
-        """Capture the input Feature column order for the ONNX by-name gather.
-
-        Every ratio denominator must be a declared column of
-        ``inputs.<stream>`` so the export graph can gather it by name.
-
-        Raises
-        ------
-        ConfigError
-            If a ratio denominator is not a declared input Feature column.
+        """Capture the input Feature column order for the ONNX by-name gather;
+        raises `ConfigError` if a ratio denominator is not a declared
+        ``inputs.<stream>`` column.
         """
         self._input_fields = tuple(fields)
         if self.target_denominators is None:

@@ -1,4 +1,4 @@
-"""Dense fully-connected block (v1 salt/models/dense.py absorption)."""
+"""Dense fully-connected block."""
 
 from __future__ import annotations
 
@@ -104,13 +104,7 @@ class Dense(nn.Module):
 
 
 def _reject_width_keys(who: str, cfg: Mapping[str, Any] | None, banned: tuple[str, ...]) -> None:
-    """Reject configured width keys — widths are inferred at bind.
-
-    Raises
-    ------
-    ConfigError
-        Naming the offending keys.
-    """
+    """Reject configured width keys (inferred at bind); raises `ConfigError` naming them."""
     if cfg and (bad := sorted(set(cfg) & set(banned))):
         raise ConfigError(
             f"{who}: dense config must not set {bad} — widths are inferred at bind from the "

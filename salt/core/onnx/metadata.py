@@ -142,12 +142,8 @@ def _export_hash() -> str | None:
 
     Tolerates a missing/unreadable git context (e.g. a container binding
     only the worktree, whose ``.git`` file points outside the bind) with a
-    warning instead of failing the export.
-
-    Returns
-    -------
-    str | None
-        The hash, or None when git state is unavailable.
+    warning instead of failing the export. Returns the hash, or None when
+    git state is unavailable.
     """
     try:
         from ftag.git_check import get_git_hash  # noqa: PLC0415 - optional, env-dependent

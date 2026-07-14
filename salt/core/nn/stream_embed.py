@@ -32,9 +32,9 @@ def _stream_len(stream: str) -> str:
 
 
 class StreamEmbed(nn.Module):
-    """Config-constructed per-stream initial embedding, replacing v1 `InitNet`.
+    """Config-constructed per-stream initial embedding.
 
-    Composes a fresh v1 `Dense` built at `bind`, with input width inferred
+    Composes a `Dense` built at `bind`, with input width inferred
     from the resolved input and context widths. Context entries are
     PREPENDED in list order (``cat([context, x])``), so the feature layout is
     ``[ctx[-1], ..., ctx[0], stream]``.
@@ -141,9 +141,8 @@ class StreamEmbed(nn.Module):
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + context keys -> ``embed.<stream>``.
 
-        Rank-AGNOSTIC: the input require and the ``embed.<s>`` produce both
-        declare ``shape=None``, so the embed inherits its rank from the bound
-        input. The ``out_dim`` width is contributed at bind via `derived_widths`.
+        Rank-agnostic: both declare ``shape=None``, so the embed inherits its
+        rank from the bound input; ``out_dim`` is contributed at bind.
         """
         del mode
         requires: dict[str, TensorSpec] = {

@@ -165,12 +165,7 @@ class MaskDecoder(nn.Module):
         return parts[1] if len(parts) > 1 else parts[0]
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``input`` + ``seq.mask`` -> the four ``objects.*`` keys (all modes).
-
-        The input is the encoded constituent sequence ``[B, T, D]`` (registers already
-        dropped); ``seq.mask`` ``[B, T]`` suppresses padded constituents in the mask
-        logits. All four products are active in every mode.
-        """
+        """Declare ``input`` + ``seq.mask`` -> the four ``objects.*`` keys (all modes)."""
         del mode
         stream = self._input_stream()
         tok = _stream_len(stream)
@@ -198,17 +193,7 @@ class MaskDecoder(nn.Module):
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
-        """Validate the resolved input width equals ``embed_dim``.
-
-        All submodules are width-fixed at ``__init__``, so there is nothing to construct
-        here — but a mismatched encoder output width would only surface as a cryptic
-        matmul error at the first forward, so it is caught loudly now.
-
-        Raises
-        ------
-        ConfigError
-            If the resolved ``input`` width is not ``embed_dim``.
-        """
+        """Validate the resolved input width equals ``embed_dim`` (all submodules are pre-sized)."""
         width = schema.width(self.input_key)
         if width != self.embed_dim:
             raise ConfigError(
@@ -225,11 +210,7 @@ class MaskDecoder(nn.Module):
                 backend("torch-math")
 
     def _get_preds(self, q: Tensor, x: Tensor, pad_mask: Tensor | None) -> dict[str, Tensor]:
-        """Class logits/probs + mask logits from queries.
-
-        The binary special case (``output_size == 1``) sigmoid-expands to a 2-column
-        ``class_probs``; otherwise the class head softmaxes over classes.
-        """
+        """Class logits/probs + mask logits from queries; ``output_size==1`` sigmoid-expands."""
         class_logits = self.class_net(q)
         if class_logits.shape[-1] == 1:
             class_probs = class_logits.sigmoid()
@@ -240,11 +221,7 @@ class MaskDecoder(nn.Module):
         return {"class_logits": class_logits, "class_probs": class_probs, "masks": pred_masks}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Refine the queries against the encoded sequence; produce the object predictions.
-
-        ``objects.embed`` is the refined queries ``[B, M, D]`` (the object-regression
-        task input).
-        """
+        """Refine the queries against the encoded sequence; produce the object predictions."""
         del mode
         x = b.get(self.input_key)
         pad_mask = b.get("seq.mask")
@@ -322,17 +299,7 @@ class MaskDecoderLayer(nn.Module):
         kv: Tensor,
         kv_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Apply one decoder layer step.
-
-        Parameters
-        ----------
-        q : Tensor
-            Query embeddings of shape ``[B, M, E]``.
-        kv : Tensor
-            Input/key-value embeddings of shape ``[B, L, E]``.
-        kv_mask : Tensor | None, optional
-            Padding mask for ``kv`` of shape ``[B, L]``, by default ``None``.
-        """
+        """Apply one decoder layer step (cross-attn, self-attn, GLU, optional bidirectional CA)."""
         attn_mask = None
         if self.mask_attention:
             # True = attend, False = masked (transformers-2 SDPA convention)

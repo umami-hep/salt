@@ -358,15 +358,13 @@ class Reader(DatasetModule):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Cut -> sort -> truncate -> pad jagged columns into a structured ``(B, T)`` array.
 
-        The shared `Reader`-base assembly: delegates to
-        `salt.core.data.stream._cut_sort_truncate_pad`. Every jagged-stream
-        reader (easyjet, ftag1lite, the jagged-combine path of multisample)
-        calls this instead of re-implementing pad/sentinel logic.
+        Delegates to `salt.core.data.stream._cut_sort_truncate_pad`. Every
+        jagged-stream reader (easyjet, ftag1lite, the jagged-combine path of
+        multisample) calls this instead of re-implementing pad/sentinel logic.
 
-        With ``stream_cfg`` carrying no cuts and no sort (the default) this
-        reproduces the readers' contiguous truncate+pad+valid path
-        byte-for-byte; the drop-then-pad / sort machinery engages only when
-        cuts/sort are configured.
+        With ``stream_cfg`` carrying no cuts and no sort (the default), only
+        truncate+pad+valid run; the drop-then-pad / sort machinery engages
+        only when cuts/sort are configured.
 
         Parameters
         ----------

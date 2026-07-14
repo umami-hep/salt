@@ -472,7 +472,7 @@ def test_load_schema_yaml(tmp_path):
 # --------------------------------------------------------------------------- #
 def _required_match_schema(n_samples=2000, seed=11):
     """A schema where the referenced group would otherwise have 0 valid items in
-    many samples (valid_fraction=0.05, min_valid=0), with a required_match link.
+    many samples, with a required_match link.
     """
     return {
         "n_samples": n_samples,
@@ -527,10 +527,7 @@ def _required_match_schema(n_samples=2000, seed=11):
 
 
 def test_required_match_propagates_min_valid_and_never_links_fill():
-    """required_match=True guarantees a genuine referent in every sample, and
-    every valid source link resolves to a real referent id, never the fill
-    sentinel.
-    """
+    """Every valid source link resolves to a real referent id, never the fill sentinel."""
     schema = _required_match_schema()
     fill_int = -1
 
@@ -573,9 +570,9 @@ def test_required_match_propagates_min_valid_and_never_links_fill():
 
 
 def test_select_over_all_slots_vs_valid_ids():
-    """select_over:all_slots may draw from ANY referenced slot (including invalid
-    pool members carrying the -1 fill), while the default valid_ids never points
-    a valid link at an invalid slot."""
+    """select_over=all_slots may draw from ANY referenced slot (incl. invalid, -1
+    fill); the default valid_ids never points a valid link at an invalid slot.
+    """
     fill_int = -1
 
     def _schema(select_over):

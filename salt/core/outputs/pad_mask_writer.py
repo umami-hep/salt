@@ -17,8 +17,8 @@ class PadMaskWriter(OutputSectionWriter):
 
     Declares ``outputs.<stream>.mask`` and produces the bool pad-mask leaf (read
     verbatim from ``masks.<stream>`` — True = padded). The per-token file-length
-    re-expansion (incl. the v1 ``mask=False`` truncation quirk) stays in the dumb
-    H5 sink. Matches the legacy ``salt.core.writers.PadMaskWriter`` semantics.
+    re-expansion (incl. the ``mask=False`` truncation quirk) stays in the dumb
+    H5 sink.
 
     Unlike `InputCopyWriter`, the pad mask IS a bundle leaf (``masks.<stream>``),
     so this writer is a real graph node: it requires ``masks.<stream>`` and
@@ -30,9 +30,8 @@ class PadMaskWriter(OutputSectionWriter):
     ----------
     streams : Sequence[str]
         The sequence streams to write a mask column for. Each must be a padded
-        sequence stream (validated by the sink against the reader). Required and
-        explicit (the v1 default — every sequence stream with a configured task —
-        is resolved by the sink, which knows the reader).
+        sequence stream (validated by the sink against the reader). Required
+        and explicit — the sink resolves the reader's default set.
     """
 
     name = "pad_mask"
