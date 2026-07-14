@@ -57,7 +57,7 @@ class MaskFormerTargets(Processor):
 
     DEMAND-gated, not mode-gated: all three product families are declared
     in ALL modes; ordinary sink pruning removes the module from a plan only
-    when nothing demands its outputs. The `MaskFormerObjectWriter` demands
+    when nothing demands its outputs. The `MaskFormerObjectsSink` demands
     ``labels.objects.{object_class,masks}`` in TEST (truth columns), so
     this module IS in the test plan. It is pruned from ONNX (nothing
     demands truth there).

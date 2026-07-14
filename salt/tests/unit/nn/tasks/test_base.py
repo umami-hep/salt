@@ -84,7 +84,7 @@ class TestGn2V2Execution:
             track_logits[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-3
         )
         # vertexing (W34.3 flipped) TEST output: RAW [E, 1] edge scores (the
-        # union-find moved off forward to get_output / get_h5), NOT the [B, T, 1]
+        # union-find moved off forward to get_output), NOT the [B, T, 1]
         # per-node assignments the forward used to publish.
         vtx = b.get("preds.tracks.track_vertexing")
         assert vtx.ndim == 2 and vtx.shape[1] == 1  # [E, 1] raw edge scores

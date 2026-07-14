@@ -178,7 +178,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_test_descale_uses_label_denominator(self, norm_paths):
-        """TEST forward = RAW scaled preds (W34.3 flip); get_h5 de-scales via the LABEL denom."""
+        """TEST forward = RAW scaled preds (W34.3 flip); get_output de-scales via LABEL denom."""
         targets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
         task = RegressionTaskModule(
             stream="jets",
@@ -209,13 +209,15 @@ class TestRegressionTaskModule:
             raw, _ = task.head_forward(pooled, {}, None, context=None)
         # W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
-        # get_h5 now owns the de-scale (label-sourced denominator, v1 get_h5)
-        h5 = task.get_h5(b, run_name="reg")
+        # get_output owns the de-scale (label-sourced denominator; the retired
+        # get_h5 pack is re-anchored onto the get_output field, plan 50 Phase E)
+        field = task.get_output(b, Mode.TEST, "reg")[0]  # [0]: prediction field (then targets)
+        assert field.h5_name == "pt"  # custom_output_names
         with torch.no_grad():
             ref = task.run_inference(
                 raw.clone(), labels={"jets": {"pt_btagJes": labels["labels.jets.pt_btagJes"]}}
             )
-        assert torch.allclose(torch.as_tensor(h5["reg_pt"]), ref[..., 0], atol=1e-6)
+        assert torch.allclose(field.value, ref[..., 0], atol=1e-6)
 
     def test_onnx_descale_uses_input_feature_by_name(self, norm_paths):
         """ONNX de-scales with the denominator gathered BY NAME from inputs.<stream>."""

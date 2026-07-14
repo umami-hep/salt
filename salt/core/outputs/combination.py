@@ -11,7 +11,6 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.core.nn.base import SaltModelModule
-from salt.core.outputs.output_field import OutputField
 
 
 class Combination(SaltModelModule):
@@ -108,10 +107,3 @@ class Combination(SaltModelModule):
         source = b.get(self.source)
         out = sum(scale * source[..., index] for index, scale in self.terms)
         return {self.output_key: out}
-
-    def output_columns(
-        self, run_name: str, model_modules: Mapping[str, Any]
-    ) -> list[OutputField]:
-        """One float global field named after the combination; present in both H5 and ONNX."""
-        del run_name, model_modules
-        return [OutputField(h5_name=self.output_name, dtype="f4", axis="global", final=True)]

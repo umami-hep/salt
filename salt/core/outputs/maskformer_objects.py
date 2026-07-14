@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 import torch
 from torch import Tensor
@@ -14,10 +13,8 @@ from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.core.nn.base import SaltModelModule
 
 # The MaskFormer export math is inlined verbatim in salt.core.onnx.reduces (the
-# legacy reduce path); this node reuses that exact copy so the folded node and
-# the legacy reduce can never drift.
+# shared math seam); this node reuses that exact copy so the two can never drift.
 from salt.core.onnx.reduces import get_maskformer_outputs
-from salt.core.outputs.output_field import OutputField
 
 
 class MaskFormerObjects(SaltModelModule):
@@ -195,32 +192,6 @@ class MaskFormerObjects(SaltModelModule):
             self.vertices_class_probs_key: vertices_class_probs,
             self.vertices_regression_key: vertices_regression,
         }
-
-    def output_columns(
-        self, run_name: str, model_modules: Mapping[str, Any]
-    ) -> list[OutputField]:
-        """The MaskFormer object leaves' field manifest — index + leading + intermediates.
-
-        The per-vertex ``vertices_class_probs`` / ``vertices_regression``
-        are exposed intermediates (``final=False``) that sinks must not
-        auto-collect.
-        """
-        del run_name, model_modules
-        return [
-            OutputField(
-                h5_name=None, onnx_name=self.index_name, dtype="int8",
-                axis="per_token", final=True,
-            ),
-            OutputField(h5_name=self.leading_name, dtype="f4", axis="global", final=True),
-            OutputField(
-                h5_name="vertices_class_probs", onnx_name=None, dtype="f4",
-                axis="per_token", final=False,
-            ),
-            OutputField(
-                h5_name="vertices_regression", onnx_name=None, dtype="f4",
-                axis="per_token", final=False,
-            ),
-        ]
 
 
 # One-window alias: `MaskFormerObject` was renamed `MaskFormerObjects`. The

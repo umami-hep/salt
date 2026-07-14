@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 from torch import Tensor
 
@@ -16,8 +15,6 @@ from salt.core.nn.base import SaltModelModule
 # nodes below reuse those exact copies so the folded node and the legacy
 # reduce can never drift.
 from salt.core.onnx.reduces import mask_fill_flattened
-from salt.core.outputs.names import VERTEX_INDEX
-from salt.core.outputs.output_field import OutputField
 from salt.core.utils.union_find import get_node_assignment_jit
 
 
@@ -104,22 +101,3 @@ class VertexUnionFind(SaltModelModule):
         vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
         vertex_list = mask_fill_flattened(vertex_indices, pad_mask)
         return {self.output_key: vertex_list.reshape(-1).char()}
-
-    def output_columns(
-        self, run_name: str, model_modules: Mapping[str, Any]
-    ) -> list[OutputField]:
-        """One int8 per-token ONNX-only field on the shared `VERTEX_INDEX` suffix.
-
-        No auto-collected H5 column: the TEST H5 vertex column comes from the
-        vertexing task's own ``get_h5`` instead.
-        """
-        del run_name, model_modules
-        return [
-            OutputField(
-                h5_name=None,
-                onnx_name=VERTEX_INDEX,
-                dtype="int8",
-                axis="per_token",
-                final=True,
-            )
-        ]

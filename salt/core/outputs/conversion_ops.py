@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.spec import Mode, TensorSpec, sym_dim
-from salt.core.outputs.names import pascal_case
-from salt.core.outputs.output_field import OutputField
 from salt.core.utils.tensor_utils import masked_softmax
 
 # Conversion ops: small strategy objects (not nn.Module) holding config and
@@ -30,31 +26,6 @@ class ConversionOp:
     def derived_width(self, in_width: int) -> int:
         """The output leaf's last-dim width given the input width (unchanged by default)."""
         return in_width
-
-    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
-        """Field manifest for this op's output leaf, resolved from the wrapped task.
-
-        The base (identity) mirrors the wrapped task's own ``output_names``:
-        one field per column, bare suffix (run-name prefix stripped — the sink
-        re-prefixes), dtype from the task descriptor, axis from the task's
-        sequence flag.
-
-        Raises
-        ------
-        ConfigError
-            When the wrapped task ships no ``output_names`` rendering.
-        """
-        names = task.output_names(run_name)
-        sequence = bool(getattr(task, "sequence", False))
-        axis = "per_token" if sequence else "global"
-        fields: list[OutputField] = []
-        for column, dtype in names:
-            suffix = column[len(run_name) + 1 :] if column.startswith(f"{run_name}_") else column
-            prefix = column.startswith(f"{run_name}_")
-            fields.append(
-                OutputField(h5_name=suffix, dtype=str(dtype), axis=axis, final=True, prefix=prefix)
-            )
-        return fields
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Identity copy of the prediction leaf (cloned so the output never aliases it)."""
@@ -78,14 +49,6 @@ class ClassProbsOp(ConversionOp):
 
     def __init__(self, bce: bool = False) -> None:
         self.bce = bool(bce)
-
-    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
-        """One float global field per class (``class_suffixes``); same suffixes for H5 and ONNX."""
-        del run_name
-        return [
-            OutputField(h5_name=px, dtype="f4", axis="global", final=True)
-            for px in task.class_suffixes
-        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Sigmoid (BCE) or softmax over the class dim."""
@@ -131,23 +94,6 @@ class SeqClassIndexOp(ConversionOp):
         """The argmax collapses the class dim to a single index column (always 1)."""
         del in_width
         return 1
-
-    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
-        """One int8 per-token ONNX-only field named ``pascal_case(task)`` (e.g. ``TrackOrigin``).
-
-        No H5 column (``h5_name=None``): the TEST H5 carries the full prob
-        vector via the sibling `SeqClassProbs` producer instead.
-        """
-        del run_name
-        return [
-            OutputField(
-                h5_name=None,
-                onnx_name=pascal_case(task.name),
-                dtype="int8",
-                axis="per_token",
-                final=True,
-            )
-        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Masked-softmax then per-token ``argmax`` over the class dim (mode-branched).
@@ -196,16 +142,6 @@ class SeqClassProbsOp(ConversionOp):
                 shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
             )
         }
-
-    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
-        """One float per-token H5-only field per class (``class_suffixes``); no ONNX leaf."""
-        del run_name
-        return [
-            OutputField(
-                h5_name=px, onnx_name=None, dtype="f4", axis="per_token", final=True
-            )
-            for px in task.class_suffixes
-        ]
 
     def convert(self, b: Bundle, mode: Mode, *, pred_key: str, stream: str) -> Tensor:
         """Masked-softmax over the class dim; ``[B, L, C]`` per-token probabilities."""

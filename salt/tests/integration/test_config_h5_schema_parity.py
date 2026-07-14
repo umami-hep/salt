@@ -1,24 +1,27 @@
-"""Per-config gate — dumb ``outputs:``-section H5 column schema == legacy TaskWriter schema."""
+"""Per-config gate — the ``outputs:``-section H5 column schema == the committed schema goldens.
+
+Closure evidence (plan 50 Phase E, 2026-07-14): this gate previously compared the
+section schema against the tasks' legacy ``output_names`` rendering (the G1
+oracle, retired with ``get_h5``/``onnx_outputs``). The contract is now the
+committed per-config schema goldens at ``salt/tests/_fixtures/output_goldens/``
+(captured at 96d88d8 via ``generate_goldens.py``, regenerated green through
+Phase C with the per-task target-label columns) — never self-consistency alone.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from salt.core.graph.spec import KEY_SEP
 from salt.core.main import CONFIG_DIR
 from salt.core.onnx.export import _run_free_cli
 
 pytestmark = pytest.mark.cpu_always
 
-# the dumb ``outputs:``-section H5OutputSink schema gate. All production
-# classification/regression/gaussian configs ride the ``outputs:`` section +
-# dumb sinks (the auto-collect producer-discovery path was removed). The
-# classification family's section H5 output is gated end-to-end by
-# test_outputs_section.py (and the regression family by test_regression_e2e.py /
-# test_regression_gaussian_e2e.py); this gate guards the ``regression`` /
-# ``regression_gaussian`` section schema == the tasks' declared output_names.
+GOLDEN_DIR = Path(__file__).parents[1] / "_fixtures" / "output_goldens"
+
 _NORM = "model.modules.norm.init_args.norm_dict=unused.yaml"
 # disable the logger so the run-free parse does not hit the keyless CometLogger
 # instantiate failure (no COMET_API_KEY in CI/local) — _run_free_cli does not apply
@@ -29,90 +32,61 @@ MIGRATED = {
     "regression_gaussian": [_NORM, _NO_LOGGER],
 }
 
-# heads whose H5 eval column is a DEFERRED family (no conversion producer):
-# their columns are excluded from the parity comparison (documented deferral).
-_DEFERRED_TASK_TYPES = {"VertexingTaskModule"}
+
+def _golden_columns(config_name: str) -> list[dict]:
+    """The committed golden's resolved H5 column table, in schema order."""
+    golden = json.loads((GOLDEN_DIR / f"{config_name}.json").read_text())
+    return [
+        {
+            "key": col["key"],
+            "stream": col["stream"],
+            "column_names": list(col["column_names"]),
+            "dtype": col["dtype"],
+            "prefix": bool(col["prefix"]),
+            "suffixes": list(col["suffixes"]),
+        }
+        for col in golden["h5"]["columns"]
+    ]
 
 
-def _legacy_columns(modules, run_name: str) -> dict[str, list[tuple[str, str]]]:
-    """The legacy TaskWriter H5 schema per stream: {stream: [(column, dtype), ...]}.
-
-    Extended (plan 50 Phase C) with the per-task target-label columns the
-    section now appends after each task's prediction columns: ``target_{task}``
-    (i4, classification) / ``target_{task}_{target}`` (f4, regression, one per
-    physical target — the legacy TaskWriter never wrote these).
-    """
-    out: dict[str, list[tuple[str, str]]] = {}
-    for module in modules.values():
-        pred_key = getattr(module, "pred_key", None)
-        stream = getattr(module, "stream", None)
-        # a task head: has pred_key + stream + output_names, and is NOT a conversion producer
-        if (
-            not isinstance(pred_key, str)
-            or not isinstance(stream, str)
-            or isinstance(getattr(module, "output_key", None), str)
-            or not callable(getattr(module, "output_names", None))
-        ):
-            continue
-        if type(module).__name__ in _DEFERRED_TASK_TYPES:
-            continue
-        try:
-            names = module.output_names(run_name)
-        except Exception:  # noqa: BLE001 — a head with no TEST rendering (shouldn't happen here)
-            continue
-        out.setdefault(stream, []).extend((str(c), str(d)) for c, d in names)
-        if getattr(module, "write_targets", False):
-            if getattr(module, "targets", None) is not None:
-                # regression: one unscaled physical target column per target
-                out[stream].extend((f"target_{module.name}_{t}", "f4") for t in module.targets)
-            else:
-                # classification: the consumed class label
-                out[stream].append((f"target_{module.name}", "i4"))
-    return out
-
-
-def _section_columns(sink, run_name: str) -> dict[str, list[tuple[str, str]]]:
-    """The dumb-section H5OutputSink schema per stream: {stream: [(column, dtype), ...]}."""
-    out: dict[str, list[tuple[str, str]]] = {}
-    for col in sink._resolve_columns(run_name):  # noqa: SLF001
-        stream = col.key.split(KEY_SEP)[1]
-        for column in col.column_names(run_name):
-            out.setdefault(stream, []).append((column, col.dtype))
-    return out
+def _section_columns(sink, run_name: str) -> list[dict]:
+    """The live sink's resolved column table, normalised like the golden capture."""
+    return [
+        {
+            "key": col.key,
+            "stream": col.stream,
+            "column_names": list(col.column_names(run_name)),
+            "dtype": col.dtype,
+            "prefix": bool(col.prefix),
+            "suffixes": list(col.suffixes),
+        }
+        for col in sink._resolve_columns(run_name)  # noqa: SLF001
+    ]
 
 
 @pytest.mark.parametrize("config_name", sorted(MIGRATED))
-def test_section_h5_schema_matches_legacy_taskwriter(config_name):
-    """The migrated config's dumb-section H5 schema == legacy TaskWriter schema (per stream)."""
+def test_section_h5_schema_matches_committed_golden(config_name):
+    """The migrated config's ``outputs:``-section H5 schema == the committed golden table."""
     from salt.core.cli import _as_sink_node, _static_writer_sink_callback
 
     config = CONFIG_DIR / f"{config_name}.yaml"
     assert config.is_file(), f"missing config {config}"
+    golden = _golden_columns(config_name)
+    assert golden, f"{config_name}: committed golden carries no H5 columns"
+
     cli = _run_free_cli([config], MIGRATED[config_name])
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001
-    modules = dict(cli.model._graph_modules)  # noqa: SLF001
     sink = _as_sink_node(_static_writer_sink_callback(cli))
     assert sink is not None, f"{config_name}: no H5OutputSink wired at callbacks"
     # the section is composed + bound onto the sink by Salt2CLI.instantiate_classes
-    # (the run-free CLI path); assert it really is the dumb-section path now.
+    # (the run-free CLI path); assert it really is the dumb-section path.
     assert sink._is_dumb_section(), (  # noqa: SLF001
-        f"{config_name}: H5OutputSink is not driven by the outputs: section "
-        "(the auto-collect path was removed)"
+        f"{config_name}: H5OutputSink is not driven by the outputs: section"
     )
 
-    legacy = _legacy_columns(modules, run_name)
     section = _section_columns(sink, run_name)
-
-    # every NON-deferred stream the legacy writer serialises must be reproduced
-    # EXACTLY by the section (same columns, same order, same dtypes). Compare the
-    # legacy streams as the authority.
-    diffs: list[str] = []
-    for stream, legacy_cols in legacy.items():
-        section_cols = section.get(stream, [])
-        if section_cols != legacy_cols:
-            diffs.append(
-                f"[{config_name}] stream {stream!r} column schema mismatch\n"
-                f"  legacy (TaskWriter):   {legacy_cols}\n"
-                f"  section (H5OutputSink): {section_cols}"
-            )
-    assert not diffs, "SECTION H5 SCHEMA PARITY FAILED:\n" + "\n".join(diffs)
+    assert section == golden, (
+        f"[{config_name}] section H5 schema drifted from the committed golden\n"
+        f"  golden ({GOLDEN_DIR / (config_name + '.json')}):\n    {golden}\n"
+        f"  section (H5OutputSink._resolve_columns):\n    {section}"
+    )

@@ -106,10 +106,9 @@ def derive_onnx_sources(export: ExportConfig, variables: Mapping[str, Sequence[s
 def _folded_output_table(adapter: OnnxAdapter) -> str:
     """Render the folded export-sink output table from the adapter.
 
-    The folded-path counterpart to `manifest_table`: a pure-folded config carries
-    no legacy ``resolved.outputs`` manifest, so the "what does Athena see" table is
-    rendered from the adapter's generated names/dtypes instead. One row per flat
-    ONNX output: name, dtype, the folded-source note.
+    The "what does Athena see" table, rendered from the adapter's generated
+    names/dtypes. One row per flat ONNX output: name, dtype, the
+    folded-source note.
     """
     rows = list(zip(adapter.output_names, adapter.output_dtypes, strict=True))
     width = max((len(name) for name, _ in rows), default=1)
@@ -126,9 +125,7 @@ def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
 
     An export-node config wires an `OnnxExportSink`
     (``salt.core.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
-    folded conversion leaves (argmax/split/combine) as a terminal node, while any
-    legacy reduce outputs (union_find/maskformer) still ride ``export.outputs``.
-    A config with no such node is the pure legacy path (unchanged).
+    folded conversion leaves (argmax/split/combine) as a terminal node.
 
     Raises `ConfigError` if more than one `OnnxExportSink` is configured
     (the Athena tuple has a single ordering authority).
@@ -149,21 +146,16 @@ def compile_onnx_plan(
     export: ExportConfig,
     variables: Mapping[str, Sequence[str]],
 ) -> Plan:
-    """Compile the ``Mode.ONNX`` plan demanded by the export sinks (folded + legacy).
+    """Compile the ``Mode.ONNX`` plan demanded by the folded export sink.
 
-    Two demand sources: a folded `OnnxExportSink` in ``model.modules`` anchors the
-    conversion leaves (argmax/split/combine) as a terminal node — its
-    ``declare_io(Mode.ONNX).requires`` are the ONNX sinks; any LEGACY reduce
-    outputs (union_find/maskformer, not folded) still ride ``export.outputs``
-    ports. A config may MIX both without drift; a pure-legacy config has no export
-    sink and uses ``[out.port for out in export.outputs]`` EXACTLY as before —
-    byte-identical plan.
+    A folded `OnnxExportSink` in ``model.modules`` anchors the conversion
+    leaves (argmax/split/combine) as a terminal node — its
+    ``declare_io(Mode.ONNX).requires`` are the ONNX sinks.
 
-    `export` must carry the legacy manifest (`attach_manifest`) UNLESS a folded
-    export sink supplies the demand. Demand pruning removes labels/losses/matcher
-    automatically; a missing output producer raises the planner's
-    `ConnectivityError`. A `ShapeError` on an ``export.inputs`` port is re-raised
-    with the config address and the concrete fix appended.
+    Demand pruning removes labels/losses/matcher automatically; a missing
+    output producer raises the planner's `ConnectivityError`. A `ShapeError`
+    on an ``export.inputs`` port is re-raised with the config address and the
+    concrete fix appended.
 
     Raises
     ------
@@ -177,8 +169,8 @@ def compile_onnx_plan(
     if export_sink is None:
         raise ConfigError(
             "compile_onnx_plan needs a folded OnnxExportSink in model.modules (plan-29 W4) — "
-            "the off-graph reduce manifest (WriterCallback.onnx_manifest + attach_manifest) "
-            "was retired. Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
+            "the off-graph reduce manifest was retired. "
+            "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
             "conversion nodes (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/"
             "Combination) own the math inside the traced graph (design §4.2/§6)."
         )
@@ -230,9 +222,8 @@ def export_graph(
     """Export a bound, weight-loaded module dict to ONNX (the programmatic core).
 
     Resolves+validates the export block (`model_name` rules apply HERE, never at
-    fit), attaches the writer-derived output manifest (or a hand-built
-    `ExportOutput` list in fixture code), compiles the ONNX plan, builds the
-    `OnnxAdapter` (torch-math forced), traces at ``opset_version=20,
+    fit), compiles the ONNX plan demanded by the folded `OnnxExportSink`, builds
+    the `OnnxAdapter` (torch-math forced), traces at ``opset_version=20,
     dynamo=False`` with example inputs sized from the `Features` declaration, and
     writes the ``gnn_config`` metadata. The checker is a separate step
     (`check_onnx` — the CLI runs it by default).
@@ -248,8 +239,9 @@ def export_graph(
         Per-stream `Features` variable lists.
     onnx_path : str | Path
         Output ``.onnx`` path.
-    outputs : Sequence[ExportOutput]
-        The writer-derived output manifest, in manifest order.
+    outputs : Sequence[Any]
+        RETIRED — must be empty (the folded `OnnxExportSink` supplies the
+        output demand); a non-empty value raises.
     run_name : str, optional
         The run ``name:`` — the default `model_name` source, by default
         ``"salt"``.

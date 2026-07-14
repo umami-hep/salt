@@ -12,8 +12,8 @@ from torch import Tensor
 from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.core.outputs.collect_outputs import _OUTPUTS_NAMESPACE
 from salt.core.outputs.h5_sink import _SinkCallback
+from salt.core.outputs.names import _OUTPUTS_NAMESPACE
 
 
 @dataclass(frozen=True)

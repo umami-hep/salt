@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor, nn
 
 from salt.core.graph.bundle import Bundle
@@ -18,7 +17,6 @@ from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
-from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.output_field import OutputField
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
@@ -605,7 +603,7 @@ class RegressionTaskModule(_TaskModuleBase):
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Publishes RAW (scaled) preds in every non-training mode; de-scaling
-        happens exactly once downstream in `get_h5`/`get_output`. A
+        happens exactly once downstream in `get_output`. A
         `publish_targets` head returns scaled targets instead of a loss.
         """
         assert self.net is not None, "forward before bind()"
@@ -662,7 +660,7 @@ class RegressionTaskModule(_TaskModuleBase):
 
     def _descaled_preds(self, b: Bundle, mode: Mode) -> Tensor:
         """De-scale the RAW ``preds.*`` leaf via `run_inference` to ``[..., R]`` (plain) or
-        ``[..., 2R]`` means-then-stds (gaussian); shared by `get_h5`/`get_output` so de-scaling
+        ``[..., 2R]`` means-then-stds (gaussian); shared by `get_output` calls so de-scaling
         happens exactly once.
         """
         assert self.net is not None, "de-scale before bind()"
@@ -681,28 +679,6 @@ class RegressionTaskModule(_TaskModuleBase):
         return descaled
 
     # -- output rendering ---------------------------------------------------
-
-    def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """One ``f4`` column per `output_suffixes` entry, named ``{run_name}_{suffix}``."""
-        return [(f"{run_name}_{suffix}", "f4") for suffix in self.output_suffixes]
-
-    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """The de-scaled values as ``f4`` columns."""
-        preds = self._descaled_preds(b, Mode.TEST)
-        dtype = np.dtype(self.output_names(run_name))
-        return u2s(preds.float().cpu().numpy(), dtype)
-
-    def onnx_outputs(self) -> list[ExportOutput]:
-        """The legacy ``split_scalars`` manifest entry, kept for manifest-gate assertions only —
-        the live ONNX de-scale runs on `get_output` via an `OnnxExportSink`, not this.
-        """
-        return [
-            ExportOutput(
-                port=self.pred_key,
-                names=list(self.output_suffixes),
-                reduce="split_scalars",
-            )
-        ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
         """A ratio head's denominator source (labels in FIT|VAL|TEST, ``inputs.<stream>`` in

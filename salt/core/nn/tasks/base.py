@@ -8,7 +8,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -17,7 +16,6 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode, TensorSpec
 from salt.core.nn.base import SaltModelModule
 from salt.core.nn.dense import Dense, _reject_width_keys
-from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.output_field import OutputField
 
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
@@ -118,74 +116,12 @@ class _TaskModuleBase(SaltModelModule):
         """  # noqa: DOC201 - private one-line predicate
         return self.write_targets and bool(mode & Mode.TEST)
 
-    # -- output rendering: TEST columns + values, ONNX manifest -----------------
+    # -- output rendering: the get_output surface --------------------------------
     #
-    # Per-family rendering lives on the task; `TaskWriter` only orchestrates
-    # (groups, prefixes-by-stream, pads, writes) and never branches on task
-    # family. A family that ships no rendering inherits the base methods below,
-    # which raise a ConfigError naming the missing rendering.
-
-    onnx_renameable: bool = False
-    """Whether `TaskWriter` ``onnx_names`` may override this task's ONNX suffix.
-
-    True for classification (needed when class names collide across two
-    classification tasks). False for vertexing (fixed `VERTEX_INDEX` suffix)
-    and regression (suffixes are its own ``custom_output_names``).
-    """
-
-    def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """The TEST column schema for this task — ``(column_name, np_dtype_str)``.
-
-        Parameters
-        ----------
-        run_name : str
-            The run ``name:`` — the TEST column prefix.
-
-        Raises
-        ------
-        ConfigError
-            For a task family that ships no TEST rendering.
-        """
-        del run_name
-        raise ConfigError(self._no_render_msg("TEST columns"))
-
-    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """Render this task's formatted TEST values as a structured array.
-
-        Reads the task's published ``preds.*`` leaf from `b` and renders it to
-        a structured array whose dtype is ``np.dtype(self.output_names(run_name))``.
-
-        Parameters
-        ----------
-        b : Bundle
-            The executed TEST bundle (carries the converted ``preds.*`` leaf).
-        run_name : str
-            The run ``name:`` — the TEST column prefix (matches `output_names`).
-
-        Raises
-        ------
-        ConfigError
-            For a task family that ships no TEST rendering.
-        """
-        del b, run_name
-        raise ConfigError(self._no_render_msg("TEST values"))
-
-    def onnx_outputs(self) -> list[ExportOutput]:
-        """Render this task's ONNX-manifest entries.
-
-        One `ExportOutput` per family entry, referencing a shipped reduce by
-        key: global classification -> ``split_scalars`` per-class suffixes;
-        sequence classification -> one ``argmax`` int8 entry; vertexing ->
-        ``vertex_union_find`` int8 on the shared `VERTEX_INDEX` constant;
-        regression -> ``split_scalars`` per-target suffixes. `TaskWriter`
-        decides WHICH tasks export; the task only renders its own entry.
-
-        Raises
-        ------
-        ConfigError
-            For a task family that ships no ONNX rendering.
-        """
-        raise ConfigError(self._no_render_msg("ONNX output"))
+    # Per-family rendering lives on the task; `RunTaskOutput` only orchestrates
+    # and never branches on task family. A family that ships no rendering
+    # inherits the base methods below, which raise a ConfigError naming the
+    # missing rendering.
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
         """Render this task's converted, graph-visible output fields.
@@ -223,8 +159,8 @@ class _TaskModuleBase(SaltModelModule):
             The execution mode — selects the H5 (probs) vs ONNX
             (split-scalars / argmax index) representation.
         run_name : str
-            Accepted for symmetry with `get_h5`/`output_names` but NOT baked
-            into the field names (the sink prefixes).
+            Accepted for interface symmetry but NOT baked into the field
+            names (the sink prefixes).
 
         Raises
         ------
@@ -290,8 +226,8 @@ class _TaskModuleBase(SaltModelModule):
         return (
             f"task {self.name!r} ({type(self).__name__}) ships no {what} rendering — "
             "supported families are ClassificationTaskModule, VertexingTaskModule and "
-            "RegressionTaskModule; give a custom task module output_names/get_h5/onnx_outputs "
-            "methods, or write a custom Writer for its outputs (design §8)"
+            "RegressionTaskModule; give a custom task module get_output/"
+            "get_output_manifest/output_time_requires methods (design §8)"
         )
 
 

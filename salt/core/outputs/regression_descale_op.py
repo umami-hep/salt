@@ -12,7 +12,6 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode, TensorSpec, sym_dim
 from salt.core.outputs.conversion_ops import ConversionOp
-from salt.core.outputs.output_field import OutputField
 from salt.core.utils.array_utils import listify
 from salt.core.utils.scalers import RegressionTargetScaler
 
@@ -136,15 +135,6 @@ class RegressionDescaleOp(ConversionOp):
     def input_feature_key(self) -> str:
         """The raw-input key carrying the ONNX denominator columns (``inputs.<stream>``)."""
         return f"inputs.{self.stream}"
-
-    def output_columns(self, task: Any, run_name: str) -> list[OutputField]:
-        """One float field per regression output (``output_suffixes``); same suffixes for H5/ONNX."""
-        del run_name
-        axis = "per_token" if bool(getattr(task, "sequence", False)) else "global"
-        return [
-            OutputField(h5_name=suffix, dtype="f4", axis=axis, final=True)
-            for suffix in task.output_suffixes
-        ]
 
     def extra_requires(self, stream: str) -> dict[str, TensorSpec]:
         """Demand the ratio-denominator sources (+ pad mask for a sequence head):

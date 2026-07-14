@@ -16,7 +16,6 @@ from salt.core.outputs.conversion_ops import (
     SeqClassIndexOp,
     SeqClassProbsOp,
 )
-from salt.core.outputs.output_field import OutputField, _resolve_task
 from salt.core.outputs.regression_descale_op import RegressionDescaleOp
 
 
@@ -101,17 +100,6 @@ class TaskOutput(SaltModelModule):
         """Apply the op to the prediction leaf, writing the ``outputs.*`` leaf."""
         converted = self.op.convert(b, mode, pred_key=self.pred_key, stream=self.stream)
         return {self.output_key: converted}
-
-    def output_columns(
-        self, run_name: str, model_modules: Mapping[str, Any]
-    ) -> list[OutputField]:
-        """The field manifest this producer's ``outputs.*`` leaf expands into.
-
-        Resolves the wrapped task (`task`) from `model_modules` and delegates
-        to the op's `output_columns`.
-        """
-        task = _resolve_task(model_modules, self.task, f"producer {self.name!r}")
-        return self.op.output_columns(task, run_name)
 
 
 class ClassProbs(TaskOutput):

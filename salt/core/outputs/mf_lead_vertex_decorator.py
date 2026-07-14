@@ -12,7 +12,6 @@ from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.core.nn.base import SaltModelModule
-from salt.core.outputs.output_field import OutputField
 
 
 class MFLeadVertexDecorator(SaltModelModule):
@@ -206,13 +205,3 @@ class MFLeadVertexDecorator(SaltModelModule):
             value = torch.where(any_qualify, value, torch.full_like(value, torch.nan))
             out[key] = value.float()
         return out
-
-    def output_columns(
-        self, run_name: str, model_modules: Mapping[str, Any]
-    ) -> list[OutputField]:
-        """One float global jet-level field per configured lead-vertex scalar (no legacy oracle)."""
-        del run_name, model_modules
-        return [
-            OutputField(h5_name=name, dtype="f4", axis="global", final=True)
-            for name, _ in self.outputs_map
-        ]

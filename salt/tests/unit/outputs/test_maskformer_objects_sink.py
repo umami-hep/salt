@@ -1,4 +1,6 @@
-"""The MaskFormer objects sink on the H5OutputSink ``extra_groups`` seam."""
+"""The MaskFormer objects sink on the H5OutputSink ``extra_groups`` seam,
+plus the hosted `MaskFormerObjectWriter` formatting core (byte parity vs v1).
+"""
 
 from __future__ import annotations
 
@@ -8,13 +10,16 @@ import numpy as np
 import pytest
 
 from salt.core.graph.bundle import Bundle
+from salt.core.graph.errors import ConfigError
 from salt.core.outputs import MaskFormerObjectsSink
 from salt.core.outputs.h5_sink import _ExtraGroupCtx
-from salt.core.outputs.maskformer import MaskFormerObjectWriter
+from salt.core.outputs.maskformer_objects_sink import MaskFormerObjectWriter, _MFWriteCtxShim
 from salt.core.outputs.names import OBJECT_INDEX
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (pytest fixtures)
     L_FILE,
     data,
+    declare_ctx,
+    modules,
 )
 
 pytestmark = pytest.mark.cpu_always
@@ -138,11 +143,10 @@ def _bundle(batch_size=6, n_tracks=10):
 
 
 def _legacy_writer(data):  # noqa: ANN001
-    from salt.tests.unit.writers.test_maskformer import mf_write_ctx
-
+    del data
     w = MaskFormerObjectWriter(object_classes=OBJECT_CLASSES, regression_task="regression")
     w.name = "object_writer"
-    w.setup(mf_write_ctx(data, _mf_modules(data), n_tracks=10, total=6))
+    w.ctx = _MFWriteCtxShim(run_name="MFrun", precision="full")
     return w
 
 
@@ -172,6 +176,110 @@ class TestByteParityVsDelegatedWriter:
         assert set(sink) == set(legacy)
         for group in legacy:
             assert sink[group] == legacy[group]
+
+
+# 2b. the hosted MaskFormerObjectWriter formatting core: TEST byte parity vs the
+# v1 op chain (predictionwriter.py:267-308) + the demand/schema declarations.
+# (Folded here from tests/unit/writers/test_maskformer.py when the standalone
+# writer family was retired at plan 50 Phase E; the writer now lives in
+# salt.core.outputs.maskformer_objects_sink.)
+
+
+class TestMaskFormerObjectWriterCore:
+    def _writer(self):
+        w = MaskFormerObjectWriter(object_classes=OBJECT_CLASSES, regression_task="regression")
+        w.name = "object_writer"
+        return w
+
+    def test_requires_decoder_preds_and_truth_labels(self, modules):
+        """The truth requires keep MaskFormerTargets alive in the TEST plan;
+        masks.tracks is the constituent pad mask `write` reads for the MaskIndex padding.
+        """
+        keys = sorted(self._writer().requires(declare_ctx(modules)))
+        assert keys == [
+            "labels.objects.masks",
+            "labels.objects.object_class",
+            "masks.tracks",
+            "objects.class_probs",
+            "objects.masks",
+        ]
+
+    def test_columns_v1_naming(self):
+        """objects: per-class p{name} probs + class_label truth (v1 :276-285); tracks:
+        the PINNED MaskIndex suffix; object_masks: truth + logits (v1 :300-308).
+        """
+        cols = self._writer().columns(_MFWriteCtxShim(run_name="MFrun", precision="full"))
+        assert list(cols["objects"].names) == [
+            "MFrun_pb",
+            "MFrun_pc",
+            "MFrun_pnull",
+            "class_label",
+        ]
+        assert list(cols["tracks"].names) == [f"MFrun_{OBJECT_INDEX.test}"]
+        assert list(cols["object_masks"].names) == ["truth_mask", "mask_logits"]
+
+    def test_write_byte_parity_vs_v1_opchain(self, data):
+        """write() reproduces the v1 op chain byte-for-byte (probs/class/MaskIndex/masks)."""
+        from numpy.lib.recfunctions import unstructured_to_structured as u2s
+
+        from salt.core.utils.mask_utils import indices_from_mask
+        from salt.tests._fixtures.v2_builders import make_maskformer_writer_batch
+
+        writer = _legacy_writer(data)
+        batch = make_maskformer_writer_batch(batch_size=6, n_tracks=10)
+        bundle = Bundle()
+        for key, value in batch.items():
+            bundle.set(key, value)
+        out = writer.write(bundle, slice(0, 6))
+
+        cp, masks = batch["objects.class_probs"], batch["objects.masks"]
+        oc, tm, pad = (
+            batch["labels.objects.object_class"],
+            batch["labels.objects.masks"],
+            batch["masks.tracks"],
+        )
+        # objects group: probs + truth class (v1 op chain, predictionwriter.py:276-285)
+        v1_probs = u2s(cp.numpy(), np.dtype([(f"MFrun_p{c}", "f4") for c in OBJECT_CLASSES]))
+        for n in v1_probs.dtype.names:
+            assert out["objects"][n].tobytes() == v1_probs[n].tobytes()
+        v1_class = u2s(oc.unsqueeze(-1).numpy(), np.dtype([("class_label", "i8")]))
+        assert out["objects"]["class_label"].tobytes() == v1_class["class_label"].tobytes()
+        # MaskIndex: indices_from_mask(sigmoid > 0.5) (-2 no object), -1 padded (v1 :287-297)
+        v1_idx = indices_from_mask(masks.sigmoid() > 0.5).int().numpy()
+        v1_idx = np.where(~pad.numpy(), v1_idx, -1)
+        col = f"MFrun_{OBJECT_INDEX.test}"
+        assert (
+            out["tracks"][col].tobytes()
+            == u2s(np.expand_dims(v1_idx, -1), np.dtype([(col, "i8")]))[col].tobytes()
+        )
+        assert (out["tracks"][col] == -1).any()  # padded sentinel
+        assert (out["tracks"][col] == -2).any()  # no-object sentinel
+        # object_masks group: truth mask + logits (v1 :300-308)
+        assert (
+            out["object_masks"]["truth_mask"].tobytes()
+            == u2s(tm.unsqueeze(-1).numpy(), np.dtype([("truth_mask", "i8")]))[
+                "truth_mask"
+            ].tobytes()
+        )
+        assert (
+            out["object_masks"]["mask_logits"].tobytes()
+            == u2s(masks.float().unsqueeze(-1).numpy(), np.dtype([("mask_logits", "f4")]))[
+                "mask_logits"
+            ].tobytes()
+        )
+
+    def test_empty_object_classes_rejected(self):
+        with pytest.raises(ConfigError, match="non-empty"):
+            MaskFormerObjectWriter(object_classes=[])
+
+    def test_object_index_imported_not_redeclared(self):
+        # merge condition 4: the strings live ONLY in salt.core.outputs.names
+        import salt.core.outputs.maskformer_objects_sink as src
+
+        source = Path(src.__file__).read_text()
+        assert "from salt.core.outputs.names import OBJECT_INDEX" in source
+        assert '"MaskIndex"' not in source and "'MaskIndex'" not in source
+        assert '"HadronIndex"' not in source and "'HadronIndex'" not in source
 
 
 # 3. ONNX tuple order: explicit object leaves AFTER the section block

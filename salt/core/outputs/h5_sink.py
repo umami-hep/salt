@@ -148,7 +148,7 @@ class _SinkCallback(Callback):
 class _ExtraGroupCtx:
     """The minimal write-context an extra-group node reads to size its groups.
 
-    Duck-types the ``WriteCtx`` surface that a node's ``extra_groups`` /
+    The write-context surface a node's ``extra_groups`` /
     ``columns`` declaration consumes — carries only the file-geometry facts
     the sink owns (a node's own model modules ride its prior
     ``bind_model_modules``, not this ctx). ``streams`` feeds the extra-group
@@ -733,7 +733,7 @@ class H5OutputSink(_SinkCallback):
             values = tensor.detach().cpu().numpy()
             # the producer leaf may be [B] / [B, L] (collapsed index columns) or
             # [B, C] / [B, L, C] — give u2s an explicit trailing channel axis so a
-            # single-suffix column packs the same as the v1 task.get_h5 path
+            # single-suffix column packs the same as the v1 eval path
             if values.ndim == 1 or (values.ndim == 2 and col.stream in self._seq_lengths):
                 values = values[..., np.newaxis]
             arr = u2s(np.ascontiguousarray(values), col.np_dtype(self._run_name))

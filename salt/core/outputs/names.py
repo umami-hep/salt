@@ -8,10 +8,13 @@ from dataclasses import dataclass
 
 __all__ = ["OBJECT_INDEX", "VERTEX_INDEX", "ModeSplitSuffix", "pascal_case"]
 
+_OUTPUTS_NAMESPACE = "outputs"
+"""The bundle namespace the output sinks demand from (``outputs.*`` leaves)."""
+
 VERTEX_INDEX = "VertexIndex"
 """The vertexing output suffix — shared by TEST and ONNX.
 
-TEST: the `TaskWriter` column (bare while ``prefix_vertex_column=false``,
+TEST: the eval-H5 column (bare while ``prefix_vertex_column=false``,
 v1 byte parity; ``{run_name}_VertexIndex`` once that flag flips). ONNX:
 ``{model_name}_VertexIndex``. One constant, one per-mode prefix rule, one
 compat flag.
@@ -54,8 +57,8 @@ OBJECT_INDEX = ModeSplitSuffix(
 )
 """The MaskFormer track-to-object index suffix pair.
 
-`MaskFormerObjectWriter` uses ``OBJECT_INDEX.test`` for its eval column and
-``OBJECT_INDEX.onnx`` for its `ExportOutput` entry.
+`MaskFormerObjectsSink` uses ``OBJECT_INDEX.test`` for its eval column;
+``OBJECT_INDEX.onnx`` names the explicit `OnnxExportLeaf` object index.
 """
 
 

@@ -30,12 +30,13 @@ from salt.core.onnx import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.core.onnx.config import ExportOutput, _resolve_output, default_athena_name
+from salt.core.onnx.config import ExportOutput, default_athena_name
 from salt.core.onnx.reduces import (
     BoundReduce,
     ReduceCtx,
     bind_reduce,
     reduce_dtype,
+    reduce_spec,
     register_reduce,
     registered_reduces,
 )
@@ -346,6 +347,8 @@ class TestRegisterReduce:
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
 
     def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
+        # (re-anchored at plan 50 Phase E: the retired `_resolve_output` manifest
+        # resolver is gone; the registry spec is the dtype/arity authority now.)
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
         # live everywhere: registry, config view, dtype lookup
         assert fresh_reduce_name in registered_reduces()
@@ -353,13 +356,13 @@ class TestRegisterReduce:
         from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
-        # config validates a manifest entry naming it AND defaults its dtype from
-        # the DECLARED dtype (no hard-coded per-reduce rule)
-        out = ExportOutput(port="preds.objects.x", name="Lead", reduce=fresh_reduce_name)
-        resolved = _resolve_output(out)
-        assert resolved.reduce == fresh_reduce_name
-        assert resolved.dtype == "int8"
+        # the registered spec carries the declared field knowledge
+        spec = reduce_spec(fresh_reduce_name)
+        assert spec.dtype == "int8"
+        assert spec.per_token is False
+        assert spec.expects_names is False
         # and bind_reduce dispatches to the registered binder
+        out = ExportOutput(port="preds.objects.x", name="Lead", reduce=fresh_reduce_name)
         ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
         bound = bind_reduce(replace(out, dtype="int8"), ctx)
         assert bound.output_names == ("M_Lead",)
@@ -367,18 +370,6 @@ class TestRegisterReduce:
         b.set("preds.objects.x", torch.tensor([[1.0, 2.0]]))
         (got,) = bound.fn(b)
         assert got.dtype == torch.int8
-
-    def test_new_reduce_dtype_mismatch_rejected(self, fresh_reduce_name):
-        # the registry's DECLARED dtype is enforced — a contradicting entry dtype
-        # is a ConfigError (negative control: with the live-dtype default removed
-        # this would silently accept float32)
-        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
-        with pytest.raises(ConfigError, match="emits int8"):
-            _resolve_output(
-                ExportOutput(
-                    port="preds.objects.x", name="Lead", reduce=fresh_reduce_name, dtype="float32"
-                )
-            )
 
     def test_duplicate_registration_rejected(self, fresh_reduce_name):
         # re-registering an already-registered name is a hard error (no silent
@@ -395,11 +386,11 @@ class TestRegisterReduce:
         with pytest.raises(ConfigError, match="non-empty string"):
             register_reduce("", _bind_passthrough_int8, dtype="int8")
 
-    def test_unregistered_reduce_rejected_by_config_and_bind(self):
-        # a name that is NOT registered is rejected at config validation AND at bind
+    def test_unregistered_reduce_rejected_at_bind(self):
+        # a name that is NOT registered is rejected at bind (spec lookup)
         out = ExportOutput(port="preds.objects.x", name="Lead", reduce="never_registered_reduce")
         with pytest.raises(ConfigError, match="unknown reduce"):
-            _resolve_output(out)
+            reduce_spec("never_registered_reduce")
         ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
         with pytest.raises(ConfigError, match="unknown reduce"):
             bind_reduce(out, ctx)

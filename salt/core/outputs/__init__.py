@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from salt.core.outputs.collect_outputs import CollectOutputs
 from salt.core.outputs.combination import Combination
 from salt.core.outputs.conversion_ops import (
     ClassProbsOp,
@@ -36,7 +35,6 @@ from salt.core.outputs.vertex_union_find import VertexUnionFind
 __all__ = [
     "ClassProbs",
     "ClassProbsOp",
-    "CollectOutputs",
     "Combination",
     "ConversionOp",
     "H5OutputSink",

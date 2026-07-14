@@ -39,17 +39,13 @@ def test_class_probs_global_softmax_matches_task_run_inference():
     torch.testing.assert_close(got.sum(-1), torch.ones(7), rtol=0, atol=_FLOAT_TOL)
 
 
-def test_class_probs_global_matches_task_get_h5_values():
-    """``ClassProbs`` op values == the f4 columns ``task.get_h5`` would emit."""
+def test_class_probs_global_matches_literal_f4_softmax():
+    """``ClassProbs`` op values == the literal f4-packed softmax columns
+    (re-anchored from the retired ``task.get_h5`` oracle, plan 50 Phase E).
+    """
     torch.manual_seed(1)
-    module = _bind_classification(
-        _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
-    )
     logits = torch.randn(5, 3)
-    # the flipped TEST forward publishes RAW logits; get_h5 softmaxes + packs
-    b_oracle = Bundle({"preds": {_STREAM_J: {module.name: logits.clone()}}})
-    structured = module.get_h5(b_oracle, run_name="GN2")
-    oracle_cols = np.stack([structured[n] for n in structured.dtype.names], axis=-1)
+    oracle_cols = torch.softmax(logits, dim=-1).numpy().astype("f4")
 
     producer = _producer(ClassProbsOp(), stream=_STREAM_J, task="t")
     got = producer.forward(
@@ -220,7 +216,7 @@ def test_seq_class_index_onnx_int8_argmax_invariant_to_softmax():
 
 
 # GATE 2b: SeqClassProbs (sequence classification PROBS) == masked softmax,
-#          and == the float values the sequence ClassificationTask.get_h5 packs.
+#          and == the literal f4-packed eval-H5 float columns.
 #          This is the eval-H5 column counterpart of the SeqClassIndex argmax.
 
 
@@ -250,8 +246,11 @@ def test_seq_class_probs_matches_masked_softmax():
     torch.testing.assert_close(got[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-6, rtol=0)
 
 
-def test_seq_class_probs_matches_task_run_inference_and_get_h5():
-    """``SeqClassProbs`` == the bound task's sequence ``run_inference`` AND its ``get_h5`` floats."""
+def test_seq_class_probs_matches_task_run_inference_and_literal_f4_pack():
+    """``SeqClassProbs`` == the bound task's sequence ``run_inference`` AND the
+    literal f4-packed masked-softmax columns (re-anchored from the retired
+    ``task.get_h5`` oracle, plan 50 Phase E).
+    """
     torch.manual_seed(41)
     b, t = 4, 5
     class_names = ["Pileup", "Fake", "Primary", "FromB", "FromBC", "FromC", "FromTau", "Other"]
@@ -272,15 +271,7 @@ def test_seq_class_probs_matches_task_run_inference_and_get_h5():
     )[f"outputs.{_STREAM_T}.origin"]
     torch.testing.assert_close(got, oracle, rtol=0, atol=_FLOAT_TOL)
 
-    # == the float values the task's get_h5 packs (what the M4.5 writer serialises).
-    # Since the P1.5 flip get_h5 reads the RAW logits leaf (+ masks.<stream>) and
-    # run_inference-s them itself, so feed it the SAME raw logits + mask; the
-    # packed floats then equal the producer probs (both convert ONCE).
-    structured = module.get_h5(
-        Bundle(
-            {"preds": {_STREAM_T: {module.name: logits.clone()}}, "masks": {_STREAM_T: mask}}
-        ),
-        "RUN",
-    )
-    packed = np.stack([structured[f"RUN_p{c}"] for c in class_names], axis=-1)
+    # == the literal f4-packed per-class masked-softmax columns (what the eval
+    # H5 serialises after the sink's f4 downcast) — the retired get_h5 pack.
+    packed = masked_softmax(logits.clone(), mask.unsqueeze(-1)).numpy().astype("f4")
     np.testing.assert_allclose(packed, got.numpy(), rtol=0, atol=_FLOAT_TOL)

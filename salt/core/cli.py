@@ -302,8 +302,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 else:
                     keys = list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
                 if writer_sink_cb is not None and sink_node is None:
-                    # a non-node persistence sink (duck-typed writer_demand only,
-                    # e.g. CollectOutputs): fold its writer_demand into the flat
+                    # a non-node persistence sink (duck-typed writer_demand
+                    # only): fold its writer_demand into the flat
                     # sinks exactly as SaltModule._boundary_demand does at salt2
                     # test, so the in-graph conversion producers (outputs.*) stay
                     # alive in the render instead of pruning dead. A renderable
@@ -486,8 +486,8 @@ def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
 def _as_sink_node(callback: Any) -> Any | None:
     """`callback` as a renderable sink NODE (a `GraphModule` with
     ``is_sink() -> True``, e.g. `H5OutputSink`), or None for a non-node
-    persistence sink (duck-typed ``writer_demand`` only, e.g.
-    `CollectOutputs`), which keeps the legacy flat-``<sinks>`` folding.
+    persistence sink (duck-typed ``writer_demand`` only), which keeps the
+    legacy flat-``<sinks>`` folding.
     """
     if callback is None:
         return None
@@ -1095,13 +1095,6 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 # graph resolve [--annotate]
 # ---------------------------------------------------------------------------
 
-MANIFEST_BEGIN = "# === salt2 output manifest"
-"""First line of the generated annotation block (the replace anchor)."""
-
-MANIFEST_END = "# === end salt2 output manifest ==="
-"""Last line of the generated annotation block."""
-
-
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """``salt2 graph resolve``: the writer-derived output manifest, eval + ONNX.
     Prints the assembled manifest; with ``--annotate``, writes it into the
@@ -1127,96 +1120,6 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         "by the outputs: section + OnnxExportSink — inspect those directly "
         "(see gn2v2-dummy.yaml for the canonical config pattern)"
     )
-
-
-def _manifest_block(
-    cli: Any, writer_cb: Any, paths: Sequence[Path], set_overrides: Sequence[str] | None
-) -> str:
-    """Render the eval + ONNX manifest as a ``#``-prefixed config comment block
-    (lines between `MANIFEST_BEGIN`/`MANIFEST_END`), with an embedded refresh
-    hint reproducing the full generating command.
-    """
-    model, dm = cli.model, cli.datamodule
-    modules = model._graph_modules  # noqa: SLF001 - same-package adapter
-    reader = dm.reader
-    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
-    refresh_args = " ".join([
-        *(f"-c {path.name}" for path in paths),
-        *(f"--set {entry}" for entry in set_overrides or []),
-    ])
-    refresh = f"(generated — refresh: salt2 graph resolve {refresh_args} --annotate)"
-    lines = [
-        f"{MANIFEST_BEGIN} {refresh} ===",
-        f"# eval columns (salt2 test; prefix = run name {run_name!r}):",
-    ]
-    for wname, streams in writer_cb.column_manifests(modules, reader, run_name).items():
-        if not streams:
-            lines.append(
-                f"#   [{wname}] file-dependent or no static columns (e.g. source-file "
-                "copies ride along with file dtypes)"
-            )
-            continue
-        lines.extend(
-            f"#   [{wname}] {stream}: {' '.join(columns)}" for stream, columns in streams.items()
-        )
-    # the ONNX-output annotation derives from the folded OnnxExportSink (the
-    # off-graph writer manifest is retired), not from writer_cb.onnx_manifest.
-    export_sink = _static_onnx_export_sink(cli)
-    if export_sink is None:
-        lines.extend((
-            "# onnx outputs (salt2 export): NONE — no OnnxExportSink declared",
-            MANIFEST_END,
-        ))
-        return "\n".join(lines)
-    from salt.core.onnx.config import (  # noqa: PLC0415 - heavy package
-        sanitised_model_name,
-        validate_model_name,
-    )
-
-    if export_sink.model_name is None:
-        export_sink.model_name = validate_model_name(
-            (export_cfg.model_name if export_cfg is not None else None) or sanitised_model_name(run_name)
-        )
-    source_note = " — default from run name):" if export_cfg is None else "):"
-    lines.append(
-        f"# onnx outputs (salt2 export; model_name {export_sink.model_name!r}{source_note}"
-    )
-    rows = zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True)
-    width = max((len(n) for n in export_sink.output_names()), default=1)
-    lines.extend(
-        f"#   {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)"
-        for name, dtype in rows
-    )
-    lines.append(MANIFEST_END)
-    return "\n".join(lines)
-
-
-def _write_annotation(path: Path, block: str) -> None:
-    """Insert or refresh the manifest comment block in a config file: a
-    previous generated block is replaced in place, else appended at the end
-    (comments are inert YAML).
-    """
-    text = path.read_text()
-    new_lines: list[str] = []
-    replaced = False
-    skipping = False
-    for line in text.splitlines():
-        if line.startswith(MANIFEST_BEGIN):
-            skipping = True
-            replaced = True
-            new_lines.append(block)
-            continue
-        if skipping:
-            if line.startswith(MANIFEST_END):
-                skipping = False
-            continue
-        new_lines.append(line)
-    if not replaced:
-        if new_lines and new_lines[-1].strip():
-            new_lines.append("")
-        new_lines.append(block)
-    path.write_text("\n".join(new_lines) + "\n")
 
 
 # ---------------------------------------------------------------------------

@@ -5,10 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import numpy as np
 import torch
 import yaml
-from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
@@ -22,7 +20,6 @@ from salt.core.nn.tasks.base import (
     _loss_class,
     _TaskModuleBase,
 )
-from salt.core.onnx.config import ExportOutput
 from salt.core.outputs.names import pascal_case
 from salt.core.outputs.output_field import OutputField
 from salt.core.utils.tensor_utils import masked_softmax
@@ -44,9 +41,6 @@ class ClassificationTaskModule(_TaskModuleBase):
     resume. A literal ``loss.init_args.weight`` list is exclusive with
     ``weight_source``.
     """
-
-    onnx_renameable = True
-    """Classification ONNX suffixes are overridable via ``onnx_names``."""
 
     def __init__(
         self,
@@ -292,7 +286,7 @@ class ClassificationTaskModule(_TaskModuleBase):
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Publishes RAW logits in every non-training mode; conversion happens
-        exactly once downstream in `get_h5`/`get_output`.
+        exactly once downstream in `get_output`.
         """
         assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -320,33 +314,6 @@ class ClassificationTaskModule(_TaskModuleBase):
         from ftag import Flavours  # noqa: PLC0415
 
         return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
-
-    def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """One ``f4`` column per class, named ``{run_name}_{px}``."""
-        return [(f"{run_name}_{px}", "f4") for px in self.class_suffixes]
-
-    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """Softmax the RAW TEST logits then pack as ``f4`` columns (padded positions read 0.0)."""
-        assert self.net is not None, "get_h5 before bind()"
-        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        preds = self.run_inference(b.get(self.pred_key), mask)
-        dtype = np.dtype(self.output_names(run_name))
-        return u2s(preds.float().cpu().numpy(), dtype)
-
-    def onnx_outputs(self) -> list[ExportOutput]:
-        """Global head -> per-class ``split_scalars``; sequence head -> one int8
-        argmax named by the Pascal-case task name.
-        """
-        if not self.sequence:
-            return [ExportOutput(port=self.pred_key, names=list(self.class_suffixes))]
-        return [
-            ExportOutput(
-                port=self.pred_key,
-                name=pascal_case(self.name),
-                reduce="argmax",
-                dtype="int8",
-            )
-        ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
         """``["masks.<stream>"]`` for a padded seq head, plus the task's label key in

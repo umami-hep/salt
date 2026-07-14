@@ -1,4 +1,14 @@
-"""Unit gates for the task modules' ``get_output`` output rendering."""
+"""Unit gates for the task modules' ``get_output`` output rendering.
+
+Closure evidence (plan 50 Phase E, 2026-07-14): the legacy per-task oracles
+``get_h5``/``output_names``/``onnx_outputs`` were retired with the G1 output
+generation. Every comparison that used them is re-anchored here onto LITERAL
+expected schemas/values — the eval math written out explicitly (softmax /
+masked-softmax / union-find / de-scale) and the literal column/ONNX suffix
+lists, cross-checked against the committed per-config schema goldens at
+``salt/tests/_fixtures/output_goldens/`` (captured at 96d88d8, regenerated
+green through Phase C).
+"""
 
 from __future__ import annotations
 
@@ -16,9 +26,12 @@ from salt.core.nn.tasks import (
     VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
+from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs import ClassProbs, Regression, SeqClassIndex, SeqClassProbs, VertexUnionFind
 from salt.core.outputs.output_field import OutputField
 from salt.core.outputs.names import VERTEX_INDEX, pascal_case
+from salt.core.utils.tensor_utils import masked_softmax
+from salt.core.utils.union_find import get_node_assignment_jit
 
 _FLOAT_TOL = 1e-6
 _STREAM_J = "jets"
@@ -90,31 +103,34 @@ def test_global_get_output_value_matches_class_probs_producer():
         torch.testing.assert_close(f.value, producer_out[..., c], rtol=0, atol=_FLOAT_TOL)
 
 
-def test_global_get_output_value_matches_get_h5_columns():
-    """Global head: per-leaf ``value`` == the f4 floats ``get_h5`` packs (sink prefixes)."""
+def test_global_get_output_value_matches_literal_softmax_schema():
+    """Global head: bare pb/pc/pu suffixes, values == the literal per-class softmax
+    (re-anchored from the retired ``get_h5`` oracle; the sink prefixes + downcasts).
+    """
     torch.manual_seed(1)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
     )
     logits = torch.randn(5, 3)
 
-    structured = module.get_h5(_pred_bundle(module, logits.clone()), run_name=_RUN)
     fields = module.get_output(_pred_bundle(module, logits.clone()), Mode.TEST, _RUN)
+    expected = torch.softmax(logits, dim=-1)
 
-    # get_h5 column {RUN}_{px} <-> get_output field px (bare, sink prefixes)
-    for f in fields:
-        col = structured[f"{_RUN}_{f.h5_name}"]
-        np.testing.assert_allclose(f.value.numpy(), col, rtol=0, atol=_FLOAT_TOL)
+    assert [f.h5_name for f in fields] == ["pb", "pc", "pu"]
+    for c, f in enumerate(fields):
+        np.testing.assert_allclose(
+            f.value.numpy(), expected[..., c].numpy().astype("f4"), rtol=0, atol=_FLOAT_TOL
+        )
 
 
-def test_global_get_output_onnx_names_match_onnx_outputs():
-    """Global head ONNX: field suffixes == ``onnx_outputs`` ``class_suffixes`` (split-scalars)."""
+def test_global_get_output_onnx_names_are_literal_class_suffixes():
+    """Global head ONNX: field suffixes == the literal per-class pb/pc/pu split-scalars
+    (re-anchored from the retired ``onnx_outputs`` manifest oracle).
+    """
     torch.manual_seed(2)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
     )
-
-    (export_entry,) = module.onnx_outputs()  # one split_scalars entry
 
     # B=1 is the real ONNX export trace shape (adapter keeps batch dim 1 for
     # globals) — the case where the sink's squeeze() drops to a 0-dim scalar.
@@ -122,7 +138,7 @@ def test_global_get_output_onnx_names_match_onnx_outputs():
         logits = torch.randn(batch, 3)
         fields = module.get_output(_pred_bundle(module, logits.clone()), Mode.ONNX, _RUN)
 
-        assert [f.resolved_onnx_name for f in fields] == list(export_entry.names)
+        assert [f.resolved_onnx_name for f in fields] == ["pb", "pc", "pu"]
         # the live sink's exact per-class scalar: split the [B, C] probs leaf into
         # C columns of [B, 1] then squeeze() (no dim → drops ALL size-1 dims).
         probs = torch.softmax(logits, dim=-1)
@@ -219,8 +235,10 @@ def test_seq_get_output_h5_probs_match_seq_class_probs_producer():
         torch.testing.assert_close(f.value, producer_out[..., ci], rtol=0, atol=_FLOAT_TOL)
 
 
-def test_seq_get_output_h5_probs_match_get_h5_columns():
-    """Seq head (H5): per-leaf ``value`` == the per-class f4 columns ``get_h5`` packs."""
+def test_seq_get_output_h5_probs_match_literal_masked_softmax():
+    """Seq head (H5): per-leaf ``value`` == the literal per-class masked softmax
+    (re-anchored from the retired ``get_h5`` oracle).
+    """
     torch.manual_seed(6)
     b, t, c = 4, 5, 8
     module = _bind_classification(
@@ -230,11 +248,13 @@ def test_seq_get_output_h5_probs_match_get_h5_columns():
     mask = torch.zeros(b, t, dtype=torch.bool)
     mask[0, 2:] = True
 
-    structured = module.get_h5(_pred_bundle(module, logits.clone(), mask), run_name=_RUN)
+    expected = masked_softmax(logits.clone(), mask.unsqueeze(-1))
     fields = module.get_output(_pred_bundle(module, logits.clone(), mask), Mode.TEST, _RUN)
-    for f in fields:
-        col = structured[f"{_RUN}_{f.h5_name}"]
-        np.testing.assert_allclose(f.value.numpy(), col, rtol=0, atol=_FLOAT_TOL)
+    assert [f.h5_name for f in fields] == [f"po{i}" for i in range(c)]
+    for ci, f in enumerate(fields):
+        np.testing.assert_allclose(
+            f.value.numpy(), expected[..., ci].numpy().astype("f4"), rtol=0, atol=_FLOAT_TOL
+        )
 
 
 def test_seq_get_output_pad_positions_zeroed():
@@ -290,18 +310,16 @@ def test_seq_get_output_onnx_index_matches_seq_class_index_producer():
     torch.testing.assert_close(field.value, oracle, rtol=0, atol=0)  # int — EXACT
 
 
-def test_seq_get_output_onnx_name_matches_onnx_outputs():
-    """Seq head ONNX: the field name == the ``onnx_outputs`` argmax entry name + dtype."""
+def test_seq_get_output_onnx_name_is_literal_pascal_case_argmax():
+    """Seq head ONNX: one int8 argmax field named ``TrackOrigin`` — the literal
+    Pascal-case task name (re-anchored from the retired ``onnx_outputs`` oracle).
+    """
     module = _bind_classification(
         _STREAM_T, "origin_label", [f"o{i}" for i in range(8)], sequence=True
     )
-    (export_entry,) = module.onnx_outputs()  # one argmax int8 entry
-    assert export_entry.name == pascal_case(module.name)
-    assert export_entry.dtype == "int8"
-
     bundle = _pred_bundle(module, torch.randn(1, 4, 8), torch.zeros(1, 4, dtype=torch.bool))
     (field,) = module.get_output(bundle, Mode.ONNX, _RUN)
-    assert field.resolved_onnx_name == export_entry.name
+    assert field.resolved_onnx_name == "TrackOrigin" == pascal_case(module.name)
     assert field.onnx_dtype == "int8"
 
 
@@ -460,8 +478,10 @@ def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
     torch.testing.assert_close(field.value, oracle, rtol=0, atol=0)  # int — EXACT
 
 
-def test_vtx_get_output_test_matches_get_h5_run_inference():
-    """Vertexing (TEST): the field ``value`` == the int-cast union-find ``get_h5`` packs."""
+def test_vtx_get_output_test_matches_literal_union_find_chain():
+    """Vertexing (TEST): the field ``value`` == the literal scripted union-find chain
+    int-cast (re-anchored from the retired ``get_h5`` oracle; -inf padding -> int32 min).
+    """
     module = _bind_vertexing()
     gen = torch.Generator().manual_seed(7)
     # the head emits one edge score per ordered pair of VALID tracks (the compressed
@@ -472,17 +492,19 @@ def test_vtx_get_output_test_matches_get_h5_run_inference():
     edge_scores = torch.rand(n_edges, 1, generator=gen)
     mask = torch.zeros(1, n_tracks, dtype=torch.bool)
 
-    structured = module.get_h5(_vtx_bundle(module, edge_scores, mask), run_name=_RUN)
+    # the literal v1 eval chain: scripted union-find -> batch unflatten -> int cast
+    expected = mask_fill_flattened(
+        get_node_assignment_jit(edge_scores.clone(), mask), mask
+    ).int()
+
     (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.TEST, _RUN)
     assert field.h5_name == VERTEX_INDEX
     assert field.onnx_name is None  # H5-only (ONNX side is the .char() index)
     assert field.dtype == "i8"
     assert field.axis == "per_token"
     assert field.prefix is False  # bare VertexIndex (v1 byte-parity, default)
-    # the get_h5 column (bare VertexIndex) and the get_output int value must match
     np.testing.assert_array_equal(
-        field.value.cpu().numpy().reshape(structured[VERTEX_INDEX].shape),
-        structured[VERTEX_INDEX],
+        field.value.cpu().numpy().reshape(expected.shape), expected.numpy()
     )
 
 
@@ -560,21 +582,22 @@ def _reg_bundle(module, preds, *, mask=None, labels=None, inputs=None):
     return Bundle(data)
 
 
-def test_reg_norm_params_get_output_matches_get_h5():
-    """Regression norm_params global head: get_output value == get_h5 columns."""
+def test_reg_norm_params_get_output_matches_literal_denorm():
+    """Regression norm_params global head: values == the literal ``pred*std + mean``
+    de-norm (re-anchored from the retired ``get_h5`` oracle).
+    """
     torch.manual_seed(20)
+    mean, std = [1.0, 2.0], [3.0, 4.0]
     module = _bind_regression(
-        _STREAM_J, ["mHH", "dR"], sequence=False, norm={"mean": [1.0, 2.0], "std": [3.0, 4.0]}
+        _STREAM_J, ["mHH", "dR"], sequence=False, norm={"mean": mean, "std": std}
     )
     preds = torch.randn(6, 2)
-    structured = module.get_h5(_reg_bundle(module, preds.clone()), run_name=_RUN)
     fields = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
     assert [f.h5_name for f in fields] == ["mHH", "dR"]
-    for f in fields:
+    for i, f in enumerate(fields):
         assert f.dtype == "f4" and f.axis == "global"
-        np.testing.assert_allclose(
-            f.value.numpy(), structured[f"{_RUN}_{f.h5_name}"], rtol=0, atol=_FLOAT_TOL
-        )
+        expected = (preds[..., i] * std[i] + mean[i]).numpy().astype("f4")
+        np.testing.assert_allclose(f.value.numpy(), expected, rtol=0, atol=_FLOAT_TOL)
 
 
 def test_reg_get_output_value_matches_regression_descale_producer():
@@ -616,37 +639,44 @@ def test_reg_ratio_output_time_requires_mode_split():
     assert module.output_time_requires(Mode.ONNX) == [module.input_feature_key]
 
 
-def test_reg_ratio_get_output_test_matches_get_h5():
-    """Ratio head (TEST): get_output value == get_h5 (de-scale via labels.<stream>.<denom>)."""
+def test_reg_ratio_get_output_test_matches_literal_denominator_product():
+    """Ratio head (TEST): value == the literal ``pred * labels.<stream>.<denom>``
+    de-scale (re-anchored from the retired ``get_h5`` oracle).
+    """
     torch.manual_seed(23)
     module = _bind_regression(
         _STREAM_J, ["m_over_mHH"], sequence=False, denoms=["mHH"], fields=("mHH",)
     )
     preds = torch.randn(7, 1)
     denom = torch.rand(7)
-    b1 = _reg_bundle(module, preds.clone(), labels={"mHH": denom.clone()})
-    b2 = _reg_bundle(module, preds.clone(), labels={"mHH": denom.clone()})
-    structured = module.get_h5(b1, run_name=_RUN)
-    (field,) = module.get_output(b2, Mode.TEST, _RUN)
-    np.testing.assert_allclose(
-        field.value.numpy(), structured[f"{_RUN}_m_over_mHH"], rtol=0, atol=_FLOAT_TOL
+    (field,) = module.get_output(
+        _reg_bundle(module, preds.clone(), labels={"mHH": denom.clone()}), Mode.TEST, _RUN
     )
+    expected = (preds[..., 0] * denom).numpy().astype("f4")
+    np.testing.assert_allclose(field.value.numpy(), expected, rtol=0, atol=_FLOAT_TOL)
 
 
-def test_reg_gaussian_get_output_matches_get_h5_one_array():
-    """Gaussian head: get_output mints 2R fields (means ‖ _stddev) == get_h5 columns."""
+def test_reg_gaussian_get_output_matches_literal_mean_stddev_math():
+    """Gaussian head: 2R fields (means ‖ _stddev); mean == ``pred*std + mean``,
+    stddev == ``sqrt(softplus(var)) * std`` (re-anchored from the retired
+    ``get_h5`` oracle; the literal v1 gaussian de-scale).
+    """
     torch.manual_seed(24)
+    mean, std = 0.0, 2.0
     module = _bind_regression(
-        _STREAM_J, ["mu"], sequence=False, norm={"mean": 0.0, "std": 2.0}, gaussian=True
+        _STREAM_J, ["mu"], sequence=False, norm={"mean": mean, "std": std}, gaussian=True
     )
     preds = torch.randn(5, 2)  # gaussian head: [B, 2R] (mean ‖ raw var)
-    structured = module.get_h5(_reg_bundle(module, preds.clone()), run_name=_RUN)
     fields = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
     assert [f.h5_name for f in fields] == ["mu", "mu_stddev"]
-    for f in fields:
-        np.testing.assert_allclose(
-            f.value.numpy(), structured[f"{_RUN}_{f.h5_name}"], rtol=0, atol=_FLOAT_TOL
-        )
+    expected_mean = (preds[..., 0] * std + mean).numpy().astype("f4")
+    expected_stddev = (
+        (torch.sqrt(torch.nn.functional.softplus(preds[..., 1])) * std).numpy().astype("f4")
+    )
+    np.testing.assert_allclose(fields[0].value.numpy(), expected_mean, rtol=0, atol=_FLOAT_TOL)
+    np.testing.assert_allclose(
+        fields[1].value.numpy(), expected_stddev, rtol=0, atol=_FLOAT_TOL
+    )
 
 
 def test_reg_get_output_manifest_mirrors_get_output():

@@ -197,8 +197,7 @@ class ReduceSpec:
     """One live registry entry: a reduce's binder + its declared output dtype.
 
     `register_reduce` builds and registers these; `bind_reduce` looks up the
-    binder by name, and `salt.core.onnx.config._resolve_output` reads `dtype`
-    and `per_token` to default + validate the manifest entry.
+    binder by name.
 
     Parameters
     ----------
@@ -208,16 +207,12 @@ class ReduceSpec:
         Builds the traced-graph `BoundReduce` for one resolved entry.
     dtype : str
         The reduce's declared ONNX output dtype (``float32``/``int8``) — the
-        single owner of the per-reduce dtype rule. `_resolve_output` defaults an
-        entry's ``dtype`` from this and rejects any other declared dtype.
+        single owner of the per-reduce dtype rule.
     per_token : bool
         Whether the reduce emits per-token (dynamic sequence axis) outputs.
-        `config.combine_insertion_index` keys off this set — combines insert
-        before the first per-token entry.
     expects_names : bool
         Whether the reduce consumes the plural ``names`` field (per-class
-        scalars, ``split_scalars``) vs the singular ``name`` field. Drives
-        `_resolve_output`'s name/names exclusivity rule.
+        scalars) vs the singular ``name`` field.
     """
 
     name: str
@@ -241,10 +236,9 @@ def register_reduce(
 ) -> None:
     """Register a reduce under `name` with its declared dtype.
 
-    The single entry point that adds a reduce to the live registry validated by
-    `salt.core.onnx.config`. A custom / export-only writer can register its own
-    export math the same way — the field knowledge (binder, dtype, per-token
-    placement) lives with the registration, not in a frozen config tuple.
+    The single entry point that adds a reduce to the live registry — the field
+    knowledge (binder, dtype, per-token placement) lives with the
+    registration, not in a frozen config tuple.
 
     Parameters
     ----------
@@ -256,8 +250,7 @@ def register_reduce(
         The reduce's declared ONNX output dtype (``float32``/``int8``).
     per_token : bool, optional
         Whether the reduce emits dynamic-axis (per-token) outputs, by default
-        False (a global output). Drives the combine-insertion order in
-        `config.combine_insertion_index`.
+        False (a global output).
     expects_names : bool, optional
         Whether the reduce consumes the plural ``names`` field (per-class
         scalars) rather than the singular ``name``, by default False.
@@ -348,11 +341,7 @@ def reduce_dtype(name: str) -> str:
 
 
 def per_token_reduces() -> tuple[str, ...]:
-    """The registered reduces that emit per-token (dynamic-axis) outputs, sorted.
-
-    Consumed by `config.combine_insertion_index`: combines insert before the
-    first per-token entry.
-    """
+    """The registered reduces that emit per-token (dynamic-axis) outputs, sorted."""
     return tuple(sorted(name for name, spec in _REGISTRY.items() if spec.per_token))
 
 

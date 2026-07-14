@@ -1,14 +1,8 @@
-"""`OutputField` — one output column a producer contributes to a sink's field manifest.
-
-Also home to the shared producer-side private helper `_resolve_task` per the
-§3.4 split map (tensor helpers live in `salt.core.utils.tensor_utils`).
-"""
+"""`OutputField` — one output column a producer contributes to a sink's field manifest."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from torch import Tensor
 
@@ -77,17 +71,3 @@ class OutputField:
     def onnx_dtype(self) -> str:
         """The ONNX dtype namespace mapping of `dtype` (``f4 -> float32``, ``i1/i8 -> int8``)."""
         return "int8" if self.dtype in {"i1", "i8", "int8"} else "float32"
-
-
-def _resolve_task(model_modules: Mapping[str, Any], task_name: str, who: str) -> Any:
-    """Look up the wrapped task module by name in the model module dict;
-    raises `ConfigError` when absent.
-    """
-    task = model_modules.get(task_name)
-    if task is None:
-        raise ConfigError(
-            f"{who}: wrapped task {task_name!r} is not in the model modules — a conversion "
-            "producer's output_columns() resolve their names from the task they wrap "
-            "(plan 31 §3.1)"
-        )
-    return task

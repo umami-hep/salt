@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import numpy as np
 import torch
-from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from torch import Tensor
 
 from salt.core.graph.bundle import Bundle
@@ -17,7 +15,6 @@ from salt.core.nn.bind import ResolvedSchema
 from salt.core.nn.dense import Dense
 from salt.core.nn.stream_embed import _stream_len
 from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
-from salt.core.onnx.config import ExportOutput
 from salt.core.onnx.reduces import mask_fill_flattened
 from salt.core.outputs.names import VERTEX_INDEX
 from salt.core.outputs.output_field import OutputField
@@ -403,8 +400,7 @@ class VertexingTaskModule(_TaskModuleBase):
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Publishes RAW ``[E, 1]`` edge scores in every non-training mode; the
-        union-find conversion happens exactly once downstream in
-        `get_h5`/`get_output`.
+        union-find conversion happens exactly once downstream in `get_output`.
         """
         assert self.net is not None, "forward before bind()"
         x = b.get(self.input_key)
@@ -426,36 +422,6 @@ class VertexingTaskModule(_TaskModuleBase):
 
     # -- output rendering ---------------------------------------------------
 
-    def output_names(self, run_name: str) -> list[tuple[str, str]]:
-        """A single ``('VertexIndex', 'i8')`` column (``{run_name}_VertexIndex`` if
-        `prefix_vertex_column`).
-        """
-        column = f"{run_name}_{VERTEX_INDEX}" if self.prefix_vertex_column else VERTEX_INDEX
-        return [(column, "i8")]
-
-    def get_h5(self, b: Bundle, run_name: str) -> np.ndarray:
-        """Union-finds the raw edge scores to per-node vertex assignments, one
-        ``i8`` column (padded positions read int32 ``-2147483648``).
-        """
-        assert self.net is not None, "get_h5 before bind()"
-        mask = b.get(f"masks.{self.stream}")
-        preds = self.run_inference(b.get(self.pred_key), mask)
-        dtype = np.dtype(self.output_names(run_name))
-        return u2s(preds.int().cpu().numpy(), dtype)
-
-    def onnx_outputs(self) -> list[ExportOutput]:
-        """One ``vertex_union_find`` int8 entry on the shared `VERTEX_INDEX` suffix;
-        ONNX publishes raw edge scores that the reduce consumes.
-        """
-        return [
-            ExportOutput(
-                port=self.pred_key,
-                name=VERTEX_INDEX,
-                reduce="vertex_union_find",
-                dtype="int8",
-            )
-        ]
-
     def output_time_requires(self, mode: Mode) -> list[str]:
         """``["masks.<stream>"]`` — a vertexing head always requires a pad mask —
         plus the vertex-index label key in TEST when ``write_targets`` (never in ONNX).
@@ -467,7 +433,7 @@ class VertexingTaskModule(_TaskModuleBase):
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
         """ONNX: union-find -> flatten -> int8 ``[L]`` field under `VERTEX_INDEX`. H5 modes:
-        the same value `get_h5` packs, ``onnx_name=None``, prefix follows `prefix_vertex_column`.
+        the int-cast union-find value, ``onnx_name=None``, prefix follows `prefix_vertex_column`.
         """
         del run_name
         assert self.net is not None, "get_output before bind()"

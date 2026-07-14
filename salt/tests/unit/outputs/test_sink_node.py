@@ -19,7 +19,7 @@ from salt.core.graph.spec import (
     TensorSpec,
     unflatten_spec,
 )
-from salt.core.outputs import CollectOutputs, H5OutputSink
+from salt.core.outputs import H5OutputSink
 from salt.core.render import dot_source
 from salt.core.saltmodule import SaltModule
 
@@ -55,7 +55,7 @@ def _compile(cfg, mode):
     )
 
 
-# (1) the SinkModule marker — H5OutputSink is a sink node, CollectOutputs is NOT
+# (1) the SinkModule marker — H5OutputSink is a sink node
 
 
 def test_h5_output_sink_is_a_sink_module():
@@ -92,13 +92,6 @@ def test_close_if_open_closes_handle_without_full_count_assertion():
     # idempotent: a second close on the already-released handle is a no-op
     sink.close_if_open()
     assert sink._h5 is None  # noqa: SLF001
-
-
-def test_collect_outputs_is_not_a_sink_module():
-    """The legacy duck-typed `CollectOutputs` is NOT a `SinkModule` (legacy path preserved)."""
-    legacy = CollectOutputs(outputs=[_TRK_OUT])
-    assert not isinstance(legacy, SinkModule)
-    assert not hasattr(legacy, "is_sink")
 
 
 # (2) executor partition — folded sink is in plan.steps, NOT in the forward loop
