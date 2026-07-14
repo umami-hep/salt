@@ -99,7 +99,8 @@ def _jet_args(adapter: OnnxAdapter, bundle: Bundle, i: int) -> tuple[torch.Tenso
 
     Globals ``[1, F]``; sequences ``[L_valid, F]`` — padded positions stripped
     via the batch pad mask (Athena feeds valid tokens only; valid tokens are
-    the leading rows, the reader's pad layout).
+    the leading rows, the reader's pad layout — enforced per batch by
+    `_check_leading_valid`).
     """  # noqa: DOC201 - private helper, per docstring policy
     args: list[torch.Tensor] = []
     for entry in adapter._positional:  # noqa: SLF001 - same-package (check.py precedent)
@@ -110,6 +111,25 @@ def _jet_args(adapter: OnnxAdapter, bundle: Bundle, i: int) -> tuple[torch.Tenso
         else:
             args.append(x[i : i + 1])
     return tuple(args)
+
+
+def _check_leading_valid(mask: Any, stream: str) -> None:
+    """Reject a batch whose valid tokens are not the leading rows.
+
+    The per-token H5 writeback places each jet's values at the LEADING
+    positions and writes the file's pad mask verbatim (`_consume_batch`), so
+    the two agree only when every valid token precedes every padded one (the
+    dumper/reader pad layout). A file with interior padded tokens would
+    otherwise yield silently value/mask-misaligned per-token columns.
+    """  # noqa: DOC501 - private helper, per docstring policy
+    if bool((mask[..., :-1] & ~mask[..., 1:]).any()):
+        raise ConfigError(
+            f"masks.{stream}: valid tokens are not the leading rows (a padded token "
+            "precedes a valid one) — salt2 inference writes per-token values at "
+            "leading positions against the file's pad mask, so this file would "
+            "produce misaligned per-token columns. Re-order each jet's tokens "
+            "valid-first (the training-dataset-dumper layout)"
+        )
 
 
 def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
@@ -146,8 +166,17 @@ def _consume_batch(
     sink packs: global scalars stack to ``[B]``; per-token values are placed
     into a zero-padded ``[B, L]`` block (the sink re-expands to the file
     length — padded positions read 0, with the pad-mask column marking them).
+    Leading placement is checked, not assumed: `_check_leading_valid` rejects
+    any batch whose valid tokens are not the leading rows.
     """
     bundle_in = Bundle(dict(batch))
+    seq_streams = {
+        stream_of_input_port(entry.port)
+        for entry in adapter._positional  # noqa: SLF001 - same-package (check.py precedent)
+        if entry.sequence
+    }
+    for stream in sorted(seq_streams | set(sink._mask_streams)):  # noqa: SLF001 - sink drive
+        _check_leading_valid(bundle_in.get(f"masks.{stream}"), stream)
     rows = bundle_in.get("meta.rows")
     n = int(rows[1]) - int(rows[0])
     per_col: dict[str, list[torch.Tensor]] = {col.key: [] for col, _, _ in column_plan}
@@ -200,7 +229,10 @@ def run_inference(
         Checkpoint to load (required — inference names its output after it).
     test_file : str | Path
         The H5 to run over. May be LABEL-FREE: the dataset demand is derived
-        from ``export.inputs`` only, so no label dataset is demanded or read.
+        from ``export.inputs`` only, so no label dataset is demanded — a
+        label-stripped file runs green. Demand-free is not redaction: an
+        export-mode ``InputCopyWriter`` copies the source fields it selects
+        verbatim, labels included when the file carries them.
     output : str | Path | None, optional
         Output H5 path; default `INFERENCE_OUTPUT` next to the checkpoint.
     set_overrides : Sequence[str], optional
@@ -235,8 +267,8 @@ def run_inference(
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config assembles no ONNX export selection — salt2 inference writes STRICTLY "
-            "the export output set (plan 50 decision 2). Give at least one outputs: "
+            "config assembles no ONNX export selection — salt2 inference's task columns "
+            "ARE the export output set (plan 50 decision 2). Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
     if export_sink._explicit_leaves:  # noqa: SLF001 - same-package scope guard
@@ -308,9 +340,12 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="salt2 inference",
         description=(
-            "Label-free inference: write the EXPORT output set to H5 (plan 50). "
-            "Compiles the same Mode.ONNX selection as salt2 export and executes it "
-            "eagerly per jet — offline inference == Athena semantics by construction."
+            "Label-free inference (labels are never demanded, so label-stripped files "
+            "run green; export-mode InputCopyWriter columns still pass source fields "
+            "through verbatim, labels included): write the EXPORT output set to H5 "
+            "(plan 50). Compiles the same Mode.ONNX selection as salt2 export and "
+            "executes it eagerly per jet — offline inference == Athena semantics by "
+            "construction."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

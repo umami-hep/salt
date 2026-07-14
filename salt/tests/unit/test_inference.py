@@ -16,6 +16,7 @@ from salt.core.graph.errors import ConfigError
 from salt.core.graph.spec import Mode
 from salt.core.inference import (
     INFERENCE_OUTPUT,
+    _check_leading_valid,
     _parse_args,
     build_inference_sink,
     inference_demand,
@@ -314,6 +315,38 @@ class TestInferenceCoreLoop:
         # True = padded, exactly the batch pad mask
         assert tracks["mask"].dtype == np.dtype(bool)
         assert np.array_equal(tracks["mask"][0], batch["masks"]["tracks"][0].numpy())
+        # the pad-layout guard fires INSIDE the loop: doctor an interior pad
+        bad = dset[np.s_[0:1]]
+        bad_mask = bad["masks"]["tracks"]
+        assert int((~bad_mask[0]).sum()) >= 2, "fixture sanity: need >=2 valid tokens"
+        bad_mask[0, 0] = True  # first token padded, later tokens still valid
+        with pytest.raises(ConfigError, match="leading rows"):
+            _consume_batch(sink, adapter, column_plan, bad)
+
+
+class TestLeadingValidGuard:
+    """`_check_leading_valid`: the per-batch pad-layout guard (True = padded)."""
+
+    def test_leading_valid_layouts_pass(self):
+        """All-valid, all-padded, and valid-then-padded rows pass."""
+        import torch
+
+        for row in ([0, 0, 1, 1], [0, 0, 0, 0], [1, 1, 1, 1], [0, 1, 1, 1]):
+            _check_leading_valid(torch.tensor([row], dtype=torch.bool), "tracks")
+
+    def test_interior_pad_is_refused(self):
+        """A padded token followed by a valid one raises ConfigError."""
+        import torch
+
+        bad = torch.tensor([[False, True, False, True]])
+        with pytest.raises(ConfigError, match="leading rows"):
+            _check_leading_valid(bad, "tracks")
+
+    def test_numpy_masks_and_stream_name(self):
+        """Numpy bool masks work; the error names the offending stream."""
+        _check_leading_valid(np.array([[False, False, True]]), "tracks")
+        with pytest.raises(ConfigError, match=r"masks\.flow"):
+            _check_leading_valid(np.array([[True, False]]), "flow")
 
 
 class TestLabelFreePlanCompile:

@@ -399,9 +399,12 @@ salt2 inference --ckpt_path <run_dir>/checkpoints/....ckpt \
 # like fit); output defaults to {ckpt_dir}/{ckpt_stem}__inference_{sample}.h5
 ```
 
-**`salt2 inference` == Athena semantics by construction.** The command is
-STRICTLY the export output set written to H5 (plan 50 decision 2 — no
-separate config surface): it compiles the SAME `Mode.ONNX` plan `salt2
+**`salt2 inference` == Athena semantics by construction.** The command's
+TASK columns are STRICTLY the export output set written to H5 (plan 50
+decision 2 — no separate config surface; the only other columns are the
+export-mode `InputCopyWriter`/`PadMaskWriter` copy/mask columns, which
+Athena never sees — see **Label-free** below): it compiles the SAME
+`Mode.ONNX` plan `salt2
 export` traces (the section's export-mode `OutputField` selection, via the
 implicit `OnnxExportSink`) and executes it eagerly per jet through the
 `OnnxAdapter` — the exact eager reference the post-export `check_onnx`
@@ -420,7 +423,12 @@ demanded, so the command runs unchanged on a label-stripped file (the
 `get_output` label-free on the task side). No `target_{task}` columns are
 written. `InputCopyWriter`/`PadMaskWriter` participate iff their `modes:`
 include `export` (the default) — input copies re-read source columns by
-row, which is file content, not label demand.
+row, which is file content, not label demand. On a labelled file a
+copy-all `InputCopyWriter` therefore passes the label columns through
+into the inference H5 verbatim: label-freedom is a DEMAND guarantee
+(nothing is ever required of the file), not a redaction guarantee.
+Restrict the writer's `variables:` (or strip the file) to keep labels
+out of the output.
 
 What governs participation is the single `modes:` surface: `export` in a
 `RunTaskOutput`'s modes list puts its tasks in the ONNX tuple AND the
