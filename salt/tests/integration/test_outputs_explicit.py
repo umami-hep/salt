@@ -39,6 +39,33 @@ def _golden_task_columns() -> dict[str, list[str]]:
     return per_stream
 
 
+def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
+    """The FULL ordered per-stream H5 column contract for the Phase-B gate.
+
+    Byte-identical columns = input-copy source columns FIRST (in source-file
+    order; an empty golden ``copy_inputs`` means the v1 copy-ALL default, so
+    every source field is copied), then the task columns in golden order, then
+    the trailing pad-mask column. Asserting the H5 dtype.names EQUAL this list
+    (not merely contain it) enforces "no ADDED columns" — the exact Phase-C
+    label-leak the gate forbids from landing early.
+    """
+    h5 = json.loads(GOLDEN.read_text())["h5"]
+    tasks: dict[str, list[str]] = {}
+    for col in h5["columns"]:
+        tasks.setdefault(col["stream"], []).extend(col["column_names"])
+    copy_cfg = h5["copy_inputs"]
+    pad_streams = set(h5["write_pad_mask"])
+    per_stream: dict[str, list[str]] = {}
+    for stream, file_fields in src_cols.items():
+        # input copies: explicit golden subset, else copy-all (source order)
+        cols = list(copy_cfg.get(stream) or file_fields)
+        cols += tasks.get(stream, [])  # task columns in golden order
+        if stream in pad_streams:
+            cols.append("mask")  # pad mask written last
+        per_stream[stream] = cols
+    return per_stream
+
+
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
     """Synthetic norm dict + dummy H5 + schema artifact (all generated live)."""
@@ -118,20 +145,26 @@ class TestImplicitSinkCliE2E:
             assert set(f.keys()) >= {"jets", "tracks"}
             assert f["jets"].shape[0] == N_TEST
 
-    def test_task_columns_match_golden(self, cli_h5):
-        """The eval H5's TASK columns == the committed Phase-A golden (f4), per stream."""
-        expected = _golden_task_columns()
+    def test_task_columns_match_golden(self, data, cli_h5):
+        """The eval H5's columns EQUAL the committed Phase-A golden, per stream, in order.
+
+        Exact-list equality (not membership) is the Phase-B gate: byte-identical
+        columns with NO new label columns yet. Any ADDED column — a Phase-C
+        label-emission leak, or an accidental extra leaf — fails here.
+        """
+        with h5py.File(data["h5"]) as src:
+            src_cols = {"jets": list(src["jets"].dtype.names), "tracks": list(src["tracks"].dtype.names)}
+        expected = _expected_full_columns(src_cols)
         with h5py.File(cli_h5) as f:
-            jets_names = list(f["jets"].dtype.names)
-            tracks_names = list(f["tracks"].dtype.names)
-        present = {"jets": jets_names, "tracks": tracks_names}
+            present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
+        assert present.keys() == expected.keys(), (
+            f"H5 streams {sorted(present)} != golden streams {sorted(expected)}"
+        )
         for stream, cols in expected.items():
-            for col in cols:
-                assert col in present[stream], f"missing {stream} golden column {col}"
-        # jet task columns appear in the golden's order
-        jet_cols = expected["jets"]
-        idx = [jets_names.index(c) for c in jet_cols]
-        assert idx == sorted(idx), f"jet columns out of golden order: {jet_cols} in {jets_names}"
+            assert present[stream] == cols, (
+                f"{stream} columns diverge from golden (added/removed/reordered): "
+                f"got {present[stream]}, golden {cols}"
+            )
 
     def test_probs_are_softmaxed_not_double_converted(self, cli_h5):
         """The prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""

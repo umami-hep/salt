@@ -202,10 +202,14 @@ class H5OutputSink(_SinkCallback):
 
     Parameters
     ----------
-    outputs : Sequence[OutputColumn | Mapping[str, Any]]
-        The output columns to serialise, in H5 column order within each
-        group. Each entry is an `OutputColumn` (or a mapping jsonargparse
-        builds into one).
+    outputs : None
+        RETIRED as a config surface (plan 50 Phase B). The H5 sink is now
+        implicit — the ``salt2 test`` command wires it and derives its column
+        schema from the bound top-level ``outputs:`` section (``RunTaskOutput``
+        + ``InputCopyWriter`` + ``PadMaskWriter``). Only ``None``/``[]`` is
+        accepted; any truthy value raises `ConfigError`. Do NOT wire this sink
+        in ``callbacks:`` with an explicit ``OutputColumn`` table — declare the
+        section instead (see ``gn2v2-opendata.yaml``).
     copy_inputs : Mapping[str, Sequence[str]] | None, optional
         Per-stream source-file variables to copy into the eval H5, in column
         order, by default None.
@@ -228,8 +232,9 @@ class H5OutputSink(_SinkCallback):
     Raises
     ------
     ConfigError
-        For an empty outputs list, a duplicate output key, or (at run setup)
-        a column-name collision / unknown stream / missing source variable.
+        For any truthy ``outputs`` value (the retired explicit-table surface),
+        or (at run setup) a column-name collision / unknown stream / missing
+        source variable.
     """
 
     name = "h5_output"

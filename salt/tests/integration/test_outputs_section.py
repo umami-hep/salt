@@ -44,6 +44,32 @@ def _golden_task_columns() -> dict[str, list[str]]:
         per_stream.setdefault(col["stream"], []).extend(col["column_names"])
     return per_stream
 
+
+def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
+    """The FULL ordered per-stream H5 column contract for the Phase-B gate.
+
+    Byte-identical columns = input-copy source columns FIRST (in source-file
+    order; an empty golden ``copy_inputs`` means the v1 copy-ALL default, so
+    every source field is copied), then task columns in golden order, then the
+    trailing pad-mask column. Asserting H5 dtype.names EQUAL this (not merely
+    contain it) enforces "no ADDED columns" — a Phase-C label-emission leak, or
+    an un-deferred extra leaf from a bad expose merge, cannot slip past.
+    """
+    h5 = json.loads(GOLDEN.read_text())["h5"]
+    tasks: dict[str, list[str]] = {}
+    for col in h5["columns"]:
+        tasks.setdefault(col["stream"], []).extend(col["column_names"])
+    copy_cfg = h5["copy_inputs"]
+    pad_streams = set(h5["write_pad_mask"])
+    per_stream: dict[str, list[str]] = {}
+    for stream, file_fields in src_cols.items():
+        cols = list(copy_cfg.get(stream) or file_fields)
+        cols += tasks.get(stream, [])
+        if stream in pad_streams:
+            cols.append("mask")
+        per_stream[stream] = cols
+    return per_stream
+
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
 # VertexIndex is NOT deferred — the vertexing get_output fold mints it (H5
@@ -139,19 +165,30 @@ class TestSectionH5SelfConsistency:
         with h5py.File(section_h5) as f:
             assert f["jets"].shape[0] == N_TEST
 
-    def test_task_columns_match_golden(self, section_h5):
-        """The eval H5's TASK columns == the committed cutover34 golden (parsed JSON).
+    def test_task_columns_match_golden(self, data, section_h5):
+        """The eval H5's columns EQUAL the committed cutover34 golden, per stream, in order.
 
-        Nothing is deferred — the vertexing get_output fold mints the
-        per-token VertexIndex integer column alongside the classification probs.
+        Exact-list equality (not membership) is the Phase-B gate: byte-identical
+        columns with NO new label columns yet. Any ADDED column — a Phase-C
+        label-emission leak, or an un-deferred extra leaf from a bad expose merge
+        — fails here. Nothing is deferred in this config: the vertexing
+        get_output fold mints the per-token VertexIndex integer column alongside
+        the classification probs.
         """
-        expected = _golden_task_columns()
+        with h5py.File(data["h5"]) as src:
+            src_cols = {"jets": list(src["jets"].dtype.names), "tracks": list(src["tracks"].dtype.names)}
+        expected = _expected_full_columns(src_cols)
         with h5py.File(section_h5) as f:
             present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
             jets, tracks = f["jets"].dtype, f["tracks"].dtype
+        assert present.keys() == expected.keys(), (
+            f"H5 streams {sorted(present)} != golden streams {sorted(expected)}"
+        )
         for stream, cols in expected.items():
-            for col in cols:
-                assert col in present[stream], f"missing {stream} golden column {col}"
+            assert present[stream] == cols, (
+                f"{stream} columns diverge from golden (added/removed/reordered): "
+                f"got {present[stream]}, golden {cols}"
+            )
         # dtypes: prob columns float, the bare VertexIndex column integer
         for s in JET_SUFFIXES:
             assert np.issubdtype(jets[f"{RUN_NAME}_{s}"], np.floating)
