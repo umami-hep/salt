@@ -9,7 +9,7 @@ import torch
 from torch import BoolTensor, Tensor, nn
 
 from salt.core.nn.attention import ATTN_TYPES, Attention, EdgeAttention
-from salt.core.nn.glu import GLU
+from salt.core.nn.dense import GLU
 from salt.core.nn.layernorm import _LAYERNORMS
 from salt.core.utils.tensor_utils import (
     redo_padding,
