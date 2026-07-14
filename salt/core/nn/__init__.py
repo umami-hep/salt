@@ -13,16 +13,15 @@ from salt.core.nn.bind import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.concat import Concat
 from salt.core.nn.edge_embed import EdgeEmbed, EdgeFeatures
 from salt.core.nn.featurewise import FeaturewiseTransformation
 from salt.core.nn.losses import LossGLS, LossSum
 from salt.core.nn.maskdecoder import MaskDecoder
 from salt.core.nn.maskformer_matched_loss import MaskFormerMatchedLoss
 from salt.core.nn.norm import MaskedInputNormaliser, Normaliser
+from salt.core.nn.plumbing import Concat, Split, VectorConcat
 from salt.core.nn.pooling import GlobalAttentionPooling
 from salt.core.nn.posenc import PositionalEncoder
-from salt.core.nn.split import Split
 from salt.core.nn.stream_embed import StreamEmbed
 from salt.core.nn.tasks import (
     ClassificationTaskModule,
@@ -30,7 +29,6 @@ from salt.core.nn.tasks import (
     VertexingTaskModule,
 )
 from salt.core.nn.transformer_encoder import TransformerEncoder
-from salt.core.nn.vector_concat import VectorConcat
 
 __all__ = [
     "BindError",
