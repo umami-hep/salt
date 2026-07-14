@@ -500,9 +500,14 @@ def test_lead_vertex_decorator_rejects_bad_config():
 
 def test_lead_vertex_decorator_leaf_packs_into_h5_output_column():
     """The decorator's jet-level scalar is a NORMAL outputs.* leaf the H5OutputSink serialises."""
-    sink = H5OutputSink(
-        outputs=[OutputColumn(key="outputs.jets.lead_vertex_pt", suffixes=["lead_vertex_pt"])]
+    sink = H5OutputSink()
+    # OutputColumn is the sink's internal value object (plan 50 Phase B — the
+    # explicit-table config surface is retired); seed it directly for this
+    # white-box packing test.
+    sink._columns = (  # noqa: SLF001
+        OutputColumn(key="outputs.jets.lead_vertex_pt", suffixes=["lead_vertex_pt"]),
     )
+    sink._columns_resolved = True  # noqa: SLF001
     sink._run_name = "GN3X"  # noqa: SLF001 - exercising the packing path without open_schema
     sink._seq_lengths = {}  # noqa: SLF001 - jets is a GLOBAL stream (no per-token re-expansion)
     b = Bundle()

@@ -1,44 +1,47 @@
 # Overlay on gn2v2-dummy.yaml: demonstrates the folded ONNX export path — a
 # ClassProbs softmax, a SeqClassIndex argmax, and a Combination (pbc = pb+pc)
-# minted in-graph and named by a declare-only OnnxExportSink, instead of an
-# off-graph reduce manifest. Stack as:
+# minted in-graph and named by an explicit OnnxExportSink (the conversion-node +
+# explicit-leaf ONNX surface retained for combinations, which the section
+# get_output path does not express — the same escape hatch MaskFormer uses).
+# The eval-H5 side rides the base's outputs: section (test-only); the ONNX tuple
+# comes entirely from the folded conversion nodes below. Stack as:
 #   salt2 graph plot --config gn2v2-dummy.yaml --config gn2v2-dummy-onnx-fold.yaml --mode onnx
 
 model:
   modules:
-    track_vertexing:
-      class_path: salt.core.nn.tasks.VertexingTaskModule
-      init_args:
-        stream: tracks
-        label: ftagTruthVertexIndex
-        origin_label: ftagTruthOriginLabel
-        context: pooled.global
-        weight: 1.5
-        dense: { hidden_layers: [16], activation: ReLU }
-        expose: [fit, val] # opts vertexing out of ONNX here (no VertexIndex)
-    # opts vertexing out of ONNX entirely, to demo the pbc Combination instead
-    track_vertex_index: null
+    # the folded ONNX conversion producers (the base runs get_output for H5 only)
     jet_probs:
       class_path: salt.core.outputs.ClassProbs
-      init_args: { task: jets_classification, stream: jets }
-    # distinct leaf name: the base's track_origin_probs (SeqClassProbs, the TEST
-    # H5 producer) already owns outputs.tracks.track_origin — the ONNX argmax
-    # writes its own leaf so the two producers never collide
+      init_args: {task: jets_classification, stream: jets}
+    # distinct leaf name so the ONNX argmax never collides with the section's
+    # test-mode track_origin leaves
     track_origin_index:
       class_path: salt.core.outputs.SeqClassIndex
-      init_args: { task: track_origin, stream: tracks, name: track_origin_index }
+      init_args: {task: track_origin, stream: tracks, name: track_origin_index}
     pbc:
       class_path: salt.core.outputs.Combination
       init_args:
         source: outputs.jets.jets_classification
         name: pbc
-        terms: { 0: 1.0, 1: 1.0 } # pbc = pb + pc
+        terms: {0: 1.0, 1: 1.0} # pbc = pb + pc
+
+outputs:
+  # eval-H5 only: the section provides no ONNX leaves; the folded conversion
+  # nodes + explicit OnnxExportSink below own the ONNX tuple
+  jets_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {modes: [test]}
+  origin_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {modes: [test]}
 
 callbacks:
+  # explicit ONNX sink (the Combination escape hatch — no section equivalent);
+  # the H5 sink stays implicit (wired by salt2 test over the outputs: section)
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:
       outputs:
-        - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
-        - { key: outputs.jets.pbc, name: pbc }
-        - { key: outputs.tracks.track_origin_index, name: TrackOrigin, dtype: int8, per_token: true }
+        - {key: outputs.jets.jets_classification, names: [pb, pc, pu]}
+        - {key: outputs.jets.pbc, name: pbc}
+        - {key: outputs.tracks.track_origin_index, name: TrackOrigin, dtype: int8, per_token: true}

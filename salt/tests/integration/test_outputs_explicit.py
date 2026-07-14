@@ -1,19 +1,18 @@
-"""End-to-end eval-H5 checks for the EXPLICIT-outputs H5 sink path (gn2v2-dummy.yaml).
+"""End-to-end eval-H5 check for the base gn2v2-dummy.yaml — implicit H5 sink.
 
-Historical note (plan 47): this file was the frozen-oracle byte-parity gate
-diffing the sink's eval H5 against a committed ``gn2v2_dummy_oracle`` fixture
-(the legacy ``WriterCallback`` output). The v1 writers path is deleted and the
-byte-for-byte parity was proven and CLOSED at the v1 pin ``29c67a1`` (see the
-parity-closure section of ``salt/core/README.md`` for the closure evidence and
-the regeneration recipe). What remains are the v2-only checks: the shipped
-``gn2v2-dummy.yaml`` (explicit sink ``outputs:`` tables — the complement of the
-``outputs:``-section path gated by ``test_outputs_section``) fits and
-evaluates end-to-end through the real CLI, and the eval H5's contents are
-asserted from first principles.
+Plan 50 Phase B: gn2v2-dummy.yaml migrated OFF the explicit-sink ``outputs:``
+OutputColumn table onto the ``outputs:`` section path (two mode-split
+RunTaskOutput writers). No config declares H5OutputSink/OnnxExportSink — the
+``salt2 test`` command wires the H5 sink over the section. This test fits +
+evaluates the shipped config end-to-end through the real CLI (proving the
+implicit-sink runtime path) and asserts the eval H5's TASK columns against the
+committed Phase-A golden (``gn2v2-dummy.json``) — a PARSED-JSON contract, not a
+text oracle.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import h5py
@@ -23,14 +22,21 @@ import pytest
 from salt.core.main import CONFIG_DIR, main
 from salt.core.schema import dump_schema, save_schema
 from salt.core.testing.inputs import write_dummy_file
-from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy.json"
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
-N_TEST = 300  # data.num_test
+N_TEST = 300
 
-JET_SUFFIXES = ["pb", "pc", "pu"]
-ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
+
+def _golden_task_columns() -> dict[str, list[str]]:
+    """Per-stream ordered flat TASK column names from the committed golden."""
+    golden = json.loads(GOLDEN.read_text())
+    per_stream: dict[str, list[str]] = {}
+    for col in golden["h5"]["columns"]:
+        per_stream.setdefault(col["stream"], []).extend(col["column_names"])
+    return per_stream
 
 
 @pytest.fixture(scope="module")
@@ -81,10 +87,12 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def cli_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from ``salt2 test`` on the shipped gn2v2-dummy.yaml (explicit tables)."""
-    out = tmp_path_factory.mktemp("h5_writer_cli") / "eval.h5"
-    root = tmp_path_factory.mktemp("h5_writer_cli_root")
+def cli_h5(data, ckpt) -> Path:
+    """Eval H5 from ``salt2 test`` — the H5 sink is IMPLICIT (wired by the command).
+
+    No ``--callbacks.h5_output`` override: the sink is injected over the outputs:
+    section and writes to the default ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``.
+    """
     rc = main([
         "test",
         "--config",
@@ -92,17 +100,17 @@ def cli_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--data.test_file={data['h5']}",
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
-        f"--trainer.default_root_dir={root}",
-        f"--callbacks.h5_output.init_args.output={out}",
+        f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
     assert rc == 0, "salt2 test on the shipped gn2v2-dummy.yaml must run end-to-end"
-    assert out.exists(), f"the CLI wrote no eval H5 at {out}"
-    return out
+    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
+    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
+    return evals[-1]
 
 
-class TestExplicitSinkCliE2E:
-    """The shipped gn2v2-dummy.yaml drives the explicit-tables H5 sink end-to-end."""
+class TestImplicitSinkCliE2E:
+    """The shipped gn2v2-dummy.yaml drives the implicit H5 sink end-to-end."""
 
     def test_cli_writes_eval_h5(self, cli_h5):
         """``salt2 test`` writes a non-empty eval H5 with the reader-stream groups."""
@@ -110,30 +118,33 @@ class TestExplicitSinkCliE2E:
             assert set(f.keys()) >= {"jets", "tracks"}
             assert f["jets"].shape[0] == N_TEST
 
-    def test_task_columns_present(self, cli_h5):
-        """The explicit outputs: tables mint the jet + origin prob columns (f4)."""
+    def test_task_columns_match_golden(self, cli_h5):
+        """The eval H5's TASK columns == the committed Phase-A golden (f4), per stream."""
+        expected = _golden_task_columns()
         with h5py.File(cli_h5) as f:
-            jets, tracks = f["jets"].dtype, f["tracks"].dtype
-        for s in JET_SUFFIXES:
-            col = f"{RUN_NAME}_{s}"
-            assert col in jets.names, f"missing jet prob column {col}"
-            assert np.issubdtype(jets[col], np.floating)
-        for s in ORIGIN_SUFFIXES:
-            col = f"{RUN_NAME}_{s}"
-            assert col in tracks.names, f"missing origin prob column {col}"
-            assert np.issubdtype(tracks[col], np.floating)
+            jets_names = list(f["jets"].dtype.names)
+            tracks_names = list(f["tracks"].dtype.names)
+        present = {"jets": jets_names, "tracks": tracks_names}
+        for stream, cols in expected.items():
+            for col in cols:
+                assert col in present[stream], f"missing {stream} golden column {col}"
+        # jet task columns appear in the golden's order
+        jet_cols = expected["jets"]
+        idx = [jets_names.index(c) for c in jet_cols]
+        assert idx == sorted(idx), f"jet columns out of golden order: {jet_cols} in {jets_names}"
 
     def test_probs_are_softmaxed_not_double_converted(self, cli_h5):
         """The prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
+        expected = _golden_task_columns()
         with h5py.File(cli_h5) as f:
             jets = f["jets"][:]
             tracks = f["tracks"][:]
             valid = ~tracks["mask"]
-        jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
+        jet_cols = expected["jets"]
         prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
         assert np.allclose(prob_sum, 1.0, atol=1e-3)
         # padded track positions read 0.0 (masked softmax), valid sum to ~1
-        origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+        origin_cols = expected["tracks"]
         origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
         assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
         assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)

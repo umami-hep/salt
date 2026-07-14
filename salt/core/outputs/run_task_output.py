@@ -14,16 +14,67 @@ from salt.core.nn.base import SaltModelModule
 from salt.core.outputs.output_field import OutputField
 
 
+_OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
+"""The YAML ``modes:`` vocabulary — ``test`` -> Mode.TEST, ``export`` -> Mode.ONNX."""
+
+
+def parse_output_modes(modes: Any, who: str) -> Mode:
+    """Map a YAML ``modes:`` list onto the Mode flag the section writer runs in.
+
+    ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the pre-plan-50
+    default). A non-empty list of ``test``/``export`` names ORs into the flag.
+    Raises `ConfigError` on an empty list or an unknown mode name (naming the key).
+    """
+    if modes is None:
+        return Mode.TEST | Mode.ONNX
+    names = [modes] if isinstance(modes, str) else list(modes)
+    if not names:
+        raise ConfigError(
+            f"{who}: 'modes' is an empty list — name at least one of "
+            f"{sorted(_OUTPUT_MODE_NAMES)} (or omit 'modes' entirely for both)"
+        )
+    out = Mode(0)
+    for name in names:
+        flag = _OUTPUT_MODE_NAMES.get(str(name).lower())
+        if flag is None:
+            raise ConfigError(
+                f"{who}: unknown output mode {name!r} — valid names are "
+                f"{sorted(_OUTPUT_MODE_NAMES)} (test -> Mode.TEST eval H5, export -> Mode.ONNX)"
+            )
+        out |= flag
+    return out
+
+
 class OutputSectionWriter(SaltModelModule):
     """Shared base for the ``outputs:`` section writers.
 
     Named (not just `SaltModelModule` directly) so the top-level ``outputs:``
     CLI namespace can be typed ``dict[str, OutputSectionWriter | None]`` and
-    jsonargparse builds each writer from its ``class_path``. Carries no
-    behaviour of its own beyond the `SaltModelModule` contract — the section
-    writers supply their own ``declare_io`` / manifest surface (some, like
-    `InputCopyWriter`, are manifest-only and never override `forward`).
+    jsonargparse builds each writer from its ``class_path``. Beyond the
+    `SaltModelModule` contract it owns the ``modes:`` surface (plan 50): each
+    section writer declares the modes it runs in (``test``/``export``), which
+    the command uses to pick the implicit per-command sink and which gates the
+    writer's own `declare_io` / manifest so an ``export``-omitted writer mints
+    no ONNX leaves.
+
+    Parameters
+    ----------
+    modes : Sequence[str] | None, optional
+        The modes this writer participates in — a subset of ``["test",
+        "export"]``. ``None`` (default) = both (the pre-plan-50 behaviour).
     """
+
+    def __init__(self, modes: Sequence[str] | None = None) -> None:
+        super().__init__()
+        self._section_modes = parse_output_modes(modes, type(self).__name__)
+
+    def section_modes(self) -> Mode:
+        """The Mode flag this writer runs in (``test`` -> TEST, ``export`` -> ONNX)."""
+        return self._section_modes
+
+    def runs_in_mode(self, mode: Mode) -> bool:
+        """Whether this writer participates in `mode` (per its ``modes:`` list)."""
+        return bool(mode & self._section_modes)
 
 
 # the bundle modes that run get_output (everything but pure FIT/VAL training):
@@ -65,15 +116,20 @@ class RunTaskOutput(OutputSectionWriter):
         appear in the eval H5 (the model-declaration order). Each must
         resolve to a task carrying ``get_output`` / ``output_time_requires``
         / ``pred_key`` / ``stream`` at compile time.
+    modes : Sequence[str] | None, optional
+        The modes this writer serialises in (``["test", "export"]`` subset;
+        ``None`` = both). A ``test``-only writer mints no ONNX leaves (so the
+        implicit ONNX sink names none of its fields); an ``export``-only
+        writer contributes no eval-H5 columns.
 
     Raises
     ------
     ConfigError
-        For an empty task list or a duplicate task name.
+        For an empty task list, a duplicate task name, or an unknown mode name.
     """
 
-    def __init__(self, tasks: Sequence[str]) -> None:
-        super().__init__()
+    def __init__(self, tasks: Sequence[str], modes: Sequence[str] | None = None) -> None:
+        super().__init__(modes=modes)
         names = list(tasks or [])
         if not names:
             raise ConfigError(
@@ -148,7 +204,14 @@ class RunTaskOutput(OutputSectionWriter):
     # -- graph node surface -------------------------------------------------
 
     def declare_io(self, mode: Mode) -> IO:
-        """Per task: requires its raw preds + output-time deps; produces its output fields."""
+        """Per task: requires its raw preds + output-time deps; produces its output fields.
+
+        Gated by the writer's ``modes:`` list — a mode the writer opts out of
+        (e.g. ``export`` on a ``modes: [test]`` writer) declares nothing, so the
+        planner prunes it and the mode's implicit sink names none of its leaves.
+        """
+        if not self.runs_in_mode(mode):
+            return IO(requires={}, produces={})
         requires: dict[str, TensorSpec] = {}
         produces: dict[str, TensorSpec] = {}
         for task in self._resolved_tasks().values():
@@ -192,7 +255,10 @@ class RunTaskOutput(OutputSectionWriter):
         metadata through ``get_output_manifest(mode, run_name)`` — the value-
         free twin of ``get_output``. Returns fields tagged with their per-field
         leaf key, in task then field order (the H5/ONNX column-order authority).
+        Empty when the writer opts out of `mode` (its ``modes:`` list).
         """
+        if not self.runs_in_mode(mode):
+            return []
         out: list[tuple[str, OutputField]] = []
         for task in self._resolved_tasks().values():
             out.extend(

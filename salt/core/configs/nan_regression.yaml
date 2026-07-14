@@ -115,13 +115,10 @@ outputs:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
       tasks: [reg_nan_norm, reg_nan_ratio, reg_nan_seq]
+      modes: [test]
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
 
 export:
   model_name: nanRegression # Athena name: no '_'/'-'

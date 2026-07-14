@@ -11,6 +11,7 @@ real CLI, and the section H5's contents/order are asserted from first principles
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import h5py
@@ -30,8 +31,18 @@ from salt.core.testing.inputs import write_dummy_file
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
+GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
 RUN_NAME = "GN2v2_dummy"
 N_TEST = 300
+
+
+def _golden_task_columns() -> dict[str, list[str]]:
+    """Per-stream ordered flat TASK column names from the committed cutover34 golden."""
+    golden = json.loads(GOLDEN.read_text())
+    per_stream: dict[str, list[str]] = {}
+    for col in golden["h5"]["columns"]:
+        per_stream.setdefault(col["stream"], []).extend(col["column_names"])
+    return per_stream
 
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
@@ -85,9 +96,12 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def section_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the outputs:-section + dumb sinks (via the real CLI)."""
-    out = tmp_path_factory.mktemp("section") / "section.h5"
+def section_h5(data, ckpt) -> Path:
+    """Eval H5 from the outputs:-section + IMPLICIT sinks (via the real CLI).
+
+    Plan 50 Phase B: no ``--callbacks.h5_output`` — the H5 sink is wired by the
+    command over the section and writes the default-templated eval H5.
+    """
     rc = main([
         "test",
         "--config",
@@ -98,12 +112,12 @@ def section_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
         f"--trainer.default_root_dir={data['dir']}",
-        f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])
     assert rc == 0, "salt2 test on the outputs:-section config must run end-to-end"
-    assert out.exists()
-    return out
+    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
+    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
+    return evals[-1]
 
 
 @pytest.mark.cpu_always
@@ -125,26 +139,25 @@ class TestSectionH5SelfConsistency:
         with h5py.File(section_h5) as f:
             assert f["jets"].shape[0] == N_TEST
 
-    def test_task_columns_present(self, section_h5):
-        """All task columns exist: jet probs (f4), origin probs (f4), VertexIndex (int).
+    def test_task_columns_match_golden(self, section_h5):
+        """The eval H5's TASK columns == the committed cutover34 golden (parsed JSON).
 
         Nothing is deferred — the vertexing get_output fold mints the
         per-token VertexIndex integer column alongside the classification probs.
         """
+        expected = _golden_task_columns()
         with h5py.File(section_h5) as f:
+            present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
             jets, tracks = f["jets"].dtype, f["tracks"].dtype
+        for stream, cols in expected.items():
+            for col in cols:
+                assert col in present[stream], f"missing {stream} golden column {col}"
+        # dtypes: prob columns float, the bare VertexIndex column integer
         for s in JET_SUFFIXES:
-            col = f"{RUN_NAME}_{s}"
-            assert col in jets.names, f"missing jet prob column {col}"
-            assert np.issubdtype(jets[col], np.floating)
+            assert np.issubdtype(jets[f"{RUN_NAME}_{s}"], np.floating)
         for s in ORIGIN_SUFFIXES:
-            col = f"{RUN_NAME}_{s}"
-            assert col in tracks.names, f"missing origin prob column {col}"
-            assert np.issubdtype(tracks[col], np.floating)
-        # bare (un-prefixed) column — the v1 convention (prefix_vertex_column=False)
-        vtx = "VertexIndex"
-        assert vtx in tracks.names, f"missing vertexing column {vtx}"
-        assert np.issubdtype(tracks[vtx], np.integer)
+            assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
+        assert np.issubdtype(tracks["VertexIndex"], np.integer)
 
     def test_probs_are_softmaxed_not_double_converted(self, section_h5):
         """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
@@ -187,28 +200,25 @@ class TestColumnOrderDrivenBySection:
 
 
 class TestSectionOverlayConfigContent:
-    """The gn2v2-dummy-cutover34.yaml overlay wires the outputs: section + dumb sinks."""
+    """The gn2v2-dummy-cutover34.yaml overlay wires the full-family outputs: section.
+
+    Plan 50 Phase B: the overlay replaces the base's mode-split jets_out/origin_out
+    writers with ONE all-modes RunTaskOutput, and declares NO callbacks: sinks —
+    the command wires the implicit H5 + ONNX sinks.
+    """
 
     def test_config_content(self):
         cfg = yaml.safe_load(CUTOVER34_CFG.read_text())
-        # the standalone conversion producers are nulled (get_output replaces them)
+        # track_vertexing is un-deferred (base defers via expose: [fit, val]) so
+        # its get_output fold mints the VertexIndex eval/ONNX leaves.
         mods = cfg["model"]["modules"]
-        assert mods["jet_probs"] is None
-        assert mods["track_origin_probs"] is None
-        assert mods["track_origin_index"] is None
-        assert mods["track_vertex_index"] is None
-        # track_vertexing is NOT opted out of TEST/ONNX — the vtx get_output
-        # fold mints its eval/ONNX leaves. The base gn2v2-dummy.yaml defers
-        # vertexing (expose: [fit, val]) for its explicit-tables sink path, so
-        # the overlay must null the expose opt-out back to the all-modes
-        # default (same-class init_args deep-merge keeps the base's other args).
         assert mods["track_vertexing"]["init_args"]["expose"] is None
         # no legacy writers: block
         assert "writers" not in cfg
-        # the outputs: section in EXACT column order
+        # the outputs: section: null the base's mode-split writers, add run_tasks
         section = cfg["outputs"]
-        assert list(section.keys()) == ["inputs_copy", "run_tasks", "pad_mask"]
-        assert section["inputs_copy"]["class_path"] == "salt.core.outputs.InputCopyWriter"
+        assert section["jets_out"] is None
+        assert section["origin_out"] is None
         assert section["run_tasks"]["class_path"] == "salt.core.outputs.RunTaskOutput"
         # track_vertexing JOINS the orchestrated tasks
         assert section["run_tasks"]["init_args"]["tasks"] == [
@@ -216,14 +226,8 @@ class TestSectionOverlayConfigContent:
             "track_origin",
             "track_vertexing",
         ]
-        assert section["pad_mask"]["class_path"] == "salt.core.outputs.PadMaskWriter"
-        # the DUMB sinks null the base's explicit outputs: tables (they dump the
-        # section's outputs.* leaves instead — an explicit table would win)
-        assert cfg["callbacks"]["h5_output"]["class_path"] == "salt.core.outputs.H5OutputSink"
-        assert cfg["callbacks"]["h5_output"]["init_args"]["outputs"] is None
-        # the DUMB OnnxExportSink (explicit leaves nulled)
-        assert cfg["callbacks"]["onnx_export"]["class_path"] == "salt.core.outputs.OnnxExportSink"
-        assert cfg["callbacks"]["onnx_export"]["init_args"]["outputs"] is None
+        # the sinks are IMPLICIT — the overlay declares no h5_output/onnx_export
+        assert "callbacks" not in cfg
 
 
 @pytest.mark.cpu_always

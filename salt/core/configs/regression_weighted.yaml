@@ -142,12 +142,6 @@ outputs:
     init_args:
       tasks: [reg_weighted, reg_weighted_multi, reg_weighted_ratio, reg_weighted_multi_ratio, reg_weighted_no_global_object]
 
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
-  onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
-
 export:
   model_name: regressionWeighted # Athena name: no '_'/'-'
   inputs:

@@ -79,6 +79,11 @@ class MaskFormerObjectsSink(OutputSectionWriter):
         The object-regression task instance name (carried for symmetry with the
         legacy writer; inert on the eval-only sink path — ``onnx=False``), by
         default ``regression``.
+    modes : Sequence[str] | None, optional
+        The modes this writer runs in (``["test", "export"]`` subset; ``None``
+        = both). The object eval columns are H5 (``test``) only — ONNX object
+        outputs are wired separately (`MaskFormerObjects` conversion node +
+        `OnnxExportSink`).
     """
 
     name = "maskformer_objects"
@@ -90,8 +95,9 @@ class MaskFormerObjectsSink(OutputSectionWriter):
         object_stream: str = "objects",
         constituent_stream: str = "tracks",
         regression_task: str = "regression",
+        modes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes)
         self.name = type(self).name
         self.object_stream = str(object_stream)
         self.constituent_stream = str(constituent_stream)

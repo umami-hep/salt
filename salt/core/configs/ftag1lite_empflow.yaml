@@ -140,13 +140,10 @@ outputs:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing]
+      modes: [test]
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
 
 trainer:
   max_epochs: 40

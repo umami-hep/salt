@@ -84,14 +84,10 @@ outputs:
     init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
-    init_args: {tasks: [jets_classification]}
+    init_args: {tasks: [jets_classification], modes: [test]}
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [jets]} # jets is a padded sequence stream here
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
 
 trainer:
   max_epochs: 20

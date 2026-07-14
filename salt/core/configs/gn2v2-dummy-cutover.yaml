@@ -1,54 +1,11 @@
-# Overlay on gn2v2-dummy.yaml: switches its TEST eval sink to the two-layer
-# output-writing system (in-graph conversion producers -> outputs.* ->
-# H5OutputWriter). Stack as:
+# Overlay on gn2v2-dummy.yaml: an H5-only eval (no ONNX export). The base wires
+# jets_classification to both test + export; this overlay flips it to test-only
+# so the run-free ONNX parse assembles NO tuple (matching a config that
+# historically dropped its OnnxExportSink). H5 columns are unchanged. Stack as:
 #   salt2 test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml ...
 
-model:
-  modules:
-    track_vertexing:
-      class_path: salt.core.nn.tasks.VertexingTaskModule
-      init_args:
-        stream: tracks
-        label: ftagTruthVertexIndex
-        origin_label: ftagTruthOriginLabel
-        context: pooled.global
-        weight: 1.5
-        dense: {hidden_layers: [16], activation: ReLU}
-        expose: [fit, val] # vertexing eval column is deferred, not produced here
-    # drop the base's ONNX conversion nodes this cutover does not use
-    track_origin_index: null
-    track_vertex_index: null
-    # classification conversion producers: read raw logits, softmax once
-    jet_probs:
-      class_path: salt.core.outputs.ClassProbs
-      init_args: {task: jets_classification, stream: jets}
-    track_origin_probs:
-      class_path: salt.core.outputs.SeqClassProbs
-      init_args: {task: track_origin, stream: tracks}
-
-callbacks:
-  # no ONNX export in this TEST cutover — drop the base's OnnxExportSink,
-  # since vertexing (opted out above) would otherwise leave a dead ONNX demand
-  onnx_export: null
-  h5_output:
-    class_path: salt.core.outputs.H5OutputWriter
-    init_args:
-      outputs:
-        - {key: outputs.jets.jets_classification, suffixes: [pb, pc, pu]}
-        - {
-            key: outputs.tracks.track_origin,
-            suffixes:
-              [
-                pPileup,
-                pFake,
-                pPrimary,
-                pFromB,
-                pFromBC,
-                pFromC,
-                pFromTau,
-                pOtherSecondary,
-              ],
-          }
-      copy_inputs: {jets: [], tracks: []}
-      write_pad_mask: [tracks]
-      extra_groups: []
+outputs:
+  # H5-only: no RunTaskOutput opts into export, so no implicit ONNX sink is wired
+  jets_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {modes: [test]}

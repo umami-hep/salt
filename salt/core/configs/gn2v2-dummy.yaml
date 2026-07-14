@@ -110,52 +110,32 @@ model:
           expose: [fit, val] # VertexIndex TEST eval column is deferred
       loss:
         class_path: salt.core.nn.LossSum
-      # conversion producers for the pre-cutover34 sink path: jet_probs feeds
-      # both ONNX + TEST for jets_classification; track_origin_probs is the
-      # TEST-eval masked-softmax producer for track_origin.
-      jet_probs:
-        class_path: salt.core.outputs.ClassProbs
-        init_args: { task: jets_classification, stream: jets }
-      track_origin_probs:
-        class_path: salt.core.outputs.SeqClassProbs
-        init_args: { task: track_origin, stream: tracks }
-      track_origin_index: null
-      track_vertex_index: null
+
+# plan 50 Phase B: the eval outputs are declared as an outputs: section (WHAT);
+# the command wires the implicit per-command sink (salt2 test -> H5, the run-free
+# ONNX parses -> the ONNX tuple). Two RunTaskOutput writers with different modes:
+# reproduce the historical explicit-table split — jets_classification is written
+# to H5 AND exported to ONNX, track_origin is H5-only (modes: [test]); vertexing
+# stays TEST-deferred (expose: [fit, val]) so no VertexIndex column appears.
+outputs:
+  inputs_copy:
+    class_path: salt.core.outputs.InputCopyWriter
+    init_args: {streams: [jets, tracks]}
+  jets_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [jets_classification]} # test + export (both)
+  origin_out:
+    class_path: salt.core.outputs.RunTaskOutput
+    init_args: {tasks: [track_origin], modes: [test]} # eval H5 only
+  pad_mask:
+    class_path: salt.core.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
 
 export: # inert during fit/test
   model_name: GN2v2dummy # Athena name: no '_'/'-'
   inputs:
     - { port: inputs.jets, name: jet_features }
     - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks }
-
-callbacks:
-  onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - { key: outputs.jets.jets_classification, names: [pb, pc, pu] }
-  h5_output:
-    class_path: salt.core.outputs.H5OutputWriter
-    init_args:
-      outputs:
-        - {key: outputs.jets.jets_classification, suffixes: [pb, pc, pu]}
-        - {
-            key: outputs.tracks.track_origin,
-            suffixes:
-              [
-                pPileup,
-                pFake,
-                pPrimary,
-                pFromB,
-                pFromBC,
-                pFromC,
-                pFromTau,
-                pOtherSecondary,
-              ],
-          }
-      copy_inputs: {jets: [], tracks: []}
-      write_pad_mask: [tracks]
-      extra_groups: []
 
 trainer:
   max_epochs: 2

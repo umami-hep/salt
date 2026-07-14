@@ -245,22 +245,25 @@ class H5OutputSink(_SinkCallback):
         extra_groups: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
-        cols = [
-            c if isinstance(c, OutputColumn) else OutputColumn(**dict(c)) for c in outputs or []
-        ]
-        seen: set[str] = set()
-        for col in cols:
-            if col.key in seen:
-                raise ConfigError(
-                    f"H5OutputSink: duplicate output key {col.key!r} — one OutputColumn per "
-                    "outputs.* leaf (design §2.2)"
-                )
-            seen.add(col.key)
-        self._explicit_columns: tuple[OutputColumn, ...] = tuple(cols)
-        # the resolved column table — the explicit list (resolved up-front), or the
-        # one resolved from the bound outputs: section on first access.
-        self._columns: tuple[OutputColumn, ...] = tuple(cols)
-        self._columns_resolved = bool(cols)
+        # plan 50 Phase B: the explicit OutputColumn table is RETIRED as a config
+        # surface — the H5 sink is now implicit (the command wires it) and derives
+        # its column schema from the bound outputs: section (RunTaskOutput +
+        # InputCopyWriter + PadMaskWriter). An explicit `outputs:` table is a hard
+        # error pointing at the section mechanism. `outputs=None`/`[]` is the only
+        # accepted value (the injected/dumb-section path).
+        if outputs:
+            raise ConfigError(
+                "H5OutputSink no longer accepts an explicit `outputs:` OutputColumn table "
+                "(plan 50 Phase B) — the H5 sink is implicit (the `salt2 test` command wires "
+                "it) and derives its columns from the top-level `outputs:` section "
+                "(RunTaskOutput + InputCopyWriter + PadMaskWriter). Declare the section, per "
+                "`gn2v2-opendata.yaml`; use each RunTaskOutput's `modes:` list to control "
+                "test-vs-export participation. Do NOT wire H5OutputSink in `callbacks:` at all."
+            )
+        # no explicit columns — resolved lazily from the bound outputs: section.
+        self._explicit_columns: tuple[OutputColumn, ...] = ()
+        self._columns: tuple[OutputColumn, ...] = ()
+        self._columns_resolved = False
         self.copy_inputs = {s: list(v) for s, v in (copy_inputs or {}).items()}
         self.write_pad_mask = write_pad_mask
         self.output = output

@@ -32,13 +32,16 @@ class PadMaskWriter(OutputSectionWriter):
         The sequence streams to write a mask column for. Each must be a padded
         sequence stream (validated by the sink against the reader). Required
         and explicit — the sink resolves the reader's default set.
+    modes : Sequence[str] | None, optional
+        The modes this writer runs in (``["test", "export"]`` subset; ``None``
+        = both). The pad-mask column is eval-H5 only.
     """
 
     name = "pad_mask"
     """The section instance name (overridable by the config dict key)."""
 
-    def __init__(self, streams: Sequence[str]) -> None:
-        super().__init__()
+    def __init__(self, streams: Sequence[str], modes: Sequence[str] | None = None) -> None:
+        super().__init__(modes=modes)
         self.name = type(self).name
         names = list(streams or [])
         if not names:
@@ -59,7 +62,8 @@ class PadMaskWriter(OutputSectionWriter):
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``masks.<stream>`` -> ``outputs.<stream>.mask`` per stream (demand-gated)."""
-        del mode
+        if not self.runs_in_mode(mode):
+            return IO(requires={}, produces={})
         requires: dict[str, TensorSpec] = {}
         produces: dict[str, TensorSpec] = {}
         for stream in self.streams:

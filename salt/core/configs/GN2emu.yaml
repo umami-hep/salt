@@ -212,13 +212,10 @@ outputs:
     class_path: salt.core.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing, electron_origin, electron_vertexing]
+      modes: [test]
   pad_mask:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks, electrons]}
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
 
 # no export: block — the soft-muon 'global' has no same-width Athena source
 # to alias from (v1's clone-from-global_object trick only works when global

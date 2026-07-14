@@ -147,12 +147,6 @@ outputs:
     class_path: salt.core.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
-  onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
-
 export: # inert during fit/test; used only by ONNX export
   model_name: GN2XE # Athena name: no '_'/'-'
   inputs:

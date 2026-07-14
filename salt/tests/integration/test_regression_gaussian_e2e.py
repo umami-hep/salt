@@ -81,9 +81,12 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def eval_h5(data, ckpt, tmp_path_factory) -> Path:
-    """Eval H5 from the ``outputs:``-section gaussian get_output path (via the CLI)."""
-    out = tmp_path_factory.mktemp("gauss_e2e_eval") / "eval.h5"
+def eval_h5(data, ckpt) -> Path:
+    """Eval H5 from the ``outputs:``-section gaussian get_output path (via the CLI).
+
+    Plan 50 Phase B: the H5 sink is IMPLICIT (wired by the command) — no
+    ``--callbacks.h5_output`` override; read the default-templated eval H5.
+    """
     rc = main([
         "test",
         "--config",
@@ -92,12 +95,12 @@ def eval_h5(data, ckpt, tmp_path_factory) -> Path:
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
         f"--trainer.default_root_dir={data['dir']}",
-        f"--callbacks.h5_output.init_args.output={out}",
         *_overrides(data),
     ])
     assert rc == 0, "salt2 test on the shipped regression_gaussian.yaml must run end-to-end"
-    assert out.exists()
-    return out
+    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
+    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
+    return evals[-1]
 
 
 def test_gaussian_eval_h5_has_stddev_columns(eval_h5):

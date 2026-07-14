@@ -19,7 +19,7 @@ from salt.core.graph.spec import (
     TensorSpec,
     unflatten_spec,
 )
-from salt.core.outputs import CollectOutputs, H5OutputSink, OutputColumn
+from salt.core.outputs import CollectOutputs, H5OutputSink
 from salt.core.render import dot_source
 from salt.core.saltmodule import SaltModule
 
@@ -32,14 +32,14 @@ _OVERRIDES = [
     "trainer.logger=false",
 ]
 
-# the cutover producer leaves the H5 sink consumes (design §7 exp-15 assertion).
-_JET_OUT = "outputs.jets.jets_classification"
+# plan 50 Phase B: the H5 sink is IMPLICIT (wired by the command over the outputs:
+# section); the section RunTaskOutput writers (jets_out/origin_out) feed it.
 _TRK_OUT = "outputs.tracks.track_origin"
 
 
 @pytest.fixture(scope="module")
 def cutover_cfg():
-    """The live cutover config — the H5OutputSink folded as a node (design §4.3)."""
+    """The live cutover config — the implicit H5OutputSink folded as a node (design §4.3)."""
     return load_config([_DUMMY, _CUTOVER], _OVERRIDES)
 
 
@@ -60,7 +60,7 @@ def _compile(cfg, mode):
 
 def test_h5_output_sink_is_a_sink_module():
     """`H5OutputSink` satisfies the `SinkModule` Protocol (``is_sink() -> True``)."""
-    sink = H5OutputSink(outputs=[OutputColumn(key=_JET_OUT, suffixes=["pb", "pc", "pu"])])
+    sink = H5OutputSink()  # implicit sink: bare, columns resolve from the bound section
     assert isinstance(sink, SinkModule)
     assert sink.is_sink() is True
 
@@ -78,7 +78,7 @@ class _FakeH5:
 
 def test_close_if_open_closes_handle_without_full_count_assertion():
     """`close_if_open` closes a leaked handle on an interrupted test and is idempotent (§5.3)."""
-    sink = H5OutputSink(outputs=[OutputColumn(key=_JET_OUT, suffixes=["pb", "pc", "pu"])])
+    sink = H5OutputSink()
     fake = _FakeH5()
     # simulate an open writer mid-test with FEWER rows written than expected
     # (the interrupted-batch shape `flush`'s full-count branch would assert on)
@@ -183,7 +183,7 @@ def test_folded_sink_contributes_no_step_or_edge_outside_test(cutover_cfg, mode)
 def test_fit_val_plan_hash_byte_identical_with_vs_without_sink(cutover_cfg, mode):
     """FIT/VAL ``plan_hash`` is byte-identical with the sink folded vs absent."""
     full = _compile(cutover_cfg, mode).plan_hash
-    eval_only = {"jet_probs", "track_origin_probs", "h5_output"}
+    eval_only = {"inputs_copy", "jets_out", "origin_out", "pad_mask", "h5_output"}
     base_modules = {k: v for k, v in cutover_cfg.modules.items() if k not in eval_only}
     base = compile_plan(
         base_modules,
@@ -207,11 +207,10 @@ def test_cutover_test_render_has_named_h5_sink_card(cutover_cfg):
     assert "<sinks>" not in dot  # the sentinel branch is dead (sinks are named nodes)
     assert "h5_output" in dot
     assert "H5OutputSink" in dot
-    for leaf in (_JET_OUT, _TRK_OUT, "meta.rows", "masks.tracks"):
-        assert leaf in dot
-    # named-consumer edges flow into the NAMED node, not a sentinel
-    assert '"jet_probs" -> "h5_output";' in dot
-    assert '"track_origin_probs" -> "h5_output";' in dot
+    assert "meta.rows" in dot
+    # named-consumer edges flow from the section writers into the NAMED sink node
+    assert '"jets_out" -> "h5_output";' in dot
+    assert '"origin_out" -> "h5_output";' in dot
 
 
 def test_cutover_onnx_render_prunes_h5_sink(cutover_cfg):
@@ -257,7 +256,16 @@ def _folded_test_plan(*, include_dead):
     )
     producer = TaskOutput(task="track_origin", stream="tracks")
     producer.name = "track_origin_output"
-    sink = H5OutputSink(outputs=[OutputColumn(key=out_key, suffixes=list("abcde"))])
+    # a minimal terminal sink demanding the converted leaf (the implicit H5 sink
+    # resolves its columns from a bound section, not an explicit table — this
+    # stub stands in for that resolved TEST demand to exercise the dead-preds gate)
+    sink = _ExplodingSink()
+    sink.name = "h5_output"
+    sink.declare_io = lambda mode, _k=out_key: (  # type: ignore[method-assign]
+        IO(unflatten_spec({_k: TensorSpec(shape=None, dtype=None, kind="data")}), produces={})
+        if (mode & Mode.TEST)
+        else IO(requires={}, produces={})
+    )
     modules = {
         track_task.name: track_task,
         producer.name: producer,

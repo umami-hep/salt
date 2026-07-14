@@ -48,15 +48,26 @@ _ORIGIN_SUFFIXES = [
 _LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 
 
+def _seed_columns(sink: H5OutputSink, columns: list[OutputColumn]) -> H5OutputSink:
+    """Seed the sink's resolved internal OutputColumns directly.
+
+    Plan 50 Phase B retired the explicit-``outputs`` config table; OutputColumn is
+    now the sink's INTERNAL value object (resolved from the bound section). These
+    white-box unit tests seed it directly instead of via the removed surface.
+    """
+    sink._columns = tuple(columns)  # noqa: SLF001 - internal value object seed
+    sink._columns_resolved = True  # noqa: SLF001
+    return sink
+
+
 def _h5_sink() -> H5OutputSink:
     """The cutover H5 persistence sink (TEST requires non-empty -> a real test sink)."""
-    return H5OutputSink(
-        outputs=[
+    return _seed_columns(
+        H5OutputSink(copy_inputs={"jets": [], "tracks": []}, write_pad_mask=["tracks"]),
+        [
             OutputColumn(key=_JET_OUT, suffixes=["pb", "pc", "pu"]),
             OutputColumn(key=_TRK_OUT, suffixes=_ORIGIN_SUFFIXES),
         ],
-        copy_inputs={"jets": [], "tracks": []},
-        write_pad_mask=["tracks"],
     )
 
 

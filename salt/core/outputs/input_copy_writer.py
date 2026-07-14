@@ -32,6 +32,9 @@ class InputCopyWriter(OutputSectionWriter):
     variables : Mapping[str, Sequence[str]] | None, optional
         Per-stream narrowing of the copied fields; a stream not listed
         copies all source fields, by default None.
+    modes : Sequence[str] | None, optional
+        The modes this writer runs in (``["test", "export"]`` subset; ``None``
+        = both). Input copies are eval-H5 only, so ``export`` is inert here.
     """
 
     name = "inputs_copy"
@@ -41,8 +44,9 @@ class InputCopyWriter(OutputSectionWriter):
         self,
         streams: Sequence[str] | None = None,
         variables: Mapping[str, Sequence[str]] | None = None,
+        modes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes)
         self.name = type(self).name
         self.streams = tuple(streams) if streams is not None else None
         self.variables = {key: list(val) for key, val in (variables or {}).items()}

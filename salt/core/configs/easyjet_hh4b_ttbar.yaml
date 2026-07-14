@@ -113,11 +113,7 @@ outputs:
     init_args: {streams: [event]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
-    init_args: {tasks: [events_classification]}
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
+    init_args: {tasks: [events_classification], modes: [test]}
 
 trainer:
   max_epochs: 20

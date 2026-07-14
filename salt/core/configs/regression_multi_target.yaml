@@ -108,11 +108,7 @@ outputs:
     init_args: {streams: [jets]}
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
-    init_args: {tasks: [reg_multi_target]}
-
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
+    init_args: {tasks: [reg_multi_target], modes: [test]}
 
 export:
   model_name: regressionMultiTarget # Athena name: no '_'/'-'

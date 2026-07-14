@@ -13,7 +13,7 @@ import re
 import sys
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -276,6 +276,35 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     return cfg
 
 
+def _section_runs_mode(section: Mapping[str, Any], mode: Any) -> bool:
+    """Whether any composed ``outputs:`` section writer runs in `mode`.
+
+    Drives the implicit H5-sink wiring — a section with at least one
+    TEST-mode writer needs the H5 persistence sink.
+    """
+    return any(
+        callable(getattr(writer, "runs_in_mode", None)) and writer.runs_in_mode(mode)
+        for writer in section.values()
+    )
+
+
+def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
+    """Whether any ``RunTaskOutput`` in the section opts into ``export`` (ONNX).
+
+    Gates the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
+    leaves (the manifest-only writers — input copies, pad masks — do not), so a
+    section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
+    tuple (matching a config that historically wired no OnnxExportSink).
+    """
+    from salt.core.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
+
+    for writer in section.values():
+        is_rto = getattr(writer, "is_run_task_output", None)
+        if callable(is_rto) and is_rto() and writer.runs_in_mode(Mode.ONNX):
+            return True
+    return False
+
+
 def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
     """Pair each ``model`` namespace with the scope its ``--class_dict`` lives in
     — top-level on the run-free surface, subcommand-scoped on a trainer run.
@@ -490,7 +519,13 @@ class Salt2CLI(LightningCLI):
         model = getattr(self, "model", None)
         composer = getattr(model, "compose_output_section", None) if model is not None else None
         if section and callable(composer):
-            composer({k: w for k, w in section.items() if w is not None})
+            live_section = {k: w for k, w in section.items() if w is not None}
+            composer(live_section)
+            # plan 50 Phase B: the command wires the implicit per-command sinks
+            # (test -> H5, export/graph -> ONNX) over the composed section, before
+            # the bind loop — so a config declaring only WHAT (modules + modes)
+            # gets the right sink without ever naming H5OutputSink/OnnxExportSink.
+            self._inject_command_sinks(live_section)
             # bind the section to the sink callbacks NOW: datamodule setup runs
             # BEFORE model setup and resolves the sink's writer_demand, which
             # needs the section already bound.
@@ -498,6 +533,57 @@ class Salt2CLI(LightningCLI):
             for cb in (trainer.callbacks if trainer is not None else []):
                 if callable(getattr(cb, "bind_output_section", None)):
                     cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
+
+    def _inject_command_sinks(self, section: Mapping[str, Any]) -> None:
+        """Wire the implicit per-command output sinks over the composed section.
+
+        Plan 50 Phase B — the config declares WHAT (section modules + their
+        ``modes:``); the command picks the sink:
+
+        - ``salt2 test`` (subcommand ``test``): the H5 persistence sink, if any
+          section writer runs in TEST.
+        - The run-free parses (``salt2 graph``/``schema``/``export`` — all
+          ``subcommand is None``, the caveat from plan 50a): BOTH the H5 sink
+          (TEST section) and the ONNX sink (any RunTaskOutput running in
+          ``export``), so the static tooling and the exporter see the same
+          implicit sinks a real run would.
+        - ``salt2 fit`` (subcommand ``fit``): no output sinks.
+
+        A sink already present in ``trainer.callbacks`` (a programmatic build,
+        or the MaskFormer ONNX escape hatch) is left alone — never double-wired.
+        """
+        from salt.core.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
+        from salt.core.outputs import (  # noqa: PLC0415 - avoid import cycle at top
+            H5OutputSink,
+            OnnxExportSink,
+        )
+
+        subcommand = getattr(self.config, "subcommand", None)
+        if subcommand == "fit":
+            return
+        trainer = getattr(self, "trainer", None)
+        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
+        if callbacks is None:
+            return
+
+        def _present(cls: type) -> bool:
+            return any(isinstance(cb, cls) for cb in callbacks)
+
+        # H5 sink: any command that persists TEST predictions (test or run-free)
+        if _section_runs_mode(section, Mode.TEST) and not _present(H5OutputSink):
+            h5 = H5OutputSink()
+            h5.name = "h5_output"
+            callbacks.append(h5)
+        # ONNX sink: only the run-free parses assemble the ONNX tuple, and only
+        # when a RunTaskOutput opts into export (a test-only section mints none).
+        if (
+            subcommand is None
+            and _section_produces_onnx(section)
+            and not _present(OnnxExportSink)
+        ):
+            onnx = OnnxExportSink()
+            onnx.name = "onnx_export"
+            callbacks.append(onnx)
 
     def _detach_fit_logger(self) -> Any:
         """Stash + null the fit-stage ``trainer.logger`` ahead of the parser pass,
@@ -546,18 +632,20 @@ class Salt2CLI(LightningCLI):
         cfg = self.config["test"]
         self.save_config_callback = None  # no config.yaml dump on test
         cfg.trainer.logger = False
-        # writers.modules no longer constitutes a valid persistence sink; a
-        # config with live writers.modules raises the migration error in
-        # instantiate_classes. Accept only the callbacks-level sink path.
+        # plan 50 Phase B: the H5 persistence sink is now IMPLICIT — the command
+        # wires it in instantiate_classes over the top-level outputs: section. So
+        # the writer-less guard checks for the section (the WHAT), not a
+        # declared callbacks-level sink; a config still MAY declare its own sink
+        # (programmatic / MaskFormer), which _inject_command_sinks leaves alone.
         has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
-        if not has_callback_sink:
+        has_outputs_section = bool(cfg.get("outputs"))
+        if not has_callback_sink and not has_outputs_section:
             raise ConfigError(
-                "salt2 test needs a persistence sink — a callbacks-level H5OutputWriter "
-                "sink; predictions would otherwise be computed and never persisted "
-                "(design §4.2, §8). Supply a top-level outputs: section "
-                "(InputCopyWriter -> RunTaskOutput -> PadMaskWriter, in v1 H5 column order) "
-                "with a callbacks-level salt.core.outputs.H5OutputSink (W6c removal; "
-                "the writers: block is gone — see gn2v2-dummy.yaml)"
+                "salt2 test needs an `outputs:` section to persist predictions — the "
+                "command wires the H5 sink over it (plan 50 Phase B). Supply a top-level "
+                "outputs: section (InputCopyWriter -> RunTaskOutput -> PadMaskWriter, in v1 "
+                "H5 column order); use each RunTaskOutput's `modes:` list to control "
+                "test-vs-export participation. See gn2v2-opendata.yaml."
             )
         if not cfg.get("ckpt_path"):
             configs = cfg.get("config") or []

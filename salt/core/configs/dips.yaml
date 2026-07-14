@@ -92,12 +92,6 @@ outputs:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification]}
 
-callbacks:
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
-  onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
-
 export:
   model_name: dips # Athena name: no '_'/'-'
   inputs:

@@ -34,12 +34,13 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # W6c: jet_probs (ClassProbs) is the shared ONNX+TEST conversion producer;
-    # track_origin_probs (SeqClassProbs) is the TEST-eval probability producer.
-    # track_origin_index (SeqClassIndex) and track_vertex_index (VertexUnionFind)
-    # are retired from model.modules in this wave.
-    "jet_probs",
-    "track_origin_probs",
+    # plan 50 Phase B: gn2v2-dummy.yaml declares its eval outputs as an outputs:
+    # section (composed onto model.net). The graph-folded section writers appear
+    # in model.net (inputs_copy is manifest-only, not folded); the standalone
+    # conversion producers (jet_probs/track_origin_probs/...) are retired.
+    "jets_out",
+    "origin_out",
+    "pad_mask",
 }
 
 FOURTH_TASK_YAML = """
@@ -128,15 +129,13 @@ class TestParseAndInstantiate:
         # (real-data runs are the gates experiment's job — no /data here)
         cli = make_cli(data, config=OPENDATA_CFG)
         assert isinstance(cli.model, SaltModule)
-        # plan 34 W34.4b: the open-data config is RELOCATED onto the outputs:
-        # section + dumb sinks — the plan-29/31 conversion PRODUCERS (jet_probs/
-        # track_origin_index/track_vertex_index) are RETIRED from model.modules
-        # (the get_output fold replaces them). model.net carries the model modules
-        # (nets + tasks + loss) PLUS the composed section GRAPH-node writers
-        # (run_tasks + pad_mask; inputs_copy is manifest-only, not an nn.Module so
-        # not in net). No conversion producers remain.
-        non_producer = GN2V2_MODULES - {"jet_probs", "track_origin_index", "track_vertex_index", "track_origin_probs"}
-        assert set(cli.model.net.keys()) == non_producer | {"run_tasks", "pad_mask"}
+        # the open-data config is on the outputs: section path — model.net carries
+        # the model modules (nets + tasks + loss) PLUS the composed section
+        # GRAPH-node writers. Open-data uses ONE run_tasks writer (+ pad_mask;
+        # inputs_copy is manifest-only, not an nn.Module) — the dummy's mode-split
+        # jets_out/origin_out writers (in GN2V2_MODULES) do not appear here.
+        base = GN2V2_MODULES - {"jets_out", "origin_out", "pad_mask"}
+        assert set(cli.model.net.keys()) == base | {"run_tasks", "pad_mask"}
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
         assert list(jets_task.class_names) == ["bjets", "cjets", "ujets", "taujets"]

@@ -1,47 +1,24 @@
-# Overlay on gn2v2-dummy.yaml: switches its eval path from the standalone
-# conversion-producer nodes to the get_output()-on-task + outputs:-section +
-# dumb-sink architecture. Stack as:
+# Overlay on gn2v2-dummy.yaml: the FULL get_output()-on-task section — all
+# three heads (jets_classification, track_origin, track_vertexing) serialised to
+# H5 and exported to ONNX via one RunTaskOutput. Replaces the base's mode-split
+# jets_out/origin_out writers with a single all-modes run_tasks. The command
+# wires the implicit H5 + ONNX sinks (plan 50 Phase B — no callbacks: sinks).
+# Stack as:
 #   salt2 test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover34.yaml ...
 
 model:
   modules:
-    # drop the old conversion producers — get_output on each task replaces them
-    track_origin_index: null
-    track_vertex_index: null
-    jet_probs: null
-    track_origin_probs: null
-    # W34.3: track_vertexing is NOT opted out of TEST/ONNX here — its get_output
-    # mints the VertexIndex leaves. The base gn2v2-dummy.yaml defers vertexing
-    # (expose: [fit, val]) for its vertexing-less H5OutputWriter sink path; null
-    # the expose opt-out back to the all-modes default (same-class init_args
-    # deep-merge keeps the base's other args).
+    # un-defer vertexing (the base defers it via expose: [fit, val]) so its
+    # get_output mints the VertexIndex H5 column + ONNX int8 leaf.
     track_vertexing:
       class_path: salt.core.nn.tasks.VertexingTaskModule
       init_args:
         expose: null
 
 outputs:
-  inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
-    init_args: {streams: [jets, tracks]}
+  # drop the base's mode-split writers; one RunTaskOutput over the full family
+  jets_out: null
+  origin_out: null
   run_tasks:
     class_path: salt.core.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification, track_origin, track_vertexing]}
-  pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
-    init_args: {streams: [tracks]}
-
-# DUMB sinks: null the base config's explicit outputs: column/leaf tables
-# (H5OutputWriter is an alias of H5OutputSink, so the base's init_args survive
-# the class_path swap in the deep merge) — an explicit table would override the
-# bound outputs: section; with outputs: null the sinks dump ALL active
-# outputs.* leaves, names/dtypes/order from the section manifest.
-callbacks:
-  onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
-    init_args:
-      outputs: null
-  h5_output:
-    class_path: salt.core.outputs.H5OutputSink
-    init_args:
-      outputs: null

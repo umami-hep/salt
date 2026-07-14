@@ -55,12 +55,21 @@ def _ctx(precision: str = "full") -> _ExtraGroupCtx:
     )
 
 
+def _seeded(sink: H5OutputSink) -> H5OutputSink:
+    """Seed one task column directly on the sink.
+
+    Plan 50 Phase B retired the explicit-``outputs`` config table; OutputColumn is
+    now the sink's INTERNAL value object. These white-box extra-group tests seed
+    it directly instead of via the removed surface.
+    """
+    sink._columns = (OutputColumn(key="outputs.jets.cls", suffixes=["pb"]),)  # noqa: SLF001
+    sink._columns_resolved = True  # noqa: SLF001
+    return sink
+
+
 def _sink(node: _StubExtraNode, *, name: str = "mf") -> H5OutputSink:
-    """A sink with ONE explicit task column + the extra-group node bound."""
-    sink = H5OutputSink(
-        outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])],
-        extra_groups=[name],
-    )
+    """A sink with ONE seeded task column + the extra-group node bound."""
+    sink = _seeded(H5OutputSink(extra_groups=[name]))
     sink.bind_output_section({name: node})
     return sink
 
@@ -78,7 +87,7 @@ class TestCollectExtraGroups:
 
     def test_empty_is_noop(self):
         """No extra_groups -> ({}, {}) (the byte-identical seam the configs ship)."""
-        sink = H5OutputSink(outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])])
+        sink = _seeded(H5OutputSink())
         assert sink._collect_extra_groups(_ctx(), _STREAMS) == ({}, {})  # noqa: SLF001
 
     def test_group_shadowing_reader_stream_raises(self):
@@ -89,10 +98,7 @@ class TestCollectExtraGroups:
 
     def test_duplicate_owner_raises(self):
         """Two nodes claiming the same extra group is a ConfigError."""
-        sink = H5OutputSink(
-            outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])],
-            extra_groups=["a", "b"],
-        )
+        sink = _seeded(H5OutputSink(extra_groups=["a", "b"]))
         sink.bind_output_section({
             "a": _StubExtraNode(extra={"objects": (_M,)}),
             "b": _StubExtraNode(extra={"objects": (_M,)}),
@@ -102,10 +108,7 @@ class TestCollectExtraGroups:
 
     def test_unbound_name_raises(self):
         """An extra_groups name with no bound section node is a ConfigError."""
-        sink = H5OutputSink(
-            outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])],
-            extra_groups=["ghost"],
-        )
+        sink = _seeded(H5OutputSink(extra_groups=["ghost"]))
         sink.bind_output_section({"mf": _StubExtraNode()})
         with pytest.raises(ConfigError, match="not a bound outputs: section node"):
             sink._collect_extra_groups(_ctx(), _STREAMS)  # noqa: SLF001
@@ -162,11 +165,7 @@ class TestMergeColumnsExtraBranch:
 
     def test_half_precision_extra_columns(self):
         """The extra ctx threads precision into the node's column dtypes (f2)."""
-        sink = H5OutputSink(
-            outputs=[OutputColumn(key="outputs.jets.cls", suffixes=["pb"])],
-            extra_groups=["mf"],
-            half_precision=True,
-        )
+        sink = _seeded(H5OutputSink(extra_groups=["mf"], half_precision=True))
         sink.bind_output_section({"mf": _StubExtraNode()})
         ctx = _ctx(precision="half")
         sink._extra_shapes, _ = sink._collect_extra_groups(ctx, _STREAMS)  # noqa: SLF001
