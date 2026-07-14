@@ -49,10 +49,12 @@ class _TaskModuleBase(SaltModelModule):
         weight: float,
         default_loss: dict[str, Any],
         expose: Sequence[str] | None = None,
+        write_targets: bool = True,
     ) -> None:
         super().__init__()
         _reject_width_keys(type(self).__name__, dense, _WIDTH_KEYS)
         self.stream = stream
+        self.write_targets = bool(write_targets)
         # `input_name` is the head-math name for the task's stream tag (the
         # single source of both the label-dict key and the pad-mask selection)
         self.input_name = stream
@@ -109,6 +111,12 @@ class _TaskModuleBase(SaltModelModule):
         or a fixed-count query bank (e.g. MaskFormer ``objects``).
         """
         return self.sequence and self.stream not in _NO_PAD_MASK_STREAMS
+
+    def _emit_targets(self, mode: Mode) -> bool:
+        """Whether `mode` gets target-label fields: TEST only, ``write_targets`` on
+        (never ONNX — export/inference stays label-free).
+        """  # noqa: DOC201 - private one-line predicate
+        return self.write_targets and bool(mode & Mode.TEST)
 
     # -- output rendering: TEST columns + values, ONNX manifest -----------------
     #
@@ -191,6 +199,21 @@ class _TaskModuleBase(SaltModelModule):
         NOT pack a structured numpy array, prefix the run/model name, or
         downcast precision (the sink does all three).
 
+        Target-label emission (plan 50 Phase C): in TEST mode, and unless the
+        task's ``write_targets`` flag is off, the prediction fields are
+        followed by the task's TARGET-LABEL field(s) — the labels the model
+        targeted, as columns named ``target_{task}`` (classification /
+        vertexing) or ``target_{task}_{target}`` (regression, one per target).
+        Label columns are model-independent, so they are NEVER run-name
+        prefixed (``prefix=False``). Per family: classification emits the
+        class label as consumed (post ``label_map`` remap; padded / invalid
+        ``-2`` positions read ``-1``, matching the loss); regression emits the
+        UNSCALED physical target(s) (padded positions NaN, matching the
+        de-scaled prediction columns); vertexing emits its per-token
+        vertex-index label (padded positions ``-1``). In ONNX/export mode NO
+        label field is ever emitted, declared, or demanded — the export graph
+        must stay label-free.
+
         Parameters
         ----------
         b : Bundle
@@ -217,7 +240,8 @@ class _TaskModuleBase(SaltModelModule):
         The bundle-free twin of `get_output`: the SAME `OutputField` list
         (names / dtypes / axis / final / prefix, same order) but with every
         ``value`` left ``None``, so sinks can resolve column names/dtypes/order
-        before any batch runs.
+        before any batch runs. Includes the TEST-mode target-label fields
+        (see `get_output`); the ONNX manifest is always label-free.
 
         Parameters
         ----------
@@ -240,8 +264,11 @@ class _TaskModuleBase(SaltModelModule):
 
         E.g. a per-token (sequence) head needs the stream pad mask
         (``masks.<stream>``) for the masked softmax; a global (pooled) head
-        needs nothing extra. The base returns ``[]``; per-family overrides
-        declare their own.
+        needs nothing extra. In TEST mode a ``write_targets`` task ALSO
+        demands exactly the ``labels.*`` keys its target-label fields read;
+        in ONNX mode no label key is ever demanded (label-free export /
+        inference is a graph contract). The base returns ``[]``; per-family
+        overrides declare their own.
 
         Parameters
         ----------

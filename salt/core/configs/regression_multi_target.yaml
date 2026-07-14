@@ -99,6 +99,10 @@ model:
           norm_params: {mean: 1.0, std: 1.0}
           loss: MSELoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+          # pt_label_handle is a MultiTarget-DERIVED label, produced in
+          # FIT|VAL only — it cannot be demanded (or dumped) in TEST, so the
+          # plan-50 Phase-C target-label column is opted out for this head.
+          write_targets: false
       loss:
         class_path: salt.core.nn.LossSum
 

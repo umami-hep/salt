@@ -49,14 +49,15 @@ def _golden_task_columns() -> dict[str, list[str]]:
 
 
 def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The FULL ordered per-stream H5 column contract for the Phase-B gate.
+    """The FULL ordered per-stream H5 column contract (Phase-C golden).
 
-    Byte-identical columns = input-copy source columns FIRST (in source-file
-    order; an empty golden ``copy_inputs`` means the v1 copy-ALL default, so
-    every source field is copied), then task columns in golden order, then the
-    trailing pad-mask column. Asserting H5 dtype.names EQUAL this (not merely
-    contain it) enforces "no ADDED columns" — a Phase-C label-emission leak, or
-    an un-deferred extra leaf from a bad expose merge, cannot slip past.
+    Exact columns = input-copy source columns FIRST (in source-file order; an
+    empty golden ``copy_inputs`` means the v1 copy-ALL default, so every
+    source field is copied), then task columns in golden order — which, since
+    plan 50 Phase C, includes each task's trailing ``target_{task}`` label
+    column — then the trailing pad-mask column. Asserting H5 dtype.names EQUAL
+    this (not merely contain it) enforces "no ADDED columns" beyond the
+    committed golden.
     """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     h5 = json.loads(GOLDEN.read_text())["h5"]
     tasks: dict[str, list[str]] = {}
@@ -172,12 +173,13 @@ class TestSectionH5SelfConsistency:
     def test_task_columns_match_golden(self, data, section_h5):
         """The eval H5's columns EQUAL the committed cutover34 golden, per stream, in order.
 
-        Exact-list equality (not membership) is the Phase-B gate: byte-identical
-        columns with NO new label columns yet. Any ADDED column — a Phase-C
-        label-emission leak, or an un-deferred extra leaf from a bad expose merge
-        — fails here. Nothing is deferred in this config: the vertexing
-        get_output fold mints the per-token VertexIndex integer column alongside
-        the classification probs.
+        Exact-list equality (not membership): pre-Phase-C columns byte-identical
+        plus exactly the per-task ``target_{task}`` label columns the golden
+        declares (jets_classification / track_origin / track_vertexing). Any
+        OTHER added column — an un-deferred extra leaf from a bad expose merge —
+        fails here. Nothing is deferred in this config: the vertexing get_output
+        fold mints the per-token VertexIndex integer column alongside the
+        classification probs.
         """
         with h5py.File(data["h5"]) as src:
             src_cols = {
@@ -202,6 +204,10 @@ class TestSectionH5SelfConsistency:
         for s in ORIGIN_SUFFIXES:
             assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
         assert np.issubdtype(tracks["VertexIndex"], np.integer)
+        # Phase-C target-label columns: unprefixed (model-independent), integer
+        assert np.issubdtype(jets["target_jets_classification"], np.integer)
+        assert np.issubdtype(tracks["target_track_origin"], np.integer)
+        assert np.issubdtype(tracks["target_track_vertexing"], np.integer)
 
     def test_probs_are_softmaxed_not_double_converted(self, section_h5):
         """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
@@ -305,6 +311,10 @@ class TestSectionWriterUnits:
         # the seq head (track_origin) AND the vertexing head declare masks.tracks
         # via output_time_requires
         assert "masks.tracks" in req
+        # Phase C: each task demands EXACTLY its target-label key in TEST
+        assert "labels.jets.flavour_label" in req
+        assert "labels.tracks.ftagTruthOriginLabel" in req
+        assert "labels.tracks.ftagTruthVertexIndex" in req
 
     def test_run_task_produces_per_field_leaves_test(self):
         """In TEST, RunTaskOutput produces one outputs.*.<col> leaf PER class column."""
@@ -320,6 +330,10 @@ class TestSectionWriterUnits:
             assert f"outputs.tracks.track_origin.{s}" in prod
         # vertexing head -> one i8 VertexIndex per-token leaf (H5)
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
+        # Phase C: one target-label leaf per task
+        assert "outputs.jets.jets_classification.target_jets_classification" in prod
+        assert "outputs.tracks.track_origin.target_track_origin" in prod
+        assert "outputs.tracks.track_vertexing.target_track_vertexing" in prod
 
     def test_run_task_produces_argmax_leaf_onnx(self):
         """In ONNX, the seq head produces a single argmax-index leaf (TrackOrigin)."""
@@ -336,18 +350,28 @@ class TestSectionWriterUnits:
         assert "outputs.tracks.track_origin.pPrimary" not in prod
         # vertexing head ONNX -> a single VertexIndex union-find leaf
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
+        # Phase C: ONNX/export mode is LABEL-FREE — no target leaf, no label demand
+        assert all("target_" not in k for k in prod)
+        req = flatten_spec(self._bound_run_task().declare_io(Mode.ONNX).requires)
+        assert all(not k.startswith("labels.") for k in req)
 
     def test_manifest_fields_order_is_task_then_field(self):
-        """manifest_fields orders fields task-then-field (the column-order authority)."""
+        """manifest_fields orders fields task-then-field (the column-order authority).
+
+        Since plan 50 Phase C each task's field list ends with its
+        ``target_{task}`` label column (preds first, then the target).
+        """
         rt = self._bound_run_task()
         fields = rt.manifest_fields(Mode.TEST)
         cols = [f.h5_name for _, f in fields]
-        # jets columns first (task order), then tracks origin columns, then the
-        # vertexing VertexIndex column (task-then-field order)
-        n_j, n_o = len(JET_SUFFIXES), len(ORIGIN_SUFFIXES)
-        assert cols[:n_j] == JET_SUFFIXES
-        assert cols[n_j : n_j + n_o] == ORIGIN_SUFFIXES
-        assert cols[n_j + n_o :] == ["VertexIndex"]
+        assert cols == [
+            *JET_SUFFIXES,
+            "target_jets_classification",
+            *ORIGIN_SUFFIXES,
+            "target_track_origin",
+            "VertexIndex",
+            "target_track_vertexing",
+        ]
 
     def test_input_copy_is_manifest_only(self):
         """InputCopyWriter is manifest-only (no graph leaf — the sink re-reads copies)."""

@@ -62,6 +62,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         weight_source: Mapping[str, str] | None = None,
         label_map: dict[int, int] | None = None,
         expose: Sequence[str] | None = None,
+        write_targets: bool = True,
     ) -> None:
         """Capture config only.
 
@@ -77,6 +78,10 @@ class ClassificationTaskModule(_TaskModuleBase):
         expose : Sequence[str] | None, optional
             Modes the ``preds.*`` port is published in, by default all modes.
             ``[fit, val]`` opts a train-only aux task out of TEST/ONNX.
+        write_targets : bool, optional
+            Also emit the consumed class label (post ``label_map`` remap) as
+            the TEST eval column ``target_{task}``, by default True. Never
+            emitted in ONNX/export mode.
 
         Raises
         ------
@@ -86,7 +91,16 @@ class ClassificationTaskModule(_TaskModuleBase):
             `expose` list.
         """
         super().__init__(
-            stream, label, input, context, dense, loss, weight, _DEFAULT_CLS_LOSS, expose
+            stream,
+            label,
+            input,
+            context,
+            dense,
+            loss,
+            weight,
+            _DEFAULT_CLS_LOSS,
+            expose,
+            write_targets,
         )
         if not class_names:
             raise ConfigError(
@@ -335,13 +349,15 @@ class ClassificationTaskModule(_TaskModuleBase):
         ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
-        """``["masks.<stream>"]`` for a padded seq head, else ``[]`` (mode-independent)."""
-        del mode
+        """``["masks.<stream>"]`` for a padded seq head, plus the task's label key in
+        TEST when ``write_targets`` (never in ONNX).
+        """
         # has_pad_mask already implies sequence, so this covers all three cases:
         # global [] / no-pad-mask seq [] / padded seq [masks.<stream>]
-        if self.has_pad_mask:
-            return [f"masks.{self.stream}"]
-        return []
+        deps: list[str] = [f"masks.{self.stream}"] if self.has_pad_mask else []
+        if self._emit_targets(mode):
+            deps.append(self.label_key)
+        return deps
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
         """Global head: sigmoid (BCE) or softmax, one ``f4`` field per class (ONNX squeezes to
@@ -360,7 +376,7 @@ class ClassificationTaskModule(_TaskModuleBase):
             # ONNX sink squeezes [1, C] per-class columns to rank-0 scalars; H5
             # sink packs the full [B] column, so only squeeze in ONNX mode
             squeeze_global = bool(mode & Mode.ONNX)
-            return [
+            fields = [
                 OutputField(
                     h5_name=px,
                     dtype="f4",
@@ -370,6 +386,9 @@ class ClassificationTaskModule(_TaskModuleBase):
                 )
                 for c, px in enumerate(self.class_suffixes)
             ]
+            if self._emit_targets(mode):
+                fields.append(self._target_field(value=self._consumed_labels(b)))
+            return fields
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
         probs = masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
         if mode & Mode.ONNX:
@@ -391,7 +410,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         # mode=Mode.ONNX (which returns before reaching here), not by scanning
         # resolved_onnx_name — these fields fall back to a (misleading) per-class
         # ONNX suffix since onnx_name=None.
-        return [
+        fields = [
             OutputField(
                 h5_name=px,
                 onnx_name=None,
@@ -402,15 +421,52 @@ class ClassificationTaskModule(_TaskModuleBase):
             )
             for c, px in enumerate(self.class_suffixes)
         ]
+        if self._emit_targets(mode):
+            fields.append(self._target_field(value=self._consumed_labels(b)))
+        return fields
+
+    def _target_field(self, value: Tensor | None = None) -> OutputField:
+        """The target-label field: the consumed class label as an unprefixed
+        ``target_{task}`` i4 column (labels are model-independent).
+        """  # noqa: DOC201 - private helper, no Returns block
+        return OutputField(
+            h5_name=f"target_{self.name}",
+            onnx_name=None,
+            dtype="i4",
+            axis="per_token" if self.sequence else "global",
+            final=True,
+            prefix=False,
+            value=value,
+        )
+
+    def _consumed_labels(self, b: Bundle) -> Tensor:
+        """The class label exactly as the loss consumes it: post ``label_map``
+        remap; for a padded seq head, padded and invalid (``-2``) positions
+        read ``-1`` (mirrors `head_forward`).
+        """  # noqa: DOC201 - private helper, no Returns block
+        labels = b.get(self.label_key)
+        if self.label_map is not None:
+            mapped = torch.clone(labels)
+            for k, v in self.label_map.items():
+                mapped[labels == k] = v
+            labels = mapped
+        if self.has_pad_mask:
+            pad_mask = b.get(f"masks.{self.stream}")
+            pad_mask = torch.masked_fill(pad_mask, labels == -2, True)
+            labels = torch.masked_fill(labels, pad_mask, -1)
+        return labels
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
         """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
         del run_name
         if not self.sequence:
-            return [
+            fields = [
                 OutputField(h5_name=px, dtype="f4", axis="global", final=True)
                 for px in self.class_suffixes
             ]
+            if self._emit_targets(mode):
+                fields.append(self._target_field())
+            return fields
         if mode & Mode.ONNX:
             return [
                 OutputField(
@@ -421,7 +477,10 @@ class ClassificationTaskModule(_TaskModuleBase):
                     final=True,
                 )
             ]
-        return [
+        fields = [
             OutputField(h5_name=px, onnx_name=None, dtype="f4", axis="per_token", final=True)
             for px in self.class_suffixes
         ]
+        if self._emit_targets(mode):
+            fields.append(self._target_field())
+        return fields

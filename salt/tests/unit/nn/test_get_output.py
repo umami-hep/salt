@@ -30,7 +30,11 @@ _RUN = "GN2"
 
 
 def _bind_classification(stream, label, class_names, sequence, *, loss=None, input_key=None):
-    """Build + bind a `ClassificationTaskModule` against a hand-built schema."""
+    """Build + bind a `ClassificationTaskModule` against a hand-built schema.
+
+    ``write_targets=False``: this file gates the PREDICTION rendering; the
+    Phase-C target-label emission has its own gate (test_target_labels.py).
+    """
     module = ClassificationTaskModule(
         stream=stream,
         label=label,
@@ -38,6 +42,7 @@ def _bind_classification(stream, label, class_names, sequence, *, loss=None, inp
         input=input_key,
         sequence=sequence,
         loss=loss,
+        write_targets=False,
     )
     module.name = f"{stream}_cls" if not sequence else "track_origin"
     schema = ResolvedSchema(widths={module.input_key: 8})
@@ -399,13 +404,16 @@ def test_base_get_output_raises_for_unsupported_family():
 
 
 def _bind_vertexing(stream=_STREAM_T):
-    """Build + bind a `VertexingTaskModule` against a hand-built schema."""
+    """Build + bind a `VertexingTaskModule` against a hand-built schema
+    (``write_targets=False`` — prediction rendering only, see test_target_labels.py).
+    """
     module = VertexingTaskModule(
         stream=stream,
         label="ftagTruthVertexIndex",
         origin_label="ftagTruthOriginLabel",
         context="pooled.global",
         dense={"hidden_layers": [4], "activation": "ReLU"},
+        write_targets=False,
     )
     module.name = "track_vertexing"
     schema = ResolvedSchema(widths={module.input_key: 8, module.context: 4})
@@ -504,6 +512,7 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
         context="pooled.global",
         dense={"hidden_layers": [4], "activation": "ReLU"},
         prefix_vertex_column=True,
+        write_targets=False,
     )
     module.name = "track_vertexing"
     module.bind(ResolvedSchema(widths={module.input_key: 8, module.context: 4}))
@@ -519,7 +528,9 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
 
 
 def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, fields=(), gaussian=False):
-    """Build + bind a `RegressionTaskModule` against a hand-built schema."""
+    """Build + bind a `RegressionTaskModule` against a hand-built schema
+    (``write_targets=False`` — prediction rendering only, see test_target_labels.py).
+    """
     module = RegressionTaskModule(
         stream=stream,
         targets=targets,
@@ -527,6 +538,7 @@ def _bind_regression(stream, targets, *, sequence, denoms=None, norm=None, field
         target_denominators=denoms,
         norm_params=norm,
         gaussian=gaussian,
+        write_targets=False,
     )
     module.name = f"{stream}_reg"
     schema = ResolvedSchema(

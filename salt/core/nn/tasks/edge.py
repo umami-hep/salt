@@ -77,6 +77,7 @@ class VertexingTaskModule(_TaskModuleBase):
         origin_weighting: Mapping[str, Sequence[int | str]] | None = None,
         prefix_vertex_column: bool = False,
         expose: Sequence[str] | None = None,
+        write_targets: bool = True,
     ) -> None:
         """Capture config only.
 
@@ -104,6 +105,10 @@ class VertexingTaskModule(_TaskModuleBase):
         expose : Sequence[str] | None, optional
             Modes the ``preds.*`` port is published in, by default all modes.
             ``[fit, val]`` opts a train-only aux task out of TEST/ONNX.
+        write_targets : bool, optional
+            Also emit the per-token vertex-index label (padded positions
+            ``-1``) as the TEST eval column ``target_{task}``, by default
+            True. Never emitted in ONNX/export mode.
 
         Raises
         ------
@@ -113,7 +118,16 @@ class VertexingTaskModule(_TaskModuleBase):
             `expose` is a bad mode list.
         """
         super().__init__(
-            stream, label, input, context, dense, loss, weight, _DEFAULT_VTX_LOSS, expose
+            stream,
+            label,
+            input,
+            context,
+            dense,
+            loss,
+            weight,
+            _DEFAULT_VTX_LOSS,
+            expose,
+            write_targets,
         )
         if "VertexIndex" not in label:
             raise ConfigError(
@@ -443,11 +457,13 @@ class VertexingTaskModule(_TaskModuleBase):
         ]
 
     def output_time_requires(self, mode: Mode) -> list[str]:
-        """``["masks.<stream>"]`` — a vertexing head always requires a pad mask
-        (mode-independent).
+        """``["masks.<stream>"]`` — a vertexing head always requires a pad mask —
+        plus the vertex-index label key in TEST when ``write_targets`` (never in ONNX).
         """
-        del mode
-        return [f"masks.{self.stream}"]
+        deps = [f"masks.{self.stream}"]
+        if self._emit_targets(mode):
+            deps.append(self.label_key)
+        return deps
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
         """ONNX: union-find -> flatten -> int8 ``[L]`` field under `VERTEX_INDEX`. H5 modes:
@@ -472,7 +488,7 @@ class VertexingTaskModule(_TaskModuleBase):
             ]
         # H5 (TEST): union-find then cast to int (-inf padding -> int32 -2147483648)
         preds = self.run_inference(edge_scores, mask).int()
-        return [
+        fields = [
             OutputField(
                 h5_name=VERTEX_INDEX,
                 onnx_name=None,
@@ -483,6 +499,26 @@ class VertexingTaskModule(_TaskModuleBase):
                 value=preds,
             )
         ]
+        if self._emit_targets(mode):
+            # the per-token vertex-index label the pairwise matching loss targets
+            # (raw indices, negative = no vertex); padded positions read -1
+            labels = torch.masked_fill(b.get(self.label_key), mask, -1)
+            fields.append(self._target_field(value=labels))
+        return fields
+
+    def _target_field(self, value: Tensor | None = None) -> OutputField:
+        """The target-label field: the per-token vertex-index label as an
+        unprefixed ``target_{task}`` i4 column (labels are model-independent).
+        """  # noqa: DOC201 - private helper, no Returns block
+        return OutputField(
+            h5_name=f"target_{self.name}",
+            onnx_name=None,
+            dtype="i4",
+            axis="per_token",
+            final=True,
+            prefix=False,
+            value=value,
+        )
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
         """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
@@ -497,7 +533,7 @@ class VertexingTaskModule(_TaskModuleBase):
                     final=True,
                 )
             ]
-        return [
+        fields = [
             OutputField(
                 h5_name=VERTEX_INDEX,
                 onnx_name=None,
@@ -507,6 +543,9 @@ class VertexingTaskModule(_TaskModuleBase):
                 prefix=self.prefix_vertex_column,
             )
         ]
+        if self._emit_targets(mode):
+            fields.append(self._target_field())
+        return fields
 
 
 def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:

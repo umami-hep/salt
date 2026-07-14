@@ -40,14 +40,15 @@ def _golden_task_columns() -> dict[str, list[str]]:
 
 
 def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The FULL ordered per-stream H5 column contract for the Phase-B gate.
+    """The FULL ordered per-stream H5 column contract (Phase-C golden).
 
-    Byte-identical columns = input-copy source columns FIRST (in source-file
-    order; an empty golden ``copy_inputs`` means the v1 copy-ALL default, so
-    every source field is copied), then the task columns in golden order, then
-    the trailing pad-mask column. Asserting the H5 dtype.names EQUAL this list
-    (not merely contain it) enforces "no ADDED columns" — the exact Phase-C
-    label-leak the gate forbids from landing early.
+    Exact columns = input-copy source columns FIRST (in source-file order; an
+    empty golden ``copy_inputs`` means the v1 copy-ALL default, so every
+    source field is copied), then the task columns in golden order — which,
+    since plan 50 Phase C, includes each task's trailing ``target_{task}``
+    label column — then the trailing pad-mask column. Asserting the H5
+    dtype.names EQUAL this list (not merely contain it) enforces "no ADDED
+    columns" beyond the committed golden.
     """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     h5 = json.loads(GOLDEN.read_text())["h5"]
     tasks: dict[str, list[str]] = {}
@@ -146,11 +147,11 @@ class TestImplicitSinkCliE2E:
             assert f["jets"].shape[0] == N_TEST
 
     def test_task_columns_match_golden(self, data, cli_h5):
-        """The eval H5's columns EQUAL the committed Phase-A golden, per stream, in order.
+        """The eval H5's columns EQUAL the committed Phase-C golden, per stream, in order.
 
-        Exact-list equality (not membership) is the Phase-B gate: byte-identical
-        columns with NO new label columns yet. Any ADDED column — a Phase-C
-        label-emission leak, or an accidental extra leaf — fails here.
+        Exact-list equality (not membership): pre-Phase-C columns byte-identical,
+        plus exactly the per-task ``target_{task}`` label columns the golden
+        declares. Any OTHER added column fails here.
         """
         with h5py.File(data["h5"]) as src:
             src_cols = {
@@ -176,11 +177,34 @@ class TestImplicitSinkCliE2E:
             jets = f["jets"][:]
             tracks = f["tracks"][:]
             valid = ~tracks["mask"]
-        jet_cols = expected["jets"]
+        # the golden task columns include the Phase-C target_{task} label
+        # columns — only the prob columns participate in the sum-to-1 check
+        jet_cols = [c for c in expected["jets"] if not c.startswith("target_")]
         prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
         assert np.allclose(prob_sum, 1.0, atol=1e-3)
         # padded track positions read 0.0 (masked softmax), valid sum to ~1
-        origin_cols = expected["tracks"]
+        origin_cols = [c for c in expected["tracks"] if not c.startswith("target_")]
         origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
         assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
         assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+    def test_target_label_columns_match_source_labels(self, data, cli_h5):
+        """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
+
+        gn2v2-dummy has no label_map, so the consumed global label is the raw
+        flavour_label; the per-token origin target reads the raw label on
+        valid positions and -1 on padded ones.
+        """
+        with h5py.File(data["h5"]) as src:
+            src_flav = src["jets"]["flavour_label"][:N_TEST].astype("i4")
+            src_origin = src["tracks"]["ftagTruthOriginLabel"][:N_TEST].astype("i4")
+            src_valid = src["tracks"]["valid"][:N_TEST].astype(bool)
+        with h5py.File(cli_h5) as f:
+            got_flav = f["jets"]["target_jets_classification"][:]
+            got_origin = f["tracks"]["target_track_origin"][:]
+        assert (got_flav == src_flav).all()
+        # valid positions read the raw label, except label==-2 which the loss
+        # (and hence the target column) masks to -1 (MR!60199 workaround)
+        v_got, v_src = got_origin[src_valid], src_origin[src_valid]
+        assert ((v_got == v_src) | ((v_src == -2) & (v_got == -1))).all()
+        assert (got_origin[~src_valid] == -1).all()

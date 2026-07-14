@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -84,6 +85,7 @@ class RegressionTaskModule(_TaskModuleBase):
         loss: str | dict[str, Any] | None = None,
         weight: float = 1.0,
         expose: Sequence[str] | None = None,
+        write_targets: bool = True,
     ) -> None:
         """Capture config only.
 
@@ -129,6 +131,12 @@ class RegressionTaskModule(_TaskModuleBase):
         expose : Sequence[str] | None, optional
             Modes the ``preds.*`` port is published in, by default all modes.
             ``[fit, val]`` opts a train-only aux task out of TEST/ONNX.
+        write_targets : bool, optional
+            Also emit the UNSCALED physical target(s) as the TEST eval columns
+            ``target_{task}_{target}`` (one f4 per target; padded positions
+            NaN), by default True. Never emitted in ONNX/export mode. Distinct
+            from ``publish_targets`` (the FIT|VAL scaled-targets port for the
+            MaskFormer matcher).
 
         Raises
         ------
@@ -140,7 +148,9 @@ class RegressionTaskModule(_TaskModuleBase):
         """
         self.gaussian = bool(gaussian)
         default_loss = _DEFAULT_GAUSS_LOSS if self.gaussian else _DEFAULT_REG_LOSS
-        super().__init__(stream, "", input, context, dense, loss, weight, default_loss, expose)
+        super().__init__(
+            stream, "", input, context, dense, loss, weight, default_loss, expose, write_targets
+        )
         # regression has no single `label` field: one label demanded per target below
         self.targets = _opt_tuple(targets) or ()
         if not self.targets:
@@ -697,7 +707,8 @@ class RegressionTaskModule(_TaskModuleBase):
     def output_time_requires(self, mode: Mode) -> list[str]:
         """A ratio head's denominator source (labels in FIT|VAL|TEST, ``inputs.<stream>`` in
         ONNX) plus the pad mask for a padded sequence head; ``norm_params``/``scaler`` need
-        no external source.
+        no external source. In TEST a ``write_targets`` head also demands its target label
+        keys (never in ONNX).
         """
         deps: list[str] = []
         if self.target_denominators is not None:
@@ -707,6 +718,8 @@ class RegressionTaskModule(_TaskModuleBase):
                 deps.extend(self.denom_label_keys)
         if self.has_pad_mask:
             deps.append(f"masks.{self.stream}")
+        if self._emit_targets(mode):
+            deps.extend(k for k in self.target_label_keys if k not in deps)
         return deps
 
     def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
@@ -718,7 +731,7 @@ class RegressionTaskModule(_TaskModuleBase):
         preds = self._descaled_preds(b, mode)
         axis = "per_token" if self.sequence else "global"
         squeeze = bool(mode & Mode.ONNX)
-        return [
+        fields = [
             OutputField(
                 h5_name=suffix,
                 dtype="f4",
@@ -728,15 +741,45 @@ class RegressionTaskModule(_TaskModuleBase):
             )
             for i, suffix in enumerate(self.output_suffixes)
         ]
+        if self._emit_targets(mode):
+            mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+            for field, key in zip(self._target_fields(), self.target_label_keys, strict=True):
+                raw = b.get(key).float()
+                if mask is not None:
+                    # padded positions NaN, matching the de-scaled prediction columns
+                    raw = torch.masked_fill(raw, mask, torch.nan)
+                fields.append(replace(field, value=raw))
+        return fields
+
+    def _target_fields(self) -> list[OutputField]:
+        """One value-free target-label field per target: the UNSCALED physical target
+        as an unprefixed ``target_{task}_{target}`` f4 column (one per `targets`
+        entry — R, not 2R, for a gaussian head).
+        """  # noqa: DOC201 - private helper, no Returns block
+        axis = "per_token" if self.sequence else "global"
+        return [
+            OutputField(
+                h5_name=f"target_{self.name}_{target}",
+                onnx_name=None,
+                dtype="f4",
+                axis=axis,
+                final=True,
+                prefix=False,
+            )
+            for target in self.targets
+        ]
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
         """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
-        del run_name, mode
+        del run_name
         axis = "per_token" if self.sequence else "global"
-        return [
+        fields = [
             OutputField(h5_name=suffix, dtype="f4", axis=axis, final=True)
             for suffix in self.output_suffixes
         ]
+        if self._emit_targets(mode):
+            fields.extend(self._target_fields())
+        return fields
 
 
 def _opt_tuple(value: str | Sequence[str] | None) -> tuple[str, ...] | None:

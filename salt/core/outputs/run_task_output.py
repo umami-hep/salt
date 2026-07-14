@@ -276,17 +276,19 @@ def _dep_spec(dep: str) -> TensorSpec:
     """The require `TensorSpec` for an output-time dep, keyed on its namespace.
 
     A task's ``output_time_requires`` mixes namespaces: the stream pad mask
-    (``masks.<stream>`` -> ``kind=pad_mask`` bool), a regression ratio-
-    denominator label (``labels.<stream>.<denom>`` -> ``kind=label`` float, the
-    TEST source), and the raw input feature (``inputs.<stream>`` -> ``kind=data``
-    float, the ONNX source). The require kind must match the dataset-source kind
-    or the planner's kind-unify raises.
+    (``masks.<stream>`` -> ``kind=pad_mask`` bool), a label (``labels.<stream>.
+    <var>`` -> ``kind=label``, the TEST source for ratio denominators AND the
+    Phase-C target-label columns — dtype unconstrained since label dtypes vary
+    per label: int64 class/vertex labels vs float32 regression targets), and
+    the raw input feature (``inputs.<stream>`` -> ``kind=data`` float, the
+    ONNX source). The require kind must match the dataset-source kind or the
+    planner's kind-unify raises.
     """
     namespace = dep.split(".", 1)[0]
     if namespace == "masks":
         return TensorSpec(shape=None, dtype="bool", kind="pad_mask")
     if namespace == "labels":
-        return TensorSpec(shape=None, dtype="float32", kind="label")
+        return TensorSpec(shape=None, dtype=None, kind="label")
     # inputs.* (the ONNX ratio-denominator Feature) — a raw data tensor
     return TensorSpec(shape=None, dtype="float32", kind="data")
 

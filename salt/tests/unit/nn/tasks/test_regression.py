@@ -225,6 +225,7 @@ class TestRegressionTaskModule:
             targets=list(targets),
             input="pooled.global",
             target_denominators=list(denoms),
+            write_targets=False,  # prediction de-scale gate; labels: test_target_labels.py
         )
         modules = build_regression_modules(norm_paths[0], task)
         fit = compile_regression(modules, Mode.FIT, targets, denoms)
@@ -276,7 +277,12 @@ class TestRegressionTaskModule:
         """Per-token (sequence) regression + functional scaler: RAW forward, get_output de-scale."""
         d = 16
         scaler = {"pt": {"op": "log", "op_scale": 0.2}, "mass": {"op": "linear", "op_scale": 10}}
-        task = RegressionTaskModule(stream="tracks", targets=["pt", "mass"], scaler=scaler)
+        task = RegressionTaskModule(
+            stream="tracks",
+            targets=["pt", "mass"],
+            scaler=scaler,
+            write_targets=False,  # prediction de-scale gate; labels: test_target_labels.py
+        )
         task.name = "regression"
         _bind_reg_module(task, {"encoded.tracks": d})
         assert task.scaler is not None
@@ -391,6 +397,7 @@ class TestRegressionTaskModule:
             input="pooled.global",
             gaussian=True,
             norm_params={"mean": 2.0, "std": 3.0},
+            write_targets=False,  # prediction de-scale gate; labels: test_target_labels.py
         )
         modules = build_regression_modules(norm_paths[0], task)
         fit = compile_regression(modules, Mode.FIT, targets)

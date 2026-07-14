@@ -27,8 +27,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-HEAD_SHA = "96d88d8"
-"""Worktree HEAD this golden set is anchored to (feature/one-class-per-file)."""
+HEAD_SHA = "d848b61+phaseC"
+"""Worktree state this golden set is anchored to (feature/one-class-per-file):
+the plan-50 Phase-C commit on top of d848b61 — adds the per-task TEST-mode
+target-label columns (``target_{task}`` / ``target_{task}_{target}``) to the
+H5 tables; ONNX tuples and FIT/VAL plans unchanged vs the Phase-A capture."""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
 CONFIG_DIR = REPO_ROOT / "core" / "configs"

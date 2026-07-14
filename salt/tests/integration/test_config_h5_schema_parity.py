@@ -35,7 +35,13 @@ _DEFERRED_TASK_TYPES = {"VertexingTaskModule"}
 
 
 def _legacy_columns(modules, run_name: str) -> dict[str, list[tuple[str, str]]]:
-    """The legacy TaskWriter H5 schema per stream: {stream: [(column, dtype), ...]}."""
+    """The legacy TaskWriter H5 schema per stream: {stream: [(column, dtype), ...]}.
+
+    Extended (plan 50 Phase C) with the per-task target-label columns the
+    section now appends after each task's prediction columns: ``target_{task}``
+    (i4, classification) / ``target_{task}_{target}`` (f4, regression, one per
+    physical target — the legacy TaskWriter never wrote these).
+    """
     out: dict[str, list[tuple[str, str]]] = {}
     for module in modules.values():
         pred_key = getattr(module, "pred_key", None)
@@ -55,6 +61,13 @@ def _legacy_columns(modules, run_name: str) -> dict[str, list[tuple[str, str]]]:
         except Exception:  # noqa: BLE001 — a head with no TEST rendering (shouldn't happen here)
             continue
         out.setdefault(stream, []).extend((str(c), str(d)) for c, d in names)
+        if getattr(module, "write_targets", False):
+            if getattr(module, "targets", None) is not None:
+                # regression: one unscaled physical target column per target
+                out[stream].extend((f"target_{module.name}_{t}", "f4") for t in module.targets)
+            else:
+                # classification: the consumed class label
+                out[stream].append((f"target_{module.name}", "i4"))
     return out
 
 
