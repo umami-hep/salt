@@ -23,9 +23,11 @@ import yaml
 from numpy.lib.recfunctions import repack_fields
 
 from salt.core.main import CONFIG_DIR, main
+from salt.core.onnx.check import make_session
+from salt.core.onnx.export import main as export_main
 from salt.core.schema import dump_schema, save_schema
 from salt.core.testing.inputs import write_dummy_file
-from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict  # noqa: PLC2701
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
@@ -69,7 +71,7 @@ def _strip_labels(src: Path, dst: Path) -> None:
 
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
-    """Labelled dummy file + label-stripped copy + per-file schema artifacts."""
+    """Labelled dummy file + label-stripped copy + per-file schema artifacts."""  # noqa: DOC201
     base = tmp_path_factory.mktemp("inference_e2e")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
@@ -102,7 +104,7 @@ def _fit_overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    """A 1-epoch checkpoint on the base dummy config (the test_outputs_section recipe)."""
+    """A 1-epoch checkpoint on the base dummy config."""  # noqa: DOC201
     fit_dir = tmp_path_factory.mktemp("inference_fit")
     rc = main([
         "fit",
@@ -146,7 +148,7 @@ def _inference_args(data, ckpt: Path, file_key: str, out: Path) -> list[str]:
 
 @pytest.fixture(scope="module")
 def inference_h5(data, ckpt) -> Path:
-    """The inference H5 on the LABELLED file."""
+    """The inference H5 on the LABELLED file."""  # noqa: DOC201
     out = data["dir"] / "inference_labelled.h5"
     rc = main(_inference_args(data, ckpt, "labelled", out))
     assert rc == 0, "salt2 inference must run green on the labelled file"
@@ -156,7 +158,7 @@ def inference_h5(data, ckpt) -> Path:
 
 @pytest.fixture(scope="module")
 def inference_h5_stripped(data, ckpt) -> Path:
-    """The inference H5 on the LABEL-STRIPPED copy (gate c: runs green)."""
+    """The inference H5 on the LABEL-STRIPPED copy (gate c: runs green)."""  # noqa: DOC201
     out = data["dir"] / "inference_stripped.h5"
     rc = main(_inference_args(data, ckpt, "stripped", out))
     assert rc == 0, "salt2 inference must run green on a label-stripped file"
@@ -174,13 +176,23 @@ class TestExportSelectionColumns:
         """
         golden = _golden_onnx()
         manifest = golden["task_manifest_onnx"]
-        assert [f"{MODEL_NAME}_{m['resolved_onnx_name']}" for m in manifest if m["axis"] == "global"] + [
+        global_names = [
+            f"{MODEL_NAME}_{m['resolved_onnx_name']}" for m in manifest if m["axis"] == "global"
+        ]
+        per_token_names = [
             f"{MODEL_NAME}_{m['resolved_onnx_name']}" for m in manifest if m["axis"] == "per_token"
-        ] == golden["output_names"], "golden self-consistency (globals-then-per-token tuple)"
+        ]
+        assert global_names + per_token_names == golden["output_names"], (
+            "golden self-consistency (globals-then-per-token tuple)"
+        )
         expected: dict[str, list[str]] = {}
         for entry in manifest:
             stream = entry["leaf_key"].split(".")[1]
-            name = f"{RUN_NAME}_{entry['resolved_onnx_name']}" if entry["prefix"] else entry["resolved_onnx_name"]
+            name = (
+                f"{RUN_NAME}_{entry['resolved_onnx_name']}"
+                if entry["prefix"]
+                else entry["resolved_onnx_name"]
+            )
             expected.setdefault(stream, []).append(name)
         with h5py.File(inference_h5) as f:
             groups = {g: list(f[g].dtype.names) for g in f}
@@ -194,7 +206,7 @@ class TestExportSelectionColumns:
             extras = [
                 c
                 for c in groups[stream]
-                if (c.startswith(f"{RUN_NAME}_") or c.startswith("target_")) and c not in set(cols)
+                if c.startswith((f"{RUN_NAME}_", "target_")) and c not in set(cols)
             ]
             assert not extras, f"{stream}: columns beyond the export selection: {extras}"
 
@@ -205,7 +217,11 @@ class TestExportSelectionColumns:
             dtypes = {g: f[g].dtype for g in f}
         for entry in golden["task_manifest_onnx"]:
             stream = entry["leaf_key"].split(".")[1]
-            col = f"{RUN_NAME}_{entry['resolved_onnx_name']}" if entry["prefix"] else entry["resolved_onnx_name"]
+            col = (
+                f"{RUN_NAME}_{entry['resolved_onnx_name']}"
+                if entry["prefix"]
+                else entry["resolved_onnx_name"]
+            )
             if entry["onnx_dtype"] == "int8":
                 assert np.issubdtype(dtypes[stream][col], np.integer), col
             else:
@@ -232,9 +248,7 @@ class TestValuesMatchOnnxRuntime:
     def onnx_path(self, data, ckpt, tmp_path_factory) -> Path:
         """Export the SAME config stack + checkpoint to ONNX (checker skipped —
         this class IS the comparison).
-        """
-        from salt.core.onnx.export import main as export_main
-
+        """  # noqa: DOC201 - test helper, no Returns block per docstring policy
         out = tmp_path_factory.mktemp("inference_onnx") / "network.onnx"
         rc = export_main([
             f"--ckpt_path={ckpt}",
@@ -257,8 +271,6 @@ class TestValuesMatchOnnxRuntime:
         convention) and compare against the H5 — floats at the check_onnx
         tolerance (1e-4), int8 exact; padded H5 positions read 0.
         """
-        from salt.core.onnx.check import make_session
-
         cfg = yaml.safe_load(DUMMY_CFG.read_text())
         variables = cfg["data"]["modules"]["features"]["init_args"]["variables"]
         with h5py.File(data["labelled"]) as f:

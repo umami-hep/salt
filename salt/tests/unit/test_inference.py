@@ -6,27 +6,48 @@ unlabelled-file dataset path.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
 import pytest
+import torch
 from numpy.lib.recfunctions import repack_fields
 
+import salt.core.inference as inference_mod
+from salt.core.cli import load_config
+from salt.core.data import Features, GraphDataset, H5StructuredReader, Labels
+from salt.core.data.datamodule import GraphDataModule
+from salt.core.graph.bundle import Bundle
 from salt.core.graph.errors import ConfigError
+from salt.core.graph.planner import compile_plan
 from salt.core.graph.spec import Mode
 from salt.core.inference import (
     INFERENCE_OUTPUT,
-    _check_leading_valid,
-    _parse_args,
+    _check_leading_valid,  # noqa: PLC2701 - the leading-valid pad guard under test
+    _column_plan,  # noqa: PLC2701 - the export column plan under test
+    _consume_batch,  # noqa: PLC2701 - the per-batch consume loop under test
+    _jet_args,  # noqa: PLC2701 - per-jet adapter args under test
+    _parse_args,  # noqa: PLC2701 - the argparse surface under test
     build_inference_sink,
     inference_demand,
 )
-from salt.core.main import CONFIG_DIR
-from salt.core.onnx.config import ExportConfig, ExportInput
+from salt.core.main import CONFIG_DIR, main
+from salt.core.nn import bind_all, resolve_bind_schema
+from salt.core.onnx.adapter import OnnxAdapter
+from salt.core.onnx.config import ExportConfig, ExportInput, resolve_export_config
+from salt.core.onnx.export import compile_onnx_plan
 from salt.core.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter
 from salt.core.outputs.input_copy_writer import InputCopyWriter
 from salt.core.outputs.run_task_output import RunTaskOutput
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
+from salt.core.schema import dump_schema, save_schema
+from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures
+    JET_VARIABLES,
+    TRACK_VARIABLES,
+    build_gn2v2_modules,
+    write_parity_norm_dict,
+)
 
 LABEL_FIELDS = {
     "flavour_label",
@@ -91,9 +112,6 @@ class TestDispatch:
 
     def test_main_dispatches(self, monkeypatch):
         """The main() entry hands argv (minus the command) to inference.main."""
-        import salt.core.inference as inference_mod
-        from salt.core.main import main
-
         seen: dict[str, list[str]] = {}
 
         def fake_main(argv):
@@ -220,20 +238,6 @@ class TestInferenceCoreLoop:
         """End-to-end core: eager per-jet adapter values land in the export-selection
         H5 columns (spot-checked against a direct adapter call), pads read 0.
         """
-        import torch
-        from types import SimpleNamespace
-
-        from salt.core.data import Features, GraphDataset, H5StructuredReader, Labels
-        from salt.core.graph.bundle import Bundle
-        from salt.core.inference import _column_plan, _consume_batch, _jet_args
-        from salt.core.nn import bind_all, resolve_bind_schema
-        from salt.core.onnx.adapter import OnnxAdapter
-        from salt.core.onnx.config import resolve_export_config
-        from salt.core.onnx.export import compile_onnx_plan
-        from salt.core.schema import dump_schema, save_schema
-        from salt.core.testing.inputs import write_dummy_file
-        from salt.tests._fixtures.gn2v2_fixture import JET_VARIABLES, TRACK_VARIABLES
-
         torch.manual_seed(42)
         nd = tmp_path / "nd.yaml"
         section = _section(tmp_path)
@@ -308,7 +312,8 @@ class TestInferenceCoreLoop:
                 rtol=1e-6, atol=1e-6,
             )
         n_valid = int((~batch["masks"]["tracks"][0]).sum())
-        for col, out in (("run_TrackOrigin", "M_TrackOrigin"), ("run_VertexIndex", "M_VertexIndex")):
+        pairs = (("run_TrackOrigin", "M_TrackOrigin"), ("run_VertexIndex", "M_VertexIndex"))
+        for col, out in pairs:
             np.testing.assert_array_equal(tracks[col][0][:n_valid], named[out].numpy())
             assert (tracks[col][0][n_valid:] == 0).all()
         # pad-mask column (PadMaskWriter declares export implicitly by default):
@@ -329,15 +334,11 @@ class TestLeadingValidGuard:
 
     def test_leading_valid_layouts_pass(self):
         """All-valid, all-padded, and valid-then-padded rows pass."""
-        import torch
-
         for row in ([0, 0, 1, 1], [0, 0, 0, 0], [1, 1, 1, 1], [0, 1, 1, 1]):
             _check_leading_valid(torch.tensor([row], dtype=torch.bool), "tracks")
 
     def test_interior_pad_is_refused(self):
         """A padded token followed by a valid one raises ConfigError."""
-        import torch
-
         bad = torch.tensor([[False, True, False, True]])
         with pytest.raises(ConfigError, match="leading rows"):
             _check_leading_valid(bad, "tracks")
@@ -363,9 +364,6 @@ class TestLabelFreePlanCompile:
         """Compile the ONNX plan through the real config surface: no labels.* key
         flows over any plan edge and the (narrowed) Labels step reads no field.
         """
-        from salt.core.cli import load_config
-        from salt.core.graph.planner import compile_plan
-
         gcfg = load_config([str(CONFIG_DIR / config)], overrides)
         assert Mode.ONNX not in gcfg.mode_errors, gcfg.mode_errors.get(Mode.ONNX)
         plan = compile_plan(
@@ -395,9 +393,6 @@ class TestUnlabelledDatasetPath:
 
     @pytest.fixture(scope="class")
     def stripped(self, tmp_path_factory) -> dict[str, Path]:
-        from salt.core.schema import dump_schema, save_schema
-        from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
-
         base = tmp_path_factory.mktemp("inference_stripped")
         nd = base / "norm_dict.yaml"
         write_dummy_norm_dict(nd, base / "class_dict.yaml")
@@ -420,9 +415,6 @@ class TestUnlabelledDatasetPath:
         """GraphDataModule + the inference demand: the label-stripped file binds and
         serves batches with no labels leaf — the exact command data path.
         """
-        from salt.core.data import Features, H5StructuredReader, Labels
-        from salt.core.data.datamodule import GraphDataModule
-
         export = ExportConfig(
             model_name="M",
             inputs=[
