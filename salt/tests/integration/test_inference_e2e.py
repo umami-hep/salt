@@ -35,7 +35,9 @@ GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-d
 
 RUN_NAME = "GN2v2_dummy"  # the config `name:` — the H5 column prefix
 MODEL_NAME = "GN2v2dummy"  # export.model_name — the ONNX tuple prefix
-N_TEST = 96
+# >= 100: upstream ftag.hdf5.H5Writer hardcodes a 100-row chunk shape, so any
+# eval/inference file under 100 jets fails dataset creation (pre-existing, v1 too)
+N_TEST = 128
 
 # label columns physically removed for the stripped copy (the
 # test_label_stripped_read.py field set)
