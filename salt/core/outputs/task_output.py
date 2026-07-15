@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Mapping
 
 from torch import Tensor
 
@@ -16,16 +15,15 @@ from salt.core.outputs.conversion_ops import (
     SeqClassIndexOp,
     SeqClassProbsOp,
 )
-from salt.core.outputs.regression_descale_op import RegressionDescaleOp
 
 
 class TaskOutput(SaltModelModule):
     """Generic producer: ``preds.<stream>.<task>`` -> ``outputs.<stream>.<name>``.
 
-    The copy/softmax/argmax/de-scale majority needs no dedicated class — one
+    The copy/softmax/argmax majority needs no dedicated class — one
     parameterised producer applies a `ConversionOp` (the eval math) to a
     task's published prediction and writes the result. The default op is an
-    identity copy; the thin `ClassProbs` / `SeqClassIndex` / `Regression`
+    identity copy; the thin `ClassProbs` / `SeqClassIndex` / `SeqClassProbs`
     subclasses pre-select a P1 op.
 
     Both ports declare ``shape=None`` (rank-agnostic — a global head is
@@ -73,17 +71,6 @@ class TaskOutput(SaltModelModule):
             requires=unflatten_spec(requires),
             produces=unflatten_spec({self.output_key: out_spec}),
         )
-
-    def bind(self, schema: Any) -> None:
-        """Delegate to the op's ``bind`` (only `RegressionDescaleOp` has one); else no-op."""
-        op_bind = getattr(self.op, "bind", None)
-        if not callable(op_bind):
-            return
-        try:
-            fields = schema.fields_of(self.op.input_feature_key)
-        except Exception:  # noqa: BLE001 — no field declaration in this (e.g. TEST-only) bind
-            fields = ()
-        op_bind(fields)
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Map the bound input prediction width through the op onto the output.
@@ -192,64 +179,4 @@ class SeqClassProbs(TaskOutput):
     ) -> None:
         super().__init__(
             task=task, stream=stream, name=name, op=SeqClassProbsOp(has_pad_mask=has_pad_mask)
-        )
-
-
-class Regression(TaskOutput):
-    """Regression de-scaling producer (a `TaskOutput` pre-wired with `RegressionDescaleOp`).
-
-    Reads a regression head's training-space values and writes the de-scaled
-    physical values. Width-preserving. For the ratio-denominator case the op
-    consumes the denominator source (``labels.<stream>.<denom>`` in TEST,
-    ``inputs.<stream>`` by name in ONNX).
-
-    Parameters
-    ----------
-    task : str
-        The source regression task's instance name.
-    stream : str
-        The regressed stream (also the output stream and the
-        denominator-source stream).
-    targets : str | Sequence[str]
-        The regression target name(s), in column order.
-    name : str | None, optional
-        The output leaf name, by default `task`.
-    target_denominators : str | Sequence[str] | None, optional
-        Per-target ratio-denominator variable name(s), by default None.
-    norm_params : Mapping[str, Any] | None, optional
-        ``{"mean": ..., "std": ...}`` per-target normalisation, by default None.
-    scaler : Mapping[str, Mapping[str, Any]] | None, optional
-        Per-target functional scaling config, by default None.
-    gaussian : bool, optional
-        Whether the source head is a gaussian (``mu``/``sigma``) head
-        publishing ``[..., 2R]``, by default False.
-    sequence : bool, optional
-        Whether the source head is per-token, by default False.
-    """
-
-    def __init__(
-        self,
-        task: str,
-        stream: str,
-        targets: str | Sequence[str],
-        name: str | None = None,
-        target_denominators: str | Sequence[str] | None = None,
-        norm_params: Mapping[str, Any] | None = None,
-        scaler: Mapping[str, Mapping[str, Any]] | None = None,
-        gaussian: bool = False,
-        sequence: bool = False,
-    ) -> None:
-        super().__init__(
-            task=task,
-            stream=stream,
-            name=name,
-            op=RegressionDescaleOp(
-                stream=stream,
-                targets=targets,
-                target_denominators=target_denominators,
-                norm_params=norm_params,
-                scaler=scaler,
-                gaussian=gaussian,
-                sequence=sequence,
-            ),
         )

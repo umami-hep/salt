@@ -21,11 +21,9 @@ from salt.core.outputs.onnx_sink import OnnxExportLeaf, OnnxExportSink
 from salt.core.outputs.output_column import OutputColumn
 from salt.core.outputs.output_field import OutputField
 from salt.core.outputs.pad_mask_writer import PadMaskWriter
-from salt.core.outputs.regression_descale_op import RegressionDescaleOp
 from salt.core.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
 from salt.core.outputs.task_output import (
     ClassProbs,
-    Regression,
     SeqClassIndex,
     SeqClassProbs,
     TaskOutput,
@@ -51,8 +49,6 @@ __all__ = [
     "OutputField",
     "OutputSectionWriter",
     "PadMaskWriter",
-    "Regression",
-    "RegressionDescaleOp",
     "RunTaskOutput",
     "SeqClassIndex",
     "SeqClassIndexOp",

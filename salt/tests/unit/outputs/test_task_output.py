@@ -18,8 +18,6 @@ from salt.core.outputs import (
     ClassProbs,
     ClassProbsOp,
     ConversionOp,
-    Regression,
-    RegressionDescaleOp,
     SeqClassIndex,
     SeqClassIndexOp,
     SeqClassProbs,
@@ -86,27 +84,6 @@ def test_seq_class_probs_subclass_forwards_like_op():
     torch.testing.assert_close(
         sub.forward(b1, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
         generic.forward(b2, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
-        rtol=0,
-        atol=0,
-    )
-
-
-def test_regression_subclass_forwards_like_op():
-    """The thin `Regression` subclass == a `TaskOutput` carrying `RegressionDescaleOp`."""
-    torch.manual_seed(11)
-    norm = {"mean": [1.0], "std": [3.0]}
-    preds = torch.randn(4, 1)
-    sub = Regression(task="t", stream=_STREAM_J, targets=["mHH"], name="out", norm_params=norm)
-    sub.name = "p"
-    op = RegressionDescaleOp(stream=_STREAM_J, targets=["mHH"], norm_params=norm)
-    generic = _producer(op, stream=_STREAM_J, task="t")
-    torch.testing.assert_close(
-        sub.forward(Bundle({"preds": {_STREAM_J: {"t": preds}}}), Mode.TEST)[
-            f"outputs.{_STREAM_J}.out"
-        ],
-        generic.forward(Bundle({"preds": {_STREAM_J: {"t": preds}}}), Mode.TEST)[
-            f"outputs.{_STREAM_J}.out"
-        ],
         rtol=0,
         atol=0,
     )
@@ -204,21 +181,6 @@ def test_seq_class_probs_width_preserved_in_test_only_bind():
     test = compile_plan(modules, Mode.TEST, sources={}, sinks=[out_key])
     schema = resolve_bind_schema([test])
     assert schema.width(out_key) == 8  # softmax preserves the class dim
-
-
-def test_regression_width_resolves_in_test_only_bind():
-    """``Regression`` de-scale preserves the target width in a TEST-only bind."""
-    pred_key = f"preds.{_STREAM_J}.t"
-    out_key = f"outputs.{_STREAM_J}.out"
-    src = _stub_source(pred_key, 2)
-    op = RegressionDescaleOp(
-        stream=_STREAM_J, targets=["mHH", "dR"], norm_params={"mean": [0, 0], "std": [1, 1]}
-    )
-    producer = _producer(op, stream=_STREAM_J, task="t")
-    modules = {"src": src, "producer": producer}
-    test = compile_plan(modules, Mode.TEST, sources={}, sinks=[out_key])
-    schema = resolve_bind_schema([test])
-    assert schema.width(out_key) == 2  # de-scale preserves the target dim
 
 
 def test_identity_op_still_clones_p0_contract():

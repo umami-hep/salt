@@ -27,7 +27,7 @@ from salt.core.nn.tasks import (
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
 from salt.core.onnx.reduces import mask_fill_flattened
-from salt.core.outputs import ClassProbs, Regression, SeqClassIndex, SeqClassProbs, VertexUnionFind
+from salt.core.outputs import ClassProbs, SeqClassIndex, SeqClassProbs, VertexUnionFind
 from salt.core.outputs.output_field import OutputField
 from salt.core.outputs.names import VERTEX_INDEX, pascal_case
 from salt.core.utils.tensor_utils import masked_softmax
@@ -623,21 +623,17 @@ def test_reg_norm_params_get_output_matches_literal_denorm():
         np.testing.assert_allclose(f.value.numpy(), expected, rtol=0, atol=_FLOAT_TOL)
 
 
-def test_reg_get_output_value_matches_regression_descale_producer():
-    """Regression: each get_output value == the per-column of the `Regression` producer leaf."""
+def test_reg_scalar_norm_params_get_output_matches_literal_denorm():
+    """Regression SCALAR norm_params (listified at init): value == the literal
+    ``pred*std + mean`` de-norm.
+    """
     torch.manual_seed(21)
-    module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, norm={"mean": 1.0, "std": 2.0})
+    mean, std = 1.0, 2.0
+    module = _bind_regression(_STREAM_J, ["mHH"], sequence=False, norm={"mean": mean, "std": std})
     preds = torch.randn(5, 1)
-    producer = Regression(
-        task=module.name, stream=_STREAM_J, name="out", targets=["mHH"],
-        norm_params={"mean": 1.0, "std": 2.0},
-    )
-    producer.name = "p"
-    producer_out = producer.forward(_reg_bundle(module, preds.clone()), Mode.TEST)[
-        f"outputs.{_STREAM_J}.out"
-    ]
     (field,) = module.get_output(_reg_bundle(module, preds.clone()), Mode.TEST, _RUN)
-    torch.testing.assert_close(field.value, producer_out[..., 0], rtol=0, atol=_FLOAT_TOL)
+    expected = preds[..., 0] * std + mean
+    torch.testing.assert_close(field.value, expected, rtol=0, atol=_FLOAT_TOL)
 
 
 def test_reg_get_output_onnx_global_squeezed_scalar():
@@ -733,53 +729,48 @@ def test_reg_get_output_does_not_mutate_raw_preds_leaf():
     torch.testing.assert_close(second, first, rtol=0, atol=0)
 
 
-def test_reg_seq_get_output_matches_producer_per_token_scaled():
-    """Per-token SCALED seq head: get_output == the `Regression` producer on every token."""
+def test_reg_seq_get_output_matches_literal_denorm_per_token():
+    """Per-token SCALED seq head: values == the literal ``pred*std + mean`` de-norm
+    on every token, NaN-filled at padded positions.
+    """
     torch.manual_seed(41)
-    norm = {"mean": [10.0, 20.0], "std": [2.0, 0.5]}
-    module = _bind_regression(_STREAM_T, ["a", "b"], sequence=True, norm=norm)
+    mean, std = [10.0, 20.0], [2.0, 0.5]
+    module = _bind_regression(_STREAM_T, ["a", "b"], sequence=True, norm={"mean": mean, "std": std})
     preds = torch.randn(3, 4, 2)
     mask = torch.zeros(3, 4, dtype=torch.bool)
     mask[0, 3] = True  # a real padded position
-    producer = Regression(
-        task=module.name, stream=_STREAM_T, name="out", targets=["a", "b"],
-        norm_params=norm, sequence=True,
+    fields = module.get_output(
+        _reg_bundle(module, preds.clone(), mask=mask.clone()), Mode.TEST, _RUN
     )
-    producer.name = "p"
-    b_prod = _reg_bundle(module, preds.clone(), mask=mask.clone())
-    producer_out = producer.forward(b_prod, Mode.TEST)[f"outputs.{_STREAM_T}.out"]
-    b_sec = _reg_bundle(module, preds.clone(), mask=mask.clone())
-    fields = module.get_output(b_sec, Mode.TEST, _RUN)
     for i, f in enumerate(fields):
         assert f.axis == "per_token"
-        torch.testing.assert_close(
-            f.value, producer_out[..., i], rtol=0, atol=_FLOAT_TOL, equal_nan=True
-        )
+        expected = (preds[..., i] * std[i] + mean[i]).masked_fill(mask, torch.nan)
+        torch.testing.assert_close(f.value, expected, rtol=0, atol=_FLOAT_TOL, equal_nan=True)
 
 
-def test_reg_gaussian_seq_get_output_matches_producer_per_token():
-    """Per-token gaussian seq head: get_output stddev == producer on valid positions."""
+def test_reg_gaussian_seq_get_output_matches_literal_per_token():
+    """Per-token gaussian seq head: mean == the literal ``pred*std + mean``,
+    stddev == ``sqrt(softplus(var)) * std``, on every token, NaN-filled at
+    padded positions (the literal v1 gaussian de-scale).
+    """
     torch.manual_seed(42)
-    norm = {"mean": [1.0], "std": [1.0]}
-    module = _bind_regression(_STREAM_T, ["dphi"], sequence=True, norm=norm, gaussian=True)
+    mean, std = 1.0, 1.0
+    module = _bind_regression(
+        _STREAM_T, ["dphi"], sequence=True, norm={"mean": [mean], "std": [std]}, gaussian=True
+    )
     preds = torch.randn(3, 4, 2)  # [B, L, 2R]
     mask = torch.zeros(3, 4, dtype=torch.bool)
     mask[1, 3] = True
-    producer = Regression(
-        task=module.name, stream=_STREAM_T, name="out", targets=["dphi"],
-        norm_params=norm, gaussian=True, sequence=True,
+    fields = module.get_output(
+        _reg_bundle(module, preds.clone(), mask=mask.clone()), Mode.TEST, _RUN
     )
-    producer.name = "p"
-    producer_out = producer.forward(
-        _reg_bundle(module, preds.clone(), mask=mask.clone()), Mode.TEST
-    )[f"outputs.{_STREAM_T}.out"]
-    b_sec = _reg_bundle(module, preds.clone(), mask=mask.clone())
-    fields = module.get_output(b_sec, Mode.TEST, _RUN)
     assert [f.h5_name for f in fields] == ["dphi", "dphi_stddev"]
-    for i, f in enumerate(fields):
-        torch.testing.assert_close(
-            f.value, producer_out[..., i], rtol=0, atol=_FLOAT_TOL, equal_nan=True
-        )
+    expected_mean = (preds[..., 0] * std + mean).masked_fill(mask, torch.nan)
+    expected_stddev = (torch.sqrt(torch.nn.functional.softplus(preds[..., 1])) * std).masked_fill(
+        mask, torch.nan
+    )
+    for f, expected in zip(fields, (expected_mean, expected_stddev), strict=True):
+        torch.testing.assert_close(f.value, expected, rtol=0, atol=_FLOAT_TOL, equal_nan=True)
     # the stddev column at a valid position is sqrt(softplus(var))*std, NOT the
     # pre-fix mean formula (var channel was reached, not corrupted)
     stddev = fields[1].value
