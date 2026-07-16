@@ -488,7 +488,7 @@ def test_no_top_level_uproot_awkward_import() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 7. round-trip smoke: file -> reader -> Features/Labels -> torch -> salt2 fit
+# 7. round-trip smoke: file -> reader -> Features/Labels -> torch -> salt fit
 # --------------------------------------------------------------------------- #
 
 _CONFIG = Path(__file__).resolve().parents[2] / "core" / "configs" / "ftag1lite_empflow.yaml"
@@ -548,13 +548,13 @@ def test_config_plan_compiles_all_modes(tmp_path: Path) -> None:
     """The shipped config plan-compiles in fit/test/onnx (label_universe-validated)."""
     import yaml
 
-    from salt.core.cli import main as salt2_main
+    from salt.core.cli import main as salt_main
 
     nd = _compute_norm_dict(SAMPLE)
     nd_path = tmp_path / "norm_dict.yaml"
     with open(nd_path, "w") as fh:
         yaml.safe_dump(nd, fh)
-    rc = salt2_main(
+    rc = salt_main(
         ["graph", "validate", "-c", str(_CONFIG),
          "--set", f"model.modules.norm.init_args.norm_dict={nd_path}",
          "--set", f"data.modules.reader.init_args.filename={SAMPLE}"]
@@ -563,17 +563,17 @@ def test_config_plan_compiles_all_modes(tmp_path: Path) -> None:
 
 
 def test_roundtrip_smoke_fit_finite_loss(tmp_path: Path) -> None:
-    """file -> FTAG1LiteReader -> Features/Labels -> torch -> salt2 fit --fast_dev_run."""
+    """file -> FTAG1LiteReader -> Features/Labels -> torch -> salt fit --fast_dev_run."""
     import yaml
 
-    from salt.core.main import main as salt2_main
+    from salt.core.main import main as salt_main
 
     nd = _compute_norm_dict(SAMPLE)
     nd_path = tmp_path / "norm_dict.yaml"
     with open(nd_path, "w") as fh:
         yaml.safe_dump(nd, fh)
 
-    rc = salt2_main([
+    rc = salt_main([
         "fit",
         "--config", str(_CONFIG),
         f"--data.train_file={SAMPLE}",
@@ -589,4 +589,4 @@ def test_roundtrip_smoke_fit_finite_loss(tmp_path: Path) -> None:
         "--data.batch_size=50",
         "--callbacks.progress=null",
     ])
-    assert rc == 0, "salt2 fit --fast_dev_run did not complete (rc != 0)"
+    assert rc == 0, "salt fit --fast_dev_run did not complete (rc != 0)"

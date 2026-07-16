@@ -110,7 +110,7 @@ default-groups = []
 
 [project.scripts]
 setup_mup = "salt.core.mup:setup_mup"
-salt2 = "salt.core.main:main"
+salt = "salt.core.main:main"
 
 [tool.setuptools]
 packages = { find = { include = ["salt*"] } }

@@ -25,7 +25,7 @@ GOLDEN_DIR = Path(__file__).parents[1] / "_fixtures" / "output_goldens"
 _NORM = "model.modules.norm.init_args.norm_dict=unused.yaml"
 # disable the logger so the run-free parse does not hit the keyless CometLogger
 # instantiate failure (no COMET_API_KEY in CI/local) — _run_free_cli does not apply
-# the disable_logger_in_config patch the salt2 graph/test entry points do.
+# the disable_logger_in_config patch the salt graph/test entry points do.
 _NO_LOGGER = "trainer.logger=false"
 MIGRATED = {
     "regression": [_NORM, _NO_LOGGER],
@@ -78,7 +78,7 @@ def test_section_h5_schema_matches_committed_golden(config_name):
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001
     sink = _as_sink_node(_static_writer_sink_callback(cli))
     assert sink is not None, f"{config_name}: no H5OutputSink wired at callbacks"
-    # the section is composed + bound onto the sink by Salt2CLI.instantiate_classes
+    # the section is composed + bound onto the sink by SaltCLI.instantiate_classes
     # (the run-free CLI path); assert it really is the dumb-section path.
     assert sink._is_dumb_section(), (  # noqa: SLF001
         f"{config_name}: H5OutputSink is not driven by the outputs: section"

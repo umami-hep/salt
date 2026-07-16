@@ -105,7 +105,7 @@ def eval_h5(data, ckpt) -> Path:
         f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the shipped regression.yaml must run end-to-end"
+    assert rc == 0, "salt test on the shipped regression.yaml must run end-to-end"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
@@ -137,12 +137,12 @@ def test_regression_eval_h5_columns_present_and_descaled(eval_h5):
 
 # ONNX: the descale-in-graph export path (get_output ONNX squeeze, the section
 # single-name leaf, the in-graph run_inference descale, the ONNX feature-gather
-# denominator) through the real `salt2 export` CLI. --no-check: the sweep
+# denominator) through the real `salt export` CLI. --no-check: the sweep
 # checker is orthogonal to the contract assertions below.
 
 
 def _export_onnx(ckpt, out: Path) -> Path:
-    """Export to ONNX via the real `salt2 export` CLI (--no-check)."""
+    """Export to ONNX via the real `salt export` CLI (--no-check)."""
     saved_config = Path(ckpt).parents[1] / "config.yaml"
     assert saved_config.is_file(), f"no saved run config at {saved_config}"
     rc = main([
@@ -154,7 +154,7 @@ def _export_onnx(ckpt, out: Path) -> Path:
         "--no-check",
         "--overwrite",
     ])
-    assert rc == 0, f"salt2 export failed (rc={rc})"
+    assert rc == 0, f"salt export failed (rc={rc})"
     assert out.exists()
     return out
 

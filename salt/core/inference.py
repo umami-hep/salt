@@ -1,6 +1,6 @@
-"""``salt2 inference``: config + checkpoint + (optionally unlabelled) H5 -> the
+"""``salt inference``: config + checkpoint + (optionally unlabelled) H5 -> the
 EXPORT output set, written to H5. Compiles the SAME ``Mode.ONNX`` plan/selection
-as ``salt2 export`` and executes it eagerly per jet through the `OnnxAdapter`.
+as ``salt export`` and executes it eagerly per jet through the `OnnxAdapter`.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from salt.core.onnx.export import (
 __all__ = ["INFERENCE_OUTPUT", "build_inference_sink", "inference_demand", "main", "run_inference"]
 
 INFERENCE_OUTPUT = "{ckpt_dir}/{ckpt_stem}__inference_{sample}.h5"
-"""Default output template — ``__inference_`` so a ``salt2 test`` eval H5 is never clobbered."""
+"""Default output template — ``__inference_`` so a ``salt test`` eval H5 is never clobbered."""
 
 # WHY eager per-jet (not the batched Lightning test loop): the export-mode graph
 # steps assume the Athena calling convention — batch 1, valid tokens only, an
@@ -45,7 +45,7 @@ INFERENCE_OUTPUT = "{ckpt_dir}/{ckpt_stem}__inference_{sample}.h5"
 # appends a [1, 1, C] zero row (classification.py get_output) and `.squeeze(0)`s
 # to [L]; the vertexing/union-find branch `reshape(-1)`s the batch away
 # (edge.py get_output / VertexUnionFind.forward). Running the adapter per jet
-# guarantees `salt2 inference` == Athena semantics by construction, at the
+# guarantees `salt inference` == Athena semantics by construction, at the
 # check_onnx tolerance.
 
 
@@ -83,7 +83,7 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
 
     if not section:
         raise ConfigError(
-            "salt2 inference needs a top-level `outputs:` section with at least one "
+            "salt inference needs a top-level `outputs:` section with at least one "
             "export-mode RunTaskOutput — the export selection IS the inference output "
             "set (plan 50 decision 2). Add `modes: [test, export]` (or omit `modes:`) "
             "on the RunTaskOutput to export"
@@ -125,7 +125,7 @@ def _check_leading_valid(mask: Any, stream: str) -> None:
     if bool((mask[..., :-1] & ~mask[..., 1:]).any()):
         raise ConfigError(
             f"masks.{stream}: valid tokens are not the leading rows (a padded token "
-            "precedes a valid one) — salt2 inference writes per-token values at "
+            "precedes a valid one) — salt inference writes per-token values at "
             "leading positions against the file's pad mask, so this file would "
             "produce misaligned per-token columns. Re-order each jet's tokens "
             "valid-first (the training-dataset-dumper layout)"
@@ -212,11 +212,11 @@ def run_inference(
     set_overrides: Sequence[str] = (),
     batch_size: int | None = None,
 ) -> Path:
-    """The programmatic core of ``salt2 inference``.
+    """The programmatic core of ``salt inference``.
 
-    Parses the run config through the real salt2 surface (run-free — the
+    Parses the run config through the real salt surface (run-free — the
     Phase B implicit-sink wiring runs, so the export-mode `OnnxExportSink` is
-    discovered exactly as ``salt2 export`` finds it), loads the checkpoint,
+    discovered exactly as ``salt export`` finds it), loads the checkpoint,
     compiles the ``Mode.ONNX`` plan through `compile_onnx_plan`, and executes
     the `OnnxAdapter` eagerly per jet over the test file, writing the named
     export outputs through the export-selection `H5OutputSink`.
@@ -259,7 +259,7 @@ def run_inference(
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - main.py precedent
     if export_cfg is None:
         raise ConfigError(
-            f"config {config_paths[0]} has no export: block — salt2 inference feeds the "
+            f"config {config_paths[0]} has no export: block — salt inference feeds the "
             "model through the Athena input contract (export.inputs), so declare it (or "
             "stack an override file carrying only the export: block as a second -c)"
         )
@@ -267,13 +267,13 @@ def run_inference(
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config assembles no ONNX export selection — salt2 inference's task columns "
+            "config assembles no ONNX export selection — salt inference's task columns "
             "ARE the export output set (plan 50 decision 2). Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
     if export_sink._explicit_leaves:  # noqa: SLF001 - same-package scope guard
         raise ConfigError(
-            "salt2 inference supports the outputs:-section export selection only — this "
+            "salt inference supports the outputs:-section export selection only — this "
             "config declares explicit OnnxExportLeaf entries (the MaskFormer object-reduce "
             "escape hatch), which have no H5 counterpart here (plan 50 Phase D scope)"
         )
@@ -324,7 +324,7 @@ def run_inference(
         total = len(dset)
         step = batch_size or dm.batch_size
         print("-" * 100)
-        print(f"salt2 inference: {total:,} rows from {test_file} (export selection, eager)")
+        print(f"salt inference: {total:,} rows from {test_file} (export selection, eager)")
         for start in range(0, total, step):
             stop = min(start + step, total)
             _consume_batch(sink, adapter, column_plan, dset[np.s_[start:stop]])
@@ -336,14 +336,14 @@ def run_inference(
 
 
 def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the ``salt2 inference`` CLI arguments."""  # noqa: DOC201 - argparse boilerplate
+    """Parse the ``salt inference`` CLI arguments."""  # noqa: DOC201 - argparse boilerplate
     parser = argparse.ArgumentParser(
-        prog="salt2 inference",
+        prog="salt inference",
         description=(
             "Label-free inference (labels are never demanded, so label-stripped files "
             "run green; export-mode InputCopyWriter columns still pass source fields "
             "through verbatim, labels included): write the EXPORT output set to H5 "
-            "(plan 50). Compiles the same Mode.ONNX selection as salt2 export and "
+            "(plan 50). Compiles the same Mode.ONNX selection as salt export and "
             "executes it eagerly per jet — offline inference == Athena semantics by "
             "construction."
         ),
@@ -391,7 +391,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
-    """The run-config stack: explicit ``-c`` files, or the ``salt2 export`` sibling
+    """The run-config stack: explicit ``-c`` files, or the ``salt export`` sibling
     inference (``<ckpt>/../../config.yaml``); raises `ConfigError` when neither
     resolves.
     """  # noqa: DOC201, DOC501 - private helper, per docstring policy
@@ -404,7 +404,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
 
 
 def main(args: Sequence[str] | None = None) -> int:
-    """``salt2 inference`` entry point.
+    """``salt inference`` entry point.
 
     Returns
     -------
@@ -415,7 +415,7 @@ def main(args: Sequence[str] | None = None) -> int:
     for entry in parsed.set_overrides:
         if "=" not in entry:
             print(
-                f"salt2 inference: --set entries must be KEY=VALUE, got {entry!r}", file=sys.stderr
+                f"salt inference: --set entries must be KEY=VALUE, got {entry!r}", file=sys.stderr
             )
             return 1
     try:

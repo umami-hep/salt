@@ -52,7 +52,7 @@ model:
     # auto-swapped to mup.optim.MuAdamW because the mup block below is configured
     optimizer: AdamW
     mup:
-      # shape_path is a REQUIRED override — generate with `salt2 mup-shapes`
+      # shape_path is a REQUIRED override — generate with `salt mup-shapes`
       # and point fit/test/onnx at the resulting file.
       shape_path: shape_mup.bsh
       apply_to: [track_embed, encoder]

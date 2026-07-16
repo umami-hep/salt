@@ -1,4 +1,4 @@
-# salt v2 (`salt.core`) — the `salt2` surface
+# salt v2 (`salt.core`) — the `salt` surface
 
 The modular salt v2 stack: graph-of-modules models, a demand-driven dataset
 pipeline, and a jsonargparse YAML surface. Everything here is config-first:
@@ -88,9 +88,9 @@ synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
 
 One-time setup: if the container's installed salt predates `salt/core/`,
 `python -m salt.core.main` fails with `ModuleNotFoundError: No module named
-'salt.core'` from any cwd except the repo root, and there is no `salt2`
+'salt.core'` from any cwd except the repo root, and there is no `salt`
 script on PATH. `pip install -e .` (from the repo root, inside the
-container) fixes both — afterwards `salt2` works from any directory.
+container) fixes both — afterwards `salt` works from any directory.
 
 ```bash
 # generate a dummy training file + norm dict (copy-paste):
@@ -103,14 +103,14 @@ write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
 write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
 "
 
-salt2 fit --config salt/core/configs/gn2v2-dummy.yaml \
+salt fit --config salt/core/configs/gn2v2-dummy.yaml \
   --data.train_file /tmp/v2/train.h5 \
   --data.val_file   /tmp/v2/train.h5 \
   --model.modules.norm.init_args.norm_dict /tmp/v2/norm_dict.yaml \
   --trainer.default_root_dir /tmp/v2/run
 ```
 
-Recommended extra: a **schema artifact** (`salt2 schema dump /tmp/v2/train.h5
+Recommended extra: a **schema artifact** (`salt schema dump /tmp/v2/train.h5
 -o /tmp/v2/schema.yaml`, design §2.6) passed as
 `--data.modules.reader.init_args.schema /tmp/v2/schema.yaml`. With it, field
 typos fail statically before any data is read, and the configured
@@ -123,7 +123,7 @@ log dir — **your cwd unless you pass `--trainer.default_root_dir <dir>`**,
 which is why the quickstart command above sets it (without it, a fit run
 from the repo root drops ~8 files into the checkout). The end-of-fit message
 prints the exact paths. A leftover `config.yaml` from a previous run is
-overwritten. `salt2 test` artifacts land next to the checkpoint, with the
+overwritten. `salt test` artifacts land next to the checkpoint, with the
 eval H5 (see below).
 
 ## Config model (design §5)
@@ -169,12 +169,12 @@ reach eval OR Athena, set `expose: [fit, val]` on the task (design §4.2):
 its prediction is gated out of the TEST/ONNX plans (the task is pruned
 there) while it keeps training. To keep it in eval but out of Athena only,
 list it in a `RunTaskOutput` with `modes: [test]` and check with
-`salt2 export --manifest`.
+`salt export --manifest`.
 
-## Evaluation: `salt2 test` + the `outputs:` section (design §8, plan 50)
+## Evaluation: `salt test` + the `outputs:` section (design §8, plan 50)
 
 ```bash
-salt2 test --config <run_dir>/config.yaml \
+salt test --config <run_dir>/config.yaml \
   --ckpt_path <run_dir>/checkpoints/....ckpt \
   --data.test_file /tmp/v2/pp_output_test_ttbar.h5
 ```
@@ -196,7 +196,7 @@ Prediction writing is declared in the top-level `outputs:` section (deep-
 mergeable, like `callbacks:`): an ORDERED dict of section writers
 (`salt.core.outputs.OutputSectionWriter` graph modules). The section says
 WHAT is written, and in which modes; the COMMAND wires the matching
-implicit sink (plan 50 Phase B): `salt2 test` instantiates the H5 sink
+implicit sink (plan 50 Phase B): `salt test` instantiates the H5 sink
 (`salt.core.outputs.H5OutputSink`) over the section, and the ONNX parse
 folds an `OnnxExportSink` naming the export-mode leaves. Every model
 config defines its own section (`base2.yaml` ships none) — **dict order =
@@ -225,7 +225,7 @@ demanded producers alive, and a produced `preds.*` key consumed by **no**
 sink is a hard error (design §4.2) — narrowing a `RunTaskOutput` `tasks:`
 list and forgetting a task fails loudly instead of silently dropping
 columns. The same error fires statically from
-`salt2 graph validate`/`deadcode`. A `salt2 test` config without an
+`salt graph validate`/`deadcode`. A `salt test` config without an
 `outputs:` section is refused, and a config still carrying the retired
 top-level `writers:` block fails with a clean migration `ConfigError`. A
 train-only aux task opts out of eval with the per-task
@@ -255,7 +255,7 @@ outputs:
 `InputCopyWriter`/`PadMaskWriter` mint no ONNX leaves (Athena feeds the
 inputs; a pad-mask output has no Athena consumer) — but their `modes:`
 list is NOT inert: it decides whether they add copy/mask columns to the
-`salt2 inference` H5 (which writes the export selection; omitted `modes:`
+`salt inference` H5 (which writes the export selection; omitted `modes:`
 = both, so they run there by default; `modes: [test]` keeps them
 eval-only). The explicit H5 sink config surface is
 RETIRED: wiring `H5OutputSink` with an explicit `OutputColumn` table is a
@@ -292,7 +292,7 @@ pinned, documented v1 divergence).
 
 The assembled ONNX manifest is a FLAT namespace: two leaves minting one
 suffix is a hard error naming both (fix via `export.rename:`). Inspect
-everything with `salt2 export --manifest` (no checkpoint needed) or the
+everything with `salt export --manifest` (no checkpoint needed) or the
 manifest table appended to the export-time `plan_onnx.txt`.
 
 Every representable task family owns its export math ON THE TASK:
@@ -360,12 +360,12 @@ class ValidTrackCountWriter(OutputSectionWriter):
 ```
 
 ```yaml
-# add_output.yaml — stack as a second --config on salt2 test
+# add_output.yaml — stack as a second --config on salt test
 outputs:
   n_valid: {class_path: my_output.ValidTrackCountWriter, init_args: {modes: [test]}}
 ```
 
-When stacking a second `--config` on `salt2 test`, pass `--ckpt_path`
+When stacking a second `--config` on `salt test`, pass `--ckpt_path`
 explicitly: the best-checkpoint glob needs exactly ONE `--config` (it
 looks next to the saved run config), so the no-`--ckpt_path` shortcut and
 config stacking are mutually exclusive.
@@ -390,21 +390,21 @@ Notes for output authors:
   `object_masks` groups) go through the H5 sink's `extra_groups` seam
   instead — see `MaskFormerObjects` + `H5OutputSink(extra_groups=[...])`.
 
-## Inference: `salt2 inference` — the export set, offline (plan 50 Phase D)
+## Inference: `salt inference` — the export set, offline (plan 50 Phase D)
 
 ```bash
-salt2 inference --ckpt_path <run_dir>/checkpoints/....ckpt \
+salt inference --ckpt_path <run_dir>/checkpoints/....ckpt \
   --data.test_file /tmp/v2/unlabelled.h5
 # config inferred at <ckpt>/../../config.yaml (pass -c to override; -c stacks
 # like fit); output defaults to {ckpt_dir}/{ckpt_stem}__inference_{sample}.h5
 ```
 
-**`salt2 inference` == Athena semantics by construction.** The command's
+**`salt inference` == Athena semantics by construction.** The command's
 TASK columns are STRICTLY the export output set written to H5 (plan 50
 decision 2 — no separate config surface; the only other columns are the
 export-mode `InputCopyWriter`/`PadMaskWriter` copy/mask columns, which
 Athena never sees — see **Label-free** below): it compiles the SAME
-`Mode.ONNX` plan `salt2
+`Mode.ONNX` plan `salt
 export` traces (the section's export-mode `OutputField` selection, via the
 implicit `OnnxExportSink`) and executes it eagerly per jet through the
 `OnnxAdapter` — the exact eager reference the post-export `check_onnx`
@@ -437,14 +437,14 @@ mints no export-mode field is refused (there is nothing Athena-visible to
 write). The explicit `OnnxExportLeaf` escape hatch (MaskFormer object
 reduces) has no H5 counterpart here and is out of scope. Note the eager
 loop runs per jet (the ONNX-mode graph branches assume the Athena calling
-convention) — for bulk labelled evaluation use `salt2 test`; this command
+convention) — for bulk labelled evaluation use `salt test`; this command
 is the offline twin of the deployed network.
 
 ## Static graph tooling (design §4)
 
-All `salt2 graph` subcommands accept BOTH the trainer configs above and the
+All `salt graph` subcommands accept BOTH the trainer configs above and the
 small M1 toy-graph format, and never touch data. Saved run `config.yaml`
-files round-trip directly (`salt2 graph plot -c <run_dir>/config.yaml ...`
+files round-trip directly (`salt graph plot -c <run_dir>/config.yaml ...`
 — the run-surface `ckpt_path` key is accepted and ignored). `-c` is
 **repeatable** for trainer configs with the fit/export deep-merge semantics
 — the base + override pattern (e.g. the add-an-aux-task journey above) is
@@ -454,15 +454,15 @@ graph exactly as at runtime, so `validate`/`deadcode` fire the dead-preds
 error for a narrowed section before anything runs, and the planner's
 kind/dtype unification rejects a require that contradicts its producing
 leaf (e.g. `preds.jets.classification` as `kind=label` where the task
-publishes `data`) — data-free, not only at `salt2 test` setup:
+publishes `data`) — data-free, not only at `salt test` setup:
 
 ```bash
-salt2 graph validate -c salt/core/configs/gn2v2-dummy.yaml \
+salt graph validate -c salt/core/configs/gn2v2-dummy.yaml \
   --set model.modules.norm.init_args.norm_dict=unused.yaml
-salt2 graph plan -c <cfg> --mode fit
-salt2 graph plot -c <cfg> --mode fit -o graph.svg
-salt2 graph why  -c <cfg> --mode fit --key encoded.seq
-salt2 graph deadcode -c <cfg>
+salt graph plan -c <cfg> --mode fit
+salt graph plot -c <cfg> --mode fit -o graph.svg
+salt graph why  -c <cfg> --mode fit --key encoded.seq
+salt graph deadcode -c <cfg>
 ```
 
 `--set KEY=VALUE` (repeatable) supplies required init_args **data-free** —
@@ -471,7 +471,7 @@ override is never read by static tooling, so any value works. `validate`
 also runs the §2.6 class-names ↔ schema-attrs cross-check when the reader
 has a schema artifact, and reports module **preflights** (e.g. a missing
 norm dict) as warnings — promotable with `--strict`; an actual
-`salt2 fit` fails hard on the same check at fit start (fresh fits only —
+`salt fit` fails hard on the same check at fit start (fresh fits only —
 resumes never re-read the norm/class dicts), with one `ConfigError`
 covering every module before any value is materialised. Unconsumed
 `preds.*` in FIT/VAL are **info**-level (the normal no-metric-callback
@@ -480,9 +480,9 @@ tagger config.
 
 **ONNX mode checks the unified manifest** (design §3.1/§4.1): the static
 ONNX sinks come from the implicit `OnnxExportSink` folded over the
-section's export-mode leaves — exactly what `salt2 export` will trace —
+section's export-mode leaves — exactly what `salt export` will trace —
 with errors attributed to the declaring section writer (`outputs.<name>`).
-The export-only half of the `export:` block is validated as `salt2 export`
+The export-only half of the `export:` block is validated as `salt export`
 does: an invalid `export.model_name` (`_`/`-`) is an error-level
 `validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
 `rename:`/`combine:` are checked against the assembled manifest, and a
@@ -496,17 +496,17 @@ configs to carry the block). Predictions narrowed out of the manifest (a
 export-pruning story). Note the static ONNX plan/plot remain the
 **dataset-fed approximation** (reader/features included); the
 authoritative rendering of the traced graph is the `plan_onnx.txt` that
-`salt2 export` writes next to `network.onnx` — the two plan hashes
+`salt export` writes next to `network.onnx` — the two plan hashes
 legitimately differ, and the CLI prints this caveat on
 `plan`/`plot --mode onnx`.
 
-**`salt2 graph resolve` was removed** with the `writers.modules` manifest
+**`salt graph resolve` was removed** with the `writers.modules` manifest
 that was its data source: to see what eval writes and what Athena gets,
 read the `outputs:` section directly, run
-`salt2 export --manifest -c <cfg>` (no checkpoint needed), or consult the
+`salt export --manifest -c <cfg>` (no checkpoint needed), or consult the
 manifest table in the export-time `plan_onnx.txt`.
 
-`salt2 graph plot` writes the §4.3 Graphviz `.dot` (port-card signature
+`salt graph plot` writes the §4.3 Graphviz `.dot` (port-card signature
 layout, namespace-coloured modules) and rasterises it to a PNG + sibling PDF
 by shelling out to the **`dot`** binary baked into the salt container. There
 is no matplotlib path; a missing `dot` is a clear actionable error (the `.dot`
@@ -514,7 +514,7 @@ is still written for manual re-rendering).
 
 ### Run-dir artifacts (design §4.4)
 
-Every `salt2 fit`/`salt2 test` writes, at stage start (rank zero):
+Every `salt fit`/`salt test` writes, at stage start (rank zero):
 `plan_fit.txt`+`plan_val.txt` / `plan_test.txt` (dataset + model plan
 tables, with the narrowed label list, the demand-narrowed per-group read
 columns, and — test — the writer-sinks table: writer instance → consumed
@@ -578,10 +578,10 @@ MaskFormer metrics (see `SaltModule._model_sinks`).
   it from the TEST/ONNX plans (silencing the dead-preds error) while it keeps
   training. `--model.modules.<task>=null` (full deletion) is the alternative.
 
-## ONNX export: `salt2 export` (design §7)
+## ONNX export: `salt export` (design §7)
 
 ```bash
-salt2 export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
+salt export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
 # config inferred at <run_dir>/config.yaml (pass -c to override); output
 # defaults to <run_dir>/network.onnx (--output / -o/--overwrite to control)
 ```
@@ -593,7 +593,7 @@ semantics — the supported way to export a run trained before the export
 block existed (every v1 migrator until the M7 converter):
 
 ```bash
-salt2 export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
+salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
 # my_export_block.yaml carries ONLY the export: block below
 ```
 
@@ -604,9 +604,9 @@ The export contract has two halves ("one manifest and a half"):
    export-mode selection is folded into the implicit `OnnxExportSink`.
    There is NO `export.outputs` section: a config declaring one fails with
    the migration error. Inspect the assembled manifest any time with
-   `salt2 export --manifest -c <config>` (no checkpoint needed).
+   `salt export --manifest -c <config>` (no checkpoint needed).
 2. **The export-only half** lives in the **`export:` block** (top-level,
-   shipped in the gn2v2 configs; parsed by the normal salt2 surface so it
+   shipped in the gn2v2 configs; parsed by the normal salt surface so it
    round-trips through saved run configs):
 
 ```yaml
@@ -670,7 +670,7 @@ How it works (no data file is touched — config + checkpoint only):
   `plan_onnx.txt` — the §4.4 plan table of the graph Athena will actually
   run (union-find placement, `Split` `index_select` mechanism) PLUS the
   output-manifest table. This is the authoritative ONNX plan;
-  `salt2 graph plan --mode onnx` shows the dataset-fed static
+  `salt graph plan --mode onnx` shows the dataset-fed static
   approximation.
 - **Expected console output**: a clean export prints NO trace warnings.
   The torch `aten::index ... indices of type Byte` UserWarning (raised on

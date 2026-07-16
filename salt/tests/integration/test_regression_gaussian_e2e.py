@@ -97,7 +97,7 @@ def eval_h5(data, ckpt) -> Path:
         f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the shipped regression_gaussian.yaml must run end-to-end"
+    assert rc == 0, "salt test on the shipped regression_gaussian.yaml must run end-to-end"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
@@ -118,7 +118,7 @@ def test_gaussian_eval_h5_has_stddev_columns(eval_h5):
 
 # ONNX: the gaussian descale-in-graph export path (get_output ONNX squeeze + the
 # section single-name leaf naming + the in-graph means‖softplus-stddev concat)
-# through the real `salt2 export` CLI.
+# through the real `salt export` CLI.
 
 
 class TestGaussianOnnxContract:
@@ -138,7 +138,7 @@ class TestGaussianOnnxContract:
             "--no-check",
             "--overwrite",
         ])
-        assert rc == 0, f"salt2 export failed (rc={rc})"
+        assert rc == 0, f"salt export failed (rc={rc})"
         assert out.exists()
         return out
 

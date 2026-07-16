@@ -58,7 +58,7 @@ class StreamEmbed(SaltModelModule):
     """
 
     MUP_WIDTH_ARG = "out_dim"
-    """The init_arg the muP shape-generation tooling (``salt2 mup-shapes``)
+    """The init_arg the muP shape-generation tooling (``salt mup-shapes``)
     sweeps for this module to produce the infshapes."""
 
     def __init__(

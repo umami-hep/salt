@@ -1,4 +1,4 @@
-r"""``salt2 graph``/``salt2 schema`` — static graph tooling CLI.
+r"""``salt graph``/``salt schema`` — static graph tooling CLI.
 
 Validates, plans, and renders module graphs from either trainer configs
 (``model:``/``data:``) or toy configs (``modules:``/``sources:``/``sinks:``);
@@ -138,7 +138,7 @@ def load_config(
     """Load and instantiate a graph config (both formats — module docstring).
 
     A top-level ``model:``/``data:`` mapping is a trainer config and is
-    adapted through `Salt2CLI` (`_load_fit_config`); a top-level ``modules:``
+    adapted through `SaltCLI` (`_load_fit_config`); a top-level ``modules:``
     mapping is the toy format. Instance names are assigned from the
     module-dict keys (names must match config keys; the planner re-checks
     this invariant).
@@ -147,7 +147,7 @@ def load_config(
     ----------
     path : str | Path | Sequence[str | Path]
         The config YAML, or a stack of trainer configs (deep-merged
-        left-to-right through the real `Salt2CLI` surface — the repeatable
+        left-to-right through the real `SaltCLI` surface — the repeatable
         ``-c`` flag). Toy graphs take exactly one config.
     set_overrides : Sequence[str] | None, optional
         ``KEY=VALUE`` entries forwarded to the trainer parser (the ``--set``
@@ -182,7 +182,7 @@ def load_config(
         # stacked file must be trainer-format
         if not any(_is_trainer_format(raw) for raw in raws):
             raise ConfigError(
-                f"repeated -c is supported for salt2 trainer configs only (deep-merged "
+                f"repeated -c is supported for salt trainer configs only (deep-merged "
                 f"left-to-right, the fit/export stacking semantics) — none of "
                 f"{[str(p) for p in paths]} has top-level model:/data: blocks; M1 toy "
                 "graph configs take exactly one -c"
@@ -193,13 +193,13 @@ def load_config(
         return _load_fit_config(paths, set_overrides)
     if set_overrides:
         raise ConfigError(
-            "--set overrides apply to salt2 trainer configs only "
+            "--set overrides apply to salt trainer configs only "
             f"({path} is an M1 toy graph config)"
         )
     modules_raw = raw.get("modules")
     if not isinstance(modules_raw, dict) or not modules_raw:
         raise ConfigError(
-            f"config file {path} must declare either a salt2 trainer config "
+            f"config file {path} must declare either a salt trainer config "
             "(top-level 'model:'/'data:' blocks, the §5.1 fit surface) or an M1 toy graph "
             "config (a non-empty 'modules' mapping of name -> {class_path, init_args})"
         )
@@ -227,7 +227,7 @@ def load_config(
 
 def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
     """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`:
-    parses through `Salt2CLI` run-free, combines ``data.modules`` +
+    parses through `SaltCLI` run-free, combines ``data.modules`` +
     ``model.modules`` into one module dict (the reader is the source node,
     so ``sources`` is empty), and derives per-mode sinks from the model's
     declared anchors plus the callbacks-level sink path (TEST H5/ONNX export
@@ -272,7 +272,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     if onnx_sink_node is not None and onnx_sink_node.model_name is None:
         # the static render needs a model_name to derive the Athena output names;
         # default it from the export block / sanitised run name exactly as
-        # `salt2 export` does
+        # `salt export` does
         onnx_sink_node.model_name = _static_export_model_name(export_cfg, run_name)
     for node in (sink_node, onnx_sink_node):
         if node is None:
@@ -304,7 +304,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 if writer_sink_cb is not None and sink_node is None:
                     # a non-node persistence sink (duck-typed writer_demand
                     # only): fold its writer_demand into the flat
-                    # sinks exactly as SaltModule._boundary_demand does at salt2
+                    # sinks exactly as SaltModule._boundary_demand does at salt
                     # test, so the in-graph conversion producers (outputs.*) stay
                     # alive in the render instead of pruning dead. A renderable
                     # sink NODE is instead folded into `modules` above and anchors
@@ -335,14 +335,14 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 mode_warnings[mode] = (
                     "the config has no export: block — the OnnxExportSink names the outputs, "
                     "but export.inputs/model_name were NOT checked; declare the export-only "
-                    "half (design §5.1, §7) so `salt2 graph validate --mode onnx` gates "
-                    "everything `salt2 export` will trace"
+                    "half (design §5.1, §7) so `salt graph validate --mode onnx` gates "
+                    "everything `salt export` will trace"
                 )
         elif mode & Mode.TRAINING and fitval_callbacks:
             # the static half of the FIT/VAL-sink contract: configured metrics
             # callbacks declare plan sinks the same way writers do for TEST, so
-            # `salt2 graph validate --mode fit` sees the same sinks (and the same
-            # boundary demand) a real `salt2 fit` does. Mirror of the TEST branch.
+            # `salt graph validate --mode fit` sees the same sinks (and the same
+            # boundary demand) a real `salt fit` does. Mirror of the TEST branch.
             try:
                 keys = list(
                     model._model_sinks(mode, callbacks=fitval_callbacks)  # noqa: SLF001 - same-package adapter
@@ -361,8 +361,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                     "the config declares no OnnxExportSink — the ONNX contract was NOT checked "
                     "(sinks fall back to every preds.* key); since plan-29 W4 the ONNX output "
                     "manifest is declared by an OnnxExportSink (callbacks.onnx_export) naming "
-                    "the conversion outputs.* leaves, so `salt2 graph validate --mode onnx` "
-                    "gates what `salt2 export` will trace"
+                    "the conversion outputs.* leaves, so `salt graph validate --mode onnx` "
+                    "gates what `salt export` will trace"
                 )
             keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
         # writer row alignment: a flat meta.rows sink — unless a sink NODE was
@@ -387,13 +387,13 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
 
 def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> Any:
-    """Parse a trainer config (stack) through the real salt2 surface, run-free
-    (repeated configs deep-merge left-to-right, as `salt2 fit`/`salt2 export`
-    do). Returns the constructed `Salt2CLI` (nothing executed, no data
+    """Parse a trainer config (stack) through the real salt surface, run-free
+    (repeated configs deep-merge left-to-right, as `salt fit`/`salt export`
+    do). Returns the constructed `SaltCLI` (nothing executed, no data
     touched); raises `ConfigError` on a parse/instantiate failure.
     """
     from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (module docstring)
+    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
 
     args: list[str] = []
     for path in paths:
@@ -410,16 +410,16 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
         with warnings.catch_warnings():
             # programmatic argv triggers Lightning's 'args parameter is
             # intended...' warning — filtered exactly as salt.core.main and
-            # the salt2 export run-free parse do (noise on tooling whose
+            # the salt export run-free parse do (noise on tooling whose
             # output users are told to read)
             warnings.filterwarnings(
                 "ignore", message=r".*args parameter is intended to run from within Python.*"
             )
-            return Salt2CLI(args=args, run=False)
+            return SaltCLI(args=args, run=False)
     except SystemExit as err:
         raise ConfigError(
             f"trainer config {' '.join(str(p) for p in paths)} failed to parse through the "
-            f"salt2 surface (parser exit {err.code}; the parser error is printed above). "
+            f"salt surface (parser exit {err.code}; the parser error is printed above). "
             "Required init_args left as overrides in the YAML header can be supplied "
             "data-free via --set, e.g. --set model.modules.norm.init_args.norm_dict=unused.yaml"
         ) from err
@@ -432,14 +432,14 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
         # with an uncaught traceback.
         raise ConfigError(
             f"trainer config {' '.join(str(p) for p in paths)} failed to instantiate "
-            f"through the salt2 surface:\n{err}"
+            f"through the salt surface:\n{err}"
         ) from err
 
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
     """The configured callbacks-level TEST persistence sink (duck-typed on
     ``writer_demand``, e.g. `H5OutputWriter`), or None — the static mirror of
-    `SaltModule._attached_writer` so ``salt2 graph`` resolves the same TEST
+    `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """
     from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
@@ -462,7 +462,7 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
 def _static_onnx_export_sink(cli: Any) -> Any | None:
     """The configured callbacks-level `OnnxExportSink`, or None — the ONNX
     counterpart to `_static_writer_sink_callback`, folded into the planning
-    module dict so ``salt2 graph plot --mode onnx`` renders it and keeps the
+    module dict so ``salt graph plot --mode onnx`` renders it and keeps the
     folded conversion nodes alive.
     """
     from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
@@ -475,7 +475,7 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
 def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
     """The Athena output prefix for the static folded ONNX render: the export
     block's ``model_name`` if set, else the sanitised run name — matching
-    `salt2 export`'s own default.
+    `salt export`'s own default.
     """
     from salt.core.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
 
@@ -644,7 +644,7 @@ def _format_graph_error(err: GraphError) -> str:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    """``salt2 graph validate``: compile every requested mode; report findings.
+    """``salt graph validate``: compile every requested mode; report findings.
 
     Graph errors, error-level deadcode findings (an unconsumed ``preds.*``
     port in TEST), and stored per-mode sink errors (`GraphConfig.mode_errors`)
@@ -673,7 +673,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # muP routing validator: apply_to naming a module without a mup init_arg
         # errors; a mup:true module outside apply_to warns. The same
         # `validate_mup_routing` SaltModule construction runs, surfaced here as
-        # `salt2 graph validate` findings (warnings promotable under --strict).
+        # `salt graph validate` findings (warnings promotable under --strict).
         # The hard errors would already abort the parse above; this is the
         # first-class CI check + the warning capture.
         from salt.core.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
@@ -712,7 +712,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # materialise sources (e.g. the Normaliser norm dict). Warning-level here —
     # `validate` must stay runnable on data-less machines where the documented
     # `--set ...norm_dict=unused.yaml` override is in play; an actual
-    # `salt2 fit`/`test` run promotes these to hard errors (SaltModule.setup).
+    # `salt fit`/`test` run promotes these to hard errors (SaltModule.setup).
     for name, module in cfg.modules.items():
         preflight = getattr(module, "preflight", None)
         if not callable(preflight):
@@ -766,7 +766,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_deadcode(args: argparse.Namespace) -> int:
-    """``salt2 graph deadcode``: mode-aware dead-output report. An unconsumed
+    """``salt graph deadcode``: mode-aware dead-output report. An unconsumed
     ``preds.*`` port in TEST (or a stored per-mode sink error) is an error
     (exit 1); unconsumed FIT/VAL preds are info; the rest are warnings. A
     per-task ``expose: [fit, val]`` opt-out surfaces here as warning-level
@@ -802,7 +802,7 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
-    """``salt2 graph plan``: print the ordered plan table for one mode — each
+    """``salt graph plan``: print the ordered plan table for one mode — each
     step's binding constraint and narrowed wildcard results.
     """
     cfg = load_config(args.config, args.set)
@@ -833,7 +833,7 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
     """Print the dataset-fed-approximation caveat for static ONNX renderings.
 
     The static ONNX-mode plan/plot of a trainer config includes the dataset
-    modules and anchors on dataset sources; the graph `salt2 export`
+    modules and anchors on dataset sources; the graph `salt export`
     actually traces has positional export inputs, no dataset modules, and
     in-graph reduces — its authoritative rendering is the `plan_onnx.txt`
     written next to ``network.onnx`` at export time (the two plan hashes
@@ -843,7 +843,7 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
         print(
             "note: this is the dataset-fed STATIC view of the ONNX graph (reader/features "
             "included, no export reduces). The traced export graph is rendered to "
-            "plan_onnx.txt next to network.onnx by `salt2 export` (design §4.4)."
+            "plan_onnx.txt next to network.onnx by `salt export` (design §4.4)."
         )
 
 
@@ -853,7 +853,7 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
 
 
 def _cmd_plot(args: argparse.Namespace) -> int:
-    """``salt2 graph plot``: render the mode graph. Emits Graphviz DOT
+    """``salt graph plot``: render the mode graph. Emits Graphviz DOT
     (port-card layout) next to the requested output, then shells out to
     ``dot`` (baked into the salt container) to rasterise a PNG + sibling PDF
     — the authoritative graph image, no matplotlib path. A missing/failing
@@ -955,7 +955,7 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
 
 
 def _cmd_why(args: argparse.Namespace) -> int:
-    """``salt2 graph why``: explain one key's producer/consumers. For a present
+    """``salt graph why``: explain one key's producer/consumers. For a present
     key: producer, spec, consumers. For an absent key: why (demand-pruned,
     mode-gated, or an undemanded wildcard) — unknown keys exit 1 with
     nearest-key suggestions. Raises `ConfigError` for an invalid ``--key``.
@@ -1007,7 +1007,7 @@ def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
     else:
         print(
             f"  consumers: none — dead output in mode {mode.name} "
-            "(see salt2 graph deadcode, design §4.2)"
+            "(see salt graph deadcode, design §4.2)"
         )
     return True
 
@@ -1096,7 +1096,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 # ---------------------------------------------------------------------------
 
 def _cmd_resolve(args: argparse.Namespace) -> int:
-    """``salt2 graph resolve``: the writer-derived output manifest, eval + ONNX.
+    """``salt graph resolve``: the writer-derived output manifest, eval + ONNX.
     Prints the assembled manifest; with ``--annotate``, writes it into the
     config as a refreshable comment block. Repeated ``-c`` deep-merges and the
     annotation goes into the last (most specific) file.
@@ -1109,13 +1109,13 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         raws.append(yaml.safe_load(path.read_text()))
     if not any(isinstance(raw, dict) and ("model" in raw or "data" in raw) for raw in raws):
         return _fail(
-            "salt2 graph resolve needs a salt2 trainer config (top-level model:/data: "
+            "salt graph resolve needs a salt trainer config (top-level model:/data: "
             "blocks) — toy graph configs have no writers block (M4.5 unified manifest)"
         )
     # the WriterCallback-based manifest (writers.modules) was removed.
-    # `salt2 graph resolve` no longer has a manifest to derive.
+    # `salt graph resolve` no longer has a manifest to derive.
     return _fail(
-        "salt2 graph resolve is no longer supported (W6c removal): the writers.modules "
+        "salt graph resolve is no longer supported (W6c removal): the writers.modules "
         "manifest block was removed; the eval columns and ONNX outputs are now declared "
         "by the outputs: section + OnnxExportSink — inspect those directly "
         "(see gn2v2-dummy.yaml for the canonical config pattern)"
@@ -1128,7 +1128,7 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def _cmd_schema_dump(args: argparse.Namespace) -> int:
-    """``salt2 schema dump``: scrape an H5 file into a schema artifact."""
+    """``salt schema dump``: scrape an H5 file into a schema artifact."""
     h5_path = Path(args.file)
     if not h5_path.is_file():
         return _fail(f"input file not found: {h5_path}")
@@ -1152,8 +1152,8 @@ def _add_config_arg(parser: argparse.ArgumentParser) -> None:
         "--config",
         required=True,
         action="append",
-        help="config YAML (salt2 trainer config or M1 toy graph). Repeatable: trainer "
-        "configs deep-merge left-to-right (the salt2 fit/export stacking semantics); "
+        help="config YAML (salt trainer config or M1 toy graph). Repeatable: trainer "
+        "configs deep-merge left-to-right (the salt fit/export stacking semantics); "
         "toy graphs take exactly one",
     )
     parser.add_argument(
@@ -1178,9 +1178,9 @@ def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``salt2`` argument parser; each subcommand sets ``func``."""
+    """Build the ``salt`` argument parser; each subcommand sets ``func``."""
     parser = argparse.ArgumentParser(
-        prog="salt2", description="salt v2 static graph tooling (M1 kernel CLI, design §4)"
+        prog="salt", description="salt v2 static graph tooling (M1 kernel CLI, design §4)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1286,7 +1286,7 @@ def _add_mup_parsers(sub: Any) -> None:
     coord.add_argument(
         "--shape-file",
         default=None,
-        help="SHARED base/delta infshape file applied at EVERY swept width (salt2 mup-shapes "
+        help="SHARED base/delta infshape file applied at EVERY swept width (salt mup-shapes "
         "output). Omit to auto-generate one (base=min width, delta=max width) — the shared-base "
         "protocol that gives a correct width_mult so the MuReadout is damped (the MU-HUMAN fix, "
         "replacing the per-width self-base that forced width_mult==1)",
@@ -1295,7 +1295,7 @@ def _add_mup_parsers(sub: Any) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """``salt2`` entry point (pyproject ``[project.scripts]``).
+    """``salt`` entry point (pyproject ``[project.scripts]``).
 
     Returns
     -------

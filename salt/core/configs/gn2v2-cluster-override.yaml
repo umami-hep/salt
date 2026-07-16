@@ -1,6 +1,6 @@
 # Cluster deltas for the v2 half of the GN2 before/after retraining gate.
 # Stack on top of gn2v2-opendata.yaml:
-#   salt2 fit --config gn2v2-opendata.yaml --config gn2v2-cluster-override.yaml ...
+#   salt fit --config gn2v2-opendata.yaml --config gn2v2-cluster-override.yaml ...
 # Switches the encoder to flash-varlen attention, runs 10 epochs at 16-mixed
 # on GPU, and checkpoints every epoch (save_top_k: -1) to match the v1 policy.
 
@@ -28,7 +28,7 @@ callbacks:
       monitor: val/loss
       mode: min
       save_top_k: -1
-      # keep in sync with the salt2-test no-ckpt_path fallback glob (base2.yaml)
+      # keep in sync with the salt-test no-ckpt_path fallback glob (base2.yaml)
       filename: "epoch={epoch:03d}-loss={val/loss:.5f}"
       auto_insert_metric_name: false
 

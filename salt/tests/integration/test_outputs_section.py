@@ -145,7 +145,7 @@ def section_h5(data, ckpt) -> Path:
         f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the outputs:-section config must run end-to-end"
+    assert rc == 0, "salt test on the outputs:-section config must run end-to-end"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
@@ -241,7 +241,7 @@ class TestSectionH5SelfConsistency:
 
 @pytest.mark.cpu_always
 class TestNoCkptFallback:
-    """``salt2 test`` without ``--ckpt_path`` (the v1 best-epoch glob).
+    """``salt test`` without ``--ckpt_path`` (the v1 best-epoch glob).
 
     Re-anchored from the retired ``test_no_ckpt_fallback_globs_v2_checkpoints``
     / ``test_no_ckpt_needs_single_config_with_losses`` e2e pair; the glob

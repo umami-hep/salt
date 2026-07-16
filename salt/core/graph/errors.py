@@ -104,7 +104,7 @@ class SchemaError(GraphError):
     """A demanded field is absent from the dataset schema.
 
     Reserved for the schema artifact tooling and the reader's bind-time check
-    (``salt2 schema``); the planner reports schema-invalid wildcard narrowing
+    (``salt schema``); the planner reports schema-invalid wildcard narrowing
     as `ConnectivityError`.
     """
 

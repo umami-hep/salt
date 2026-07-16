@@ -1,4 +1,4 @@
-"""Unit tests for ``salt2 inference`` (plan 50 Phase D): parsing/dispatch, the
+"""Unit tests for ``salt inference`` (plan 50 Phase D): parsing/dispatch, the
 export-selection sink, label-demand-free ONNX plan compilation, and the
 unlabelled-file dataset path.
 """
@@ -61,7 +61,7 @@ LABEL_FIELDS = {
 
 
 class TestParseArgs:
-    """The salt2 inference argparse surface."""
+    """The salt inference argparse surface."""
 
     def test_required_flags(self, capsys):
         """--ckpt_path and --data.test_file are both required."""
@@ -108,7 +108,7 @@ class TestParseArgs:
 
 
 class TestDispatch:
-    """``salt2 inference ...`` dispatches to salt.core.inference.main."""
+    """``salt inference ...`` dispatches to salt.core.inference.main."""
 
     def test_main_dispatches(self, monkeypatch):
         """The main() entry hands argv (minus the command) to inference.main."""
@@ -218,7 +218,7 @@ class TestExportSelectionSink:
             build_inference_sink({})
 
     def test_default_output_template_is_inference_named(self, tmp_path):
-        """The default output template never clobbers a salt2 test eval H5."""
+        """The default output template never clobbers a salt test eval H5."""
         sink = build_inference_sink(_section(tmp_path))
         assert sink.output == INFERENCE_OUTPUT
         assert "__inference_" in sink.output

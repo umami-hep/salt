@@ -1,7 +1,7 @@
-"""``salt2`` entry point — the jsonargparse YAML CLI for salt v2.
+"""``salt`` entry point — the jsonargparse YAML CLI for salt v2.
 
-``salt2 fit``/``test`` go through `Salt2CLI` (`LightningCLI` over `SaltModule`
-+ `GraphDataModule`); ``salt2 graph``/``schema``/``export``/``inference``/muP
+``salt fit``/``test`` go through `SaltCLI` (`LightningCLI` over `SaltModule`
++ `GraphDataModule`); ``salt graph``/``schema``/``export``/``inference``/muP
 tooling dispatch to their own mains.
 """
 
@@ -33,7 +33,7 @@ from salt.core.outputs.run_task_output import OutputSectionWriter
 from salt.core.parser import DeepMergeParser
 from salt.core.saltmodule import SaltModule
 
-__all__ = ["CONFIG_DIR", "Salt2CLI", "main"]
+__all__ = ["CONFIG_DIR", "SaltCLI", "main"]
 
 
 def _patch_jsonargparse_sys_modules_race() -> None:
@@ -124,7 +124,7 @@ def _best_checkpoint(config_path: Path) -> str:
     """
     ckpt_dirs = [config_path.parent / name for name in ("ckpts", "checkpoints")]
     print(
-        "salt2 test: no --ckpt_path specified, looking for best checkpoint in "
+        "salt test: no --ckpt_path specified, looking for best checkpoint in "
         + " and ".join(str(d) for d in ckpt_dirs)
     )
     scored = [
@@ -140,7 +140,7 @@ def _best_checkpoint(config_path: Path) -> str:
             "base2.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
         )
     best = min(scored)[1]
-    print(f"salt2 test: using checkpoint {best}")
+    print(f"salt test: using checkpoint {best}")
     return best
 
 
@@ -181,7 +181,7 @@ def _instantiate_class_config(cfg: Any) -> Any:
     """Instantiate a jsonargparse ``class_path``/``init_args`` config block.
 
     Mirrors jsonargparse's default subclass instantiation (`class_type(**init_args)`)
-    for the deferred fit logger (`Salt2CLI._reattach_fit_logger`) — a leaf ``cfg``
+    for the deferred fit logger (`SaltCLI._reattach_fit_logger`) — a leaf ``cfg``
     (already a fully-parsed value, not a subclass block) is returned unchanged, and
     nested ``class_path``/``init_args`` init args are instantiated recursively so an
     arbitrary user logger block round-trips, not just the scalar-arg `CometLogger`.
@@ -229,7 +229,7 @@ def _is_persistence_sink(class_path: str) -> bool:
 def _has_callback_persistence_sink(callbacks: Any) -> bool:
     """Whether the pre-instantiate ``callbacks:`` config carries a TEST
     persistence sink (any non-None entry passing `_is_persistence_sink`); used
-    by the ``salt2 test`` writer-less check.
+    by the ``salt test`` writer-less check.
     """
     items = (callbacks or {}).items() if hasattr(callbacks, "items") else ()
     for entry in (val for _, val in items if val is not None):
@@ -314,7 +314,7 @@ def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
     direct = cfg.get("model")
     if direct is not None:
         blocks.append((cfg, direct))
-    for sub in Salt2CLI.subcommands():
+    for sub in SaltCLI.subcommands():
         sub_cfg = cfg.get(sub)
         sub_model = sub_cfg.get("model") if sub_cfg is not None else None
         if sub_model is not None:
@@ -322,7 +322,7 @@ def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
     return blocks
 
 
-class Salt2CLI(LightningCLI):
+class SaltCLI(LightningCLI):
     """The salt v2 `LightningCLI`.
 
     Wires `SaltModule` (subclass mode) and `GraphDataModule` through
@@ -430,7 +430,7 @@ class Salt2CLI(LightningCLI):
             "--export",
             type=ExportConfig | None,
             default=None,
-            help="the export-ONLY half of the ONNX contract, consumed by `salt2 export` "
+            help="the export-ONLY half of the ONNX contract, consumed by `salt export` "
             "(design §5.1, §7): model_name (no '_'/'-', validated ONLY at export "
             "time), inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
             "manifest post-processing. The OUTPUT manifest derives from the outputs: "
@@ -455,7 +455,7 @@ class Salt2CLI(LightningCLI):
                 type=str | None,
                 default=None,
                 help="accepted-and-ignored on the run-free parse surface so saved run "
-                "configs round-trip into the salt2 graph tooling",
+                "configs round-trip into the salt graph tooling",
             )
         parser.link_arguments("name", "model.init_args.name")
         # the top-level outputs: section is NOT a link_arguments compute
@@ -541,14 +541,14 @@ class Salt2CLI(LightningCLI):
         Plan 50 Phase B — the config declares WHAT (section modules + their
         ``modes:``); the command picks the sink:
 
-        - ``salt2 test`` (subcommand ``test``): the H5 persistence sink, if any
+        - ``salt test`` (subcommand ``test``): the H5 persistence sink, if any
           section writer runs in TEST.
-        - The run-free parses (``salt2 graph``/``schema``/``export`` — all
+        - The run-free parses (``salt graph``/``schema``/``export`` — all
           ``subcommand is None``, the caveat from plan 50a): BOTH the H5 sink
           (TEST section) and the ONNX sink (any RunTaskOutput running in
           ``export``), so the static tooling and the exporter see the same
           implicit sinks a real run would.
-        - ``salt2 fit`` (subcommand ``fit``): no output sinks.
+        - ``salt fit`` (subcommand ``fit``): no output sinks.
 
         A sink already present in ``trainer.callbacks`` (a programmatic build,
         or the MaskFormer ONNX escape hatch) is left alone — never double-wired.
@@ -642,7 +642,7 @@ class Salt2CLI(LightningCLI):
         has_outputs_section = bool(cfg.get("outputs"))
         if not has_callback_sink and not has_outputs_section:
             raise ConfigError(
-                "salt2 test needs an `outputs:` section to persist predictions — the "
+                "salt test needs an `outputs:` section to persist predictions — the "
                 "command wires the H5 sink over it (plan 50 Phase B). Supply a top-level "
                 "outputs: section (InputCopyWriter -> RunTaskOutput -> PadMaskWriter, in v1 "
                 "H5 column order); use each RunTaskOutput's `modes:` list to control "
@@ -652,7 +652,7 @@ class Salt2CLI(LightningCLI):
             configs = cfg.get("config") or []
             if len(configs) != 1:
                 raise ConfigError(
-                    "salt2 test without --ckpt_path needs exactly one --config (the saved "
+                    "salt test without --ckpt_path needs exactly one --config (the saved "
                     "run config.yaml next to ckpts/) to glob the best checkpoint — "
                     "v1 contract (utils/cli.py:323-325)"
                 )
@@ -664,10 +664,10 @@ class Salt2CLI(LightningCLI):
             except ValueError:
                 n_devices = None  # "auto" — single-device eval contract
             if n_devices is not None and n_devices > 1:
-                print("salt2 test: forcing --trainer.devices=1 (single-device eval, design §8)")
+                print("salt test: forcing --trainer.devices=1 (single-device eval, design §8)")
                 cfg.trainer.devices = "1"
         elif isinstance(devices, list) and len(devices) > 1:
-            raise ConfigError("salt2 test requires a single device (design §8, v1 cli.py:330)")
+            raise ConfigError("salt test requires a single device (design §8, v1 cli.py:330)")
 
     @staticmethod
     def _wire_experiment_logger(cfg: Any) -> None:
@@ -719,22 +719,22 @@ class Salt2CLI(LightningCLI):
         """
         log_dir = self.trainer.log_dir or self.trainer.default_root_dir
         ckpt_dir = getattr(self.trainer.checkpoint_callback, "dirpath", None)
-        print(f"salt2 fit artifacts: config.yaml in {log_dir}")
+        print(f"salt fit artifacts: config.yaml in {log_dir}")
         print(
-            f"salt2 fit artifacts: checkpoints in {ckpt_dir}"
+            f"salt fit artifacts: checkpoints in {ckpt_dir}"
             if ckpt_dir
-            else "salt2 fit artifacts: no checkpoint callback configured"
+            else "salt fit artifacts: no checkpoint callback configured"
         )
         print("(run-directory layout with timestamped names lands in M6 — design §5)")
 
 
 def main(args: Sequence[str] | None = None) -> int:
-    """``salt2`` console entry point.
+    """``salt`` console entry point.
 
-    ``salt2 graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
-    the static graph + muP tooling (`salt.core.cli.main`), ``salt2 export``
-    to the ONNX exporter, and ``salt2 inference`` to the eager export-set
-    runner; everything else goes to `Salt2CLI` (``salt2 fit``/``test``).
+    ``salt graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
+    the static graph + muP tooling (`salt.core.cli.main`), ``salt export``
+    to the ONNX exporter, and ``salt inference`` to the eager export-set
+    runner; everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
     instead of a Python traceback.
 
@@ -766,16 +766,16 @@ def main(args: Sequence[str] | None = None) -> int:
             warnings.filterwarnings(
                 "ignore", message=r".*args parameter is intended to run from within Python.*"
             )
-            Salt2CLI(args=None if args is None else argv)
+            SaltCLI(args=None if args is None else argv)
     except SystemExit:
         if help_requested:
             print(
-                "\nsee also: 'salt2 graph --help' (static graph tooling: validate/plan/plot/"
-                "why/deadcode/resolve, design §4), 'salt2 schema --help' (schema artifacts, "
-                "§2.6), 'salt2 mup-shapes --help' / 'salt2 mup-coord-check --help' (muP base/"
-                "delta infshapes + coord-check, design §3.4), 'salt2 export --help' (ONNX "
+                "\nsee also: 'salt graph --help' (static graph tooling: validate/plan/plot/"
+                "why/deadcode/resolve, design §4), 'salt schema --help' (schema artifacts, "
+                "§2.6), 'salt mup-shapes --help' / 'salt mup-coord-check --help' (muP base/"
+                "delta infshapes + coord-check, design §3.4), 'salt export --help' (ONNX "
                 "export, §7; --manifest prints the writer-derived output manifest), "
-                "'salt2 inference --help' (label-free eager inference: the export output "
+                "'salt inference --help' (label-free eager inference: the export output "
                 "set written to H5, plan 50)"
             )
         raise

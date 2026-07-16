@@ -323,7 +323,7 @@ def deadcode(
     # the node has no sink and prunes legitimately. Demote it to info
     # (never --strict-promoted), exactly like the ONNX-narrowing case — a
     # config carrying ONNX export nodes must still pass
-    # `salt2 graph validate --strict --mode test`.
+    # `salt graph validate --strict --mode test`.
 
     def _is_conversion_producer(name: str) -> bool:
         return isinstance(getattr(modules.get(name), "output_key", None), str)
@@ -1223,7 +1223,7 @@ def _spec_payload(spec: TensorSpec | SourceSpec) -> dict[str, Any]:
     ``shape``/``dtype``/``fields`` and gates on string `stages` rather than
     `Mode`, so those keys are emitted as None / the stage list. The setup
     hash is structural and stable, giving the setup graph a reproducible
-    identity for ``salt2 graph`` exactly like the tensor graph.
+    identity for ``salt graph`` exactly like the tensor graph.
     """
     if isinstance(spec, SourceSpec):
         return {

@@ -74,7 +74,7 @@ previous value (`_typehints.py:925-933`: `val = {**prev_val, key: ...}`).
 
 ### 5. Env-var overrides — PASS
 
-With `ArgumentParser(default_env=True, env_prefix="SALT2")`, `SALT2_MODEL__MODULES` (dots in the
+With `ArgumentParser(default_env=True, env_prefix="SALT")`, `SALT_MODEL__MODULES` (dots in the
 dest become `__`, uppercased) set to a JSON/YAML dict parses and instantiates correctly.
 Caveats: the env var sets the **whole dict** (no per-key env merge), and precedence is
 CLI/config-file > env > defaults — a `--config` file on the command line wins over the env var.
@@ -112,7 +112,7 @@ parse side by side from one YAML; the §5.3 one-key override
 (`--callbacks.checkpoint.init_args.monitor=...`) works; framework-side assembly
 `[*callbacks.values(), *trainer.callbacks]` preserves YAML insertion order and types.
 
-## Recommendation for the salt2 CLI (M1+)
+## Recommendation for the salt CLI (M1+)
 
 1. Use plain `dict[str, Base | None]` annotations for module/writer/callback dicts
    (the `| None` admits the null-deletion sentinel).

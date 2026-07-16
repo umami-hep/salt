@@ -352,12 +352,12 @@ class TestTwoDynamicAxes:
         assert outputs[names.index("TwoStream_ElectronOrigin")].shape == (2,)
 
 
-# the salt2 surface: export-block parsing + the CLI from a real checkpoint
+# the salt surface: export-block parsing + the CLI from a real checkpoint
 
 
 @pytest.fixture(scope="module")
 def cli_run(tmp_path_factory):
-    """A real checkpoint + saved run config for the ``salt2 export`` CLI tests."""
+    """A real checkpoint + saved run config for the ``salt export`` CLI tests."""
     from lightning import Trainer
 
     from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
@@ -410,11 +410,11 @@ def cli_run(tmp_path_factory):
     return SimpleNamespace(ckpt=ckpt, run_dir=run_dir, config=config)
 
 
-class TestSalt2Surface:
+class TestSaltSurface:
     def test_export_block_round_trips_through_the_parser(self):
-        from salt.core.main import CONFIG_DIR, Salt2CLI
+        from salt.core.main import CONFIG_DIR, SaltCLI
 
-        cli = Salt2CLI(
+        cli = SaltCLI(
             args=[
                 "--config",
                 str(CONFIG_DIR / "gn2v2-dummy.yaml"),
@@ -434,11 +434,11 @@ class TestSalt2Surface:
         assert export_cfg.rename == {}
         assert export_cfg.combine == []
 
-    def test_dispatch_wired_into_salt2(self):
-        from salt.core.main import main as salt2_main
+    def test_dispatch_wired_into_salt(self):
+        from salt.core.main import main as salt_main
 
         with pytest.raises(SystemExit) as excinfo:
-            salt2_main(["export", "--help"])
+            salt_main(["export", "--help"])
         assert excinfo.value.code == 0
 
     def test_cli_export_from_checkpoint(self, cli_run, capsys):
@@ -532,7 +532,7 @@ class TestSalt2Surface:
         assert meta.description == "GN2v2dummy"
 
     def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
-        # salt2 export --manifest: the OnnxExportSink-derived manifest, no ckpt
+        # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
         # needed (W4: the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
         from salt.core.onnx.export import main as export_main

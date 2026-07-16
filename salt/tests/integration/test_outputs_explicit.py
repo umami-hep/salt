@@ -3,7 +3,7 @@
 Plan 50 Phase B: gn2v2-dummy.yaml migrated OFF the explicit-sink ``outputs:``
 OutputColumn table onto the ``outputs:`` section path (two mode-split
 RunTaskOutput writers). No config declares H5OutputSink/OnnxExportSink — the
-``salt2 test`` command wires the H5 sink over the section. This test fits +
+``salt test`` command wires the H5 sink over the section. This test fits +
 evaluates the shipped config end-to-end through the real CLI (proving the
 implicit-sink runtime path) and asserts the eval H5's TASK columns against the
 committed Phase-A golden (``gn2v2-dummy.json``) — a PARSED-JSON contract, not a
@@ -108,7 +108,7 @@ def ckpt(data, tmp_path_factory) -> Path:
         "--trainer.num_sanity_val_steps=0",
         "--trainer.log_every_n_steps=1",
     ])
-    assert rc == 0, "salt2 fit on the shipped gn2v2-dummy.yaml must run end-to-end"
+    assert rc == 0, "salt fit on the shipped gn2v2-dummy.yaml must run end-to-end"
     ckpts = sorted(fit_dir.rglob("*.ckpt"))
     assert ckpts, f"no checkpoint under {fit_dir}"
     return ckpts[0]
@@ -116,7 +116,7 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def cli_h5(data, ckpt) -> Path:
-    """Eval H5 from ``salt2 test`` — the H5 sink is IMPLICIT (wired by the command).
+    """Eval H5 from ``salt test`` — the H5 sink is IMPLICIT (wired by the command).
 
     No ``--callbacks.h5_output`` override: the sink is injected over the outputs:
     section and writes to the default ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``.
@@ -131,7 +131,7 @@ def cli_h5(data, ckpt) -> Path:
         f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt2 test on the shipped gn2v2-dummy.yaml must run end-to-end"
+    assert rc == 0, "salt test on the shipped gn2v2-dummy.yaml must run end-to-end"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
@@ -141,7 +141,7 @@ class TestImplicitSinkCliE2E:
     """The shipped gn2v2-dummy.yaml drives the implicit H5 sink end-to-end."""
 
     def test_cli_writes_eval_h5(self, cli_h5):
-        """``salt2 test`` writes a non-empty eval H5 with the reader-stream groups."""
+        """``salt test`` writes a non-empty eval H5 with the reader-stream groups."""
         with h5py.File(cli_h5) as f:
             assert set(f.keys()) >= {"jets", "tracks"}
             assert f["jets"].shape[0] == N_TEST

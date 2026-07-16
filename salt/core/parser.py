@@ -1,4 +1,4 @@
-"""`DeepMergeParser` — the salt2 argument parser with cross-config dict-merge semantics."""
+"""`DeepMergeParser` — the salt argument parser with cross-config dict-merge semantics."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class DeepMergeParser(LightningArgumentParser):
     them under subclass-mode ``model`` lets the outer merge resurrect a
     deleted entry from an earlier file). Deletion therefore happens at
     assembly time everywhere: `SaltModule`/`GraphDataModule` filter module
-    dicts, `Salt2CLI` filters the callbacks dict.
+    dicts, `SaltCLI` filters the callbacks dict.
     """
 
     def merge_config(self, cfg_from: Any, cfg_to: Any) -> Any:
@@ -56,7 +56,7 @@ class DeepMergeParser(LightningArgumentParser):
         ``--print_config``, so resolved values freeze into the saved run config.
         """
         # W45.2c import-placement fix: _fan_out_artifacts stays in salt.core.main
-        # (it resolves Salt2CLI subcommand scopes) and main imports this parser,
+        # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
         from salt.core.main import _fan_out_artifacts  # noqa: PLC0415
 

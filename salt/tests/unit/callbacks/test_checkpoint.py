@@ -37,7 +37,7 @@ class TestCheckpoint:
 
     def test_formatted_name_keeps_loss_tag(self):
         # the per-task metric (carrying a '/') renders into the loss= stem the
-        # salt2-test best-epoch glob keys on
+        # salt-test best-epoch glob keys on
         cb = Checkpoint(monitor_loss="val/loss")
         name = cb.format_checkpoint_name({"epoch": 9, "val/loss": 0.64624})
         assert name == "epoch=009-loss=0.64624.ckpt"
@@ -72,7 +72,7 @@ class TestCheckpoint:
             cb.setup(_ckpt_trainer("s3://bucket/run"), SimpleNamespace(), stage="fit")
 
     def test_best_checkpoint_resolves_what_setup_writes(self, tmp_path):
-        # the salt2-test run-dir contract end-to-end: a checkpoint named by the
+        # the salt-test run-dir contract end-to-end: a checkpoint named by the
         # callback under its setup-forced ckpts/ dir is discovered by
         # salt.core.main._best_checkpoint (the no-ckpt_path fallback)
         from salt.core.main import _best_checkpoint

@@ -1,4 +1,4 @@
-"""Plan 50 Phase D gate — ``salt2 inference`` end-to-end on the dummy fixture.
+"""Plan 50 Phase D gate — ``salt inference`` end-to-end on the dummy fixture.
 
 The three-part gate (plan 50 §Phase D):
 
@@ -129,7 +129,7 @@ def ckpt(data, tmp_path_factory) -> Path:
 
 
 def _inference_args(data, ckpt: Path, file_key: str, out: Path) -> list[str]:
-    """The ``salt2 inference`` argv for one input file (cutover34 stack)."""  # noqa: DOC201
+    """The ``salt inference`` argv for one input file (cutover34 stack)."""  # noqa: DOC201
     return [
         "inference",
         "-c",
@@ -153,8 +153,8 @@ def inference_h5(data, ckpt) -> Path:
     """The inference H5 on the LABELLED file."""  # noqa: DOC201
     out = data["dir"] / "inference_labelled.h5"
     rc = main(_inference_args(data, ckpt, "labelled", out))
-    assert rc == 0, "salt2 inference must run green on the labelled file"
-    assert out.is_file(), "salt2 inference wrote no H5"
+    assert rc == 0, "salt inference must run green on the labelled file"
+    assert out.is_file(), "salt inference wrote no H5"
     return out
 
 
@@ -163,7 +163,7 @@ def inference_h5_stripped(data, ckpt) -> Path:
     """The inference H5 on the LABEL-STRIPPED copy (gate c: runs green)."""  # noqa: DOC201
     out = data["dir"] / "inference_stripped.h5"
     rc = main(_inference_args(data, ckpt, "stripped", out))
-    assert rc == 0, "salt2 inference must run green on a label-stripped file"
+    assert rc == 0, "salt inference must run green on a label-stripped file"
     assert out.is_file()
     return out
 
@@ -265,7 +265,7 @@ class TestValuesMatchOnnxRuntime:
             "--set",
             f"model.modules.norm.init_args.norm_dict={data['nd']}",
         ])
-        assert rc == 0, "salt2 export must succeed on the inference config stack"
+        assert rc == 0, "salt export must succeed on the inference config stack"
         return out
 
     def test_h5_values_equal_onnxruntime(self, data, inference_h5, onnx_path):

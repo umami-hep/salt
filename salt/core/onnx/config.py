@@ -156,7 +156,7 @@ class ExportCombine:
 
 @dataclass
 class ExportConfig:
-    """The top-level ``export:`` block, consumed by ``salt2 export``.
+    """The top-level ``export:`` block, consumed by ``salt export``.
 
     The block carries the EXPORT-ONLY half of the contract: inputs, the Athena model
     name, and the ``rename:``/``combine:`` manifest post-processing. The output
@@ -199,7 +199,7 @@ def sanitised_model_name(run_name: str) -> str:
 def validate_model_name(name: str) -> str:
     """Validate the Athena-facing model name.
 
-    Called ONLY when compiling the ONNX plan / running ``salt2 export`` — never at
+    Called ONLY when compiling the ONNX plan / running ``salt export`` — never at
     fit time.
 
     Raises
@@ -283,7 +283,7 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
             "OnnxExportSink (callbacks.onnx_export) naming the conversion outputs.* leaves.\n"
             "  fix: delete the export.outputs section; declare the conversion nodes + the "
             "OnnxExportSink instead, post-process with export.rename, and inspect the "
-            "assembled manifest with `salt2 export --manifest` (design §4.2/§6)"
+            "assembled manifest with `salt export --manifest` (design §4.2/§6)"
         )
     model_name = validate_model_name(export.model_name or sanitised_model_name(run_name))
     if export.track_selection not in TRACK_SELECTIONS:

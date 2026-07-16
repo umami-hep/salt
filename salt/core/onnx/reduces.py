@@ -267,7 +267,7 @@ def register_reduce(
     if dtype not in {"float32", "int8"}:
         raise ConfigError(
             f"register_reduce {name!r}: dtype must be 'float32' or 'int8', got {dtype!r} "
-            "(the ONNX output dtypes salt2 export supports — adapter.output_dtypes/check.py:149)"
+            "(the ONNX output dtypes salt export supports — adapter.output_dtypes/check.py:149)"
         )
     if name in _REGISTRY:
         raise ConfigError(

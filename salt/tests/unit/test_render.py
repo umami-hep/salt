@@ -96,7 +96,7 @@ _HAS_DOT = shutil.which("dot") is not None
 
 
 class TestPlotCli:
-    """`salt2 graph plot` renders the §4.3 DOT to PNG+PDF via the dot binary."""
+    """`salt graph plot` renders the §4.3 DOT to PNG+PDF via the dot binary."""
 
     def test_dot_sidecar_written_even_without_image(self, tmp_path):
         # a .dot target short-circuits before any dot invocation: the DOT
@@ -221,7 +221,7 @@ class TestStaticWidthRender:
         assert "S:seq" in dot
 
     def test_render_is_data_free(self):
-        # the whole `salt2 graph plot` path produces a DOT sidecar with NO data
+        # the whole `salt graph plot` path produces a DOT sidecar with NO data
         # file and NO --probe flag, and never emits the probe's labeller line
         cfg = load_config([_DUMMY_CFG], _NORM_PLACEHOLDER)
         widths = _static_widths(cfg)
@@ -230,7 +230,7 @@ class TestStaticWidthRender:
 
 
 class TestPlotCliStaticWidths:
-    """`salt2 graph plot` (no --probe) writes a DOT with concrete feature dims."""
+    """`salt graph plot` (no --probe) writes a DOT with concrete feature dims."""
 
     def test_dot_sidecar_has_concrete_feature_dims(self, tmp_path):
         out = tmp_path / "static.dot"

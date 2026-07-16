@@ -109,7 +109,7 @@ class SaltModule(lightning.LightningModule):
           that carry ``mup: true``. Each must exist in `modules` and accept
           a ``mup`` init_arg, else `ConfigError`.
         - ``shape_path`` (optional): base-shapes file produced by
-          ``salt2 mup-shapes`` / ``setup_mup``, applied at bind time so
+          ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
           `MuReadout.width_mult()` resolves against real base widths.
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
@@ -506,7 +506,7 @@ class SaltModule(lightning.LightningModule):
     def _attached_callbacks(self) -> list[Any]:
         """Attached callbacks declaring FIT/VAL plan sinks, duck-typed on a
         callable ``fit_val_demand`` (e.g. `ConfusionMatrix`). Static/config-only
-        so ``salt2 graph`` sees the same sinks a real ``trainer.fit`` would.
+        so ``salt graph`` sees the same sinks a real ``trainer.fit`` would.
         Empty list when none are attached.
         """
         trainer = self._trainer
@@ -633,7 +633,7 @@ class SaltModule(lightning.LightningModule):
             # flat model sinks are empty. The dead-preds safety net is restored
             # AFTER compile via `_assert_no_dead_preds` below: a `preds.*` the
             # model computes but no producer feeds into a demanded output is
-            # still a hard error at `salt2 test`.
+            # still a hard error at `salt test`.
             modules = self._fold_sink_node(modules, sink_node)
             sinks: Any = []
         else:
@@ -797,7 +797,7 @@ class SaltModule(lightning.LightningModule):
         if not shape_path.is_file():
             raise ConfigError(
                 f"model.init_args.mup.shape_path {str(shape_path)!r} does not exist — generate it "
-                "with `salt2 mup-shapes` (setup_mup) before fit (design §3.4, §9.2)"
+                "with `salt mup-shapes` (setup_mup) before fit (design §3.4, §9.2)"
             )
         # the file carries infshapes for the whole net (generated from net) — apply
         # it ONCE over self.net so the apply_to MuReadout/linears get their
@@ -1091,7 +1091,7 @@ def validate_mup_routing(
     """Validate the muP routing config against the module dict.
 
     The single validator behind both `SaltModule.__init__` and
-    ``salt2 graph validate`` so the same rules fire data-free in CI and at
+    ``salt graph validate`` so the same rules fire data-free in CI and at
     run construction. ``apply_to`` is an explicit instance-name list, not a
     regex.
 
@@ -1220,7 +1220,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
     """Validate the encoder edge-port bind-time constraints.
 
     Runs at `SaltModule.__init__` (every fit/test) and in
-    ``salt2 graph validate`` so the same rules fire data-free in CI and at
+    ``salt graph validate`` so the same rules fire data-free in CI and at
     run construction — the edge analogue of `validate_mup_routing`. No-op
     when no encoder declares an edge port.
 
@@ -1313,7 +1313,7 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
     configured list must match in set **and order**. A reordered
     ``class_names`` is a silent physics mislabeling no shape check can
     catch. Runs at `SaltModule.setup` (every fit/test) and in
-    ``salt2 graph validate``. No-op without a schema artifact.
+    ``salt graph validate``. No-op without a schema artifact.
 
     Parameters
     ----------

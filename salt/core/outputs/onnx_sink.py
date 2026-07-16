@@ -106,7 +106,7 @@ class OnnxExportLeaf:
         if self.dtype not in {"float32", "int8"}:
             raise ConfigError(
                 f"OnnxExportLeaf {self.key!r}: dtype must be 'float32' or 'int8', got "
-                f"{self.dtype!r} (the ONNX output dtypes salt2 export supports)"
+                f"{self.dtype!r} (the ONNX output dtypes salt export supports)"
             )
 
     @property
@@ -432,7 +432,7 @@ class OnnxExportSink(_SinkCallback):
 
         Mirrors `H5OutputSink.writer_demand`: returns the sink's ONNX-mode
         ``declare_io`` requires (the conversion leaves), each mapped to a
-        demander description, so the static ``salt2 graph plot --mode onnx``
+        demander description, so the static ``salt graph plot --mode onnx``
         path (which folds duck-typed ``writer_demand`` into the plan sinks)
         keeps the sink's leaves demanded and the folded conversion nodes
         alive.

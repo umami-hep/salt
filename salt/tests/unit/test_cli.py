@@ -1,4 +1,4 @@
-"""Tests for the salt2 CLI (salt.core.cli — design §4.1-§4.4, §2.6)."""
+"""Tests for the salt CLI (salt.core.cli — design §4.1-§4.4, §2.6)."""
 
 import shutil
 import textwrap

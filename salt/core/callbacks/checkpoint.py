@@ -13,7 +13,7 @@ from salt.core.graph.errors import ConfigError
 class Checkpoint(ModelCheckpoint):
     """Save a checkpoint per epoch under ``ckpts/`` with the ``loss=`` filename stem.
 
-    Filename and directory are a contract: ``salt2 test`` without
+    Filename and directory are a contract: ``salt test`` without
     ``--ckpt_path`` resolves the best epoch by globbing
     ``<config dir>/{ckpts,checkpoints}/*.ckpt`` and parsing the smallest
     ``loss=<value>`` out of each name (`salt.core.main._best_checkpoint`).

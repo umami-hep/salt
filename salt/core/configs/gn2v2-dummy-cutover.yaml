@@ -2,7 +2,7 @@
 # jets_classification to both test + export; this overlay flips it to test-only
 # so the run-free ONNX parse assembles NO tuple (matching a config that
 # historically dropped its OnnxExportSink). H5 columns are unchanged. Stack as:
-#   salt2 test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml ...
+#   salt test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover.yaml ...
 
 outputs:
   # H5-only: no RunTaskOutput opts into export, so no implicit ONNX sink is wired

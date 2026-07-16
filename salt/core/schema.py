@@ -101,7 +101,7 @@ class Schema:
                         f"schema group {group!r} field {fld!r} cannot form a dotted bundle "
                         f"key — names containing {KEY_SEP!r} (or empty names) are not "
                         "addressable (design §2.1); regenerate the artifact with "
-                        "salt2 schema dump"
+                        "salt schema dump"
                     )
                 out.append(f"{group}{KEY_SEP}{fld}")
         return tuple(out)
@@ -206,7 +206,7 @@ def load_schema(path: str | Path) -> Schema:
             raise SchemaError(
                 f"schema file {path}: group {gname!r} contains {KEY_SEP!r} — group names must "
                 "be single dotted-key components (design §2.1); regenerate the artifact with "
-                "salt2 schema dump"
+                "salt schema dump"
             )
         if not isinstance(node, dict):
             raise SchemaError(f"schema file {path}: group {gname!r} must be a mapping")
@@ -220,7 +220,7 @@ def load_schema(path: str | Path) -> Schema:
                 raise SchemaError(
                     f"schema file {path}: group {gname!r} field {fld!r} contains {KEY_SEP!r} — "
                     "field names must be single dotted-key components (design §2.1); "
-                    "regenerate the artifact with salt2 schema dump"
+                    "regenerate the artifact with salt schema dump"
                 )
         attrs = node.get("attrs", {})
         if not isinstance(attrs, dict):

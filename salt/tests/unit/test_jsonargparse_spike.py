@@ -281,11 +281,11 @@ def test_dotted_cli_override_into_dict_value(tmp_path):
 
 
 def test_env_var_override(tmp_path, monkeypatch):
-    """default_env=True: SALT2_MODEL__MODULES sets the whole dict from JSON/YAML."""
+    """default_env=True: SALT_MODEL__MODULES sets the whole dict from JSON/YAML."""
     env_value = json.dumps({"envenc": {"class_path": f"{MODULE}.Encoder", "init_args": {"dim": 7}}})
-    monkeypatch.setenv("SALT2_MODEL__MODULES", env_value)
+    monkeypatch.setenv("SALT_MODEL__MODULES", env_value)
 
-    parser = make_parser(default_env=True, env_prefix="SALT2")
+    parser = make_parser(default_env=True, env_prefix="SALT")
     cfg = parser.parse_args([])
     init = parser.instantiate_classes(cfg)
     assert list(init.model.modules) == ["envenc"]

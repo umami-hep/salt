@@ -1,4 +1,4 @@
-# Shared defaults auto-loaded for every `salt2 fit` / `salt2 test` invocation.
+# Shared defaults auto-loaded for every `salt fit` / `salt test` invocation.
 # Stacked user configs deep-merge on top: dict-typed sections merge key-by-key,
 # an entry set to null is deleted. Ships trainer/callbacks only — no
 # persistence layer; every model config must define its own `outputs:` section
@@ -10,7 +10,7 @@ trainer:
   accelerator: auto
   devices: 1
   # to disable tracking (local runs, CI/smoke fixtures), set
-  # --trainer.logger false; `salt2 test` always forces logger=False.
+  # --trainer.logger false; `salt test` always forces logger=False.
   logger:
     class_path: lightning.pytorch.loggers.comet.CometLogger
     init_args: {project: salt}
@@ -23,7 +23,7 @@ callbacks:
     class_path: salt.core.callbacks.Checkpoint
     init_args:
       # also the filename loss tag ('epoch=NNN-loss=<val/loss>.ckpt') that the
-      # salt2-test no-ckpt_path fallback globs on — keep in sync with any
+      # salt-test no-ckpt_path fallback globs on — keep in sync with any
       # fname_string override.
       monitor_loss: val/loss
   progress:

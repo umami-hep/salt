@@ -1,4 +1,4 @@
-"""``salt2 export``: config + checkpoint -> validated ``.onnx``.
+"""``salt export``: config + checkpoint -> validated ``.onnx``.
 
 Compiles the ONNX plan, traces via `OnnxAdapter`, writes ``gnn_config``
 metadata, and sweep-checks torch vs onnxruntime.
@@ -56,7 +56,7 @@ class ExportResult:
 
     `plan_txt_path` is the rendered ONNX plan table written next to the ``.onnx``
     file — the authoritative view of the graph Athena will run (the static
-    ``salt2 graph plan --mode onnx`` view is dataset-fed and its plan hash
+    ``salt graph plan --mode onnx`` view is dataset-fed and its plan hash
     legitimately differs).
     """
 
@@ -309,7 +309,7 @@ def export_graph(
     )
     write_metadata(onnx_path, gnn_config, str(resolved.model_name))
     # the authoritative rendering of the graph Athena will run (the static
-    # `salt2 graph plan --mode onnx` view is dataset-fed and may differ); the
+    # `salt graph plan --mode onnx` view is dataset-fed and may differ); the
     # output manifest is appended.
     from salt.core.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
 
@@ -329,15 +329,15 @@ def export_graph(
 
 
 # ---------------------------------------------------------------------------
-# the salt2 export CLI (dispatched from salt.core.main)
+# the salt export CLI (dispatched from salt.core.main)
 # ---------------------------------------------------------------------------
 
 
 def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the ``salt2 export`` CLI arguments."""
+    """Parse the ``salt export`` CLI arguments."""
     parser = argparse.ArgumentParser(
-        prog="salt2 export",
-        description="Export a trained salt2 model to ONNX (design §7).",
+        prog="salt export",
+        description="Export a trained salt model to ONNX (design §7).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -412,16 +412,16 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) -> Any:
-    """Parse the run config(s) through the REAL salt2 surface, run-free.
+    """Parse the run config(s) through the REAL salt surface, run-free.
 
-    Multiple configs deep-merge left-to-right (the ``salt2 fit`` stacking
+    Multiple configs deep-merge left-to-right (the ``salt fit`` stacking
     semantics) — the supported way to add an ``export:`` block to a run
-    config trained without one. Returns the run-free `Salt2CLI`
+    config trained without one. Returns the run-free `SaltCLI`
     (``cli.model``/``cli.datamodule`` constructed, nothing executed, no
     data touched). Raises `ConfigError` when the parse fails (with the
-    ``--set`` hint, mirroring ``salt2 graph``).
+    ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
+    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
     from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
@@ -439,15 +439,15 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     try:
         with warnings.catch_warnings():
             # programmatic argv triggers Lightning's 'args parameter is intended...'
-            # warning — filtered exactly as the salt2 fit/test entry point does.
+            # warning — filtered exactly as the salt fit/test entry point does.
             warnings.filterwarnings(
                 "ignore", message=r".*args parameter is intended to run from within Python.*"
             )
-            return Salt2CLI(args=args, run=False)
+            return SaltCLI(args=args, run=False)
     except SystemExit as err:
         raise ConfigError(
             f"run config(s) {[str(p) for p in config_paths]} failed to parse through the "
-            f"salt2 surface (parser exit {err.code}; the parser error is printed above). "
+            f"salt surface (parser exit {err.code}; the parser error is printed above). "
             "Supply required init_args data-free via --set if needed"
         ) from err
 
@@ -517,7 +517,7 @@ def _print_check_result(result: CheckResult) -> None:
 
 
 def main(args: Sequence[str] | None = None) -> int:
-    """``salt2 export`` entry point (config + checkpoint -> checked ``.onnx``).
+    """``salt export`` entry point (config + checkpoint -> checked ``.onnx``).
 
     Returns
     -------
@@ -528,7 +528,7 @@ def main(args: Sequence[str] | None = None) -> int:
     """
     parsed = _parse_args(args)
     if not parsed.manifest and parsed.ckpt_path is None:
-        print("salt2 export: --ckpt_path is required (except with --manifest)", file=sys.stderr)
+        print("salt export: --ckpt_path is required (except with --manifest)", file=sys.stderr)
         return 1
     try:
         if parsed.manifest:
@@ -577,7 +577,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     if config_paths:
         return config_paths
     if parsed.ckpt_path is None:
-        raise ConfigError("salt2 export --manifest needs a config — pass -c <config.yaml>")
+        raise ConfigError("salt export --manifest needs a config — pass -c <config.yaml>")
     inferred = parsed.ckpt_path.parents[1] / "config.yaml"
     if not inferred.is_file():
         raise ConfigError(f"could not find a run config at {inferred} — pass --config")
@@ -589,7 +589,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
 
 
 def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
-    """``salt2 export --manifest``: print the assembled output manifest and exit.
+    """``salt export --manifest``: print the assembled output manifest and exit.
 
     Returns 0 on success (errors raise `GraphError`, handled by `main`).
     """
@@ -641,7 +641,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
             f"config {config_path} has no export: block — declare export.inputs (and "
             "optionally model_name/rename/combine; outputs derive from the writers, M4.5) "
             "in the run config, or stack an override file carrying only the export: block "
-            f"as a second config:\n  salt2 export --ckpt_path {ckpt_path} "
+            f"as a second config:\n  salt export --ckpt_path {ckpt_path} "
             f"-c {config_path} -c my_export_block.yaml"
         )
     if parsed.name is not None:

@@ -111,7 +111,7 @@ class Normaliser(SaltModelModule):
         Reads ONLY the norm-dict YAML: the file must exist, parse, and carry
         every configured stream; when already bound, per-variable mean/std
         entries are checked too. Called by `SaltModule.setup` on fresh fits
-        (hard error) and by ``salt2 graph validate`` (warning).
+        (hard error) and by ``salt graph validate`` (warning).
 
         Raises
         ------
@@ -143,7 +143,7 @@ class Normaliser(SaltModelModule):
                     f"Choose from {sorted(norm_dict)}."
                 )
             if not self._fields:
-                continue  # unbound (the data-free `salt2 graph validate` path)
+                continue  # unbound (the data-free `salt graph validate` path)
             variables = self._fields[stream]
             if missing := set(variables) - set(norm_dict[stream]):
                 raise ConfigError(

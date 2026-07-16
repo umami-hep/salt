@@ -1,4 +1,4 @@
-"""Tests for the ``salt2`` config surface / ``salt.core.main`` (design §5, §5.3)."""
+"""Tests for the ``salt`` config surface / ``salt.core.main`` (design §5, §5.3)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from salt.core.data import GraphDataModule
 from salt.core.graph.errors import ConfigError
 from salt.core.main import (
     CONFIG_DIR,
-    Salt2CLI,
+    SaltCLI,
     _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
     main,
 )
@@ -75,7 +75,7 @@ model:
 def data(tmp_path_factory) -> dict[str, Path]:
     # tmp dummy H5 + parity norm dict + schema artifact (NO machine paths in
     # the committed YAML — the documented required overrides, design §5)
-    base = tmp_path_factory.mktemp("salt2_cli")
+    base = tmp_path_factory.mktemp("salt_cli")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
     h5_path = base / "pp_output_train.h5"
@@ -95,10 +95,10 @@ def required_overrides(data) -> list[str]:
     ]
 
 
-def make_cli(data, extra: list[str] | None = None, config: Path = DUMMY_CFG) -> Salt2CLI:
+def make_cli(data, extra: list[str] | None = None, config: Path = DUMMY_CFG) -> SaltCLI:
     """Parse + instantiate (run=False) through the real CLI surface."""
     cfg = disable_logger_in_config(str(config))
-    return Salt2CLI(
+    return SaltCLI(
         args=["--config", cfg, *required_overrides(data), *(extra or [])],
         run=False,
     )
@@ -168,7 +168,7 @@ class TestPrintConfig:
         # feeding the printed config back yields the same parsed namespaces
         cli_orig = make_cli(data)
         printed_path = write_yaml(tmp_path, "printed.yaml", printed)
-        cli_again = Salt2CLI(args=["--config", printed_path], run=False)
+        cli_again = SaltCLI(args=["--config", printed_path], run=False)
         assert cli_again.config.model == cli_orig.config.model
         assert cli_again.config.data == cli_orig.config.data
         assert cli_again.config.callbacks == cli_orig.config.callbacks
@@ -291,8 +291,8 @@ class TestCallbacksDict:
 
 # FIT/VAL callback-declared sinks via the STATIC graph tooling (M5 D-prereq;
 # design §3.1 454-456, §3.4 667-671) — the runtime path is covered in
-# test_saltmodule.py::TestCallbackSinks; here the static `salt2 graph` path
-# (load_config / `salt2 graph validate`) must see the SAME FIT/VAL sinks.
+# test_saltmodule.py::TestCallbackSinks; here the static `salt graph` path
+# (load_config / `salt graph validate`) must see the SAME FIT/VAL sinks.
 
 CONFMAT_CALLBACK_YAML = """
 callbacks:
@@ -305,7 +305,7 @@ callbacks:
 
 class TestStaticFitValCallbackSinks:
     def test_validate_fit_with_callback_passes(self, data, tmp_path):
-        # a configured ConfusionMatrix must not break `salt2 graph validate
+        # a configured ConfusionMatrix must not break `salt graph validate
         # --mode fit` (it declares preds/labels the task already keeps alive)
         from salt.core.main import main as graph_main
 
@@ -379,7 +379,7 @@ class TestFitSmoke:
         ])
         assert rc == 0
         # base2's Checkpoint (D2) wrote a checkpoint under the run dir's ckpts/,
-        # with the 'loss=' stem the salt2-test fallback globs (M3-review fix)
+        # with the 'loss=' stem the salt-test fallback globs (M3-review fix)
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"
         assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
@@ -390,14 +390,14 @@ class TestFitSmoke:
         assert configs, f"no config.yaml written under {tmp_path}"
         assert "class_path: salt.core.SaltModule" in configs[0].read_text()
         # M3-review fix: the SAVED run config (which carries ckpt_path: null)
-        # round-trips into the salt2 graph tooling
+        # round-trips into the salt graph tooling
         assert "ckpt_path" in configs[0].read_text()
         assert main(["graph", "validate", "-c", str(configs[0]), "--mode", "fit"]) == 0
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
 
 
 class TestBestCheckpointFallback:
-    """The salt2-test no-``--ckpt_path`` fallback: ``_best_checkpoint`` globs
+    """The salt-test no-``--ckpt_path`` fallback: ``_best_checkpoint`` globs
     ``{ckpts,checkpoints}/*.ckpt`` next to the saved config and picks the
     lowest embedded ``loss=`` (v1 best-epoch contract).
     """
@@ -442,7 +442,7 @@ class TestBestCheckpointFallback:
             _best_checkpoint(self._config(tmp_path))
 
 
-# graph/schema dispatch (the M1 tooling keeps working through salt2)
+# graph/schema dispatch (the M1 tooling keeps working through salt)
 
 
 class TestGraphDispatch:
@@ -477,12 +477,12 @@ class TestFitRetryLoop:
             "--callbacks.progress=null",  # see test_two_step_fit
         ]
         assert main(list(args)) == 0
-        assert "salt2 fit artifacts" in capsys.readouterr().out
+        assert "salt fit artifacts" in capsys.readouterr().out
         assert main(list(args)) == 0  # used to raise: "expected ... to NOT exist"
 
 
 class TestGraphFitConfigAdapter:
-    """``salt2 graph`` over the REAL §5.1 trainer configs (stage-E HIGH fix)."""
+    """``salt graph`` over the REAL §5.1 trainer configs (stage-E HIGH fix)."""
 
     @staticmethod
     def set_flags(data) -> list[str]:
@@ -746,7 +746,7 @@ class TestGraphFitConfigAdapter:
 # Wave-1 class_dict fan-out (formerly test_wave1_fanout.py)
 #
 # These exercise the --class_dict convenience flag on salt.core.main
-# (Salt2CLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
+# (SaltCLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
 # colliding with the CLI-surface ones above. norm_dict is NOT a fan-out flag —
 # it is the Normaliser module's own config (set on
 # model.modules.norm.init_args.norm_dict); the TestNormDictOnModule section at
@@ -815,8 +815,8 @@ def wave1_class_dict_flag(wave1_data) -> list[str]:
     return [f"--class_dict={wave1_data['cd']}"]
 
 
-def wave1_make_cli(wave1_data, extra: list[str]) -> Salt2CLI:
-    return Salt2CLI(args=[*wave1_base_overrides(wave1_data), *extra], run=False)
+def wave1_make_cli(wave1_data, extra: list[str]) -> SaltCLI:
+    return SaltCLI(args=[*wave1_base_overrides(wave1_data), *extra], run=False)
 
 
 def wave1_print_config(wave1_data, extra: list[str]) -> str:
@@ -947,4 +947,4 @@ class TestNormDictOnModule:
         # norm_dict surface under test is the (now-invalid) flag.
         bad_args = [a for a in wave1_base_overrides(wave1_data) if "norm_dict" not in a]
         with pytest.raises(SystemExit):
-            Salt2CLI(args=[*bad_args, f"--norm_dict={wave1_data['nd']}"], run=False)
+            SaltCLI(args=[*bad_args, f"--norm_dict={wave1_data['nd']}"], run=False)

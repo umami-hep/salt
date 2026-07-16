@@ -8,13 +8,13 @@ from salt.core.config_utils import disable_logger_in_config  # noqa: F401
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _warm_salt2cli_model_resolution():
-    """Absorb the first run-free ``Salt2CLI`` parse's model-resolution failure."""
+def _warm_saltcli_model_resolution():
+    """Absorb the first run-free ``SaltCLI`` parse's model-resolution failure."""
     try:
-        from salt.core.main import CONFIG_DIR, Salt2CLI
+        from salt.core.main import CONFIG_DIR, SaltCLI
 
         cfg = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy.yaml"))
-        Salt2CLI(args=["--config", cfg], run=False)
+        SaltCLI(args=["--config", cfg], run=False)
     except (Exception, SystemExit):  # noqa: BLE001 - warm-up only; never fail the session
         pass
     yield

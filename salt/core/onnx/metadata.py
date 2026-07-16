@@ -110,7 +110,7 @@ def write_metadata(onnx_path: str | Path, gnn_config: Mapping[str, Any], model_n
     payload under the single ``gnn_config`` metadata key, sets
     ``doc_string = model_name``, and saves in place.
     """
-    import onnx  # noqa: PLC0415 - heavy import, export-path only (keeps salt2 startup lean)
+    import onnx  # noqa: PLC0415 - heavy import, export-path only (keeps salt startup lean)
 
     onnx_model = onnx.load(str(onnx_path))
     onnx.checker.check_model(onnx_model)

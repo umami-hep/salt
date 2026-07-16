@@ -5,7 +5,7 @@
 # get_output path does not express — the same escape hatch MaskFormer uses).
 # The eval-H5 side rides the base's outputs: section (test-only); the ONNX tuple
 # comes entirely from the folded conversion nodes below. Stack as:
-#   salt2 graph plot --config gn2v2-dummy.yaml --config gn2v2-dummy-onnx-fold.yaml --mode onnx
+#   salt graph plot --config gn2v2-dummy.yaml --config gn2v2-dummy-onnx-fold.yaml --mode onnx
 
 model:
   modules:
@@ -37,7 +37,7 @@ outputs:
 
 callbacks:
   # explicit ONNX sink (the Combination escape hatch — no section equivalent);
-  # the H5 sink stays implicit (wired by salt2 test over the outputs: section)
+  # the H5 sink stays implicit (wired by salt test over the outputs: section)
   onnx_export:
     class_path: salt.core.outputs.OnnxExportSink
     init_args:

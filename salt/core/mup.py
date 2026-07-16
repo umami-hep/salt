@@ -1,7 +1,7 @@
 r"""muP (maximal update parametrization) tooling: shape generation and coord-check.
 
-Provides :func:`generate_shapes` (``salt2 mup-shapes``), :func:`coord_check`
-(``salt2 mup-coord-check``), and :func:`setup_mup`, a console entry point.
+Provides :func:`generate_shapes` (``salt mup-shapes``), :func:`coord_check`
+(``salt mup-coord-check``), and :func:`setup_mup`, a console entry point.
 """
 
 from __future__ import annotations
@@ -38,14 +38,14 @@ __all__ = [
 
 
 def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
-    """Parse a trainer config stack through the real salt2 surface, run-free,
-    returning the constructed (un-setup) `Salt2CLI` (``cli.model`` +
+    """Parse a trainer config stack through the real salt surface, run-free,
+    returning the constructed (un-setup) `SaltCLI` (``cli.model`` +
     ``cli.datamodule``). Raises `ConfigError` on a parse failure.
     """
     import warnings  # noqa: PLC0415 - local, parse-time only
 
     from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.core.main import Salt2CLI  # noqa: PLC0415 - heavy/circular
+    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
     for cfg in configs:
@@ -62,11 +62,11 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
             warnings.filterwarnings(
                 "ignore", message=r".*args parameter is intended to run from within Python.*"
             )
-            cli = Salt2CLI(args=args, run=False)
+            cli = SaltCLI(args=args, run=False)
     except SystemExit as err:
         raise ConfigError(
             f"trainer config {' '.join(str(c) for c in configs)} failed to parse through the "
-            f"salt2 surface (parser exit {err.code}). Required init_args left as overrides in the "
+            f"salt surface (parser exit {err.code}). Required init_args left as overrides in the "
             "YAML can be supplied data-free via --set, e.g. "
             "--set model.modules.norm.init_args.norm_dict=unused.yaml"
         ) from err
@@ -241,7 +241,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# salt2 mup-shapes — base/delta infshape generation
+# salt mup-shapes — base/delta infshape generation
 # ---------------------------------------------------------------------------
 
 
@@ -312,14 +312,14 @@ def generate_shapes(
     delta_model = build_model_at_widths(configs, delta_w, set_overrides, bind=True)
     base_shapes = make_base_shapes(base_model.net, delta_model.net, savefile=str(out_path))
     print(
-        f"salt2 mup-shapes: wrote infshapes to {out_path} "
+        f"salt mup-shapes: wrote infshapes to {out_path} "
         f"(apply_to={cfg['apply_to']}, base_width={base_w}, delta_width={delta_w})"
     )
     return out_path, base_shapes
 
 
 # ---------------------------------------------------------------------------
-# salt2 mup-coord-check — coordinate-check data + plot
+# salt mup-coord-check — coordinate-check data + plot
 # ---------------------------------------------------------------------------
 
 
@@ -463,7 +463,7 @@ def _resolve_coord_shape_file(
         if not path.is_file():
             raise ConfigError(
                 f"mup-coord-check --shape-file {path} does not exist — generate it with "
-                "salt2 mup-shapes first, or omit --shape-file to auto-generate a shared base"
+                "salt mup-shapes first, or omit --shape-file to auto-generate a shared base"
             )
         return path
     if not widths:
@@ -472,7 +472,7 @@ def _resolve_coord_shape_file(
     delta_w = max(widths) if max(widths) != base_w else base_w * 2
     import tempfile  # noqa: PLC0415 - tooling-only, generated-shape path
 
-    out = Path(tempfile.mkdtemp(prefix="salt2_coord_shapes_")) / "coord_check.bsh"
+    out = Path(tempfile.mkdtemp(prefix="salt_coord_shapes_")) / "coord_check.bsh"
     generate_shapes(
         configs,
         save_path=out,
@@ -481,7 +481,7 @@ def _resolve_coord_shape_file(
         set_overrides=set_overrides,
     )
     print(
-        f"salt2 mup-coord-check: generated SHARED base/delta infshapes (base_width={base_w}, "
+        f"salt mup-coord-check: generated SHARED base/delta infshapes (base_width={base_w}, "
         f"delta_width={delta_w}) at {out} — applied at EVERY swept width so width_mult is "
         "correct (the MU-HUMAN shared-base protocol, not a per-width self-base)"
     )
@@ -586,7 +586,7 @@ def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None 
     if save_to.parent != Path():
         save_to.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_to)
-    print(f"salt2 mup-coord-check: wrote coord-check plot to {save_to}")
+    print(f"salt mup-coord-check: wrote coord-check plot to {save_to}")
     return fig
 
 
@@ -596,9 +596,9 @@ def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None 
 
 
 def setup_mup(args: Sequence[str] | None = None) -> int:
-    """The ``setup_mup`` console entry point — a thin alias for ``salt2 mup-shapes``.
+    """The ``setup_mup`` console entry point — a thin alias for ``salt mup-shapes``.
 
-    Forwards to the salt2 ``mup-shapes`` subcommand so the two surfaces
+    Forwards to the salt ``mup-shapes`` subcommand so the two surfaces
     share one implementation.
 
     Parameters
@@ -618,12 +618,12 @@ def setup_mup(args: Sequence[str] | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# argparse command handlers (wired into salt2 graph CLI, cli.py)
+# argparse command handlers (wired into salt graph CLI, cli.py)
 # ---------------------------------------------------------------------------
 
 
 def cmd_mup_shapes(args: Any) -> int:
-    """``salt2 mup-shapes`` handler: generate base/delta infshapes."""
+    """``salt mup-shapes`` handler: generate base/delta infshapes."""
     generate_shapes(
         args.config,
         save_path=args.save_path,
@@ -635,7 +635,7 @@ def cmd_mup_shapes(args: Any) -> int:
 
 
 def cmd_mup_coord_check(args: Any) -> int:
-    """``salt2 mup-coord-check`` handler: writes coord-check data (CSV) + plot."""
+    """``salt mup-coord-check`` handler: writes coord-check data (CSV) + plot."""
     widths = [int(w) for w in args.widths]
     df = coord_check(
         args.config,
@@ -651,6 +651,6 @@ def cmd_mup_coord_check(args: Any) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
     csv_path = out.with_suffix(".csv")
     df.to_csv(csv_path, index=False)
-    print(f"salt2 mup-coord-check: wrote coord-check data to {csv_path}")
+    print(f"salt mup-coord-check: wrote coord-check data to {csv_path}")
     plot_coord_data(df, out, title=f"muP coord-check (widths {widths})")
     return 0

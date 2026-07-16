@@ -204,7 +204,7 @@ class H5OutputSink(_SinkCallback):
     ----------
     outputs : None
         RETIRED as a config surface (plan 50 Phase B). The H5 sink is now
-        implicit — the ``salt2 test`` command wires it and derives its column
+        implicit — the ``salt test`` command wires it and derives its column
         schema from the bound top-level ``outputs:`` section (``RunTaskOutput``
         + ``InputCopyWriter`` + ``PadMaskWriter``). Only ``None``/``[]`` is
         accepted; any truthy value raises `ConfigError`. Do NOT wire this sink
@@ -259,7 +259,7 @@ class H5OutputSink(_SinkCallback):
         if outputs:
             raise ConfigError(
                 "H5OutputSink no longer accepts an explicit `outputs:` OutputColumn table "
-                "(plan 50 Phase B) — the H5 sink is implicit (the `salt2 test` command wires "
+                "(plan 50 Phase B) — the H5 sink is implicit (the `salt test` command wires "
                 "it) and derives its columns from the top-level `outputs:` section "
                 "(RunTaskOutput + InputCopyWriter + PadMaskWriter). Declare the section, per "
                 "`gn2v2-opendata.yaml`; use each RunTaskOutput's `modes:` list to control "
@@ -285,7 +285,7 @@ class H5OutputSink(_SinkCallback):
         # resolve at run setup.
         self._output_section: Mapping[str, Any] | None = None
         # which section selection the columns resolve from: Mode.TEST (the
-        # `salt2 test` eval schema, the default) or Mode.ONNX (`salt2 inference`
+        # `salt test` eval schema, the default) or Mode.ONNX (`salt inference`
         # writes STRICTLY the export output set — plan 50 Phase D, via
         # `use_export_selection`).
         self._section_mode: Mode = Mode.TEST
@@ -333,7 +333,7 @@ class H5OutputSink(_SinkCallback):
     def use_export_selection(self) -> None:
         """Switch the section-derived selection to the EXPORT (``Mode.ONNX``) set.
 
-        Plan 50 Phase D — ``salt2 inference`` writes STRICTLY the export
+        Plan 50 Phase D — ``salt inference`` writes STRICTLY the export
         output set to H5: columns resolve from ``manifest_fields(Mode.ONNX)``
         (one single-suffix column per ONNX leaf, named by the field's resolved
         ONNX name), and the section's copy/mask writers contribute only when
@@ -353,8 +353,8 @@ class H5OutputSink(_SinkCallback):
         authority) — the constructor knobs are ignored. The section is bound
         by the planner/SaltModule after the model. A copy/mask writer whose
         ``modes:`` list excludes this sink's selection mode contributes
-        nothing (an export-only copy writer never adds ``salt2 test`` columns,
-        and a test-only one never adds ``salt2 inference`` columns).
+        nothing (an export-only copy writer never adds ``salt test`` columns,
+        and a test-only one never adds ``salt inference`` columns).
         """
         self._output_section = section
         # the section drives copy_inputs + write_pad_mask too (override the ctor
@@ -477,7 +477,7 @@ class H5OutputSink(_SinkCallback):
                 "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "
                 f"{'export-selection' if self._section_mode is Mode.ONNX else 'H5'} column — "
                 "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2; for "
-                "salt2 inference the RunTaskOutput's modes: list must include 'export')"
+                "salt inference the RunTaskOutput's modes: list must include 'export')"
             )
         seen_cols: dict[tuple[str, str], str] = {}
         columns: list[OutputColumn] = []
@@ -1050,7 +1050,7 @@ class H5OutputSink(_SinkCallback):
         ckpt_path = trainer.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "H5OutputSink needs trainer.ckpt_path — run salt2 test with --ckpt_path "
+                "H5OutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint, v1 contract)"
             )
         stem = Path(getattr(reader, "filename", None) or reader.source_path).stem

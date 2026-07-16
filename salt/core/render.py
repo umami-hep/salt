@@ -32,7 +32,7 @@ __all__ = ["dot_source", "plan_table"]
 _DATA_DIM_FAMILIES = frozenset({"B", "T", "L", "S"})
 
 # ---------------------------------------------------------------------------
-# plan table (the salt2 graph plan stdout == plan_<mode>.txt artifact)
+# plan table (the salt graph plan stdout == plan_<mode>.txt artifact)
 # ---------------------------------------------------------------------------
 
 

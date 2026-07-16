@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from salt.core.main import CONFIG_DIR
-from salt.core.main import main as salt2_main
+from salt.core.main import main as salt_main
 from salt.core.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.v2_builders import write_vector_concat_norm_dict
@@ -52,7 +52,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
 @pytest.mark.parametrize("config", CONFIGS)
 def test_config_validates_all_modes(config, data):
     cfg = CONFIG_DIR / f"{config}.yaml"
-    rc = salt2_main([
+    rc = salt_main([
         "graph",
         "validate",
         "-c",
@@ -66,7 +66,7 @@ def test_config_validates_all_modes(config, data):
 @pytest.mark.parametrize("config", CONFIGS)
 def test_config_fast_dev_run_fit(config, data, tmp_path):
     cfg = CONFIG_DIR / f"{config}.yaml"
-    rc = salt2_main([
+    rc = salt_main([
         "fit",
         "--config",
         str(cfg),
@@ -90,7 +90,7 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
 def test_dl1_config_validates_all_modes(data):
     """DL1's jets-only MLP path plan-compiles in fit + test + onnx."""
     cfg = CONFIG_DIR / "DL1.yaml"
-    rc = salt2_main([
+    rc = salt_main([
         "graph",
         "validate",
         "-c",
@@ -102,9 +102,9 @@ def test_dl1_config_validates_all_modes(data):
 
 
 def test_dl1_config_fast_dev_run_fit(data, tmp_path):
-    """DL1 runs a real ``salt2 fit --fast_dev_run`` end-to-end (MLP-only path)."""
+    """DL1 runs a real ``salt fit --fast_dev_run`` end-to-end (MLP-only path)."""
     cfg = CONFIG_DIR / "DL1.yaml"
-    rc = salt2_main([
+    rc = salt_main([
         "fit",
         "--config",
         str(cfg),
@@ -134,7 +134,7 @@ def test_gn3v01_config_validates_all_modes(tmp_path):
     """The GN3V01 flagship (VectorConcat + alias + norm_type:hybrid) plan-compiles."""
     nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
     write_vector_concat_norm_dict(nd_path, cd_path)
-    rc = salt2_main([
+    rc = salt_main([
         "graph",
         "validate",
         "-c",

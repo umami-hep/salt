@@ -1,5 +1,5 @@
 # NEGATIVE fixture (plan 03 stage F): identical to toy.yaml except head.embed_key
-# is typo'd ('embed.y' instead of 'embed.x'). `salt2 graph validate` must fail with
+# is typo'd ('embed.y' instead of 'embed.x'). `salt graph validate` must fail with
 # a §4.1-quality ConnectivityError naming the consumer ('head'), the missing key,
 # and the did-you-mean suggestion ('embed.x').
 modules:
