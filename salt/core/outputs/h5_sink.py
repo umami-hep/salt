@@ -609,7 +609,10 @@ class H5OutputSink(_SinkCallback):
         ConfigError
             For a missing ``ckpt_path``, a foreign datamodule, an unknown
             output template key, a non-sequence pad-mask stream, a column
-            collision, or a missing input-copy source variable.
+            collision, or a missing input-copy source variable. Also when a
+            structured-reader-less reader (no ``groups``/``source_path``) is
+            paired with pad-mask columns or input-copying, which genuinely
+            need the source file — a global-only reader with neither is fine.
         """
         pl_module = trainer.lightning_module
         dm = getattr(trainer, "datamodule", None)
@@ -623,23 +626,43 @@ class H5OutputSink(_SinkCallback):
         self._run_name = getattr(pl_module, "name", "salt")
         streams = tuple(getattr(reader, "streams", ()) or ())
         groups = getattr(reader, "groups", None)
-        if not streams or groups is None:
-            raise ConfigError(
-                "H5OutputSink needs an H5StructuredReader-style reader exposing "
-                f"streams/groups — got {type(reader).__name__} (design §5.1)"
-            )
-        sequence_streams = tuple(
-            s for s in streams if not getattr(groups[s], "global_object", False)
-        )
-        group_datasets = {stream: groups[stream].dataset for stream in streams}
-        source_path = Path(reader.source_path)
-        # reader-matching open flags (HDF5 rejects mixed SWMR flags on one file
-        # within a process)
-        with h5py.File(source_path, "r", swmr=True, libver="latest") as f:
-            self._seq_lengths = {
-                stream: int(f[group_datasets[stream]].shape[1]) for stream in sequence_streams
-            }
         self._mask_streams = self._pad_mask_streams()
+        # groups/source_path only exist to probe sequence lengths (pad-mask
+        # columns) and to open the source file for input copies. A structured-
+        # reader-less reader (no .groups) is fine when NEITHER is demanded —
+        # e.g. a global-only custom reader (design §5.1).
+        copy_requested = bool(self.copy_inputs) or self._copy_all_tasked_streams
+        if groups is None:
+            if self._mask_streams or copy_requested:
+                want = " and ".join(
+                    label
+                    for label, needed in (
+                        ("pad-mask columns", bool(self._mask_streams)),
+                        ("input-copying", copy_requested),
+                    )
+                    if needed
+                )
+                raise ConfigError(
+                    f"H5OutputSink: {want} need an H5StructuredReader-style reader "
+                    f"exposing groups/source_path — {type(reader).__name__} exposes "
+                    "neither (design §5.1)"
+                )
+            sequence_streams: tuple[str, ...] = ()
+            group_datasets: dict[str, str] = {}
+            source_path: Path | None = None
+            self._seq_lengths = {}
+        else:
+            sequence_streams = tuple(
+                s for s in streams if not getattr(groups[s], "global_object", False)
+            )
+            group_datasets = {stream: groups[stream].dataset for stream in streams}
+            source_path = Path(reader.source_path)
+            # reader-matching open flags (HDF5 rejects mixed SWMR flags on one file
+            # within a process)
+            with h5py.File(source_path, "r", swmr=True, libver="latest") as f:
+                self._seq_lengths = {
+                    stream: int(f[group_datasets[stream]].shape[1]) for stream in sequence_streams
+                }
         for stream in self._mask_streams:
             if stream not in sequence_streams:
                 raise ConfigError(
@@ -658,7 +681,8 @@ class H5OutputSink(_SinkCallback):
             precision="half" if self.half_precision else "full",
         )
         self._extra_shapes, _ = self._collect_extra_groups(extra_ctx, streams)
-        self._open_copies(source_path, group_datasets, streams)
+        if source_path is not None:  # groups-None reached here only with copying off
+            self._open_copies(source_path, group_datasets, streams)
         dtypes, shapes = self._merge_columns(
             streams, sequence_streams, group_datasets, total, extra_ctx
         )
