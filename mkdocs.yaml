@@ -37,8 +37,10 @@ nav:
   - Evaluation: evaluation.md
   - ONNX Export: export.md
   - Contributing: contributing.md
-  - Tutorial (public): tutorial.md
-  - Tutorial (internal): tutorial-Xbb.md
+  - Tutorials:
+      - MNIST with salt: tutorials/mnist.md
+      - Tutorial (public): tutorial.md
+      - Tutorial (internal): tutorial-Xbb.md
 
 plugins:
   - search
