@@ -23,6 +23,17 @@ pip install -e .
 cd ..
 ```
 
+!!! info "Running in a container?"
+
+    If you use salt from an Apptainer/Singularity image, install it inside the
+    image's environment — `apptainer exec <image> pip install --user --no-deps -e .`
+    from the salt clone — and note the `salt` CLI then lands in `~/.local/bin`,
+    which must be on `PATH` inside the container. Pass the import path of
+    step 4 as `apptainer exec --env PYTHONPATH=$PWD <image> salt ...` rather
+    than relying on an `export` in your host shell. Shell globs (like the
+    checkpoint path in step 7) expand on the host, not in the container — use
+    the literal filename, or run the glob from a shell inside the container.
+
 Now create an empty working directory. All commands below run from it, in order:
 
 ```bash
@@ -381,6 +392,12 @@ salt test --config run/config.yaml --ckpt_path run/ckpts/epoch=001*.ckpt
 ```text
 Wrote eval file run/ckpts/epoch=001-loss=17.51267__test_t10k-images-idx3-ubyte.h5
 ```
+
+If `ckpts/` also contains `-v1` variants (e.g. `epoch=001-loss=17.51267-v1.ckpt`),
+you ran `salt fit` more than once into the same `run/` directory — the seeded
+re-run reproduces identical filenames and Lightning appends a version suffix
+instead of overwriting, so the `-v1` file is simply the newer (equivalent) save:
+pass `salt test` one explicit filename, or `rm -rf run` and retrain.
 
 The eval H5 has one structured dataset per stream. Read it back and compute the
 accuracy (the `hdf5plugin` import registers the compression filter salt writes
