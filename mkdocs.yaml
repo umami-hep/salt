@@ -39,6 +39,7 @@ nav:
   - Contributing: contributing.md
   - Tutorials:
       - MNIST with salt: tutorials/mnist.md
+      - MNIST part 2 — your own CNN module: tutorials/mnist_cnn.md
       - Tutorial (public): tutorial.md
       - Tutorial (internal): tutorial-Xbb.md
 
