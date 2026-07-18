@@ -25,7 +25,7 @@ from salt.core.schema import GroupSchema
 
 __all__ = ["UprootGroupConfig", "UprootReader"]
 
-_GROUP_KEYS = {"branches", "jagged", "pad_max", "truncate"}
+_GROUP_KEYS = {"branches", "jagged", "pad_max", "truncate", "link_branch", "target_collection"}
 
 
 @dataclass(frozen=True)
@@ -43,11 +43,20 @@ class UprootGroupConfig:
     constituents of a jagged stream; None auto-resolves the file's max
     multiplicity in `prepare`. (The legacy easyjet spelling ``truncate`` is
     accepted as an alias for `pad_max`.)
+
+    `link_branch` + `target_collection` turn a jagged stream into an
+    ElementLink-dereferenced constituent stream (PHYSLITE): the per-jet link
+    vector ``<jet_collection>AuxDyn.<link_branch>`` (e.g. ``GhostTrack``) carries
+    ``m_persIndex`` into the ``<target_collection>`` container (e.g.
+    ``InDetTrackParticles``), whose ``branches`` are gathered per jet. When unset
+    (default) a jagged stream is a direct double-jagged decoration.
     """
 
     branches: dict[str, str]
     jagged: bool = True
     pad_max: int | None = None
+    link_branch: str | None = None
+    target_collection: str | None = None
 
     def __post_init__(self) -> None:
         if not self.branches:
@@ -56,6 +65,21 @@ class UprootGroupConfig:
             raise ConfigError(f"group pad_max must be >= 1, got {self.pad_max}")
         if not self.jagged and self.pad_max is not None:
             raise ConfigError("group config: 'pad_max' is only valid for jagged streams")
+        if (self.link_branch is None) != (self.target_collection is None):
+            raise ConfigError(
+                "group config: 'link_branch' and 'target_collection' must be set together "
+                "(ElementLink dereference needs both the jet link vector and the target container)"
+            )
+        if self.link_branch is not None and not self.jagged:
+            raise ConfigError(
+                "group config: 'link_branch'/'target_collection' are only valid for jagged "
+                "(constituent) streams"
+            )
+
+    @property
+    def is_linked(self) -> bool:
+        """Whether this stream reads constituents via an ElementLink dereference."""
+        return self.link_branch is not None
 
 
 class UprootReader(Reader):
@@ -109,6 +133,8 @@ class UprootReader(Reader):
             branches={str(k): str(v) for k, v in dict(cfg["branches"]).items()},
             jagged=bool(cfg.get("jagged", True)),
             pad_max=pad_max,
+            link_branch=cfg.get("link_branch"),
+            target_collection=cfg.get("target_collection"),
         )
 
     @property

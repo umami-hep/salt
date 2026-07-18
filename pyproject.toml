@@ -62,6 +62,11 @@ root = [
 easyjet = [
   "salt[root]",
 ]
+# `pip install 'salt[physlite]'` — PhysliteReader (ElementLink deref); needs nothing
+# beyond the shared ROOT extra (uproot + awkward).
+physlite = [
+  "salt[root]",
+]
 muP = [
   "aiobotocore==2.24.2",
   "boto3==1.40.18",

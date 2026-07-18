@@ -17,9 +17,11 @@ from salt.core.data.labels import Labels
 from salt.core.data.maskformer_targets import MaskFormerTargets
 from salt.core.data.multi_target import MultiTarget
 from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
+from salt.core.data.physlite_reader import PhysliteGroupConfig, PhysliteReader
 from salt.core.data.reader import GroupConfig, H5StructuredReader
 from salt.core.data.stream import OffsetIndex, StreamConfig
 from salt.core.data.uproot_reader import UprootGroupConfig, UprootReader
+from salt.core.data.xaod_reader import XAODReader
 from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
 from salt.core.data.vds_module import VDS
 
@@ -44,6 +46,8 @@ __all__ = [
     "MultiSampleReader",
     "MultiTarget",
     "OffsetIndex",
+    "PhysliteGroupConfig",
+    "PhysliteReader",
     "Processor",
     "Reader",
     "SaltDatasetModule",
@@ -52,6 +56,7 @@ __all__ = [
     "UprootGroupConfig",
     "UprootReader",
     "WorkerCtx",
+    "XAODReader",
     "create_vds",
     "default_vds_path",
     "has_wildcard",
