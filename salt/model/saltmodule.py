@@ -42,6 +42,7 @@ from salt.model.bind import (
 )
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW
+from salt.schedule import StageConfig, TrainingSchedule
 
 try:
     from lion_pytorch import Lion
@@ -114,6 +115,14 @@ class SaltModule(lightning.LightningModule):
         - ``shape_path`` (optional): base-shapes file produced by
           ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
           `MuReadout.width_mult()` resolves against real base widths.
+    training_schedule : Mapping[str, Any], optional
+        Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
+        Each stage may declare an epoch budget, a `frozen`/`trainable` module
+        list (by `model.modules` name), and per-stage `optimizer`/`lrs`
+        overrides. Parsed + validated fail-loud here; ``None`` (default) leaves
+        the legacy single-optimizer path untouched. W2 supports a **single**
+        stage (its freeze mask excludes frozen params from the optimizer); a
+        multi-stage schedule is accepted here but rejected at fit time (W3).
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
     debug : bool, optional
@@ -133,6 +142,7 @@ class SaltModule(lightning.LightningModule):
         lrs: Mapping[str, float],
         optimizer: str = "AdamW",
         mup: Mapping[str, Any] | None = None,
+        training_schedule: Mapping[str, Any] | None = None,
         name: str = "salt",
         debug: bool = False,
         outputs: dict[str, SaltModelModule | None] | None = None,
@@ -170,6 +180,17 @@ class SaltModule(lightning.LightningModule):
         # validates apply_to against the module dict and warns on a mup-on module
         # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
+        # staged-training schedule (plan D1): parsed + validated against the
+        # model-module names NOW (before the outputs: writers are folded into the
+        # graph dict). None → legacy single-optimizer path, zero behaviour change.
+        self._schedule: TrainingSchedule | None = (
+            TrainingSchedule.from_config(training_schedule, tuple(modules))
+            if training_schedule is not None
+            else None
+        )
+        # module names whose params are held fixed for the active stage — set by
+        # `_apply_stage_freeze` at fit setup, re-asserted every epoch via `train`.
+        self._frozen_module_names: set[str] = set()
         # edge-stream-first + EdgeAttention-backend forcing bind-time validators.
         # No-op without an edge encoder.
         _validate_edge_port(modules)
@@ -705,6 +726,52 @@ class SaltModule(lightning.LightningModule):
         # `test` never warm-starts.
         if stage == "fit" and self._init_from is not None:
             self._warm_start_from_checkpoint(self._init_from)
+        # training_schedule: apply the initial stage's freeze mask AFTER any warm
+        # start (freeze composes on top of the loaded weights) and BEFORE
+        # optimizer construction, so `configure_optimizers` sees the requires_grad
+        # mask. Fit-only. Multi-stage transitions are W3.
+        if stage == "fit" and self._schedule is not None:
+            self._apply_training_schedule()
+
+    def _apply_training_schedule(self) -> None:
+        """Validate the schedule against the attached trainer and apply the
+        initial stage's freeze mask (fit setup).
+
+        W2 scope: a single-stage schedule is applied (freeze mask → optimizer
+        exclusion); a multi-stage schedule is validated but REJECTED here with a
+        `ConfigError` naming W3 — never silently trained ignoring stages 2+.
+
+        Raises
+        ------
+        ConfigError
+            On an over-allocated epoch budget, or a multi-stage schedule (W3).
+        """
+        assert self._schedule is not None
+        max_epochs = getattr(self._trainer, "max_epochs", None)
+        self._schedule.validate_epochs(max_epochs)
+        if self._schedule.is_multi_stage:
+            names = [stage.name for stage in self._schedule.stages]
+            raise ConfigError(
+                f"training_schedule declares {len(names)} stages {names} — multi-stage staged "
+                "training (stage transitions + mid-fit optimizer/scheduler rebuild) is W3 and "
+                "not implemented yet. W2 supports a single-stage schedule (a freeze mask that "
+                "excludes frozen params from the optimizer). Reduce to one stage, or wait for W3."
+            )
+        self._apply_stage_freeze(self._schedule.initial_stage)
+
+    def _apply_stage_freeze(self, stage: StageConfig) -> None:
+        """Freeze the modules named by `stage` (plan D1 freeze semantics): set
+        ``requires_grad=False`` on every ``net.<name>.*`` param AND put the
+        module in ``eval()`` mode (stops dropout + running-stat updates during
+        training). Records the frozen set so `train` can re-assert eval mode after
+        Lightning's per-epoch ``model.train()``.
+        """
+        frozen = self._schedule.frozen_names(stage) if self._schedule is not None else set()
+        self._frozen_module_names = frozen
+        for name in frozen:
+            module = self.net[name]
+            module.requires_grad_(False)
+            module.eval()
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
         """Static writer-input validation on the TEST path.
@@ -850,6 +917,19 @@ class SaltModule(lightning.LightningModule):
         materialise_all(targets)
         self._materialised = True
 
+    def train(self, mode: bool = True) -> SaltModule:
+        """Set training mode, then re-assert ``eval()`` on the schedule's frozen
+        modules. Lightning calls ``model.train()`` at every train-epoch start,
+        which would otherwise un-eval a frozen module (re-enabling dropout /
+        running-stat updates); this override keeps frozen modules in eval across
+        epoch boundaries. No-op when nothing is frozen.
+        """  # noqa: DOC201
+        super().train(mode)
+        if mode and self._frozen_module_names:
+            for name in self._frozen_module_names:
+                self.net[name].eval()
+        return self
+
     # -- steps ---------------------------------------------------------------------
 
     def forward(self, batch: Mapping[str, Any] | Bundle, mode: Mode = Mode.TEST) -> Bundle:
@@ -909,49 +989,66 @@ class SaltModule(lightning.LightningModule):
 
     # -- optimizer -----------------------------------------------------------------
 
-    def _get_optimizer_class(self) -> type[Optimizer]:
+    def _get_optimizer_class(self, optimizer: str | None = None) -> type[Optimizer]:
         """Resolve the optimizer class, with the muP ``MuAdamW`` swap: when `mup`
         is configured the optimizer is always ``mup.optim.MuAdamW`` (coupled to
-        the base shapes set at bind via `_apply_mup_shapes`). Raises
-        `ImportError` for lion without lion-pytorch, `ConfigError` for an
-        unsupported name.
+        the base shapes set at bind via `_apply_mup_shapes`). `optimizer` defaults
+        to ``self.optimizer`` (a stage may override it). Raises `ImportError` for
+        lion without lion-pytorch, `ConfigError` for an unsupported name.
         """
+        optimizer = optimizer or self.optimizer
         if self.mup_cfg is not None:
             from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional, muP-only path
 
             return MuAdamW
-        if self.optimizer == "lion":
+        if optimizer == "lion":
             if not _lion_available:
                 raise ImportError(
                     "Lion optimizer requested but not available. "
                     "Check installation of lion-pytorch."
                 )
             return Lion
-        if self.optimizer == "AdamW":
+        if optimizer == "AdamW":
             return AdamW
-        if self.optimizer == "HybridMuonAdamW":
+        if optimizer == "HybridMuonAdamW":
             return HybridMuonAdamW
-        raise ConfigError(f"Optimizer '{self.optimizer}' is not supported.")
+        raise ConfigError(f"Optimizer '{optimizer}' is not supported.")
+
+    def _active_optim_config(self) -> tuple[Mapping[str, float], str]:
+        """The ``(lrs, optimizer_name)`` for the active stage. With no schedule
+        (or a stage that overrides neither) this is the legacy top-level pair, so
+        the no-schedule path is bitwise-identical. A stage's `lrs` deep-overrides
+        the top-level keys; its `optimizer` replaces the top-level name.
+        """  # noqa: DOC201
+        if self._schedule is None:
+            return self.lrs, self.optimizer
+        stage = self._schedule.initial_stage
+        lrs = {**self.lrs, **stage.lrs} if stage.lrs is not None else self.lrs
+        return lrs, stage.optimizer or self.optimizer
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
-        """Build the optimizer + a step-interval OneCycleLR scheduler."""
-        optimizer_class = self._get_optimizer_class()
+        """Build the optimizer (over TRAINABLE params only — frozen modules are
+        excluded entirely, plan D1) + a step-interval OneCycleLR scheduler.
+        """
+        lrs, optimizer_name = self._active_optim_config()
+        optimizer_class = self._get_optimizer_class(optimizer_name)
         optimizer_kwargs = {
-            "lr": self.lrs["initial"],
-            "weight_decay": self.lrs.get("weight_decay", 1e-5),
+            "lr": lrs["initial"],
+            "weight_decay": lrs.get("weight_decay", 1e-5),
         }
         if optimizer_class is HybridMuonAdamW:
-            opt = optimizer_class(self.named_parameters(), **optimizer_kwargs)
+            params: Any = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
         else:
-            opt = optimizer_class(self.parameters(), **optimizer_kwargs)
+            params = [p for p in self.parameters() if p.requires_grad]
+        opt = optimizer_class(params, **optimizer_kwargs)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
-            max_lr=self.lrs["max"],
+            max_lr=lrs["max"],
             total_steps=self.trainer.estimated_stepping_batches,
-            div_factor=self.lrs["max"] / self.lrs["initial"],
-            final_div_factor=self.lrs["initial"] / self.lrs["end"],
-            pct_start=float(self.lrs["pct_start"]),
-            last_epoch=int(self.lrs.get("last_epoch", -1)),
+            div_factor=lrs["max"] / lrs["initial"],
+            final_div_factor=lrs["initial"] / lrs["end"],
+            pct_start=float(lrs["pct_start"]),
+            last_epoch=int(lrs.get("last_epoch", -1)),
             cycle_momentum=optimizer_class is not HybridMuonAdamW,
         )
         return [opt], [{"scheduler": scheduler, "interval": "step"}]
