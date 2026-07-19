@@ -269,6 +269,9 @@ def _best_checkpoint(config_path: Path) -> str:
 _CLASS_DICT_ARG = "class_dict"
 """Top-level convenience flag name (``--class_dict``)."""
 
+_INIT_FROM_ARG = "init_from"
+"""Top-level warm-start flag name (``--init_from``)."""
+
 _CLASS_DICT_CLASS = "ClassificationTaskModule"
 """Class-name suffix of the only ``class_dict``/``weight_source`` consumer."""
 
@@ -573,6 +576,17 @@ class SaltCLI(LightningCLI):
             "flag. Tasks that set weight_source explicitly are left alone; the loss CE-weight "
             "buffer is bitwise-invariant to how the path arrived (design §5.4, R1.3/R1.6).",
         )
+        parser.add_argument(
+            f"--{_INIT_FROM_ARG}",
+            type=str | None,
+            default=None,
+            help="warm-start a fit from a pretrained checkpoint's weights (plan 01 W1). "
+            "Unlike a resume --ckpt_path, trainer state stays fresh and the state dict is "
+            "loaded prefix-filtered per module with strict per-module accounting: retained "
+            "modules must be fully covered, config modules absent from the checkpoint are "
+            "fresh-inited + materialised, and checkpoint modules absent from the config are "
+            "dropped (logged). Mutually exclusive with --ckpt_path (fit subcommand only).",
+        )
         if not self._run_mode:
             # run-free parses must round-trip a saved run config.yaml, which
             # carries the Lightning run-surface key ckpt_path; accept + ignore it.
@@ -644,6 +658,11 @@ class SaltCLI(LightningCLI):
         self._reattach_fit_logger(deferred_logger_cfg)
         section = self._get(self.config_init, "outputs")
         model = getattr(self, "model", None)
+        # hand the --init_from path to the instantiated model — its setup("fit")
+        # runs the weights-only warm-start load after bind (plan 01 W1, design D4).
+        init_from = self._get(self.config_init, _INIT_FROM_ARG)
+        if init_from and model is not None and getattr(self.config, "subcommand", None) == "fit":
+            model._init_from = str(init_from)  # noqa: SLF001 - same-package wiring
         composer = getattr(model, "compose_output_section", None) if model is not None else None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
@@ -752,7 +771,16 @@ class SaltCLI(LightningCLI):
         """
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
-            self._wire_experiment_logger(self.config["fit"])
+            fit_cfg = self.config["fit"]
+            if fit_cfg.get(_INIT_FROM_ARG) and fit_cfg.get("ckpt_path"):
+                raise ConfigError(
+                    "--init_from and --ckpt_path are mutually exclusive: --ckpt_path RESUMES "
+                    "(restores trainer state, strict weight load, plan-hash gate enforced) "
+                    "while --init_from WARM-STARTS a fresh run from a possibly surgically-"
+                    "changed architecture (weights-only, per-module accounting). Pick one "
+                    "(plan 01 W1, design D4)."
+                )
+            self._wire_experiment_logger(fit_cfg)
             return
         if subcommand != "test":
             return

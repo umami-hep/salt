@@ -948,3 +948,32 @@ class TestNormDictOnModule:
         bad_args = [a for a in wave1_base_overrides(wave1_data) if "norm_dict" not in a]
         with pytest.raises(SystemExit):
             SaltCLI(args=[*bad_args, f"--norm_dict={wave1_data['nd']}"], run=False)
+
+
+class TestInitFromCLI:
+    """W1: the --init_from warm-start flag (plan 01, design D4)."""
+
+    def _fit_args(self, data, extra: list[str]) -> list[str]:
+        cfg = disable_logger_in_config(str(DUMMY_CFG))
+        return [
+            "fit", "--config", cfg, *required_overrides(data),
+            "--trainer.accelerator=cpu", "--trainer.logger=false",
+            "--trainer.fast_dev_run=1", "--callbacks.progress=null", *extra,
+        ]
+
+    def test_init_from_and_ckpt_path_mutually_exclusive(self, data, tmp_path):
+        # a bogus-but-present path for each: the guard fires in
+        # before_instantiate_classes, before either file is opened
+        fake = tmp_path / "fake.ckpt"
+        with pytest.raises(ConfigError, match="mutually exclusive"):
+            SaltCLI(args=self._fit_args(
+                data, [f"--init_from={fake}", f"--ckpt_path={fake}"]
+            ))
+
+    def test_init_from_flag_is_registered(self, data, tmp_path):
+        # the flag is accepted + parsed by the real CLI surface (registered like
+        # --class_dict); the full model plumbing is covered by the W1 integration
+        # gates (test_init_from.py).
+        fake = tmp_path / "fake.ckpt"
+        cli = make_cli(data, extra=[f"--init_from={fake}"])
+        assert str(cli.config.get("init_from")) == str(fake)

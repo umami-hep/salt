@@ -7,6 +7,7 @@ from the Lightning step hooks.
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Mapping
 from typing import Any
@@ -66,6 +67,8 @@ _EDGE_OK_BACKENDS = frozenset({"torch-math"})
 
 CKPT_KEY = "salt_core"
 """Checkpoint dict key for the schema + plan-hash payload."""
+
+_LOG = logging.getLogger(__name__)
 
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "HybridMuonAdamW")
@@ -192,6 +195,15 @@ class SaltModule(lightning.LightningModule):
         self._materialised = False
         self._loaded_from_checkpoint = False
         self._ckpt_plan_hashes: dict[str, str] = {}
+        # --init_from warm start (fresh trainer state, prefix-filtered weight
+        # load with per-module accounting — distinct from a resume ckpt_path).
+        # The CLI sets `_init_from` on the instantiated model; `setup("fit")`
+        # runs the load after bind. `_init_loaded_modules` records which config
+        # modules received checkpoint weights so `on_fit_start` materialises
+        # ONLY the ones that did not (design D4, selective materialise).
+        self._init_from: str | None = None
+        self._init_warm_started = False
+        self._init_loaded_modules: set[str] = set()
         # programmatic-construction path: compose the outputs: section now (the CLI
         # path passes outputs=None here and composes via instantiate_classes).
         if outputs:
@@ -687,6 +699,12 @@ class SaltModule(lightning.LightningModule):
             resolve_origin_weighting(self._graph_modules, dm.test_dset.reader)
             self._validate_writer_specs(dm.test_dset)
         self._ensure_bound()
+        # --init_from: warm start weights AFTER bind (params now carry their
+        # resolved shapes) and BEFORE optimizer construction / the first step
+        # (both are strictly later in the Lightning fit sequence). Fit-only —
+        # `test` never warm-starts.
+        if stage == "fit" and self._init_from is not None:
+            self._warm_start_from_checkpoint(self._init_from)
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
         """Static writer-input validation on the TEST path.
@@ -705,14 +723,16 @@ class SaltModule(lightning.LightningModule):
         producer_specs.update(writers.model_producer_specs(self._graph_modules))
         writers.validate_specs(self._graph_modules, reader, producer_specs)
 
-    def _run_preflights(self) -> None:
+    def _run_preflights(self, modules: Mapping[str, SaltModelModule] | None = None) -> None:
         """Fail-fast data-free checks of file-backed `materialise` sources: every
         module exposing a callable ``preflight()`` (e.g. `Normaliser`) is
         checked before any `materialise` writes buffers, so a bad path/content
         raises one `ConfigError` instead of a per-module mid-materialise crash.
-        Called from ``on_fit_start`` on fresh fits only.
+        Called from ``on_fit_start`` on fresh fits only. On an ``--init_from``
+        warm start only the to-be-materialised (checkpoint-uncovered) modules
+        are passed — a retained module's file need not exist on this machine.
         """
-        for module in self._graph_modules.values():
+        for module in (self._graph_modules if modules is None else modules).values():
             preflight = getattr(module, "preflight", None)
             if callable(preflight):
                 preflight()
@@ -809,15 +829,25 @@ class SaltModule(lightning.LightningModule):
     def on_fit_start(self) -> None:
         """Materialise file-backed values before the first step of a FRESH fit.
 
-        Runs after checkpoint restore: when any checkpoint was loaded
-        (resume or `load_from_checkpoint`) materialise is skipped and the
-        values come from the state_dict — `Normaliser.forward` raises if a
-        checkpoint lacked them.
+        Runs after checkpoint restore: when a full checkpoint was loaded
+        (resume or `load_from_checkpoint`) materialise is skipped entirely and
+        the values come from the state_dict — `Normaliser.forward` raises if a
+        checkpoint lacked them. On an ``--init_from`` warm start the load is
+        PARTIAL, so materialise is SELECTIVE: exactly the config modules that
+        received no checkpoint weights are materialised (a newly-added
+        `Normaliser` reads its norm_dict; retained modules keep loaded stats).
         """
         if self._materialised or self._loaded_from_checkpoint:
             return
-        self._run_preflights()
-        materialise_all(self._graph_modules)
+        targets = self._graph_modules
+        if self._init_warm_started:
+            targets = {
+                name: module
+                for name, module in self._graph_modules.items()
+                if name not in self._init_loaded_modules
+            }
+        self._run_preflights(targets)
+        materialise_all(targets)
         self._materialised = True
 
     # -- steps ---------------------------------------------------------------------
@@ -955,18 +985,9 @@ class SaltModule(lightning.LightningModule):
         (disables `materialise`).
         """
         state_dict = checkpoint.get("state_dict")
-        if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
-            raise ConfigError(
-                "this checkpoint has the v1 (ModelWrapper) state-dict layout "
-                "('model.pool_net.*' keys) — v1 checkpoints are not supported by "
-                "salt. Use them at the v1 pin 29c67a1 (git checkout 29c67a1) "
-                "or convert the weights offline (see the parity-closure section "
-                "of docs/architecture.md)."
-            )
-        if state_dict and any("_orig_mod." in k for k in state_dict):
-            checkpoint["state_dict"] = {
-                k.replace("_orig_mod.", ""): v for k, v in state_dict.items()
-            }
+        cleaned = self._reject_v1_and_strip_orig_mod(state_dict)
+        if cleaned is not state_dict:
+            checkpoint["state_dict"] = cleaned
 
         self._loaded_from_checkpoint = True
         payload = checkpoint.get(CKPT_KEY)
@@ -1004,6 +1025,196 @@ class SaltModule(lightning.LightningModule):
         if mode is Mode.FIT:
             raise ConfigError(msg)
         warnings.warn(f"{msg} — continuing (non-FIT modes warn only)", stacklevel=2)
+
+    @staticmethod
+    def _reject_v1_and_strip_orig_mod(
+        state_dict: Mapping[str, Tensor] | None,
+    ) -> Mapping[str, Tensor] | None:
+        """Reject a v1 (``ModelWrapper``) state-dict and strip a ``--compile``-added
+        ``_orig_mod.`` prefix. Shared by the resume (`on_load_checkpoint`) and
+        warm-start (`_warm_start_from_checkpoint`) paths.
+
+        Returns the input unchanged when no ``_orig_mod.`` prefix is present
+        (so callers can detect a no-op by identity); raises `ConfigError` on a
+        v1 layout.
+        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
+            raise ConfigError(
+                "this checkpoint has the v1 (ModelWrapper) state-dict layout "
+                "('model.pool_net.*' keys) — v1 checkpoints are not supported by "
+                "salt. Use them at the v1 pin 29c67a1 (git checkout 29c67a1) "
+                "or convert the weights offline (see the parity-closure section "
+                "of docs/architecture.md)."
+            )
+        if state_dict and any("_orig_mod." in k for k in state_dict):
+            return {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        return state_dict
+
+    # -- init_from: weights-only warm start with module surgery -------------------
+
+    def _warm_start_from_checkpoint(self, path: str) -> None:
+        """Warm-start weights from `path` into the (already-bound) model with
+        strict per-module accounting — the ``--init_from`` load path (design D4).
+
+        Distinct from a resume `ckpt_path`: trainer state stays fresh, the FIT
+        plan-hash gate is NOT enforced (the checkpoint's hashes are logged for
+        information only, since the architecture may have been surgically
+        changed), and the state-dict load is prefix-filtered by module name
+        rather than strict.
+
+        The load is classified per config-module (``net.<name>.*`` prefix):
+
+        - **loaded** — a module present in both the checkpoint and the current
+          config, fully covered (identical key set, shapes, dtypes). Its
+          tensors are loaded.
+        - **new** — a config module absent from the checkpoint. Left at fresh
+          init; `on_fit_start` materialises it (Wall #3 fix).
+        - **dropped** — a checkpoint module absent from the current config.
+          Skipped and logged.
+
+        A *retained* module (present in both) that is only PARTIALLY covered
+        (missing/unexpected subkeys or a shape/dtype mismatch) is a hard
+        `ConfigError`: the module's internal architecture changed, which is a
+        swap — declare it as one (rename the module so it drops+adds cleanly).
+
+        Raises
+        ------
+        ConfigError
+            If the model is not yet bound, the checkpoint has no ``state_dict``,
+            it is a v1 layout, or any retained module is only partially covered.
+        """
+        if not self._bound:
+            raise ConfigError(
+                f"--init_from {path!r}: warm start before bind — the model must compile its "
+                "plans and bind first (design D4). This is an internal ordering error."
+            )
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        raw_state = checkpoint.get("state_dict") if isinstance(checkpoint, Mapping) else None
+        if not raw_state:
+            raise ConfigError(
+                f"--init_from {path!r}: the checkpoint carries no 'state_dict' — it is not a "
+                "salt/Lightning training checkpoint."
+            )
+        ckpt_state = self._reject_v1_and_strip_orig_mod(raw_state)
+        assert ckpt_state is not None  # non-empty raw_state → non-None
+
+        # plan hashes are informational on a warm start (architecture may differ)
+        payload = checkpoint.get(CKPT_KEY) if isinstance(checkpoint, Mapping) else None
+        if payload:
+            for mode, plan in self.plans.items():
+                stored = (payload.get("plan_hashes") or {}).get(mode.name)
+                if stored and stored != plan.plan_hash:
+                    _LOG.info(
+                        "--init_from: %s plan hash differs (checkpoint %s…, current %s…) — "
+                        "not enforced on a weights-only warm start.",
+                        mode.name, stored[:16], plan.plan_hash[:16],
+                    )
+
+        loaded, new, dropped = self._apply_warm_start(ckpt_state, path)
+        self._init_warm_started = True
+        self._init_loaded_modules = set(loaded)
+        _LOG.info(
+            "--init_from %s: %d module(s) loaded, %d new (fresh init + materialise), "
+            "%d dropped.\n%s",
+            path, len(loaded), len(new), len(dropped),
+            _warm_start_summary(loaded, new, dropped),
+        )
+
+    def _apply_warm_start(
+        self, ckpt_state: Mapping[str, Tensor], path: str
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Classify + load `ckpt_state` by module; returns ``(loaded, new,
+        dropped)`` module-name lists. Raises `ConfigError` on partial coverage
+        of a retained module (see `_warm_start_from_checkpoint`).
+        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        current_state = self.state_dict()
+        current_by_mod = _partition_by_module(current_state)
+        ckpt_by_mod = _partition_by_module(ckpt_state)
+        config_names = list(self._graph_modules)
+
+        loaded: list[str] = []
+        new: list[str] = []
+        partial: list[str] = []
+        to_load: dict[str, Tensor] = {}
+        for name in config_names:
+            cur = current_by_mod.get(name, {})
+            ckpt = ckpt_by_mod.get(name, {})
+            if not ckpt:
+                # no checkpoint weights for this config module → new (or a
+                # params-free module, e.g. Concat/Split — nothing to load and
+                # nothing to materialise, so it does not need reporting).
+                if cur:
+                    new.append(name)
+                continue
+            mismatch = _coverage_mismatch(cur, ckpt)
+            if mismatch is not None:
+                partial.append(f"  - {name}: {mismatch}")
+                continue
+            loaded.append(name)
+            to_load.update({key: ckpt[key] for key in cur})
+        if partial:
+            raise ConfigError(
+                f"--init_from {path!r}: {len(partial)} retained module(s) are only PARTIALLY "
+                "covered by the checkpoint — their internal architecture changed. That is a "
+                "swap, not a warm start: rename the module so it drops the old weights and "
+                "fresh-inits the new ones (design D4, rename-with-weights is out of scope). "
+                "Offenders:\n" + "\n".join(partial)
+            )
+        dropped = sorted(
+            name
+            for name in ckpt_by_mod
+            if name is not None and name not in self._graph_modules
+        )
+        # only compatible retained-module tensors are handed to load_state_dict;
+        # strict=False tolerates the missing new-module keys (never shape errors,
+        # which the coverage preflight above already rejected).
+        self.load_state_dict(to_load, strict=False)
+        return loaded, new, dropped
+
+
+def _partition_by_module(state: Mapping[str, Tensor]) -> dict[str | None, dict[str, Tensor]]:
+    """Group a ``net.<name>.*`` state dict by module name. Keys outside the
+    ``net.<name>.`` layout land under the ``None`` bucket (never a model
+    module — informational only).
+    """  # noqa: DOC201 - private helper, per docstring policy
+    grouped: dict[str | None, dict[str, Tensor]] = {}
+    for key, value in state.items():
+        parts = key.split(".", 2)
+        name = parts[1] if len(parts) >= 3 and parts[0] == "net" else None
+        grouped.setdefault(name, {})[key] = value
+    return grouped
+
+
+def _coverage_mismatch(
+    current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]
+) -> str | None:
+    """Return a one-line description of why `ckpt` does not fully cover
+    `current` (missing/unexpected keys, or a shape/dtype mismatch on a shared
+    key), or ``None`` when coverage is exact. Runs BEFORE `load_state_dict`
+    because PyTorch raises on a shape mismatch even under ``strict=False``.
+    """  # noqa: DOC201 - private helper, per docstring policy
+    cur_keys, ckpt_keys = set(current), set(ckpt)
+    if missing := cur_keys - ckpt_keys:
+        return f"{len(missing)} key(s) missing from checkpoint (e.g. {min(missing)})"
+    if unexpected := ckpt_keys - cur_keys:
+        return f"{len(unexpected)} extra key(s) in checkpoint (e.g. {min(unexpected)})"
+    for key in sorted(cur_keys):
+        cval, kval = current[key], ckpt[key]
+        if tuple(cval.shape) != tuple(kval.shape):
+            return f"shape mismatch at {key}: model {tuple(cval.shape)} vs ckpt {tuple(kval.shape)}"
+        if cval.dtype != kval.dtype:
+            return f"dtype mismatch at {key}: model {cval.dtype} vs ckpt {kval.dtype}"
+    return None
+
+
+def _warm_start_summary(loaded: list[str], new: list[str], dropped: list[str]) -> str:
+    """A per-module warm-start summary table (loaded / new / dropped)."""  # noqa: DOC201
+    rows = [
+        *(f"  loaded   {name}" for name in loaded),
+        *(f"  new      {name}  (fresh init + materialise)" for name in new),
+        *(f"  dropped  {name}  (in checkpoint, not in config)" for name in dropped),
+    ]
+    return "\n".join(rows) if rows else "  (no module-level weights)"
 
 
 def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: Any) -> str:
