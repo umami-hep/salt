@@ -119,10 +119,12 @@ class SaltModule(lightning.LightningModule):
         Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
         Each stage may declare an epoch budget, a `frozen`/`trainable` module
         list (by `model.modules` name), and per-stage `optimizer`/`lrs`
-        overrides. Parsed + validated fail-loud here; ``None`` (default) leaves
-        the legacy single-optimizer path untouched. W2 supports a **single**
-        stage (its freeze mask excludes frozen params from the optimizer); a
-        multi-stage schedule is accepted here but rejected at fit time (W3).
+        overrides. Parsed + validated fail-loud here; ``None`` (default) desugars
+        to one `fit` stage falling back to the top-level ``lrs:``/``optimizer:``
+        (bitwise-identical to legacy training). Multi-stage schedules run inside a
+        single `trainer.fit()`: the auto-injected `TrainingScheduleCallback`
+        applies each stage's freeze mask and rebuilds the optimizer + per-stage
+        OneCycle scheduler at the epoch boundaries.
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
     debug : bool, optional
@@ -180,16 +182,24 @@ class SaltModule(lightning.LightningModule):
         # validates apply_to against the module dict and warns on a mup-on module
         # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
-        # staged-training schedule (plan D1): parsed + validated against the
+        # staged-training schedule (plan D1/D2): parsed + validated against the
         # model-module names NOW (before the outputs: writers are folded into the
-        # graph dict). None → legacy single-optimizer path, zero behaviour change.
-        self._schedule: TrainingSchedule | None = (
+        # graph dict). It is the single canonical home for optimizer/LR config —
+        # a plain config (no training_schedule) desugars to one `fit` stage that
+        # falls back to the top-level lrs:/optimizer:, so `configure_optimizers`
+        # has ONE code path and legacy training stays bitwise-identical.
+        self._schedule: TrainingSchedule = (
             TrainingSchedule.from_config(training_schedule, tuple(modules))
             if training_schedule is not None
-            else None
+            else TrainingSchedule.desugar_legacy(tuple(modules))
         )
+        # index of the stage currently active (0 at fit start; advanced by the
+        # `TrainingScheduleCallback` at each stage boundary). `configure_optimizers`
+        # reads it to pick the stage's optimizer/LR + per-stage OneCycle steps.
+        self._current_stage_index = 0
         # module names whose params are held fixed for the active stage — set by
-        # `_apply_stage_freeze` at fit setup, re-asserted every epoch via `train`.
+        # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
+        # epoch via `train`.
         self._frozen_module_names: set[str] = set()
         # edge-stream-first + EdgeAttention-backend forcing bind-time validators.
         # No-op without an edge encoder.
@@ -726,52 +736,51 @@ class SaltModule(lightning.LightningModule):
         # `test` never warm-starts.
         if stage == "fit" and self._init_from is not None:
             self._warm_start_from_checkpoint(self._init_from)
-        # training_schedule: apply the initial stage's freeze mask AFTER any warm
-        # start (freeze composes on top of the loaded weights) and BEFORE
-        # optimizer construction, so `configure_optimizers` sees the requires_grad
-        # mask. Fit-only. Multi-stage transitions are W3.
-        if stage == "fit" and self._schedule is not None:
+        # training_schedule: reset to stage 0 and apply its freeze mask AFTER any
+        # warm start (freeze composes on top of the loaded weights) and BEFORE
+        # optimizer construction, so the initial `configure_optimizers` (built by
+        # Lightning's strategy.setup, after this) sees stage 0's requires_grad
+        # mask — Gotcha #2. Later stage boundaries are driven by the
+        # `TrainingScheduleCallback`. Fit-only.
+        if stage == "fit":
             self._apply_training_schedule()
 
     def _apply_training_schedule(self) -> None:
-        """Validate the schedule against the attached trainer and apply the
-        initial stage's freeze mask (fit setup).
-
-        W2 scope: a single-stage schedule is applied (freeze mask → optimizer
-        exclusion); a multi-stage schedule is validated but REJECTED here with a
-        `ConfigError` naming W3 — never silently trained ignoring stages 2+.
+        """Validate the schedule against the attached trainer and apply stage 0's
+        freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
 
         Raises
         ------
         ConfigError
-            On an over-allocated epoch budget, or a multi-stage schedule (W3).
+            On an over-allocated epoch budget, or a multi-stage schedule with no
+            finite `trainer.max_epochs` (see `TrainingSchedule.validate_epochs`).
         """
-        assert self._schedule is not None
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
-        if self._schedule.is_multi_stage:
-            names = [stage.name for stage in self._schedule.stages]
-            raise ConfigError(
-                f"training_schedule declares {len(names)} stages {names} — multi-stage staged "
-                "training (stage transitions + mid-fit optimizer/scheduler rebuild) is W3 and "
-                "not implemented yet. W2 supports a single-stage schedule (a freeze mask that "
-                "excludes frozen params from the optimizer). Reduce to one stage, or wait for W3."
-            )
-        self._apply_stage_freeze(self._schedule.initial_stage)
+        self._current_stage_index = 0
+        self._apply_stage_freeze(self._schedule.stages[0])
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
-        """Freeze the modules named by `stage` (plan D1 freeze semantics): set
-        ``requires_grad=False`` on every ``net.<name>.*`` param AND put the
-        module in ``eval()`` mode (stops dropout + running-stat updates during
-        training). Records the frozen set so `train` can re-assert eval mode after
-        Lightning's per-epoch ``model.train()``.
+        """Apply `stage`'s freeze mask as a DELTA against the currently-frozen set
+        (plan D1 semantics): modules entering the frozen set get
+        ``requires_grad=False`` + ``eval()`` (stops dropout + running-stat updates
+        during training); modules leaving it are (re-)enabled with
+        ``requires_grad=True`` + ``train()`` — so a boundary that *unfreezes* a
+        module restores it. Modules outside both sets are left untouched, so the
+        desugared no-freeze path never mutates a param (bitwise parity). Records
+        the frozen set so `train` re-asserts eval after Lightning's per-epoch
+        ``model.train()``.
         """
-        frozen = self._schedule.frozen_names(stage) if self._schedule is not None else set()
-        self._frozen_module_names = frozen
-        for name in frozen:
+        frozen = self._schedule.frozen_names(stage)
+        for name in frozen - self._frozen_module_names:  # newly frozen
             module = self.net[name]
             module.requires_grad_(False)
             module.eval()
+        for name in self._frozen_module_names - frozen:  # newly unfrozen
+            module = self.net[name]
+            module.requires_grad_(True)
+            module.train()
+        self._frozen_module_names = frozen
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
         """Static writer-input validation on the TEST path.
@@ -1015,20 +1024,33 @@ class SaltModule(lightning.LightningModule):
         raise ConfigError(f"Optimizer '{optimizer}' is not supported.")
 
     def _active_optim_config(self) -> tuple[Mapping[str, float], str]:
-        """The ``(lrs, optimizer_name)`` for the active stage. With no schedule
-        (or a stage that overrides neither) this is the legacy top-level pair, so
-        the no-schedule path is bitwise-identical. A stage's `lrs` deep-overrides
-        the top-level keys; its `optimizer` replaces the top-level name.
+        """The ``(lrs, optimizer_name)`` for the currently-active stage. The
+        desugared single `fit` stage overrides neither, so this returns the
+        top-level pair unchanged (the bitwise-parity path). A stage's `lrs`
+        deep-overrides the top-level keys; its `optimizer` replaces the name.
         """  # noqa: DOC201
-        if self._schedule is None:
-            return self.lrs, self.optimizer
-        stage = self._schedule.initial_stage
+        stage = self._schedule.stages[self._current_stage_index]
         lrs = {**self.lrs, **stage.lrs} if stage.lrs is not None else self.lrs
         return lrs, stage.optimizer or self.optimizer
 
+    def _stage_total_steps(self) -> int:
+        """The `OneCycleLR.total_steps` for the active stage. A single-stage
+        schedule uses the whole-run `estimated_stepping_batches` exactly (parity);
+        a multi-stage schedule uses this stage's proportional per-stage allocation
+        of that estimate (Gotcha #1 — never the whole-run figure for a sub-stage).
+        """  # noqa: DOC201
+        total = self.trainer.estimated_stepping_batches
+        if not self._schedule.is_multi_stage:
+            return total
+        allocations = self._schedule.stage_step_allocations(total, self.trainer.max_epochs)
+        return allocations[self._current_stage_index]
+
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
-        """Build the optimizer (over TRAINABLE params only — frozen modules are
-        excluded entirely, plan D1) + a step-interval OneCycleLR scheduler.
+        """Build the active stage's optimizer (over TRAINABLE params only — frozen
+        modules are excluded entirely, plan D1) + a step-interval OneCycleLR
+        scheduler over that stage's step allocation. Re-invoked by the
+        `TrainingScheduleCallback` at each stage boundary via
+        ``trainer.strategy.setup_optimizers``.
         """
         lrs, optimizer_name = self._active_optim_config()
         optimizer_class = self._get_optimizer_class(optimizer_name)
@@ -1044,7 +1066,7 @@ class SaltModule(lightning.LightningModule):
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=lrs["max"],
-            total_steps=self.trainer.estimated_stepping_batches,
+            total_steps=self._stage_total_steps(),
             div_factor=lrs["max"] / lrs["initial"],
             final_div_factor=lrs["initial"] / lrs["end"],
             pct_start=float(lrs["pct_start"]),

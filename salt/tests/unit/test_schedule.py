@@ -161,12 +161,90 @@ class TestEpochAllocation:
         with pytest.raises(ConfigError, match="only the final stage may omit"):
             sched.validate_epochs(5)
 
-    def test_infinite_training_skips_check(self):
+    def test_infinite_training_single_stage_skips_check(self):
+        # a single (desugared/only) stage has no per-stage allocation to do, so
+        # infinite max_epochs is fine (matches the plain-training semantics).
+        sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
+        sched.validate_epochs(-1)  # max_epochs=-1 (infinite) → nothing to bound
+        sched.validate_epochs(None)
+
+    def test_infinite_training_multi_stage_rejected(self):
+        # W3: epoch-delimited multi-stage training needs a finite max_epochs to
+        # allocate per-stage epochs/steps — infinite is a hard error.
         sched = TrainingSchedule.from_config(
             {"stages": {"a": {"epochs": 99}, "b": {}}}, MODULE_NAMES
         )
-        sched.validate_epochs(-1)  # max_epochs=-1 (infinite) → no bound to check
-        sched.validate_epochs(None)
+        for infinite in (-1, None):
+            with pytest.raises(ConfigError, match="finite positive max_epochs"):
+                sched.validate_epochs(infinite)
+
+
+class TestDesugarLegacy:
+    """The single-`fit`-stage schedule a plain config desugars to (plan D2)."""
+
+    def test_desugar_is_single_non_freezing_fit_stage(self):
+        sched = TrainingSchedule.desugar_legacy(MODULE_NAMES)
+        assert not sched.is_multi_stage
+        assert not sched.has_freezing
+        assert sched.initial_stage == StageConfig(name="fit")
+        assert sched.frozen_names(sched.initial_stage) == set()
+
+
+class TestStepAllocation:
+    """Per-stage OneCycle step allocation from estimated_stepping_batches
+    (Gotcha #1: never the whole-run figure for a sub-stage)."""
+
+    def test_single_stage_returns_total_unchanged(self):
+        sched = TrainingSchedule.desugar_legacy(MODULE_NAMES)
+        assert sched.stage_step_allocations(1234, 10) == [1234]
+
+    def test_multi_stage_allocations_sum_to_total(self):
+        # 2 stages, warmup=2 epochs of 10, so ~1/5 of the steps go to warmup.
+        sched = TrainingSchedule.from_config(
+            {"stages": {"warmup": {"epochs": 2}, "full": {}}}, MODULE_NAMES
+        )
+        allocs = sched.stage_step_allocations(1000, 10)
+        assert sum(allocs) == 1000  # exact — final stage takes the remainder
+        assert allocs == [200, 800]
+
+    def test_three_stage_allocation_rounds_and_sums(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 3}, "b": {"epochs": 3}, "c": {}}}, MODULE_NAMES
+        )
+        allocs = sched.stage_step_allocations(101, 10)  # non-divisible on purpose
+        assert sum(allocs) == 101
+        assert len(allocs) == 3
+        # boundaries: round(101*3/10)=30, round(101*6/10)=61 -> [30, 31, 40]
+        assert allocs == [30, 31, 40]
+
+
+class TestStageIndexForEpoch:
+    def test_epoch_maps_to_owning_stage(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 2}, "b": {"epochs": 3}, "c": {}}}, MODULE_NAMES
+        )
+        # a owns [0,2), b owns [2,5), c owns [5, max)
+        got = [sched.stage_index_for_epoch(e, 10) for e in range(10)]
+        assert got == [0, 0, 1, 1, 1, 2, 2, 2, 2, 2]
+
+
+class TestChangesFreezeAcrossStages:
+    def test_true_when_freeze_set_differs(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"warmup": {"epochs": 2, "frozen": ["encoder"]}, "full": {"frozen": []}}},
+            MODULE_NAMES,
+        )
+        assert sched.changes_freeze_across_stages()
+
+    def test_false_when_freeze_set_constant(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 2, "frozen": ["encoder"]}, "b": {"frozen": ["encoder"]}}},
+            MODULE_NAMES,
+        )
+        assert not sched.changes_freeze_across_stages()
+
+    def test_false_for_single_stage(self):
+        assert not TrainingSchedule.desugar_legacy(MODULE_NAMES).changes_freeze_across_stages()
 
 
 class TestSaltModuleInstantiation:
@@ -180,10 +258,18 @@ class TestSaltModuleInstantiation:
                 training_schedule={"stages": {"fit": {"frozen": ["nonexistent"]}}},
             )
 
-    def test_no_schedule_leaves_state_clean(self, norm_dict):
+    def test_no_schedule_desugars_to_single_fit_stage(self, norm_dict):
+        # plan D2: a plain config (no training_schedule) desugars to one `fit`
+        # stage that overrides neither lrs nor optimizer nor freezes anything.
         model = SaltModule(build_gn2v2_modules(norm_dict), lrs=LRS)
-        assert model._schedule is None  # noqa: SLF001
+        sched = model._schedule  # noqa: SLF001
+        assert sched is not None
+        assert not sched.is_multi_stage
+        assert sched.initial_stage.name == "fit"
+        assert not sched.has_freezing
+        assert sched.frozen_names(sched.initial_stage) == set()
         assert model._frozen_module_names == set()  # noqa: SLF001
+        assert model._current_stage_index == 0  # noqa: SLF001
 
     def test_valid_single_stage_stored(self, norm_dict):
         model = SaltModule(

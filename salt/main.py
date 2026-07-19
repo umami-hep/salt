@@ -615,10 +615,29 @@ class SaltCLI(LightningCLI):
             for cb in callbacks_dict.values()
             if cb is not None and (has_logger or not _needs_logger(cb))
         ]
+        stock = self._get(self.config_init, "trainer.callbacks") or []
+        assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
-            stock = self._get(self.config_init, "trainer.callbacks") or []
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
         return super().instantiate_trainer(**kwargs)
+
+    def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
+        """Auto-inject the `TrainingScheduleCallback` on ``fit`` when the model's
+        `training_schedule` is multi-stage or freezes anything — the user never
+        registers the stage-transition driver manually (plan 01 W3). A no-op for
+        a plain (desugared single-`fit`, no-freeze) schedule, off ``fit``, or when
+        one is already present.
+        """  # noqa: DOC201
+        from salt.callbacks.schedule import TrainingScheduleCallback  # noqa: PLC0415
+
+        if getattr(self.config, "subcommand", None) != "fit":
+            return assembled
+        schedule = getattr(getattr(self, "model", None), "_schedule", None)
+        if schedule is None or not (schedule.is_multi_stage or schedule.has_freezing):
+            return assembled
+        if any(isinstance(cb, TrainingScheduleCallback) for cb in (*assembled, *stock)):
+            return assembled
+        return [*assembled, TrainingScheduleCallback()]
 
     def instantiate_classes(self) -> None:
         """Instantiate, then compose the top-level ``outputs:`` section onto the

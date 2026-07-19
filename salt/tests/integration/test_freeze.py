@@ -177,21 +177,23 @@ class TestG2dNoScheduleNoChange:
         assert all(p.requires_grad for p in model.parameters())
 
 
-class TestScopeGuardMultiStage:
-    """A >1-stage schedule is accepted at __init__ but REJECTED at fit (W3)."""
+class TestMultiStageBindsAtFit:
+    """A >1-stage schedule is now EXECUTED (W3 removed W2's fit-time rejection):
+    it binds and applies stage 0's freeze mask at setup.
+    """
 
-    def test_multi_stage_rejected_at_fit(self, data):
-        from salt.graph.errors import ConfigError  # noqa: PLC0415
-
+    def test_multi_stage_binds_and_applies_stage0_freeze(self, data):
         model = build_model(
             build_gn2v2_modules(data["nd"]),
             training_schedule={
                 "stages": {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
             },
         )
-        assert model._schedule.is_multi_stage  # noqa: SLF001 - accepted at init
-        with pytest.raises(ConfigError, match=r"multi-stage.*W3"):
-            offline_bind(model, build_datamodule(data))
+        assert model._schedule.is_multi_stage  # noqa: SLF001
+        offline_bind(model, build_datamodule(data))  # no rejection
+        assert model._current_stage_index == 0  # noqa: SLF001
+        assert model._frozen_module_names == {"encoder"}  # noqa: SLF001 - stage-0 mask
+        assert not any(p.requires_grad for p in model.net["encoder"].parameters())
 
 
 class TestG2eInitFromComposesWithFreeze:

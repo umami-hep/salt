@@ -1,8 +1,11 @@
 """Training-schedule schema: named stages with per-stage freeze + optimizer/LR.
 
-Parsed and validated fail-loud at `SaltModule.__init__`. W2 delivers the schema
-surface, freeze resolution and the epoch-allocation check; multi-stage execution
-(stage transitions + mid-fit optimizer rebuild) is W3.
+Parsed and validated fail-loud at `SaltModule.__init__`. It is the single
+canonical home for optimizer/LR config (plan D1/D2): a plain (no
+`training_schedule`) config desugars to a single `fit` stage (see
+`desugar_legacy`), so `SaltModule.configure_optimizers` has exactly one code
+path. This module also owns the per-stage epoch→step allocation math and the
+stage-boundary lookup the `TrainingScheduleCallback` drives.
 """
 
 from __future__ import annotations
@@ -59,6 +62,24 @@ class TrainingSchedule:
         """Whether the schedule declares more than one stage."""
         return len(self.stages) > 1
 
+    @property
+    def module_names(self) -> tuple[str, ...]:
+        """The model-module names this schedule's freeze specs range over."""
+        return self._module_names
+
+    @property
+    def has_freezing(self) -> bool:
+        """Whether any stage freezes at least one module."""
+        return any(self.frozen_names(stage) for stage in self.stages)
+
+    def changes_freeze_across_stages(self) -> bool:
+        """Whether the frozen set differs between any two consecutive stages —
+        the condition under which DDP needs ``find_unused_parameters=True``
+        (freeze/unfreeze flips break the reducer's fixed bucketing otherwise).
+        """  # noqa: DOC201
+        masks = [frozenset(self.frozen_names(stage)) for stage in self.stages]
+        return any(a != b for a, b in zip(masks, masks[1:], strict=False))
+
     def frozen_names(self, stage: StageConfig) -> set[str]:
         """Resolve `stage`'s freeze spec to the set of frozen module names:
         `frozen` freezes those modules; `trainable` freezes their complement over
@@ -67,6 +88,46 @@ class TrainingSchedule:
         if stage.trainable is not None:
             return set(self._module_names) - set(stage.trainable)
         return set(stage.frozen or ())
+
+    def _non_final_epoch_bounds(self, max_epochs: int) -> list[int]:
+        """Cumulative epoch index at which each *non-final* stage ends (its
+        explicit `epochs` summed left-to-right). The final stage owns everything
+        from the last bound to `max_epochs`, so it is not represented here.
+        """
+        bounds, acc = [], 0
+        for stage in self.stages[:-1]:
+            assert stage.epochs is not None  # validated by validate_epochs
+            acc += stage.epochs
+            bounds.append(acc)
+        return bounds
+
+    def stage_index_for_epoch(self, epoch: int, max_epochs: int) -> int:
+        """The index of the stage that owns `epoch` (0-based). Non-final stages
+        own ``[bound_{i-1}, bound_i)``; the final stage owns everything from the
+        last bound onward (so any epochs past the explicit budgets run there).
+        """  # noqa: DOC201
+        for index, bound in enumerate(self._non_final_epoch_bounds(max_epochs)):
+            if epoch < bound:
+                return index
+        return len(self.stages) - 1
+
+    def stage_step_allocations(self, total_steps: int, max_epochs: int) -> list[int]:
+        """Split `total_steps` (Lightning's whole-run `estimated_stepping_batches`)
+        across the stages proportionally to their epoch budgets, so each stage's
+        `OneCycleLR.total_steps` spans only that stage (Gotcha #1). Boundaries are
+        rounded at each non-final stage end and the final stage takes the exact
+        remainder, so the allocations always sum to `total_steps`. A single-stage
+        schedule returns ``[total_steps]`` unchanged (bitwise parity path).
+        """  # noqa: DOC201
+        if not self.is_multi_stage:
+            return [total_steps]
+        allocations, prev = [], 0
+        for bound in self._non_final_epoch_bounds(max_epochs):
+            boundary_step = round(total_steps * bound / max_epochs)
+            allocations.append(boundary_step - prev)
+            prev = boundary_step
+        allocations.append(total_steps - prev)  # final stage: exact remainder
+        return allocations
 
     def validate_epochs(self, max_epochs: int | None) -> None:
         """Validate the stage epoch allocation against `trainer.max_epochs`
@@ -85,6 +146,12 @@ class TrainingSchedule:
             or an omitted final stage is left a zero/negative remainder.
         """
         if max_epochs is None or max_epochs < 0:
+            if self.is_multi_stage:
+                raise ConfigError(
+                    "training_schedule declares multiple epoch-delimited stages but "
+                    f"trainer.max_epochs is {max_epochs} — staged training needs a finite "
+                    "positive max_epochs to allocate per-stage epochs/steps (plan D1)."
+                )
             return
         *non_final, final = self.stages
         for stage in non_final:
@@ -158,6 +225,15 @@ class TrainingSchedule:
         _check_orders(stages)
         ordered = _order_stages(stages)
         return cls(ordered, module_names)
+
+    @classmethod
+    def desugar_legacy(cls, module_names: Sequence[str]) -> TrainingSchedule:
+        """The single-`fit`-stage schedule a plain (no `training_schedule`) config
+        desugars to (plan D2): one stage, no freeze, no per-stage optimizer/LR
+        override — so `configure_optimizers` falls back to the top-level
+        ``lrs:``/``optimizer:`` and training is bitwise-identical to legacy code.
+        """  # noqa: DOC201
+        return cls([StageConfig(name="fit")], module_names)
 
 
 def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:

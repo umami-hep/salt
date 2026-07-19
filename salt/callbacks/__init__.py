@@ -12,6 +12,7 @@ from salt.callbacks.graph_artifacts import GraphArtifacts
 from salt.callbacks.maskformer_confusion_matrix import MaskformerConfusionMatrix
 from salt.callbacks.maskformer_metrics import MaskformerMetrics
 from salt.callbacks.progress import ProgressBar
+from salt.callbacks.schedule import TrainingScheduleCallback
 
 __all__ = [
     "Checkpoint",
@@ -20,4 +21,5 @@ __all__ = [
     "MaskformerConfusionMatrix",
     "MaskformerMetrics",
     "ProgressBar",
+    "TrainingScheduleCallback",
 ]
