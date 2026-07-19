@@ -25,7 +25,7 @@ Below are some helpful links to get you started:
 
 !!! question "There is a [channel](https://mattermost.web.cern.ch/aft-algs/channels/gnns) for the framework in the [FTAG Mattermost workspace](https://mattermost.web.cern.ch/signup_user_complete/?id=1wicts5csjd49kg7uymwwt9aho&md=link&sbr=su) (for active CERN users only)"
 
-!!! abstract "A tutorial on using Salt with open data can be found [here](tutorial.md). A tutorial using internal CERN data is [also available](tutorial-Xbb.md)"
+!!! abstract "New to salt's v2 (modular) stack? Start the tutorial series: [1. MNIST](tutorials/mnist.md) → [2. your own CNN module](tutorials/mnist_cnn.md) → [3. event-level tagging with easyjet](tutorials/event_classifier.md) → [4. GN2 jet tagging on open data](tutorials/gn2_opendata.md). A v1 tutorial on using salt with open data can be found [here](tutorial.md); a tutorial using internal CERN data is [also available](tutorial-Xbb.md)"
 
 !!! note "[Contributions](contributing) are welcome! Check out [existing issues](https://gitlab.cern.ch/aft/algorithms/salt/-/issues) for inspiration, or open your own"
 

@@ -40,6 +40,8 @@ nav:
   - Tutorials:
       - MNIST with salt: tutorials/mnist.md
       - MNIST part 2 — your own CNN module: tutorials/mnist_cnn.md
+      - Event-level tagging with easyjet: tutorials/event_classifier.md
+      - GN2 jet tagging on open data: tutorials/gn2_opendata.md
       - Tutorial (public): tutorial.md
       - Tutorial (internal): tutorial-Xbb.md
 
