@@ -197,18 +197,21 @@ file directly — it stays generic on purpose):
 cp $(python -c "import salt.core, pathlib; print(pathlib.Path(salt.core.__file__).parent / 'configs/gn2v2-opendata.yaml')") config.yaml
 ```
 
-Edit `config.yaml`, replacing the `${DATA_*}` placeholders with your download
-directory — same idea as the [v1 tutorial's Step
-3](../tutorial.md#step-3-running-the-software), just in different places:
+Edit `config.yaml`, replacing the `${DATA_*}` placeholders with **literal**
+paths into your download directory — same idea as the [v1 tutorial's Step
+3](../tutorial.md#step-3-running-the-software), just in different places.
+YAML does NOT expand shell variables, so write the actual path (e.g.
+`/home/you/tutorial-data/pp_output_train.h5`), not the literal string
+`$TUTORIAL_DATA/...`:
 
 ```yaml
     input_samples:
       class_path: salt.core.data.InputSamples
       init_args:
         files:
-          train: $TUTORIAL_DATA/pp_output_train.h5
-          val: $TUTORIAL_DATA/pp_output_val.h5
-          test: $TUTORIAL_DATA/pp_output_test_ttbar.h5
+          train: <path to directory>/pp_output_train.h5
+          val: <path to directory>/pp_output_val.h5
+          test: <path to directory>/pp_output_test_ttbar.h5
         num: {train: -1, val: -1, test: -1}
 ```
 
@@ -216,7 +219,7 @@ directory — same idea as the [v1 tutorial's Step
       norm:
         class_path: salt.core.nn.Normaliser
         init_args:
-          norm_dict: $TUTORIAL_DATA/norm_dict.yaml
+          norm_dict: <path to directory>/norm_dict.yaml
 ```
 
 !!! warning "Don't pass `files.train`/`files.val` as separate CLI dotted overrides"
@@ -269,9 +272,13 @@ tutorial](../tutorial.md#step-3-running-the-software).
 
     Note `limit_train_batches`/`limit_val_batches` cap how many batches run,
     not the dataset size reported at startup — `InputSamples.num` (`-1` =
-    all rows) still controls how much of the file is *indexed*; the created
-    training/validation dataset entry counts above are the FULL file sizes,
-    consistent with a real download.
+    all rows) still controls how much of the file is *indexed*, so the
+    created training/validation dataset entry counts above are always the
+    FULL file sizes regardless of the smoke-scale flags. The exact counts
+    (1,500,000 / 150,000 above) are what this validation's own local copy of
+    the dataset reports — a fresh Zenodo download is the full 13.5M-train /
+    1.35M-val jets described in [Step 1](#1-get-the-data); expect that
+    larger number instead, not a discrepancy to debug.
 
 ## 4. Evaluate
 
@@ -281,19 +288,24 @@ set in `config.yaml`'s `input_samples` block, no extra flag is needed —
 `salt test` needs only the saved config and a checkpoint, exactly as in
 [part 1](mnist.md#7-evaluate):
 
+The checkpoint filename embeds the epoch and validation loss (e.g.
+`epoch=039-loss=1.02345.ckpt`) — glob for it rather than typing the exact
+loss value, same as [part 1](mnist.md#7-evaluate):
+
 ```bash
 salt test --config run/config.yaml --ckpt_path run/ckpts/epoch=039*.ckpt
 ```
 
 ```text
 Created test dataset with 150,000 entries
-Restoring states from the checkpoint path at run/ckpts/epoch=039-....ckpt
+Restoring states from the checkpoint path at run/ckpts/epoch=039-loss=<value>.ckpt
 Testing DataLoader 0: 100%|██████████| 150/150 [05:24<00:00, 0.46it/s]
-Wrote eval file run/ckpts/epoch=039-...__test_pp_output_test_ttbar.h5
+Wrote eval file run/ckpts/epoch=039-loss=<value>__test_pp_output_test_ttbar.h5
 ```
 
 `H5OutputSink` writes the eval file next to the checkpoint, exactly as in
-[parts 1–3](mnist.md#7-evaluate): `run/ckpts/epoch=039-...__test_pp_output_test_ttbar.h5`.
+[parts 1–3](mnist.md#7-evaluate) — glob for it too:
+`glob.glob("run/ckpts/*__test_*.h5")[0]`.
 150,000 jets at batch 1000 (the shipped default) takes several minutes on
 CPU — the smoke-scale quick-check from Step 3 does not shrink the test set
 (there is no `--data.num_test` equivalent used here; the full test file is
@@ -330,6 +342,8 @@ column names change per the table above.
     ```
 
 ```python
+import glob
+
 import h5py
 import hdf5plugin  # noqa: F401
 import numpy as np
@@ -344,13 +358,13 @@ def calc_rej(sig_disc: np.ndarray, bkg_disc: np.ndarray, sig_eff: np.ndarray) ->
         return np.where(bkg_eff > 0, 1.0 / bkg_eff, np.inf)
 
 
-with h5py.File("run/ckpts/epoch=039-...__test_pp_output_test_ttbar.h5") as f:
+with h5py.File(glob.glob("run/ckpts/*__test_*.h5")[0]) as f:
     table = f["jets"][:]
 
 pb, pc, pu = table["GN2v2_opendata_pb"], table["GN2v2_opendata_pc"], table["GN2v2_opendata_pu"]
 flavour = table["flavour_label"]
 
-def disc_fct(arr: np.ndarray, f_c: float = 0.018) -> np.ndarray:
+def disc_fct(arr: np.ndarray, f_c: float = 0.018) -> float:
     return np.log(arr[2] / (f_c * arr[1] + (1 - f_c) * arr[0]))
 
 discs = np.apply_along_axis(disc_fct, 1, np.stack([pu, pc, pb], axis=1))
@@ -408,7 +422,7 @@ training config format).
 | | v1 (`tutorial.md`) | v2 (this doc) |
 |---|---|---|
 | Config | one monolithic YAML with `class_path` model list | composable `modules:` — embed, encode, pool, task heads each a stock module |
-| Data paths | edited directly into the config file | `--data.modules.input_samples.init_args.files.*` CLI overrides on a generic shipped config |
+| Data paths | edited directly into the config file | still edited directly into a copy of the shipped config (`input_samples.init_args.files.*`) — CLI dotted overrides of this dict-typed field are rejected by jsonargparse, see the warning box in Step 3 |
 | Quick check | `--trainer.fast_dev_run 2` | same flag, plus `num_workers`/`batch_size` overrides (v2 configs ship cluster-sized worker counts by default) |
 | Eval columns | `GN2_pu`/`GN2_pc`/`GN2_pb` | `GN2v2_opendata_pu`/`_pc`/`_pb` (`{run_name}_p{class}`, same convention as [part 1](mnist.md)) |
 | Class weighting | `class_dict` wired into the config | opt-in `--class_dict` CLI flag, fans out to every classification task (this config leaves it unset) |

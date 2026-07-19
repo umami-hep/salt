@@ -32,9 +32,11 @@ export PYTHONPATH=$PWD
 ```
 
 The container notes from part 1 apply unchanged. Reading easyjet ROOT files
-needs salt's `root` extra: `pip install -e '.[easyjet]'` from the salt clone
-(installs `uproot`/`awkward`; `EasyjetReader` raises a clear `ImportError`
-naming this extra if it is missing).
+needs salt's `easyjet` extra: `pip install -e '.[easyjet]'` from the salt
+clone (installs `uproot`/`awkward`; `EasyjetReader` raises a clear
+`ImportError` naming this extra if it is missing). `easyjet` is one of
+several reader-specific extras built on a shared `root` extra — use
+`easyjet` here, not `root` directly.
 
 ## 1. Generate the fixture
 
@@ -313,10 +315,13 @@ task's TEST-mode output already emits both the class probabilities *and* the
     time, just with a real error location if something is wrong (a missing
     branch, a shape mismatch), rather than a static preflight.
 
-## 3. Make your reader importable and train
+## 3. Train
+
+Unlike [part 1](mnist.md), every `class_path` above is a stock salt module —
+there is no user reader to make importable this time, so (unlike part 1)
+`export PYTHONPATH=$PWD` is not required. Just fit:
 
 ```bash
-export PYTHONPATH=$PWD
 salt fit --config config.yaml
 ```
 
@@ -349,9 +354,16 @@ hardcoding it, same as [part 1](mnist.md#7-evaluate)).
 
 The eval file has one structured dataset per stream — here `event` (there is
 no `jets` dataset: input-copying is unsupported for this reader family, see
-above). Read the network's score and compute its AUC, then compute the same
-metric for the **dumb njets-only baseline** read straight from the ROOT test
-files:
+above). Columns follow the same `{run_name}_p{class}` / `target_{task}`
+convention introduced in [part 1](mnist.md#7-evaluate): `name: EventTagger`
++ `class_names: [background, signal]` gives `EventTagger_pbackground` /
+`EventTagger_psignal`, and the task name `event_classification` gives
+`target_event_classification`. `import hdf5plugin` (unused directly, hence
+`# noqa: F401`) registers the HDF5 compression filter salt's `H5OutputSink`
+writes with — without it, `h5py.File(...)` raises an "unknown filter"
+error on read. Read the network's score and compute its AUC, then compute
+the same metric for the **dumb njets-only baseline** read straight from the
+ROOT test files:
 
 ```python
 import glob
