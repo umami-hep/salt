@@ -610,9 +610,11 @@ class H5OutputSink(_SinkCallback):
             For a missing ``ckpt_path``, a foreign datamodule, an unknown
             output template key, a non-sequence pad-mask stream, a column
             collision, or a missing input-copy source variable. Also when a
-            structured-reader-less reader (no ``groups``/``source_path``) is
-            paired with pad-mask columns or input-copying, which genuinely
-            need the source file — a global-only reader with neither is fine.
+            reader advertising no h5py-openable structured source
+            (``reader.h5_source is None`` — a uproot/ROOT reader, a
+            `MultiSampleReader`, or a global-only custom reader) is paired with
+            pad-mask columns or input-copying, which genuinely need that source
+            file — such a reader with neither demand is fine.
         """
         pl_module = trainer.lightning_module
         dm = getattr(trainer, "datamodule", None)
@@ -627,12 +629,19 @@ class H5OutputSink(_SinkCallback):
         streams = tuple(getattr(reader, "streams", ()) or ())
         groups = getattr(reader, "groups", None)
         self._mask_streams = self._pad_mask_streams()
-        # groups/source_path only exist to probe sequence lengths (pad-mask
-        # columns) and to open the source file for input copies. A structured-
-        # reader-less reader (no .groups) is fine when NEITHER is demanded —
-        # e.g. a global-only custom reader (design §5.1).
+        # The structured-H5 path opens an h5py source to probe per-stream
+        # sequence lengths (pad-mask columns) and to copy input fields. Key on
+        # the reader's advertised CAPABILITY (`h5_source`), not its type: a
+        # reader with no h5py-openable source (`h5_source is None`) — a
+        # uproot/ROOT reader whose `.groups` are a non-H5 config shape, a
+        # MultiSampleReader wrapping any reader, or a global-only custom reader
+        # — takes the no-source path, writing task outputs only. That path is
+        # fine when NEITHER pad-mask columns NOR input-copying is demanded;
+        # both genuinely need the source file (design §5.1). Capability-keying
+        # (no isinstance) makes MultiSampleReader delegation work for free.
+        h5_source = getattr(reader, "h5_source", None)
         copy_requested = bool(self.copy_inputs) or self._copy_all_tasked_streams
-        if groups is None:
+        if h5_source is None:
             if self._mask_streams or copy_requested:
                 want = " and ".join(
                     label
@@ -644,8 +653,8 @@ class H5OutputSink(_SinkCallback):
                 )
                 raise ConfigError(
                     f"H5OutputSink: {want} need an H5StructuredReader-style reader "
-                    f"exposing groups/source_path — {type(reader).__name__} exposes "
-                    "neither (design §5.1)"
+                    f"exposing an h5py-openable source (reader.h5_source) — "
+                    f"{type(reader).__name__} advertises none (design §5.1)"
                 )
             sequence_streams: tuple[str, ...] = ()
             group_datasets: dict[str, str] = {}
@@ -681,7 +690,7 @@ class H5OutputSink(_SinkCallback):
             precision="half" if self.half_precision else "full",
         )
         self._extra_shapes, _ = self._collect_extra_groups(extra_ctx, streams)
-        if source_path is not None:  # groups-None reached here only with copying off
+        if source_path is not None:  # the no-source branch reaches here only with copying off
             self._open_copies(source_path, group_datasets, streams)
         dtypes, shapes = self._merge_columns(
             streams, sequence_streams, group_datasets, total, extra_ctx
@@ -1077,7 +1086,14 @@ class H5OutputSink(_SinkCallback):
                 "H5OutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint, v1 contract)"
             )
-        stem = Path(getattr(reader, "filename", None) or reader.source_path).stem
+        # name the output after the reader's file. A single-file reader exposes
+        # `filename`/`source_path`; a MultiSampleReader (N sources, neither
+        # attribute) falls back to its first staged source, else the run name.
+        src = getattr(reader, "filename", None) or getattr(reader, "source_path", None)
+        if src is None:
+            srcs = reader.sources() if hasattr(reader, "sources") else []
+            src = srcs[0] if srcs else self._run_name
+        stem = Path(src).stem
         sample = split[3] if len(split := stem.split("_")) == 4 else stem
         test_suff = getattr(dm, "test_suff", None)
         if test_suff:

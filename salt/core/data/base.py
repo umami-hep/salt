@@ -247,6 +247,22 @@ class Reader(SaltDatasetModule):
         """
         return None
 
+    @property
+    def h5_source(self) -> Path | None:
+        """The h5py-openable structured source file, when this reader has one.
+
+        A capability advertisement (not a type tag): `H5OutputSink` opens this
+        file to probe per-stream sequence lengths (pad-mask columns) and to copy
+        input fields. A reader without a structured HDF5 source — a ROOT/uproot
+        reader (`EasyjetReader`/`FTAG1LiteReader`/`PhysliteReader`, whose source
+        is a ROOT file and whose ``groups`` are a different, non-H5 config
+        shape), a `MultiSampleReader` (N sources, no single file), or a
+        global-only custom reader — returns None, and the sink takes its
+        no-source path (task-outputs only; pad-mask columns / input-copying then
+        raise a clear ConfigError). Default None; `H5StructuredReader` overrides.
+        """
+        return None
+
     def with_source(
         self,
         filename: str | Path,

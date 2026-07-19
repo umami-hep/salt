@@ -38,6 +38,11 @@ class _Reader:
             "tracks": _Group("tracks", global_object=False),
         }
 
+    @property
+    def h5_source(self) -> str:
+        """Advertise the h5py-openable source (mirrors H5StructuredReader)."""
+        return self.source_path
+
 
 class _Dset:
     def __init__(self, reader: _Reader) -> None:

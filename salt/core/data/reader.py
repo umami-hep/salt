@@ -355,6 +355,11 @@ class H5StructuredReader(Reader):
         assert self._resolved is not None
         return self._resolved
 
+    @property
+    def h5_source(self) -> Path:
+        """This reader's h5py-openable structured source (the resolved `source_path`)."""
+        return self.source_path
+
     def _ensure_open(self) -> None:
         """Open (or re-open) the per-process H5 handle, pid-guarded against fork."""
         pid = os.getpid()
