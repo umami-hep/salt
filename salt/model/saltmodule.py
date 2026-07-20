@@ -1078,8 +1078,21 @@ class SaltModule(lightning.LightningModule):
     # -- checkpoints: schema + plan hashes, never Plan objects --------------------
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Serialise the resolved schema + per-mode plan hashes under `CKPT_KEY`
-        (Plans themselves aren't picklable; the hash is the integrity check).
+        """Serialise the resolved schema + per-mode plan hashes + the active
+        training-schedule stage under `CKPT_KEY` (Plans themselves aren't
+        picklable; the hash is the integrity check).
+
+        The recorded ``schedule.stage_index`` is *the stage whose optimizer and
+        scheduler state this checkpoint carries* (the currently-active stage). On
+        resume, `on_load_checkpoint` sets `_current_stage_index` back to it BEFORE
+        the optimizer is rebuilt, so `configure_optimizers` constructs an optimizer
+        whose `state_dict` shape matches the saved optimizer state (W4). This is
+        epoch-boundary granular: stage transitions are keyed off the epoch (see
+        `TrainingScheduleCallback`), so a checkpoint saved at an epoch boundary
+        (Lightning's default val-loss `ModelCheckpoint`) resumes exactly; a
+        mid-epoch (`every_n_train_steps`) checkpoint restores the same stage's
+        optimizer but any pending stage transition is only re-evaluated at the
+        next epoch start.
         """
         if self.schema is None:
             warnings.warn(
@@ -1093,15 +1106,21 @@ class SaltModule(lightning.LightningModule):
                 "fields": {key: list(val) for key, val in self.schema.fields.items()},
             },
             "plan_hashes": {mode.name: plan.plan_hash for mode, plan in self.plans.items()},
+            "schedule": {
+                "stage_index": self._current_stage_index,
+                "stage_name": self._schedule.stages[self._current_stage_index].name,
+            },
         }
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Runs before the state-dict load on both restore paths: verifies plan
         hashes (fatal on FIT mismatch via `_verify_ckpt_hash`), binds from the
         checkpoint's stored schema if not yet bound, strips a ``--compile``-added
-        ``_orig_mod.`` state_dict prefix, and rejects the v1 (``ModelWrapper``)
-        state-dict layout with `ConfigError`. Marks the instance checkpoint-loaded
-        (disables `materialise`).
+        ``_orig_mod.`` state_dict prefix, rejects the v1 (``ModelWrapper``)
+        state-dict layout with `ConfigError`, and (on a fit resume of a multi-stage
+        schedule) restores the saved stage index + freeze mask BEFORE the optimizer
+        is rebuilt (W4 — see `_restore_schedule_stage`). Marks the instance
+        checkpoint-loaded (disables `materialise`).
         """
         state_dict = checkpoint.get("state_dict")
         cleaned = self._reject_v1_and_strip_orig_mod(state_dict)
@@ -1128,6 +1147,59 @@ class SaltModule(lightning.LightningModule):
                     fields={key: tuple(val) for key, val in stored.get("fields", {}).items()},
                 )
             )
+        # W4 resume: re-establish the saved schedule stage + freeze mask now, while
+        # the model is bound but the optimizer has NOT yet been built (Lightning
+        # restore order: setup("fit") -> on_load_checkpoint -> configure_optimizers
+        # -> restore_optimizers_and_schedulers, empirically confirmed by the W4
+        # restore-order probe). setup("fit") already applied stage 0; this promotes
+        # it to the checkpoint's stage k so `configure_optimizers` builds a stage-k
+        # optimizer whose state_dict shape matches the saved (stage-k) optimizer
+        # state. A resume at a stage boundary is then handled by the callback's one
+        # post-restore rebuild at the resume epoch (it sees a later epoch-implied
+        # stage); a mid-stage resume sees no change and keeps the restored moments.
+        self._restore_schedule_stage(payload.get("schedule"))
+
+    def _restore_schedule_stage(self, schedule_state: Mapping[str, Any] | None) -> None:
+        """On a multi-stage fit resume, set `_current_stage_index` + apply the
+        saved stage's freeze mask (the delta off the stage-0 mask `setup` applied).
+
+        No-op unless the schedule is multi-stage AND the trainer is fitting: the
+        desugared/legacy single-stage path is left bitwise-untouched (parity
+        guard), and `salt test --ckpt_path` never mutates the freeze set. A
+        checkpoint whose saved stage is out of range for, or names a different
+        stage than, the current schedule is a hard `ConfigError` (the schedule
+        config changed since the checkpoint — resume is not defined).
+
+        Raises
+        ------
+        ConfigError
+            The saved stage index is out of range, or its recorded name no longer
+            matches the schedule stage at that index.
+        """
+        if schedule_state is None or not self._schedule.is_multi_stage:
+            return
+        from lightning.pytorch.trainer.states import TrainerFn  # noqa: PLC0415
+
+        fn = getattr(getattr(self._trainer, "state", None), "fn", None)
+        if fn is not None and fn != TrainerFn.FITTING:
+            return
+        index = schedule_state["stage_index"]
+        if not 0 <= index < len(self._schedule.stages):
+            raise ConfigError(
+                f"checkpoint records training_schedule stage index {index}, out of range for the "
+                f"current {len(self._schedule.stages)}-stage schedule — the schedule changed since "
+                "the checkpoint was written; resume is not defined (plan 02 W4)."
+            )
+        saved_name = schedule_state.get("stage_name")
+        current_name = self._schedule.stages[index].name
+        if saved_name is not None and saved_name != current_name:
+            raise ConfigError(
+                f"checkpoint records training_schedule stage {index} as {saved_name!r} but the "
+                f"current schedule names it {current_name!r} — the schedule changed since the "
+                "checkpoint was written; resume is not defined (plan 02 W4)."
+            )
+        self._current_stage_index = index
+        self._apply_stage_freeze(self._schedule.stages[index])
 
     def _verify_ckpt_hash(self, mode: Mode, plan: Plan) -> None:
         """Compare a compiled plan's hash with the checkpoint's stored hash;

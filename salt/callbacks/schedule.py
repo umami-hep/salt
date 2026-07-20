@@ -60,6 +60,14 @@ class TrainingScheduleCallback(Callback):
         optimizer + OneCycle scheduler over the now-trainable params. Stage 0 (and
         any epoch that stays within the current stage) is left to the initial
         `configure_optimizers`; only crossings into a *later* stage rebuild.
+
+        This is also the resume boundary handler (W4): after a checkpoint restore,
+        `pl_module._current_stage_index` holds the *saved* stage (set by
+        `SaltModule.on_load_checkpoint` before the optimizer was rebuilt). If the
+        resume epoch's implied stage is later (resume exactly at a boundary), this
+        fires exactly once to rebuild fresh into that stage — identical to the
+        uninterrupted run's boundary. A mid-stage resume sees the same stage and
+        does not rebuild, so the restored optimizer moments are kept.
         """
         schedule = pl_module._schedule  # noqa: SLF001 - same-package schedule state
         new_index = schedule.stage_index_for_epoch(trainer.current_epoch, trainer.max_epochs)
