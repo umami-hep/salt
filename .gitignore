@@ -46,3 +46,6 @@ graph_*.svg
 plan_*.txt
 resolved_io.yaml
 
+/site/
+/temp_mup/
+/shape_mup/

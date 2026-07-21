@@ -195,12 +195,30 @@ Salt requires Python 3.10 to 3.14.
 
         Standard CERN batch schedds **reject `/eos` paths inside the submit file**
         (`Standard batch schedds cannot use /eos paths directly within the submit
-        file`). So `salt-lxplus-gpu` puts the job **executable + `log`/`output`/`error`
-        on AFS home** (`$HOME/.salt-lxplus/`, KB-scale — override with
-        `SALT_LXPLUS_AFS`), while the SIF, salt source, datasets and outputs stay on
-        `/eos` and are read at **run time** (allowed). If you would rather keep
-        everything on EOS, submit via the [EosSubmit schedds](https://batchdocs.web.cern.ch/local/eossubmit.html)
-        instead.
+        file` — this includes `arguments`, `environment`, `log`, and the job's
+        working dir). So `salt-lxplus-gpu` puts the job **executable + `log`/`output`/
+        `error` + config path + salt source on AFS** (`$HOME/.salt-lxplus/`, override
+        with `SALT_LXPLUS_AFS`); the **SIF stays on `/eos`** and its path is passed to
+        the job via a sourced AFS file (never a submit-file field). If you would rather
+        keep everything on EOS, submit via the
+        [EosSubmit schedds](https://batchdocs.web.cern.ch/local/eossubmit.html) instead.
+
+    !!! warning "Reading datasets on EOS from inside the container"
+
+        The SIF loop-mounts fine (apptainer reads it from *outside* the container), but
+        **EOS's FUSE mount (`/eos/...` paths) is invisible *inside* apptainer** — a bind
+        of `/eos` gives `Permission denied`. So:
+
+        - **ROOT files** (uproot / ROOT readers): read them over **xrootd** with a
+          `root://eosuser.cern.ch//eos/user/<i>/<user>/...` URL — this works inside the
+          container without FUSE.
+        - **Non-ROOT files** (HDF5, config YAML, checkpoints, MNIST idx): put them on
+          **AFS** (readable in-container), or stage them into the job's node-local
+          `$TMPDIR` *outside* the container with
+          `xrdcp root://eosuser.cern.ch//eos/... "$TMPDIR"/` and bind `$TMPDIR`.
+
+        `salt-lxplus-gpu` already binds AFS and runs your `SALT_LXPLUS_SRC` from there;
+        keep configs + small datasets on AFS, or use `root://` URLs for big ROOT inputs.
 
     #### Venv path (fallback)
 
