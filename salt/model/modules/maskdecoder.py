@@ -13,14 +13,14 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn.attention import Attention
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.dense import GLU, Dense
-from salt.core.nn.stream_embed import _stream_len
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.model.nn.attention import Attention
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.dense import GLU, Dense
+from salt.model.modules.stream_embed import _stream_len
 
 __all__ = ["MaskDecoder", "MaskDecoderLayer"]
 

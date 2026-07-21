@@ -8,9 +8,9 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured as s2u
 
-from salt.core.data.base import Processor
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.data.base import Processor
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 
 class Features(Processor):

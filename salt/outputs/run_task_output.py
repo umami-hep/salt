@@ -7,11 +7,11 @@ from typing import Any
 
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.nn.base import SaltModelModule
-from salt.core.outputs.output_field import OutputField
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.model.base import SaltModelModule
+from salt.outputs.output_field import OutputField
 
 _OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
 """The YAML ``modes:`` vocabulary — ``test`` -> Mode.TEST, ``export`` -> Mode.ONNX."""

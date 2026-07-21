@@ -2,7 +2,7 @@
 
 ``get_dtype`` builds a structured numpy dtype for a requested variable
 subset, casting float16-like fields to half via ``as_half``.
-``salt.core.data.reader`` imports ``get_dtype`` from here.
+``salt.data.readers.reader`` imports ``get_dtype`` from here.
 """
 
 from collections.abc import Iterable

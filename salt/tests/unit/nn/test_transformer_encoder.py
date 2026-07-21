@@ -1,4 +1,4 @@
-"""Unit tests for TransformerEncoder (mirror of salt/core/nn/transformer_encoder.py)."""
+"""Unit tests for TransformerEncoder (mirror of salt/model/modules/transformer_encoder.py)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Executor,
@@ -16,7 +16,7 @@ from salt.core.graph import (
     PlanStep,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     BindError,
     TransformerEncoder,
 )
@@ -213,14 +213,14 @@ class TestDerivedWidthsFixpoint:
     def test_chain_resolves_when_dependent_visited_first(self):
         # b (depends on mid) BEFORE a (produces mid): a single pass would leave
         # 'out' unbound; the fixpoint loop re-runs b after a binds 'mid'.
-        from salt.core.nn.bind import _apply_derived_widths
+        from salt.model.bind import _apply_derived_widths
 
         widths = {"src": 10}
         _apply_derived_widths([self._chained_plan(["b", "a"])], widths)
         assert widths == {"src": 10, "mid": 11, "out": 12}
 
     def test_chain_resolves_for_either_order(self):
-        from salt.core.nn.bind import _apply_derived_widths
+        from salt.model.bind import _apply_derived_widths
 
         for order in (["a", "b"], ["b", "a"]):
             widths = {"src": 10}
@@ -228,7 +228,7 @@ class TestDerivedWidthsFixpoint:
             assert widths == {"src": 10, "mid": 11, "out": 12}, order
 
     def test_conflicting_derived_width_still_raises(self):
-        from salt.core.nn.bind import _apply_derived_widths
+        from salt.model.bind import _apply_derived_widths
 
         class _Mod:
             name = "clash"

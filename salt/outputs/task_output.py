@@ -6,10 +6,10 @@ from collections.abc import Mapping
 
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.nn.base import SaltModelModule
-from salt.core.outputs.conversion_ops import (
+from salt.graph.bundle import Bundle
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.model.base import SaltModelModule
+from salt.outputs.conversion_ops import (
     ClassProbsOp,
     ConversionOp,
     SeqClassIndexOp,

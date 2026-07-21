@@ -25,13 +25,13 @@ from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.trainer import Trainer
 
-from salt.core import cli as graph_cli
-from salt.core.data.datamodule import GraphDataModule
-from salt.core.graph.errors import ConfigError, GraphError
-from salt.core.onnx.config import ExportConfig
-from salt.core.outputs.run_task_output import OutputSectionWriter
-from salt.core.parser import DeepMergeParser
-from salt.core.saltmodule import SaltModule
+from salt import cli as graph_cli
+from salt.data.datamodule import GraphDataModule
+from salt.graph.errors import ConfigError, GraphError
+from salt.onnx.config import ExportConfig
+from salt.outputs.run_task_output import OutputSectionWriter
+from salt.parser import DeepMergeParser
+from salt.model.saltmodule import SaltModule
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
 
@@ -207,7 +207,7 @@ def _is_persistence_sink(class_path: str) -> bool:
     """
     import importlib  # noqa: PLC0415 - local, only on the test path
 
-    from salt.core.outputs import (  # noqa: PLC0415 - avoid import cycle at top
+    from salt.outputs import (  # noqa: PLC0415 - avoid import cycle at top
         H5OutputWriter,
         OnnxExportSink,
     )
@@ -248,7 +248,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     left alone. Mutates `cfg` in place before validation/``--print_config``, so
     resolved values land in the saved run-dir config. No-op when unset.
     """
-    from salt.core.nn.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
+    from salt.model.modules.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
 
     for scope, model in _iter_model_blocks(cfg):
         class_dict = scope.get(_CLASS_DICT_ARG)
@@ -297,7 +297,7 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple (matching a config that historically wired no OnnxExportSink).
     """  # noqa: DOC201 - private helper, no Returns block per docstring policy
-    from salt.core.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
+    from salt.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
 
     for writer in section.values():
         is_rto = getattr(writer, "is_run_task_output", None)
@@ -553,8 +553,8 @@ class SaltCLI(LightningCLI):
         A sink already present in ``trainer.callbacks`` (a programmatic build,
         or the MaskFormer ONNX escape hatch) is left alone — never double-wired.
         """
-        from salt.core.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
-        from salt.core.outputs import (  # noqa: PLC0415 - avoid import cycle at top
+        from salt.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
+        from salt.outputs import (  # noqa: PLC0415 - avoid import cycle at top
             H5OutputSink,
             OnnxExportSink,
         )
@@ -732,7 +732,7 @@ def main(args: Sequence[str] | None = None) -> int:
     """``salt`` console entry point.
 
     ``salt graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
-    the static graph + muP tooling (`salt.core.cli.main`), ``salt export``
+    the static graph + muP tooling (`salt.cli.main`), ``salt export``
     to the ONNX exporter, and ``salt inference`` to the eager export-set
     runner; everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
@@ -750,14 +750,14 @@ def main(args: Sequence[str] | None = None) -> int:
     if argv and argv[0] == _EXPORT_COMMAND:
         # local import: the exporter pulls onnx/onnxruntime — not needed at
         # fit/test/graph startup
-        from salt.core.onnx import export as onnx_export  # noqa: PLC0415 - heavy, export-only
+        from salt.onnx import export as onnx_export  # noqa: PLC0415 - heavy, export-only
 
         return onnx_export.main(argv[1:])
     if argv and argv[0] == _INFERENCE_COMMAND:
         # trainer-free like export: inference executes the export-mode plan
         # eagerly per jet (plan 50 Phase D), so it dispatches to its own main
         # rather than a Lightning Trainer subcommand.
-        from salt.core import inference as inference_cli  # noqa: PLC0415 - heavy, eager-only
+        from salt import inference as inference_cli  # noqa: PLC0415 - heavy, eager-only
 
         return inference_cli.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
@@ -781,7 +781,7 @@ def main(args: Sequence[str] | None = None) -> int:
         raise
     except GraphError as err:
         # one-block form — no Python traceback for config errors
-        print(f"salt.core.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
     return 0
 

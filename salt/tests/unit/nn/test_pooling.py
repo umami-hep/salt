@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Executor,
     Mode,
     compile_plan,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
     LossSum,
@@ -20,7 +20,7 @@ from salt.core.nn import (
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.tasks import (
+from salt.model.modules.tasks import (
     ClassificationTaskModule,
 )
 from salt.tests._fixtures.gn2v2_fixture import (

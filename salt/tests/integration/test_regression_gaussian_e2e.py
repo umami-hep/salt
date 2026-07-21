@@ -7,7 +7,7 @@ The shipped ``regression_gaussian.yaml`` has since been migrated onto the
 section + dumb sinks natively, which made the overlay a no-op and the A/B
 comparison degenerate (both legs ran the identical path). The comparison seam
 is retired (section==producer parity was proven while both paths existed — see
-the parity-closure section of ``salt/core/README.md``); what remains is the
+the parity-closure section of ``docs/architecture.md``); what remains is the
 live single-leg coverage: the shipped config trains, evaluates and exports
 through the real CLI, with the gaussian doubled columns and the ONNX contract
 asserted from first principles. ``--no-check`` on export: the torch-vs-ONNX
@@ -23,10 +23,10 @@ import numpy as np
 import onnx
 import pytest
 
-from salt.core.main import CONFIG_DIR, main
-from salt.core.onnx import make_session
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file
+from salt.main import CONFIG_DIR, main
+from salt.onnx import make_session
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always

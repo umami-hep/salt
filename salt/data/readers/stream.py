@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from salt.core.graph.errors import ConfigError
+from salt.graph.errors import ConfigError
 
 if TYPE_CHECKING:
-    from salt.core.data.cuts import Cut
-    from salt.core.schema import GroupSchema
+    from salt.data.readers.cuts import Cut
+    from salt.schema import GroupSchema
 
 __all__ = ["INT_PAD_SENTINEL", "OffsetIndex", "StreamConfig", "pad_fill"]
 
@@ -49,7 +49,7 @@ class StreamConfig:
         Per-constituent keep cuts (drop-then-pad). ``()`` (default) keeps every
         constituent — the parity-preserving path. A constituent failing any cut is
         removed before padding (never wastes a ``pad_max`` slot). Reuses
-        `salt.core.data.cuts.Cut`.
+        `salt.data.readers.cuts.Cut`.
     jagged : bool, optional
         Whether this is a variable-length sequence stream (padded to ``pad_max``
         with a ``valid`` field + pad mask). ``False`` is a scalar / global-object
@@ -68,7 +68,7 @@ class StreamConfig:
     jagged: bool = True
 
     def __post_init__(self) -> None:
-        from salt.core.data.cuts import Cut  # noqa: PLC0415 - lazy: avoid base<-stream<-cuts cycle
+        from salt.data.readers.cuts import Cut  # noqa: PLC0415 - lazy: avoid base<-stream<-cuts cycle
 
         if self.pad_max < 1:
             raise ConfigError(f"StreamConfig: pad_max must be >= 1, got {self.pad_max}")
@@ -197,7 +197,7 @@ def _apply_cut_and_sort(
 
     # --- 1. cut: drop-then-pad (a failing constituent is REMOVED) ---
     if stream_cfg.cuts:
-        from salt.core.data.multi_target import _OPERATORS  # noqa: PLC0415
+        from salt.data.processors.multi_target import _OPERATORS  # noqa: PLC0415
 
         keep = None
         for c in stream_cfg.cuts:

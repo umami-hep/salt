@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from salt.core.data.base import SaltDatasetModule
-from salt.core.data.datamodule import _is_setup_only
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import (
+from salt.data.base import SaltDatasetModule
+from salt.data.datamodule import _is_setup_only
+from salt.graph.bundle import Bundle
+from salt.graph.errors import (
     ConnectivityError,
     DeclarationError,
     KeyCollisionError,
 )
-from salt.core.graph.planner import compile_plan, compile_setup_plan
-from salt.core.graph.setup_executor import run_setup_plan
-from salt.core.graph.setup_spec import (
+from salt.graph.planner import compile_plan, compile_setup_plan
+from salt.graph.setup_executor import run_setup_plan
+from salt.graph.setup_spec import (
     SetupIO,
     SourceSpec,
     unflatten_source_spec,
 )
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 # dummy setup-only modules (no physics — kernel scope)
 
@@ -56,7 +56,7 @@ class SelfMergeToy(SetupToy):
 
     def setup(self, ctx, stage):
         del stage
-        from salt.core.graph.executor import canonical_produced
+        from salt.graph.executor import canonical_produced
 
         out = {key: self._values.get(key, f"<{key}>") for key in self._prod}
         if out:
@@ -148,7 +148,7 @@ class TestCompileSetupPlan:
             compile_setup_plan(mods(vds), "train")
 
     def test_kind_mismatch_raises(self):
-        from salt.core.graph.errors import KindError
+        from salt.graph.errors import KindError
 
         prod = SetupToy("prod", produces={"k": src(kind="scalar")})
         cons = SetupToy("cons", requires={"k": src(kind="path")}, produces={"out": src()})
@@ -277,7 +277,7 @@ class TestNamespaceSplit:
 
     def test_unpartitioned_setup_only_would_trip_dead_error(self):
         # documents WHY the split is required: without it, compile_plan raises.
-        from salt.core.graph.errors import AllModesDeadError
+        from salt.graph.errors import AllModesDeadError
 
         a = BatchToy("a", requires={"inputs.x": TensorSpec()}, produces={"preds.x": TensorSpec()})
         setup_mod = SetupToy("inp", produces={"source.r.train.pattern": src()})
@@ -306,7 +306,7 @@ class TestTensorPlannerUnaffected:
         assert list(plan.module_names) == ["a", "b"]
 
     def test_shape_conflict_still_raises(self):
-        from salt.core.graph.errors import ShapeError
+        from salt.graph.errors import ShapeError
 
         a = BatchToy("a", requires={"inputs.x": TensorSpec(shape=("B", 4))},
                      produces={"embed.x": TensorSpec(shape=("B", 8))})

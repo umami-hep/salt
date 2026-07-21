@@ -17,9 +17,9 @@ from typing import Any
 import torch
 import yaml
 
-from salt.core.graph.errors import ConfigError, GraphError, ShapeError
-from salt.core.graph.planner import Plan, compile_plan
-from salt.core.graph.spec import (
+from salt.graph.errors import ConfigError, GraphError, ShapeError
+from salt.graph.planner import Plan, compile_plan
+from salt.graph.spec import (
     GraphModule,
     Mode,
     NestedSpec,
@@ -27,16 +27,16 @@ from salt.core.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.core.onnx.adapter import OnnxAdapter
-from salt.core.onnx.check import CheckResult, check_onnx
-from salt.core.onnx.config import (
+from salt.onnx.adapter import OnnxAdapter
+from salt.onnx.check import CheckResult, check_onnx
+from salt.onnx.config import (
     ExportConfig,
     resolve_export_config,
     sanitised_model_name,
     stream_of_input_port,
     validate_model_name,
 )
-from salt.core.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
+from salt.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
 
 __all__ = [
     "ExportResult",
@@ -124,13 +124,13 @@ def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
     """Find the folded `OnnxExportSink` node among the model modules, if any.
 
     An export-node config wires an `OnnxExportSink`
-    (``salt.core.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
+    (``salt.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
     folded conversion leaves (argmax/split/combine) as a terminal node.
 
     Raises `ConfigError` if more than one `OnnxExportSink` is configured
     (the Athena tuple has a single ordering authority).
     """
-    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
     found = [m for m in modules.values() if isinstance(m, OnnxExportSink)]
     if len(found) > 1:
@@ -311,7 +311,7 @@ def export_graph(
     # the authoritative rendering of the graph Athena will run (the static
     # `salt graph plan --mode onnx` view is dataset-fed and may differ); the
     # output manifest is appended.
-    from salt.core.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
+    from salt.graph.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
     # the folded export-sink's output table renders from the adapter's generated
@@ -329,7 +329,7 @@ def export_graph(
 
 
 # ---------------------------------------------------------------------------
-# the salt export CLI (dispatched from salt.core.main)
+# the salt export CLI (dispatched from salt.main)
 # ---------------------------------------------------------------------------
 
 
@@ -421,8 +421,8 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     data touched). Raises `ConfigError` when the parse fails (with the
     ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
-    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
+    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
+    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
     for path in config_paths:
@@ -458,13 +458,13 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
     Returns ``{stream: ordered variable list}``. Raises `ConfigError` when
     the config has no `Features` processor.
     """
-    from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
+    from salt.data.processors.features import Features  # noqa: PLC0415 - heavy/circular
 
     for module in cli.datamodule.modules.values():
         if isinstance(module, Features):
             return dict(module.variables)
     raise ConfigError(
-        "the run config declares no salt.core.data.Features module — export input widths "
+        "the run config declares no salt.data.Features module — export input widths "
         "derive from its variable lists (design §7.1)"
     )
 
@@ -535,7 +535,7 @@ def main(args: Sequence[str] | None = None) -> int:
             return _print_manifest_from_cli(parsed)
         result, adapter = _export_from_cli(parsed)
     except GraphError as err:
-        print(f"salt.core.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
     except FileExistsError as err:
         print(
@@ -585,7 +585,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
 
 
 # the ONNX output manifest derives from the folded OnnxExportSink's declared
-# leaves, found via `salt.core.cli._static_onnx_export_sink`.
+# leaves, found via `salt.cli._static_onnx_export_sink`.
 
 
 def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
@@ -593,7 +593,7 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
 
     Returns 0 on success (errors raise `GraphError`, handled by `main`).
     """
-    from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
 
     config_paths = _resolve_config_paths(parsed)
     cli = _run_free_cli(config_paths, parsed.set_overrides)
@@ -629,7 +629,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     ``export.outputs``, or schema drift; `FileExistsError` on an existing
     output without ``--overwrite``.
     """
-    from salt.core.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
 
     ckpt_path: Path = parsed.ckpt_path
     config_paths = _resolve_config_paths(parsed)
@@ -651,7 +651,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     # the folded OnnxExportSink (wired at callbacks:) is the sole ONNX output
     # authority. Find it on the parsed CLI and fold it into the planning module
     # dict so its declared leaves anchor the ONNX plan demand.
-    from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
 
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:

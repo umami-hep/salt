@@ -7,18 +7,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     ConfigError,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     ResolvedSchema,
 )
-from salt.core.nn.tasks import (
+from salt.model.modules.tasks import (
     VertexingTaskModule,
 )
-from salt.core.schema import GroupSchema, Schema
+from salt.schema import GroupSchema, Schema
 from salt.tests._fixtures.gn2v2_fixture import (
     ORIGIN_CLASSES,
 )
@@ -127,7 +127,7 @@ class TestOriginWeightingConfig:
 
     def test_resolve_origin_weighting_module_helper(self):
         # the saltmodule helper resolves over a module dict, counting resolutions
-        from salt.core.saltmodule import resolve_origin_weighting
+        from salt.model.saltmodule import resolve_origin_weighting
 
         task = self._name_based()
         # an int-id sibling must NOT count (already resolved)

@@ -22,11 +22,11 @@ import pytest
 import yaml
 from numpy.lib.recfunctions import repack_fields
 
-from salt.core.main import CONFIG_DIR, main
-from salt.core.onnx.check import make_session
-from salt.core.onnx.export import main as export_main
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file
+from salt.main import CONFIG_DIR, main
+from salt.onnx.check import make_session
+from salt.onnx.export import main as export_main
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict  # noqa: PLC2701
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"

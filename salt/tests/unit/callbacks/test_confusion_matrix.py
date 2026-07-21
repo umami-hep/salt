@@ -1,4 +1,4 @@
-"""Tests for `salt.core.callbacks.ConfusionMatrix` (split from test_callbacks.py)."""
+"""Tests for `salt.callbacks.ConfusionMatrix` (split from test_callbacks.py)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from salt.core.callbacks import ConfusionMatrix
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
+from salt.callbacks import ConfusionMatrix
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
 
 
 ORIGIN_NAMES = tuple(f"c{i}" for i in range(8))

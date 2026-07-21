@@ -1,29 +1,29 @@
-"""salt.core.data — the v2 dataset pipeline: readers, processors, the
+"""salt.data — the v2 dataset pipeline: readers, processors, the
 `GraphDataset` runtime and `GraphDataModule` Lightning wiring, VDS helpers.
 """
 
 from __future__ import annotations
 
-from salt.core.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
-from salt.core.data.cuts import Cut, CutSpec
-from salt.core.data.datamodule import GraphDataModule
-from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
-from salt.core.data.easyjet_reader import EasyjetGroupConfig, EasyjetReader
-from salt.core.data.features import Features
-from salt.core.data.ftag1lite_reader import FTAG1LiteGroupConfig, FTAG1LiteReader
-from salt.core.data.ftag_labeller import FtagLabeller
-from salt.core.data.input_samples import InputSamples
-from salt.core.data.labels import Labels
-from salt.core.data.maskformer_targets import MaskFormerTargets
-from salt.core.data.multi_target import MultiTarget
-from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
-from salt.core.data.physlite_reader import PhysliteGroupConfig, PhysliteReader
-from salt.core.data.reader import GroupConfig, H5StructuredReader
-from salt.core.data.stream import OffsetIndex, StreamConfig
-from salt.core.data.uproot_reader import UprootGroupConfig, UprootReader
-from salt.core.data.xaod_reader import XAODReader
-from salt.core.data.vds import create_vds, default_vds_path, has_wildcard
-from salt.core.data.vds_module import VDS
+from salt.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
+from salt.data.readers.cuts import Cut, CutSpec
+from salt.data.datamodule import GraphDataModule
+from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.data.readers.easyjet_reader import EasyjetGroupConfig, EasyjetReader
+from salt.data.processors.features import Features
+from salt.data.readers.ftag1lite_reader import FTAG1LiteGroupConfig, FTAG1LiteReader
+from salt.data.processors.ftag_labeller import FtagLabeller
+from salt.data.input_samples import InputSamples
+from salt.data.processors.labels import Labels
+from salt.data.processors.maskformer_targets import MaskFormerTargets
+from salt.data.processors.multi_target import MultiTarget
+from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
+from salt.data.readers.physlite_reader import PhysliteGroupConfig, PhysliteReader
+from salt.data.readers.reader import GroupConfig, H5StructuredReader
+from salt.data.readers.stream import OffsetIndex, StreamConfig
+from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
+from salt.data.readers.xaod_reader import XAODReader
+from salt.data.readers.vds import create_vds, default_vds_path, has_wildcard
+from salt.data.readers.vds_module import VDS
 
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",

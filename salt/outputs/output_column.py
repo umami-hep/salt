@@ -7,9 +7,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import KEY_SEP
-from salt.core.outputs.names import _OUTPUTS_NAMESPACE
+from salt.graph.errors import ConfigError
+from salt.graph.spec import KEY_SEP
+from salt.outputs.names import _OUTPUTS_NAMESPACE
 
 
 @dataclass(frozen=True)

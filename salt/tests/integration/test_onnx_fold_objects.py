@@ -10,8 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.nn import bind_all, resolve_bind_schema
-from salt.core.onnx import (
+from salt.model.modules import bind_all, resolve_bind_schema
+from salt.onnx import (
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -20,7 +20,7 @@ from salt.core.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.core.outputs import (
+from salt.outputs import (
     MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
@@ -28,7 +28,7 @@ from salt.core.outputs import (
     OnnxExportSink,
     VertexUnionFind,
 )
-from salt.core.render import dot_source
+from salt.graph.render import dot_source
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -308,8 +308,8 @@ class _DecoratorOnnxWrapper(nn.Module):
         self.decorator = decorator
 
     def forward(self, class_probs: torch.Tensor, regression: torch.Tensor):
-        from salt.core.graph.bundle import Bundle  # noqa: PLC0415 - test-local
-        from salt.core.graph.spec import Mode  # noqa: PLC0415 - test-local
+        from salt.graph.bundle import Bundle  # noqa: PLC0415 - test-local
+        from salt.graph.spec import Mode  # noqa: PLC0415 - test-local
 
         b = Bundle()
         b.set(self.decorator.source, class_probs)

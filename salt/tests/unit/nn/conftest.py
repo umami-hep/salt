@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     Mode,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     bind_all,
     materialise_all,
     resolve_bind_schema,

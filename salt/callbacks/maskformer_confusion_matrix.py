@@ -10,8 +10,8 @@ from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import Tensor
 
-from salt.core.callbacks.confusion_matrix import ConfusionMatrix
-from salt.core.graph.bundle import Bundle
+from salt.callbacks.confusion_matrix import ConfusionMatrix
+from salt.graph.bundle import Bundle
 
 
 class MaskformerConfusionMatrix(Callback):

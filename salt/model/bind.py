@@ -8,10 +8,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from salt.core.graph.errors import _SUGGESTION_CUTOFF, GraphError
-from salt.core.graph.planner import Plan
-from salt.core.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
-from salt.core.nn.base import SaltModelModule
+from salt.graph.errors import _SUGGESTION_CUTOFF, GraphError
+from salt.graph.planner import Plan
+from salt.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
+from salt.model.base import SaltModelModule
 
 __all__ = ["BindError", "ResolvedSchema", "bind_all", "materialise_all", "resolve_bind_schema"]
 
@@ -260,7 +260,7 @@ def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: Resol
     """Call ``bind(schema)`` on every `SaltModelModule` in `modules`, in dict order.
 
     `SaltModule._graph_modules` (the production caller argument, see
-    `salt.core.saltmodule`) is model-only by construction — but some test
+    `salt.model.saltmodule`) is model-only by construction — but some test
     fixtures call this directly on a per-mode LOCAL module dict with a
     terminal sink folded in (mirroring `SaltModule.compile_mode`'s own fold,
     e.g. an `OnnxExportSink` under `salt.tests.unit.onnx.test_adapter`), so

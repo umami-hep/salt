@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-from salt.core.graph import Bundle, Executor, Mode
-from salt.core.nn import bind_all, resolve_bind_schema
-from salt.core.onnx import (
+from salt.graph import Bundle, Executor, Mode
+from salt.model.modules import bind_all, resolve_bind_schema
+from salt.onnx import (
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -19,7 +19,7 @@ from salt.core.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.core.outputs import (
+from salt.outputs import (
     ClassProbs,
     Combination,
     OnnxExportLeaf,

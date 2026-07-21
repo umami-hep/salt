@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.executor import canonical_produced
-from salt.core.graph.planner import Plan
-from salt.core.graph.setup_spec import SetupStage
+from salt.graph.bundle import Bundle
+from salt.graph.executor import canonical_produced
+from salt.graph.planner import Plan
+from salt.graph.setup_spec import SetupStage
 
 __all__ = ["run_setup_plan"]
 

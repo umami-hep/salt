@@ -1,17 +1,17 @@
-"""Unit tests for the setup-graph type system (`salt.core.graph.setup_spec`)."""
+"""Unit tests for the setup-graph type system (`salt.graph.setup_spec`)."""
 
 from __future__ import annotations
 
 import pytest
 
-from salt.core.graph.setup_spec import (
+from salt.graph.setup_spec import (
     SOURCE_KINDS,
     SetupIO,
     SourceSpec,
     flatten_source_spec,
     unflatten_source_spec,
 )
-from salt.core.graph.spec import TensorSpec
+from salt.graph.spec import TensorSpec
 
 
 def src(kind="path", **kwargs):

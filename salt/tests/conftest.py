@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from salt.core.config_utils import disable_logger_in_config  # noqa: F401
+from salt.config_utils import disable_logger_in_config  # noqa: F401
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _warm_saltcli_model_resolution():
     """Absorb the first run-free ``SaltCLI`` parse's model-resolution failure."""
     try:
-        from salt.core.main import CONFIG_DIR, SaltCLI
+        from salt.main import CONFIG_DIR, SaltCLI
 
         cfg = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy.yaml"))
         SaltCLI(args=["--config", cfg], run=False)

@@ -9,7 +9,7 @@ from typing import Any
 
 from lightning.pytorch.cli import LightningArgumentParser
 
-from salt.core.graph.errors import ConfigError
+from salt.graph.errors import ConfigError
 
 # --model.modules.X=null: jsonargparse's SUBCLASS adapter re-emits nested args
 # as "--key=value" strings, so a None value arrives at the inner dict typehint
@@ -55,10 +55,10 @@ class DeepMergeParser(LightningArgumentParser):
         (`_fan_out_artifacts`) after the deep-merge but before validation/
         ``--print_config``, so resolved values freeze into the saved run config.
         """
-        # W45.2c import-placement fix: _fan_out_artifacts stays in salt.core.main
+        # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
-        from salt.core.main import _fan_out_artifacts  # noqa: PLC0415
+        from salt.main import _fan_out_artifacts  # noqa: PLC0415
 
         if args is None:
             args = sys.argv[1:]

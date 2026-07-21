@@ -6,16 +6,16 @@ from collections.abc import Mapping
 
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn.base import SaltModelModule
+from salt.graph.bundle import Bundle
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.model.base import SaltModelModule
 
 # The two scripted union-find helpers + the MaskFormer export math are inlined
-# verbatim in salt.core.onnx.reduces (the legacy reduce path); the conversion
+# verbatim in salt.onnx.reduces (the legacy reduce path); the conversion
 # nodes below reuse those exact copies so the folded node and the legacy
 # reduce can never drift.
-from salt.core.onnx.reduces import mask_fill_flattened
-from salt.core.utils.union_find import get_node_assignment_jit
+from salt.onnx.reduces import mask_fill_flattened
+from salt.utils.union_find import get_node_assignment_jit
 
 
 class VertexUnionFind(SaltModelModule):

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from salt.core.data import (
+from salt.data import (
     VDS,
     Features,
     GraphDataModule,
@@ -16,15 +16,15 @@ from salt.core.data import (
     InputSamples,
     Labels,
 )
-from salt.core.data.base import SaltDatasetModule, SetupBundle
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import _check_incompatibilities, compile_setup_plan
-from salt.core.graph.setup_executor import run_setup_plan
-from salt.core.graph.setup_spec import SetupIO, SetupStage, SourceSpec, flatten_source_spec
-from salt.core.graph.spec import IO, Mode
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.data.base import SaltDatasetModule, SetupBundle
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.planner import _check_incompatibilities, compile_setup_plan
+from salt.graph.setup_executor import run_setup_plan
+from salt.graph.setup_spec import SetupIO, SetupStage, SourceSpec, flatten_source_spec
+from salt.graph.spec import IO, Mode
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -140,7 +140,7 @@ class TestVdsUnit:
             calls.append((Path(pattern), out_fname))
             return sentinel
 
-        monkeypatch.setattr("salt.core.data.vds_module.create_vds", fake_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", fake_create_vds)
         vds = _wired_vds(vds_capable=True)
         ctx = Bundle()
         pattern = str(data["dir"] / "pp_output_*.h5")
@@ -163,7 +163,7 @@ class TestVdsUnit:
             calls.append((Path(pattern), out_fname))
             return Path(out_fname)
 
-        monkeypatch.setattr("salt.core.data.vds_module.create_vds", fake_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", fake_create_vds)
         vds = _wired_vds(vds_capable=True, out={"train": out_path})
         ctx = Bundle()
         pattern = str(data["dir"] / "pp_output_*.h5")
@@ -204,7 +204,7 @@ class TestVdsUnit:
             called["n"] += 1
             raise AssertionError("create_vds must NOT run for a non-vds_capable reader")
 
-        monkeypatch.setattr("salt.core.data.vds_module.create_vds", spy_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", spy_create_vds)
         vds = _wired_vds(vds_capable=False)  # a ROOT reader (easyjet/ftag1lite)
         ctx = Bundle()
         glob_value = "/data/ntuples/*.root"

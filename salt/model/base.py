@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
-from salt.core.graph.spec import _UNNAMED, IO, Mode
+from salt.graph.spec import _UNNAMED, IO, Mode
 
 if TYPE_CHECKING:
-    from salt.core.graph.bundle import Bundle
-    from salt.core.nn.bind import ResolvedSchema
+    from salt.graph.bundle import Bundle
+    from salt.model.bind import ResolvedSchema
 
 __all__ = ["SaltModelModule"]
 
@@ -97,7 +97,7 @@ class SaltModelModule(nn.Module):
         Some modules' output width is not a single shared symbol the
         bind-time dim table can unify (e.g. a concat's summed width); such a
         module contributes it here instead. Runs to a fixpoint alongside
-        symbol back-binding (`salt.core.nn.bind.resolve_bind_schema`) — a
+        symbol back-binding (`salt.model.bind.resolve_bind_schema`) — a
         contribution that disagrees with an already-resolved width raises
         `BindError` there.
 
@@ -115,7 +115,7 @@ class SaltModelModule(nn.Module):
         Model-side graph participants are never sinks in practice — terminal
         sinks (`H5OutputSink`, `OnnxExportSink`) are Lightning `Callback`s
         satisfying the separate `SinkModule` Protocol
-        (`salt.core.graph.spec`), not `SaltModelModule`. Kept here only as a
+        (`salt.graph.spec`), not `SaltModelModule`. Kept here only as a
         defensive default so an `isinstance(m, SinkModule)` structural check
         never accidentally matches an unrelated model module.
 

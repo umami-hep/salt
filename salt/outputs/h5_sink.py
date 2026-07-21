@@ -17,9 +17,9 @@ from ftag.hdf5 import H5Writer
 from lightning import Callback, LightningModule, Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     KEY_SEP,
     Mode,
@@ -28,8 +28,8 @@ from salt.core.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.core.outputs.output_column import OutputColumn
-from salt.core.utils.array_utils import join_structured_arrays
+from salt.outputs.output_column import OutputColumn
+from salt.utils.array_utils import join_structured_arrays
 
 DEFAULT_OUTPUT = "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
 """The v1-compatible output template."""
@@ -1113,7 +1113,7 @@ class H5OutputSink(_SinkCallback):
 
 # DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed
 # H5OutputWriter -> H5OutputSink. Downstream configs that wire
-# `salt.core.outputs.H5OutputWriter` (incl. gn2v2-dummy-cutover.yaml) keep
+# `salt.outputs.H5OutputWriter` (incl. gn2v2-dummy-cutover.yaml) keep
 # working — the alias resolves to the promoted node. Remove after the migration
 # window.
 H5OutputWriter = H5OutputSink

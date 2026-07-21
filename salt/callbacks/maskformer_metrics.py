@@ -10,7 +10,7 @@ from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
+from salt.graph.bundle import Bundle
 
 
 class MaskformerMetrics(Callback):
@@ -121,7 +121,7 @@ class MaskformerMetrics(Callback):
 
     def _compute(self, bundle: Bundle) -> dict[str, Tensor]:
         """Compute ``{metric name: scalar tensor}`` from the matched object bundle keys."""
-        from salt.core.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415
+        from salt.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415
 
         class_logits = bundle.get(self._matched_key("class_logits")).detach()
         object_class = bundle.get(self._matched_key("object_class")).detach()

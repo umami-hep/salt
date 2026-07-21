@@ -1,4 +1,4 @@
-"""Regression tests for `salt.core.data.MultiSampleReader` (plan 02, v2 dataloaders)."""
+"""Regression tests for `salt.data.MultiSampleReader` (plan 02, v2 dataloaders)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from salt.core.data.base import Reader, WorkerCtx
-from salt.core.data.multisample_reader import MultiSampleReader, SampleConfig
-from salt.core.graph.errors import SchemaError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.schema import GroupSchema, Schema
+from salt.data.base import Reader, WorkerCtx
+from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
+from salt.graph.errors import SchemaError
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.schema import GroupSchema, Schema
 
 
 # --------------------------------------------------------------------------- #
@@ -491,7 +491,7 @@ def test_declare_io_injects_label_field() -> None:
         ]
     )
     io = reader.declare_io(Mode.FIT)
-    from salt.core.graph.spec import flatten_spec
+    from salt.graph.spec import flatten_spec
 
     flat = flatten_spec(io.produces)
     ev = flat["raw.event"]
@@ -504,7 +504,7 @@ def test_declare_io_injects_label_field() -> None:
 
 def test_demand_narrowing_strips_injected_label_field() -> None:
     # the injected label field is NOT a disk field -> never forwarded to sub-readers
-    from salt.core.graph.planner import PlanStep
+    from salt.graph.planner import PlanStep
     from types import MappingProxyType
 
     sig = StubReader(n=10, seed=1)
@@ -539,7 +539,7 @@ def test_demand_narrowing_strips_injected_label_field() -> None:
 uproot = pytest.importorskip("uproot")
 awkward = pytest.importorskip("awkward")
 
-from salt.core.data import EasyjetGroupConfig, EasyjetReader  # noqa: E402
+from salt.data import EasyjetGroupConfig, EasyjetReader  # noqa: E402
 from salt.tests._fixtures.easyjet_minitree import (  # noqa: E402
     build_fixture_arrays,
     write_minitree,

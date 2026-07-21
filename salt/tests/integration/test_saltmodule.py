@@ -11,19 +11,19 @@ import yaml
 from lightning import Callback, Trainer
 from torch import nn
 
-from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
-from salt.core.graph import IO, Bundle, ConfigError, Mode
-from salt.core.nn.losses import LossGLS, LossSum
-from salt.core.outputs import RunTaskOutput
-from salt.core.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
-from salt.core.schema import dump_schema, save_schema
+from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.graph import IO, Bundle, ConfigError, Mode
+from salt.model.modules.losses import LossGLS, LossSum
+from salt.outputs import RunTaskOutput
+from salt.model.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
+from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
     write_parity_norm_dict,
 )
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
-from salt.core.testing.inputs import write_dummy_file
+from salt.testing.inputs import write_dummy_file
 
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 TASKS = ["jets_classification", "track_origin", "track_vertexing"]
@@ -214,7 +214,7 @@ class TestConstruction:
         # plan 49 §4 audited defensive branch: a terminal callback-style sink
         # (SinkModule-protocol, not nn.Module) is ALSO accepted here — real
         # shipped configs never exercise this (terminal sinks are wired via
-        # trainer.callbacks:, see salt.core.nn.base.SaltModelModule docstring),
+        # trainer.callbacks:, see salt.model.base.SaltModelModule docstring),
         # but the validation must not reject the protocol shape outright.
         class _FakeManifestOnlySink:
             name = "fake_sink"
@@ -518,7 +518,7 @@ class _AuxProbe(nn.Module):
         self.name = "aux"
 
     def declare_io(self, mode):
-        from salt.core.graph.spec import IO, TensorSpec, unflatten_spec
+        from salt.graph.spec import IO, TensorSpec, unflatten_spec
 
         del mode
         return IO(
@@ -586,7 +586,7 @@ class TestCallbackSinks:
     def test_pruned_producer_kept_alive_by_callback_sink(self, data):
         # THE behaviour the deferral note describes: a preds.* key no task keeps
         # alive is demand-PRUNED in FIT without the callback, and ALIVE with it
-        from salt.core.graph.planner import compile_plan
+        from salt.graph.planner import compile_plan
         from salt.tests._fixtures.gn2v2_fixture import gn2v2_sources
 
         model = self._model_with_aux(data)
@@ -655,7 +655,7 @@ class TestClassNamesCheck:
         return H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"])
 
     def test_matching_lists_pass_and_are_counted(self, data):
-        from salt.core.saltmodule import check_class_names
+        from salt.model.saltmodule import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         # the dummy file carries jets.attrs['flavour_label'] = [bjets, cjets,
@@ -663,7 +663,7 @@ class TestClassNamesCheck:
         assert check_class_names(modules, self.make_reader(data)) == 1
 
     def test_reordered_class_names_fail_set_and_order(self, data):
-        from salt.core.saltmodule import check_class_names
+        from salt.model.saltmodule import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
@@ -675,7 +675,7 @@ class TestClassNamesCheck:
         assert "['bjets', 'cjets', 'ujets']" in message  # schema
 
     def test_wrong_class_set_fails(self, data):
-        from salt.core.saltmodule import check_class_names
+        from salt.model.saltmodule import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "cjets", "ujets", "taujets")
@@ -683,7 +683,7 @@ class TestClassNamesCheck:
             check_class_names(modules, self.make_reader(data))
 
     def test_no_schema_artifact_is_noop(self, data):
-        from salt.core.saltmodule import check_class_names
+        from salt.model.saltmodule import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
@@ -709,7 +709,7 @@ class TestOriginWeightingResolvedAtSetup:
     def _schema_with_origin_attr(data):
         # the dummy file's schema carries no tracks origin class-name attr;
         # build an in-memory Schema that does (umami-preprocessing convention)
-        from salt.core.schema import GroupSchema, Schema, load_schema
+        from salt.schema import GroupSchema, Schema, load_schema
 
         schema = load_schema(data["schema"])
         groups = dict(schema.groups)
@@ -739,7 +739,7 @@ class TestOriginWeightingResolvedAtSetup:
         )
 
     def test_setup_resolves_names_to_v1_ids(self, data):
-        from salt.core.nn.tasks import VertexingTaskModule
+        from salt.model.modules.tasks import VertexingTaskModule
 
         modules = build_gn2v2_modules(data["nd"])
         modules["track_vertexing"] = VertexingTaskModule(
@@ -761,7 +761,7 @@ class TestOriginWeightingResolvedAtSetup:
     def test_name_based_without_schema_fails_loudly(self, data):
         # a name-based config but the standard datamodule schema has no origin
         # class-name attr → loud setup error (resolve_origin_names raises)
-        from salt.core.nn.tasks import VertexingTaskModule
+        from salt.model.modules.tasks import VertexingTaskModule
 
         modules = build_gn2v2_modules(data["nd"])
         modules["track_vertexing"] = VertexingTaskModule(

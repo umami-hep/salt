@@ -12,11 +12,11 @@ from typing import Any
 import yaml
 from lightning import Callback, LightningModule, Trainer
 
-from salt.core.data.dataset import GraphDataset
-from salt.core.graph.errors import GraphError
-from salt.core.graph.planner import Plan
-from salt.core.graph.spec import Mode, TensorSpec
-from salt.core.render import dot_source, plan_table
+from salt.data.dataset import GraphDataset
+from salt.graph.errors import GraphError
+from salt.graph.planner import Plan
+from salt.graph.spec import Mode, TensorSpec
+from salt.graph.render import dot_source, plan_table
 
 
 class GraphArtifacts(Callback):

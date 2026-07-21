@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED
-from salt.core.nn.dense import Dense, _reject_width_keys
+from salt.graph.errors import ConfigError
+from salt.graph.spec import _UNNAMED
+from salt.model.nn.dense import Dense, _reject_width_keys
 
 _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
 """Valid FiLM ``layer`` placements: ``input`` applies scale/bias before a

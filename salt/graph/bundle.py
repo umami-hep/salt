@@ -7,8 +7,8 @@ from __future__ import annotations
 from collections.abc import Set as AbstractSet
 from typing import Any
 
-from salt.core.graph.errors import DeclarationError, KeyCollisionError
-from salt.core.graph.spec import KEY_SEP, check_key_component, split_key
+from salt.graph.errors import DeclarationError, KeyCollisionError
+from salt.graph.spec import KEY_SEP, check_key_component, split_key
 
 __all__ = ["Bundle"]
 

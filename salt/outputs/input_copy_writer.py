@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.outputs.run_task_output import OutputSectionWriter
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs.run_task_output import OutputSectionWriter
 
 
 class InputCopyWriter(OutputSectionWriter):

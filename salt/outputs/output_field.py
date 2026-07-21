@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
-from salt.core.graph.errors import ConfigError
+from salt.graph.errors import ConfigError
 
 
 @dataclass(frozen=True)

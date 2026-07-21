@@ -7,9 +7,9 @@ from dataclasses import replace
 import pytest
 import torch
 
-from salt.core.graph import Bundle, Mode
-from salt.core.graph.errors import ConfigError, ConnectivityError, ShapeError
-from salt.core.nn import (
+from salt.graph import Bundle, Mode
+from salt.graph.errors import ConfigError, ConnectivityError, ShapeError
+from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
     Normaliser,
@@ -19,8 +19,8 @@ from salt.core.nn import (
     bind_all,
     resolve_bind_schema,
 )
-from salt.core.nn.tasks import ClassificationTaskModule
-from salt.core.onnx import (
+from salt.model.modules.tasks import ClassificationTaskModule
+from salt.onnx import (
     ExportConfig,
     ExportInput,
     OnnxAdapter,
@@ -30,8 +30,8 @@ from salt.core.onnx import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.core.onnx.config import ExportOutput, default_athena_name
-from salt.core.onnx.reduces import (
+from salt.onnx.config import ExportOutput, default_athena_name
+from salt.onnx.reduces import (
     BoundReduce,
     ReduceCtx,
     bind_reduce,
@@ -40,7 +40,7 @@ from salt.core.onnx.reduces import (
     register_reduce,
     registered_reduces,
 )
-from salt.core.outputs import (
+from salt.outputs import (
     ClassProbs,
     OnnxExportLeaf,
     OnnxExportSink,
@@ -275,7 +275,7 @@ class TestRetiredReduces:
     def test_no_shipped_reduces_registered(self):
         # the five shipped reduce REGISTRATIONS are gone at W4 (the conversion
         # nodes own the math); registered_reduces() carries no shipped name
-        from salt.core.onnx.reduces import registered_reduces  # noqa: PLC0415
+        from salt.onnx.reduces import registered_reduces  # noqa: PLC0415
 
         shipped = {"split_scalars", "argmax", "vertex_union_find", "leading_object", "object_index"}
         assert shipped.isdisjoint(set(registered_reduces()))
@@ -316,7 +316,7 @@ def _bind_passthrough_int8(out_cfg, ctx):
 @pytest.fixture
 def fresh_reduce_name():
     """Yield a never-registered reduce name and unregister it on teardown."""
-    import salt.core.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
+    import salt.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
 
     name = "test_passthrough_int8"
     assert name not in reduces_mod._REGISTRY, "fixture name already registered (leak)"  # noqa: SLF001
@@ -340,7 +340,7 @@ class TestRegisterReduce:
     def test_config_known_reduces_is_a_live_registry_view(self, fresh_reduce_name):
         # the config-level public names stay a LIVE view of the registry (PEP 562
         # __getattr__); a freshly-registered probe reduce shows up in the view
-        from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+        from salt.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
         assert set(cfg.KNOWN_REDUCES) == set(registered_reduces())
@@ -353,7 +353,7 @@ class TestRegisterReduce:
         # live everywhere: registry, config view, dtype lookup
         assert fresh_reduce_name in registered_reduces()
         assert reduce_dtype(fresh_reduce_name) == "int8"
-        from salt.core.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+        from salt.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
         # the registered spec carries the declared field knowledge
@@ -424,7 +424,7 @@ class TestOnnxPlan:
 
     def test_sources_are_config_derived(self):
         resolved = resolve_export_config(gn2_export_cfg(), "m")
-        from salt.core.graph.spec import flatten_spec
+        from salt.graph.spec import flatten_spec
 
         flat = flatten_spec(derive_onnx_sources(resolved, VARIABLES))
         assert set(flat) == {"inputs.jets", "inputs.tracks", "masks.tracks"}

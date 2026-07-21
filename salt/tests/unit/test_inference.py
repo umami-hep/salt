@@ -14,15 +14,15 @@ import pytest
 import torch
 from numpy.lib.recfunctions import repack_fields
 
-import salt.core.inference as inference_mod
-from salt.core.cli import load_config
-from salt.core.data import Features, GraphDataset, H5StructuredReader, Labels
-from salt.core.data.datamodule import GraphDataModule
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import Mode
-from salt.core.inference import (
+import salt.inference as inference_mod
+from salt.cli import load_config
+from salt.data import Features, GraphDataset, H5StructuredReader, Labels
+from salt.data.datamodule import GraphDataModule
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode
+from salt.inference import (
     INFERENCE_OUTPUT,
     _check_leading_valid,  # noqa: PLC2701 - the leading-valid pad guard under test
     _column_plan,  # noqa: PLC2701 - the export column plan under test
@@ -32,16 +32,16 @@ from salt.core.inference import (
     build_inference_sink,
     inference_demand,
 )
-from salt.core.main import CONFIG_DIR, main
-from salt.core.nn import bind_all, resolve_bind_schema
-from salt.core.onnx.adapter import OnnxAdapter
-from salt.core.onnx.config import ExportConfig, ExportInput, resolve_export_config
-from salt.core.onnx.export import compile_onnx_plan
-from salt.core.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter
-from salt.core.outputs.input_copy_writer import InputCopyWriter
-from salt.core.outputs.run_task_output import RunTaskOutput
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.main import CONFIG_DIR, main
+from salt.model.modules import bind_all, resolve_bind_schema
+from salt.onnx.adapter import OnnxAdapter
+from salt.onnx.config import ExportConfig, ExportInput, resolve_export_config
+from salt.onnx.export import compile_onnx_plan
+from salt.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter
+from salt.outputs.input_copy_writer import InputCopyWriter
+from salt.outputs.run_task_output import RunTaskOutput
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -108,7 +108,7 @@ class TestParseArgs:
 
 
 class TestDispatch:
-    """``salt inference ...`` dispatches to salt.core.inference.main."""
+    """``salt inference ...`` dispatches to salt.inference.main."""
 
     def test_main_dispatches(self, monkeypatch):
         """The main() entry hands argv (minus the command) to inference.main."""

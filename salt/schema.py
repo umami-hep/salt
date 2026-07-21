@@ -17,8 +17,8 @@ import h5py
 import numpy as np
 import yaml
 
-from salt.core.graph.errors import _SUGGESTION_CUTOFF, SchemaError
-from salt.core.graph.spec import KEY_SEP, join_key, split_key
+from salt.graph.errors import _SUGGESTION_CUTOFF, SchemaError
+from salt.graph.spec import KEY_SEP, join_key, split_key
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -254,7 +254,7 @@ def save_schema(schema: Schema, path: str | Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# H5 -> Schema (the only file-touching function in salt.core)
+# H5 -> Schema (the only file-touching function in salt)
 # ---------------------------------------------------------------------------
 
 

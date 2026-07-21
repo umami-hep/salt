@@ -1,21 +1,21 @@
-"""Unit tests for LossSum and LossGLS (mirror of salt/core/nn/losses.py)."""
+"""Unit tests for LossSum and LossGLS (mirror of salt/model/modules/losses.py)."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     LossGLS,
     LossSum,
 )
-from salt.core.nn.tasks import (
+from salt.model.modules.tasks import (
     ClassificationTaskModule,
     RegressionTaskModule,
 )

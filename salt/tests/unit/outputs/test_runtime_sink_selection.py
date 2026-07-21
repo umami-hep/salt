@@ -7,19 +7,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from salt.core.graph.spec import Mode
-from salt.core.main import (
+from salt.graph.spec import Mode
+from salt.main import (
     _has_callback_persistence_sink,
     _is_persistence_sink,
 )
-from salt.core.nn.losses import LossSum
-from salt.core.outputs import (
+from salt.model.modules.losses import LossSum
+from salt.outputs import (
     H5OutputSink,
     OnnxExportLeaf,
     OnnxExportSink,
     OutputColumn,
 )
-from salt.core.saltmodule import (
+from salt.model.saltmodule import (
     SaltModule,
     _is_test_persistence_sink,
 )
@@ -32,8 +32,8 @@ from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
 _JET_OUT = "outputs.jets.jets_classification"
 _TRK_OUT = "outputs.tracks.track_origin"
-_ONNX_CLASS_PATH = "salt.core.outputs.OnnxExportSink"
-_H5_CLASS_PATH = "salt.core.outputs.H5OutputWriter"
+_ONNX_CLASS_PATH = "salt.outputs.OnnxExportSink"
+_H5_CLASS_PATH = "salt.outputs.H5OutputWriter"
 
 _ORIGIN_SUFFIXES = [
     "pPileup",
@@ -143,14 +143,14 @@ def test_attached_writer_none_when_only_onnx_sink_present():
 @pytest.fixture(scope="module")
 def cutover_data(tmp_path_factory):
     """A dummy H5 + norm dict + schema for a real ``model.setup('test')`` (CPU)."""
-    from salt.core.data import (  # noqa: PLC0415
+    from salt.data import (  # noqa: PLC0415
         Features,
         GraphDataModule,
         H5StructuredReader,
         Labels,
     )
-    from salt.core.schema import dump_schema, save_schema  # noqa: PLC0415
-    from salt.core.testing.inputs import write_dummy_file  # noqa: PLC0415
+    from salt.schema import dump_schema, save_schema  # noqa: PLC0415
+    from salt.testing.inputs import write_dummy_file  # noqa: PLC0415
 
     base = tmp_path_factory.mktemp("runtime_sink_b2")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
@@ -173,8 +173,8 @@ def cutover_data(tmp_path_factory):
 def _cutover_model(nd_path: Path) -> SaltModule:
     """A GN2v2 SaltModule with the cutover conversion producers (jet/track probs)."""
     # PLC2701: _parse_expose is private but the cleanest way to set expose_modes
-    from salt.core.nn.tasks import _parse_expose  # noqa: PLC0415, PLC2701 - test-local
-    from salt.core.outputs import ClassProbs, SeqClassProbs  # noqa: PLC0415 - test-local
+    from salt.model.modules.tasks import _parse_expose  # noqa: PLC0415, PLC2701 - test-local
+    from salt.outputs import ClassProbs, SeqClassProbs  # noqa: PLC0415 - test-local
 
     modules = build_gn2v2_modules(nd_path)
     # opt track_vertexing OUT of TEST eval (its VertexIndex is a deferred reduce

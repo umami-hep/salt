@@ -1,4 +1,4 @@
-"""Unit tests for `salt.core.optim` — HybridMuonAdamW + MuonParamPolicy."""
+"""Unit tests for `salt.optim` — HybridMuonAdamW + MuonParamPolicy."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.optim import HybridMuonAdamW, MuonParamPolicy
+from salt.optim import HybridMuonAdamW, MuonParamPolicy
 
 
 class TinyModel(nn.Module):

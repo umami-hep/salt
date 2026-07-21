@@ -1,1 +1,1 @@
-"""Testing utilities for salt/core (schema-driven synthetic data generation)."""
+"""Testing utilities for salt (schema-driven synthetic data generation)."""

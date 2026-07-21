@@ -15,16 +15,16 @@ from typing import Any
 import numpy as np
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError, GraphError
-from salt.core.graph.spec import Mode
-from salt.core.onnx.adapter import OnnxAdapter
-from salt.core.onnx.config import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError, GraphError
+from salt.graph.spec import Mode
+from salt.onnx.adapter import OnnxAdapter
+from salt.onnx.config import (
     ExportConfig,
     resolve_export_config,
     stream_of_input_port,
 )
-from salt.core.onnx.export import (
+from salt.onnx.export import (
     _cross_check_schema,
     _features_variables,
     _run_free_cli,
@@ -79,7 +79,7 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
     copy/mask columns only when their ``modes:`` include ``export``.
     Raises `ConfigError` on an empty/missing section (no WHAT to write).
     """  # noqa: DOC201, DOC501 - constructor-shaped helper, per docstring policy
-    from salt.core.outputs import H5OutputSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import H5OutputSink  # noqa: PLC0415 - heavy/circular
 
     if not section:
         raise ConfigError(
@@ -251,8 +251,8 @@ def run_inference(
         On a missing export block / export-mode selection, an explicit-leaf
         (MaskFormer escape hatch) config, or any sink schema error.
     """
-    from salt.core.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
-    from salt.core.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)
@@ -428,7 +428,7 @@ def main(args: Sequence[str] | None = None) -> int:
             batch_size=parsed.batch_size,
         )
     except GraphError as err:
-        print(f"salt.core.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
     print("-" * 100)
     print(f"Done! Wrote inference H5 at {out}")

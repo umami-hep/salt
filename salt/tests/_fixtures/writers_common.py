@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.outputs.maskformer_objects_sink import WriterDeclareCtx
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file
+from salt.outputs.maskformer_objects_sink import WriterDeclareCtx
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import (
     build_gn2v2_modules,
     write_parity_norm_dict,

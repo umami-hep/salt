@@ -7,23 +7,23 @@ from pathlib import Path
 import pytest
 import torch
 
-from salt.core.cli import load_config
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import (
+from salt.cli import load_config
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import compile_plan
+from salt.graph.spec import (
     IO,
     Mode,
     SinkModule,
     TensorSpec,
     unflatten_spec,
 )
-from salt.core.outputs import H5OutputSink
-from salt.core.render import dot_source
-from salt.core.saltmodule import SaltModule
+from salt.outputs import H5OutputSink
+from salt.graph.render import dot_source
+from salt.model.saltmodule import SaltModule
 
-# this file is at salt/tests/unit/outputs/ — the configs live at salt/core/configs/
+# this file is at salt/tests/unit/outputs/ — the configs live at salt/configs/
 _CONFIGS = Path(__file__).parents[3] / "core" / "configs"
 _DUMMY = str(_CONFIGS / "gn2v2-dummy.yaml")
 _CUTOVER = str(_CONFIGS / "gn2v2-dummy-cutover.yaml")
@@ -239,7 +239,7 @@ class _StubSalt:
 
 def _folded_test_plan(*, include_dead):
     """Compile a TEST plan: a converted track pred (+ optionally a DEAD jet pred)."""
-    from salt.core.outputs import TaskOutput  # noqa: PLC0415 - test-local
+    from salt.outputs import TaskOutput  # noqa: PLC0415 - test-local
 
     pred_key = "preds.tracks.track_origin"
     out_key = "outputs.tracks.track_origin"

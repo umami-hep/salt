@@ -1,4 +1,4 @@
-"""Tests for `salt.core.render`: plan table, DOT source, and the CLI dot render."""
+"""Tests for `salt.graph.render`: plan table, DOT source, and the CLI dot render."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.cli import load_config
-from salt.core.cli import main as cli_main
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
-from salt.core.nn.bind import resolve_bind_schema
-from salt.core.render import _shape_str, dot_source, plan_table  # noqa: PLC2701
+from salt.cli import load_config
+from salt.cli import main as cli_main
+from salt.graph.planner import compile_plan
+from salt.graph.spec import PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
+from salt.model.bind import resolve_bind_schema
+from salt.graph.render import _shape_str, dot_source, plan_table  # noqa: PLC2701
 from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 
 # the in-repo test-scale GN2v2 config (16-dim, no machine paths) — the static

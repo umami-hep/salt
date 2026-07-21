@@ -8,9 +8,9 @@ from collections.abc import Iterable, Mapping, Sequence
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     GraphModule,
     Mode,
@@ -18,7 +18,7 @@ from salt.core.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
+from salt.model.base import SaltModelModule
 
 
 class LossSum(SaltModelModule):

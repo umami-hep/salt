@@ -8,8 +8,8 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.core.testing.datagen import RecipeError
-from salt.core.testing.datagen.modules import (
+from salt.testing.datagen import RecipeError
+from salt.testing.datagen.modules import (
     ClassDictWriter,
     Constituents,
     H5Writer,
@@ -18,7 +18,7 @@ from salt.core.testing.datagen.modules import (
     Tracks,
     TruthHadronInserter,
 )
-from salt.core.testing.datagen.pipeline import Pipeline, load_pipeline
+from salt.testing.datagen.pipeline import Pipeline, load_pipeline
 
 _RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
 

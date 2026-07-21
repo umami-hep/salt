@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from salt.core.data import Cut, OffsetIndex, StreamConfig
-from salt.core.data.stream import INT_PAD_SENTINEL, _cut_sort_truncate_pad, pad_fill
-from salt.core.graph.errors import ConfigError
-from salt.core.schema import GroupSchema
+from salt.data import Cut, OffsetIndex, StreamConfig
+from salt.data.readers.stream import INT_PAD_SENTINEL, _cut_sort_truncate_pad, pad_fill
+from salt.graph.errors import ConfigError
+from salt.schema import GroupSchema
 
 ak = pytest.importorskip("awkward")
 

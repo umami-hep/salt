@@ -5,18 +5,18 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.spec import (
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.transformer_encoder import _SEQ_LEN
-from salt.core.utils.tensor_utils import (
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.transformer_encoder import _SEQ_LEN
+from salt.utils.tensor_utils import (
     flatten_tensor_dict,
     masked_softmax,
 )

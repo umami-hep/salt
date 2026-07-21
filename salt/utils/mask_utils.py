@@ -1,4 +1,4 @@
-"""Mask helpers used by production ``salt.core`` code (``indices_from_mask``,
+"""Mask helpers used by production ``salt`` code (``indices_from_mask``,
 the ``mask_from_logits`` chain, ``reco_metrics``).
 """
 

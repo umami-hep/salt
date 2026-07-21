@@ -8,25 +8,25 @@ import numpy as np
 import pytest
 import torch
 
-from salt.core.data import (
+from salt.data import (
     Features,
     GraphDataModule,
     H5StructuredReader,
     InputSamples,
     Labels,
 )
-from salt.core.data.input_samples import (
+from salt.data.input_samples import (
     SOURCE_REGISTRY,
     deepest_source_path,
     source_num,
 )
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import compile_setup_plan
-from salt.core.graph.setup_executor import run_setup_plan
-from salt.core.graph.spec import Mode
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.planner import compile_setup_plan
+from salt.graph.setup_executor import run_setup_plan
+from salt.graph.spec import Mode
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -165,7 +165,7 @@ class TestInputSamplesUnit:
 
 
 def _flat(nested):
-    from salt.core.graph.setup_spec import flatten_source_spec
+    from salt.graph.setup_spec import flatten_source_spec
 
     return flatten_source_spec(nested)
 

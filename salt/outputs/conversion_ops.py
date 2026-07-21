@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import Mode, TensorSpec, sym_dim
-from salt.core.utils.tensor_utils import masked_softmax
+from salt.graph.bundle import Bundle
+from salt.graph.spec import Mode, TensorSpec, sym_dim
+from salt.utils.tensor_utils import masked_softmax
 
 # Conversion ops: small strategy objects (not nn.Module) holding config and
 # reproducing one task family's eval math. Three hooks parameterise the

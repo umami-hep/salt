@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from salt.core.graph.planner import SINKS, SOURCES, Plan
-from salt.core.graph.spec import (
+from salt.graph.planner import SINKS, SOURCES, Plan
+from salt.graph.spec import (
     KEY_SEP,
     TensorSpec,
     _has_wildcard,
@@ -19,15 +19,15 @@ from salt.core.graph.spec import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from salt.core.graph.planner import PlanStep
-    from salt.core.graph.spec import GraphModule
+    from salt.graph.planner import PlanStep
+    from salt.graph.spec import GraphModule
 
 __all__ = ["dot_source", "plan_table"]
 
 # Symbolic dim families that are genuinely data-dependent (batch, per-stream
 # token length, encoder layer length, merged seq length) and so stay symbolic
 # in rendered shapes. Every other symbolic family is a config-fixed feature
-# width resolved by `salt.core.nn.bind.resolve_bind_schema`, so the renderer
+# width resolved by `salt.model.bind.resolve_bind_schema`, so the renderer
 # substitutes the concrete int instead.
 _DATA_DIM_FAMILIES = frozenset({"B", "T", "L", "S"})
 
@@ -238,7 +238,7 @@ def dot_source(
         Names of demand-pruned modules to draw grey/dashed, by default ().
     widths : Mapping[str, int] | None, optional
         Statically resolved per-key feature widths (dotted key -> concrete
-        last-dim int), from `salt.core.nn.bind.resolve_bind_schema`. When a
+        last-dim int), from `salt.model.bind.resolve_bind_schema`. When a
         key's declared shape ends in a symbolic feature dim, that dim is shown
         as the concrete width; data-dependent dims stay symbolic. By default None.
     """

@@ -1,4 +1,4 @@
-"""Tests for `salt.core.callbacks.GraphArtifacts` (split from test_callbacks.py)."""
+"""Tests for `salt.callbacks.GraphArtifacts` (split from test_callbacks.py)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from salt.core.callbacks import GraphArtifacts
-from salt.core.graph.spec import Mode, flatten_spec
-from salt.core.saltmodule import SaltModule
+from salt.callbacks import GraphArtifacts
+from salt.graph.spec import Mode, flatten_spec
+from salt.model.saltmodule import SaltModule
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
 from salt.tests.unit.callbacks.conftest import LRS
@@ -119,9 +119,9 @@ class TestGraphArtifacts:
     def test_registered_by_default_in_base2(self, tmp_path):
         # base2.yaml ships the artifacts entry; the CLI assembles it into
         # trainer.callbacks (run=False instantiation — no fit needed)
-        from salt.core.schema import dump_schema, save_schema
+        from salt.schema import dump_schema, save_schema
         from salt.tests.unit.test_main import make_cli
-        from salt.core.testing.inputs import write_dummy_file
+        from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)

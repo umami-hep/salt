@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from salt.core.graph.errors import ConfigError
-from salt.core.outputs.h5_sink import H5OutputSink, _ExtraGroupCtx
-from salt.core.outputs.output_column import OutputColumn
+from salt.graph.errors import ConfigError
+from salt.outputs.h5_sink import H5OutputSink, _ExtraGroupCtx
+from salt.outputs.output_column import OutputColumn
 
 pytestmark = pytest.mark.cpu_always
 

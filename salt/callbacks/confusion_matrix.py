@@ -10,8 +10,8 @@ from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
 
 
 class ConfusionMatrix(Callback):

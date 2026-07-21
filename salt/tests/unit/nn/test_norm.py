@@ -1,17 +1,17 @@
-"""Unit tests for Normaliser and MaskedInputNormaliser (mirror of salt/core/nn/norm.py)."""
+"""Unit tests for Normaliser and MaskedInputNormaliser (mirror of salt/model/modules/norm.py)."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     MaskedInputNormaliser,
     Normaliser,
     bind_all,

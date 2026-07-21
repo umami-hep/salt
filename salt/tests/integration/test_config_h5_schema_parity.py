@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.main import CONFIG_DIR
-from salt.core.onnx.export import _run_free_cli
+from salt.main import CONFIG_DIR
+from salt.onnx.export import _run_free_cli
 
 pytestmark = pytest.mark.cpu_always
 
@@ -67,7 +67,7 @@ def _section_columns(sink, run_name: str) -> list[dict]:
 @pytest.mark.parametrize("config_name", sorted(MIGRATED))
 def test_section_h5_schema_matches_committed_golden(config_name):
     """The migrated config's ``outputs:``-section H5 schema == the committed golden table."""
-    from salt.core.cli import _as_sink_node, _static_writer_sink_callback
+    from salt.cli import _as_sink_node, _static_writer_sink_callback
 
     config = CONFIG_DIR / f"{config_name}.yaml"
     assert config.is_file(), f"missing config {config}"

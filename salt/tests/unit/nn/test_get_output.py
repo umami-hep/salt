@@ -16,22 +16,22 @@ import numpy as np
 import pytest
 import torch
 
-from salt.core.graph import Mode
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.tasks import (
+from salt.graph import Mode
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.tasks import (
     ClassificationTaskModule,
     RegressionTaskModule,
     VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
-from salt.core.onnx.reduces import mask_fill_flattened
-from salt.core.outputs import ClassProbs, SeqClassIndex, SeqClassProbs, VertexUnionFind
-from salt.core.outputs.output_field import OutputField
-from salt.core.outputs.names import VERTEX_INDEX, pascal_case
-from salt.core.utils.tensor_utils import masked_softmax
-from salt.core.utils.union_find import get_node_assignment_jit
+from salt.onnx.reduces import mask_fill_flattened
+from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs, VertexUnionFind
+from salt.outputs.output_field import OutputField
+from salt.outputs.names import VERTEX_INDEX, pascal_case
+from salt.utils.tensor_utils import masked_softmax
+from salt.utils.union_find import get_node_assignment_jit
 
 _FLOAT_TOL = 1e-6
 _STREAM_J = "jets"

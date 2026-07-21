@@ -12,7 +12,7 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 from ftag.vds import create_virtual_file
 
-from salt.core.utils import file_utils as fu
+from salt.utils import file_utils as fu
 
 __all__ = ["create_vds", "default_vds_path", "has_wildcard", "stage_file"]
 
@@ -157,7 +157,7 @@ def stage_file(src: Path, dst: Path) -> Path:
     the file exactly once (the rest skip via the marker), without needing a
     trainer handle: the FileLock serialises every contender and the ``.done``
     marker short-circuits the followers. The actual byte copy delegates to
-    `salt.core.utils.file_utils.copy_file` (a no-op when ``dst`` exists).
+    `salt.utils.file_utils.copy_file` (a no-op when ``dst`` exists).
 
     Parameters
     ----------

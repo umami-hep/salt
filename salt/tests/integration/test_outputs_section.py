@@ -3,7 +3,7 @@
 Historical note (DEL-1, plan 45): this file was the FULL-PAYLOAD H5 PARITY GATE
 diffing the outputs:-section eval H5 against the legacy ``WriterCallback``
 oracle. The legacy writers path is deleted; the byte-for-byte parity was proven
-and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, salt/core/README.md).
+and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, docs/architecture.md).
 What remains are the v2-only checks: the section stack runs end-to-end via the
 real CLI, and the section H5's contents/order are asserted from first principles
 (config + section manifest), not from a legacy oracle.
@@ -19,13 +19,13 @@ import numpy as np
 import pytest
 import yaml
 
-from salt.core.graph.spec import Mode
-from salt.core.main import CONFIG_DIR, main
-from salt.core.outputs.input_copy_writer import InputCopyWriter
-from salt.core.outputs.pad_mask_writer import PadMaskWriter
-from salt.core.outputs.run_task_output import RunTaskOutput
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file
+from salt.graph.spec import Mode
+from salt.main import CONFIG_DIR, main
+from salt.outputs.input_copy_writer import InputCopyWriter
+from salt.outputs.pad_mask_writer import PadMaskWriter
+from salt.outputs.run_task_output import RunTaskOutput
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import (
     ORIGIN_CLASSES,
     build_gn2v2_modules,
@@ -259,7 +259,7 @@ class TestNoCkptFallback:
         # cannot collide with the section_h5 fixture's file next to the ckpt
         out = tmp_path / "fallback.h5"
         sink = (
-            '{"class_path": "salt.core.outputs.H5OutputSink", '
+            '{"class_path": "salt.outputs.H5OutputSink", '
             f'"init_args": {{"output": "{out}"}}}}'
         )
         rc = main([
@@ -334,7 +334,7 @@ class TestSectionOverlayConfigContent:
         section = cfg["outputs"]
         assert section["jets_out"] is None
         assert section["origin_out"] is None
-        assert section["run_tasks"]["class_path"] == "salt.core.outputs.RunTaskOutput"
+        assert section["run_tasks"]["class_path"] == "salt.outputs.RunTaskOutput"
         # track_vertexing JOINS the orchestrated tasks
         assert section["run_tasks"]["init_args"]["tasks"] == [
             "jets_classification",
@@ -365,7 +365,7 @@ class TestSectionWriterUnits:
 
     def test_run_task_requires_preds_and_pad_mask(self):
         """RunTaskOutput.declare_io requires each task's preds + the seq head's pad mask."""
-        from salt.core.graph.spec import flatten_spec
+        from salt.graph.spec import flatten_spec
 
         rt = self._bound_run_task()
         req = flatten_spec(rt.declare_io(Mode.TEST).requires)
@@ -383,7 +383,7 @@ class TestSectionWriterUnits:
 
     def test_run_task_produces_per_field_leaves_test(self):
         """In TEST, RunTaskOutput produces one outputs.*.<col> leaf PER class column."""
-        from salt.core.graph.spec import flatten_spec
+        from salt.graph.spec import flatten_spec
 
         rt = self._bound_run_task()
         prod = set(flatten_spec(rt.declare_io(Mode.TEST).produces))
@@ -402,7 +402,7 @@ class TestSectionWriterUnits:
 
     def test_run_task_produces_argmax_leaf_onnx(self):
         """In ONNX, the seq head produces a single argmax-index leaf (TrackOrigin)."""
-        from salt.core.graph.spec import flatten_spec
+        from salt.graph.spec import flatten_spec
 
         rt = self._bound_run_task()
         prod = set(flatten_spec(rt.declare_io(Mode.ONNX).produces))
@@ -446,7 +446,7 @@ class TestSectionWriterUnits:
 
     def test_pad_mask_produces_mask_leaf(self):
         """PadMaskWriter produces outputs.<stream>.mask from masks.<stream>."""
-        from salt.core.graph.spec import flatten_spec
+        from salt.graph.spec import flatten_spec
 
         pmw = PadMaskWriter(streams=["tracks"])
         io = pmw.declare_io(Mode.TEST)
@@ -455,7 +455,7 @@ class TestSectionWriterUnits:
 
     def test_run_task_rejects_empty_and_duplicate(self):
         """RunTaskOutput rejects an empty tasks list and duplicate task names."""
-        from salt.core.graph.errors import ConfigError
+        from salt.graph.errors import ConfigError
 
         with pytest.raises(ConfigError):
             RunTaskOutput(tasks=[])
@@ -467,7 +467,7 @@ class TestSectionWriterUnits:
 # PROVES the LOCKED no-double-split decision: get_output squeezes the global
 # per-class scalars, so the dumb sink ONLY names them. Expectations are
 # hand-pinned literals (the /tmp golden apparatus is retired — closure at the
-# v1 pin, see salt/core/README.md).
+# v1 pin, see docs/architecture.md).
 
 # the FULL gn2v2 contract — pb/pc/pu globals + the TrackOrigin per-token
 # argmax + the VertexIndex per-token union-find (both int8).
@@ -482,15 +482,15 @@ class TestSectionOnnxContract:
     def _section_export(self, tmp_path):
         import torch
 
-        from salt.core.nn import bind_all, resolve_bind_schema
-        from salt.core.onnx import (
+        from salt.model.modules import bind_all, resolve_bind_schema
+        from salt.onnx import (
             ExportConfig,
             ExportInput,
             compile_onnx_plan,
             export_graph,
             resolve_export_config,
         )
-        from salt.core.outputs import OnnxExportSink
+        from salt.outputs import OnnxExportSink
         from salt.tests._fixtures.gn2v2_fixture import (
             JET_VARIABLES,
             TRACK_VARIABLES,

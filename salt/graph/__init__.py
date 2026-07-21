@@ -1,4 +1,4 @@
-"""salt.core.graph — the pure graph kernel.
+"""salt.graph — the pure graph kernel.
 
 Public API: bundle, declared interfaces, planner, executor, and the
 exception hierarchy.
@@ -6,8 +6,8 @@ exception hierarchy.
 
 from __future__ import annotations
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import (
     AllModesDeadError,
     ConfigError,
     ConnectivityError,
@@ -21,8 +21,8 @@ from salt.core.graph.errors import (
     ShapeError,
     UndeclaredAccessError,
 )
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import (
+from salt.graph.executor import Executor
+from salt.graph.planner import (
     SINKS,
     SOURCES,
     DeadOutput,
@@ -34,8 +34,8 @@ from salt.core.graph.planner import (
     compile_setup_plan,
     deadcode,
 )
-from salt.core.graph.setup_executor import run_setup_plan
-from salt.core.graph.setup_spec import (
+from salt.graph.setup_executor import run_setup_plan
+from salt.graph.setup_spec import (
     SOURCE_KINDS,
     SetupIO,
     SetupStage,
@@ -46,7 +46,7 @@ from salt.core.graph.setup_spec import (
     iter_source_leaves,
     unflatten_source_spec,
 )
-from salt.core.graph.spec import (
+from salt.graph.spec import (
     IO,
     KEY_SEP,
     KINDS,

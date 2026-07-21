@@ -12,12 +12,12 @@ from pathlib import Path
 
 import numpy as np
 
-from salt.core.data.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_pad
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.planner import PlanStep
-from salt.core.graph.setup_spec import SetupIO, SetupStage
-from salt.core.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
-from salt.core.schema import GroupSchema, Schema
+from salt.data.readers.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_pad
+from salt.graph.bundle import Bundle
+from salt.graph.planner import PlanStep
+from salt.graph.setup_spec import SetupIO, SetupStage
+from salt.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
+from salt.schema import GroupSchema, Schema
 
 __all__ = [
     "OffsetIndex",
@@ -323,7 +323,7 @@ class Reader(SaltDatasetModule):
         their files.
 
         Base default: copy each `sources` file to ``root`` via the
-        FileLock-coordinated `salt.core.data.vds.stage_file` (a DDP / worker
+        FileLock-coordinated `salt.data.readers.vds.stage_file` (a DDP / worker
         stampede copies each file exactly once), then clone with the new path
         via `with_source`. A reader with a single source uses this directly;
         multi-source readers (`MultiSampleReader`) override to restage each
@@ -348,7 +348,7 @@ class Reader(SaltDatasetModule):
             default only knows how to re-point a single-source reader via
             `with_source`).
         """
-        from salt.core.data.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+        from salt.data.readers.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
 
         root = Path(root)
         srcs = self.sources()
@@ -374,7 +374,7 @@ class Reader(SaltDatasetModule):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Cut -> sort -> truncate -> pad jagged columns into a structured ``(B, T)`` array.
 
-        Delegates to `salt.core.data.stream._cut_sort_truncate_pad`. Every
+        Delegates to `salt.data.readers.stream._cut_sort_truncate_pad`. Every
         jagged-stream reader (easyjet, ftag1lite, the jagged-combine path of
         multisample) calls this instead of re-implementing pad/sentinel logic.
 

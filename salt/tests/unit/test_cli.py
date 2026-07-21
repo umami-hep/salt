@@ -1,4 +1,4 @@
-"""Tests for the salt CLI (salt.core.cli — design §4.1-§4.4, §2.6)."""
+"""Tests for the salt CLI (salt.cli — design §4.1-§4.4, §2.6)."""
 
 import shutil
 import textwrap
@@ -10,9 +10,9 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.core.cli import main
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.schema import load_schema
+from salt.cli import main
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.schema import load_schema
 
 # the in-repo test-scale GN2v2 trainer config (16-dim, no machine paths) — the
 # static width-resolution plot path needs a real trainer config but no data file

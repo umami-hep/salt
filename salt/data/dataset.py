@@ -15,14 +15,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
 
-from salt.core.data.base import RAW_NAMESPACE, Reader, SaltDatasetModule, WorkerCtx
-from salt.core.data.labels import Labels
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
-from salt.core.graph.executor import canonical_produced
-from salt.core.graph.planner import Plan, Sinks, compile_plan
-from salt.core.graph.spec import KEY_SEP, Mode, TensorSpec
-from salt.core.utils.array_utils import maybe_copy
+from salt.data.base import RAW_NAMESPACE, Reader, SaltDatasetModule, WorkerCtx
+from salt.data.processors.labels import Labels
+from salt.graph.bundle import Bundle
+from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
+from salt.graph.executor import canonical_produced
+from salt.graph.planner import Plan, Sinks, compile_plan
+from salt.graph.spec import KEY_SEP, Mode, TensorSpec
+from salt.utils.array_utils import maybe_copy
 
 __all__ = ["MODEL_VISIBLE_NAMESPACES", "GraphDataset"]
 

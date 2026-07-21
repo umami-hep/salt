@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.data import PhysliteGroupConfig, PhysliteReader
-from salt.core.data.xaod_reader import _pers_index, _pers_key  # noqa: PLC2701 - test internals
-from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.graph.spec import Mode
+from salt.data import PhysliteGroupConfig, PhysliteReader
+from salt.data.readers.xaod_reader import _pers_index, _pers_key  # noqa: PLC2701 - test internals
+from salt.graph.errors import ConfigError, SchemaError
+from salt.graph.spec import Mode
 
 ak = pytest.importorskip("awkward")
 np = pytest.importorskip("numpy")
@@ -174,7 +174,7 @@ def test_group_config_link_validation():
 
 def test_physlite_defaults_and_declare_io():
     """PhysliteReader defaults to AnalysisJets; declare_io keeps concrete pad_max dims."""
-    from salt.core.graph.spec import flatten_spec  # noqa: PLC0415
+    from salt.graph.spec import flatten_spec  # noqa: PLC0415
 
     reader = _reader()
     assert reader.jet_collection == "AnalysisJets"
@@ -189,8 +189,8 @@ def test_physlite_defaults_and_declare_io():
 
 def test_no_top_level_uproot_awkward_import():
     """The physlite + xaod reader modules must lazy-import uproot/awkward."""
-    import salt.core.data.physlite_reader as pmod  # noqa: PLC0415
-    import salt.core.data.xaod_reader as xmod  # noqa: PLC0415
+    import salt.data.readers.physlite_reader as pmod  # noqa: PLC0415
+    import salt.data.readers.xaod_reader as xmod  # noqa: PLC0415
 
     for mod in (pmod, xmod):
         tree = ast.parse(Path(mod.__file__).read_text())

@@ -12,7 +12,7 @@ import torch
 import yaml
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.utils.array_utils import join_structured_arrays
+from salt.utils.array_utils import join_structured_arrays
 
 __all__ = [
     "ELECTRON_VARS",

@@ -8,17 +8,17 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.dense import Dense
-from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
-from salt.core.onnx.reduces import mask_fill_flattened
-from salt.core.outputs.names import VERTEX_INDEX
-from salt.core.outputs.output_field import OutputField
-from salt.core.utils.union_find import get_node_assignment_jit
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.dense import Dense
+from salt.model.modules.stream_embed import _stream_len
+from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
+from salt.onnx.reduces import mask_fill_flattened
+from salt.outputs.names import VERTEX_INDEX
+from salt.outputs.output_field import OutputField
+from salt.utils.union_find import get_node_assignment_jit
 
 _DEFAULT_VTX_LOSS: dict[str, Any] = {
     "class_path": "torch.nn.BCEWithLogitsLoss",
@@ -165,7 +165,7 @@ class VertexingTaskModule(_TaskModuleBase):
         No-op for integer-id weighting. For name-based weighting, the origin
         label's class-name attr (``schema_group(stream).attrs[origin_label]``)
         maps each name to its index. Must be called (via
-        `salt.core.saltmodule.resolve_origin_weighting`) before `bind`.
+        `salt.model.saltmodule.resolve_origin_weighting`) before `bind`.
 
         Parameters
         ----------

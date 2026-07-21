@@ -9,12 +9,12 @@ from typing import Any
 import numpy as np
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import _UNNAMED, GraphModule, Mode, TensorSpec
-from salt.core.outputs.names import OBJECT_INDEX
-from salt.core.outputs.run_task_output import OutputSectionWriter
-from salt.core.utils.mask_utils import indices_from_mask
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import _UNNAMED, GraphModule, Mode, TensorSpec
+from salt.outputs.names import OBJECT_INDEX
+from salt.outputs.run_task_output import OutputSectionWriter
+from salt.utils.mask_utils import indices_from_mask
 
 
 @dataclass(frozen=True)

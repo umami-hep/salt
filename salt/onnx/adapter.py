@@ -10,12 +10,12 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import Plan
-from salt.core.graph.spec import Mode
-from salt.core.onnx.config import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import Plan
+from salt.graph.spec import Mode
+from salt.onnx.config import (
     ExportConfig,
     ExportInput,
     stream_of_input_port,
@@ -241,7 +241,7 @@ class OnnxAdapter(nn.Module):
         authority); returns it, or None when no sink is wired (which the
         adapter rejects).
         """
-        from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+        from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
         for step in plan.steps:
             if isinstance(step.module, OnnxExportSink):

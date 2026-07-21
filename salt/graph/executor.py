@@ -11,15 +11,15 @@ from typing import Any, NoReturn, cast
 
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import (
     ConfigError,
     DeclarationError,
     MutationError,
     UndeclaredAccessError,
 )
-from salt.core.graph.planner import Plan, PlanStep
-from salt.core.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec, split_key
+from salt.graph.planner import Plan, PlanStep
+from salt.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec, split_key
 
 __all__ = ["Executor", "canonical_produced"]
 
@@ -304,7 +304,7 @@ def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -
     value whose dotted path is in `expected` is a declared dict-valued leaf
     and is kept whole; empty undeclared dicts are kept as leaves so they
     surface as unexpected keys. Public because the dataset-side runner
-    (`salt.core.data.dataset`) merges module returns under the same
+    (`salt.data.dataset`) merges module returns under the same
     convention.
 
     Raises `DeclarationError` on malformed/duplicate keys (e.g. both

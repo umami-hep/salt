@@ -8,13 +8,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     FeaturewiseTransformation,
     PositionalEncoder,
     ResolvedSchema,

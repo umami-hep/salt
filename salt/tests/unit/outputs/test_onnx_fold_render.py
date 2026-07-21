@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.cli import load_config
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import Mode
-from salt.core.render import dot_source
+from salt.cli import load_config
+from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode
+from salt.graph.render import dot_source
 
 _CONFIGS = Path(__file__).parents[3] / "core" / "configs"
 _DUMMY = str(_CONFIGS / "gn2v2-dummy.yaml")

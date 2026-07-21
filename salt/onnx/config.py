@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import split_key
+from salt.graph.errors import ConfigError
+from salt.graph.spec import split_key
 
 __all__ = [
     "KNOWN_REDUCES",  # noqa: F822 - PEP 562 module __getattr__ (live registry view)
@@ -38,14 +38,14 @@ TRACK_SELECTIONS = (
 
 def _live_known_reduces() -> tuple[str, ...]:
     """Registered reduce names, from the live registry (deferred import keeps this module torch-free)."""
-    from salt.core.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
+    from salt.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
 
     return registered_reduces()
 
 
 def _live_per_token_reduces() -> tuple[str, ...]:
     """Registered per-token reduce names, from the live registry (deferred import)."""
-    from salt.core.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
+    from salt.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
 
     return per_token_reduces()
 
@@ -53,7 +53,7 @@ def _live_per_token_reduces() -> tuple[str, ...]:
 def __getattr__(name: str) -> tuple[str, ...]:
     """Resolve the live ``KNOWN_REDUCES``/``PER_TOKEN_REDUCES`` attributes (PEP 562).
 
-    These are live views of the `salt.core.onnx.reduces` registry, resolved on attribute access —
+    These are live views of the `salt.onnx.reduces` registry, resolved on attribute access —
     accessing them triggers the deferred registry import, never at this module's own import.
     """
     if name == "KNOWN_REDUCES":
@@ -102,11 +102,11 @@ class ExportInput:
 class ExportOutput:
     """One ONNX output group for the custom-reduce binder protocol.
 
-    The parameter object `salt.core.onnx.reduces.bind_reduce` (the public
+    The parameter object `salt.onnx.reduces.bind_reduce` (the public
     ``register_reduce`` extension surface) consumes; never config-parsed
     (`resolve_export_config` hard-errors on a config-declared
     ``export.outputs`` — the live output manifest is the folded
-    `salt.core.outputs.OnnxExportSink`).
+    `salt.outputs.OnnxExportSink`).
 
     Parameters
     ----------
@@ -160,7 +160,7 @@ class ExportConfig:
 
     The block carries the EXPORT-ONLY half of the contract: inputs, the Athena model
     name, and the ``rename:``/``combine:`` manifest post-processing. The output
-    manifest itself derives from the folded `salt.core.outputs.OnnxExportSink`;
+    manifest itself derives from the folded `salt.outputs.OnnxExportSink`;
     DECLARING ``outputs`` in a config is a hard error.
 
     Parameters

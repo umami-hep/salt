@@ -13,15 +13,15 @@ from pathlib import Path
 import lightning
 from torch.utils.data import DataLoader
 
-from salt.core.data.base import Reader, SaltDatasetModule, SetupBundle
-from salt.core.data.dataset import GraphDataset
-from salt.core.data.input_samples import InputSamples, deepest_source_path, source_num
-from salt.core.data.samplers import RandomBatchSampler
-from salt.core.data.vds_module import VDS
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import compile_setup_plan
-from salt.core.graph.setup_executor import run_setup_plan
-from salt.core.graph.spec import PRIMARY_MODES, Mode
+from salt.data.base import Reader, SaltDatasetModule, SetupBundle
+from salt.data.dataset import GraphDataset
+from salt.data.input_samples import InputSamples, deepest_source_path, source_num
+from salt.data.samplers import RandomBatchSampler
+from salt.data.readers.vds_module import VDS
+from salt.graph.errors import ConfigError
+from salt.graph.planner import compile_setup_plan
+from salt.graph.setup_executor import run_setup_plan
+from salt.graph.spec import PRIMARY_MODES, Mode
 
 __all__ = ["GraphDataModule"]
 

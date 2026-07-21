@@ -8,10 +8,10 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
-from salt.core.nn.base import SaltModelModule
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.model.base import SaltModelModule
 
 
 class MFLeadVertexDecorator(SaltModelModule):

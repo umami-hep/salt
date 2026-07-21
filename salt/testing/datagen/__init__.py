@@ -1,4 +1,4 @@
-"""Schema-driven synthetic test-data generation for salt/core: ``generate_data``,
+"""Schema-driven synthetic test-data generation for salt: ``generate_data``,
 ``write_h5``, ``compute_norm_dict``, ``compute_class_dict``, ``load_schema``.
 """
 

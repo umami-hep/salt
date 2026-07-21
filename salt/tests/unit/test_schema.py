@@ -1,14 +1,14 @@
-"""Tests for salt.core.schema (design §2.6, §11 risk 12)."""
+"""Tests for salt.schema (design §2.6, §11 risk 12)."""
 
 import h5py
 import numpy as np
 import pytest
 import yaml
 
-from salt.core.graph.errors import ConnectivityError, SchemaError
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.schema import (
+from salt.graph.errors import ConnectivityError, SchemaError
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.schema import (
     SCHEMA_VERSION,
     GroupSchema,
     Schema,
@@ -22,7 +22,7 @@ from salt.core.schema import (
 
 @pytest.fixture
 def h5_path(tmp_path):
-    """A tiny structured H5 file modeled on salt.core.testing.inputs.write_dummy_file."""
+    """A tiny structured H5 file modeled on salt.testing.inputs.write_dummy_file."""
     path = tmp_path / "train.h5"
     jets_dtype = np.dtype([("pt", "f4"), ("eta", "f4"), ("flavour_label", "i4")])
     tracks_dtype = np.dtype([("d0", "f4"), ("ftagTruthOriginLabel", "i4"), ("valid", "?")])

@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional
 
-from salt.core.nn.matcher import HungarianMatcher
+from salt.model.nn.matcher import HungarianMatcher
 
 __all__ = ["MaskFormerLoss"]
 

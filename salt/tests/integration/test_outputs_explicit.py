@@ -19,9 +19,9 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.core.main import CONFIG_DIR, main
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file
+from salt.main import CONFIG_DIR, main
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"

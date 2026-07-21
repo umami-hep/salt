@@ -9,18 +9,18 @@ import torch
 import yaml
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.stream_embed import _stream_len
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.stream_embed import _stream_len
 
 
 class Normaliser(SaltModelModule):
@@ -29,7 +29,7 @@ class Normaliser(SaltModelModule):
     The DEFAULT input normaliser: loads a precomputed ``norm_dict.yaml``
     (fixed per-stream, per-variable ``{mean, std}``). For a self-normalising
     variant that learns statistics online (no norm dict), use
-    ``class_path: salt.core.nn.MaskedInputNormaliser`` instead.
+    ``class_path: salt.model.modules.MaskedInputNormaliser`` instead.
 
     ``materialise()`` is the only file-touching hook (loads the norm dict and
     fills the buffers) — skipped on checkpoint load, where values arrive via

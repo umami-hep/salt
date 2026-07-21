@@ -9,11 +9,11 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.core.outputs.h5_sink import _SinkCallback
-from salt.core.outputs.names import _OUTPUTS_NAMESPACE
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.outputs.h5_sink import _SinkCallback
+from salt.outputs.names import _OUTPUTS_NAMESPACE
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ class OnnxExportSink(_SinkCallback):
     per-batch compute: it just flattens/names the populated ``outputs.*``
     into the flat Athena output tuple.
 
-    It is the folded-path counterpart to the legacy `salt.core.onnx.reduces`
+    It is the folded-path counterpart to the legacy `salt.onnx.reduces`
     path: `compile_onnx_plan` sources its ONNX sinks from
     ``declare_io(Mode.ONNX).requires`` when an export node is present, and
     the `OnnxAdapter` reads the named leaves from the executed bundle instead

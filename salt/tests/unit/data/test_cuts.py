@@ -1,12 +1,12 @@
-"""Unit tests for `salt.core.data.cuts` (Cut + CutSpec, plan 19, Track C)."""
+"""Unit tests for `salt.data.readers.cuts` (Cut + CutSpec, plan 19, Track C)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from salt.core.data import Cut, CutSpec
-from salt.core.graph.errors import ConfigError
+from salt.data import Cut, CutSpec
+from salt.graph.errors import ConfigError
 
 
 def _jets(pt: list[float], label: list[int]) -> np.ndarray:

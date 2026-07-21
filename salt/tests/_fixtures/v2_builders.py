@@ -14,8 +14,8 @@ import torch
 import yaml
 from torch import Tensor
 
-from salt.core.graph.planner import Plan, compile_plan
-from salt.core.graph.spec import (
+from salt.graph.planner import Plan, compile_plan
+from salt.graph.spec import (
     IO,
     GraphModule,
     Mode,
@@ -24,7 +24,7 @@ from salt.core.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
     LossSum,
@@ -36,7 +36,7 @@ from salt.core.nn import (
     TransformerEncoder,
     VectorConcat,
 )
-from salt.core.nn.tasks import ClassificationTaskModule, RegressionTaskModule
+from salt.model.modules.tasks import ClassificationTaskModule, RegressionTaskModule
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,

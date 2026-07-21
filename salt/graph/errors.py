@@ -26,7 +26,7 @@ _SUGGESTION_CUTOFF = 0.5
 
 
 class GraphError(Exception):
-    """Base class for all errors raised by the salt.core graph kernel."""
+    """Base class for all errors raised by the salt graph kernel."""
 
 
 class KeyCollisionError(GraphError):

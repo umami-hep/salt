@@ -208,7 +208,7 @@ def _task_manifest(sink: Any, mode: Any) -> list[dict[str, Any]]:
     Empty for an explicit-sink config (no RunTaskOutput section bound) — the
     resolved column/leaf tables below still carry the full schema in that case.
     """
-    from salt.core.outputs.run_task_output import RunTaskOutput  # noqa: PLC0415
+    from salt.outputs.run_task_output import RunTaskOutput  # noqa: PLC0415
 
     out: list[dict[str, Any]] = []
     section = getattr(sink, "_output_section", None) or {}
@@ -221,16 +221,16 @@ def _task_manifest(sink: Any, mode: Any) -> list[dict[str, Any]]:
 
 
 def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
-    from salt.core.cli import (  # noqa: PLC0415
+    from salt.cli import (  # noqa: PLC0415
         _as_sink_node,
         _static_export_model_name,
         _static_onnx_export_sink,
         _static_writer_sink_callback,
     )
-    from salt.core.graph.errors import ConfigError  # noqa: PLC0415
-    from salt.core.graph.spec import Mode  # noqa: PLC0415
-    from salt.core.onnx.export import _run_free_cli  # noqa: PLC0415
-    from salt.core.outputs import H5OutputSink  # noqa: PLC0415
+    from salt.graph.errors import ConfigError  # noqa: PLC0415
+    from salt.graph.spec import Mode  # noqa: PLC0415
+    from salt.onnx.export import _run_free_cli  # noqa: PLC0415
+    from salt.outputs import H5OutputSink  # noqa: PLC0415
 
     stack_paths = [CONFIG_DIR / c for c in spec.stack]
     missing = [str(p) for p in stack_paths if not p.is_file()]
@@ -316,8 +316,8 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
     # static plan-compile check (Mode.TEST / Mode.ONNX) through the real
     # planner — "the same machinery as salt graph validate" per plan 50 §A.
     try:
-        from salt.core.cli import load_config  # noqa: PLC0415
-        from salt.core.graph.planner import compile_plan  # noqa: PLC0415
+        from salt.cli import load_config  # noqa: PLC0415
+        from salt.graph.planner import compile_plan  # noqa: PLC0415
 
         gcfg = load_config([str(p) for p in stack_paths], overrides)
         compile_info: dict[str, Any] = {}

@@ -1,11 +1,11 @@
-"""Tests for salt.core.graph.bundle (design §2.1)."""
+"""Tests for salt.graph.bundle (design §2.1)."""
 
 import numpy as np
 import pytest
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import DeclarationError, GraphError, KeyCollisionError
+from salt.graph.bundle import Bundle
+from salt.graph.errors import DeclarationError, GraphError, KeyCollisionError
 
 # construction
 

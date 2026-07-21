@@ -1,18 +1,18 @@
-"""Unit tests for MaskDecoder (mirror of salt/core/nn/maskdecoder.py)."""
+"""Unit tests for MaskDecoder (mirror of salt/model/modules/maskdecoder.py)."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Executor,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     MaskDecoder,
     bind_all,
     materialise_all,

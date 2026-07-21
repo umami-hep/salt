@@ -1,4 +1,4 @@
-"""Regression tests for `salt.core.data.FTAG1LiteReader` (plan 19, Track C)."""
+"""Regression tests for `salt.data.FTAG1LiteReader` (plan 19, Track C)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from salt.core.data import Cut, CutSpec, FTAG1LiteGroupConfig, FTAG1LiteReader
-from salt.core.graph.errors import SchemaError
-from salt.core.graph.spec import Mode
+from salt.data import Cut, CutSpec, FTAG1LiteGroupConfig, FTAG1LiteReader
+from salt.graph.errors import SchemaError
+from salt.graph.spec import Mode
 
 uproot = pytest.importorskip("uproot")
 awkward = pytest.importorskip("awkward")
@@ -346,8 +346,8 @@ def test_cut_variable_read_even_if_not_in_groups() -> None:
 
 
 def test_features_processor_compat() -> None:
-    from salt.core.data import Features
-    from salt.core.graph.bundle import Bundle
+    from salt.data import Features
+    from salt.graph.bundle import Bundle
 
     reader = _reader()
     n = len(reader)
@@ -369,11 +369,11 @@ def test_features_processor_compat() -> None:
 def test_labels_processor_compat_origin_and_vertexing() -> None:
     from types import MappingProxyType
 
-    from salt.core.data import Labels
-    from salt.core.data.base import WorkerCtx
-    from salt.core.graph.bundle import Bundle
-    from salt.core.graph.planner import PlanStep
-    from salt.core.graph.spec import TensorSpec
+    from salt.data import Labels
+    from salt.data.base import WorkerCtx
+    from salt.graph.bundle import Bundle
+    from salt.graph.planner import PlanStep
+    from salt.graph.spec import TensorSpec
 
     reader = _reader()
     n = len(reader)
@@ -419,7 +419,7 @@ def test_labels_processor_compat_origin_and_vertexing() -> None:
 
 
 def test_demand_narrowed_read() -> None:
-    from salt.core.data.base import WorkerCtx
+    from salt.data.base import WorkerCtx
 
     reader = _reader()
     reader.bind(
@@ -459,7 +459,7 @@ def test_jaggedness_mismatch_raises() -> None:
 
 
 def test_no_jet_level_stream_raises() -> None:
-    from salt.core.graph.errors import ConfigError
+    from salt.graph.errors import ConfigError
 
     with pytest.raises(ConfigError):
         FTAG1LiteReader(
@@ -473,8 +473,8 @@ def test_no_jet_level_stream_raises() -> None:
 
 
 def test_no_top_level_uproot_awkward_import() -> None:
-    """The reader module must lazy-import uproot/awkward (salt.core w/o them)."""
-    import salt.core.data.ftag1lite_reader as mod
+    """The reader module must lazy-import uproot/awkward (salt w/o them)."""
+    import salt.data.readers.ftag1lite_reader as mod
 
     tree = ast.parse(Path(mod.__file__).read_text())
     top_level: set[str] = set()
@@ -548,7 +548,7 @@ def test_config_plan_compiles_all_modes(tmp_path: Path) -> None:
     """The shipped config plan-compiles in fit/test/onnx (label_universe-validated)."""
     import yaml
 
-    from salt.core.cli import main as salt_main
+    from salt.cli import main as salt_main
 
     nd = _compute_norm_dict(SAMPLE)
     nd_path = tmp_path / "norm_dict.yaml"
@@ -566,7 +566,7 @@ def test_roundtrip_smoke_fit_finite_loss(tmp_path: Path) -> None:
     """file -> FTAG1LiteReader -> Features/Labels -> torch -> salt fit --fast_dev_run."""
     import yaml
 
-    from salt.core.main import main as salt_main
+    from salt.main import main as salt_main
 
     nd = _compute_norm_dict(SAMPLE)
     nd_path = tmp_path / "norm_dict.yaml"

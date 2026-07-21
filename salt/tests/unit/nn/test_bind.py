@@ -1,4 +1,4 @@
-"""Unit tests for bind-schema resolution (mirror of salt/core/nn/bind.py)."""
+"""Unit tests for bind-schema resolution (mirror of salt/model/bind.py)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.graph import IO, Bundle, Executor, Mode
-from salt.core.nn import (
+from salt.graph import IO, Bundle, Executor, Mode
+from salt.model.modules import (
     BindError,
     SaltModelModule,
     bind_all,
@@ -60,7 +60,7 @@ class TestResolvedSchema:
                 schema.width(key)
 
     def test_conflicting_widths_raise(self):
-        from salt.core.nn.bind import _DimBindings
+        from salt.model.bind import _DimBindings
 
         dims = _DimBindings()
         dims.bind("F:x", 3, "here")
@@ -105,7 +105,7 @@ class TestMaterialisedTrainability:
 
 # bind_all / materialise_all de-duck-typing (plan 49 §5): the PRODUCTION caller argument
 # (SaltModule._graph_modules, saltmodule.py) is model-only by construction (never a terminal
-# sink — see salt.core.nn.bind.bind_all's docstring for the audit). But at least one TEST call
+# sink — see salt.model.bind.bind_all's docstring for the audit). But at least one TEST call
 # site (salt.tests.unit.onnx.test_adapter's gn2_folded_modules fixture) calls bind_all directly
 # on a per-mode LOCAL module dict with a terminal OnnxExportSink folded in, mirroring
 # SaltModule.compile_mode's own fold — so bind_all/materialise_all keep an explicit

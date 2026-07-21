@@ -13,9 +13,9 @@ import torch
 import yaml
 from torch import Tensor
 
-from salt.core.graph.planner import Plan, compile_plan
-from salt.core.graph.spec import GraphModule, Mode, NestedSpec, TensorSpec, unflatten_spec
-from salt.core.nn import (
+from salt.graph.planner import Plan, compile_plan
+from salt.graph.spec import GraphModule, Mode, NestedSpec, TensorSpec, unflatten_spec
+from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
     LossSum,
@@ -24,7 +24,7 @@ from salt.core.nn import (
     StreamEmbed,
     TransformerEncoder,
 )
-from salt.core.nn.tasks import ClassificationTaskModule, VertexingTaskModule
+from salt.model.modules.tasks import ClassificationTaskModule, VertexingTaskModule
 
 __all__ = [
     "ELECTRON_VARIABLES",

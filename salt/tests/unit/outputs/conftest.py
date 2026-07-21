@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.tasks import ClassificationTaskModule
-from salt.core.outputs import TaskOutput
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.tasks import ClassificationTaskModule
+from salt.outputs import TaskOutput
 
 
 _FLOAT_TOL = 1e-6

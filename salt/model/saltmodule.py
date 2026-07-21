@@ -16,13 +16,13 @@ import torch
 from torch import Tensor, nn
 from torch.optim import AdamW, Optimizer
 
-from salt.core.data.datamodule import GraphDataModule
-from salt.core.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import Plan, compile_plan
-from salt.core.graph.spec import (
+from salt.data.datamodule import GraphDataModule
+from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import Plan, compile_plan
+from salt.graph.spec import (
     KEY_SEP,
     GraphModule,
     Mode,
@@ -32,15 +32,15 @@ from salt.core.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import (
+from salt.model.base import SaltModelModule
+from salt.model.bind import (
     ResolvedSchema,
     bind_all,
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.losses import LossGLS, LossSum
-from salt.core.optim import HybridMuonAdamW
+from salt.model.modules.losses import LossGLS, LossSum
+from salt.optim import HybridMuonAdamW
 
 try:
     from lion_pytorch import Lion
@@ -232,7 +232,7 @@ class SaltModule(lightning.LightningModule):
             # accepted shapes (design §2.5): a graph-folded section writer
             # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter/
             # MaskFormerObjectsSink today) or a terminal callback-style sink
-            # (SinkModule) — see salt.core.nn.base.SaltModelModule for the
+            # (SinkModule) — see salt.model.base.SaltModelModule for the
             # audited rationale (real shipped configs only ever wire the
             # former here; terminal sinks are wired via trainer.callbacks:
             # and folded into the per-mode plan separately, at compile_mode).
@@ -519,7 +519,7 @@ class SaltModule(lightning.LightningModule):
         keys they read each VAL epoch, becoming FIT/VAL plan sinks so their
         producers survive demand pruning. Empty outside TRAINING modes.
         ``callbacks=None`` discovers from the attached trainer; explicit is the
-        static `salt.core.cli` path.
+        static `salt.cli` path.
         """
         if not (mode & Mode.TRAINING):
             return {}
@@ -543,7 +543,7 @@ class SaltModule(lightning.LightningModule):
         error, unlike TEST (writer demand, where it raises `ConfigError`).
         ONNX with no export-sink demand falls through to every declared
         ``preds.*`` key. Explicit writers/reader/callbacks are the static
-        `salt.core.cli` path; default None discovers from the trainer.
+        `salt.cli` path; default None discovers from the trainer.
         """
         produced: dict[str, str] = {}
         for name, module in self._graph_modules.items():
@@ -959,9 +959,9 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 "this checkpoint has the v1 (ModelWrapper) state-dict layout "
                 "('model.pool_net.*' keys) — v1 checkpoints are not supported by "
-                "salt.core. Use them at the v1 pin 29c67a1 (git checkout 29c67a1) "
+                "salt. Use them at the v1 pin 29c67a1 (git checkout 29c67a1) "
                 "or convert the weights offline (see the parity-closure section "
-                "of salt/core/README.md)."
+                "of docs/architecture.md)."
             )
         if state_dict and any("_orig_mod." in k for k in state_dict):
             checkpoint["state_dict"] = {

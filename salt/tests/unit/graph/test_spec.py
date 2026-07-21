@@ -1,10 +1,10 @@
-"""Tests for salt.core.graph.spec (design §2.2)."""
+"""Tests for salt.graph.spec (design §2.2)."""
 
 import dataclasses
 
 import pytest
 
-from salt.core.graph.spec import (
+from salt.graph.spec import (
     IO,
     KINDS,
     PRIMARY_MODES,

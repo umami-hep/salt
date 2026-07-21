@@ -10,18 +10,18 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.transformer_encoder import _ENC_LEN, _SEQ_LEN
+from salt.model.base import SaltModelModule
+from salt.model.modules.stream_embed import _stream_len
+from salt.model.modules.transformer_encoder import _ENC_LEN, _SEQ_LEN
 
 
 class Concat(SaltModelModule):

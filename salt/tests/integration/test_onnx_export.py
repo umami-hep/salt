@@ -11,9 +11,9 @@ import pytest
 import torch
 import yaml
 
-from salt.core.graph import Bundle, Executor, Mode
-from salt.core.graph.spec import GraphModule
-from salt.core.nn import (
+from salt.graph import Bundle, Executor, Mode
+from salt.graph.spec import GraphModule
+from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
     Normaliser,
@@ -23,8 +23,8 @@ from salt.core.nn import (
     bind_all,
     resolve_bind_schema,
 )
-from salt.core.nn.tasks import ClassificationTaskModule
-from salt.core.onnx import (
+from salt.model.modules.tasks import ClassificationTaskModule
+from salt.onnx import (
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -33,7 +33,7 @@ from salt.core.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.core.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
+from salt.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
 from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
@@ -278,7 +278,7 @@ def two_stream(tmp_path_factory):
     # W4 folded path: conversion nodes + OnnxExportSink (the off-graph manifest
     # is retired). The jets head's softmax + the two argmax aux leaves fold into
     # ClassProbs/SeqClassIndex nodes named by the sink.
-    from salt.core.outputs import ClassProbs
+    from salt.outputs import ClassProbs
 
     def _n(node, name):
         node.name = name
@@ -360,10 +360,10 @@ def cli_run(tmp_path_factory):
     """A real checkpoint + saved run config for the ``salt export`` CLI tests."""
     from lightning import Trainer
 
-    from salt.core.data import Features, GraphDataModule, H5StructuredReader, Labels
-    from salt.core.main import CONFIG_DIR
-    from salt.core.saltmodule import SaltModule
-    from salt.core.testing.inputs import write_dummy_file
+    from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+    from salt.main import CONFIG_DIR
+    from salt.model.saltmodule import SaltModule
+    from salt.testing.inputs import write_dummy_file
 
     tmp_path = tmp_path_factory.mktemp("onnx_cli_run")
     run_dir = tmp_path / "run"
@@ -412,7 +412,7 @@ def cli_run(tmp_path_factory):
 
 class TestSaltSurface:
     def test_export_block_round_trips_through_the_parser(self):
-        from salt.core.main import CONFIG_DIR, SaltCLI
+        from salt.main import CONFIG_DIR, SaltCLI
 
         cli = SaltCLI(
             args=[
@@ -435,14 +435,14 @@ class TestSaltSurface:
         assert export_cfg.combine == []
 
     def test_dispatch_wired_into_salt(self):
-        from salt.core.main import main as salt_main
+        from salt.main import main as salt_main
 
         with pytest.raises(SystemExit) as excinfo:
             salt_main(["export", "--help"])
         assert excinfo.value.code == 0
 
     def test_cli_export_from_checkpoint(self, cli_run, capsys):
-        from salt.core.onnx.export import main as export_main
+        from salt.onnx.export import main as export_main
 
         rc = export_main([
             "--ckpt_path",
@@ -485,7 +485,7 @@ class TestSaltSurface:
         # a run config trained WITHOUT an export: block must fail with the
         # exact working stacking command in the message (M4-review fix: the
         # old 'stack an override config' hint was not actionable)
-        from salt.core.onnx.export import main as export_main
+        from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config.pop("export")
@@ -501,7 +501,7 @@ class TestSaltSurface:
         # the documented escape hatch: -c is repeatable, later files
         # deep-merge on top (the fit semantics) — an export-block-only
         # override file completes a run config trained without one
-        from salt.core.onnx.export import main as export_main
+        from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         export_block = {"export": config.pop("export")}
@@ -535,7 +535,7 @@ class TestSaltSurface:
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
         # needed (W4: the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
-        from salt.core.onnx.export import main as export_main
+        from salt.onnx.export import main as export_main
 
         rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
         assert rc == 0
@@ -548,7 +548,7 @@ class TestSaltSurface:
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
         # the M4.5 migration error must fire on the CLI path with the
         # writers: pointer (§4.1 bar)
-        from salt.core.onnx.export import main as export_main
+        from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config["export"] = dict(config["export"])

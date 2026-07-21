@@ -12,12 +12,12 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Reader, WorkerCtx
-from salt.core.data.stream import pad_fill
-from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.graph.planner import PlanStep
-from salt.core.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.core.schema import GroupSchema, Schema
+from salt.data.base import Reader, WorkerCtx
+from salt.data.readers.stream import pad_fill
+from salt.graph.errors import ConfigError, SchemaError
+from salt.graph.planner import PlanStep
+from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.schema import GroupSchema, Schema
 
 __all__ = ["MultiSampleReader", "SampleConfig"]
 

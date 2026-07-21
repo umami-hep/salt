@@ -11,12 +11,12 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode, TensorSpec
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.dense import Dense, _reject_width_keys
-from salt.core.outputs.output_field import OutputField
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, TensorSpec
+from salt.model.base import SaltModelModule
+from salt.model.nn.dense import Dense, _reject_width_keys
+from salt.outputs.output_field import OutputField
 
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 

@@ -1,12 +1,12 @@
-"""Unit tests for `SaltModelModule` (mirror of salt/core/nn/base.py, plan 49)."""
+"""Unit tests for `SaltModelModule` (mirror of salt/model/base.py, plan 49)."""
 
 from __future__ import annotations
 
 import pytest
 from torch import nn
 
-from salt.core.graph import IO, Mode
-from salt.core.nn import SaltModelModule
+from salt.graph import IO, Mode
+from salt.model.modules import SaltModelModule
 
 
 class _Bare(SaltModelModule):

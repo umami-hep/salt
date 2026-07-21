@@ -7,7 +7,7 @@ import math
 import numpy as np
 import pytest
 
-from salt.core.testing.datagen import (
+from salt.testing.datagen import (
     SchemaError,
     compute_class_dict,
     compute_norm_dict,

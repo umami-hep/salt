@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from salt.core.graph.bundle import Bundle
+from salt.graph.bundle import Bundle
 
 
 LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}

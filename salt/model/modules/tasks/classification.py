@@ -9,20 +9,20 @@ import torch
 import yaml
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.dense import Dense
-from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.tasks.base import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.dense import Dense
+from salt.model.modules.stream_embed import _stream_len
+from salt.model.modules.tasks.base import (
     _checked_weight_source,
     _loss_class,
     _TaskModuleBase,
 )
-from salt.core.outputs.names import pascal_case
-from salt.core.outputs.output_field import OutputField
-from salt.core.utils.tensor_utils import masked_softmax
+from salt.outputs.names import pascal_case
+from salt.outputs.output_field import OutputField
+from salt.utils.tensor_utils import masked_softmax
 
 _DEFAULT_CLS_LOSS: dict[str, Any] = {"class_path": "torch.nn.CrossEntropyLoss"}
 
@@ -32,7 +32,7 @@ class ClassificationTaskModule(_TaskModuleBase):
 
     ``class_names`` is REQUIRED and explicit. When the dataset schema names the
     label's classes, the configured list is cross-checked (set and order) by
-    `salt.core.saltmodule.check_class_names`. The head width is
+    `salt.model.saltmodule.check_class_names`. The head width is
     ``len(class_names)``; input/context widths are inferred at `bind`.
 
     Declarative class weights: ``weight_source: {from_class_dict: <path>}``

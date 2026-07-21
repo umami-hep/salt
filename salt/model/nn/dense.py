@@ -7,8 +7,8 @@ from typing import Any
 
 from torch import Tensor, nn
 
-from salt.core.graph.errors import ConfigError
-from salt.core.utils.tensor_utils import (
+from salt.graph.errors import ConfigError
+from salt.utils.tensor_utils import (
     attach_context,
 )
 

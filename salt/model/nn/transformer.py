@@ -8,10 +8,10 @@ from typing import Any, final
 import torch
 from torch import BoolTensor, Tensor, nn
 
-from salt.core.nn.attention import ATTN_TYPES, Attention, EdgeAttention
-from salt.core.nn.dense import GLU
-from salt.core.nn.layernorm import _LAYERNORMS
-from salt.core.utils.tensor_utils import (
+from salt.model.nn.attention import ATTN_TYPES, Attention, EdgeAttention
+from salt.model.nn.dense import GLU
+from salt.model.nn.layernorm import _LAYERNORMS
+from salt.utils.tensor_utils import (
     redo_padding,
     undo_padding,
 )

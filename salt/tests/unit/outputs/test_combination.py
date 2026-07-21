@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.core.outputs import Combination
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.outputs import Combination
 
 _SRC = "outputs.jets.jets_classification"
 

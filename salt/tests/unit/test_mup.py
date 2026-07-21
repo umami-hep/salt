@@ -1,4 +1,4 @@
-"""Tests for the muP routing surface + tooling (`salt.core.mup`, plan 12 sub-wave B)."""
+"""Tests for the muP routing surface + tooling (`salt.model.mup`, plan 12 sub-wave B)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from salt.core.graph import ConfigError, Mode
-from salt.core.graph.planner import compile_plan
-from salt.core.main import CONFIG_DIR
-from salt.core.mup import (
+from salt.graph import ConfigError, Mode
+from salt.graph.planner import compile_plan
+from salt.main import CONFIG_DIR
+from salt.model.mup import (
     _combined_graph,
     _parse_cli,
     build_model_at_widths,
@@ -20,8 +20,8 @@ from salt.core.mup import (
     plot_coord_data,
     setup_mup,
 )
-from salt.core.nn.bind import resolve_bind_schema
-from salt.core.saltmodule import (
+from salt.model.bind import resolve_bind_schema
+from salt.model.saltmodule import (
     SaltModule,
     module_mup_enabled,
     module_supports_mup,
@@ -77,7 +77,7 @@ _MUP_NUM_LAYERS = 2
 
 def _muP_modules(norm_dict: Path) -> dict:
     """A GN2_muP-shaped module dict with mup embed + mup encoder."""
-    from salt.core.nn import (  # noqa: PLC0415 - test-local fixture
+    from salt.model.modules import (  # noqa: PLC0415 - test-local fixture
         Concat,
         GlobalAttentionPooling,
         LossSum,
@@ -85,7 +85,7 @@ def _muP_modules(norm_dict: Path) -> dict:
         StreamEmbed,
         TransformerEncoder,
     )
-    from salt.core.nn.tasks import ClassificationTaskModule  # noqa: PLC0415
+    from salt.model.modules.tasks import ClassificationTaskModule  # noqa: PLC0415
 
     modules: dict = {
         "norm": Normaliser(norm_dict=norm_dict, streams=["jets", "tracks"], global_object="jets"),

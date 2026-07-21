@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode, SinkModule, flatten_spec
-from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, SinkModule, flatten_spec
+from salt.outputs import OnnxExportLeaf, OnnxExportSink
 
 _JET = "outputs.jets.jets_classification"
 _PBC = "outputs.jets.pbc"

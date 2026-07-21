@@ -1,8 +1,8 @@
-"""Tests for salt.core.graph.planner (design §3.1, §2.2, §4.1, §4.2, principle 10)."""
+"""Tests for salt.graph.planner (design §3.1, §2.2, §4.1, §4.2, principle 10)."""
 
 import pytest
 
-from salt.core.graph.errors import (
+from salt.graph.errors import (
     AllModesDeadError,
     ConfigError,
     ConnectivityError,
@@ -10,7 +10,7 @@ from salt.core.graph.errors import (
     KindError,
     ShapeError,
 )
-from salt.core.graph.planner import (
+from salt.graph.planner import (
     SINKS,
     SOURCES,
     DeadOutput,
@@ -18,7 +18,7 @@ from salt.core.graph.planner import (
     compile_plan,
     deadcode,
 )
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 # toy fixtures (no physics — M1 scope)
 

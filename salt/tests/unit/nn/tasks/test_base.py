@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Executor,
@@ -14,13 +14,13 @@ from salt.core.graph import (
     compile_plan,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     LossSum,
     bind_all,
     materialise_all,
     resolve_bind_schema,
 )
-from salt.core.nn.tasks import (
+from salt.model.modules.tasks import (
     ClassificationTaskModule,
     RegressionTaskModule,
     VertexingTaskModule,
@@ -235,7 +235,7 @@ class TestExposeOptOut:
     def test_exposed_pred_cannot_be_a_test_sink(self, norm_paths):
         # the exposed pred is mode-inactive in TEST, so demanding it as a TEST
         # sink is a no-producer error naming the FIT/VAL modes where it lives
-        from salt.core.graph.errors import GraphError
+        from salt.graph.errors import GraphError
 
         modules = self._modules_with_exposed_aux(norm_paths[0])
         with pytest.raises(GraphError, match="FIT/VAL"):

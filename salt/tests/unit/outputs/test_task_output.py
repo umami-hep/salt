@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     IO,
     Mode,
     TensorSpec,
@@ -12,9 +12,9 @@ from salt.core.graph import (
     sym_dim,
     unflatten_spec,
 )
-from salt.core.graph.bundle import Bundle
-from salt.core.nn import resolve_bind_schema
-from salt.core.outputs import (
+from salt.graph.bundle import Bundle
+from salt.model.modules import resolve_bind_schema
+from salt.outputs import (
     ClassProbs,
     ClassProbsOp,
     ConversionOp,

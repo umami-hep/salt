@@ -7,7 +7,7 @@ from pathlib import Path
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 
-from salt.core.graph.errors import ConfigError
+from salt.graph.errors import ConfigError
 
 
 class Checkpoint(ModelCheckpoint):
@@ -16,7 +16,7 @@ class Checkpoint(ModelCheckpoint):
     Filename and directory are a contract: ``salt test`` without
     ``--ckpt_path`` resolves the best epoch by globbing
     ``<config dir>/{ckpts,checkpoints}/*.ckpt`` and parsing the smallest
-    ``loss=<value>`` out of each name (`salt.core.main._best_checkpoint`).
+    ``loss=<value>`` out of each name (`salt.main._best_checkpoint`).
     Keep the filename stem and the glob in sync.
 
     Parameters
@@ -63,7 +63,7 @@ class Checkpoint(ModelCheckpoint):
             log_dir = trainer.log_dir or trainer.default_root_dir
             if log_dir is not None and str(log_dir).startswith(("s3://", "s3:/")):
                 raise ConfigError(
-                    "salt.core.callbacks.Checkpoint does not support s3:// log dirs yet "
+                    "salt.callbacks.Checkpoint does not support s3:// log dirs yet "
                     "(rides with the M6 Comet/run-dir wiring); use a local trainer.log_dir "
                     "(v1 checkpoint.py:34-43 s3 branch deferred)"
                 )

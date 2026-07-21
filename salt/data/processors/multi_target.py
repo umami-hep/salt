@@ -8,9 +8,9 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Processor
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.data.base import Processor
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 # v1 operators — the conditional-replacement comparators, applied to the
 # selection label against the configured value.

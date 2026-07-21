@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from salt.core.cli import load_config
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import Mode
-from salt.core.nn import MaskFormerMatchedLoss
-from salt.core.nn.bind import BindError, ResolvedSchema, bind_all, resolve_bind_schema
+from salt.cli import load_config
+from salt.graph.errors import ConfigError
+from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode
+from salt.model.modules import MaskFormerMatchedLoss
+from salt.model.bind import BindError, ResolvedSchema, bind_all, resolve_bind_schema
 
-# this file is at salt/tests/unit/nn/ — the configs live at salt/core/configs/
+# this file is at salt/tests/unit/nn/ — the configs live at salt/configs/
 _MASKFORMER = str(Path(__file__).parents[3] / "core" / "configs" / "MaskFormer.yaml")
 _OVERRIDES = ["model.modules.norm.init_args.norm_dict=unused.yaml"]
 

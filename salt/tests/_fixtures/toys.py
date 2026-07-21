@@ -8,8 +8,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.graph.bundle import Bundle
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 __all__ = [
     "ToyDead",

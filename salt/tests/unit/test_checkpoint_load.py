@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.core.graph.errors import ConfigError
-from salt.core.saltmodule import SaltModule
+from salt.graph.errors import ConfigError
+from salt.model.saltmodule import SaltModule
 
 
 def _on_load(checkpoint: dict) -> None:
@@ -19,7 +19,7 @@ class TestV1CheckpointRejected:
     def test_v1_layout_raises_explicit_config_error(self):
         """A v1 (ModelWrapper) state-dict layout fails EARLY with a clear message.
 
-        v1 checkpoints carry ``model.pool_net.*`` keys — salt.core must reject
+        v1 checkpoints carry ``model.pool_net.*`` keys — salt must reject
         them with one explicit error (pin 29c67a1 / offline conversion), not a
         cascade of hundreds of missing-key failures from the strict load.
         """

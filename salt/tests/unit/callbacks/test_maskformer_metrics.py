@@ -1,11 +1,11 @@
-"""Tests for `salt.core.callbacks.MaskformerMetrics` (split from test_callbacks.py)."""
+"""Tests for `salt.callbacks.MaskformerMetrics` (split from test_callbacks.py)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from salt.core.graph.spec import Mode
-from salt.core.saltmodule import SaltModule
+from salt.graph.spec import Mode
+from salt.model.saltmodule import SaltModule
 from salt.tests.unit.callbacks.conftest import LRS, make_matched_bundle
 
 
@@ -16,7 +16,7 @@ class TestMaskformerMetrics:
     def test_fit_val_demand_declares_matched_keys(self):
         # the DP2 declaration: the matcher-permuted class/object-class/mask keys
         # the callback reads each VAL epoch (config-only, no setup needed)
-        from salt.core.callbacks import MaskformerMetrics
+        from salt.callbacks import MaskformerMetrics
 
         callback = MaskformerMetrics()
         assert callback.fit_val_demand({}) == (
@@ -30,9 +30,9 @@ class TestMaskformerMetrics:
         # the criterion: the REAL MaskformerMetrics callback, attached to a
         # SaltModule carrying a MaskFormerMatchedLoss, makes the matched.* keys
         # FIT/VAL plan sinks (DP2) AND keeps the matched loss alive under pruning
-        from salt.core.callbacks import MaskformerMetrics
-        from salt.core.graph.planner import compile_plan
-        from salt.core.nn import LossSum
+        from salt.callbacks import MaskformerMetrics
+        from salt.graph.planner import compile_plan
+        from salt.model.modules import LossSum
         from salt.tests._fixtures.v2_builders import (
             build_matched_loss_module,
         )
@@ -51,7 +51,7 @@ class TestMaskformerMetrics:
         # beyond losses.* — the callback sink is what keeps matched.* reachable)
         m = 5
         n_cls = 3
-        from salt.core.graph.spec import TensorSpec, unflatten_spec
+        from salt.graph.spec import TensorSpec, unflatten_spec
 
         f = Mode.FIT
         sources = unflatten_spec({
@@ -83,7 +83,7 @@ class TestMaskformerMetrics:
 
     def test_compute_metrics_from_matched_bundle(self):
         # the metrics are computed from matched.objects.* (bundle-native) and stashed
-        from salt.core.callbacks import MaskformerMetrics
+        from salt.callbacks import MaskformerMetrics
 
         callback = MaskformerMetrics()
         trainer = SimpleNamespace(fast_dev_run=False)
@@ -104,7 +104,7 @@ class TestMaskformerMetrics:
         assert 0.0 <= callback.last_metrics["class_exact_match"] <= 1.0
 
     def test_only_val_skips_train_logging(self):
-        from salt.core.callbacks import MaskformerMetrics
+        from salt.callbacks import MaskformerMetrics
 
         callback = MaskformerMetrics(only_val=True)
         logged: dict[str, float] = {}

@@ -1,6 +1,6 @@
 """Export output reduces: the live registry of bundle-port -> ONNX-output
 conversions (`register_reduce`) plus shared math helpers used by the folded
-conversion nodes in `salt.core.outputs.producers`.
+conversion nodes in `salt.outputs.producers`.
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import TensorSpec
-from salt.core.onnx.config import ExportOutput
-from salt.core.utils.mask_utils import indices_from_mask
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import TensorSpec
+from salt.onnx.config import ExportOutput
+from salt.utils.mask_utils import indices_from_mask
 
 __all__ = [
     "BoundReduce",
@@ -323,7 +323,7 @@ def reduce_spec(name: str) -> ReduceSpec:
     except KeyError:
         raise ConfigError(
             f"unknown reduce {name!r} — registry: {registered_reduces()} "
-            "(register it via salt.core.onnx.reduces.register_reduce; design §7.3)"
+            "(register it via salt.onnx.reduces.register_reduce; design §7.3)"
         ) from None
 
 

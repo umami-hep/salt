@@ -7,16 +7,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from salt.core.data.base import SaltDatasetModule, SetupBundle
-from salt.core.graph.executor import canonical_produced
-from salt.core.graph.setup_spec import (
+from salt.data.base import SaltDatasetModule, SetupBundle
+from salt.graph.executor import canonical_produced
+from salt.graph.setup_spec import (
     SETUP_STAGES,
     SetupIO,
     SetupStage,
     SourceSpec,
     unflatten_source_spec,
 )
-from salt.core.graph.spec import IO, Mode, check_key_component
+from salt.graph.spec import IO, Mode, check_key_component
 
 __all__ = ["InputSamples"]
 

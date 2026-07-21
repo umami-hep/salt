@@ -16,13 +16,13 @@ import numpy as np
 import pytest
 from numpy.lib.recfunctions import repack_fields
 
-from salt.core.data import Features, GraphDataset, H5StructuredReader, Labels
-from salt.core.graph.errors import GraphError
-from salt.core.graph.spec import Mode
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.tasks import ClassificationTaskModule
-from salt.core.schema import dump_schema, save_schema
-from salt.core.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.data import Features, GraphDataset, H5StructuredReader, Labels
+from salt.graph.errors import GraphError
+from salt.graph.spec import Mode
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.tasks import ClassificationTaskModule
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]

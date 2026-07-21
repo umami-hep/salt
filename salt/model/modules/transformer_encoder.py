@@ -8,9 +8,9 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     KEY_SEP,
     Mode,
@@ -18,11 +18,11 @@ from salt.core.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.featurewise import FeaturewiseTransformation
-from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.transformer import Transformer
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.featurewise import FeaturewiseTransformation
+from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.transformer import Transformer
 
 _SEQ_LEN = sym_dim("S", "seq")
 

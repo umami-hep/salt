@@ -6,10 +6,10 @@ from collections.abc import Sequence
 
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.outputs.run_task_output import OutputSectionWriter
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.outputs.run_task_output import OutputSectionWriter
 
 
 class PadMaskWriter(OutputSectionWriter):

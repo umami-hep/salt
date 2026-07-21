@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from salt.core.cli import load_config
-from salt.core.cli import main as cli_main
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import AllModesDeadError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import SINKS, SOURCES, Edge, compile_plan, deadcode
-from salt.core.graph.spec import Mode
+from salt.cli import load_config
+from salt.cli import main as cli_main
+from salt.graph.bundle import Bundle
+from salt.graph.errors import AllModesDeadError
+from salt.graph.executor import Executor
+from salt.graph.planner import SINKS, SOURCES, Edge, compile_plan, deadcode
+from salt.graph.spec import Mode
 from salt.tests._fixtures.toys import ToyDead
 
 CONFIG_DIR = Path(__file__).parent.parent / "_fixtures" / "configs"

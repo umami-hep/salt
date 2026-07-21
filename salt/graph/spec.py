@@ -412,8 +412,8 @@ assigned before compile."""
 _OBJECT_STREAM = "objects"
 """The maskformer object-stream key component — the ``labels.objects.*`` /
 ``matched.objects.*`` contract shared by the data-side target builder
-(`salt.core.data.maskformer_targets`) and the nn-side matched loss
-(`salt.core.nn.maskformer_matched_loss`)."""
+(`salt.data.processors.maskformer_targets`) and the nn-side matched loss
+(`salt.model.modules.maskformer_matched_loss`)."""
 
 
 @runtime_checkable
@@ -444,7 +444,7 @@ class SinkModule(Protocol):
     excludes it from the per-batch forward + write-once merge loop: a sink
     produces no tensor and is not invoked as a callable. This is the
     inverse of the setup-only partition
-    (`salt.core.data.datamodule._is_setup_only`), which removes setup
+    (`salt.data.datamodule._is_setup_only`), which removes setup
     modules from the per-batch plan entirely — a sink stays IN the plan.
 
     The marker is the ``is_sink()`` method returning ``True`` (duck-typed,

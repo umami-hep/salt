@@ -10,16 +10,16 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.dense import Dense
-from salt.core.nn.stream_embed import _stream_len
-from salt.core.nn.tasks.base import _loss_class, _TaskModuleBase
-from salt.core.outputs.output_field import OutputField
-from salt.core.utils.array_utils import listify
-from salt.core.utils.scalers import RegressionTargetScaler
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.dense import Dense
+from salt.model.modules.stream_embed import _stream_len
+from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
+from salt.outputs.output_field import OutputField
+from salt.utils.array_utils import listify
+from salt.utils.scalers import RegressionTargetScaler
 
 _DEFAULT_REG_LOSS: dict[str, Any] = {"class_path": "torch.nn.MSELoss"}
 _DEFAULT_GAUSS_LOSS: dict[str, Any] = {"class_path": "torch.nn.GaussianNLLLoss"}
@@ -61,7 +61,7 @@ class RegressionTaskModule(_TaskModuleBase):
     per-element loss before the mean. Both require ``loss.reduction == 'none'``.
 
     The `MultiTarget` processor (row-wise target replacement) is a
-    dataset-side sibling (`salt.core.data.processors.MultiTarget`), not a task
+    dataset-side sibling (`salt.data.processors.MultiTarget`), not a task
     flag — it runs over the label bundle before the task forward.
     """
 

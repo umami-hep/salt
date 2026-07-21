@@ -8,9 +8,9 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Processor
-from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.data.base import Processor
+from salt.graph.errors import ConfigError, SchemaError
+from salt.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, unflatten_spec
 
 
 @dataclass(frozen=True)

@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode, flatten_spec
-from salt.core.nn.norm import Normaliser
-from salt.core.saltmodule import SaltModule
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, flatten_spec
+from salt.model.modules.norm import Normaliser
+from salt.model.saltmodule import SaltModule
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
 
@@ -85,9 +85,9 @@ class TestSaltModulePreflights:
         # the real trainer path: fresh fit + nonexistent norm dict ->
         # ConfigError from the preflight at fit start (NOT a bare
         # FileNotFoundError from inside materialise)
-        from salt.core.schema import dump_schema, save_schema
+        from salt.schema import dump_schema, save_schema
         from salt.tests.integration.test_saltmodule import build_datamodule, build_model, make_trainer
-        from salt.core.testing.inputs import write_dummy_file
+        from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)
@@ -113,10 +113,10 @@ class TestSaltModulePreflights:
     def test_validate_reports_preflight_as_warning(self, tmp_path, capsys):
         # the documented data-free flow: validate with a placeholder norm
         # dict must stay exit 0 (warning only), --strict promotes it
-        from salt.core.cli import main as cli_main
-        from salt.core.main import CONFIG_DIR
-        from salt.core.schema import dump_schema, save_schema
-        from salt.core.testing.inputs import write_dummy_file
+        from salt.cli import main as cli_main
+        from salt.main import CONFIG_DIR
+        from salt.schema import dump_schema, save_schema
+        from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)

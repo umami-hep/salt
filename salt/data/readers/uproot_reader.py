@@ -17,11 +17,11 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.base import Reader, WorkerCtx, _require_root_deps
-from salt.core.data.stream import StreamConfig
-from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.core.schema import GroupSchema
+from salt.data.base import Reader, WorkerCtx, _require_root_deps
+from salt.data.readers.stream import StreamConfig
+from salt.graph.errors import ConfigError, SchemaError
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.schema import GroupSchema
 
 __all__ = ["UprootGroupConfig", "UprootReader"]
 
@@ -181,7 +181,7 @@ class UprootReader(Reader):
         """
         import hashlib  # noqa: PLC0415 - opt-in staging path only
 
-        from salt.core.data.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+        from salt.data.readers.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
 
         root = Path(root)
         srcs = self.sources()

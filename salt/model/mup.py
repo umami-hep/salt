@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import Mode
-from salt.core.nn.bind import bind_all, materialise_all, resolve_bind_schema
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode
+from salt.model.bind import bind_all, materialise_all, resolve_bind_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas as pd
@@ -44,8 +44,8 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
     """
     import warnings  # noqa: PLC0415 - local, parse-time only
 
-    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular
+    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415
+    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular
 
     args: list[str] = []
     for cfg in configs:
@@ -187,8 +187,8 @@ def _model_boundary_sources(cli: Any) -> Any:
     reader's ``global_object`` flag, and the model's FIT label demand.
     Raises `ConfigError` when no `Features` module is configured.
     """
-    from salt.core.data.features import Features  # noqa: PLC0415 - heavy/circular
-    from salt.core.graph.spec import TensorSpec, sym_dim, unflatten_spec  # noqa: PLC0415
+    from salt.data.processors.features import Features  # noqa: PLC0415 - heavy/circular
+    from salt.graph.spec import TensorSpec, sym_dim, unflatten_spec  # noqa: PLC0415
 
     model, dm = cli.model, cli.datamodule
     reader = dm.reader
@@ -229,7 +229,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
     """The combined data + model module dict; binds the dataset `Labels`
     processors to the reader streams so their label-key universe resolves.
     """
-    from salt.core.data.labels import Labels  # noqa: PLC0415 - heavy/circular
+    from salt.data.processors.labels import Labels  # noqa: PLC0415 - heavy/circular
 
     model, dm = cli.model, cli.datamodule
     data_modules = dm.modules
@@ -611,7 +611,7 @@ def setup_mup(args: Sequence[str] | None = None) -> int:
     int
         Process exit code.
     """
-    from salt.core.cli import main as graph_main  # noqa: PLC0415 - heavy/circular
+    from salt.cli import main as graph_main  # noqa: PLC0415 - heavy/circular
 
     argv = list(sys.argv[1:] if args is None else args)
     return graph_main(["mup-shapes", *argv])

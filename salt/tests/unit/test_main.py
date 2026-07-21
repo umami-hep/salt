@@ -1,4 +1,4 @@
-"""Tests for the ``salt`` config surface / ``salt.core.main`` (design §5, §5.3)."""
+"""Tests for the ``salt`` config surface / ``salt.main`` (design §5, §5.3)."""
 
 from __future__ import annotations
 
@@ -10,21 +10,21 @@ import pytest
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
-from salt.core.callbacks import Checkpoint, ProgressBar
-from salt.core.config_utils import disable_logger_in_config
-from salt.core.data import GraphDataModule
-from salt.core.graph.errors import ConfigError
-from salt.core.main import (
+from salt.callbacks import Checkpoint, ProgressBar
+from salt.config_utils import disable_logger_in_config
+from salt.data import GraphDataModule
+from salt.graph.errors import ConfigError
+from salt.main import (
     CONFIG_DIR,
     SaltCLI,
     _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
     main,
 )
-from salt.core.nn.tasks import ClassificationTaskModule
-from salt.core.saltmodule import SaltModule
-from salt.core.schema import dump_schema, save_schema
+from salt.model.modules.tasks import ClassificationTaskModule
+from salt.model.saltmodule import SaltModule
+from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
-from salt.core.testing.inputs import write_dummy_file
+from salt.testing.inputs import write_dummy_file
 
 DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
@@ -54,7 +54,7 @@ model:
   init_args:
     modules:
       track_type:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -161,8 +161,8 @@ class TestPrintConfig:
         assert excinfo.value.code == 0
         printed = capsys.readouterr().out
         # full class_path/init_args blocks with defaults made explicit
-        assert "class_path: salt.core.SaltModule" in printed
-        assert "class_path: salt.core.nn.TransformerEncoder" in printed
+        assert "class_path: salt.model.SaltModule" in printed
+        assert "class_path: salt.model.modules.TransformerEncoder" in printed
         assert "torch-math" in printed
 
         # feeding the printed config back yields the same parsed namespaces
@@ -201,7 +201,7 @@ class TestDeepMerge:
         cli = make_cli(data, extra=["--config", override])
         enc_cfg = cli.config.model.init_args.modules["encoder"]
         # class_path inherited, other init_args survive, the one key updated
-        assert enc_cfg["class_path"] == "salt.core.nn.TransformerEncoder"
+        assert enc_cfg["class_path"] == "salt.model.modules.TransformerEncoder"
         assert enc_cfg["init_args"]["num_layers"] == 3
         assert enc_cfg["init_args"]["dim"] == 16
         assert set(cli.model.net.keys()) == GN2V2_MODULES  # siblings survive
@@ -260,7 +260,7 @@ class TestDottedOverrides:
 
 class TestCallbacksDict:
     def test_base2_defaults_assembled(self, data):
-        # base2.yaml ships the salt.core.callbacks.Checkpoint port (a
+        # base2.yaml ships the salt.callbacks.Checkpoint port (a
         # ModelCheckpoint subclass) + ProgressBar + ModelSummary (D2)
         cli = make_cli(data)
         assert any(isinstance(cb, Checkpoint) for cb in cli.trainer.callbacks)
@@ -297,7 +297,7 @@ class TestCallbacksDict:
 CONFMAT_CALLBACK_YAML = """
 callbacks:
   confmat:
-    class_path: salt.core.callbacks.ConfusionMatrix
+    class_path: salt.callbacks.ConfusionMatrix
     init_args:
       task_name: jets_classification
 """
@@ -307,7 +307,7 @@ class TestStaticFitValCallbackSinks:
     def test_validate_fit_with_callback_passes(self, data, tmp_path):
         # a configured ConfusionMatrix must not break `salt graph validate
         # --mode fit` (it declares preds/labels the task already keeps alive)
-        from salt.core.main import main as graph_main
+        from salt.main import main as graph_main
 
         override = write_yaml(tmp_path, "confmat.yaml", CONFMAT_CALLBACK_YAML)
         rc = graph_main([
@@ -333,8 +333,8 @@ class TestStaticFitValCallbackSinks:
     def test_load_config_fit_sinks_include_callback_demand(self, data, tmp_path):
         # the static adapter sees the callback FIT/VAL sinks + their origins,
         # exactly as the runtime SaltModule does
-        from salt.core.cli import load_config
-        from salt.core.graph.spec import Mode
+        from salt.cli import load_config
+        from salt.graph.spec import Mode
 
         override = write_yaml(tmp_path, "confmat.yaml", CONFMAT_CALLBACK_YAML)
         cfg = load_config(
@@ -388,7 +388,7 @@ class TestFitSmoke:
         # the resolved config was persisted (SaveConfigCallback, design §5)
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
-        assert "class_path: salt.core.SaltModule" in configs[0].read_text()
+        assert "class_path: salt.model.SaltModule" in configs[0].read_text()
         # M3-review fix: the SAVED run config (which carries ckpt_path: null)
         # round-trips into the salt graph tooling
         assert "ckpt_path" in configs[0].read_text()
@@ -745,7 +745,7 @@ class TestGraphFitConfigAdapter:
 # ===========================================================================
 # Wave-1 class_dict fan-out (formerly test_wave1_fanout.py)
 #
-# These exercise the --class_dict convenience flag on salt.core.main
+# These exercise the --class_dict convenience flag on salt.main
 # (SaltCLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
 # colliding with the CLI-surface ones above. norm_dict is NOT a fan-out flag —
 # it is the Normaliser module's own config (set on

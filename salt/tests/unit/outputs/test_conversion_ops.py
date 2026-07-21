@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from salt.core.graph import Mode
-from salt.core.graph.bundle import Bundle
-from salt.core.outputs import ClassProbsOp, SeqClassIndexOp, SeqClassProbsOp, TaskOutput
-from salt.core.utils.tensor_utils import masked_softmax  # parity-oracle access
+from salt.graph import Mode
+from salt.graph.bundle import Bundle
+from salt.outputs import ClassProbsOp, SeqClassIndexOp, SeqClassProbsOp, TaskOutput
+from salt.utils.tensor_utils import masked_softmax  # parity-oracle access
 from salt.tests.unit.outputs.conftest import (
     _FLOAT_TOL,
     _STREAM_J,

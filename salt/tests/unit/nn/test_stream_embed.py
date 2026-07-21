@@ -1,21 +1,21 @@
-"""Unit tests for StreamEmbed (mirror of salt/core/nn/stream_embed.py)."""
+"""Unit tests for StreamEmbed (mirror of salt/model/modules/stream_embed.py)."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from salt.core.graph import (
+from salt.graph import (
     Bundle,
     ConfigError,
     Mode,
     flatten_spec,
 )
-from salt.core.nn import (
+from salt.model.modules import (
     ResolvedSchema,
     StreamEmbed,
 )
-from salt.core.nn.dense import Dense
+from salt.model.nn.dense import Dense
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,

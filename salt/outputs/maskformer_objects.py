@@ -7,14 +7,14 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.nn.base import SaltModelModule
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.model.base import SaltModelModule
 
-# The MaskFormer export math is inlined verbatim in salt.core.onnx.reduces (the
+# The MaskFormer export math is inlined verbatim in salt.onnx.reduces (the
 # shared math seam); this node reuses that exact copy so the two can never drift.
-from salt.core.onnx.reduces import get_maskformer_outputs
+from salt.onnx.reduces import get_maskformer_outputs
 
 
 class MaskFormerObjects(SaltModelModule):

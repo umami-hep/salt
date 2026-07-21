@@ -12,9 +12,9 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     _OBJECT_STREAM,
     IO,
     Mode,
@@ -22,10 +22,10 @@ from salt.core.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.maskformer_loss import MaskFormerLoss
-from salt.core.nn.matcher import HungarianMatcher
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.maskformer_loss import MaskFormerLoss
+from salt.model.nn.matcher import HungarianMatcher
 
 __all__ = ["MaskFormerMatchedLoss"]
 

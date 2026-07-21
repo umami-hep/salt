@@ -14,10 +14,10 @@ from typing import Any
 
 import numpy as np
 
-from salt.core.data.stream import OffsetIndex
-from salt.core.data.uproot_reader import UprootGroupConfig, UprootReader
-from salt.core.graph.errors import ConfigError, SchemaError
-from salt.core.schema import GroupSchema, Schema
+from salt.data.readers.stream import OffsetIndex
+from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
+from salt.graph.errors import ConfigError, SchemaError
+from salt.schema import GroupSchema, Schema
 
 __all__ = ["EasyjetGroupConfig", "EasyjetReader"]
 

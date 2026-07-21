@@ -12,16 +12,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.core.graph import Mode
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import flatten_spec
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.tasks import (
+from salt.graph import Mode
+from salt.graph.bundle import Bundle
+from salt.graph.spec import flatten_spec
+from salt.model.bind import ResolvedSchema
+from salt.model.modules.tasks import (
     ClassificationTaskModule,
     RegressionTaskModule,
     VertexingTaskModule,
 )
-from salt.core.outputs.run_task_output import RunTaskOutput
+from salt.outputs.run_task_output import RunTaskOutput
 
 _RUN = "GN2"
 

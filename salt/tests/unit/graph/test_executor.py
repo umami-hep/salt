@@ -1,20 +1,20 @@
-"""Tests for salt.core.graph.executor (design §3.2, §4.1)."""
+"""Tests for salt.graph.executor (design §3.2, §4.1)."""
 
 import pytest
 import torch
 from torch import nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import (
     ConfigError,
     DeclarationError,
     KeyCollisionError,
     MutationError,
     UndeclaredAccessError,
 )
-from salt.core.graph.executor import Executor
-from salt.core.graph.planner import compile_plan
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.graph.executor import Executor
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 # toy fixtures (no physics — M1 scope)
 

@@ -1,4 +1,4 @@
-"""Tests for `salt.core.callbacks.Checkpoint` (split from test_callbacks.py)."""
+"""Tests for `salt.callbacks.Checkpoint` (split from test_callbacks.py)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from salt.core.callbacks import Checkpoint
-from salt.core.graph.errors import ConfigError
+from salt.callbacks import Checkpoint
+from salt.graph.errors import ConfigError
 
 
 # Checkpoint (the v1 salt.callbacks.Checkpoint port — D2 slice) + ProgressBar
@@ -74,8 +74,8 @@ class TestCheckpoint:
     def test_best_checkpoint_resolves_what_setup_writes(self, tmp_path):
         # the salt-test run-dir contract end-to-end: a checkpoint named by the
         # callback under its setup-forced ckpts/ dir is discovered by
-        # salt.core.main._best_checkpoint (the no-ckpt_path fallback)
-        from salt.core.main import _best_checkpoint
+        # salt.main._best_checkpoint (the no-ckpt_path fallback)
+        from salt.main import _best_checkpoint
 
         cb = Checkpoint(monitor_loss="val/loss")
         cb.setup(_ckpt_trainer(str(tmp_path)), SimpleNamespace(), stage="fit")
@@ -84,6 +84,6 @@ class TestCheckpoint:
         for epoch, loss in ((8, 0.70123), (9, 0.64624)):
             name = cb.format_checkpoint_name({"epoch": epoch, "val/loss": loss})
             (ckpt_dir / name).write_text("ckpt")
-        (tmp_path / "config.yaml").write_text("class_path: salt.core.SaltModule\n")
+        (tmp_path / "config.yaml").write_text("class_path: salt.model.SaltModule\n")
         best = _best_checkpoint(tmp_path / "config.yaml")
         assert Path(best).name == "epoch=009-loss=0.64624.ckpt"  # lowest loss

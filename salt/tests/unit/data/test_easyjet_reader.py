@@ -1,4 +1,4 @@
-"""Regression tests for `salt.core.data.EasyjetReader` (plan 01, v2 dataloaders)."""
+"""Regression tests for `salt.data.EasyjetReader` (plan 01, v2 dataloaders)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from salt.core.data import EasyjetGroupConfig, EasyjetReader
-from salt.core.graph.spec import Mode
+from salt.data import EasyjetGroupConfig, EasyjetReader
+from salt.graph.spec import Mode
 
 uproot = pytest.importorskip("uproot")
 awkward = pytest.importorskip("awkward")
@@ -189,8 +189,8 @@ def test_slice_crossing_file_boundary(two_files: tuple[Path, list[dict]]) -> Non
 
 
 def test_features_processor_compat(single_file: tuple[Path, dict]) -> None:
-    from salt.core.data import Features
-    from salt.core.graph.bundle import Bundle
+    from salt.data import Features
+    from salt.graph.bundle import Bundle
 
     path, arrays = single_file
     t = 8
@@ -221,11 +221,11 @@ def test_features_processor_compat(single_file: tuple[Path, dict]) -> None:
 def test_labels_processor_compat_and_padding_masked(single_file: tuple[Path, dict]) -> None:
     from types import MappingProxyType
 
-    from salt.core.data import Labels
-    from salt.core.data.base import WorkerCtx
-    from salt.core.graph.bundle import Bundle
-    from salt.core.graph.planner import PlanStep
-    from salt.core.graph.spec import TensorSpec
+    from salt.data import Labels
+    from salt.data.base import WorkerCtx
+    from salt.graph.bundle import Bundle
+    from salt.graph.planner import PlanStep
+    from salt.graph.spec import TensorSpec
 
     path, arrays = single_file
     t = 8
@@ -270,7 +270,7 @@ def test_labels_processor_compat_and_padding_masked(single_file: tuple[Path, dic
 
 
 def test_demand_narrowed_read(single_file: tuple[Path, dict]) -> None:
-    from salt.core.data.base import WorkerCtx
+    from salt.data.base import WorkerCtx
 
     path, _ = single_file
     reader = EasyjetReader(groups=_groups(truncate=8), filename=path)
@@ -299,7 +299,7 @@ def test_schema_built_and_label_universe(single_file: tuple[Path, dict]) -> None
 
 
 def test_missing_branch_raises(single_file: tuple[Path, dict]) -> None:
-    from salt.core.graph.errors import SchemaError
+    from salt.graph.errors import SchemaError
 
     path, _ = single_file
     bad = {
@@ -313,10 +313,10 @@ def test_missing_branch_raises(single_file: tuple[Path, dict]) -> None:
 
 
 def test_no_top_level_uproot_awkward_import() -> None:
-    """The reader module must lazy-import uproot/awkward (salt.core w/o them)."""
+    """The reader module must lazy-import uproot/awkward (salt w/o them)."""
     src = Path(EasyjetReader.__module__.replace(".", "/") + ".py")
     # resolve via the imported module's file
-    import salt.core.data.easyjet_reader as mod
+    import salt.data.readers.easyjet_reader as mod
 
     tree = ast.parse(Path(mod.__file__).read_text())
     top_level_imports: set[str] = set()
@@ -400,7 +400,7 @@ def test_missing_root_deps_raises_helpful_error(single_file: tuple[Path, dict]) 
     sys.meta_path.insert(0, blocker)
     # Also ensure the easyjet_reader module re-runs its guard by busting the
     # cached imports inside the module (clear uproot from its namespace if loaded)
-    import salt.core.data.easyjet_reader as _mod
+    import salt.data.readers.easyjet_reader as _mod
 
     _orig_uproot = _mod.__dict__.pop("uproot", None)
 
@@ -511,7 +511,7 @@ def test_datamodule_trigger_restages_per_stage_reader_for_vds_precreation(
     two_files: tuple[Path, list[dict]], tmp_path: Path
 ) -> None:
     """The GraphDataModule thin trigger restages so VDS precreation sees staged paths."""
-    from salt.core.data.datamodule import GraphDataModule
+    from salt.data.datamodule import GraphDataModule
 
     d, _ = two_files
     proto = EasyjetReader(groups=_groups(), filename=d)

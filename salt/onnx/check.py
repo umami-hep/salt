@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from salt.core.onnx.adapter import OnnxAdapter
-from salt.core.onnx.config import stream_of_input_port
+from salt.onnx.adapter import OnnxAdapter
+from salt.onnx.config import stream_of_input_port
 
 __all__ = ["CheckResult", "check_onnx", "compare_once", "make_session"]
 

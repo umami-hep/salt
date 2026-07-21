@@ -10,7 +10,7 @@ from torch import BoolTensor, Size, Tensor, nn
 from torch.nn import functional
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from salt.core.nn.layernorm import RMSNorm
+from salt.model.nn.layernorm import RMSNorm
 
 try:
     from flash_attn import flash_attn_varlen_qkvpacked_func as _flash_attn_func

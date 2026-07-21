@@ -24,9 +24,9 @@ from typing import Any
 
 import yaml
 
-from salt.core.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
-from salt.core.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
-from salt.core.graph.spec import (
+from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
+from salt.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
+from salt.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
     GraphModule,
@@ -39,10 +39,10 @@ from salt.core.graph.spec import (
     split_key,
     unflatten_spec,
 )
-from salt.core.nn.bind import resolve_bind_schema
-from salt.core.onnx.config import resolve_export_config
-from salt.core.render import dot_source, plan_table
-from salt.core.schema import dump_schema, load_schema, save_schema
+from salt.model.bind import resolve_bind_schema
+from salt.onnx.config import resolve_export_config
+from salt.graph.render import dot_source, plan_table
+from salt.schema import dump_schema, load_schema, save_schema
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
 
@@ -236,8 +236,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     module-name collision between ``data.modules`` and ``model.modules``.
     """
     # local import: the trainer surface (lightning/jsonargparse) is heavy
-    # and circular with this module (salt.core.main dispatches to cli.main)
-    from salt.core.data.labels import Labels  # noqa: PLC0415 - heavy/circular (docstring)
+    # and circular with this module (salt.main dispatches to cli.main)
+    from salt.data.processors.labels import Labels  # noqa: PLC0415 - heavy/circular (docstring)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
@@ -392,8 +392,8 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
     do). Returns the constructed `SaltCLI` (nothing executed, no data
     touched); raises `ConfigError` on a parse/instantiate failure.
     """
-    from salt.core.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.core.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
+    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415
+    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
 
     args: list[str] = []
     for path in paths:
@@ -409,7 +409,7 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
     try:
         with warnings.catch_warnings():
             # programmatic argv triggers Lightning's 'args parameter is
-            # intended...' warning — filtered exactly as salt.core.main and
+            # intended...' warning — filtered exactly as salt.main and
             # the salt export run-free parse do (noise on tooling whose
             # output users are told to read)
             warnings.filterwarnings(
@@ -442,7 +442,7 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
     `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """
-    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
@@ -465,7 +465,7 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
     module dict so ``salt graph plot --mode onnx`` renders it and keeps the
     folded conversion nodes alive.
     """
-    from salt.core.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
 
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
@@ -477,7 +477,7 @@ def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
     block's ``model_name`` if set, else the sanitised run name — matching
     `salt export`'s own default.
     """
-    from salt.core.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
+    from salt.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
 
     name = getattr(export_cfg, "model_name", None) if export_cfg is not None else None
     return name or sanitised_model_name(run_name)
@@ -633,9 +633,9 @@ def _fail(message: str) -> int:
 
 def _format_graph_error(err: GraphError) -> str:
     """Format a kernel error with its class prefixed, e.g.
-    ``"salt.core.graph.ConnectivityError: ..."``.
+    ``"salt.graph.ConnectivityError: ..."``.
     """
-    return f"salt.core.graph.{type(err).__name__}: {err}"
+    return f"salt.graph.{type(err).__name__}: {err}"
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +664,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if cfg.reader is not None:
         # default-on class-names <-> schema-attrs cross-check (set AND order);
         # raises ConfigError -> formatted by main()
-        from salt.core.saltmodule import check_class_names  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import check_class_names  # noqa: PLC0415 - heavy/circular
 
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
@@ -676,7 +676,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # `salt graph validate` findings (warnings promotable under --strict).
         # The hard errors would already abort the parse above; this is the
         # first-class CI check + the warning capture.
-        from salt.core.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
             stdlib_warnings.simplefilter("always")
@@ -696,7 +696,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # surfaced here as a first-class CI check (these are hard errors — they
         # would already abort the parse above; this captures the OK line / the
         # error message for the validate report).
-        from salt.core.saltmodule import validate_edge_port  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import validate_edge_port  # noqa: PLC0415 - heavy/circular
 
         try:
             n_edge = validate_edge_port(cfg.model_modules)
@@ -1244,11 +1244,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _add_mup_parsers(sub: Any) -> None:
     """Add the ``mup-shapes`` / ``mup-coord-check`` subcommands.
 
-    Deferred to `salt.core.mup` handlers (heavy mup/pandas imports stay out of
+    Deferred to `salt.model.mup` handlers (heavy mup/pandas imports stay out of
     the graph-tooling startup path). The ``setup_mup`` console entry forwards
     to ``mup-shapes`` (pyproject.toml).
     """
-    from salt.core.mup import cmd_mup_coord_check, cmd_mup_shapes  # noqa: PLC0415
+    from salt.model.mup import cmd_mup_coord_check, cmd_mup_shapes  # noqa: PLC0415
 
     shapes = sub.add_parser(
         "mup-shapes",

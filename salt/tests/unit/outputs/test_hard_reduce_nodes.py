@@ -6,15 +6,15 @@ import numpy as np
 import pytest
 import torch
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import Mode, flatten_spec
-from salt.core.onnx.reduces import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, flatten_spec
+from salt.onnx.reduces import (
     get_maskformer_outputs,
     mask_fill_flattened,
 )
-from salt.core.utils.union_find import get_node_assignment_jit
-from salt.core.outputs import (
+from salt.utils.union_find import get_node_assignment_jit
+from salt.outputs import (
     H5OutputSink,
     MaskFormerObject,
     MaskFormerObjects,

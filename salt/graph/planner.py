@@ -17,7 +17,7 @@ from itertools import pairwise
 from types import MappingProxyType
 from typing import Any, Literal, NoReturn, TypeAlias
 
-from salt.core.graph.errors import (
+from salt.graph.errors import (
     _SUGGESTION_CUTOFF,
     AllModesDeadError,
     ConfigError,
@@ -27,12 +27,12 @@ from salt.core.graph.errors import (
     KindError,
     ShapeError,
 )
-from salt.core.graph.setup_spec import (
+from salt.graph.setup_spec import (
     SetupStage,
     SourceSpec,
     flatten_source_spec,
 )
-from salt.core.graph.spec import (
+from salt.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
     GraphModule,
@@ -316,7 +316,7 @@ def deadcode(
         if mode == Mode.ONNX
         else ""
     )
-    # A CONVERSION PRODUCER (a salt.core.outputs node producing an
+    # A CONVERSION PRODUCER (a salt.outputs node producing an
     # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/VertexUnionFind/etc.)
     # that prunes in a non-ONNX mode is the by-design export-pruning story:
     # its OnnxExportSink (or an H5OutputSink) is inactive in that mode, so

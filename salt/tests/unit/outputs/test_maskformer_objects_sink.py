@@ -9,12 +9,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.outputs import MaskFormerObjectsSink
-from salt.core.outputs.h5_sink import _ExtraGroupCtx
-from salt.core.outputs.maskformer_objects_sink import MaskFormerObjectWriter, _MFWriteCtxShim
-from salt.core.outputs.names import OBJECT_INDEX
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.outputs import MaskFormerObjectsSink
+from salt.outputs.h5_sink import _ExtraGroupCtx
+from salt.outputs.maskformer_objects_sink import MaskFormerObjectWriter, _MFWriteCtxShim
+from salt.outputs.names import OBJECT_INDEX
 from salt.tests._fixtures.writers_common import (  # noqa: F401  (pytest fixtures)
     L_FILE,
     data,
@@ -31,7 +31,7 @@ OBJECT_CLASSES = ["b", "c", "null"]
 RUN_NAME = "MaskFormer"
 # the upstream group name the v2 "objects" group deliberately diverges from
 # (recorded decision 2026-06-30; upstream equivalence closed at pin 6570e85,
-# see the parity-closure section of salt/core/README.md).
+# see the parity-closure section of docs/architecture.md).
 UPSTREAM_OBJECT_GROUP = "truth_hadrons"
 # the deferred per-object regression eval columns — KNOWN-ABSENT from v2's objects
 # group (no v2 writer emits per-object regression in TEST yet; MaskFormer.yaml).
@@ -182,7 +182,7 @@ class TestByteParityVsDelegatedWriter:
 # v1 op chain (predictionwriter.py:267-308) + the demand/schema declarations.
 # (Folded here from tests/unit/writers/test_maskformer.py when the standalone
 # writer family was retired at plan 50 Phase E; the writer now lives in
-# salt.core.outputs.maskformer_objects_sink.)
+# salt.outputs.maskformer_objects_sink.)
 
 
 class TestMaskFormerObjectWriterCore:
@@ -222,7 +222,7 @@ class TestMaskFormerObjectWriterCore:
         """write() reproduces the v1 op chain byte-for-byte (probs/class/MaskIndex/masks)."""
         from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
-        from salt.core.utils.mask_utils import indices_from_mask
+        from salt.utils.mask_utils import indices_from_mask
         from salt.tests._fixtures.v2_builders import make_maskformer_writer_batch
 
         writer = _legacy_writer(data)
@@ -273,11 +273,11 @@ class TestMaskFormerObjectWriterCore:
             MaskFormerObjectWriter(object_classes=[])
 
     def test_object_index_imported_not_redeclared(self):
-        # merge condition 4: the strings live ONLY in salt.core.outputs.names
-        import salt.core.outputs.maskformer_objects_sink as src
+        # merge condition 4: the strings live ONLY in salt.outputs.names
+        import salt.outputs.maskformer_objects_sink as src
 
         source = Path(src.__file__).read_text()
-        assert "from salt.core.outputs.names import OBJECT_INDEX" in source
+        assert "from salt.outputs.names import OBJECT_INDEX" in source
         assert '"MaskIndex"' not in source and "'MaskIndex'" not in source
         assert '"HadronIndex"' not in source and "'HadronIndex'" not in source
 
@@ -321,8 +321,8 @@ class TestMaskFormerOnnxTupleOrder:
     """Explicit MaskFormer object leaves appear AFTER the section block."""
 
     def _onnx_sink(self, tmp_path: Path):
-        from salt.core.outputs import OnnxExportLeaf, OnnxExportSink
-        from salt.core.outputs.run_task_output import RunTaskOutput
+        from salt.outputs import OnnxExportLeaf, OnnxExportSink
+        from salt.outputs.run_task_output import RunTaskOutput
         from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
         from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 
@@ -378,7 +378,7 @@ class TestObjectMasksShapeGuard:
 
     def _sink_with_state(self, extra_shapes=None):
         """Minimal H5OutputSink with _extra_shapes and a stub extra-group node set up."""
-        from salt.core.outputs import H5OutputSink
+        from salt.outputs import H5OutputSink
 
         sink = H5OutputSink(extra_groups=["mf_objects"])
         # Set the internal state that open_schema would normally populate.
@@ -406,7 +406,7 @@ class TestObjectMasksShapeGuard:
 
     def test_truncated_constituent_axis_raises_config_error(self):
         """object_masks with T_model < T_file raises ConfigError (not an h5py broadcast crash)."""
-        from salt.core.graph.errors import ConfigError
+        from salt.graph.errors import ConfigError
 
         B, T_model = 4, 30  # T_model < T_file=40 — a truncated constituent axis
         sink = self._sink_and_node(arr_shape=(B, self._M, T_model))
@@ -416,7 +416,7 @@ class TestObjectMasksShapeGuard:
 
     def test_error_message_names_declared_and_actual_shape(self):
         """The ConfigError message includes both the declared and actual per-row shapes."""
-        from salt.core.graph.errors import ConfigError
+        from salt.graph.errors import ConfigError
 
         B, T_model = 4, 30
         sink = self._sink_and_node(arr_shape=(B, self._M, T_model))

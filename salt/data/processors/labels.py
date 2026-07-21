@@ -8,10 +8,10 @@ from typing import ClassVar, Literal
 
 import numpy as np
 
-from salt.core.data.base import Processor, WorkerCtx
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.planner import PlanStep
-from salt.core.graph.spec import IO, KEY_SEP, Mode, TensorSpec, unflatten_spec
+from salt.data.base import Processor, WorkerCtx
+from salt.graph.errors import ConfigError
+from salt.graph.planner import PlanStep
+from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, unflatten_spec
 
 
 class Labels(Processor):

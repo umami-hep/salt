@@ -8,7 +8,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, get_args
 
-from salt.core.graph.spec import KEY_SEP, check_key_component, split_key
+from salt.graph.spec import KEY_SEP, check_key_component, split_key
 
 __all__ = [
     "SOURCE_KINDS",

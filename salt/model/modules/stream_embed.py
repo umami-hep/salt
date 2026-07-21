@@ -7,21 +7,21 @@ from typing import Any
 
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.errors import ConfigError
-from salt.core.graph.spec import (
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import (
     IO,
     Mode,
     TensorSpec,
     sym_dim,
     unflatten_spec,
 )
-from salt.core.nn.base import SaltModelModule
-from salt.core.nn.bind import ResolvedSchema
-from salt.core.nn.dense import Dense, _reject_width_keys
-from salt.core.nn.featurewise import FeaturewiseTransformation
-from salt.core.nn.posenc import PositionalEncoder
-from salt.core.utils.tensor_utils import (
+from salt.model.base import SaltModelModule
+from salt.model.bind import ResolvedSchema
+from salt.model.nn.dense import Dense, _reject_width_keys
+from salt.model.nn.featurewise import FeaturewiseTransformation
+from salt.model.nn.posenc import PositionalEncoder
+from salt.utils.tensor_utils import (
     attach_context,
 )
 
