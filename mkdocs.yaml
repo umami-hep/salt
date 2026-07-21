@@ -45,6 +45,7 @@ nav:
       - GN2 jet tagging on open data: tutorials/gn2_opendata.md
       - Tutorial (public): tutorial.md
       - Tutorial (internal): tutorial-Xbb.md
+      - Fine-tuning a pretrained tagger: tutorials/finetuning.md
 
 plugins:
   - search
