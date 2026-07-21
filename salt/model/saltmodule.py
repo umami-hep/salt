@@ -42,7 +42,14 @@ from salt.model.bind import (
 )
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW
-from salt.schedule import StageConfig, TrainingSchedule
+from salt.schedule import (
+    StageConfig,
+    TrainingSchedule,
+    apply_stage_freeze,
+    clear_frozen_grads,
+    reducer_safe_freeze_required,
+    trainable_named_params,
+)
 
 try:
     from lion_pytorch import Lion
@@ -207,6 +214,13 @@ class SaltModule(lightning.LightningModule):
         # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
         # epoch via `train`.
         self._frozen_module_names: set[str] = set()
+        # reducer-safe freeze mode (plan 06/W6): decided at fit `setup` from the
+        # attached strategy + schedule. When True, schedule-managed params keep
+        # `requires_grad=True` at DDP wrap (so a later unfreeze stays rank-synced);
+        # "frozen" is enforced by optimizer-exclusion + eval + per-step grad
+        # clearing. False (default) keeps the requires_grad-based freeze (optimal
+        # + bitwise-parity for single-device / static-freeze runs).
+        self._reducer_safe_freeze: bool = False
         # edge-stream-first + EdgeAttention-backend forcing bind-time validators.
         # No-op without an edge encoder.
         _validate_edge_port(modules)
@@ -763,29 +777,40 @@ class SaltModule(lightning.LightningModule):
         """
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
+        # Decide the freeze mode BEFORE applying the stage-0 mask: under a DDP
+        # strategy with a freeze set that changes across stages, keep every managed
+        # param requires_grad=True at wrap so the reducer manages them across flips
+        # (W6 fix for the init-frozen-unfreeze desync). Off DDP / static freeze,
+        # stays False → the requires_grad-based freeze (bitwise-parity path).
+        self._reducer_safe_freeze = reducer_safe_freeze_required(
+            getattr(self._trainer, "strategy", None), self._schedule
+        )
         self._current_stage_index = 0
         self._apply_stage_freeze(self._schedule.stages[0])
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
         """Apply `stage`'s freeze mask as a DELTA against the currently-frozen set
-        (plan D1 semantics): modules entering the frozen set get
-        ``requires_grad=False`` + ``eval()`` (stops dropout + running-stat updates
-        during training); modules leaving it are (re-)enabled with
-        ``requires_grad=True`` + ``train()`` — so a boundary that *unfreezes* a
-        module restores it. Modules outside both sets are left untouched, so the
-        desugared no-freeze path never mutates a param (bitwise parity). Records
-        the frozen set so `train` re-asserts eval after Lightning's per-epoch
-        ``model.train()``.
+        (plan D1 semantics): modules entering the frozen set get ``eval()`` (stops
+        dropout + running-stat updates during training); modules leaving it are
+        restored to ``train()``. Modules outside both sets are left untouched, so
+        the desugared no-freeze path never mutates a param (bitwise parity).
+
+        The requires_grad handling depends on the freeze mode (see
+        `apply_stage_freeze`): the default mode toggles ``requires_grad`` so the
+        optimizer excludes frozen params by it; reducer-safe mode (W6, under DDP
+        with a freeze-flipping schedule) leaves ``requires_grad=True`` on every
+        managed param so the reducer keeps managing it across the flip, excluding
+        frozen params from the optimizer by membership instead. Records the frozen
+        set so `train` re-asserts eval after Lightning's per-epoch ``model.train()``
+        and `configure_optimizers`/`on_after_backward` can key off it.
         """
         frozen = self._schedule.frozen_names(stage)
-        for name in frozen - self._frozen_module_names:  # newly frozen
-            module = self.net[name]
-            module.requires_grad_(False)
-            module.eval()
-        for name in self._frozen_module_names - frozen:  # newly unfrozen
-            module = self.net[name]
-            module.requires_grad_(True)
-            module.train()
+        apply_stage_freeze(
+            self.net,
+            frozen,
+            self._frozen_module_names,
+            reducer_safe=self._reducer_safe_freeze,
+        )
         self._frozen_module_names = frozen
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
@@ -945,6 +970,18 @@ class SaltModule(lightning.LightningModule):
                 self.net[name].eval()
         return self
 
+    def on_after_backward(self) -> None:
+        """Reducer-safe mode only: clear the frozen modules' gradients each step,
+        after the DDP reducer has finished all-reducing them. Frozen params keep
+        ``requires_grad=True`` (to stay in the reducer across freeze flips), so
+        they accumulate a gradient every backward that is never stepped; clearing
+        it here stops a frozen stage's gradient from surviving to the first
+        optimizer step after the module is unfrozen. No-op off reducer-safe mode
+        (frozen params have ``requires_grad=False`` there and never get a grad).
+        """
+        if self._reducer_safe_freeze and self._frozen_module_names:
+            clear_frozen_grads(self.net, self._frozen_module_names)
+
     # -- steps ---------------------------------------------------------------------
 
     def forward(self, batch: Mapping[str, Any] | Bundle, mode: Mode = Mode.TEST) -> Bundle:
@@ -1064,10 +1101,17 @@ class SaltModule(lightning.LightningModule):
             "lr": lrs["initial"],
             "weight_decay": lrs.get("weight_decay", 1e-5),
         }
+        # Optimizer owns only the active stage's TRAINABLE params: those with
+        # requires_grad NOT under a frozen module's prefix. Keying off the frozen
+        # SET (not just requires_grad) also excludes a reducer-safe frozen module,
+        # whose params keep requires_grad=True — so weight decay never touches a
+        # frozen param either. In the default freeze mode this selects the exact
+        # same set as the old requires_grad filter (bitwise parity).
+        named_trainable = trainable_named_params(self.named_parameters(), self._frozen_module_names)
         if optimizer_class is HybridMuonAdamW:
-            params: Any = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+            params: Any = named_trainable
         else:
-            params = [p for p in self.parameters() if p.requires_grad]
+            params = [p for _, p in named_trainable]
         opt = optimizer_class(params, **optimizer_kwargs)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,

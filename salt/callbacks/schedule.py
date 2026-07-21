@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 from lightning.pytorch.callbacks import Callback
 
+from salt.schedule import reducer_safe_freeze_required
+
 if TYPE_CHECKING:
     from lightning.pytorch import LightningModule, Trainer
 
@@ -40,13 +42,16 @@ class TrainingScheduleCallback(Callback):
         if stage != "fit":
             return
         schedule = getattr(pl_module, "_schedule", None)
-        if schedule is None or not schedule.changes_freeze_across_stages():
-            return
         strategy = trainer.strategy
-        ddp_kwargs = getattr(strategy, "_ddp_kwargs", None)
-        if ddp_kwargs is None:  # not a DDP-family strategy — nothing to configure
+        # Same predicate that puts SaltModule into reducer-safe freeze mode: a
+        # DDP-family strategy + a freeze set that changes across stages. The
+        # reducer-safe mode keeps managed params in the reducer across flips; a
+        # frozen module that is also loss-disconnected in a stage still produces
+        # no grad, so find_unused_parameters remains required.
+        if not reducer_safe_freeze_required(strategy, schedule):
             return
-        if not ddp_kwargs.get("find_unused_parameters", False):
+        ddp_kwargs = getattr(strategy, "_ddp_kwargs", None)
+        if ddp_kwargs is not None and not ddp_kwargs.get("find_unused_parameters", False):
             ddp_kwargs["find_unused_parameters"] = True
             log.warning(
                 "training_schedule changes the frozen module set across stages under a DDP "
