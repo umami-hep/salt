@@ -12,7 +12,7 @@ from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode
 from salt.graph.render import dot_source
 
-_CONFIGS = Path(__file__).parents[3] / "core" / "configs"
+_CONFIGS = Path(__file__).parents[3] / "configs"
 _DUMMY = str(_CONFIGS / "gn2v2-dummy.yaml")
 _FOLD = str(_CONFIGS / "gn2v2-dummy-onnx-fold.yaml")
 _OVERRIDES = [

@@ -491,7 +491,7 @@ def test_no_top_level_uproot_awkward_import() -> None:
 # 7. round-trip smoke: file -> reader -> Features/Labels -> torch -> salt fit
 # --------------------------------------------------------------------------- #
 
-_CONFIG = Path(__file__).resolve().parents[2] / "core" / "configs" / "ftag1lite_empflow.yaml"
+_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "ftag1lite_empflow.yaml"
 
 # the feature variables the shipped config feeds to Features (must have norm stats)
 _NORM_JETS = ["pt", "eta", "phi", "mass"]

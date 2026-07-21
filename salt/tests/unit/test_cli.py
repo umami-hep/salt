@@ -16,7 +16,7 @@ from salt.schema import load_schema
 
 # the in-repo test-scale GN2v2 trainer config (16-dim, no machine paths) — the
 # static width-resolution plot path needs a real trainer config but no data file
-_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "core" / "configs" / "gn2v2-dummy.yaml")
+_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "gn2v2-dummy.yaml")
 
 # toy modules (no physics — M1 scope); instance names assigned by the CLI
 

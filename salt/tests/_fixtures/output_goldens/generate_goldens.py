@@ -51,7 +51,7 @@ tar -x`` into a scratch dir, run this script there with PYTHONPATH pointing at
 the extraction) and diff those files against these."""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
-CONFIG_DIR = REPO_ROOT / "core" / "configs"
+CONFIG_DIR = REPO_ROOT / "configs"
 OUT_DIR = Path(__file__).resolve().parent
 
 

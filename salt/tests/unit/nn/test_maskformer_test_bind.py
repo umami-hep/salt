@@ -14,7 +14,7 @@ from salt.model.modules import MaskFormerMatchedLoss
 from salt.model.bind import BindError, ResolvedSchema, bind_all, resolve_bind_schema
 
 # this file is at salt/tests/unit/nn/ — the configs live at salt/configs/
-_MASKFORMER = str(Path(__file__).parents[3] / "core" / "configs" / "MaskFormer.yaml")
+_MASKFORMER = str(Path(__file__).parents[3] / "configs" / "MaskFormer.yaml")
 _OVERRIDES = ["model.modules.norm.init_args.norm_dict=unused.yaml"]
 
 _REG_PRED_KEY = "preds.objects.regression"
