@@ -75,4 +75,4 @@ Training files are suggested to follow a certain directory structure, which is b
 
 To see how data is structured when inputted to a salt model,
 take a look at the signature of the `forward()` function of the
-`salt.core.SaltModule` class.
+`salt.model.SaltModule` class.

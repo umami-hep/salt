@@ -66,7 +66,7 @@ RUN uv pip install --no-deps \
 # line — so CFLAGS/CXXFLAGS/CMAKE_ARGS flag overrides can NEVER win (the last
 # -march wins for gcc/clang). Compiled on the docker build runner, the
 # extension then carries ISA extensions (e.g. AVX-512) that the GPU CI node's
-# CPU lacks -> SIGILL at `import salt.core` (via py_lap_solver). Fix: fetch the
+# CPU lacks -> SIGILL at `import salt` (via py_lap_solver). Fix: fetch the
 # pinned sdist, patch -march=native to the portable x86-64-v2 baseline (and
 # -mcpu=native -> generic for arm), PROVE the patch took (grep gates), then
 # build from the patched tree. The pyproject's own CMAKE_*_FLAGS_RELEASE are

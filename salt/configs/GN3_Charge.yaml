@@ -6,11 +6,11 @@
 name: GN3_Charge
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       jets_charge:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -51,6 +51,6 @@ model:
 
 outputs:
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression, jets_charge]

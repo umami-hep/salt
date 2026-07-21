@@ -69,7 +69,7 @@ data:
       ...
 ```
 
-The number of variables specified here will be used to automatically set the `input_size` of your `salt.core.nn.StreamEmbed` modules.
+The number of variables specified here will be used to automatically set the `input_size` of your `salt.model.modules.StreamEmbed` modules.
 
 Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) which includes a separate electrons input type.
 
@@ -246,7 +246,7 @@ As highlighted above, the `default_root_dir` should be a valid url to an S3 fold
 #### Global Object Features
 
 By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
-in the `salt.core.nn.StreamEmbed`.
+in the `salt.model.modules.StreamEmbed`.
 You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
 In order to this you should add a `global` key under `data.variables` and specify which global-level variables do you want to use.
 

@@ -61,7 +61,7 @@ That is 60,000 training and 10,000 test images (28×28 pixels) with digit labels
 ## 2. Write the reader
 
 A reader is the only piece of code you write today. It subclasses
-`salt.core.data.base.Reader` and turns "files on disk" into named **streams** of
+`salt.data.base.Reader` and turns "files on disk" into named **streams** of
 numpy arrays. Everything downstream — normalisation, the model, label handling,
 output writing — is configured, not coded.
 
@@ -79,8 +79,8 @@ from pathlib import Path
 
 import numpy as np
 
-from salt.core.data.base import Reader, WorkerCtx
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.data.base import Reader, WorkerCtx
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 N_PIXELS = 28 * 28
 
@@ -205,28 +205,28 @@ data:
     reader:
       class_path: my_mnist.reader.IdxReader
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-5, pct_start: 0.1}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.MaskedInputNormaliser
+        class_path: salt.model.modules.MaskedInputNormaliser
         init_args:
           streams: [mnist]
           global_object: mnist
       mnist_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: mnist
           out_dim: 128
           dense: {hidden_layers: [256]}
       mnist_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: mnist
           input: embed.mnist
@@ -236,11 +236,11 @@ model:
           loss: torch.nn.CrossEntropyLoss
           dense: {hidden_layers: [64]}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [mnist_classification]}
 
 trainer:
@@ -267,7 +267,7 @@ tutorial. `num_workers: 0` and `batch_size: 32` keep the run laptop-safe.
 ### `model:`
 
 Four modules, matched to salt's shipped
-[`DL1.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/core/configs/DL1.yaml)
+[`DL1.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/DL1.yaml)
 — the simplest production config (global feature vector → MLP → classifier).
 MNIST is structurally identical: a fixed-length global vector per sample.
 

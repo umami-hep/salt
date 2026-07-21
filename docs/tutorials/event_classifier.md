@@ -145,7 +145,7 @@ data:
   test_file: test
   modules:
     reader:
-      class_path: salt.core.data.MultiSampleReader
+      class_path: salt.data.MultiSampleReader
       init_args:
         label_stream: event
         label_field: process
@@ -154,7 +154,7 @@ data:
           - name: background
             label: 0
             reader:
-              class_path: salt.core.data.EasyjetReader
+              class_path: salt.data.EasyjetReader
               init_args:
                 tree: AnalysisMiniTree
                 groups: &groups
@@ -178,7 +178,7 @@ data:
           - name: signal
             label: 1
             reader:
-              class_path: salt.core.data.EasyjetReader
+              class_path: salt.data.EasyjetReader
               init_args:
                 tree: AnalysisMiniTree
                 groups: *groups
@@ -187,34 +187,34 @@ data:
               val: data/signal_val.root
               test: data/signal_test.root
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           jets: [pt, eta, phi, m]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-5, max: 1.0e-3, end: 1.0e-5, pct_start: 0.1}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.MaskedInputNormaliser
+        class_path: salt.model.modules.MaskedInputNormaliser
         init_args: {streams: [jets]}
       jet_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: jets
           out_dim: &embed_dim 32
           dense: {hidden_layers: [32], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [jets]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: 32
@@ -222,10 +222,10 @@ model:
           attention: {num_heads: 4, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       event_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: event
           input: pooled.global
@@ -233,11 +233,11 @@ model:
           class_names: [background, signal]
           dense: {hidden_layers: [32, 16], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [event_classification], modes: [test]}
 
 trainer:

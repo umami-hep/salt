@@ -25,7 +25,7 @@ reader genuinely needs it. Specifically:
 5. **Properties, getters, setters: one line maximum.**
 6. **No history or provenance in docstrings** — no "ported from", "absorbed at wave X",
    "was previously" narration. Git history is the archive (see
-   `salt/core/README.md` §Parity-closure).
+   `docs/architecture.md` §Parity-closure).
 7. Tests: one-line docstrings; the test name should carry most of the meaning.
 
 ## Comparisons against old code

@@ -1,4 +1,4 @@
-# salt v2 (`salt.core`) — the `salt` surface
+# salt v2 — the `salt` surface
 
 The modular salt v2 stack: graph-of-modules models, a demand-driven dataset
 pipeline, and a jsonargparse YAML surface. Everything here is config-first:
@@ -67,7 +67,7 @@ pin (redundant by construction):
   `test_onnx_fold_w3.py::test_maskformer_folded_contract_matches_oracle`
   dropped — its literal twin `test_maskformer_folded_export_contract` stays).
 - **`map_v1_state_dict`** (v1→v2 checkpoint weight mapper,
-  `salt/core/nn/state_dict.py`) + `salt/tests/_fixtures/v1_gn2_state_dict.json`
+  `salt/model/state_dict.py`) + `salt/tests/_fixtures/v1_gn2_state_dict.json`
   + `salt/tests/unit/nn/test_state_dict.py::TestStateDictMapping::*`:
   v1-checkpoint loading is deliberately dropped — recoverable from history
   (`fb90a7c`) or usable at the pin `29c67a1`. `SaltModule.on_load_checkpoint`
@@ -79,16 +79,16 @@ pin (redundant by construction):
 from `provenance.json` and the retired oracle test, both in git history at
 `93a29ed^` (`salt/tests/_fixtures/gn2v2_dummy_oracle/provenance.json`,
 `salt/tests/integration/test_outputs_h5_parity.py`). Parameters recorded there:
-commit `a9e2ac2`, salt-py314 container, `salt/core/configs/gn2v2-dummy.yaml`;
+commit `a9e2ac2`, salt-py314 container, `salt/configs/gn2v2-dummy.yaml`;
 synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
 `np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
 `limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
 
 ## Quickstart: train GN2v2 on a dummy file
 
-One-time setup: if the container's installed salt predates `salt/core/`,
-`python -m salt.core.main` fails with `ModuleNotFoundError: No module named
-'salt.core'` from any cwd except the repo root, and there is no `salt`
+One-time setup: if the container's installed salt predates the modular `salt` package,
+`python -m salt.main` fails with `ModuleNotFoundError: No module named
+'salt'` from any cwd except the repo root, and there is no `salt`
 script on PATH. `pip install -e .` (from the repo root, inside the
 container) fixes both — afterwards `salt` works from any directory.
 
@@ -97,13 +97,13 @@ container) fixes both — afterwards `salt` works from any directory.
 python -c "
 from pathlib import Path
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
-from salt.core.testing.inputs import write_dummy_file
+from salt.testing.inputs import write_dummy_file
 Path('/tmp/v2').mkdir(parents=True, exist_ok=True)
 write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
 write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
 "
 
-salt fit --config salt/core/configs/gn2v2-dummy.yaml \
+salt fit --config salt/configs/gn2v2-dummy.yaml \
   --data.train_file /tmp/v2/train.h5 \
   --data.val_file   /tmp/v2/train.h5 \
   --model.modules.norm.init_args.norm_dict /tmp/v2/norm_dict.yaml \
@@ -143,12 +143,12 @@ eval H5 (see below).
 ### Worked example: add an aux task from an override file
 
 ```yaml
-# my_aux_task.yaml — stack with: --config salt/core/configs/gn2v2-dummy.yaml --config my_aux_task.yaml
+# my_aux_task.yaml — stack with: --config salt/configs/gn2v2-dummy.yaml --config my_aux_task.yaml
 model:
   init_args:
     modules:
       track_type:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -194,10 +194,10 @@ artifacts are written into the same directory.
 
 Prediction writing is declared in the top-level `outputs:` section (deep-
 mergeable, like `callbacks:`): an ORDERED dict of section writers
-(`salt.core.outputs.OutputSectionWriter` graph modules). The section says
+(`salt.outputs.OutputSectionWriter` graph modules). The section says
 WHAT is written, and in which modes; the COMMAND wires the matching
 implicit sink (plan 50 Phase B): `salt test` instantiates the H5 sink
-(`salt.core.outputs.H5OutputSink`) over the section, and the ONNX parse
+(`salt.outputs.H5OutputSink`) over the section, and the ONNX parse
 folds an `OnnxExportSink` naming the export-mode leaves. Every model
 config defines its own section (`base2.yaml` ships none) — **dict order =
 per-group column order**, the v1 layout being:
@@ -205,13 +205,13 @@ per-group column order**, the v1 layout being:
 ```yaml
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter  # source columns, source dtypes
+    class_path: salt.outputs.InputCopyWriter  # source columns, source dtypes
     init_args: {streams: [jets, tracks]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput    # {run_name}_pb/... probs, VertexIndex
+    class_path: salt.outputs.RunTaskOutput    # {run_name}_pb/... probs, VertexIndex
     init_args: {tasks: [jets_classification, track_origin, track_vertexing]}
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter    # bool 'mask', True = padded
+    class_path: salt.outputs.PadMaskWriter    # bool 'mask', True = padded
     init_args: {streams: [tracks]}
 ```
 
@@ -245,10 +245,10 @@ leaves; an export-only writer contributes no eval columns.
 ```yaml
 outputs:
   jets_out:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification]}          # test + export (both)
   origin_out:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [track_origin], modes: [test]}  # eval H5 only
 ```
 
@@ -286,7 +286,7 @@ Naming policy: fields declare logical **suffixes**; the TEST column is
 literally the `class_names`-derived list both modes share, so reordering
 classes moves eval columns AND Athena outputs together (the v1
 eval-vs-ONNX vertex-naming drift class is unrepresentable). Cross-mode
-suffix constants live in `salt.core.outputs.names` (`VERTEX_INDEX`
+suffix constants live in `salt.outputs.names` (`VERTEX_INDEX`
 shared; the MaskFormer `OBJECT_INDEX` MaskIndex/HadronIndex pair is a
 pinned, documented v1 divergence).
 
@@ -297,12 +297,12 @@ manifest table appended to the export-time `plan_onnx.txt`.
 
 Every representable task family owns its export math ON THE TASK:
 classification (`ClassProbs`/`SeqClassProbs`/`SeqClassIndex` in
-`salt.core.outputs.task_output`), vertexing (in-graph union-find), and
+`salt.outputs.task_output`), vertexing (in-graph union-find), and
 regression (`RegressionTaskModule.get_output` — de-scaled f4 columns in
 TEST, squeezed per-target scalars in ONNX) are all first-class in both
 modes. The legacy per-task rendering surface (`get_h5` / `output_names` /
 `onnx_outputs`) and the writer module family (`Writer` / `TaskWriter` /
-`ExportOnlyWriter` / `WriterCallback` under `salt.core.writers`) were
+`ExportOnlyWriter` / `WriterCallback` under the old `salt.core.writers`) were
 retired in plan 50 Phase E; `salt/tests/unit/nn/test_get_output.py`
 carries the re-anchored per-family oracles.
 
@@ -312,11 +312,11 @@ Two extension seams, by scope:
 
 - **A new column family for a task** — implement it on the task:
   `get_output(bundle, mode, run_name)` returns `OutputField`s (see
-  `salt/core/outputs/task_output.py` for the shared per-family value
-  helpers and `salt/core/nn/tasks/` for the shipped families). This is
+  `salt/outputs/task_output.py` for the shared per-family value
+  helpers and `salt/model/modules/tasks/` for the shipped families). This is
   the right seam when the column is a rendering of a task's prediction.
 - **A column not owned by any task** — write a custom section writer:
-  subclass `salt.core.outputs.OutputSectionWriter`, declare + produce an
+  subclass `salt.outputs.OutputSectionWriter`, declare + produce an
   `outputs.<stream>.<col>` leaf, and expose the manifest surface the dumb
   sinks discover (`is_run_task_output()` returning True, plus
   `manifest_fields(mode)` returning `(leaf_key, OutputField)` pairs — the
@@ -327,8 +327,8 @@ Worked example — one new `jets` column counting each jet's valid tracks:
 ```python
 # my_output.py
 import torch
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.outputs import OutputField, OutputSectionWriter
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs import OutputField, OutputSectionWriter
 
 _LEAF = "outputs.jets.n_tracks_valid"
 
@@ -457,7 +457,7 @@ leaf (e.g. `preds.jets.classification` as `kind=label` where the task
 publishes `data`) — data-free, not only at `salt test` setup:
 
 ```bash
-salt graph validate -c salt/core/configs/gn2v2-dummy.yaml \
+salt graph validate -c salt/configs/gn2v2-dummy.yaml \
   --set model.modules.norm.init_args.norm_dict=unused.yaml
 salt graph plan -c <cfg> --mode fit
 salt graph plot -c <cfg> --mode fit -o graph.svg
@@ -523,7 +523,7 @@ every module's flattened requires/produces with resolved specs) and
 `graph_<stage>.{dot,svg}` (+ `graph_<stage>_dataset.{dot,svg}`). Fit
 artifacts go into the trainer log dir; test artifacts go NEXT TO THE
 CHECKPOINT, with the eval H5. Default-on via the `artifacts:` entry in
-`base2.yaml` (`salt.core.callbacks.GraphArtifacts`); delete with
+`base2.yaml` (`salt.callbacks.GraphArtifacts`); delete with
 `--callbacks.artifacts=null`, retarget with
 `--callbacks.artifacts.init_args.output_dir=...`. (Writer nodes in the
 `graph plot` rendering itself are an M5 item — the plan-table writer-sinks
@@ -531,7 +531,7 @@ section is the current source of that answer.)
 
 ## Metrics callbacks
 
-`salt.core.callbacks.ConfusionMatrix` is the v1 `ConfusionMatrixCallback`
+`salt.callbacks.ConfusionMatrix` is the v1 `ConfusionMatrixCallback`
 port: it reads the step bundle (`preds.<stream>.<task>` argmax vs
 `labels.<stream>.<label>`), resolves stream/label/class names from the named
 task module, and logs to Comet at each validation epoch end (values are also
@@ -541,7 +541,7 @@ stashed on the callback: `last_matrix`, `last_truth_labels`,
 ```yaml
 callbacks:
   confusion_matrix:
-    class_path: salt.core.callbacks.ConfusionMatrix
+    class_path: salt.callbacks.ConfusionMatrix
     init_args:
       task_name: jets_classification
 ```
@@ -680,10 +680,10 @@ How it works (no data file is touched — config + checkpoint only):
   proof the traced graph is correct.
 
 Programmatic surface for gates/tests (no checkpoint needed):
-`salt.core.onnx.export_graph(modules, export_cfg, variables, path)` — the
+`salt.onnx.export_graph(modules, export_cfg, variables, path)` — the
 output set derives from the folded `OnnxExportSink` in `modules`; passing
 a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
-`salt.core.onnx.check_onnx(adapter, path, ...)`.
+`salt.onnx.check_onnx(adapter, path, ...)`.
 
 ## Checkpoints and resume (design §2.3)
 

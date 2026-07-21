@@ -9,7 +9,7 @@ data:
   num_workers: 20
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
@@ -17,7 +17,7 @@ data:
           flow: {global_object: false, truncate: 100}
           truth_hadrons: {global_object: false}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           jets: [pt, eta]
@@ -47,11 +47,11 @@ data:
           flow: [flow_pt, flow_energy, flow_deta, flow_dphi]
           truth_hadrons: [charge, pt, mass, energy, eta, phi, deta, dphi, dr, Lxy]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args:
         dtype_policy: int64-for-int
     ftag_labeller:
-      class_path: salt.core.data.FtagLabeller
+      class_path: salt.data.FtagLabeller
       init_args:
         # qcdll stands in for qcdxx, which is absent from this container's
         # ftag Flavours catalogue. class_names must match
@@ -62,26 +62,26 @@ data:
         class_names: [hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll]
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-7, max: 3.0e-4, end: 5.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks, flow, truth_hadrons]
           global_object: jets
       track_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: tracks
           context: [normed.jets]
           out_dim: &embed_dim 256
           dense: {hidden_layers: [256], activation: ReLU}
       flow_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: flow
           context: [normed.jets]
@@ -90,17 +90,17 @@ model:
       # third stream: feeds encoder attention but has no task head, so it is
       # not split back out below.
       truth_hadrons_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: truth_hadrons
           context: [normed.jets]
           out_dim: *embed_dim
           dense: {hidden_layers: [256], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks, flow, truth_hadrons]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
@@ -110,13 +110,13 @@ model:
           dense: {activation: ReLU, gated: true, dropout: 0.1}
       split:
         # only tracks has per-token tasks
-        class_path: salt.core.nn.Split
+        class_path: salt.model.modules.Split
         init_args: {streams: [tracks]}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       jets_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -125,7 +125,7 @@ model:
           loss: torch.nn.CrossEntropyLoss
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -135,7 +135,7 @@ model:
           loss: torch.nn.CrossEntropyLoss
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_vertexing:
-        class_path: salt.core.nn.tasks.VertexingTaskModule
+        class_path: salt.model.modules.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
@@ -144,18 +144,18 @@ model:
           weight: 0.75
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [jets, tracks]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing]
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
+    class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
 export:

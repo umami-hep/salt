@@ -9,13 +9,13 @@ data:
   num_workers: 15
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false, truncate: 100}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         # EdgeFeatures needs eta/phi/pt (dR/kt/z) + subjetIndex among these,
         # resolved by name at bind.
@@ -48,35 +48,35 @@ data:
               numberOfSCTSharedHits,
             ]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int} # precomputed flavour_label (no labeller)
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-7, max: 3.0e-4, end: 5.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       # pairwise edge features on the raw (un-normalised) tracks.
       edge_features:
-        class_path: salt.core.nn.EdgeFeatures
+        class_path: salt.model.modules.EdgeFeatures
         init_args:
           stream: tracks
           features: [dR, z, kt, subjetIndex, isSelfLoop]
       edge_embed:
-        class_path: salt.core.nn.EdgeEmbed
+        class_path: salt.model.modules.EdgeEmbed
         init_args:
           stream: tracks
           out_dim: &edge_embed_dim 32
           dense: {hidden_layers: [32], activation: &activation SiLU}
       track_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: tracks
           context: [normed.jets] # concats normed.jets into the track embed
@@ -85,10 +85,10 @@ model:
       concat:
         # tracks is the only stream, so it is trivially streams[0] as
         # required by the edge-stream-first constraint.
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
@@ -99,13 +99,13 @@ model:
           edge_embed_dim: *edge_embed_dim
           update_edges: true # edge tensor is updated each layer
       split:
-        class_path: salt.core.nn.Split
+        class_path: salt.model.modules.Split
         init_args: {streams: [tracks]}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       jets_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -114,7 +114,7 @@ model:
           loss: torch.nn.CrossEntropyLoss
           dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: &dropout 0.1}
       track_origin:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -124,7 +124,7 @@ model:
           loss: torch.nn.CrossEntropyLoss
           dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: *dropout}
       track_vertexing:
-        class_path: salt.core.nn.tasks.VertexingTaskModule
+        class_path: salt.model.modules.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
@@ -133,18 +133,18 @@ model:
           weight: 1.5
           dense: {hidden_layers: [128, 64, 32], activation: *activation, dropout: *dropout}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [jets, tracks]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing]
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
+    class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
 export: # inert during fit/test; used only by ONNX export

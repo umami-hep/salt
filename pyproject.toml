@@ -30,8 +30,8 @@ dependencies = [
   "onnxruntime==1.27.0",
   "onnxscript>=0.7.0",
   "puma-hep==0.5.3",
-  # hard import at salt.core module load since the MaskFormer-update wave
-  # (salt/core/nn/matcher.py) — without it every CI test job dies at
+  # hard import at salt module load since the MaskFormer-update wave
+  # (salt/model/nn/matcher.py) — without it every CI test job dies at
   # conftest import (feature/modular-core pipelines red since 2026-07-10)
   "py-lap-solver>=0.1.4",
   "rich>=15.0.0",
@@ -114,8 +114,8 @@ default-groups = []
 "Issue Tracker" = "https://gitlab.cern.ch/aft/algorithms/salt/-/issues"
 
 [project.scripts]
-setup_mup = "salt.core.mup:setup_mup"
-salt = "salt.core.main:main"
+setup_mup = "salt.model.mup:setup_mup"
+salt = "salt.main:main"
 
 [tool.setuptools]
 packages = { find = { include = ["salt*"] } }
@@ -163,7 +163,7 @@ exclude = '^salt/tests/.*\.py$'
 log_cli = true
 log_cli_level = "CRITICAL"
 filterwarnings = ["ignore::DeprecationWarning"]
-# salt/tests/unit mirrors salt/core 1:1 (genuine unit tests); salt/tests/integration
+# salt/tests/unit mirrors salt/ 1:1 (genuine unit tests); salt/tests/integration
 # holds the gate harnesses + any test that builds/runs a full model or reads real
 # data. Shared fixtures live in salt/tests/_fixtures (imported as
 # salt.tests._fixtures.*, not collected).

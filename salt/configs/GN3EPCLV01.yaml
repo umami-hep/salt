@@ -10,7 +10,7 @@ data:
   num_workers: 20
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
@@ -20,7 +20,7 @@ data:
           global: {global_object: true}
         selections: null
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         non_finite_to_num: true
         variables:
@@ -88,17 +88,17 @@ data:
               f3,
             ]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: lion
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks, flows, electrons]
@@ -106,36 +106,36 @@ model:
       # second normaliser: 'global' needs its own global_object slot (jets
       # already fills the one on `norm` above)
       norm_global:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           streams: [global]
           global_object: global
       track_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: tracks
           context: [normed.jets]
           out_dim: &embed_dim 512
           dense: {hidden_layers: [512], activation: SiLU}
       flow_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: flows
           context: [normed.jets]
           out_dim: *embed_dim # equal embed width is a Concat constraint
           dense: {hidden_layers: [512], activation: SiLU}
       electron_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: electrons
           context: [normed.jets]
           out_dim: *embed_dim
           dense: {hidden_layers: [512], activation: SiLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks, flows, electrons]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 256
@@ -147,20 +147,20 @@ model:
           dense: {activation: SiLU, gated: true}
       split:
         # only tracks carry per-token tasks
-        class_path: salt.core.nn.Split
+        class_path: salt.model.modules.Split
         init_args: {streams: [tracks]}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       # order matters: pooled rep first, global features last — every task
       # below reads this augmented vconcat.global.
       vconcat:
-        class_path: salt.core.nn.VectorConcat
+        class_path: salt.model.modules.VectorConcat
         init_args:
           inputs: [pooled.global, normed.global]
           out: vconcat.global
       jets_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: vconcat.global
@@ -170,7 +170,7 @@ model:
           weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_origin:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: vconcat.global
@@ -180,7 +180,7 @@ model:
           weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_vertexing:
-        class_path: salt.core.nn.tasks.VertexingTaskModule
+        class_path: salt.model.modules.tasks.VertexingTaskModule
         init_args:
           stream: tracks
           label: ftagTruthVertexIndex
@@ -188,7 +188,7 @@ model:
           context: vconcat.global
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_type:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: vconcat.global
@@ -197,7 +197,7 @@ model:
           class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       jet_pt_regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: jets
           input: vconcat.global
@@ -206,7 +206,7 @@ model:
           loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       jets_bccharge:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: vconcat.global
@@ -247,18 +247,18 @@ model:
             }
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossGLS
+        class_path: salt.model.modules.LossGLS
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [jets, tracks]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression, jets_bccharge]
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
+    class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
 export:

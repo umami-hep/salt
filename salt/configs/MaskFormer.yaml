@@ -9,7 +9,7 @@ data:
   num_workers: 40
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
@@ -18,7 +18,7 @@ data:
           # object_class + masks
           truth_hadrons: {global_object: false}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           jets: [pt_btagJes, eta_btagJes]
@@ -45,10 +45,10 @@ data:
               numberOfSCTSharedHits,
             ]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
     mf_targets:
-      class_path: salt.core.data.MaskFormerTargets
+      class_path: salt.data.MaskFormerTargets
       init_args:
         object_stream: truth_hadrons
         object_class: flavour
@@ -71,29 +71,29 @@ data:
         regression_targets: [pt, Lxy, deta, dphi, mass]
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: tracks
           context: [normed.jets]
           out_dim: &embed_dim 256
           dense: {hidden_layers: [256], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: *embed_dim
@@ -103,7 +103,7 @@ model:
           num_registers: 1
           drop_registers: true # registers visible to attention, stripped from encoded.seq
       mask_decoder:
-        class_path: salt.core.nn.MaskDecoder
+        class_path: salt.model.modules.MaskDecoder
         init_args:
           input: encoded.seq # register-free encoder output
           embed_dim: *embed_dim
@@ -115,7 +115,7 @@ model:
       # instance name `regression` so its port is `preds.objects.regression` —
       # the key the matched loss + object writer read.
       regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: objects
           input: objects.embed # decoder query embeddings (per-object)
@@ -137,7 +137,7 @@ model:
           expose: [fit, val, onnx]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       mf_matched_loss:
-        class_path: salt.core.nn.MaskFormerMatchedLoss # FIT|VAL only
+        class_path: salt.model.modules.MaskFormerMatchedLoss # FIT|VAL only
         init_args:
           num_classes: 2 # non-null classes (b, c)
           num_objects: 5 # == the decoder query bank M
@@ -148,20 +148,20 @@ model:
       # (leading-object regression scalars) and outputs.tracks.object_index
       # (per-constituent owning-object index). Demand-gated so FIT/VAL/TEST prune it.
       maskformer_objects_onnx:
-        class_path: salt.core.outputs.MaskFormerObjects
+        class_path: salt.outputs.MaskFormerObjects
         init_args:
           n_reg: 5 # == len(regression.targets)
           regression_task: regression
           stream: objects
           constituent_stream: tracks
       split:
-        class_path: salt.core.nn.Split
+        class_path: salt.model.modules.Split
         init_args: {streams: [tracks]}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       jets_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -169,7 +169,7 @@ model:
           class_names: [bjets, cjets, ujets]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -178,23 +178,23 @@ model:
           weight: 0.5
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [jets, tracks]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin]
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
+    class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
   # object writer: emits objects [B, M] (class probs + class_label) +
   # object_masks [B, M, T] (truth_mask + mask_logits) + tracks MaskIndex.
   maskformer_objects:
-    class_path: salt.core.outputs.MaskFormerObjectsSink
+    class_path: salt.outputs.MaskFormerObjectsSink
     init_args:
       object_classes: [b, c, "null"] # null LAST
       object_stream: objects
@@ -204,13 +204,13 @@ outputs:
 callbacks:
   # consumes matched.objects.* -> keeps the matched loss alive under pruning
   maskformer_metrics:
-    class_path: salt.core.callbacks.MaskformerMetrics
+    class_path: salt.callbacks.MaskformerMetrics
   h5_output:
-    class_path: salt.core.outputs.H5OutputSink
+    class_path: salt.outputs.H5OutputSink
     init_args:
       extra_groups: [maskformer_objects]
   onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
+    class_path: salt.outputs.OnnxExportSink
     init_args:
       outputs:
         - key: outputs.objects.leading_object

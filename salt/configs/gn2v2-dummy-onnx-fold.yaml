@@ -11,15 +11,15 @@ model:
   modules:
     # the folded ONNX conversion producers (the base runs get_output for H5 only)
     jet_probs:
-      class_path: salt.core.outputs.ClassProbs
+      class_path: salt.outputs.ClassProbs
       init_args: {task: jets_classification, stream: jets}
     # distinct leaf name so the ONNX argmax never collides with the section's
     # test-mode track_origin leaves
     track_origin_index:
-      class_path: salt.core.outputs.SeqClassIndex
+      class_path: salt.outputs.SeqClassIndex
       init_args: {task: track_origin, stream: tracks, name: track_origin_index}
     pbc:
-      class_path: salt.core.outputs.Combination
+      class_path: salt.outputs.Combination
       init_args:
         source: outputs.jets.jets_classification
         name: pbc
@@ -29,17 +29,17 @@ outputs:
   # eval-H5 only: the section provides no ONNX leaves; the folded conversion
   # nodes + explicit OnnxExportSink below own the ONNX tuple
   jets_out:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {modes: [test]}
   origin_out:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {modes: [test]}
 
 callbacks:
   # explicit ONNX sink (the Combination escape hatch — no section equivalent);
   # the H5 sink stays implicit (wired by salt test over the outputs: section)
   onnx_export:
-    class_path: salt.core.outputs.OnnxExportSink
+    class_path: salt.outputs.OnnxExportSink
     init_args:
       outputs:
         - {key: outputs.jets.jets_classification, names: [pb, pc, pu]}

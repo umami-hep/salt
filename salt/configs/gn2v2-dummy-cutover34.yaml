@@ -11,7 +11,7 @@ model:
     # un-defer vertexing (the base defers it via expose: [fit, val]) so its
     # get_output mints the VertexIndex H5 column + ONNX int8 leaf.
     track_vertexing:
-      class_path: salt.core.nn.tasks.VertexingTaskModule
+      class_path: salt.model.modules.tasks.VertexingTaskModule
       init_args:
         expose: null
 
@@ -20,5 +20,5 @@ outputs:
   jets_out: null
   origin_out: null
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification, track_origin, track_vertexing]}

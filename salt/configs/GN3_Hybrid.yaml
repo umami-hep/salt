@@ -5,11 +5,11 @@
 name: GN3_Hybrid
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           norm: RMSNorm
           norm_type: hybrid

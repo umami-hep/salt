@@ -7,5 +7,5 @@
 outputs:
   # H5-only: no RunTaskOutput opts into export, so no implicit ONNX sink is wired
   jets_out:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {modes: [test]}

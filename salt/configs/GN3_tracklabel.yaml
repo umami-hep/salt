@@ -7,11 +7,11 @@
 name: GN3_tracklabel
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       track_type:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -22,7 +22,7 @@ model:
           weight_source: null
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       track_source:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: tracks
           context: pooled.global
@@ -47,6 +47,6 @@ model:
 # restate the full 5-task list, not just the two heads it adds.
 outputs:
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification, track_origin, track_vertexing, track_type, track_source]

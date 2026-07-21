@@ -7,11 +7,11 @@
 name: GN2v2opendata
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: 256
           out_dim: 128
@@ -21,7 +21,7 @@ model:
 
 callbacks:
   loss_history:
-    class_path: salt.core.loss_history.LossHistoryWriter
+    class_path: salt.utils.loss_history.LossHistoryWriter
   checkpoint:
     class_path: lightning.pytorch.callbacks.ModelCheckpoint
     init_args:

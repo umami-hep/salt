@@ -24,7 +24,7 @@
     - when: on_success
 
 # --------------------------- UNIT TESTS ---------------------------
-# salt/tests/unit mirrors salt/core 1:1 — fast on CPU. The conftest GPU-guard
+# salt/tests/unit mirrors salt/ 1:1 — fast on CPU. The conftest GPU-guard
 # keeps the heavy salt/tests/integration gates OUT of this job (they need
 # --run-integration).
 modular-unit-tests:
@@ -77,8 +77,8 @@ gpu-smoke:
       # same generators the unit suite uses — salt/tests/unit/test_main.py).
       python - <<'EOF'
       from pathlib import Path
-      from salt.core.schema import dump_schema, save_schema
-      from salt.core.testing.inputs import write_dummy_file
+      from salt.schema import dump_schema, save_schema
+      from salt.testing.inputs import write_dummy_file
       from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
       base = Path("gpu_smoke_data")
       base.mkdir(exist_ok=True)
@@ -89,7 +89,7 @@ gpu-smoke:
       save_schema(dump_schema(h5), base / "schema.yaml")
       EOF
     - salt fit
-      --config salt/core/configs/gn2v2-dummy.yaml
+      --config salt/configs/gn2v2-dummy.yaml
       --data.train_file=gpu_smoke_data/pp_output_train.h5
       --data.val_file=gpu_smoke_data/pp_output_train.h5
       --data.modules.reader.init_args.schema=gpu_smoke_data/schema.yaml

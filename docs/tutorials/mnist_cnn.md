@@ -56,9 +56,9 @@ import math
 
 from torch import Tensor, nn
 
-from salt.core.graph.bundle import Bundle
-from salt.core.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.core.nn import ResolvedSchema, SaltModelModule
+from salt.graph.bundle import Bundle
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.model.modules import ResolvedSchema, SaltModelModule
 
 
 class MnistCNN(SaltModelModule):
@@ -117,7 +117,7 @@ class MnistCNN(SaltModelModule):
         return {f"embed.{self.stream}": out}
 ```
 
-`SaltModelModule` and `ResolvedSchema` come straight from `salt.core.nn` —
+`SaltModelModule` and `ResolvedSchema` come straight from `salt.model.modules` —
 the same public API the shipped modules use.
 
 ### The contract, method by method
@@ -188,7 +188,7 @@ The full diff against part 1:
 -name: MNIST_MLP
 +name: MNIST_CNN
 ...
--        class_path: salt.core.nn.StreamEmbed
+-        class_path: salt.model.modules.StreamEmbed
 +        class_path: my_mnist.cnn.MnistCNN
 ...
 -          dense: {hidden_layers: [256]}

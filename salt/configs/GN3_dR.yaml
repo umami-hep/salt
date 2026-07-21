@@ -8,7 +8,7 @@ name: GN3_dR
 data:
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           tracks: {global_object: false, dataset: tracks_dr}

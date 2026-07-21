@@ -3,12 +3,12 @@ seed: 42
 n_samples: 1000
 flags: {}
 modules:
-  - class_path: salt.core.testing.datagen.modules.Jets
+  - class_path: salt.testing.datagen.modules.Jets
     init_args:
       fields: jet_features.yaml
-  - class_path: salt.core.testing.datagen.modules.H5Writer
+  - class_path: salt.testing.datagen.modules.H5Writer
     init_args: { path: "${OUTPUT_DIR}/jets_only.h5" }
-  - class_path: salt.core.testing.datagen.modules.NormWriter
+  - class_path: salt.testing.datagen.modules.NormWriter
     init_args: { path: "${OUTPUT_DIR}/norm_dict.yaml" }
-  - class_path: salt.core.testing.datagen.modules.ClassDictWriter
+  - class_path: salt.testing.datagen.modules.ClassDictWriter
     init_args: { path: "${OUTPUT_DIR}/class_dict.yaml" }

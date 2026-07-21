@@ -20,14 +20,14 @@ trainer:
 
 callbacks:
   checkpoint:
-    class_path: salt.core.callbacks.Checkpoint
+    class_path: salt.callbacks.Checkpoint
     init_args:
       # also the filename loss tag ('epoch=NNN-loss=<val/loss>.ckpt') that the
       # salt-test no-ckpt_path fallback globs on — keep in sync with any
       # fname_string override.
       monitor_loss: val/loss
   progress:
-    class_path: salt.core.callbacks.ProgressBar
+    class_path: salt.callbacks.ProgressBar
     init_args:
       refresh_rate: 50
   # dropped automatically when no logger is attached (LearningRateMonitor
@@ -43,4 +43,4 @@ callbacks:
   # writes plan_<mode>.txt + graph_<stage>.{dot,svg} into the trainer log dir
   # at fit/test start. Delete with `artifacts: null`.
   artifacts:
-    class_path: salt.core.callbacks.GraphArtifacts
+    class_path: salt.callbacks.GraphArtifacts

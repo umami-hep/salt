@@ -8,7 +8,7 @@ name: GN3_LepID_SMT
 data:
   modules:
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           tracks:

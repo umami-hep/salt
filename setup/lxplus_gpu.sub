@@ -24,7 +24,7 @@
 universe   = vanilla
 
 # Executable is the AFS copy of setup/salt-lxplus-gpu; it runs salt v2 in the image
-# (container mode) or the venv (fallback), then `python -m salt.core.main`.
+# (container mode) or the venv (fallback), then `python -m salt.main`.
 # Pin the job's working dir to AFS — otherwise condor records the submit cwd as Iwd,
 # and if you submitted from an /eos dir the schedd rejects it (/eos in a submit field).
 initialdir = $(SALT_JOBDIR)

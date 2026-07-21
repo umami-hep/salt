@@ -1,5 +1,5 @@
 # salt-v1-schema.yaml -- SCHEMA-FORMAT doc (n_samples/seed/groups/fields),
-# consumed by parity.py via salt.core.testing.datagen.schema.load_schema
+# consumed by parity.py via salt.testing.datagen.schema.load_schema
 # (plain yaml.safe_load + parse_schema -- NOT the pipeline recipe loader, so the
 # feature lists are INLINED here rather than referenced).
 #

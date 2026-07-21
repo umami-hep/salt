@@ -11,13 +11,13 @@ data:
   num_workers: 4
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           events: {global_object: true, dataset: event_vars}
           objects: {global_object: false, dataset: objects_vars}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           # mHH is deliberately absent — mHH_regression sources it from
@@ -25,32 +25,32 @@ data:
           events: [mBB]
           objects: [type, pt, eta, phi, mass, btag, tauId]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [events, objects]
           global_object: events
       object_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: objects
           out_dim: &embed_dim 64
           dense: {hidden_layers: [256, 128, 64], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [objects]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
@@ -58,10 +58,10 @@ model:
           attention: {num_heads: 4, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       events_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
           stream: events
           input: pooled.global
@@ -69,7 +69,7 @@ model:
           class_names: [ggF, VBF]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
       mHH_regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: events
           input: pooled.global
@@ -78,14 +78,14 @@ model:
           loss: {class_path: torch.nn.MSELoss, init_args: {reduction: none}}
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [events]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [events_classification, mHH_regression], modes: [test]}
 
 trainer:

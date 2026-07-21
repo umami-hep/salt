@@ -9,13 +9,13 @@ name: GN3_SoftE
 data:
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           electrons: {global_object: false}
           global: {global_object: true}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           # same 2 columns as jets, so the ONNX alias below is an identity clone
@@ -53,48 +53,48 @@ data:
             ]
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           streams: [jets, tracks, flows, electrons]
           global_object: jets
       norm_global:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           streams: [global]
           global_object: global
       electron_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: electrons
           context: [normed.jets]
           out_dim: 512
           dense: {hidden_layers: [512], activation: SiLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks, flows, electrons]}
       vconcat:
-        class_path: salt.core.nn.VectorConcat
+        class_path: salt.model.modules.VectorConcat
         init_args:
           inputs: [pooled.global, normed.global]
           out: vconcat.global
       jets_classification:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args: {input: vconcat.global}
       track_origin:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args: {context: vconcat.global}
       track_vertexing:
-        class_path: salt.core.nn.tasks.VertexingTaskModule
+        class_path: salt.model.modules.tasks.VertexingTaskModule
         init_args: {context: vconcat.global}
       track_type:
-        class_path: salt.core.nn.tasks.ClassificationTaskModule
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args: {context: vconcat.global}
       jet_pt_regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args: {input: vconcat.global}
 
 export:

@@ -9,45 +9,45 @@ data:
   num_workers: 4
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
           hits: {global_object: false}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           jets: [pt, eta]
           hits: [layer, j, a, b]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-7, pct_start: 0.2}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, hits]
           global_object: jets
       hits_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: hits
           context: [normed.jets]
           out_dim: &embed_dim 32
           dense: {hidden_layers: [128, 128, 128], activation: ReLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [hits]}
       encoder:
-        class_path: salt.core.nn.TransformerEncoder
+        class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
           out_dim: &out_dim 128
@@ -55,10 +55,10 @@ model:
           attention: {num_heads: 2, attn_type: torch-math}
           dense: {activation: ReLU, gated: false}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
       gaussian_regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -68,14 +68,14 @@ model:
           loss: GaussianNLLLoss
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args: {streams: [jets]}
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [gaussian_regression]}
 
 export:

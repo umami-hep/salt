@@ -111,12 +111,12 @@ _salt_lxplus_setup() {
 
     # --- fast path: already installed -> just re-activate ---
     if [[ -x "$SALT_LXPLUS_DIR/.venv/bin/python" ]] \
-        && "$SALT_LXPLUS_DIR/.venv/bin/python" -c "import salt.core.main" 2>/dev/null; then
+        && "$SALT_LXPLUS_DIR/.venv/bin/python" -c "import salt.main" 2>/dev/null; then
         # shellcheck disable=SC1091
         source "$SALT_LXPLUS_DIR/.venv/bin/activate" || return 1
         export PATH="$setup_dir:$PATH"
         echo "salt env already installed — re-activated ($SALT_LXPLUS_DIR/.venv)."
-        echo "Verify: python -m salt.core.main --help"
+        echo "Verify: python -m salt.main --help"
         return 0
     fi
 
@@ -165,7 +165,7 @@ _salt_lxplus_setup() {
    venv            = $SALT_LXPLUS_DIR/.venv  (activated)
 
  Verify:
-   python -m salt.core.main --help
+   python -m salt.main --help
 
  GPU access — CERN HTCondor batch farm (the sanctioned GPU route):
    salt-lxplus-gpu shell [flavour]           interactive GPU node

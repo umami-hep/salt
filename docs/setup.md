@@ -181,7 +181,7 @@ Salt requires Python 3.10 to 3.14.
     setup/salt-lxplus-gpu status                        # your condor jobs
     ```
 
-    The job runs `apptainer exec --nv --bind /eos <sif> python -m salt.core.main
+    The job runs `apptainer exec --nv --bind /eos <sif> python -m salt.main
     fit --config …` on the GPU worker. To run a **local salt checkout** instead of
     the image's baked-in salt (developing a branch, or an image whose salt is an
     editable install), set `SALT_LXPLUS_SRC=/path/to/salt` — it is **bind-mounted
@@ -229,7 +229,7 @@ Salt requires Python 3.10 to 3.14.
     cd /eos/user/${USER:0:1}/$USER          # or an AFS workspace (see warning)
     git clone https://gitlab.cern.ch/aft/algorithms/salt.git && cd salt
     source setup/setup_lxplus.sh            # uv install, Python 3.14 venv, uv sync
-    python -m salt.core.main --help         # verify the v2 entry point
+    python -m salt.main --help         # verify the v2 entry point
     ```
 
     It auto-picks the install location: `$SALT_LXPLUS_DIR` (your override) → AFS

@@ -10,34 +10,34 @@ name: GN3_flow
 data:
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false, dataset: tracks_ghost}
           flow: {global_object: false, dataset: flows}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           flow: [pt, energy, deta, dphi, isCharged]
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           streams: [jets, tracks, flow]
           global_object: jets
       flow_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: flow
           context: [normed.jets]
           out_dim: 256
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
-        class_path: salt.core.nn.Concat
+        class_path: salt.model.modules.Concat
         init_args: {streams: [tracks, flow]}

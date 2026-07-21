@@ -10,13 +10,13 @@ data:
   num_workers: 0
   modules:
     reader:
-      class_path: salt.core.data.H5StructuredReader
+      class_path: salt.data.H5StructuredReader
       init_args:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false}
     features:
-      class_path: salt.core.data.Features
+      class_path: salt.data.Features
       init_args:
         variables:
           jets: [pt_btagJes, eta_btagJes]
@@ -43,38 +43,38 @@ data:
               numberOfSCTSharedHits,
             ]
     labels:
-      class_path: salt.core.data.Labels
+      class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
 
 model:
-  class_path: salt.core.SaltModule
+  class_path: salt.model.SaltModule
   init_args:
     lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
     optimizer: AdamW
     modules:
       norm:
-        class_path: salt.core.nn.Normaliser
+        class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
           streams: [jets, tracks]
           global_object: jets
       track_embed:
-        class_path: salt.core.nn.StreamEmbed
+        class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: tracks
           context: [normed.jets]
           out_dim: 128
           dense: {hidden_layers: [256], activation: SiLU}
       concat:
-        class_path: salt.core.nn.Concat # one stream -> seq.x/seq.mask (no encoder)
+        class_path: salt.model.modules.Concat # one stream -> seq.x/seq.mask (no encoder)
         init_args: {streams: [tracks]}
       pool:
-        class_path: salt.core.nn.GlobalAttentionPooling
+        class_path: salt.model.modules.GlobalAttentionPooling
         init_args:
           input: seq.x # the Concat output (encoder-less: no encoded.seq)
           out: pooled.global
       gaussian_regression:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: jets
           input: pooled.global
@@ -84,7 +84,7 @@ model:
           loss: GaussianNLLLoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       gaussian_regression_no_global_object:
-        class_path: salt.core.nn.tasks.RegressionTaskModule
+        class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args:
           stream: tracks # per-token sequence regression (reads seq.x)
           input: seq.x
@@ -96,22 +96,22 @@ model:
           loss: GaussianNLLLoss
           dense: {hidden_layers: [128, 64, 32], activation: SiLU}
       loss:
-        class_path: salt.core.nn.LossSum
+        class_path: salt.model.modules.LossSum
 
 outputs:
   inputs_copy:
-    class_path: salt.core.outputs.InputCopyWriter
+    class_path: salt.outputs.InputCopyWriter
     init_args:
       streams: [jets, tracks]
       variables:
         jets: []
         tracks: []
   run_tasks:
-    class_path: salt.core.outputs.RunTaskOutput
+    class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [gaussian_regression, gaussian_regression_no_global_object]
   pad_mask:
-    class_path: salt.core.outputs.PadMaskWriter
+    class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
 
 export:

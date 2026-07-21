@@ -1,1 +1,1 @@
-include salt/core/configs/*.yaml
+include salt/configs/*.yaml
