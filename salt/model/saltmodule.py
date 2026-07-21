@@ -230,8 +230,8 @@ class SaltModule(lightning.LightningModule):
             return
         for key, w in section.items():
             # accepted shapes (design §2.5): a graph-folded section writer
-            # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter/
-            # MaskFormerObjectsSink today) or a terminal callback-style sink
+            # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter
+            # today) or a terminal callback-style sink
             # (SinkModule) — see salt.model.base.SaltModelModule for the
             # audited rationale (real shipped configs only ever wire the
             # former here; terminal sinks are wired via trainer.callbacks:

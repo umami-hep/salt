@@ -280,20 +280,28 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
                 "write_pad_mask": h5_sink.write_pad_mask
                 if isinstance(h5_sink.write_pad_mask, (bool, list, tuple))
                 else list(h5_sink.write_pad_mask),
-                "extra_group_names": list(h5_sink._extra_group_names),  # noqa: SLF001
+                # declarative object groups (e.g. the MaskFormer objects /
+                # object_masks / tracks-MaskIndex groups) — captured statically
+                # from their field specs (data-free, unlike the retired
+                # extra_groups reader-dependent schema).
+                "object_groups": [
+                    {
+                        "name": group.name,
+                        "shape": None if group.shape is None else list(group.shape),
+                        "fields": [
+                            {
+                                "leaf": field.leaf,
+                                "suffixes": list(field.suffixes),
+                                "dtype": field.dtype,
+                                "prefix": field.prefix,
+                                "kind": field.kind,
+                            }
+                            for field in group.fields
+                        ],
+                    }
+                    for group in h5_sink._object_groups  # noqa: SLF001
+                ],
             }
-            if h5_sink._extra_group_names:  # noqa: SLF001
-                # extra_groups (e.g. MaskFormerObjectsSink's objects/object_masks)
-                # size their columns from a live reader at open_schema (seq
-                # lengths / shapes) — NOT resolvable statically/data-free. The
-                # `columns` list above therefore covers the RunTaskOutput task
-                # columns only; the extra-group schema is a documented gap.
-                result["h5"]["static_capture_gap"] = (
-                    "extra_groups "
-                    f"{list(h5_sink._extra_group_names)} columns NOT captured — "  # noqa: SLF001
-                    "their schema is resolved from a live reader at open_schema "
-                    "(sequence lengths / shapes), not data-free"
-                )
         except ConfigError as err:
             result["h5"] = {"error": str(err)}
 

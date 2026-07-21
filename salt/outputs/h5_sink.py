@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
+from salt.outputs.object_group import ObjectGroup, ObjectGroupField
 from salt.outputs.output_column import OutputColumn
 from salt.utils.array_utils import join_structured_arrays
 
@@ -144,25 +144,6 @@ class _SinkCallback(Callback):
         self.close_if_open()
 
 
-@dataclass(frozen=True)
-class _ExtraGroupCtx:
-    """The minimal write-context an extra-group node reads to size its groups.
-
-    The write-context surface a node's ``extra_groups`` /
-    ``columns`` declaration consumes — carries only the file-geometry facts
-    the sink owns (a node's own model modules ride its prior
-    ``bind_model_modules``, not this ctx). ``streams`` feeds the extra-group
-    shadow check; ``precision`` is the f2/f4 column dtype selector. An empty
-    ``extra_groups`` list never builds one.
-    """
-
-    streams: tuple[str, ...]
-    seq_lengths: Mapping[str, int]
-    total: int
-    run_name: str
-    precision: str
-
-
 class H5OutputSink(_SinkCallback):
     """The H5 sink: a terminal graph node serialising ``outputs.*`` to the eval H5.
 
@@ -222,12 +203,15 @@ class H5OutputSink(_SinkCallback):
         by default `DEFAULT_OUTPUT`.
     half_precision : bool, optional
         Write float columns at f2 instead of f4, by default False.
-    extra_groups : Sequence[str] | None, optional
-        Names of bound ``outputs:``-section nodes that declare NON-reader
-        output groups — e.g. the MaskFormer object writer's
-        ``objects``/``object_masks`` groups, whose object axis no reader
-        stream carries. Empty/None (the default) makes the extra-group
-        mechanism a strict no-op.
+    object_groups : Sequence[ObjectGroup] | None, optional
+        Declarative structured output groups fed from bundle leaves — each an
+        `ObjectGroup` naming a NON-reader group (with a trailing `shape`, e.g.
+        the MaskFormer ``objects`` ``(M,)`` / ``object_masks`` ``(M, T)``
+        groups) or extra per-token columns on an existing reader stream (e.g.
+        the ``tracks`` ``MaskIndex`` column). Each field sources one bundle
+        leaf, which the sink demands (keeping its producer alive) and packs.
+        Generic: the sink has no per-consumer knowledge. Empty/None (the
+        default) makes the mechanism a strict no-op (byte-identical schema).
 
     Raises
     ------
@@ -247,7 +231,7 @@ class H5OutputSink(_SinkCallback):
         write_pad_mask: bool | Sequence[str] = False,
         output: str = DEFAULT_OUTPUT,
         half_precision: bool = False,
-        extra_groups: Sequence[str] | None = None,
+        object_groups: Sequence[ObjectGroup | Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         # plan 50 Phase B: the explicit OutputColumn table is RETIRED as a config
@@ -273,10 +257,13 @@ class H5OutputSink(_SinkCallback):
         self.write_pad_mask = write_pad_mask
         self.output = output
         self.half_precision = half_precision
-        # names of bound output-section nodes that declare NON-reader output groups.
-        # Empty by default — the extra-group mechanism is then a strict no-op and
-        # the H5 schema is byte-identical to a plain sink.
-        self._extra_group_names: tuple[str, ...] = tuple(extra_groups or ())
+        # declarative structured output groups fed from bundle leaves. Empty by
+        # default — the mechanism is then a strict no-op and the H5 schema is
+        # byte-identical to a plain sink. Self-contained (no section-node lookup):
+        # each field sources a bundle leaf the sink demands + packs.
+        self._object_groups: tuple[ObjectGroup, ...] = tuple(
+            ObjectGroup.coerce(g) for g in (object_groups or ())
+        )
         # DUMB-SECTION mode: when an `outputs:` section is bound (RunTaskOutput +
         # InputCopyWriter + PadMaskWriter), the sink dumps ALL active outputs.*
         # leaves and derives its column schema + copy spec + mask streams from the
@@ -302,9 +289,9 @@ class H5OutputSink(_SinkCallback):
         self._run_name = "salt"
         self._group_of: dict[str, str] = {}
         self._seq_lengths: dict[str, int] = {}
-        # extra (non-reader) output group -> trailing per-row shape, resolved
-        # at open_schema from the configured extra_groups nodes ({} when none).
-        self._extra_shapes: dict[str, tuple[int, ...]] = {}
+        # non-reader object-group -> trailing per-row shape, resolved at
+        # open_schema from the configured object_groups ({} when none).
+        self._object_shapes: dict[str, tuple[int, ...]] = {}
         self._mask_streams: tuple[str, ...] = ()
         self._copy_handle: h5py.File | None = None
         self._copy_reads: dict[str, tuple[h5py.Dataset, list[str]]] = {}
@@ -542,30 +529,29 @@ class H5OutputSink(_SinkCallback):
                 req[f"masks.{stream}"] = TensorSpec(
                     shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
                 )
-        # a manifest-only extra-group node (the MaskFormer object writer)
-        # computes its columns from bundle leaves the SINK must demand on its
-        # behalf — fold each node's `sink_requires` into the sink's TEST demand
-        # so the planner keeps those producers alive. Empty for the shipped
-        # non-MaskFormer sinks (byte-identical no-op).
-        for key, spec in self._extra_group_requires().items():
+        # each object-group field sources a bundle leaf the sink must demand
+        # (so its producer — a decoder head, a truth-label processor, a
+        # reconstruction node like MaskFormerObjects — stays alive in the TEST
+        # plan and its leaf threads into the consume bundle). Empty for the
+        # shipped non-object-group sinks (byte-identical no-op).
+        for key, spec in self._object_group_requires().items():
             req.setdefault(key, spec)
         return IO(requires=unflatten_spec(req), produces={})
 
-    def _extra_group_requires(self) -> dict[str, TensorSpec]:
-        """The decoder/truth/pad-mask demand of each extra-group node, for the sink to anchor.
+    def _object_group_requires(self) -> dict[str, TensorSpec]:
+        """The source-leaf demand of every object-group field, for the sink to anchor.
 
-        A manifest-only extra-group node mints no graph leaf, so it cannot
-        anchor its own demand; the host sink folds these requires into its
-        TEST ``declare_io`` (and thus ``writer_demand``). Nodes without a
-        ``sink_requires`` contribute nothing.
+        The sink consumes each leaf and casts at write time, so the require
+        dtype is unconstrained; the field's ``kind`` must match its producer's
+        declared kind (data / label / pad_mask) or the planner's kind-unify
+        raises.
         """
         out: dict[str, TensorSpec] = {}
-        for name in self._extra_group_names:
-            node = self._extra_group_node(name)
-            sink_requires = getattr(node, "sink_requires", None)
-            if callable(sink_requires):
-                for key, spec in sink_requires().items():
-                    out.setdefault(key, spec)
+        for group in self._object_groups:
+            for field in group.fields:
+                out.setdefault(
+                    field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind)
+                )
         return out
 
     # -- static demand (consumed by SaltModule) ----------------------
@@ -679,21 +665,14 @@ class H5OutputSink(_SinkCallback):
                     f"pad masks exist for {list(sequence_streams)} only (design §6.1)"
                 )
         total = self._expected_rows(trainer, len(dset), dm.batch_size)
-        # resolve writer-declared NON-reader output groups (extra_groups). Empty
-        # extra_groups -> ({}, {}) and self._extra_shapes stays empty, so the
+        # resolve the NON-reader object groups' trailing shapes (object_groups).
+        # Empty object_groups -> {} so self._object_shapes stays empty and the
         # column merge below is byte-identical to a plain sink (the no-op path).
-        extra_ctx = _ExtraGroupCtx(
-            streams=streams,
-            seq_lengths=self._seq_lengths,
-            total=total,
-            run_name=self._run_name,
-            precision="half" if self.half_precision else "full",
-        )
-        self._extra_shapes, _ = self._collect_extra_groups(extra_ctx, streams)
+        self._object_shapes = self._resolve_object_shapes(streams)
         if source_path is not None:  # the no-source branch reaches here only with copying off
             self._open_copies(source_path, group_datasets, streams)
         dtypes, shapes = self._merge_columns(
-            streams, sequence_streams, group_datasets, total, extra_ctx
+            streams, sequence_streams, group_datasets, total
         )
         self.output_path = self._output_path(trainer, dm, reader)
         self._h5 = H5Writer(
@@ -737,14 +716,13 @@ class H5OutputSink(_SinkCallback):
         # pad masks last
         for stream, arr in self._mask_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
-        # extra-group nodes (the MaskFormer object writer) pack their own
-        # structured arrays from the demanded decoder/truth leaves. The
-        # `objects` / `object_masks` groups are NEW (extra) groups; the
-        # per-token MaskIndex rides the constituent reader stream and is
+        # object groups pack their declared fields from the demanded bundle
+        # leaves. NON-reader groups (e.g. `objects` / `object_masks`) are new
+        # groups; a reader-stream group (e.g. the `tracks` MaskIndex column) is
         # re-expanded to the file token length like any per-token column.
         # Appended AFTER the copy/output/mask fragments so the join order
-        # matches `_merge_columns` (extra-group columns come last).
-        for stream, arr in self._extra_group_fragments(bundle, rows).items():
+        # matches `_merge_columns` (object-group columns come last).
+        for stream, arr in self._object_group_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
         for stream, arrs in fragments.items():
             for arr in arrs:
@@ -837,48 +815,49 @@ class H5OutputSink(_SinkCallback):
             out[stream] = _pad_to(arr, self._seq_lengths[stream])
         return out
 
-    def _extra_group_fragments(self, bundle: Bundle, rows: slice) -> dict[str, np.ndarray]:
-        """Pack each extra-group node's per-batch structured arrays.
+    def _object_group_fragments(self, bundle: Bundle) -> dict[str, np.ndarray]:
+        """Pack each object group's declared fields from the demanded bundle leaves.
 
-        Calls ``write(bundle, rows, run_name, precision)`` on each configured
-        ``extra_groups`` node exposing one. A per-token fragment on a reader
-        sequence stream is re-expanded to the file token length; a
-        NON-reader extra group is written verbatim, guarded against a
-        per-row shape mismatch with the schema-declared shape (raises
-        `ConfigError`; ``object_masks`` must span the full constituent
-        width, incompatible with a tracks ``truncate``). Nodes without
-        ``write`` contribute nothing.
+        Each field sources one bundle leaf and packs its last dimension into
+        the field's named columns; a group's fields are joined in declaration
+        order. A reader-stream group's fragment is re-expanded to the file
+        token length; a NON-reader group's per-row shape is guarded against the
+        schema-declared shape (raises `ConfigError` — e.g. ``object_masks``
+        must span the full file constituent width, incompatible with a reader
+        ``truncate``). Empty ``object_groups`` -> ``{}`` (the no-op path).
         """
         out: dict[str, np.ndarray] = {}
-        if not self._extra_group_names:
-            return out
-        precision = "half" if self.half_precision else "full"
-        for name in self._extra_group_names:
-            node = self._extra_group_node(name)
-            writer = getattr(node, "write", None)
-            if not callable(writer):
-                continue
-            for group, arr in writer(bundle, rows, self._run_name, precision).items():
-                if group in out:
+        for group in self._object_groups:
+            frags = [self._pack_object_field(bundle, f) for f in group.fields]
+            arr = frags[0] if len(frags) == 1 else join_structured_arrays(frags)
+            if group.name in self._seq_lengths and arr.ndim >= 2:
+                arr = _pad_to(arr, self._seq_lengths[group.name])
+            if group.name in self._object_shapes:
+                declared = self._object_shapes[group.name]
+                actual = arr.shape[1:]
+                if actual != declared:
                     raise ConfigError(
-                        f"H5OutputSink: extra-group group {group!r} written by more than one "
-                        f"extra_groups node (one node owns one group, design §8) — at {name!r}"
+                        f"H5OutputSink: object group {group.name!r} fragment per-row shape "
+                        f"{actual} does not match the schema-declared per-row shape {declared} "
+                        "— a reader `truncate` narrower than the file width is unsupported for a "
+                        "non-reader object group (its trailing axes must span the full file width)"
                     )
-                if group in self._seq_lengths and arr.ndim >= 2:
-                    arr = _pad_to(arr, self._seq_lengths[group])
-                if group in self._extra_shapes:
-                    declared = self._extra_shapes[group]
-                    actual = arr.shape[1:]
-                    if actual != declared:
-                        raise ConfigError(
-                            f"H5OutputSink: extra-group {group!r} fragment per-row shape "
-                            f"{actual} does not match the schema-declared per-row shape "
-                            f"{declared} — tracks `truncate` is not supported with the "
-                            f"MaskFormer object sink; object_masks must span the full file "
-                            f"constituent width"
-                        )
-                out[group] = arr
+            out[group.name] = arr
         return out
+
+    def _pack_object_field(self, bundle: Bundle, field: ObjectGroupField) -> np.ndarray:
+        """Pack one field's source leaf into its declared columns (u2s), casting at write time.
+
+        A single-suffix field wraps a channel-less leaf into one column; a
+        multi-suffix field expands the leaf's trailing channel axis in
+        ``suffixes`` order.
+        """
+        values = bundle.get(field.leaf).detach().cpu().numpy()
+        if len(field.suffixes) == 1:
+            values = values[..., np.newaxis]
+        return u2s(
+            np.ascontiguousarray(values), field.np_dtype(self._run_name, self.half_precision)
+        )
 
     def _copy_fragments(self, rows: slice) -> dict[str, np.ndarray]:
         """Re-read this batch's input-copy columns by absolute rows, at full file
@@ -930,54 +909,60 @@ class H5OutputSink(_SinkCallback):
             self._copy_handle = None
         self._copy_reads = {}
 
-    def _extra_group_node(self, name: str) -> Any:
-        """Resolve an ``extra_groups`` name to its bound ``outputs:``-section node.
+    def _resolve_object_shapes(self, streams: tuple[str, ...]) -> dict[str, tuple[int, ...]]:
+        """Resolve each NON-reader object group's trailing per-row shape.
 
-        Nodes live in the ``outputs:`` section bound via
-        `bind_output_section`; resolved here (not at config construction) so
-        the name can reference a node composed AFTER the model. Raises
-        `ConfigError` when the name is not a bound section node.
-        """
-        section = self._output_section or {}
-        if name not in section:
-            raise ConfigError(
-                f"H5OutputSink: extra_groups names {name!r}, which is not a bound outputs: "
-                f"section node — section nodes are {sorted(section)} (W6a; the MaskFormer "
-                "object writer binds via the outputs: section in W6b)"
-            )
-        return section[name]
+        A `shape` entry is an ``int``, or a reader stream name resolved to that
+        stream's file token length. A non-reader group name may NOT shadow a
+        reader stream, and two groups may NOT share a name. A reader-stream
+        group (``shape is None``) must name an actual reader stream. Returns
+        ``{group -> trailing shape}`` for the non-reader groups only; empty
+        ``object_groups`` -> ``{}`` (the byte-identical no-op path).
 
-    def _collect_extra_groups(
-        self, ctx: _ExtraGroupCtx, streams: tuple[str, ...]
-    ) -> tuple[dict[str, tuple[int, ...]], dict[str, str]]:
-        """Merge the configured nodes' ``extra_groups`` declarations.
-
-        Each `extra_groups`-listed node sizes its NON-reader output groups
-        via ``extra_groups(ctx) -> {group: trailing}``; an extra group may
-        NOT shadow a reader stream, and two nodes may NOT own the same group
-        (raises `ConfigError`). Returns ``(group -> trailing per-row shape,
-        group -> declaring node)``; empty ``extra_groups`` short-circuits to
-        ``({}, {})`` (the no-op path).
+        Raises
+        ------
+        ConfigError
+            For a duplicate group name, a non-reader group shadowing a reader
+            stream, a reader-stream group naming an unknown stream, or a shape
+            token naming a stream with no file token length.
         """
         shapes: dict[str, tuple[int, ...]] = {}
-        owner: dict[str, str] = {}
-        for name in self._extra_group_names:
-            node = self._extra_group_node(name)
-            for group, trailing in node.extra_groups(ctx).items():
-                if group in streams:
+        seen: set[str] = set()
+        for group in self._object_groups:
+            if group.name in seen:
+                raise ConfigError(
+                    f"H5OutputSink: object group {group.name!r} is declared twice — one group "
+                    "owns one H5 group name"
+                )
+            seen.add(group.name)
+            if group.shape is None:
+                if group.name not in streams:
                     raise ConfigError(
-                        f"H5OutputSink: extra_groups node {name!r} declares extra group "
-                        f"{group!r}, which shadows reader stream {group!r} — extra groups are "
-                        "NON-reader output groups only (design §8)"
+                        f"H5OutputSink: object group {group.name!r} has no `shape` (a reader-"
+                        f"stream group) but {group.name!r} is not a reader stream — reader "
+                        f"streams are {list(streams)}; give it a `shape` for a non-reader group"
                     )
-                if (other := owner.get(group)) is not None:
-                    raise ConfigError(
-                        f"extra output group {group!r} is declared by nodes {other!r} AND "
-                        f"{name!r} — one node owns one extra group (design §8)"
-                    )
-                owner[group] = name
-                shapes[group] = tuple(int(d) for d in trailing)
-        return shapes, owner
+                continue
+            if group.name in streams:
+                raise ConfigError(
+                    f"H5OutputSink: non-reader object group {group.name!r} shadows reader stream "
+                    f"{group.name!r} — drop its `shape` to add columns to the reader stream, or "
+                    "rename the group"
+                )
+            trailing: list[int] = []
+            for dim in group.shape:
+                if isinstance(dim, str):
+                    if dim not in self._seq_lengths:
+                        raise ConfigError(
+                            f"H5OutputSink: object group {group.name!r} shape token {dim!r} is "
+                            f"not a sequence stream — sequence streams are "
+                            f"{sorted(self._seq_lengths)}"
+                        )
+                    trailing.append(self._seq_lengths[dim])
+                else:
+                    trailing.append(int(dim))
+            shapes[group.name] = tuple(trailing)
+        return shapes
 
     def _merge_columns(
         self,
@@ -985,24 +970,23 @@ class H5OutputSink(_SinkCallback):
         sequence_streams: tuple[str, ...],
         group_datasets: Mapping[str, str],
         total: int,
-        extra_ctx: _ExtraGroupCtx | None = None,
     ) -> tuple[dict[str, np.dtype], dict[str, tuple[int, ...]]]:
-        """Merge copy / output / pad-mask columns into per-group dtypes/shapes.
+        """Merge copy / output / pad-mask / object-group columns into per-group dtypes/shapes.
 
         Column order: input copies, then output columns (declaration order),
-        then the pad mask. Output groups are named after the FILE dataset. A
-        column collision or an output leaf for an unknown stream raises
-        `ConfigError` naming both contributors.
+        the pad mask, then the object-group columns. Output groups are named
+        after the FILE dataset. A column collision or an output leaf for an
+        unknown stream raises `ConfigError` naming both contributors.
         """
         descrs: dict[str, list] = {}
         owners: dict[tuple[str, str], str] = {}
 
         def _add(stream: str, dtype: np.dtype, who: str) -> None:
-            if stream not in streams and stream not in self._extra_shapes:
+            if stream not in streams and stream not in self._object_shapes:
                 raise ConfigError(
                     f"H5OutputSink: {who} targets unknown group {stream!r} — reader streams "
-                    f"are {list(streams)} and extra groups are {sorted(self._extra_shapes)} "
-                    "(declare a non-reader output group via extra_groups, design §8)"
+                    f"are {list(streams)} and object groups are {sorted(self._object_shapes)} "
+                    "(declare a non-reader group's `shape` in object_groups)"
                 )
             for descr in dtype.descr:
                 field_name = descr[0]
@@ -1024,18 +1008,18 @@ class H5OutputSink(_SinkCallback):
             _add(col.stream, col.np_dtype(self._run_name), f"output {col.key!r}")
         for stream in self._mask_streams:
             _add(stream, np.dtype([("mask", "?")]), f"pad mask[{stream!r}]")
-        # writer-declared NON-reader output group columns (extra_groups) —
-        # appended AFTER the task/mask columns, mirroring the v1 WriterCallback's
-        # extra-group merge. Each node declares its group dtypes via
-        # `columns(ctx)`; the per-column uniqueness/attribution check is the
-        # SAME `_add` owners map a reader column rides. Dead code when
-        # extra_groups is empty.
-        if self._extra_group_names:
-            assert extra_ctx is not None, "extra_groups set but no _ExtraGroupCtx passed"
-            for name in self._extra_group_names:
-                node = self._extra_group_node(name)
-                for group, dtype in node.columns(extra_ctx).items():
-                    _add(group, np.dtype(dtype), f"extra_groups[{name!r}]")
+        # object-group columns — appended AFTER the copy/task/mask columns
+        # (mirroring the retired extra-group merge order). Each field declares
+        # its column dtypes from its own spec; the per-column uniqueness /
+        # attribution check is the SAME `_add` owners map a reader column rides.
+        # Dead code when object_groups is empty (byte-identical no-op).
+        for group in self._object_groups:
+            for field in group.fields:
+                _add(
+                    group.name,
+                    field.np_dtype(self._run_name, self.half_precision),
+                    f"object_groups[{group.name!r}].{field.leaf!r}",
+                )
         if not descrs:
             raise ConfigError("H5OutputSink declares no output columns at all (design §8)")
         self._group_of = {stream: group_datasets.get(stream, stream) for stream in descrs}
@@ -1052,11 +1036,11 @@ class H5OutputSink(_SinkCallback):
         """The fixed-mode H5 shape of one output group (leading ``total`` row dim).
 
         A reader sequence stream carries ``(total, file_seq_len)``, a reader
-        global stream ``(total,)``, and a writer-declared extra group
-        ``(total, *trailing)`` from its `extra_groups` declaration.
+        global stream ``(total,)``, and a non-reader object group
+        ``(total, *trailing)`` from its `object_groups` shape.
         """
-        if stream in self._extra_shapes:
-            return (total, *self._extra_shapes[stream])
+        if stream in self._object_shapes:
+            return (total, *self._object_shapes[stream])
         if stream in sequence_streams:
             return (total, self._seq_lengths[stream])
         return (total,)

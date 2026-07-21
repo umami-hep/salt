@@ -38,10 +38,9 @@ class SaltModelModule(nn.Module):
     Not a Python ``ABC``: `declare_io` and `forward` are each documented as
     the contract every FORWARD-REACHABLE participant must implement, but
     neither is a hard `abstractmethod` — a manifest-only ``outputs:`` section
-    writer (e.g. `MaskFormerObjectsSink`) legitimately implements NEITHER
-    (its demand/serialisation surface is `sink_requires`/`columns`/`write`
-    instead) because it never enters the planner's per-mode module dict or
-    the executor's forward loop. Instantiation-time validation
+    writer (e.g. `InputCopyWriter`) legitimately implements no ``forward``
+    (its serialisation surface is `copy_spec`/`columns` instead) because it
+    never enters the executor's forward loop. Instantiation-time validation
     (`SaltModule.__init__`/`GraphDataModule.__init__`) checks
     ``isinstance(m, SaltModelModule)``, not method presence.
     """

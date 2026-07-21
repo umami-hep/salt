@@ -57,7 +57,7 @@ OBJECT_INDEX = ModeSplitSuffix(
 )
 """The MaskFormer track-to-object index suffix pair.
 
-`MaskFormerObjectsSink` uses ``OBJECT_INDEX.test`` for its eval column;
+The H5 sink's object group uses ``OBJECT_INDEX.test`` for its eval column;
 ``OBJECT_INDEX.onnx`` names the explicit `OnnxExportLeaf` object index.
 """
 

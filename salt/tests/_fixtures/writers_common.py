@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from salt.outputs.maskformer_objects_sink import WriterDeclareCtx
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import (
@@ -34,9 +33,3 @@ def data(tmp_path_factory) -> dict[str, Path]:
 def modules(data):
     # config-only module dict: requires/columns need attrs, not bound layers
     return build_gn2v2_modules(data["nd"])
-
-
-def declare_ctx(modules) -> WriterDeclareCtx:
-    return WriterDeclareCtx(
-        model_modules=modules, streams=("jets", "tracks"), sequence_streams=("tracks",)
-    )

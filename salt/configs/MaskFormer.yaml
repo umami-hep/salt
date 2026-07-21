@@ -144,9 +144,14 @@ model:
           null_class_weight: 0.5
           # mask_ce (binary cross-entropy) is deliberately used, not mask_focal
           loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
-      # mints the ONNX-only object export leaves: outputs.objects.leading_object
-      # (leading-object regression scalars) and outputs.tracks.object_index
-      # (per-constituent owning-object index). Demand-gated so FIT/VAL/TEST prune it.
+      # the SINGLE MaskFormer object reconstruction node, serving BOTH modes:
+      # ONNX mints the export leaves outputs.objects.leading_object
+      # (leading-object regression scalars) + outputs.tracks.object_index
+      # (reordered per-constituent index); TEST mints outputs.tracks.object_index
+      # from the RAW masks (the eval-H5 MaskIndex, indices_from_mask + pad->-1).
+      # Demand-gated: FIT/VAL prune it; the h5_output object group / OnnxExportSink
+      # pull it into TEST / ONNX respectively. (Instance name kept for ONNX
+      # plan-hash stability — it now serves TEST too.)
       maskformer_objects_onnx:
         class_path: salt.outputs.MaskFormerObjects
         init_args:
@@ -191,15 +196,6 @@ outputs:
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-  # object writer: emits objects [B, M] (class probs + class_label) +
-  # object_masks [B, M, T] (truth_mask + mask_logits) + tracks MaskIndex.
-  maskformer_objects:
-    class_path: salt.outputs.MaskFormerObjectsSink
-    init_args:
-      object_classes: [b, c, "null"] # null LAST
-      object_stream: objects
-      constituent_stream: tracks
-      regression_task: regression
 
 callbacks:
   # consumes matched.objects.* -> keeps the matched loss alive under pruning
@@ -208,7 +204,27 @@ callbacks:
   h5_output:
     class_path: salt.outputs.H5OutputSink
     init_args:
-      extra_groups: [maskformer_objects]
+      # the MaskFormer object eval-H5 groups, declared as generic structured
+      # object groups fed from bundle leaves (the sink has no MaskFormer
+      # knowledge): objects [B, M] (raw class probs + truth class_label),
+      # object_masks [B, M, T] (truth mask + raw mask logits), and the tracks
+      # MaskIndex column (from the MaskFormerObjects TEST reconstruction leaf).
+      object_groups:
+        - name: objects
+          shape: [5] # == num_objects M (the decoder query bank)
+          fields:
+            - {leaf: objects.class_probs, suffixes: [pb, pc, pnull], dtype: f4}
+            - {leaf: labels.objects.object_class, suffixes: [class_label], dtype: i8,
+               prefix: false, kind: label}
+        - name: object_masks
+          shape: [5, tracks] # M, then the file constituent (tracks) width
+          fields:
+            - {leaf: labels.objects.masks, suffixes: [truth_mask], dtype: i8,
+               prefix: false, kind: label}
+            - {leaf: objects.masks, suffixes: [mask_logits], dtype: f4, prefix: false}
+        - name: tracks # the reader stream the per-token MaskIndex column rides
+          fields:
+            - {leaf: outputs.tracks.object_index, suffixes: [MaskIndex], dtype: i8}
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
     init_args:

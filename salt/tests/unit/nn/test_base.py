@@ -19,7 +19,7 @@ class _Bare(SaltModelModule):
 
 class _NoDeclareIo(SaltModelModule):
     """A manifest-only-style subclass overriding neither `declare_io` nor `forward`
-    (mirrors `MaskFormerObjectsSink`'s pattern — never entered into the plan).
+    (a manifest-only-writer pattern — never entered into the plan).
     """
 
 
@@ -61,7 +61,7 @@ def test_forward_default_raises_not_implemented():
 
 def test_declare_io_default_raises_not_implemented():
     # the manifest-only carve-out: a subclass that never overrides declare_io
-    # (mirrors MaskFormerObjectsSink) instantiates fine (not a hard abstractmethod)...
+    # (a manifest-only-writer pattern) instantiates fine (not a hard abstractmethod)...
     m = _NoDeclareIo()
     assert isinstance(m, SaltModelModule)
     # ...but calling it unimplemented is a loud NotImplementedError, not silent.

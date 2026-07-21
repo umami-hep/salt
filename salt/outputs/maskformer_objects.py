@@ -15,12 +15,13 @@ from salt.model.base import SaltModelModule
 # The MaskFormer export math is inlined verbatim in salt.onnx.reduces (the
 # shared math seam); this node reuses that exact copy so the two can never drift.
 from salt.onnx.reduces import get_maskformer_outputs
+from salt.utils.mask_utils import indices_from_mask
 
 
 class MaskFormerObjects(SaltModelModule):
-    """MaskFormer object reconstruction node (the "writer" half of the two-node MaskFormer split).
+    """MaskFormer object reconstruction node — the single reconstruction path for both modes.
 
-    Runs `get_maskformer_outputs` once inside ``forward(b, Mode.ONNX)`` (the
+    In **ONNX** it runs `get_maskformer_outputs` once inside ``forward`` (the
     null-suppression + pT reorder + index math) and exposes its products so a
     downstream `MFLeadVertexDecorator` can read the reordered per-vertex
     outputs without redoing any of the heavy lifting. Produces:
@@ -43,8 +44,13 @@ class MaskFormerObjects(SaltModelModule):
     ``regression`` in place for null-suppression + pT reorder), so the
     write-once bundle is never mutated.
 
-    ONNX-only by construction (like `VertexUnionFind`): never wired into a
-    TEST H5 config.
+    In **TEST** it publishes the same ``object_index`` leaf, computed from the
+    RAW decoder masks (``indices_from_mask(masks.sigmoid() > 0.5)``, padded
+    constituents set to -1) — the eval-H5 ``MaskIndex`` semantics. The node is
+    the ONE reconstruction path for both modes: the sink is a dumb terminal
+    that only packs the leaf. Demand-gated (a TEST plan pulls it in only when
+    an object-group field sources ``outputs.<constituent>.<index_name>``); FIT
+    and VAL declare nothing, so the node never enters those plans.
 
     Parameters
     ----------
@@ -112,6 +118,9 @@ class MaskFormerObjects(SaltModelModule):
         self.class_probs_key = f"{stream}.class_probs"
         self.masks_key = f"{stream}.masks"
         self.reg_key = f"preds.{stream}.{regression_task}"
+        # the constituent pad mask the TEST index reconstruction reads (padded
+        # constituents -> -1), the same demand the deleted sink used to fold.
+        self.pad_key = f"masks.{constituent_stream}"
         # the GLOBAL leading-regression leaf is written under the OBJECT stream; the
         # PER-TOKEN index leaf under the CONSTITUENT stream (its dynamic axis source)
         self.leading_key = f"outputs.{stream}.{leading_name}"
@@ -121,13 +130,36 @@ class MaskFormerObjects(SaltModelModule):
         self.vertices_regression_key = f"outputs.{stream}.{vertices_regression_name}"
 
     def declare_io(self, mode: Mode) -> IO:
-        """Requires the three maskformer reads; produces the leading/index/per-vertex leaves."""
-        del mode
-        # ONNX-only ports (same gate as `VertexUnionFind`): the null-suppression
-        # + pT-reorder chain is shaped for the traced export batch, so this node
-        # is inactive in FIT/VAL/TEST — a config that wires it for ONNX export
-        # alongside an object-regression head opted out of TEST eval does not
-        # trip the planner's pre-prune connectivity check on this require.
+        """Mode-branched: TEST -> raw-mask ``object_index``; ONNX -> the reorder leaves; else empty.
+
+        FIT/VAL declare nothing (the node never enters those plans, so their
+        plan hashes are unaffected); the ONNX ports are byte-unchanged.
+        """
+        if mode & Mode.TEST:
+            return self._test_io()
+        if mode & Mode.ONNX:
+            return self._onnx_io()
+        return IO(requires={}, produces={})
+
+    def _test_io(self) -> IO:
+        """TEST: require the RAW masks + constituent pad mask; produce ``object_index`` [B, T]."""
+        requires = {
+            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
+            self.pad_key: TensorSpec(
+                shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST
+            ),
+        }
+        produces = {
+            self.index_key: TensorSpec(shape=None, dtype="int64", kind="data", modes=Mode.TEST),
+        }
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def _onnx_io(self) -> IO:
+        """ONNX ports (same gate as `VertexUnionFind`): the null-suppression + pT-reorder
+        chain is shaped for the traced export batch, so this node is inactive in FIT/VAL/TEST
+        for these leaves — a config that wires it for ONNX export alongside an object-regression
+        head opted out of TEST eval does not trip the planner's pre-prune connectivity check.
+        """
         requires = {
             self.class_probs_key: TensorSpec(
                 shape=None, dtype="float32", kind="data", modes=Mode.ONNX
@@ -161,8 +193,9 @@ class MaskFormerObjects(SaltModelModule):
         }
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Run ``get_maskformer_outputs`` once -> object_index + leading + the per-vertex leaves."""
-        del mode
+        """TEST -> raw-mask ``object_index``; ONNX -> ``get_maskformer_outputs`` reorder leaves."""
+        if mode & Mode.TEST:
+            return self._forward_test(b)
         objects = {
             "class_probs": b.get(self.class_probs_key).clone(),
             "masks": b.get(self.masks_key).clone(),
@@ -192,6 +225,21 @@ class MaskFormerObjects(SaltModelModule):
             self.vertices_class_probs_key: vertices_class_probs,
             self.vertices_regression_key: vertices_regression,
         }
+
+    def _forward_test(self, b: Bundle) -> dict[str, Tensor]:
+        """The eval-H5 ``MaskIndex`` reconstruction.
+
+        Per-constituent owning-object index from the RAW decoder masks
+        (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object claims a
+        constituent), with padded constituents forced to -1. No reordering /
+        null-suppression (that is the ONNX path) — the eval-H5 index is a
+        function of the raw masks.
+        """
+        masks = b.get(self.masks_key)  # [B, M, T] raw logits
+        pad = b.get(self.pad_key)  # [B, T] bool, True = padded
+        idx = indices_from_mask(masks.sigmoid() > 0.5)  # [B, T] int64, -2 = no object
+        idx = torch.where(pad, torch.full_like(idx, -1), idx)  # padded constituents -> -1
+        return {self.index_key: idx}
 
 
 # One-window alias: `MaskFormerObject` was renamed `MaskFormerObjects`. The

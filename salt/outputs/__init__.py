@@ -15,8 +15,8 @@ from salt.outputs.conversion_ops import (
 from salt.outputs.h5_sink import H5OutputSink, H5OutputWriter
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.maskformer_objects import MaskFormerObject, MaskFormerObjects
-from salt.outputs.maskformer_objects_sink import MaskFormerObjectsSink
 from salt.outputs.mf_lead_vertex_decorator import MFLeadVertexDecorator
+from salt.outputs.object_group import ObjectGroup, ObjectGroupField
 from salt.outputs.onnx_sink import OnnxExportLeaf, OnnxExportSink
 from salt.outputs.output_column import OutputColumn
 from salt.outputs.output_field import OutputField
@@ -42,7 +42,8 @@ __all__ = [
     "MFLeadVertexDecorator",
     "MaskFormerObject",
     "MaskFormerObjects",
-    "MaskFormerObjectsSink",
+    "ObjectGroup",
+    "ObjectGroupField",
     "OnnxExportLeaf",
     "OnnxExportSink",
     "OutputColumn",

@@ -374,7 +374,7 @@ def build_matched_loss_module(
     return module
 
 
-# MaskFormerObjectWriter fixtures — the writer's TEST byte parity + the ONNX
+# MaskFormer object fixtures — the eval-H5 TEST byte parity + the ONNX
 # leading_object / object_index reduce export
 
 MASKFORMER_WRITER_REG_TARGETS = ("pt", "Lxy", "mass")
@@ -431,7 +431,7 @@ def make_maskformer_writer_batch(
     n_reg: int = len(MASKFORMER_WRITER_REG_TARGETS),
     seed: int = 31,
 ) -> dict[str, Tensor]:
-    """A TEST bundle for the `MaskFormerObjectWriter`: decoder preds + truth labels + pad."""
+    """A TEST bundle for the MaskFormer eval-H5: decoder preds + truth labels + pad."""
     gen = torch.Generator().manual_seed(seed)
     class_probs = torch.randn(batch_size, num_objects, num_classes, generator=gen).softmax(-1)
     masks = torch.randn(batch_size, num_objects, n_tracks, generator=gen)
