@@ -1,0 +1,6 @@
+# Shared flow (constituent) feature list. Seeded from example_schema.yaml.
+- { name: pt,        type: distribution, dtype: f4, dist: lognormal }
+- { name: energy,    type: distribution, dtype: f4, dist: lognormal }
+- { name: deta,      type: distribution, dtype: f4 }
+- { name: dphi,      type: distribution, dtype: f4 }
+- { name: isCharged, type: distribution, dtype: f4 }
