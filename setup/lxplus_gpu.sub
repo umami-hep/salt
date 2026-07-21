@@ -1,0 +1,65 @@
+# setup/lxplus_gpu.sub — HTCondor GPU batch template for salt v2 on CERN lxplus.
+#
+# Requests one modern GPU on the CERN batch farm and runs a salt v2 command in an
+# Apptainer image (container mode) or the venv (fallback). You normally submit it
+# through the helper, which fills the macros below and handles the AFS/EOS split:
+#
+#     salt-lxplus-gpu submit <config.yaml> [flavour]
+#
+# STORAGE SPLIT: standard CERN batch schedds reject /eos paths *inside the submit
+# file*, so the executable + log/output/error live on AFS (SALT_EXECUTABLE, SALT_JOBDIR),
+# while all bulk data (SIF, salt source, datasets) stays on /eos and is only referenced
+# in the runtime `environment` / arguments. (Alternative: the EosSubmit schedds —
+# https://batchdocs.web.cern.ch/local/eossubmit.html.)
+#
+# Submit-file macros (ALL must be AFS/node-local — no /eos):
+#   SALT_EXECUTABLE : AFS path to the salt-lxplus-gpu wrapper (the job executable)
+#   SALT_JOBDIR     : AFS dir for this job's log/output/error + the sourced job_env.sh
+#   SALT_ARGS       : salt v2 CLI args, e.g. "fit --config /afs/.../config.yaml"
+#   JobFlavour      : walltime bucket — espresso 20m, microcentury 1h, longlunch 2h, ...
+# The backend config (SALT_LXPLUS_SIF on /eos, SALT_LXPLUS_SRC/PYPATH on AFS, etc.) lives
+# in $(SALT_JOBDIR)/job_env.sh, sourced by the executable at run time — never in the
+# submit file (the schedd rejects /eos in any submit-file field).
+
+universe   = vanilla
+
+# Executable is the AFS copy of setup/salt-lxplus-gpu; it runs salt v2 in the image
+# (container mode) or the venv (fallback), then `python -m salt.core.main`.
+# Pin the job's working dir to AFS — otherwise condor records the submit cwd as Iwd,
+# and if you submitted from an /eos dir the schedd rejects it (/eos in a submit field).
+initialdir = $(SALT_JOBDIR)
+executable = $(SALT_EXECUTABLE)
+arguments  = "_run $(SALT_ARGS)"
+
+# The backend config (incl. the EOS SIF path) is sourced by the executable from
+# $(SALT_JOBDIR)/job_env.sh at run time — NOT passed here, because the schedd rejects
+# /eos in ANY submit-file field. SALT_JOBDIR is an AFS path (schedd-safe) and tells the
+# executable where to find job_env.sh (condor runs the executable from a scratch copy,
+# so it can't locate job_env.sh by its own path). Keep this line /eos-free.
+environment = "SALT_JOBDIR=$(SALT_JOBDIR) OMP_NUM_THREADS=4"
+
+# --- GPU worker contract ---
+# gpus_minimum_capability defaults to 7.0 so the job can land on the plentiful V100 (7.0)
+# and T4 (7.5) slots, not just the small, contended A100 (8.0) pool. Raise to 8.0 (via
+# SALT_LXPLUS_GPU_CAPABILITY) only if your model needs flash-attention (SM80+).
+request_gpus            = 1
+gpus_minimum_capability = $(GpuCapability)
+gpus_minimum_memory     = 12GB
+# request_cpus / request_memory (MB): the job must fit in the LEFTOVER CPU/RAM of a busy
+# GPU host when its GPU frees, so keep these modest — a smoke needs little; bump for real
+# training (SALT_LXPLUS_GPU_CPUS / SALT_LXPLUS_GPU_MEMORY).
+request_cpus            = $(RequestCpus)
+request_memory          = $(RequestMemory)
+
++JobFlavour = "$(JobFlavour)"
+
+# Log/output/error on AFS (KB-scale; schedd-safe).
+output = $(SALT_JOBDIR)/salt.$(ClusterId).$(ProcId).out
+error  = $(SALT_JOBDIR)/salt.$(ClusterId).$(ProcId).err
+log    = $(SALT_JOBDIR)/salt.$(ClusterId).$(ProcId).log
+
+# AFS (executable/logs) and /eos (SIF, source, data) are both mounted on the worker,
+# so nothing needs transferring to the execute node.
+should_transfer_files = NO
+
+queue

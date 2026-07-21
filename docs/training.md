@@ -145,6 +145,14 @@ If you have enough RAM, you can load the training data into shared memory before
 
 ### Batch systems
 
+!!! tip "On CERN lxplus?"
+
+    For lxplus specifically, the [lxplus (CERN) setup tab](setup.md) ships a
+    one-command environment setup plus a `salt-lxplus-gpu` helper that submits GPU
+    jobs to the CERN HTCondor batch farm (`salt-lxplus-gpu submit <config>`) or
+    opens an interactive GPU node (`salt-lxplus-gpu shell`). Start there rather
+    than hand-writing the submit files described below.
+
 #### HTCondor Batch
 
 Those at institutions with HTCondor managed GPU batch queues can submit training jobs using

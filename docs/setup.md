@@ -146,6 +146,119 @@ Salt requires Python 3.10 to 3.14.
 
     Please note that if you want an editable install, you need to run the installation command below each time you open a new apptainer shell.
 
+=== "lxplus (CERN)"
+
+    On CERN's `lxplus`, the login nodes have no usable GPU — you train on the
+    [HTCondor batch farm](https://batchdocs.web.cern.ch/gpu/index.html), the
+    sanctioned route to a decent GPU at CERN. The helper `setup/salt-lxplus-gpu`
+    submits GPU jobs for you; it runs salt two ways, **container-first**:
+
+    - **Container (recommended).** A single Apptainer `.sif` is one loop-mounted
+      file, so it avoids the per-job small-file penalty EOS FUSE imposes on a venv
+      at *every* job's import time. This is the fast, reproducible default.
+    - **Venv (fallback).** A `uv`-built virtualenv on shared storage — useful if you
+      can't use a container or want an editable local install.
+
+    #### Container path (recommended)
+
+    **1. Get the image onto EOS (once).** Pull the published salt image:
+
+    ```bash
+    cd /eos/user/${USER:0:1}/$USER          # EOS home (batch-worker-visible)
+    git clone https://gitlab.cern.ch/aft/algorithms/salt.git && cd salt
+    # pull salt:latest to /eos/user/<i>/<user>/salt-containers/salt.sif
+    setup/salt-lxplus-gpu pull
+    ```
+
+    (You can also point `SALT_LXPLUS_SIF` at any `.sif` you already have.)
+
+    **2. Submit a GPU job:**
+
+    ```bash
+    export SALT_LXPLUS_SIF=/eos/user/${USER:0:1}/$USER/salt-containers/salt.sif
+    setup/salt-lxplus-gpu submit config.yaml            # espresso (20 min)
+    setup/salt-lxplus-gpu submit config.yaml longlunch  # 2 h walltime
+    setup/salt-lxplus-gpu status                        # your condor jobs
+    ```
+
+    The job runs `apptainer exec --nv --bind /eos <sif> python -m salt.core.main
+    fit --config …` on the GPU worker. To run a **local salt checkout** instead of
+    the image's baked-in salt (developing a branch, or an image whose salt is an
+    editable install), set `SALT_LXPLUS_SRC=/path/to/salt` — it is **bind-mounted
+    over** the image's salt package (`SALT_LXPLUS_IMAGE_SRC`, default `/opt/salt-src`,
+    is the image-side path). Bind-over is used rather than `PYTHONPATH` because
+    `PYTHONPATH` does not reliably shadow an image's editable install. For extra
+    importable packages *not* in the image (e.g. a custom reader), use
+    `SALT_LXPLUS_PYPATH=/a,/b`; extra bind mounts, `SALT_LXPLUS_BIND=/a,/b`.
+
+    !!! info "Where job files go (AFS) vs data (EOS)"
+
+        Standard CERN batch schedds **reject `/eos` paths inside the submit file**
+        (`Standard batch schedds cannot use /eos paths directly within the submit
+        file`). So `salt-lxplus-gpu` puts the job **executable + `log`/`output`/`error`
+        on AFS home** (`$HOME/.salt-lxplus/`, KB-scale — override with
+        `SALT_LXPLUS_AFS`), while the SIF, salt source, datasets and outputs stay on
+        `/eos` and are read at **run time** (allowed). If you would rather keep
+        everything on EOS, submit via the [EosSubmit schedds](https://batchdocs.web.cern.ch/local/eossubmit.html)
+        instead.
+
+    #### Venv path (fallback)
+
+    Clone salt onto shared, batch-visible storage (the CUDA torch wheels total
+    ~3–5 GB, too big for the 10 GB AFS home), then source the setup script:
+
+    ```bash
+    cd /eos/user/${USER:0:1}/$USER          # or an AFS workspace (see warning)
+    git clone https://gitlab.cern.ch/aft/algorithms/salt.git && cd salt
+    source setup/setup_lxplus.sh            # uv install, Python 3.14 venv, uv sync
+    python -m salt.core.main --help         # verify the v2 entry point
+    ```
+
+    It auto-picks the install location: `$SALT_LXPLUS_DIR` (your override) → AFS
+    workspace → EOS home → AFS home (only if ≥8 GB free); it never uses `/tmp`.
+    On EOS it puts uv's cache on node-local `/tmp`, forces copy mode, and applies a
+    `scikit-build-core<0.8` build constraint (a `py-lap-solver` cp314 build fix).
+    Re-sourcing just re-activates the venv. With no `.sif` configured,
+    `salt-lxplus-gpu submit` automatically uses this venv on the worker.
+
+    !!! warning "Do not put the venv on AFS home or `/tmp`"
+
+        AFS home is too small for the CUDA wheels. `/tmp` is **node-local** — the
+        batch worker cannot see it, so the job will not find the venv. Use an AFS
+        workspace (request one free at the CERN Resources Portal → AFS Workspaces —
+        best latency) or EOS home. EOS works out of the box but is FUSE-mounted, so
+        `uv sync` is slower there.
+
+    !!! tip "Long install over SSH?"
+
+        The first venv `uv sync` on EOS pulls several GB and can take a while. On a
+        flaky SSH connection run it inside `tmux`/`screen` (or `nohup`) so it
+        survives a dropped session — the venv lands on shared storage either way,
+        so just re-`source setup/setup_lxplus.sh` afterwards to re-activate.
+
+    #### Interactive vs batch, and flavours
+
+    Use `salt-lxplus-gpu shell [flavour]` for a live GPU node (quick checks /
+    debugging — you wait for a slot and lose it on logout); use `submit` for real
+    training since it survives logout. Attach to a *running* batch job with
+    `condor_ssh_to_job <jobid>`. The **flavour** is the walltime bucket —
+    `espresso` (20 min) schedules fastest (ideal for smoke tests), stepping up to
+    `longlunch` (2 h), `workday` (8 h), `tomorrow` (1 day). Both paths request one
+    GPU with compute capability ≥ **7.0** and ≥ 12 GB memory via
+    [`setup/lxplus_gpu.sub`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/setup/lxplus_gpu.sub);
+    edit that file (or pass extra `-append` macros) to change the resource request.
+
+    !!! tip "Capability floor vs. queue time"
+
+        The default floor is `gpus_minimum_capability = 7.0`, which keeps the
+        plentiful **V100 (7.0)** and **T4 (7.5)** slots in play. Requiring **8.0**
+        restricts you to the **A100** pool, which is small and heavily contended —
+        a job can sit idle for a long time even when hundreds of GPU slots are free.
+        Raise the floor (`SALT_LXPLUS_GPU_CAPABILITY=8.0`) **only** if your model
+        needs flash-attention (SM 80+); a plain torch-math training does not. Check
+        current availability with
+        `condor_status -compact -constraint 'TotalGpus > 0'`.
+
 
 ### Install the salt package
 

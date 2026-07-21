@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# salt-lxplus-gpu — get a CERN HTCondor GPU node for salt v2 (interactive or batch).
+#
+# Two execution backends, container-first:
+#   * CONTAINER (recommended): run inside an Apptainer image (one loop-mounted file,
+#     so no per-job small-file penalty from EOS). Point SALT_LXPLUS_SIF at a .sif,
+#     or `salt-lxplus-gpu pull` one from the salt registry onto EOS.
+#   * VENV (fallback): the environment built by `source setup/setup_lxplus.sh`.
+# Container mode is used when a .sif is found (SALT_LXPLUS_SIF / default EOS path).
+#
+# STORAGE SPLIT (important on lxplus): standard CERN batch schedds REJECT /eos paths
+# inside the submit file, so the job's executable + log/output/error go on AFS home
+# (KB-scale), while all bulk data (SIF, salt source, datasets, outputs) stays on /eos
+# and is read at RUN time. (The "avoid AFS" alternative is the EosSubmit schedds; see
+# https://batchdocs.web.cern.ch/local/eossubmit.html.)
+#
+# Env vars:
+#   SALT_LXPLUS_SIF       Apptainer image (default /eos/user/<i>/<user>/salt-containers/salt.sif)
+#   SALT_LXPLUS_SRC       salt checkout to run instead of the image's baked-in salt. It is
+#                         BIND-MOUNTED over the image's salt package (worktree-over-image) —
+#                         PYTHONPATH does not reliably shadow an image's editable install.
+#   SALT_LXPLUS_IMAGE_SRC image-side salt source dir to bind over (default /opt/salt-src,
+#                         which matches the CCRA salt-py314-cuda layout; image-specific).
+#   SALT_LXPLUS_PYPATH    extra dirs prepended to PYTHONPATH inside the image (e.g. a custom
+#                         reader package) — for packages NOT already in the image.
+#   SALT_LXPLUS_BIND      extra comma-separated bind paths (besides /eos,/afs).
+#   SALT_LXPLUS_AFS       AFS base for submit-file artifacts (default $HOME/.salt-lxplus).
+#   SALT_LXPLUS_DIR       venv install dir (venv fallback), exported by setup_lxplus.sh.
+#   SALT_REPO_DIR         salt checkout holding this wrapper.
+#
+# Usage:
+#   salt-lxplus-gpu pull [dest.sif]                     pull salt:latest onto EOS
+#   salt-lxplus-gpu shell [flavour]                     interactive GPU shell
+#   salt-lxplus-gpu submit <config> [flavour] [-- args] batch `salt fit` on a GPU
+#   salt-lxplus-gpu status                              your condor jobs
+#   salt-lxplus-gpu _run <salt args...>                 (internal) run salt v2 (container or venv)
+#
+# Flavours (walltime): espresso 20m, microcentury 1h, longlunch 2h, workday 8h,
+#                      tomorrow 1d, testmatch 3d, nextweek 1w.
+
+set -uo pipefail
+
+SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+: "${SALT_REPO_DIR:="$(dirname -- "$SETUP_DIR")"}"
+: "${SALT_LXPLUS_DIR:="$SALT_REPO_DIR"}"
+SUB_TEMPLATE="$SETUP_DIR/lxplus_gpu.sub"
+REGISTRY_IMAGE="docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest"
+
+_user="${USER:-$(id -un)}"
+DEFAULT_SIF="/eos/user/${_user:0:1}/${_user}/salt-containers/salt.sif"
+SIF="${SALT_LXPLUS_SIF:-$DEFAULT_SIF}"
+AFS_BASE="${SALT_LXPLUS_AFS:-$HOME/.salt-lxplus}"
+# GPU compute-capability floor. Default 7.0 keeps the plentiful V100(7.0)/T4(7.5) slots;
+# raise to 8.0 only for flash-attention (SM80+) — the A100 pool is small and contended.
+GPU_CAP="${SALT_LXPLUS_GPU_CAPABILITY:-7.0}"
+# CPU/RAM(MB) request: kept modest so the job fits a busy GPU host's leftover resources;
+# bump for real training.
+GPU_CPUS="${SALT_LXPLUS_GPU_CPUS:-4}"
+GPU_MEM="${SALT_LXPLUS_GPU_MEMORY:-10000}"
+
+_have_container() { [[ -f "$SIF" ]]; }
+
+_abspath() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")";; esac; }
+
+# Assemble apptainer bind args (APP_BINDS[]) + extra PYTHONPATH (APP_PYTHONPATH).
+_apptainer_args() {
+    APP_BINDS=(--bind /eos)
+    [[ -d /afs ]] && APP_BINDS+=(--bind /afs)
+    # worktree-over-image: bind the checkout's salt package over the image's salt.
+    if [[ -n "${SALT_LXPLUS_SRC:-}" ]]; then
+        APP_BINDS+=(--bind "$SALT_LXPLUS_SRC/salt:${SALT_LXPLUS_IMAGE_SRC:-/opt/salt-src}/salt")
+    fi
+    if [[ -n "${SALT_LXPLUS_BIND:-}" ]]; then
+        IFS=',' read -r -a _extra <<< "$SALT_LXPLUS_BIND"
+        for b in "${_extra[@]}"; do [[ -n "$b" ]] && APP_BINDS+=(--bind "$b"); done
+    fi
+    APP_PYTHONPATH="${SALT_LXPLUS_PYPATH:-}"
+}
+
+# condor_submit with the AFS/EOS storage split. Args: <jobdir> <salt_args> <flavour>
+# Standard CERN schedds reject /eos *anywhere in the submit file*, so the EOS SIF path
+# (and the rest of the backend config) is written to an AFS job_env.sh that the executable
+# sources at run time — never appearing in a submit-file field. Everything referenced in
+# the submit file (executable, logs, config path in SALT_ARGS) must live on AFS/node-local.
+_submit_job() {
+    local jobdir="$1" salt_args="$2" flavour="$3"
+    mkdir -p "$jobdir"
+    # Executable MUST be on AFS (standard schedds reject /eos executables).
+    cp "$SETUP_DIR/salt-lxplus-gpu" "$jobdir/salt-lxplus-gpu"
+    chmod +x "$jobdir/salt-lxplus-gpu"
+    # Backend config sourced by the executable at run time (may contain /eos — this file
+    # is NOT a submit-file field, so the schedd does not scan it).
+    cat > "$jobdir/job_env.sh" <<EOF
+export SALT_LXPLUS_SIF='${SALT_LXPLUS_SIF:-}'
+export SALT_LXPLUS_SRC='${SALT_LXPLUS_SRC:-}'
+export SALT_LXPLUS_IMAGE_SRC='${SALT_LXPLUS_IMAGE_SRC:-}'
+export SALT_LXPLUS_PYPATH='${SALT_LXPLUS_PYPATH:-}'
+export SALT_LXPLUS_BIND='${SALT_LXPLUS_BIND:-}'
+export SALT_LXPLUS_DIR='${SALT_LXPLUS_DIR}'
+export SALT_REPO_DIR='${SALT_REPO_DIR}'
+EOF
+    condor_submit "$SUB_TEMPLATE" \
+        -append "SALT_EXECUTABLE=$jobdir/salt-lxplus-gpu" \
+        -append "SALT_JOBDIR=$jobdir" \
+        -append "GpuCapability=$GPU_CAP" \
+        -append "RequestCpus=$GPU_CPUS" \
+        -append "RequestMemory=$GPU_MEM" \
+        -append "JobFlavour=$flavour" \
+        -append "SALT_ARGS=$salt_args"
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    _run)
+        # Pull the backend config (incl. the EOS SIF path) from job_env.sh on AFS.
+        # condor runs the executable from a node-local scratch COPY, so $SETUP_DIR is
+        # NOT the AFS jobdir — locate job_env.sh via SALT_JOBDIR (passed in the condor
+        # environment, an AFS path). Fall back to $SETUP_DIR for a direct local run.
+        _jobenv="${SALT_JOBDIR:+$SALT_JOBDIR/job_env.sh}"
+        [[ -z "$_jobenv" || ! -f "$_jobenv" ]] && _jobenv="$SETUP_DIR/job_env.sh"
+        [[ -f "$_jobenv" ]] && source "$_jobenv"
+        SIF="${SALT_LXPLUS_SIF:-$DEFAULT_SIF}"
+        if _have_container; then
+            _apptainer_args
+            echo "=== salt-lxplus-gpu (container) on $(hostname) at $(date -u) ==="
+            echo "image: $SIF"
+            [[ -n "${SALT_LXPLUS_SRC:-}" ]] && echo "salt src (bind-over): $SALT_LXPLUS_SRC/salt -> ${SALT_LXPLUS_IMAGE_SRC:-/opt/salt-src}/salt"
+            apptainer --version 2>&1 || echo "(apptainer not found on worker!)"
+            nvidia-smi -L 2>/dev/null || echo "(no nvidia-smi — not on a GPU node?)"
+            apptainer exec --nv "${APP_BINDS[@]}" ${APP_PYTHONPATH:+--env PYTHONPATH="$APP_PYTHONPATH"} "$SIF" \
+                python - <<'PY' 2>&1 || echo "(in-container torch check failed)"
+import salt, torch
+print("salt:", salt.__file__)
+print("in-container torch", torch.__version__, "| cuda_available", torch.cuda.is_available(),
+      "|", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no CUDA device")
+PY
+            exec apptainer exec --nv "${APP_BINDS[@]}" ${APP_PYTHONPATH:+--env PYTHONPATH="$APP_PYTHONPATH"} "$SIF" \
+                python -m salt.core.main "$@"
+        else
+            # venv fallback — fail LOUDLY if it isn't actually usable, rather than
+            # limping into "python: command not found".
+            if [[ ! -x "$SALT_LXPLUS_DIR/.venv/bin/python" ]]; then
+                echo "ERROR: no container selected AND no usable venv." >&2
+                echo "  mode decision: SALT_LXPLUS_SIF='${SALT_LXPLUS_SIF:-<empty>}' resolved SIF='$SIF' exists=$([[ -f "$SIF" ]] && echo yes || echo no)" >&2
+                echo "  job_env.sh: '$_jobenv' ($([[ -f "$_jobenv" ]] && echo sourced || echo MISSING)); SALT_JOBDIR='${SALT_JOBDIR:-<unset>}'" >&2
+                echo "  venv python: '$SALT_LXPLUS_DIR/.venv/bin/python' (missing)" >&2
+                echo "  -> set SALT_LXPLUS_SIF to a .sif for container mode, or build the venv (source setup/setup_lxplus.sh)." >&2
+                exit 3
+            fi
+            # shellcheck disable=SC1091
+            source "$SALT_LXPLUS_DIR/.venv/bin/activate"
+            echo "=== salt-lxplus-gpu (venv) on $(hostname) at $(date -u) ==="
+            nvidia-smi -L 2>/dev/null || echo "(no nvidia-smi — not on a GPU node?)"
+            python - <<'PY' 2>&1 || echo "(torch import failed)"
+import torch
+print("torch", torch.__version__, "| cuda_available", torch.cuda.is_available(),
+      "|", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no CUDA device")
+PY
+            exec python -m salt.core.main "$@"
+        fi
+        ;;
+
+    pull)
+        dest="$(_abspath "${1:-$DEFAULT_SIF}")"
+        mkdir -p "$(dirname "$dest")"
+        echo "Pulling $REGISTRY_IMAGE -> $dest (once; several GB)..."
+        echo "Tip: set APPTAINER_CACHEDIR to a roomy dir first if your home quota is small."
+        exec apptainer pull "$dest" "$REGISTRY_IMAGE"
+        ;;
+
+    shell)
+        flavour="${1:-espresso}"
+        jobdir="$AFS_BASE/jobs/interactive-$(date +%Y%m%d-%H%M%S)"   # AFS (submit artifacts)
+        mkdir -p "$jobdir"
+        sub="$jobdir/interactive.sub"
+        cat > "$sub" <<EOF
+universe                = vanilla
+request_gpus            = 1
+gpus_minimum_capability = $GPU_CAP
+gpus_minimum_memory     = 12GB
+request_cpus            = $GPU_CPUS
+request_memory          = $GPU_MEM
++JobFlavour             = "$flavour"
+log                     = $jobdir/interactive.log
+queue
+EOF
+        echo "Requesting an interactive GPU slot (flavour: $flavour)..."
+        if _have_container; then
+            echo "When you land on the worker, open a GPU shell in the container with:"
+            echo "    apptainer shell --nv --bind /eos${SALT_LXPLUS_SRC:+ --bind $SALT_LXPLUS_SRC/salt:${SALT_LXPLUS_IMAGE_SRC:-/opt/salt-src}/salt} \"$SIF\""
+            echo "then e.g.:  python -m salt.core.main fit --config <config.yaml>"
+        else
+            echo "When you land on the worker, activate the venv with:"
+            echo "    source \"$SALT_LXPLUS_DIR/.venv/bin/activate\""
+            echo "then e.g.:  python -m salt.core.main fit --config <config.yaml>"
+        fi
+        echo "(Attach to a running batch job instead with: condor_ssh_to_job <jobid>)"
+        exec condor_submit -interactive "$sub"
+        ;;
+
+    submit)
+        [[ $# -ge 1 ]] || { echo "usage: salt-lxplus-gpu submit <config> [flavour] [-- extra salt args]" >&2; exit 1; }
+        config="$(_abspath "$1")"; shift
+        [[ -f "$config" ]] || { echo "ERROR: config not found: $config" >&2; exit 1; }
+        flavour="espresso"
+        if [[ $# -ge 1 && "$1" != "--" ]]; then flavour="$1"; shift; fi
+        [[ "${1:-}" == "--" ]] && shift || true
+        salt_args="fit --config $config"
+        [[ $# -gt 0 ]] && salt_args="$salt_args $*"
+        jobdir="$AFS_BASE/jobs/fit-$(date +%Y%m%d-%H%M%S)"           # AFS (submit artifacts)
+        if _have_container; then
+            echo "Submitting salt fit to HTCondor GPU (container mode):"
+            echo "  image:   $SIF"
+        else
+            echo "Submitting salt fit to HTCondor GPU (venv mode):"
+        fi
+        echo "  config:  $config"
+        echo "  flavour: $flavour"
+        echo "  jobdir:  $jobdir  (AFS: logs + executable)"
+        _submit_job "$jobdir" "$salt_args" "$flavour"
+        echo "Monitor: condor_q ; tail -f $jobdir/salt.*.out"
+        ;;
+
+    status)
+        condor_q
+        ;;
+
+    help|-h|--help)
+        sed -n '2,40p' "${BASH_SOURCE[0]}"
+        ;;
+
+    *)
+        echo "unknown subcommand: $cmd (try: salt-lxplus-gpu help)" >&2
+        exit 1
+        ;;
+esac
