@@ -431,7 +431,30 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _relocate_training_schedule(cfg: Any) -> Any:
+def _schedule_overrides_to_tree(overrides: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a nested override dict from ``--training_schedule.<dotted.path> <value>``
+    CLI pairs (extracted upstream — jsonargparse does not split multi-level dotted
+    keys into a plain ``dict[str, Any]``). Each value is YAML-coerced (``"3"``→int,
+    ``"[encoder]"``→list, ``"null"``→None) so it matches the config-file shape
+    `TrainingSchedule.from_config` expects.
+    """
+    import yaml  # noqa: PLC0415 - local, only on the deep-CLI-override path
+
+    tree: dict[str, Any] = {}
+    for path, raw in overrides:
+        keys = path.split(".")
+        node = tree
+        for key in keys[:-1]:
+            nxt = node.get(key)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[key] = nxt
+            node = nxt
+        node[keys[-1]] = yaml.safe_load(raw) if isinstance(raw, str) else raw
+    return tree
+
+
+def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] = ()) -> Any:
     """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` constructor
     arg (``model.init_args.training_schedule``) before jsonargparse instantiates
     the model — the schedule describes the run, so it is a config-surface peer of
@@ -439,8 +462,11 @@ def _relocate_training_schedule(cfg: Any) -> Any:
 
     Mirrors `_fan_out_artifacts` (parser-time, per model-block scope): reads the
     schedule from the block's scope (top-level on the run-free surface,
-    subcommand-scoped on a trainer run) and writes the plain-dict-normalised value
-    onto ``model.init_args.training_schedule``. A user-authored
+    subcommand-scoped on a trainer run), deep-merges any extracted
+    ``--training_schedule.<path> <value>`` CLI overrides on top, and writes the
+    plain-dict-normalised value onto BOTH the scope key (so ``--print_config`` /
+    the saved config round-trip carries the resolved schedule) AND
+    ``model.init_args.training_schedule``. A user-authored
     ``model.init_args.training_schedule`` with NO top-level schedule (the retired
     home) is a fail-loud `ConfigError`. When a top-level schedule IS present the
     nested slot is treated as ours to own — overwritten from the authoritative
@@ -454,13 +480,19 @@ def _relocate_training_schedule(cfg: Any) -> Any:
         A config nests ``training_schedule`` under ``model.init_args`` without a
         top-level ``training_schedule:`` (the schema moved to the top level).
     """
+    override_tree = _schedule_overrides_to_tree(overrides)
+    from salt.parser import _deep_merge_dicts  # noqa: PLC0415 - avoid a load-time cycle
+
     for scope, model in _iter_model_blocks(cfg):
         init_args = getattr(model, "init_args", None)
         if init_args is None:
             continue
         top_level = scope.get(_TRAINING_SCHEDULE_ARG)
         nested = _entry_get(init_args, _TRAINING_SCHEDULE_ARG)
-        if top_level is None:
+        resolved = _plain(top_level) if top_level is not None else None
+        if override_tree:
+            resolved = _deep_merge_dicts(resolved or {}, override_tree)
+        if resolved is None:
             if nested is not None:
                 raise ConfigError(
                     "training_schedule is now a TOP-LEVEL config key (peer of trainer:/"
@@ -470,7 +502,12 @@ def _relocate_training_schedule(cfg: Any) -> Any:
                     "nested model.init_args.training_schedule is no longer accepted."
                 )
             continue
-        _entry_set(init_args, _TRAINING_SCHEDULE_ARG, _plain(top_level))
+        if override_tree:
+            # a deep CLI override was folded in: rewrite the scope key too so the
+            # resolved schedule (not the pre-override config value) is what
+            # --print_config / the saved config dumps and a resume round-trips.
+            _entry_set(scope, _TRAINING_SCHEDULE_ARG, resolved)
+        _entry_set(init_args, _TRAINING_SCHEDULE_ARG, resolved)
     return cfg
 
 

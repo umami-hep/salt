@@ -31,6 +31,45 @@ _MODULE_DICT_NULL = re.compile(
 _TRAINING_SCHEDULE_KEY = "training_schedule"
 
 
+def _extract_schedule_cli_overrides(
+    args: list[Any],
+) -> tuple[list[Any], list[tuple[str, Any]]]:
+    """Split ``--training_schedule.<dotted.path>[=<value>]`` (or the two-token
+    ``--training_schedule.<path> <value>``) CLI args out of `args`.
+
+    jsonargparse does not split multi-level dotted keys into a plain
+    ``dict[str, Any]`` (it keeps the tail as a literal flat key and replaces the
+    base value wholesale), so these deep overrides are pulled out here and applied
+    as a controlled deep-merge in `_relocate_training_schedule` instead. The
+    whole-value forms (``--training_schedule=<json>`` / ``--training_schedule
+    <json>``) do NOT start with the ``--training_schedule.`` prefix and pass
+    through untouched. Returns the remaining args plus ``(dotted_path, raw_value)``
+    pairs.
+    """  # noqa: DOC201
+    prefix = f"--{_TRAINING_SCHEDULE_KEY}."
+    kept: list[Any] = []
+    overrides: list[tuple[str, Any]] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if isinstance(arg, str) and arg.startswith(prefix):
+            body = arg[len(prefix) :]
+            if "=" in body:
+                path, value = body.split("=", 1)
+                overrides.append((path, value))
+                i += 1
+            elif i + 1 < len(args) and not str(args[i + 1]).startswith("--"):
+                overrides.append((body, args[i + 1]))
+                i += 2
+            else:  # a bare --training_schedule.key with no value: treat as null
+                overrides.append((body, None))
+                i += 1
+        else:
+            kept.append(arg)
+            i += 1
+    return kept, overrides
+
+
 def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge ``over`` onto ``base``: nested dicts merge key-by-key;
     any scalar / list / ``None`` (the stage-name null-delete idiom, filtered at
@@ -101,7 +140,9 @@ class DeepMergeParser(LightningArgumentParser):
         if args is None:
             args = sys.argv[1:]
         print_config_flags: str | None = None
+        schedule_overrides: list[tuple[str, Any]] = []
         if isinstance(args, Sequence) and not isinstance(args, str):
+            args, schedule_overrides = _extract_schedule_cli_overrides(list(args))
             normalised: list[Any] = []
             for arg in args:
                 if isinstance(arg, str) and (
@@ -119,7 +160,7 @@ class DeepMergeParser(LightningArgumentParser):
         caller_skips = bool(kwargs.pop("_skip_validation", False))
         cfg = super().parse_args(args, *pargs, _skip_validation=True, **kwargs)
         _fan_out_artifacts(cfg)
-        _relocate_training_schedule(cfg)
+        _relocate_training_schedule(cfg, schedule_overrides)
         if not caller_skips:
             self.validate(cfg)
         if print_config_flags is not None:
