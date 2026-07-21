@@ -693,6 +693,30 @@ top-level `salt_core` key. On resume, a FIT plan-hash mismatch is fatal
 come from the state dict — the norm/class dicts are NOT re-read.
 Data-less loading: `SaltModule.load_from_checkpoint(path, modules=...)`.
 
+### Class-path compatibility across the de-core rename (Plan 61)
+
+The v2 namespace was flattened from `salt.core.*` to `salt.*` (e.g.
+`salt.core.nn.StreamEmbed` → `salt.model.modules.StreamEmbed`,
+`salt.core.SaltModule` → `salt.model.SaltModule`). Two loading policies:
+
+- **Pre-rename v2 checkpoints** (and their saved `config.yaml`, which embed
+  `salt.core.*` class_paths) **load unmodified.** A load-time remapper in
+  `salt/main.py` (`_remap_class_path`, a longest-prefix `salt.core.* → salt.*`
+  table) is applied at every class-path resolution site: the salt-owned
+  `_resolve_class_path`/`_is_persistence_sink`, and — via a wrapper installed on
+  jsonargparse's `import_object` — the top-level model **subclass resolution
+  during config parse**. So `salt test --config <old_run>/config.yaml
+  --ckpt_path …` just works. The `salt_core` checkpoint **metadata key** is a
+  plain dict key (not an import path) and is intentionally unchanged.
+  The remapper table + its tests (`salt/tests/unit/test_ckpt_compat.py`) are the
+  only sanctioned `salt.core.*` strings in the codebase.
+
+- **v1 checkpoints** (the `ModelWrapper` `model.pool_net.*` state-dict layout)
+  are **not** directly loadable — `SaltModule.on_load_checkpoint` rejects them
+  with a clear error. Convert them offline via the v1→v2 weight mapper
+  (`map_v1_state_dict` / the `scripts/convert_v1_model.py` pattern) or use them
+  at the frozen pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).
+
 ## Parity and gate harnesses (design §9.5) — RETIRED
 
 The standalone v1-vs-v2 migration harnesses (`parity_gn2`, `gates_m2`,

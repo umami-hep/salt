@@ -66,6 +66,132 @@ def _patch_jsonargparse_sys_modules_race() -> None:
 
 _patch_jsonargparse_sys_modules_race()
 
+
+# --- pre-de-core checkpoint/config compatibility (Plan 61) -------------------
+# v2 checkpoints and their saved ``config.yaml`` written BEFORE the de-core
+# rename carry ``salt.core.*`` class_paths. This remapper resolves them to their
+# flat ``salt.*`` homes at load time so old artifacts stay loadable with no edit.
+# Ordered longest-prefix-first so the ``salt.core.nn.*`` / ``salt.core.data.*``
+# fan-out (which splits across three destination packages) is resolved before
+# the bare package facades. The ONLY sanctioned ``salt.core.*`` strings in the
+# codebase live here + the compat tests (see docs/architecture.md §Checkpoints).
+_CLASS_PATH_REMAP: dict[str, str] = {
+    # data -> readers
+    "salt.core.data.reader": "salt.data.readers.reader",
+    "salt.core.data.uproot_reader": "salt.data.readers.uproot_reader",
+    "salt.core.data.xaod_reader": "salt.data.readers.xaod_reader",
+    "salt.core.data.easyjet_reader": "salt.data.readers.easyjet_reader",
+    "salt.core.data.ftag1lite_reader": "salt.data.readers.ftag1lite_reader",
+    "salt.core.data.physlite_reader": "salt.data.readers.physlite_reader",
+    "salt.core.data.multisample_reader": "salt.data.readers.multisample_reader",
+    "salt.core.data.stream": "salt.data.readers.stream",
+    "salt.core.data.cuts": "salt.data.readers.cuts",
+    "salt.core.data.vds_module": "salt.data.readers.vds_module",
+    "salt.core.data.vds": "salt.data.readers.vds",
+    # data -> processors
+    "salt.core.data.features": "salt.data.processors.features",
+    "salt.core.data.labels": "salt.data.processors.labels",
+    "salt.core.data.maskformer_targets": "salt.data.processors.maskformer_targets",
+    "salt.core.data.multi_target": "salt.data.processors.multi_target",
+    "salt.core.data.ftag_labeller": "salt.data.processors.ftag_labeller",
+    # data top-level + facade
+    "salt.core.data.datamodule": "salt.data.datamodule",
+    "salt.core.data.dataset": "salt.data.dataset",
+    "salt.core.data.base": "salt.data.base",
+    "salt.core.data.dtypes": "salt.data.dtypes",
+    "salt.core.data.samplers": "salt.data.samplers",
+    "salt.core.data.input_samples": "salt.data.input_samples",
+    "salt.core.data": "salt.data",
+    # nn -> model / model.modules / model.nn
+    "salt.core.nn.tasks": "salt.model.modules.tasks",
+    "salt.core.nn.base": "salt.model.base",
+    "salt.core.nn.bind": "salt.model.bind",
+    "salt.core.nn.stream_embed": "salt.model.modules.stream_embed",
+    "salt.core.nn.transformer_encoder": "salt.model.modules.transformer_encoder",
+    "salt.core.nn.pooling": "salt.model.modules.pooling",
+    "salt.core.nn.norm": "salt.model.modules.norm",
+    "salt.core.nn.plumbing": "salt.model.modules.plumbing",
+    "salt.core.nn.losses": "salt.model.modules.losses",
+    "salt.core.nn.maskdecoder": "salt.model.modules.maskdecoder",
+    "salt.core.nn.maskformer_matched_loss": "salt.model.modules.maskformer_matched_loss",
+    "salt.core.nn.edge_embed": "salt.model.modules.edge_embed",
+    "salt.core.nn.transformer": "salt.model.nn.transformer",
+    "salt.core.nn.attention": "salt.model.nn.attention",
+    "salt.core.nn.dense": "salt.model.nn.dense",
+    "salt.core.nn.layernorm": "salt.model.nn.layernorm",
+    "salt.core.nn.posenc": "salt.model.nn.posenc",
+    "salt.core.nn.featurewise": "salt.model.nn.featurewise",
+    "salt.core.nn.matcher": "salt.model.nn.matcher",
+    "salt.core.nn.maskformer_loss": "salt.model.nn.maskformer_loss",
+    "salt.core.nn": "salt.model.modules",
+    # top-level singletons
+    "salt.core.saltmodule": "salt.model.saltmodule",
+    "salt.core.SaltModule": "salt.model.SaltModule",
+    "salt.core.mup": "salt.model.mup",
+    "salt.core.render": "salt.graph.render",
+    "salt.core.loss_history": "salt.utils.loss_history",
+    "salt.core.outputs": "salt.outputs",
+    "salt.core.graph": "salt.graph",
+    "salt.core.callbacks": "salt.callbacks",
+    "salt.core.onnx": "salt.onnx",
+    "salt.core.utils": "salt.utils",
+    "salt.core.testing": "salt.testing",
+    "salt.core.optim": "salt.optim",
+    "salt.core.inference": "salt.inference",
+    "salt.core.config_utils": "salt.config_utils",
+    "salt.core.schema": "salt.schema",
+    "salt.core.parser": "salt.parser",
+    "salt.core.main": "salt.main",
+    "salt.core.cli": "salt.cli",
+}
+_CLASS_PATH_REMAP_KEYS = sorted(_CLASS_PATH_REMAP, key=len, reverse=True)
+
+
+def _remap_class_path(name: str) -> str:
+    """Remap a pre-de-core ``salt.core.*`` dotted path to its ``salt.*`` home.
+
+    No-op for any non-``salt.core`` path (longest matching prefix wins). Lets
+    checkpoints/configs authored before the Plan-61 rename load unmodified.
+    """
+    if not isinstance(name, str) or not name.startswith("salt.core"):
+        return name
+    for old in _CLASS_PATH_REMAP_KEYS:
+        if name == old or name.startswith(old + "."):
+            return _CLASS_PATH_REMAP[old] + name[len(old):]
+    return name
+
+
+def _patch_jsonargparse_class_path_remap() -> None:
+    """Wrap jsonargparse's class-path importer so a saved config/ckpt naming
+    ``salt.core.*`` resolves to its ``salt.*`` home — covers the top-level model
+    subclass resolution during config parse (jsonargparse ``_typehints`` binds
+    ``import_object`` by value at import, so the wrapper is installed on every
+    loaded jsonargparse module holding that reference). Idempotent; no-op if
+    jsonargparse renames the helper (falls back to salt-owned resolution +
+    the documented ckpt-config rewrite).
+    """
+    import sys  # noqa: PLC0415
+
+    from jsonargparse import _typehints as _th  # noqa: F401, PLC0415, PLC2701 - force-load the binder
+    from jsonargparse import _util as _ju  # noqa: PLC0415, PLC2701 - patch site
+
+    orig = getattr(_ju, "import_object", None)
+    if orig is None or getattr(orig, "_salt_decore_remap", False):
+        return
+
+    @functools.wraps(orig)
+    def _remapped_import_object(name: str) -> Any:
+        return orig(_remap_class_path(name))
+
+    _remapped_import_object._salt_decore_remap = True  # type: ignore[attr-defined]
+    for _mod in list(sys.modules.values()):
+        if getattr(_mod, "__name__", "").startswith("jsonargparse") and \
+                getattr(_mod, "import_object", None) is orig:
+            _mod.import_object = _remapped_import_object  # noqa: SLF001 - the patch site
+
+
+_patch_jsonargparse_class_path_remap()
+
 CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base2.yaml`` and the worked GN2v2 configs."""
 
@@ -171,8 +297,12 @@ def _entry_set(entry: Any, key: str, value: Any) -> None:
 
 
 def _resolve_class_path(class_path: str) -> type:
-    """Import a dotted ``module.Class`` path and return the class object."""
-    module_path, _, attr = class_path.rpartition(".")
+    """Import a dotted ``module.Class`` path and return the class object.
+
+    Pre-de-core ``salt.core.*`` paths (old checkpoints/configs) are remapped to
+    their ``salt.*`` homes first (see ``_remap_class_path``).
+    """
+    module_path, _, attr = _remap_class_path(class_path).rpartition(".")
     module = import_module(module_path)
     return getattr(module, attr)
 
@@ -212,7 +342,7 @@ def _is_persistence_sink(class_path: str) -> bool:
         OnnxExportSink,
     )
 
-    module_path, _, attr = class_path.rpartition(".")
+    module_path, _, attr = _remap_class_path(class_path).rpartition(".")
     if not module_path:
         return False
     try:
