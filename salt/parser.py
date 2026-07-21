@@ -22,6 +22,28 @@ _MODULE_DICT_NULL = re.compile(
     r"^--(?P<parent>model\.(?:init_args\.)?modules)\.(?P<key>[\w-]+)=(?:null|None)$"
 )
 
+# the top-level staged-training schedule key (kept in sync with
+# salt.main._TRAINING_SCHEDULE_ARG; duplicated here to avoid a parser<->main
+# import cycle at module load). Its nested {stages: {name: {...}}} content needs a
+# RECURSIVE deep-merge across stacked config files — the shallow dict-leaf union
+# below would replace the whole `stages` dict wholesale (plain dict[str, Any] has
+# no per-entry subclass adapter), losing D1's per-stage-by-name merge.
+_TRAINING_SCHEDULE_KEY = "training_schedule"
+
+
+def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``over`` onto ``base``: nested dicts merge key-by-key;
+    any scalar / list / ``None`` (the stage-name null-delete idiom, filtered at
+    assembly by `TrainingSchedule.from_config`) replaces.
+    """
+    merged = dict(base)
+    for key, val in over.items():
+        if isinstance(val, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
+
 
 class DeepMergeParser(LightningArgumentParser):
     """`LightningArgumentParser` with cross-config-file dict-merge semantics.
@@ -40,25 +62,41 @@ class DeepMergeParser(LightningArgumentParser):
     """
 
     def merge_config(self, cfg_from: Any, cfg_to: Any) -> Any:
-        """Union dict-typed leaves key-by-key before the standard merge."""
+        """Union dict-typed leaves key-by-key before the standard merge.
+
+        The top-level ``training_schedule`` leaf is RECURSIVELY deep-merged instead
+        (its stage names live one level down under ``stages:``), so stacked configs
+        override per-stage-by-name rather than replacing the whole schedule (plan 03
+        / D1).
+        """
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):
                 continue
             val_to = cfg_to.get(key)
             if isinstance(val_to, dict):
-                cfg_from[key] = {**val_to, **val_from}
+                cfg_from[key] = (
+                    _deep_merge_dicts(val_to, val_from)
+                    if key == _TRAINING_SCHEDULE_KEY
+                    else {**val_to, **val_from}
+                )
         return super().merge_config(cfg_from, cfg_to)
 
     def parse_args(self, args: Sequence[str] | None = None, *pargs: Any, **kwargs: Any) -> Any:
         """Parse args with ``--…modules.X=null`` normalised to the JSON-block form,
         then fan out ``--class_dict`` onto model-side consumers
-        (`_fan_out_artifacts`) after the deep-merge but before validation/
-        ``--print_config``, so resolved values freeze into the saved run config.
+        (`_fan_out_artifacts`) and relocate the top-level ``training_schedule:``
+        into the `SaltModule` constructor arg (`_relocate_training_schedule`,
+        rejecting the retired nested home) — both after the deep-merge but before
+        validation/``--print_config``, so resolved values freeze into the saved
+        run config.
         """
         # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
-        from salt.main import _fan_out_artifacts  # noqa: PLC0415
+        from salt.main import (  # noqa: PLC0415
+            _fan_out_artifacts,
+            _relocate_training_schedule,
+        )
 
         if args is None:
             args = sys.argv[1:]
@@ -81,6 +119,7 @@ class DeepMergeParser(LightningArgumentParser):
         caller_skips = bool(kwargs.pop("_skip_validation", False))
         cfg = super().parse_args(args, *pargs, _skip_validation=True, **kwargs)
         _fan_out_artifacts(cfg)
+        _relocate_training_schedule(cfg)
         if not caller_skips:
             self.validate(cfg)
         if print_config_flags is not None:

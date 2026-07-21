@@ -272,6 +272,14 @@ _CLASS_DICT_ARG = "class_dict"
 _INIT_FROM_ARG = "init_from"
 """Top-level warm-start flag name (``--init_from``)."""
 
+_TRAINING_SCHEDULE_ARG = "training_schedule"
+"""Top-level staged-training-schedule key (``--training_schedule``), plan 03.
+
+Its canonical home is the config top level (peer of ``trainer:``/``data:``/
+``model:``), NOT ``model.init_args``; `_relocate_training_schedule` injects the
+resolved value into the `SaltModule` constructor arg before instantiation.
+"""
+
 _CLASS_DICT_CLASS = "ClassificationTaskModule"
 """Class-name suffix of the only ``class_dict``/``weight_source`` consumer."""
 
@@ -403,6 +411,66 @@ def _fan_out_artifacts(cfg: Any) -> Any:
                     "weight_source",
                     _checked_weight_source({"from_class_dict": str(class_dict)}),
                 )
+    return cfg
+
+
+def _plain(value: Any) -> Any:
+    """Recursively convert jsonargparse `Namespace` nodes to plain dicts.
+
+    The top-level ``training_schedule`` may arrive as a plain dict (config file)
+    or with `Namespace` nodes (deep CLI override / subclass adapter); normalising
+    to plain nested dicts before injection guarantees the value is a `Mapping`
+    that `TrainingSchedule.from_config` accepts regardless of its provenance.
+    """
+    if isinstance(value, Namespace):
+        value = value.as_dict()
+    if isinstance(value, dict):
+        return {key: _plain(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_plain(val) for val in value]
+    return value
+
+
+def _relocate_training_schedule(cfg: Any) -> Any:
+    """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` constructor
+    arg (``model.init_args.training_schedule``) before jsonargparse instantiates
+    the model — the schedule describes the run, so it is a config-surface peer of
+    ``trainer:``/``data:``/``model:``, not a model-architecture field (plan 03).
+
+    Mirrors `_fan_out_artifacts` (parser-time, per model-block scope): reads the
+    schedule from the block's scope (top-level on the run-free surface,
+    subcommand-scoped on a trainer run) and writes the plain-dict-normalised value
+    onto ``model.init_args.training_schedule``. A user-authored
+    ``model.init_args.training_schedule`` with NO top-level schedule (the retired
+    home) is a fail-loud `ConfigError`. When a top-level schedule IS present the
+    nested slot is treated as ours to own — overwritten from the authoritative
+    top-level value — so a round-tripped saved config (which carries both the
+    top-level schedule and the previously-injected nested copy) re-injects without
+    error. No-op when neither is set (plain training desugars to one `fit` stage).
+
+    Raises
+    ------
+    ConfigError
+        A config nests ``training_schedule`` under ``model.init_args`` without a
+        top-level ``training_schedule:`` (the schema moved to the top level).
+    """
+    for scope, model in _iter_model_blocks(cfg):
+        init_args = getattr(model, "init_args", None)
+        if init_args is None:
+            continue
+        top_level = scope.get(_TRAINING_SCHEDULE_ARG)
+        nested = _entry_get(init_args, _TRAINING_SCHEDULE_ARG)
+        if top_level is None:
+            if nested is not None:
+                raise ConfigError(
+                    "training_schedule is now a TOP-LEVEL config key (peer of trainer:/"
+                    "data:/model:), not a model field — move it out of "
+                    "model.init_args.training_schedule to the config top level (plan 03 / "
+                    "D2). The CLI injects it into the SaltModule constructor for you; a "
+                    "nested model.init_args.training_schedule is no longer accepted."
+                )
+            continue
+        _entry_set(init_args, _TRAINING_SCHEDULE_ARG, _plain(top_level))
     return cfg
 
 
@@ -586,6 +654,19 @@ class SaltCLI(LightningCLI):
             "modules must be fully covered, config modules absent from the checkpoint are "
             "fresh-inited + materialised, and checkpoint modules absent from the config are "
             "dropped (logged). Mutually exclusive with --ckpt_path (fit subcommand only).",
+        )
+        parser.add_argument(
+            f"--{_TRAINING_SCHEDULE_ARG}",
+            type=dict[str, Any] | None,
+            default=None,
+            help="TOP-LEVEL staged-training schedule (plan 03, D1/D2): "
+            "{stages: {name: {epochs, frozen|trainable, optimizer, lrs, order}}}. A peer of "
+            "trainer:/data:/model: — the CLI injects the resolved value into the SaltModule "
+            "constructor before instantiation. A user-authored model.init_args."
+            "training_schedule (the retired home) is a fail-loud ConfigError. Stacked configs "
+            "deep-merge per-stage by name (like callbacks:/modules:; stage: null deletes) and "
+            "deep CLI overrides apply (--training_schedule.stages.<name>.epochs N). Inert "
+            "outside fit — schedule application is fit-only.",
         )
         if not self._run_mode:
             # run-free parses must round-trip a saved run config.yaml, which

@@ -911,6 +911,179 @@ class TestFanOutInstantiated:
         # norm_dict (module config from the base overrides) still landed
         assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
 
+
+# ===========================================================================
+# Plan 03: TOP-LEVEL `training_schedule:` config home
+#
+# The staged-training schedule is a config-surface peer of trainer:/data:/model:,
+# NOT nested under model.init_args. salt.main._relocate_training_schedule
+# injects the resolved top-level value into the SaltModule constructor arg before
+# instantiation (mirroring the --class_dict fan-out / --init_from hand-off), and
+# rejects the retired nested home fail-loud. DeepMergeParser deep-merges the
+# schedule per-stage-by-name across stacked configs (plan D1). SaltModule
+# internals, W4 checkpoint payloads, desugaring and the callback are unchanged.
+# ===========================================================================
+
+
+# A structural twin of the study example config
+# (examples/finetune_gn3large.yaml): two stages — head warm-up (only the
+# classification head trainable, per-stage lrs override) then a full-network
+# fine-tune (frozen: [] = everything trainable, epochs omitted = remainder).
+TOP_LEVEL_SCHEDULE_YAML = """
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      lrs:
+        max: 1.0e-4
+    full_finetune:
+      frozen: []
+      lrs:
+        initial: 1.0e-7
+        max: 1.0e-5
+"""
+
+SCHEDULE_OVERRIDE_YAML = """
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 2
+"""
+
+DELETE_STAGE_YAML = """
+training_schedule:
+  stages:
+    full_finetune: null
+"""
+
+NESTED_SCHEDULE_YAML = """
+model:
+  init_args:
+    training_schedule:
+      stages:
+        fit:
+          frozen: [encoder]
+"""
+
+
+class TestTopLevelTrainingSchedule:
+    def test_top_level_schedule_parses_into_model(self, data, tmp_path):
+        # the example-config twin parses on the real CLI surface and builds the
+        # 2-stage schedule on the instantiated SaltModule (schema move, plan 03).
+        override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        cli = make_cli(data, extra=["--config", override])
+        sched = cli.model._schedule  # noqa: SLF001
+        assert sched.is_multi_stage
+        assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
+        assert sched.stages[0].epochs == 5
+        assert sched.stages[0].trainable == ("jets_classification",)
+        assert sched.stages[0].lrs == {"max": 1.0e-4}
+        assert sched.stages[1].frozen == ()
+        # the top-level value was injected into the constructor arg
+        assert cli.config.model.init_args.training_schedule is not None
+
+    def test_nested_home_rejected_fail_loud(self, data, tmp_path):
+        # the retired home (model.init_args.training_schedule, no top-level key)
+        # is a ConfigError naming the new top-level location.
+        override = write_yaml(tmp_path, "nested.yaml", NESTED_SCHEDULE_YAML)
+        with pytest.raises(ConfigError, match="TOP-LEVEL config key"):
+            make_cli(data, extra=["--config", override])
+
+    def test_deep_cli_override_updates_one_stage_field(self, data, tmp_path):
+        # a deep CLI override reaches into the schedule and updates one leaf,
+        # leaving sibling stage fields intact (plan 03 done-criterion).
+        override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        cli = make_cli(
+            data,
+            extra=["--config", override, "--training_schedule.stages.head_warmup.epochs=3"],
+        )
+        sched = cli.model._schedule  # noqa: SLF001
+        head = next(s for s in sched.stages if s.name == "head_warmup")
+        assert head.epochs == 3  # CLI override won
+        assert head.trainable == ("jets_classification",)  # sibling field survived
+
+    def test_stacked_config_merges_per_stage_by_name(self, data, tmp_path):
+        # a second --config overrides ONE field of ONE stage; the untouched stage
+        # (full_finetune) and the untouched field (head_warmup.trainable) survive
+        # — DeepMergeParser deep-merges the schedule per-stage-by-name (plan D1).
+        base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        over = write_yaml(tmp_path, "over_sched.yaml", SCHEDULE_OVERRIDE_YAML)
+        cli = make_cli(data, extra=["--config", base, "--config", over])
+        sched = cli.model._schedule  # noqa: SLF001
+        assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
+        head = next(s for s in sched.stages if s.name == "head_warmup")
+        assert head.epochs == 2  # override won
+        assert head.trainable == ("jets_classification",)  # base field survived
+
+    def test_stacked_config_stage_null_deletes(self, data, tmp_path):
+        # a `stage: null` override deletes that stage (the deep-merge deletion
+        # idiom, plan D1) — full_finetune is dropped, head_warmup remains.
+        base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        over = write_yaml(tmp_path, "del_sched.yaml", DELETE_STAGE_YAML)
+        cli = make_cli(data, extra=["--config", base, "--config", over])
+        sched = cli.model._schedule  # noqa: SLF001
+        assert [s.name for s in sched.stages] == ["head_warmup"]
+
+    def test_top_level_schedule_round_trips_through_print_config(self, data, tmp_path, capsys):
+        # --print_config dumps the top-level schedule AND the injected nested copy;
+        # re-parsing that dump must NOT re-reject (round-trip: top-level present =>
+        # the nested slot is ours) and must rebuild the same schedule. This is the
+        # saved-run-config path W4 resume relies on (config home is location-
+        # agnostic to the checkpoint's schedule.{stage_index,stage_name} payload).
+        override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        with pytest.raises(SystemExit) as excinfo:
+            make_cli(data, extra=["--config", override, "--print_config"])
+        assert excinfo.value.code == 0
+        printed = capsys.readouterr().out
+        printed_path = write_yaml(tmp_path, "printed.yaml", printed)
+        cli_again = SaltCLI(args=["--config", printed_path], run=False)
+        sched = cli_again.model._schedule  # noqa: SLF001
+        assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
+        assert sched.stages[0].epochs == 5
+
+    def test_no_schedule_is_a_noop_desugars(self, data):
+        # no top-level schedule (and no nested) => the desugared single `fit` stage
+        # (legacy parity path, plan D2); nothing injected, no reject.
+        cli = make_cli(data)
+        sched = cli.model._schedule  # noqa: SLF001
+        assert not sched.is_multi_stage
+        assert sched.initial_stage.name == "fit"
+        assert getattr(cli.config.model.init_args, "training_schedule", None) is None
+
+
+# main.py callback auto-injection gate (plan 03: long-standing follow-up, folded
+# in since main.py is being touched). The TrainingScheduleCallback is auto-added
+# on `fit` iff the schedule is multi-stage or freezes anything; never otherwise.
+class TestScheduleCallbackAutoInjection:
+    def test_callback_injected_for_multistage_fit(self, data, tmp_path):
+        from salt.callbacks.schedule import TrainingScheduleCallback
+
+        override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        cli = make_cli(data, extra=["--config", override])
+        cli.config.subcommand = "fit"  # the injector keys off the fit subcommand
+        assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
+        assert any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
+
+    def test_callback_absent_for_plain_fit(self, data):
+        from salt.callbacks.schedule import TrainingScheduleCallback
+
+        cli = make_cli(data)  # desugared single fit stage, no freeze
+        cli.config.subcommand = "fit"
+        assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
+        assert not any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
+
+    def test_callback_absent_off_fit(self, data, tmp_path):
+        # even a multi-stage schedule injects nothing when the subcommand is not
+        # fit (test/graph/export are schedule-inert).
+        from salt.callbacks.schedule import TrainingScheduleCallback
+
+        override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
+        cli = make_cli(data, extra=["--config", override])
+        cli.config.subcommand = "test"
+        assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
+        assert not any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
+
     def test_class_dict_only_requires_norm_dict_elsewhere(self, wave1_data):
         # --class_dict fans out to the tasks; norm_dict must still be supplied
         # (it is REQUIRED on the Normaliser) — here via the module config in the

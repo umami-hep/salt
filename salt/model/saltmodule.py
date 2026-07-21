@@ -117,6 +117,12 @@ class SaltModule(lightning.LightningModule):
           `MuReadout.width_mult()` resolves against real base widths.
     training_schedule : Mapping[str, Any], optional
         Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
+        Its config home is the TOP-LEVEL ``training_schedule:`` key (peer of
+        ``trainer:``/``data:``/``model:``, plan 03); the CLI
+        (`salt.main._relocate_training_schedule`) injects the resolved value
+        into this constructor arg before instantiation, and rejects a nested
+        ``model.init_args.training_schedule`` fail-loud. Passed directly when
+        constructing `SaltModule` programmatically (tests).
         Each stage may declare an epoch budget, a `frozen`/`trainable` module
         list (by `model.modules` name), and per-stage `optimizer`/`lrs`
         overrides. Parsed + validated fail-loud here; ``None`` (default) desugars
