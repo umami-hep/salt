@@ -386,9 +386,13 @@ Notes for output authors:
   packs each demanded `outputs.*` leaf itself (global `[B]`/`[B, C]` and
   per-token `[B, L]`/`[B, L, C]` shapes; per-token columns are zero-padded
   to the file sequence length by the sink — `h5_sink._pad_to`).
-- Whole NON-reader output groups (e.g. the MaskFormer `objects`/
-  `object_masks` groups) go through the H5 sink's `extra_groups` seam
-  instead — see `MaskFormerObjects` + `H5OutputSink(extra_groups=[...])`.
+- Whole structured output groups (e.g. the MaskFormer `objects`/
+  `object_masks` groups + the `tracks` MaskIndex column) go through the H5
+  sink's declarative `object_groups` seam instead — a generic capability
+  whose fields source arbitrary bundle leaves (no per-consumer knowledge in
+  the sink). The MaskFormer object math lives ONLY in the `MaskFormerObjects`
+  node (which mints the `object_index` leaf in both TEST and ONNX); see
+  `H5OutputSink(object_groups=[...])`.
 
 ## Inference: `salt inference` — the export set, offline (plan 50 Phase D)
 
