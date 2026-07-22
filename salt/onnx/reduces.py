@@ -16,12 +16,14 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import TensorSpec
 from salt.onnx.config import ExportOutput
 from salt.utils.mask_utils import indices_from_mask
+from salt.utils.union_find import mask_fill_flattened
 
 __all__ = [
     "BoundReduce",
     "ReduceCtx",
     "ReduceSpec",
     "bind_reduce",
+    "mask_fill_flattened",
     "per_token_reduces",
     "reduce_dtype",
     "register_reduce",
@@ -33,43 +35,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # shared MaskFormer export math
 # ---------------------------------------------------------------------------
-# `get_maskformer_outputs` (null suppression + pT reorder + index math) and
-# `mask_fill_flattened` (the per-node -> batch unflatten) are pure functions the
-# folded VertexUnionFind / MaskFormerObjects conversion nodes compose.
-
-
-# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
-@torch.jit.script
-def mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
-    """Unflatten a per-node array back to a batch-shaped tensor using a mask.
-
-    The ``@torch.jit.script`` decorator is load-bearing: the union-find export
-    reduce inlines this scripted subgraph into the ONNX trace, and the scripted
-    form's loop semantics matter for export parity.
-
-    Parameters
-    ----------
-    flat_array : Tensor
-        Tensor of shape ``[N, F]`` with concatenated (valid) per-node values.
-    mask : Tensor
-        Boolean mask of shape ``[B, L]`` where valid (non-padded) positions are ``False``.
-
-    Returns
-    -------
-    Tensor
-        Filled tensor of shape ``[B, L, F]`` where padded positions are set to ``-inf``.
-    """
-    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
-    mask = mask.to(torch.bool)
-    start_index = end_index = 0
-
-    for i in range(mask.shape[0]):
-        if mask[i].shape[0] > 0:
-            end_index += (~mask[i]).to(torch.long).sum()
-            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
-            start_index = end_index
-
-    return filled
+# `get_maskformer_outputs` (null suppression + pT reorder + index math) is a pure
+# function the folded MaskFormerObjects conversion node composes. The per-node ->
+# batch unflatten `mask_fill_flattened` lives in `salt.utils.union_find` (its
+# single home, alongside the union-find kernel) and is re-exported here so the
+# ONNX-math seam keeps naming it.
 
 
 def get_maskformer_outputs(

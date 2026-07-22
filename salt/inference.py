@@ -44,7 +44,7 @@ INFERENCE_OUTPUT = "{ckpt_dir}/{ckpt_stem}__inference_{sample}.h5"
 # batched eager ONNX execution is UNSAFE: the seq-classification ONNX branch
 # appends a [1, 1, C] zero row (classification.py get_output) and `.squeeze(0)`s
 # to [L]; the vertexing/union-find branch `reshape(-1)`s the batch away
-# (edge.py get_output / VertexUnionFind.forward). Running the adapter per jet
+# (edge.py get_output). Running the adapter per jet
 # guarantees `salt inference` == Athena semantics by construction, at the
 # check_onnx tolerance.
 

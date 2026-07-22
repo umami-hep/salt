@@ -1,4 +1,4 @@
-"""End-to-end ONNX export gates for the vertexing union-find and MaskFormer object nodes."""
+"""End-to-end ONNX export gates for the MaskFormer object nodes."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from salt.model.modules import bind_all, resolve_bind_schema
 from salt.onnx import (
     ExportConfig,
     ExportInput,
-    check_onnx,
     compile_onnx_plan,
     export_graph,
     make_session,
@@ -26,13 +25,11 @@ from salt.outputs import (
     MFLeadVertexDecorator,
     OnnxExportLeaf,
     OnnxExportSink,
-    VertexUnionFind,
 )
 from salt.graph.render import dot_source
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_gn2v2_modules,
     write_parity_norm_dict,
 )
 from salt.tests._fixtures.v2_builders import (
@@ -42,25 +39,13 @@ from salt.tests._fixtures.v2_builders import (
 
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
-# These are pure-CPU ONNX-trace gates (export contract, union-find and
-# maskformer traces). They are NOT GPU/heavy despite living under
+# These are pure-CPU ONNX-trace gates (the MaskFormer object-node export
+# contract + traces). They are NOT GPU/heavy despite living under
 # tests/integration/ — the `cpu_always` marker (conftest.py) opts them OUT of
 # the GPU skip so they run on EVERY CI invocation, with or without
 # --run-integration. Skipping them would let an object-node export regression
 # ship unnoticed.
 pytestmark = pytest.mark.cpu_always
-
-
-def _gn2_export_cfg() -> ExportConfig:
-    return ExportConfig(
-        model_name="GN2v2",
-        inputs=[
-            ExportInput(port="inputs.jets", name="jet_features"),
-            ExportInput(
-                port="inputs.tracks", name="track_features", sequence=True, dyn_axis="n_tracks"
-            ),
-        ],
-    )
 
 
 def _mf_export_cfg() -> ExportConfig:
@@ -80,57 +65,6 @@ def _mf_export_cfg() -> ExportConfig:
 
 _LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
 _N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
-
-
-def _build_vertex_folded(tmp_path):
-    """Folded ``VertexUnionFind`` node + ``OnnxExportSink`` export of the gn2v2 weights."""
-    torch.manual_seed(42)  # deterministic non-trivial weights
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    vuf = VertexUnionFind(task="track_vertexing", stream="tracks")
-    vuf.name = "vertex_uf"
-    sink = OnnxExportSink(outputs=[
-        OnnxExportLeaf(
-            key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True
-        ),
-    ])
-    sink.name = "onnx_export"
-    modules.update({"vertex_uf": vuf, "onnx_export": sink})
-    resolved = resolve_export_config(_gn2_export_cfg(), "GN2_v2")
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    modules["norm"].materialise()
-    torch.manual_seed(42)
-    return export_graph(
-        modules, _gn2_export_cfg(), VARIABLES, tmp_path / "folded_vertex.onnx",
-        outputs=[], run_name="GN2_v2",
-    )
-
-
-@pytest.fixture(scope="module")
-def vertex(tmp_path_factory):
-    """The folded VertexIndex export on deterministic weights."""
-    tmp = tmp_path_factory.mktemp("vertex_fold")
-    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
-    return SimpleNamespace(folded=_build_vertex_folded(tmp))
-
-
-def test_vertex_folded_export_contract(vertex):
-    """The folded VertexUnionFind sink names the int8 leaf with the n_tracks dynamic axis."""
-    adapter = vertex.folded.adapter
-    assert adapter.output_names == ["GN2v2_VertexIndex"]
-    assert adapter.output_dtypes == ["int8"]
-    assert adapter.dynamic_axes["GN2v2_VertexIndex"] == {0: "n_tracks"}
-
-
-def test_vertex_folded_check_onnx_agrees_including_zero_tokens(vertex):
-    """torch-vs-ort 1e-6 incl. L=0 — the folded scripted union-find traces correctly."""
-    grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
-    result = check_onnx(
-        vertex.folded.adapter, vertex.folded.onnx_path, trials=2,
-        float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid,
-    )
-    assert result.passed, result.failures
-    assert result.n_cases == 2 * len(grid)
 
 
 # MaskFormerObject: ONE node mints BOTH object leaves (leading_object +

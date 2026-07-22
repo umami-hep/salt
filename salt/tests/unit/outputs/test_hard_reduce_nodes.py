@@ -11,85 +11,16 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode, flatten_spec
 from salt.onnx.reduces import (
     get_maskformer_outputs,
-    mask_fill_flattened,
 )
-from salt.utils.union_find import get_node_assignment_jit
 from salt.outputs import (
     H5OutputSink,
     MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
     OutputColumn,
-    VertexUnionFind,
 )
 
 pytestmark = pytest.mark.cpu_always
-
-
-# VertexUnionFind (folds reduces._bind_vertex_union_find)
-
-
-def test_vertex_union_find_declares_raw_preds_and_mask_requires():
-    """The node declares the SAME raw preds.* port the reduce reads + the pad mask (R8/R1)."""
-    node = VertexUnionFind(task="track_vertexing", stream="tracks")
-    node.name = "vertex_uf"
-    io = node.declare_io(Mode.ONNX)
-    assert sorted(flatten_spec(io.requires)) == ["masks.tracks", "preds.tracks.track_vertexing"]
-    assert sorted(flatten_spec(io.produces)) == ["outputs.tracks.track_vertexing"]
-    # the produced leaf is int8 (the .char() output)
-    assert flatten_spec(io.produces)["outputs.tracks.track_vertexing"].dtype == "int8"
-    # the require pad mask is kind=pad_mask, the preds leaf kind=data
-    reqs = flatten_spec(io.requires)
-    assert reqs["masks.tracks"].kind == "pad_mask"
-    assert reqs["preds.tracks.track_vertexing"].kind == "data"
-
-
-def test_vertex_union_find_derived_width_collapses_to_one():
-    """The ``reshape(-1)`` collapse has no recoverable last dim -> width 1 (R6)."""
-    node = VertexUnionFind(task="track_vertexing", stream="tracks")
-    node.name = "vertex_uf"
-    assert node.derived_widths({"preds.tracks.track_vertexing": 1}) == {
-        "outputs.tracks.track_vertexing": 1
-    }
-    # the collapse is independent of any input width
-    assert node.derived_widths({}) == {"outputs.tracks.track_vertexing": 1}
-
-
-def test_vertex_union_find_forward_matches_inlined_chain():
-    """The forward runs the @torch.jit.script chain VERBATIM (folds the reduce, R1)."""
-    node = VertexUnionFind(task="track_vertexing", stream="tracks")
-    node.name = "vertex_uf"
-    gen = torch.Generator().manual_seed(3)
-    n_tracks = 4
-    n_edges = n_tracks * (n_tracks - 1)
-    edge_scores = torch.rand(n_edges, 1, generator=gen)
-    pad_mask = torch.zeros(1, n_tracks, dtype=torch.bool)
-    b = Bundle()
-    b.set("preds.tracks.track_vertexing", edge_scores)
-    b.set("masks.tracks", pad_mask)
-    out = node.forward(b, Mode.ONNX)["outputs.tracks.track_vertexing"]
-    # the reduce's exact inlined chain
-    vertex_indices = get_node_assignment_jit(edge_scores, pad_mask)
-    expected = mask_fill_flattened(vertex_indices, pad_mask).reshape(-1).char()
-    torch.testing.assert_close(out, expected, rtol=0, atol=0)
-    assert out.dtype == torch.int8
-
-
-def test_vertex_union_find_forward_does_not_mutate_bundle_leaves():
-    """The node never mutates the write-once bundle (R4 clone discipline / §2.1)."""
-    node = VertexUnionFind(task="track_vertexing", stream="tracks")
-    node.name = "vertex_uf"
-    gen = torch.Generator().manual_seed(5)
-    edge_scores = torch.rand(6, 1, generator=gen)
-    pad_mask = torch.zeros(1, 3, dtype=torch.bool)
-    b = Bundle()
-    b.set("preds.tracks.track_vertexing", edge_scores)
-    b.set("masks.tracks", pad_mask)
-    before_scores = edge_scores.clone()
-    before_mask = pad_mask.clone()
-    node.forward(b, Mode.ONNX)
-    torch.testing.assert_close(b.get("preds.tracks.track_vertexing"), before_scores, rtol=0, atol=0)
-    torch.testing.assert_close(b.get("masks.tracks"), before_mask, rtol=0, atol=0)
 
 
 # MaskFormerObject (folds _bind_leading_object + _bind_object_index — ONE node)

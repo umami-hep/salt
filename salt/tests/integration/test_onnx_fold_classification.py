@@ -25,7 +25,6 @@ from salt.outputs import (
     OnnxExportLeaf,
     OnnxExportSink,
     SeqClassIndex,
-    VertexUnionFind,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -59,49 +58,9 @@ def _export_cfg() -> ExportConfig:
     )
 
 
-# the full GN2 export contract (ClassProbs + SeqClassIndex + VertexUnionFind)
-
-
-def _folded_gn2_export(tmp_path):
-    """A deterministically-weighted GN2 export through the folded conversion nodes."""
-    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-    torch.manual_seed(42)  # deterministic non-trivial weights
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
-    ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
-    vi = VertexUnionFind(task="track_vertexing", stream="tracks"); vi.name = "track_vertex_index"
-    sink = OnnxExportSink(outputs=[
-        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-        OnnxExportLeaf(key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True),
-        OnnxExportLeaf(key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True),
-    ]); sink.name = "onnx_export"
-    modules.update({"jet_probs": jp, "track_origin_index": ti, "track_vertex_index": vi, "onnx_export": sink})
-    resolved = resolve_export_config(_export_cfg(), "GN2_v2")
-    plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
-    modules["norm"].materialise()
-    result = export_graph(
-        modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2"
-    )
-    return result, modules
-
-
-def test_folded_gn2v2_export_contract_full(tmp_path):
-    """The folded gn2v2 export contract (incl VertexIndex) matches the pinned literals."""
-    want_names = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "GN2v2_VertexIndex"]
-    want_dtypes = ["float32", "float32", "float32", "int8", "int8"]
-    result, _ = _folded_gn2_export(tmp_path)
-    adapter = result.adapter
-    assert adapter.output_names == want_names  # ORDERED list-equality
-    assert adapter.output_dtypes == want_dtypes
-    assert adapter.dynamic_axes["GN2v2_TrackOrigin"] == {0: "n_tracks"}
-    assert adapter.dynamic_axes["GN2v2_VertexIndex"] == {0: "n_tracks"}
-    example = adapter.example_inputs(sequence_length=5)
-    with torch.no_grad():
-        out_tuple = adapter(*example)
-    assert len(out_tuple) == len(want_names)
-    session = make_session(result.onnx_path)
-    assert [o.name for o in session.get_outputs()] == want_names
+# the GN2 export contract (ClassProbs + SeqClassIndex): the vertexing head's
+# VertexIndex export rides the live VertexingTaskModule.get_output path (not a
+# conversion node), covered by the shipped-config goldens + tests/unit get_output.
 
 
 @pytest.fixture(scope="module")

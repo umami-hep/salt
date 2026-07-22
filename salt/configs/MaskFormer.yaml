@@ -146,9 +146,12 @@ model:
           loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
       # the SINGLE MaskFormer object reconstruction node, serving BOTH modes:
       # ONNX mints the export leaves outputs.objects.leading_object
-      # (leading-object regression scalars) + outputs.tracks.object_index
-      # (reordered per-constituent index); TEST mints outputs.tracks.object_index
+      # (leading-object regression scalars) + outputs.tracks.HadronIndex
+      # (reordered per-constituent index); TEST mints outputs.tracks.HadronIndex
       # from the RAW masks (the eval-H5 HadronIndex, indices_from_mask + pad->-1).
+      # `index_name: HadronIndex` is the SINGLE source of the index name — the
+      # h5_output object group / OnnxExportSink derive their column / ONNX suffix
+      # from the leaf's terminal segment (no sink-side respelling).
       # Demand-gated: FIT/VAL prune it; the h5_output object group / OnnxExportSink
       # pull it into TEST / ONNX respectively. (Instance name kept for ONNX
       # plan-hash stability — it now serves TEST too.)
@@ -159,6 +162,7 @@ model:
           regression_task: regression
           stream: objects
           constituent_stream: tracks
+          index_name: HadronIndex # single-source: eval-H5 column + ONNX suffix derive from this
       split:
         class_path: salt.model.modules.Split
         init_args: {streams: [tracks]}
@@ -223,8 +227,9 @@ callbacks:
                prefix: false, kind: label}
             - {leaf: objects.masks, suffixes: [mask_logits], dtype: f4, prefix: false}
         - name: tracks # the reader stream the per-token HadronIndex column rides
+          # single-source: the column suffix defaults to the leaf terminal (HadronIndex)
           fields:
-            - {leaf: outputs.tracks.object_index, suffixes: [HadronIndex], dtype: i8}
+            - {leaf: outputs.tracks.HadronIndex, dtype: i8}
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
     init_args:
@@ -232,8 +237,8 @@ callbacks:
         - key: outputs.objects.leading_object
           names: [leading_objects_pt, leading_objects_Lxy, leading_objects_deta,
                   leading_objects_dphi, leading_objects_mass]
-        - key: outputs.tracks.object_index
-          name: HadronIndex # unified eval-H5 + ONNX suffix (Athena contract)
+        # single-source: the ONNX suffix defaults to the leaf terminal (HadronIndex)
+        - key: outputs.tracks.HadronIndex
           dtype: int8
           per_token: true
 

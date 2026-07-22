@@ -158,7 +158,7 @@ class MaskFormerObjects(SaltModelModule):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def _onnx_io(self) -> IO:
-        """ONNX ports (same gate as `VertexUnionFind`): the null-suppression + pT-reorder
+        """ONNX ports (Mode.ONNX gate): the null-suppression + pT-reorder
         chain is shaped for the traced export batch, so this node is inactive in FIT/VAL/TEST
         for these leaves — a config that wires it for ONNX export alongside an object-regression
         head opted out of TEST eval does not trip the planner's pre-prune connectivity check.

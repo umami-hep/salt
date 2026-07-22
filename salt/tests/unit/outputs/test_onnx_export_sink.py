@@ -151,11 +151,16 @@ def test_named_outputs_split_count_mismatch_errors_eagerly():
 # config validation
 
 
-def test_leaf_requires_exactly_one_of_name_names():
-    with pytest.raises(ConfigError, match="exactly one of 'name'"):
+def test_leaf_rejects_both_name_and_names():
+    with pytest.raises(ConfigError, match="BOTH"):
         OnnxExportLeaf(key=_JET, name="x", names=["a", "b"])
-    with pytest.raises(ConfigError, match="exactly one of 'name'"):
-        OnnxExportLeaf(key=_JET)
+
+
+def test_leaf_defaults_name_to_leaf_terminal_segment():
+    """Single-source naming: omitting name/names defaults the suffix to the leaf terminal."""
+    leaf = OnnxExportLeaf(key=_JET)
+    assert leaf.name == "jets_classification"
+    assert leaf.suffixes == ("jets_classification",)
 
 
 def test_leaf_rejects_non_outputs_key():

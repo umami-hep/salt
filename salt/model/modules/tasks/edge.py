@@ -15,33 +15,13 @@ from salt.model.bind import ResolvedSchema
 from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
-from salt.onnx.reduces import mask_fill_flattened
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField
-from salt.utils.union_find import get_node_assignment_jit
+from salt.utils.union_find import get_node_assignment_jit, mask_fill_flattened
 
 _DEFAULT_VTX_LOSS: dict[str, Any] = {
     "class_path": "torch.nn.BCEWithLogitsLoss",
     "init_args": {"reduction": "none"},
 }
-
-
-# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
-@torch.jit.script
-def _mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
-    """Unflatten a per-node array back to a ``[B, L, F]`` batch-shaped tensor;
-    padded positions read -inf.
-    """
-    filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
-    mask = mask.to(torch.bool)
-    start_index = end_index = 0
-
-    for i in range(mask.shape[0]):
-        if mask[i].shape[0] > 0:
-            end_index += (~mask[i]).to(torch.long).sum()
-            filled[i, : end_index - start_index] = flat_array[start_index:end_index]
-            start_index = end_index
-
-    return filled
 
 
 class VertexingTaskModule(_TaskModuleBase):
@@ -57,7 +37,7 @@ class VertexingTaskModule(_TaskModuleBase):
     rejected.
 
     TEST publishes per-node vertex assignments (union-find); ONNX publishes
-    RAW edge scores for the export-side ``vertex_union_find`` reduce.
+    RAW edge scores that `get_output` folds into the union-find vertex index.
     """
 
     def __init__(
@@ -395,7 +375,7 @@ class VertexingTaskModule(_TaskModuleBase):
             Flattened per-node assignments with paddings filled to ``-inf``.
         """
         preds = get_node_assignment_jit(preds, pad_mask)
-        return _mask_fill_flattened(preds, pad_mask)
+        return mask_fill_flattened(preds, pad_mask)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Publishes RAW ``[E, 1]`` edge scores in every non-training mode; the

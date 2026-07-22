@@ -105,7 +105,7 @@ class OnnxAdapter(nn.Module):
                 "OnnxAdapter needs a folded OnnxExportSink in the plan — the off-graph reduce "
                 "manifest was retired at plan-29 W4. Declare an OnnxExportSink naming the "
                 "conversion outputs.* leaves (design §4.2/§6); the conversion nodes "
-                "(ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/Combination) own "
+                "(ClassProbs/SeqClassIndex/MaskFormerObjects/Combination) own "
                 "the math inside the traced graph."
             )
         if self._export_sink.model_name is None:

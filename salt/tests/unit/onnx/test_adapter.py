@@ -45,7 +45,6 @@ from salt.outputs import (
     OnnxExportLeaf,
     OnnxExportSink,
     SeqClassIndex,
-    VertexUnionFind,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -86,23 +85,17 @@ def gn2_folded_modules(tmp_path):
         "track_origin_index": _named(
             SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
         ),
-        "track_vertex_index": _named(
-            VertexUnionFind(task="track_vertexing", stream="tracks"), "track_vertex_index"
-        ),
         "onnx_export": _named(gn2_export_sink(), "onnx_export"),
     })
     return modules
 
 
 def gn2_export_sink() -> OnnxExportSink:
-    """The GN2 OnnxExportSink: pb/pc/pu (split), TrackOrigin int8, VertexIndex int8."""
+    """The GN2 OnnxExportSink: pb/pc/pu (split) + TrackOrigin int8 (folded conversion nodes)."""
     return OnnxExportSink(outputs=[
         OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
         OnnxExportLeaf(
             key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-        ),
-        OnnxExportLeaf(
-            key="outputs.tracks.track_vertexing", name="VertexIndex", dtype="int8", per_token=True
         ),
     ])
 
@@ -222,8 +215,14 @@ class TestExportSinkOutputs:
     # proven bitwise in test_onnx_fold_classification/objects). These assert the migrated surface.
 
     def test_name_and_names_exclusive(self):
-        with pytest.raises(ConfigError, match="exactly one of"):
+        with pytest.raises(ConfigError, match="BOTH"):
             OnnxExportLeaf(key="outputs.jets.c", name="both", names=["pb", "pc"])
+
+    def test_name_defaults_to_leaf_terminal_segment(self):
+        """Single-source naming: omitting name/names defaults the suffix to the leaf terminal."""
+        leaf = OnnxExportLeaf(key="outputs.tracks.HadronIndex", dtype="int8", per_token=True)
+        assert leaf.name == "HadronIndex"
+        assert leaf.suffixes == ("HadronIndex",)
 
     def test_names_default_to_split(self):
         leaf = OnnxExportLeaf(key="outputs.jets.c", names=["pb", "pc", "pu"])
@@ -265,10 +264,11 @@ class TestExportSinkOutputs:
 
 
 # plan-29 W4: the SHIPPED reduces are RETIRED — folded into conversion nodes.
-# The argmax/union_find/maskformer math is now proven BITWISE in
+# The argmax/maskformer math is now proven BITWISE in
 # test_onnx_fold_classification.py (SeqClassIndex/Combination) and test_onnx_fold_objects.py
-# (VertexUnionFind/MaskFormerObjects) against the same v1 chains these reduces
-# composed. These tests pin the RETIREMENT (no shipped reduce registered).
+# (MaskFormerObjects) against the same v1 chains these reduces composed; the union-find
+# vertex index rides the live VertexingTaskModule.get_output path (tests/unit get_output).
+# These tests pin the RETIREMENT (no shipped reduce registered).
 
 
 class TestRetiredReduces:
@@ -494,14 +494,12 @@ class TestOnnxAdapter:
             "GN2v2_pc",
             "GN2v2_pu",
             "GN2v2_TrackOrigin",
-            "GN2v2_VertexIndex",
         ]
         assert gn2_adapter.dynamic_axes == {
             "track_features": {0: "n_tracks"},
             "GN2v2_TrackOrigin": {0: "n_tracks"},
-            "GN2v2_VertexIndex": {0: "n_tracks"},
         }
-        assert gn2_adapter.output_dtypes == ["float32"] * 3 + ["int8"] * 2
+        assert gn2_adapter.output_dtypes == ["float32"] * 3 + ["int8"]
 
     def test_example_inputs_shapes(self, gn2_adapter):
         jets, tracks = gn2_adapter.example_inputs(sequence_length=40)

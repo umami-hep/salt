@@ -34,7 +34,6 @@ from salt.outputs.task_output import (
     SeqClassProbs,
     TaskOutput,
 )
-from salt.outputs.vertex_union_find import VertexUnionFind
 
 __all__ = [
     "ClassProbs",
@@ -62,5 +61,4 @@ __all__ = [
     "SeqClassProbs",
     "SeqClassProbsOp",
     "TaskOutput",
-    "VertexUnionFind",
 ]

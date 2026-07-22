@@ -392,8 +392,9 @@ Notes for output authors:
   sink's declarative `object_groups` seam instead — a generic capability
   whose fields source arbitrary bundle leaves (no per-consumer knowledge in
   the sink). The MaskFormer object math lives ONLY in the `MaskFormerObjects`
-  node (which mints the `object_index` leaf in both TEST and ONNX); see
-  `H5OutputSink(object_groups=[...])`.
+  node (which mints the per-constituent index leaf — named `HadronIndex` in
+  the shipped `MaskFormer.yaml` via `index_name`, single-source — in both TEST
+  and ONNX); see `H5OutputSink(object_groups=[...])`.
 
 ## Inference: `salt inference` — the export set, offline (plan 50 Phase D)
 

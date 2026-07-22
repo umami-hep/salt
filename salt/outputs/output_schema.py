@@ -203,10 +203,13 @@ class ObjectGroupField:
     ----------
     leaf : str
         The bundle key to source (e.g. ``objects.class_probs``,
-        ``labels.objects.object_class``, ``outputs.tracks.object_index``). The
+        ``labels.objects.object_class``, ``outputs.tracks.HadronIndex``). The
         sink demands it (keeping its producer alive) and casts it at write time.
-    suffixes : Sequence[str]
-        The per-channel column suffixes, in last-dim order.
+    suffixes : Sequence[str] | None, optional
+        The per-channel column suffixes, in last-dim order. Omit (or ``None``)
+        for a single-channel leaf to default the one column suffix to the
+        leaf's terminal segment (single-source naming — the producing node
+        names it once).
     dtype : str, optional
         The H5 column dtype (numpy descriptor), by default ``"f4"``. A float
         dtype is demoted to ``f2`` when the sink runs half-precision.
@@ -220,11 +223,11 @@ class ObjectGroupField:
     Raises
     ------
     ConfigError
-        For an empty leaf, an empty suffix list, or an unknown kind.
+        For an empty leaf or an unknown kind.
     """
 
     leaf: str
-    suffixes: Sequence[str]
+    suffixes: Sequence[str] | None = None
     dtype: str = "f4"
     prefix: bool = True
     kind: str = "data"
@@ -232,11 +235,10 @@ class ObjectGroupField:
     def __post_init__(self) -> None:
         if not self.leaf:
             raise ConfigError("ObjectGroupField needs a non-empty source `leaf` bundle key")
-        if not list(self.suffixes):
-            raise ConfigError(
-                f"ObjectGroupField {self.leaf!r} needs a non-empty `suffixes` list — name the "
-                "per-channel columns the leaf's last dimension expands into"
-            )
+        if not self.suffixes:
+            # single-source naming: default the one column suffix to the leaf's
+            # terminal segment (the producing node names the leaf once).
+            object.__setattr__(self, "suffixes", (self.leaf.split(KEY_SEP)[-1],))
         if self.kind not in _VALID_KINDS:
             raise ConfigError(
                 f"ObjectGroupField {self.leaf!r}: kind {self.kind!r} must be one of "

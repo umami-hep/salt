@@ -317,7 +317,7 @@ def deadcode(
         else ""
     )
     # A CONVERSION PRODUCER (a salt.outputs node producing an
-    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/VertexUnionFind/etc.)
+    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/etc.)
     # that prunes in a non-ONNX mode is the by-design export-pruning story:
     # its OnnxExportSink (or an H5OutputSink) is inactive in that mode, so
     # the node has no sink and prunes legitimately. Demote it to info

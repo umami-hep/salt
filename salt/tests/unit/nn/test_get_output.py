@@ -27,7 +27,7 @@ from salt.model.modules.tasks import (
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
 from salt.onnx.reduces import mask_fill_flattened
-from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs, VertexUnionFind
+from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import get_node_assignment_jit
@@ -453,8 +453,10 @@ def test_vtx_output_time_requires_pad_mask():
     assert module.output_time_requires(Mode.ONNX) == [f"masks.{_STREAM_T}"]
 
 
-def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
-    """Vertexing (ONNX): the field ``value`` == the `VertexUnionFind` producer leaf."""
+def test_vtx_get_output_onnx_matches_literal_union_find_chain():
+    """Vertexing (ONNX): the field ``value`` == the literal scripted union-find chain
+    (folded once in get_output): union-find -> batch unflatten -> reshape(-1).char().
+    """
     module = _bind_vertexing()
     gen = torch.Generator().manual_seed(3)
     n_tracks = 4
@@ -462,11 +464,12 @@ def test_vtx_get_output_onnx_matches_vertex_union_find_producer():
     edge_scores = torch.rand(n_edges, 1, generator=gen)
     mask = torch.zeros(1, n_tracks, dtype=torch.bool)
 
-    producer = VertexUnionFind(task=module.name, stream=_STREAM_T)
-    producer.name = "track_vertex_index"
-    oracle = producer.forward(_vtx_bundle(module, edge_scores, mask), Mode.ONNX)[
-        f"outputs.{_STREAM_T}.track_vertexing"
-    ]
+    # the literal v1 export chain the get_output ONNX branch folds
+    oracle = (
+        mask_fill_flattened(get_node_assignment_jit(edge_scores.clone(), mask), mask)
+        .reshape(-1)
+        .char()
+    )
 
     (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.ONNX, _RUN)
     assert field.h5_name is None  # ONNX-only leaf

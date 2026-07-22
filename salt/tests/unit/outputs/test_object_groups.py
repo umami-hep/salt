@@ -90,6 +90,18 @@ def _batch(batch_size=4, n_tracks=_T):
     return b
 
 
+class TestObjectGroupFieldNaming:
+    def test_suffix_defaults_to_leaf_terminal_segment(self):
+        """Single-source naming: omitting suffixes defaults the one column to the leaf terminal."""
+        field = ObjectGroupField(leaf="outputs.tracks.HadronIndex", dtype="i8")
+        assert field.suffixes == ("HadronIndex",)
+        assert field.column_names("GN3") == ["GN3_HadronIndex"]
+
+    def test_explicit_suffixes_still_honoured(self):
+        field = ObjectGroupField(leaf="objects.class_probs", suffixes=["pb", "pc", "pnull"])
+        assert list(field.suffixes) == ["pb", "pc", "pnull"]
+
+
 class TestResolveObjectShapes:
     def test_non_reader_and_reader_groups(self):
         sink = _open(_sink())

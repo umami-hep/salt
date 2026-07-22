@@ -171,7 +171,7 @@ def compile_onnx_plan(
             "compile_onnx_plan needs a folded OnnxExportSink in model.modules (plan-29 W4) — "
             "the off-graph reduce manifest was retired. "
             "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
-            "conversion nodes (ClassProbs/SeqClassIndex/VertexUnionFind/MaskFormerObjects/"
+            "conversion nodes (ClassProbs/SeqClassIndex/MaskFormerObjects/"
             "Combination) own the math inside the traced graph (design §4.2/§6)."
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
@@ -658,7 +658,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         raise ConfigError(
             "config has no OnnxExportSink — since plan-29 W4 the ONNX output manifest is "
             "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
-            "outputs.* leaves the folded nodes mint (ClassProbs/SeqClassIndex/VertexUnionFind/"
+            "outputs.* leaves the folded nodes mint (ClassProbs/SeqClassIndex/"
             "MaskFormerObjects/Combination). The off-graph reduce manifest was retired; add the "
             "conversion nodes + the OnnxExportSink to the run config (design §4.2/§6)."
         )

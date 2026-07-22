@@ -45,7 +45,9 @@ class OnnxExportLeaf:
         Concrete, under the ``outputs`` namespace.
     name : str | None, optional
         Single-output Athena suffix (full name ``{model_name}_{name}``).
-        Exclusive with `names`.
+        Exclusive with `names`. When both `name` and `names` are omitted the
+        suffix defaults to the leaf key's terminal segment (single-source
+        naming — the producing node names the leaf once).
     names : Sequence[str] | None, optional
         Per-class scalar suffixes for the split (one converted leaf -> N
         named scalars). Exclusive with `name`.
@@ -86,11 +88,15 @@ class OnnxExportLeaf:
                 "namespace — the ONNX sink names the conversion outputs.* leaves the folded "
                 "nodes mint, not raw predictions (design §6.2)"
             )
-        if (self.name is None) == (self.names is None):
+        if self.name is not None and self.names is not None:
             raise ConfigError(
-                f"OnnxExportLeaf {self.key!r} must set exactly one of 'name' (single output) or "
-                "'names' (per-class split_scalars) (design §6.2)"
+                f"OnnxExportLeaf {self.key!r} sets BOTH 'name' (single output) and 'names' "
+                "(per-class split_scalars) — pick one (design §6.2)"
             )
+        if self.name is None and self.names is None:
+            # single-source naming: default the ONNX suffix to the leaf key's
+            # terminal segment (the producing node names the leaf once).
+            object.__setattr__(self, "name", self.key.split(KEY_SEP)[-1])
         if self.names is not None:
             if not list(self.names) or len(set(self.names)) != len(self.names):
                 raise ConfigError(
