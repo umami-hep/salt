@@ -30,6 +30,12 @@
 modular-unit-tests:
   extends: .test-template
   script:
+    # TEMP DIAGNOSTIC (reader-unification CI-red triage): localize the deterministic
+    # jsonargparse deep-merge breakage. (a) spike in isolation, (b) full suite with
+    # pytest-randomly disabled. Both non-fatal (|| echo marker) so the real run below
+    # still reports. Remove once root-caused.
+    - echo "===DIAG_SPIKE_ISOLATION_BEGIN==="; run_test salt/tests/unit/test_jsonargparse_spike.py && echo "===DIAG_SPIKE_ISOLATION=PASS===" || echo "===DIAG_SPIKE_ISOLATION=FAIL==="
+    - echo "===DIAG_NORANDOMLY_BEGIN==="; run_test salt/tests/unit -p no:randomly && echo "===DIAG_NORANDOMLY=PASS===" || echo "===DIAG_NORANDOMLY=FAIL==="
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
 # --------------- CPU INTEGRATION GATES ---------------
