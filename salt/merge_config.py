@@ -53,18 +53,14 @@ merged YAML is byte-identical to `salt fit [same args] --print_config`.
 def main(args: Sequence[str] | None = None) -> int:
     """``salt merge-config`` entry point (dispatched from `salt.main.main`).
 
+    A `ConfigError` (bad ``--merged.*`` option / fit-parse failure) or a
+    `GraphError` (e.g. a missing ``dot`` binary) propagates to `salt.main.main`,
+    which prints it as a clean one-block message.
+
     Returns
     -------
     int
         ``0`` on success.
-
-    Raises
-    ------
-    ConfigError
-        On a missing/invalid ``--merged.*`` option or a fit-parse failure.
-    GraphError
-        Propagated from graph compilation/rendering (e.g. a missing ``dot``
-        binary) — `salt.main.main` prints it as a clean one-block message.
     """
     argv = list(sys.argv[1:] if args is None else args)
     if any(a in {"-h", "--help"} for a in argv):
@@ -172,7 +168,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     modules + sinks); the FIT-mode plan is compiled once and re-styled per stage
     with the stage's frozen mask. A ``.dot`` is always written; each is
     rasterised to ``.png``/``.pdf`` only when `do_plots` is set.
-    """
+    """  # noqa: DOC501
     from salt.cli import _resolve_widths, load_config  # noqa: PLC0415 - heavy/circular
 
     merged = yaml.safe_load(merged_text)
