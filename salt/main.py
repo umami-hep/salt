@@ -79,10 +79,6 @@ _CLASS_PATH_REMAP: dict[str, str] = {
     # data -> readers
     "salt.core.data.reader": "salt.data.readers.reader",
     "salt.core.data.uproot_reader": "salt.data.readers.uproot_reader",
-    "salt.core.data.xaod_reader": "salt.data.readers.xaod_reader",
-    "salt.core.data.easyjet_reader": "salt.data.readers.easyjet_reader",
-    "salt.core.data.ftag1lite_reader": "salt.data.readers.ftag1lite_reader",
-    "salt.core.data.physlite_reader": "salt.data.readers.physlite_reader",
     "salt.core.data.multisample_reader": "salt.data.readers.multisample_reader",
     "salt.core.data.stream": "salt.data.readers.stream",
     "salt.core.data.cuts": "salt.data.readers.cuts",
