@@ -63,6 +63,30 @@ def _export_cfg() -> ExportConfig:
 # conversion node), covered by the shipped-config goldens + tests/unit get_output.
 
 
+def _folded_gn2_export(tmp_path):
+    """A deterministically-weighted GN2 export through the folded conversion nodes
+    (ClassProbs pb/pc/pu + SeqClassIndex TrackOrigin); no vertexing node.
+    """
+    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+    torch.manual_seed(42)  # deterministic non-trivial weights
+    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+    jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
+    ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
+    sink = OnnxExportSink(outputs=[
+        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
+        OnnxExportLeaf(key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True),
+    ]); sink.name = "onnx_export"
+    modules.update({"jet_probs": jp, "track_origin_index": ti, "onnx_export": sink})
+    resolved = resolve_export_config(_export_cfg(), "GN2_v2")
+    plan = compile_onnx_plan(modules, resolved, VARIABLES)
+    bind_all(modules, resolve_bind_schema([plan]))
+    modules["norm"].materialise()
+    result = export_graph(
+        modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2"
+    )
+    return result, modules
+
+
 @pytest.fixture(scope="module")
 def folded(tmp_path_factory):
     """A deterministically-weighted GN2 export through the FOLDED path (SeqClassIndex +

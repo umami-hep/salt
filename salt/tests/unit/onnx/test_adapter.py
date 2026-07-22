@@ -513,12 +513,10 @@ class TestOnnxAdapter:
         tracks = torch.rand(length, 19, generator=gen)
         with torch.no_grad():
             outputs = gn2_adapter(jets, tracks)
-        assert len(outputs) == 5
+        assert len(outputs) == 4
         assert all(out.dim() == 0 for out in outputs[:3])
         assert outputs[3].shape == (length,)
         assert outputs[3].dtype == torch.int8
-        assert outputs[4].shape == (length,)
-        assert outputs[4].dtype == torch.int8
 
     def test_global_input_must_have_batch_dim(self, gn2_adapter):
         with pytest.raises(AssertionError, match="batch, features"):
