@@ -1,0 +1,43 @@
+# Reader fragment — DAOD_PHYSLITE POOL files, pre-calibrated AnalysisJets.
+#
+# Stackable: `salt fit --config readers/physlite.yaml --config <model>.yaml`.
+# Provide the source file(s) via --data.train_file / --data.val_file.
+#
+# Schema notes (moved from the deleted PhysliteReader docstring; confirmed on a
+# real mc23 ttbar file, exp 25):
+#   - unroll: jets  -> one row per AnalysisJet; `[event][jet]` flattened away.
+#   - Jet-level scalars live under prefix: AnalysisJetsAuxDyn.
+#   - Tracks are reached by ElementLink, NOT direct decorations: the per-jet link
+#     vector AnalysisJetsAuxDyn.GhostTrack (link_branch: GhostTrack, resolved with
+#     the jets-group prefix) carries {m_persKey, m_persIndex}; m_persIndex gathers
+#     the target container InDetTrackParticles (target_prefix:
+#     InDetTrackParticlesAuxDyn.), whose branches are the track fields.
+#   - GhostTrack links are ~88% null (m_persKey==0, thinned tracks) and are
+#     dropped by the reader — served track multiplicity is the non-null count.
+
+data:
+  modules:
+    reader:
+      class_path: salt.data.UprootReader
+      init_args:
+        tree: CollectionTree
+        unroll: jets
+        groups:
+          jets:
+            prefix: AnalysisJetsAuxDyn.
+            jagged: false
+            branches:
+              pt: pt
+              eta: eta
+              phi: phi
+              mass: m
+              flavour_label: HadronConeExclTruthLabelID
+          tracks:
+            jagged: true
+            pad_max: 40
+            link_branch: GhostTrack               # -> AnalysisJetsAuxDyn.GhostTrack
+            target_prefix: InDetTrackParticlesAuxDyn.
+            branches:
+              d0: d0
+              z0SinTheta: z0
+              # add further InDetTrackParticlesAuxDyn.<branch> fields as needed

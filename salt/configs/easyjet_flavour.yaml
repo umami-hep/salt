@@ -1,7 +1,11 @@
 # Minimal jet-flavour tagger trained directly on easyjet AnalysisMiniTree ROOT
-# ntuples via EasyjetReader (no H5 pre-processing). Jets are a per-event
+# ntuples via UprootReader (no H5 pre-processing). Jets are a per-event
 # jagged sequence, treated as a token sequence; the classification head runs
 # per-jet on HadronConeExclTruthLabelID. No tracks — easyjet output has none.
+#
+# unroll: null serves one row per tree entry (event); jets is a per-event jagged
+# sequence padded to `truncate`. Branch names are verbatim (empty prefix): the
+# `recojet_antikt4PFlow_*` collection prefix and `_NOSYS` suffix live in `branches`.
 
 name: easyjet_flavour
 
@@ -10,9 +14,10 @@ data:
   num_workers: 4
   modules:
     reader:
-      class_path: salt.data.EasyjetReader
+      class_path: salt.data.UprootReader
       init_args:
         tree: AnalysisMiniTree
+        unroll: null
         groups:
           jets:
             jagged: true

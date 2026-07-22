@@ -1,6 +1,11 @@
 # Small-R EMPFlow flavour tagger trained directly on xAOD DAOD_FTAG1LITE POOL
-# files via FTAG1LiteReader (no H5 pre-processing). Same model as
+# files via UprootReader (no H5 pre-processing). Same model as
 # gn2v2-opendata.yaml — only the reader differs. No ONNX export (fit/test only).
+#
+# FTAG1LITE stores per-jet track lists as DIRECT double-jagged aux decorations
+# (`ft1l_trk_*` under the jet collection's aux store) — no ElementLink deref.
+# unroll: jets serves one row per jet (`[event][jet] -> jet`); the jets/tracks
+# `prefix` is the jet-collection aux store `AntiKt4EMPFlowJetsAuxDyn.`.
 
 name: ftag1lite_empflow
 
@@ -9,12 +14,13 @@ data:
   num_workers: 4
   modules:
     reader:
-      class_path: salt.data.FTAG1LiteReader
+      class_path: salt.data.UprootReader
       init_args:
-        jet_collection: AntiKt4EMPFlowJets
         tree: CollectionTree
+        unroll: jets
         groups:
           jets:
+            prefix: AntiKt4EMPFlowJetsAuxDyn.
             jagged: false
             branches:
               pt: pt
@@ -23,6 +29,7 @@ data:
               mass: mass_calibrated
               flavour_label: HadronConeExclTruthLabelID
           tracks:
+            prefix: AntiKt4EMPFlowJetsAuxDyn.
             jagged: true
             pad_max: 40
             branches:

@@ -1,9 +1,9 @@
 # Event-level signal-vs-background classifier trained directly on two
 # per-sample easyjet AnalysisMiniTree ROOT ntuples via MultiSampleReader (no
 # UPP/umami pre-resampling). Signal (HH->4b, mc23) and background (ttbar,
-# mc20) are read by their own EasyjetReader sub-readers and proportionally
-# interleaved, with a per-event sample label injected as raw.event.process.
-# Only branches common to both campaigns are used.
+# mc20) are read by their own UprootReader sub-readers (unroll: null, one row
+# per event) and proportionally interleaved, with a per-event sample label
+# injected as raw.event.process. Only branches common to both campaigns are used.
 
 name: easyjet_hh4b_ttbar
 
@@ -26,9 +26,10 @@ data:
           - name: signal
             label: 1
             reader:
-              class_path: salt.data.EasyjetReader
+              class_path: salt.data.UprootReader
               init_args:
                 tree: AnalysisMiniTree
+                unroll: null
                 groups: &ej_groups
                   jets:
                     jagged: true
@@ -50,9 +51,10 @@ data:
           - name: background
             label: 0
             reader:
-              class_path: salt.data.EasyjetReader
+              class_path: salt.data.UprootReader
               init_args:
                 tree: AnalysisMiniTree
+                unroll: null
                 groups: *ej_groups
             # sources: REQUIRED override per stage — ttbar files
     features:

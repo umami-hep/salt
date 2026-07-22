@@ -31,12 +31,10 @@ mkdir event-classifier-tutorial && cd event-classifier-tutorial
 export PYTHONPATH=$PWD
 ```
 
-The container notes from part 1 apply unchanged. Reading easyjet ROOT files
-needs salt's `easyjet` extra: `pip install -e '.[easyjet]'` from the salt
-clone (installs `uproot`/`awkward`; `EasyjetReader` raises a clear
-`ImportError` naming this extra if it is missing). `easyjet` is one of
-several reader-specific extras built on a shared `root` extra — use
-`easyjet` here, not `root` directly.
+The container notes from part 1 apply unchanged. Reading ROOT files needs
+salt's `root` extra: `pip install -e '.[root]'` from the salt clone (installs
+`uproot`/`awkward`; `UprootReader` raises a clear `ImportError` naming this
+extra if it is missing).
 
 ## 1. Generate the fixture
 
@@ -154,9 +152,10 @@ data:
           - name: background
             label: 0
             reader:
-              class_path: salt.data.EasyjetReader
+              class_path: salt.data.UprootReader
               init_args:
                 tree: AnalysisMiniTree
+                unroll: null
                 groups: &groups
                   jets:
                     jagged: true
@@ -178,9 +177,10 @@ data:
           - name: signal
             label: 1
             reader:
-              class_path: salt.data.EasyjetReader
+              class_path: salt.data.UprootReader
               init_args:
                 tree: AnalysisMiniTree
+                unroll: null
                 groups: *groups
             sources:
               train: data/signal_train.root
@@ -248,9 +248,10 @@ trainer:
   default_root_dir: run
 ```
 
-### `data:` — MultiSampleReader over two EasyjetReaders
+### `data:` — MultiSampleReader over two UprootReaders
 
-`MultiSampleReader` wraps N labelled sub-readers (here two `EasyjetReader`s)
+`MultiSampleReader` wraps N labelled sub-readers (here two `UprootReader`s,
+`unroll: null` so each row is an event)
 and interleaves them proportionally to their size, injecting a per-event
 integer label as `raw.event.process` (`label_stream`/`label_field`). Each
 sample owns its own **per-stage sourcing** — the `sources:` block under each
@@ -305,7 +306,7 @@ task's TEST-mode output already emits both the class probabilities *and* the
 !!! warning "`salt graph validate` does not yet support this reader family"
 
     Unlike [part 1](mnist.md#5-validate-the-graph-before-training)'s custom
-    `IdxReader`, `EasyjetReader`/`MultiSampleReader` build their schema by
+    `IdxReader`, `UprootReader`/`MultiSampleReader` build their schema by
     probing the source file's branches (`Reader.prepare()`), and `graph
     validate` calls this on the raw config-instantiated reader — before any
     file has been bound via `with_source` — which raises `reader 'unnamed'
@@ -417,7 +418,7 @@ against the cheapest thing that could have explained the same score.
 
 ## What you just proved
 
-- **The reader seam serves ROOT as readily as HDF5 or IDX.** `EasyjetReader`
+- **The reader seam serves ROOT as readily as HDF5 or IDX.** `UprootReader`
   is a stock salt module — nothing here is a custom reader, unlike
   [part 1](mnist.md).
 - **`MultiSampleReader` composes readers, not just streams.** Two structurally

@@ -1,0 +1,60 @@
+# Reader fragment — two easyjet AnalysisMiniTree samples (signal + background)
+# combined by MultiSampleReader with proportional stratification.
+#
+# Stackable: `salt fit --config readers/easyjet_hh4b.yaml --config <model>.yaml`.
+# Fill in each sample's per-stage `sources:` (train/val/test file lists) before
+# use — MultiSampleReader sources per sample, so the datamodule train/val/test
+# file keys are placeholders it ignores.
+#
+# Schema notes:
+#   - Each sub-reader is a UprootReader with unroll: null (one row per event); the
+#     `recojet_antikt4PFlow_*` collection prefix + `_NOSYS` suffix live verbatim in
+#     `branches` (empty group prefix). Jets are a per-event jagged token sequence.
+#   - MultiSampleReader injects a per-event sample label as raw.event.process
+#     (signal=1, background=0). Only branches common to both campaigns are read.
+
+data:
+  train_file: train  # placeholders: MultiSampleReader sources per sample below
+  val_file: val
+  test_file: test
+  modules:
+    reader:
+      class_path: salt.data.MultiSampleReader
+      init_args:
+        label_stream: event
+        label_field: process
+        samples:
+          - name: signal
+            label: 1
+            reader:
+              class_path: salt.data.UprootReader
+              init_args:
+                tree: AnalysisMiniTree
+                unroll: null
+                groups: &ej_groups
+                  jets:
+                    jagged: true
+                    truncate: 20
+                    branches:
+                      pt: recojet_antikt4PFlow_pt_NOSYS
+                      eta: recojet_antikt4PFlow_eta
+                      phi: recojet_antikt4PFlow_phi
+                      m: recojet_antikt4PFlow_m_NOSYS
+                      GN2v01_pb: recojet_antikt4PFlow_GN2v01_pb
+                      GN2v01_pc: recojet_antikt4PFlow_GN2v01_pc
+                      GN2v01_pu: recojet_antikt4PFlow_GN2v01_pu
+                  event:
+                    jagged: false
+                    branches:
+                      eventNumber: eventNumber
+                      mcChannelNumber: mcChannelNumber
+            # sources: {train: [...], val: [...], test: [...]}  # signal files
+          - name: background
+            label: 0
+            reader:
+              class_path: salt.data.UprootReader
+              init_args:
+                tree: AnalysisMiniTree
+                unroll: null
+                groups: *ej_groups
+            # sources: {train: [...], val: [...], test: [...]}  # ttbar files
