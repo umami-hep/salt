@@ -1,8 +1,8 @@
 """``salt`` entry point — the jsonargparse YAML CLI for salt v2.
 
 ``salt fit``/``test`` go through `SaltCLI` (`LightningCLI` over `SaltModule`
-+ `GraphDataModule`); ``salt graph``/``schema``/``export``/``inference``/muP
-tooling dispatch to their own mains.
++ `GraphDataModule`); ``salt graph``/``schema``/``export``/``inference``/
+``merge-config``/muP tooling dispatch to their own mains.
 """
 
 from __future__ import annotations
@@ -194,6 +194,7 @@ CONFIG_DIR = Path(__file__).parent / "configs"
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
 _EXPORT_COMMAND = "export"
 _INFERENCE_COMMAND = "inference"
+_MERGE_CONFIG_COMMAND = "merge-config"
 
 
 def _needs_logger(callback: Any) -> bool:
@@ -1024,8 +1025,10 @@ def main(args: Sequence[str] | None = None) -> int:
 
     ``salt graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
     the static graph + muP tooling (`salt.cli.main`), ``salt export``
-    to the ONNX exporter, and ``salt inference`` to the eager export-set
-    runner; everything else goes to `SaltCLI` (``salt fit``/``test``).
+    to the ONNX exporter, ``salt inference`` to the eager export-set
+    runner, and ``salt merge-config`` to the config-merge + per-stage
+    freeze-graph tooling (`salt.merge_config.main`); everything else goes to
+    `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
     instead of a Python traceback.
 
@@ -1051,6 +1054,16 @@ def main(args: Sequence[str] | None = None) -> int:
         from salt import inference as inference_cli  # noqa: PLC0415 - heavy, eager-only
 
         return inference_cli.main(argv[1:])
+    if argv and argv[0] == _MERGE_CONFIG_COMMAND:
+        # trainer-free like export: merges the fit config stack + renders the
+        # per-stage freeze graphs (plan 10) without touching data/checkpoints.
+        from salt import merge_config as merge_config_cli  # noqa: PLC0415 - heavy, tooling-only
+
+        try:
+            return merge_config_cli.main(argv[1:])
+        except GraphError as err:
+            print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
+            return 1
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
         with warnings.catch_warnings():
@@ -1067,7 +1080,8 @@ def main(args: Sequence[str] | None = None) -> int:
                 "delta infshapes + coord-check, design §3.4), 'salt export --help' (ONNX "
                 "export, §7; --manifest prints the writer-derived output manifest), "
                 "'salt inference --help' (label-free eager inference: the export output "
-                "set written to H5, plan 50)"
+                "set written to H5, plan 50), 'salt merge-config --help' (emit the merged "
+                "config + one per-stage freeze graph for a fit config stack, plan 10)"
             )
         raise
     except GraphError as err:

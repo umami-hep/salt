@@ -154,6 +154,36 @@ never perturbs a plain run.
     training) is a `ConfigError` — staged training must know how many epochs it is
     dividing up.
 
+## Preview the merge before you train — `salt merge-config`
+
+A fine-tune stacks a base `config.yaml`, an overlay, and CLI overrides. Before you
+spend GPU time, it is worth *seeing* exactly what those layers merged into — and
+which modules each stage freezes. `salt merge-config` takes **the same arguments as
+`salt fit`** and writes two things without instantiating a trainer, reading data,
+or loading a checkpoint:
+
+```bash
+salt merge-config \
+  --config base_config.yaml \
+  --config finetune_gn3large.yaml \
+  --init_from /path/to/pretrained.ckpt \
+  --merged.output out/merged.yaml
+```
+
+1. **`out/merged.yaml`** — the fully-merged config, produced through the same salt
+   config surface as `--print_config` (the same deep-merge, the same `base2.yaml`
+   defaults, the same schedule relocation). This is the single source of truth for
+   what will actually run: every default made explicit, every overlay applied.
+2. **One graph per stage** — `out/merged_stage00_head_warmup.png`,
+   `out/merged_stage01_full_finetune.png`, … (numbered by execution order). Each is
+   the model graph with that stage's **frozen** modules greyed out and badged, and a
+   caption naming the stage and its frozen set. This is the fastest way to confirm a
+   `trainable:`/`frozen:` spec froze what you intended.
+
+Pass `--merged.plots false` to write only the merged YAML and the `.dot` graph
+sources (skips rasterisation, so no Graphviz `dot` binary is needed). The graphs
+render the FIT-mode plan; only the freeze overlay differs between stages.
+
 ## Worked example A — same-heads fine-tune of GN3Large
 
 The goal: take the converted GN3Large tagger and adapt it to a new dataset while

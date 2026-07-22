@@ -1,0 +1,247 @@
+"""Tests for ``salt merge-config`` (`salt.merge_config`) and its render support:
+fit-parity merged dump, per-stage freeze-graph naming/annotation, legacy
+desugar, ``--merged.plots`` gating, and the `dot_source` regression gate.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+from pathlib import Path
+
+import pytest
+import yaml
+
+from salt.config_utils import disable_logger_in_config
+from salt.graph.planner import compile_plan
+from salt.graph.render import dot_source
+from salt.graph.spec import Mode, TensorSpec, unflatten_spec
+from salt.main import CONFIG_DIR, SaltCLI
+from salt.main import main as salt_main
+from salt.merge_config import main as merge_config_main
+from salt.schema import dump_schema, save_schema
+from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
+from salt.testing.inputs import write_dummy_file
+
+DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+
+# a two-stage schedule twin of the fine-tuning example: head_warmup freezes
+# everything but jets_classification (via trainable:), full_finetune frees all.
+TWO_STAGE_SCHEDULE_YAML = """
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      lrs:
+        max: 1.0e-4
+    full_finetune:
+      frozen: []
+      lrs:
+        initial: 1.0e-7
+        max: 1.0e-5
+"""
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory) -> dict[str, Path]:
+    base = tmp_path_factory.mktemp("merge_config")
+    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
+    write_parity_norm_dict(nd_path, cd_path)
+    h5_path = base / "pp_output_train.h5"
+    write_dummy_file(h5_path, nd_path)
+    schema_path = base / "schema.yaml"
+    save_schema(dump_schema(h5_path), schema_path)
+    return {"h5": h5_path, "nd": nd_path, "schema": schema_path}
+
+
+def fit_args(data: dict[str, Path], *extra: str) -> list[str]:
+    """The gn2v2-dummy config (logger disabled) + its documented overrides."""
+    cfg = disable_logger_in_config(str(DUMMY_CFG))
+    return [
+        "--config",
+        cfg,
+        f"--data.train_file={data['h5']}",
+        f"--data.val_file={data['h5']}",
+        f"--data.modules.reader.init_args.schema={data['schema']}",
+        f"--model.modules.norm.init_args.norm_dict={data['nd']}",
+        *extra,
+    ]
+
+
+def write_yaml(tmp_path: Path, name: str, text: str) -> str:
+    path = tmp_path / name
+    path.write_text(text)
+    return str(path)
+
+
+def print_config_dump(args: list[str]) -> str:
+    """The run-free ``--print_config`` dump for `args` (the fit config surface)."""
+    buffer = io.StringIO()
+    with pytest.raises(SystemExit) as excinfo, contextlib.redirect_stdout(buffer):
+        SaltCLI(args=[*args, "--print_config"], run=False)
+    assert excinfo.value.code == 0
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# render support: frozen styling + title (and the byte-identity regression gate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def toy_plan():
+    modules = {
+        "source": ToySource(),
+        "embed": ToyEmbed(),
+        "labels": ToyWildcardLabels(),
+        "head": ToyHead(),
+    }
+    for name, module in modules.items():
+        module.name = name
+    return compile_plan(
+        modules,
+        Mode.FIT,
+        sources=unflatten_spec({"raw.x": TensorSpec(shape=("B", 8), dtype="float32")}),
+        schema=("labels.x",),
+        sinks=["losses.total"],
+    )
+
+
+class TestDotSourceAnnotation:
+    def test_default_output_byte_identical(self, toy_plan):
+        # frozen=None/title=None must be byte-identical to an empty frozen set /
+        # no title — the regression gate protecting existing `salt graph plot`.
+        base = dot_source(toy_plan)
+        assert base == dot_source(toy_plan, frozen=None, title=None)
+        assert base == dot_source(toy_plan, frozen=frozenset())
+        # no annotation artefacts leak into the unannotated render
+        assert "#bdbdbd" not in base
+        assert "labelloc" not in base
+        assert "frozen" not in base
+
+    def test_frozen_module_styled_and_badged(self, toy_plan):
+        dot = dot_source(toy_plan, frozen=frozenset({"embed"}))
+        assert "#bdbdbd" in dot  # frozen fill
+        assert ">frozen<" in dot  # badge
+        # a non-frozen module keeps its namespace fill (not the frozen grey)
+        head_card = dot.split('"head" [label=')[1].split("];")[0]
+        assert "#bdbdbd" not in head_card
+
+    def test_title_becomes_graph_label(self, toy_plan):
+        dot = dot_source(toy_plan, title="stage 1/2: head_warmup — frozen: embed")
+        assert "labelloc=" in dot
+        assert 'label="stage 1/2: head_warmup' in dot
+
+
+# ---------------------------------------------------------------------------
+# merge-config: fit-parity dump
+# ---------------------------------------------------------------------------
+
+
+class TestMergedDumpParity:
+    def test_merged_yaml_matches_print_config(self, data, tmp_path):
+        args = fit_args(data)
+        out = tmp_path / "merged.yaml"
+        rc = merge_config_main([*args, "--merged.output", str(out), "--merged.plots", "false"])
+        assert rc == 0
+        merged_obj = yaml.safe_load(out.read_text())
+        printed_obj = yaml.safe_load(print_config_dump(args))
+        assert merged_obj == printed_obj
+
+    def test_merge_only_options_absent_from_dump(self, data, tmp_path):
+        out = tmp_path / "merged.yaml"
+        merge_config_main([*fit_args(data), "--merged.output", str(out), "--merged.plots=false"])
+        merged_obj = yaml.safe_load(out.read_text())
+        assert "merged" not in merged_obj
+
+    def test_missing_output_is_config_error(self, data):
+        from salt.graph.errors import ConfigError
+
+        with pytest.raises(ConfigError, match="merged.output"):
+            merge_config_main(fit_args(data))
+
+
+# ---------------------------------------------------------------------------
+# merge-config: per-stage freeze graphs
+# ---------------------------------------------------------------------------
+
+
+class TestStagePlots:
+    def test_two_stage_files_named_and_annotated(self, data, tmp_path):
+        sched = write_yaml(tmp_path, "sched.yaml", TWO_STAGE_SCHEDULE_YAML)
+        out = tmp_path / "merged.yaml"
+        merge_config_main([
+            *fit_args(data, "--config", sched),
+            "--merged.output",
+            str(out),
+            "--merged.plots",
+            "false",
+        ])
+        stage0 = tmp_path / "merged_stage00_head_warmup.dot"
+        stage1 = tmp_path / "merged_stage01_full_finetune.dot"
+        assert stage0.is_file()
+        assert stage1.is_file()
+
+        dot0 = stage0.read_text()
+        # head_warmup: trainable=[jets_classification] => everything else frozen
+        assert "#bdbdbd" in dot0
+        assert ">frozen<" in dot0
+        label0 = next(ln for ln in dot0.splitlines() if ln.strip().startswith("label="))
+        assert "stage 1/2: head_warmup" in label0
+        assert "encoder" in label0  # a frozen module named in the caption
+        assert "jets_classification" not in label0  # the one trainable module
+
+        dot1 = stage1.read_text()
+        # full_finetune: frozen=[] => nothing frozen, no frozen styling
+        assert "#bdbdbd" not in dot1
+        label1 = next(ln for ln in dot1.splitlines() if ln.strip().startswith("label="))
+        assert "stage 2/2: full_finetune" in label1
+        assert "(none)" in label1
+
+    def test_legacy_config_single_fit_stage(self, data, tmp_path):
+        # no training_schedule => one desugared `fit` stage, nothing frozen.
+        out = tmp_path / "merged.yaml"
+        merge_config_main([*fit_args(data), "--merged.output", str(out), "--merged.plots", "false"])
+        only = list(tmp_path.glob("merged_stage*.dot"))
+        assert [p.name for p in only] == ["merged_stage00_fit.dot"]
+        dot = only[0].read_text()
+        assert "#bdbdbd" not in dot
+        assert "stage 1/1: fit" in dot
+
+    def test_plots_false_writes_dot_without_images(self, data, tmp_path):
+        out = tmp_path / "merged.yaml"
+        merge_config_main([*fit_args(data), "--merged.output", str(out), "--merged.plots", "false"])
+        assert (tmp_path / "merged_stage00_fit.dot").is_file()
+        # no rasterisation requested => no PNG/PDF siblings
+        assert not list(tmp_path.glob("*.png"))
+        assert not list(tmp_path.glob("*.pdf"))
+
+
+# ---------------------------------------------------------------------------
+# dispatch + help
+# ---------------------------------------------------------------------------
+
+
+class TestDispatch:
+    def test_help_exits_zero(self, capsys):
+        assert merge_config_main(["--help"]) == 0
+        assert "merge-config" in capsys.readouterr().out
+
+    def test_help_via_salt_main(self, capsys):
+        assert salt_main(["merge-config", "--help"]) == 0
+        assert "merge-config" in capsys.readouterr().out
+
+    def test_salt_main_dispatch_writes_merged(self, data, tmp_path):
+        out = tmp_path / "merged.yaml"
+        rc = salt_main([
+            "merge-config",
+            *fit_args(data),
+            "--merged.output",
+            str(out),
+            "--merged.plots",
+            "false",
+        ])
+        assert rc == 0
+        assert out.is_file()

@@ -119,6 +119,14 @@ _KIND_COLOURS = {"label": "#b5651d", "loss": "#c0392b", "preds": "#1f6fb2"}
 _ROW_DEFAULT_COLOUR = "#333333"
 _SHAPE_COLOUR = "#888888"
 _PRUNED_FILL = "#dddddd"
+# frozen-module card fill (mid-grey, distinct from the lighter pruned fill).
+_FROZEN_FILL = "#bdbdbd"
+
+
+def _graph_label(text: str) -> str:
+    """A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _row_colour(key: str, spec: TensorSpec | None) -> str:
@@ -186,18 +194,27 @@ def _card_node(
     fill: str,
     ins: list[tuple[str, str, str]],
     outs: list[tuple[str, str, str]],
+    *,
+    badge: str | None = None,
 ) -> str:
     """Assemble one HTML-like signature-card node line: `ins`/`outs` are
     ``(key, shape, colour)`` row triples; the header carries `title` +
-    optional `cls` over a `fill` background.
+    optional `cls` over a `fill` background, plus an optional `badge` line
+    (e.g. "frozen") under the class name.
     """
     sub = (
         f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>'
         if cls
         else ""
     )
+    badge_html = (
+        f'<BR/><FONT POINT-SIZE="8" COLOR="#b30000"><B>{_html_esc(badge)}</B></FONT>'
+        if badge
+        else ""
+    )
     rows = [
-        f'    <TR><TD BGCOLOR="{fill}" ALIGN="CENTER"><B>{_html_esc(title)}</B>{sub}</TD></TR>'
+        '    <TR><TD BGCOLOR="'
+        f'{fill}" ALIGN="CENTER"><B>{_html_esc(title)}</B>{sub}{badge_html}</TD></TR>'
     ]
     if ins:
         rows.append(_card_section("in"))
@@ -218,6 +235,8 @@ def dot_source(
     modules: Mapping[str, GraphModule] | None = None,
     pruned: Iterable[str] = (),
     widths: Mapping[str, int] | None = None,
+    frozen: frozenset[str] | None = None,
+    title: str | None = None,
 ) -> str:
     r"""Render a compiled plan as Graphviz DOT text — port-card layout.
 
@@ -241,6 +260,15 @@ def dot_source(
         last-dim int), from `salt.model.bind.resolve_bind_schema`. When a
         key's declared shape ends in a symbolic feature dim, that dim is shown
         as the concrete width; data-dependent dims stay symbolic. By default None.
+    frozen : frozenset[str] | None, optional
+        Module names to style as frozen (grey fill + a "frozen" badge) — the
+        rest render with their default namespace fill. Used by ``salt
+        merge-config`` to show a `training_schedule` stage's freeze mask. By
+        default None (no module is styled frozen; DOT output byte-identical to
+        the unannotated render).
+    title : str | None, optional
+        A caption placed at the top of the graph (e.g. a stage header). By
+        default None (no caption; DOT output byte-identical).
     """
     modules = dict(modules or {})
     # plaintext nodes carry HTML-like TABLE labels (the cards), so shape/style/
@@ -257,6 +285,10 @@ def dot_source(
         '  node [shape=plaintext, fontname="Helvetica"];',
         '  edge [color="#777777", arrowsize=0.8, penwidth=1.3];',
     ]
+    if title is not None:
+        lines.append('  labelloc="t";')
+        lines.append('  fontname="Helvetica";')
+        lines.append(f"  label={_graph_label(title)};")
 
     # consumed keys per module: each require edge into the module, with the
     # spec carried by the producing edge (via the _edge_spec lookup).
@@ -283,7 +315,12 @@ def dot_source(
         ins = _rows(consumed.get(step.name, {}).items())
         outs = _rows(step.produces.items())
         cls = type(step.module).__name__
-        lines.append(_card_node(step.name, step.name, cls, _module_colour(step), ins, outs))
+        if frozen is not None and step.name in frozen:
+            lines.append(
+                _card_node(step.name, step.name, cls, _FROZEN_FILL, ins, outs, badge="frozen")
+            )
+        else:
+            lines.append(_card_node(step.name, step.name, cls, _module_colour(step), ins, outs))
     if any(edge.consumer == SINKS for edge in plan.edges):
         lines.append(
             _card_node(SINKS, SINKS, "", "#f5f5f5", _rows(consumed.get(SINKS, {}).items()), [])
