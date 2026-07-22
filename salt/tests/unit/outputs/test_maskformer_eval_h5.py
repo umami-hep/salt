@@ -18,14 +18,15 @@ from salt.graph.bundle import Bundle
 from salt.graph.spec import Mode, flatten_spec
 from salt.outputs import MaskFormerObjects, ObjectGroup, ObjectGroupField
 from salt.outputs.h5_sink import H5OutputSink
-from salt.outputs.names import OBJECT_INDEX
-from salt.outputs.output_column import OutputColumn
+from salt.outputs.output_schema import OutputColumn
 from salt.utils.mask_utils import indices_from_mask
 
 pytestmark = pytest.mark.cpu_always
 
 OBJECT_CLASSES = ["b", "c", "null"]
 RUN_NAME = "MFrun"
+# the unified MaskFormer track->object index suffix (eval-H5 and ONNX share it)
+INDEX_SUFFIX = "HadronIndex"
 _M = 5   # num objects (query bank)
 _N_TRACKS = 10
 _F4, _I8 = np.dtype("f4"), np.dtype("i8")
@@ -64,7 +65,7 @@ def _object_groups() -> list[ObjectGroup]:
             name="tracks",
             fields=[
                 ObjectGroupField(
-                    leaf="outputs.tracks.object_index", suffixes=[OBJECT_INDEX.test], dtype="i8"
+                    leaf="outputs.tracks.object_index", suffixes=[INDEX_SUFFIX], dtype="i8"
                 ),
             ],
         ),
@@ -159,10 +160,10 @@ class TestEvalH5ByteParity:
             assert frags["objects"][n].tobytes() == v1_probs[n].tobytes()
         v1_class = u2s(oc.unsqueeze(-1).numpy(), np.dtype([("class_label", "i8")]))
         assert frags["objects"]["class_label"].tobytes() == v1_class["class_label"].tobytes()
-        # tracks MaskIndex: indices_from_mask(sigmoid>0.5) (-2), padded -> -1
+        # tracks HadronIndex: indices_from_mask(sigmoid>0.5) (-2), padded -> -1
         v1_idx = indices_from_mask(masks.sigmoid() > 0.5).int().numpy()
         v1_idx = np.where(~pad.numpy(), v1_idx, -1)
-        col = f"{RUN_NAME}_{OBJECT_INDEX.test}"
+        col = f"{RUN_NAME}_{INDEX_SUFFIX}"
         assert (
             frags["tracks"][col].tobytes()
             == u2s(np.expand_dims(v1_idx, -1), np.dtype([(col, "i8")]))[col].tobytes()
@@ -192,7 +193,7 @@ class TestEvalH5ByteParity:
         assert dtypes["object_masks"].names == ("truth_mask", "mask_logits")
         assert dtypes["object_masks"]["truth_mask"] == _I8
         assert dtypes["object_masks"]["mask_logits"] == _F4
-        assert f"{RUN_NAME}_{OBJECT_INDEX.test}" in dtypes["tracks"].names
+        assert f"{RUN_NAME}_{INDEX_SUFFIX}" in dtypes["tracks"].names
         assert shapes["objects"] == (64, _M)
         assert shapes["object_masks"] == (64, _M, _N_TRACKS)
 

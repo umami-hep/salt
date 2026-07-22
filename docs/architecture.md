@@ -286,9 +286,10 @@ Naming policy: fields declare logical **suffixes**; the TEST column is
 literally the `class_names`-derived list both modes share, so reordering
 classes moves eval columns AND Athena outputs together (the v1
 eval-vs-ONNX vertex-naming drift class is unrepresentable). Cross-mode
-suffix constants live in `salt.outputs.names` (`VERTEX_INDEX`
-shared; the MaskFormer `OBJECT_INDEX` MaskIndex/HadronIndex pair is a
-pinned, documented v1 divergence).
+suffix constants live in `salt.outputs.output_schema` (`VERTEX_INDEX`,
+shared by TEST and ONNX). The MaskFormer track-to-object index is the
+single suffix `HadronIndex` in both the eval-H5 column and the ONNX
+output (the eval column, ours to name, was unified onto the Athena name).
 
 The assembled ONNX manifest is a FLAT namespace: two leaves minting one
 suffix is a hard error naming both (fix via `export.rename:`). Inspect
@@ -387,7 +388,7 @@ Notes for output authors:
   per-token `[B, L]`/`[B, L, C]` shapes; per-token columns are zero-padded
   to the file sequence length by the sink — `h5_sink._pad_to`).
 - Whole structured output groups (e.g. the MaskFormer `objects`/
-  `object_masks` groups + the `tracks` MaskIndex column) go through the H5
+  `object_masks` groups + the `tracks` HadronIndex column) go through the H5
   sink's declarative `object_groups` seam instead — a generic capability
   whose fields source arbitrary bundle leaves (no per-consumer knowledge in
   the sink). The MaskFormer object math lives ONLY in the `MaskFormerObjects`

@@ -11,7 +11,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.model.base import SaltModelModule
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import OutputField
 
 _OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
 """The YAML ``modes:`` vocabulary — ``test`` -> Mode.TEST, ``export`` -> Mode.ONNX."""

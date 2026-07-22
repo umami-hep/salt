@@ -27,8 +27,7 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.outputs.object_group import ObjectGroup, ObjectGroupField
-from salt.outputs.output_column import OutputColumn
+from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
 from salt.utils.array_utils import join_structured_arrays
 
 DEFAULT_OUTPUT = "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
@@ -208,7 +207,7 @@ class H5OutputSink(_SinkCallback):
         `ObjectGroup` naming a NON-reader group (with a trailing `shape`, e.g.
         the MaskFormer ``objects`` ``(M,)`` / ``object_masks`` ``(M, T)``
         groups) or extra per-token columns on an existing reader stream (e.g.
-        the ``tracks`` ``MaskIndex`` column). Each field sources one bundle
+        the ``tracks`` ``HadronIndex`` column). Each field sources one bundle
         leaf, which the sink demands (keeping its producer alive) and packs.
         Generic: the sink has no per-consumer knowledge. Empty/None (the
         default) makes the mechanism a strict no-op (byte-identical schema).
@@ -718,7 +717,7 @@ class H5OutputSink(_SinkCallback):
             fragments.setdefault(stream, []).append(arr)
         # object groups pack their declared fields from the demanded bundle
         # leaves. NON-reader groups (e.g. `objects` / `object_masks`) are new
-        # groups; a reader-stream group (e.g. the `tracks` MaskIndex column) is
+        # groups; a reader-stream group (e.g. the `tracks` HadronIndex column) is
         # re-expanded to the file token length like any per-token column.
         # Appended AFTER the copy/output/mask fragments so the join order
         # matches `_merge_columns` (object-group columns come last).

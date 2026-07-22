@@ -20,8 +20,7 @@ from salt.model.modules.tasks.base import (
     _loss_class,
     _TaskModuleBase,
 )
-from salt.outputs.names import pascal_case
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 
 _DEFAULT_CLS_LOSS: dict[str, Any] = {"class_path": "torch.nn.CrossEntropyLoss"}

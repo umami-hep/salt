@@ -13,7 +13,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.h5_sink import _SinkCallback
-from salt.outputs.names import _OUTPUTS_NAMESPACE
+from salt.outputs.output_schema import _OUTPUTS_NAMESPACE
 
 
 @dataclass(frozen=True)

@@ -439,7 +439,7 @@ def make_maskformer_writer_batch(
     object_class = torch.randint(0, num_classes, (batch_size, num_objects), generator=gen)
     target_masks = torch.rand(batch_size, num_objects, n_tracks, generator=gen) > 0.5
     pad = torch.zeros(batch_size, n_tracks, dtype=torch.bool)
-    pad[:, -3:] = True  # last 3 constituents padded (MaskIndex -> -1 there)
+    pad[:, -3:] = True  # last 3 constituents padded (HadronIndex -> -1 there)
     return {
         "objects.class_probs": class_probs,
         "objects.masks": masks,

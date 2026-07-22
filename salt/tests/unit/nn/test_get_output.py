@@ -28,8 +28,7 @@ from salt.model.modules.tasks import (
 )
 from salt.onnx.reduces import mask_fill_flattened
 from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs, VertexUnionFind
-from salt.outputs.output_field import OutputField
-from salt.outputs.names import VERTEX_INDEX, pascal_case
+from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import get_node_assignment_jit
 

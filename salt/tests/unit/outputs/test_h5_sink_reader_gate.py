@@ -13,7 +13,7 @@ import pytest
 
 from salt.graph.errors import ConfigError
 from salt.outputs.h5_sink import H5OutputSink
-from salt.outputs.output_column import OutputColumn
+from salt.outputs.output_schema import OutputColumn
 
 pytestmark = pytest.mark.cpu_always
 

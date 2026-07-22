@@ -16,8 +16,7 @@ from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
 from salt.onnx.reduces import mask_fill_flattened
-from salt.outputs.names import VERTEX_INDEX
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import VERTEX_INDEX, OutputField
 from salt.utils.union_find import get_node_assignment_jit
 
 _DEFAULT_VTX_LOSS: dict[str, Any] = {

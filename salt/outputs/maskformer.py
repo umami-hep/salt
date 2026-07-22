@@ -49,7 +49,7 @@ class MaskFormerObjects(SaltModelModule):
 
     In **TEST** it publishes the same ``object_index`` leaf, computed from the
     RAW decoder masks (``indices_from_mask(masks.sigmoid() > 0.5)``, padded
-    constituents set to -1) — the eval-H5 ``MaskIndex`` semantics. The node is
+    constituents set to -1) — the eval-H5 ``HadronIndex`` semantics. The node is
     the ONE reconstruction path for both modes: the sink is a dumb terminal
     that only packs the leaf. Demand-gated (a TEST plan pulls it in only when
     an object-group field sources ``outputs.<constituent>.<index_name>``); FIT
@@ -230,7 +230,7 @@ class MaskFormerObjects(SaltModelModule):
         }
 
     def _forward_test(self, b: Bundle) -> dict[str, Tensor]:
-        """The eval-H5 ``MaskIndex`` reconstruction.
+        """The eval-H5 ``HadronIndex`` reconstruction.
 
         Per-constituent owning-object index from the RAW decoder masks
         (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object claims a

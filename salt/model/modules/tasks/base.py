@@ -16,7 +16,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode, TensorSpec
 from salt.model.base import SaltModelModule
 from salt.model.nn.dense import Dense, _reject_width_keys
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import OutputField
 
 _WIDTH_KEYS = ("input_size", "output_size", "context_size")
 

@@ -281,7 +281,7 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
                 if isinstance(h5_sink.write_pad_mask, (bool, list, tuple))
                 else list(h5_sink.write_pad_mask),
                 # declarative object groups (e.g. the MaskFormer objects /
-                # object_masks / tracks-MaskIndex groups) — captured statically
+                # object_masks / tracks-HadronIndex groups) — captured statically
                 # from their field specs (data-free, unlike the retired
                 # extra_groups reader-dependent schema).
                 "object_groups": [

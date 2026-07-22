@@ -17,7 +17,7 @@ from salt.model.bind import ResolvedSchema
 from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import OutputField
 from salt.utils.array_utils import listify
 from salt.utils.scalers import RegressionTargetScaler
 

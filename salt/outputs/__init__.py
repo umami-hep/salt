@@ -19,10 +19,13 @@ from salt.outputs.maskformer import (
     MaskFormerObjects,
     MFLeadVertexDecorator,
 )
-from salt.outputs.object_group import ObjectGroup, ObjectGroupField
 from salt.outputs.onnx_sink import OnnxExportLeaf, OnnxExportSink
-from salt.outputs.output_column import OutputColumn
-from salt.outputs.output_field import OutputField
+from salt.outputs.output_schema import (
+    ObjectGroup,
+    ObjectGroupField,
+    OutputColumn,
+    OutputField,
+)
 from salt.outputs.pad_mask_writer import PadMaskWriter
 from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
 from salt.outputs.task_output import (
