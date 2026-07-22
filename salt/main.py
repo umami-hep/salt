@@ -1020,7 +1020,7 @@ class SaltCLI(LightningCLI):
         print("(run-directory layout with timestamped names lands in M6 — design §5)")
 
 
-def main(args: Sequence[str] | None = None) -> int:
+def main(args: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one return per subcommand
     """``salt`` console entry point.
 
     ``salt graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to

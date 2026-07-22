@@ -57,6 +57,12 @@ def main(args: Sequence[str] | None = None) -> int:
     `GraphError` (e.g. a missing ``dot`` binary) propagates to `salt.main.main`,
     which prints it as a clean one-block message.
 
+    Parameters
+    ----------
+    args : Sequence[str] | None, optional
+        The argv after the ``merge-config`` command word; defaults to
+        ``sys.argv[1:]``.
+
     Returns
     -------
     int
@@ -150,7 +156,7 @@ def _dump_merged_config(fit_args: list[str]) -> str:
             )
             SaltCLI(args=[*fit_args, "--print_config"], run=False)
     except SystemExit as err:
-        if err.code not in (0, None):
+        if err.code not in {0, None}:
             raise ConfigError(
                 "salt merge-config: the fit config stack failed to parse "
                 f"(parser exit {err.code}; the error is printed above)"

@@ -286,9 +286,11 @@ def dot_source(
         '  edge [color="#777777", arrowsize=0.8, penwidth=1.3];',
     ]
     if title is not None:
-        lines.append('  labelloc="t";')
-        lines.append('  fontname="Helvetica";')
-        lines.append(f"  label={_graph_label(title)};")
+        lines.extend([
+            '  labelloc="t";',
+            '  fontname="Helvetica";',
+            f"  label={_graph_label(title)};",
+        ])
 
     # consumed keys per module: each require edge into the module, with the
     # spec carried by the producing edge (via the _edge_spec lookup).
