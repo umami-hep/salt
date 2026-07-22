@@ -9,12 +9,39 @@ from salt.config_utils import disable_logger_in_config  # noqa: F401
 
 @pytest.fixture(scope="session", autouse=True)
 def _warm_saltcli_model_resolution():
-    """Absorb the first run-free ``SaltCLI`` parse's model-resolution failure."""
+    """Absorb the first run-free ``SaltCLI`` parse's model-resolution failure.
+
+    jsonargparse's first-time subclass typehint resolution is fragile to
+    import/collection order (pytest-randomly reshuffles it). The first parse of
+    each distinct resolution path warms jsonargparse's global type cache so the
+    per-entry ``dict[str, Subclass]`` merge (``DeepMergeParser.merge_config``)
+    is recognised instead of degrading to an atomic dict replace. A single
+    single-config parse only warms one path; the stacked-config + dotted
+    subclass-dict-override parse warms the deep-merge path every failing test
+    (onnx-fold / mup / deep-merge / null-deletion / spike) actually exercises.
+    """
     try:
         from salt.main import CONFIG_DIR, SaltCLI
 
-        cfg = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy.yaml"))
-        SaltCLI(args=["--config", cfg], run=False)
+        base = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy.yaml"))
+        # 1. single-config parse — the original warm.
+        SaltCLI(args=["--config", base], run=False)
+        # 2. stacked config files + a dotted override into a subclass-dict value
+        #    (``model.modules.norm`` -> Normaliser.norm_dict) — the cross-config
+        #    deep-merge / per-entry-dict-value resolution path. Warming this once
+        #    at session start keeps sibling module keys from being dropped when a
+        #    later config or CLI override touches one entry.
+        fold = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy-onnx-fold.yaml"))
+        SaltCLI(
+            args=[
+                "--config",
+                base,
+                "--config",
+                fold,
+                "--model.modules.norm.init_args.norm_dict=unused.yaml",
+            ],
+            run=False,
+        )
     except (Exception, SystemExit):  # noqa: BLE001 - warm-up only; never fail the session
         pass
     yield
