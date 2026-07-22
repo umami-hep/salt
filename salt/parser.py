@@ -41,10 +41,14 @@ class DeepMergeParser(LightningArgumentParser):
 
     def merge_config(self, cfg_from: Any, cfg_to: Any) -> Any:
         """Union dict-typed leaves key-by-key before the standard merge."""
+        print("=DBG merge_config CALLED type=", type(self).__name__, flush=True)  # noqa: T201
+        for _k, _v in list(cfg_from.items()):
+            print("=DBG from", repr(_k), type(_v).__name__, flush=True)  # noqa: T201
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):
                 continue
             val_to = cfg_to.get(key)
+            print("=DBG dict-key", repr(key), "val_to", type(val_to).__name__, flush=True)  # noqa: T201
             if isinstance(val_to, dict):
                 cfg_from[key] = {**val_to, **val_from}
         return super().merge_config(cfg_from, cfg_to)
