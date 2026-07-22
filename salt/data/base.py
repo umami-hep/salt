@@ -203,7 +203,7 @@ class Reader(SaltDatasetModule):
 
     The `VDS` setup module gates build-vs-identity on this flag (not an
     `isinstance` check). Default `False` on the `Reader` base — a
-    non-`vds_capable` reader (ROOT: `EasyjetReader`/`FTAG1LiteReader`) keeps
+    non-`vds_capable` reader (the ROOT `UprootReader`) keeps
     its own native glob, and the `VDS` module is an identity edge for it
     (``vds_path == pattern``, never calling `create_vds` on a ROOT glob, which
     would crash). `H5StructuredReader` overrides it to `True`.
@@ -253,10 +253,10 @@ class Reader(SaltDatasetModule):
 
         A capability advertisement (not a type tag): `H5OutputSink` opens this
         file to probe per-stream sequence lengths (pad-mask columns) and to copy
-        input fields. A reader without a structured HDF5 source — a ROOT/uproot
-        reader (`EasyjetReader`/`FTAG1LiteReader`/`PhysliteReader`, whose source
-        is a ROOT file and whose ``groups`` are a different, non-H5 config
-        shape), a `MultiSampleReader` (N sources, no single file), or a
+        input fields. A reader without a structured HDF5 source — the ROOT/uproot
+        `UprootReader` (whose source is a ROOT file and whose ``groups`` are a
+        different, non-H5 config shape), a `MultiSampleReader` (N sources, no
+        single file), or a
         global-only custom reader — returns None, and the sink takes its
         no-source path (task-outputs only; pad-mask columns / input-copying then
         raise a clear ConfigError). Default None; `H5StructuredReader` overrides.
@@ -277,7 +277,7 @@ class Reader(SaltDatasetModule):
 
         `stage` (``"train"``/``"val"``/``"test"``) is the optional per-reader
         stage-sourcing hook: single-source readers (`H5StructuredReader`,
-        `EasyjetReader`) ignore it — their one ``filename`` per stage is the
+        `UprootReader`) ignore it — their one ``filename`` per stage is the
         data. Multi-source readers (`MultiSampleReader`, a future cut-based
         reader) use it to select each sub-source's per-stage data. The
         datamodule passes the stage it already knows; readers that don't need

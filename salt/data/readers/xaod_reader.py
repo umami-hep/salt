@@ -19,7 +19,7 @@ import numpy as np
 
 from salt.data.readers.cuts import CutSpec
 from salt.data.readers.stream import OffsetIndex
-from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
+from salt.data.readers._legacy_uproot import UprootGroupConfig, UprootReader
 from salt.graph.errors import ConfigError, SchemaError
 from salt.schema import GroupSchema, Schema
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from salt.data.readers.uproot_reader import UprootGroupConfig
+from salt.data.readers._legacy_uproot import UprootGroupConfig
 from salt.data.readers.xaod_reader import XAODReader
 
 __all__ = ["FTAG1LiteGroupConfig", "FTAG1LiteReader"]
