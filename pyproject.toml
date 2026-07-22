@@ -22,7 +22,7 @@ dependencies = [
   "comet_ml>=3.58.3",
   "filelock>=3.29.4",
   "h5py>=3.16.0",
-  "jsonargparse[signatures,argcomplete]>=4.49.0",
+  "jsonargparse[signatures,argcomplete]>=4.49.0,<4.50",  # 4.50 regressed dict[str,Subclass] per-entry config merge (siblings dropped); see the deep-merge/null-deletion tests
   "lightning==2.6.5",
   "lion-pytorch>=0.2.4",
   "numpy>=2.3.2",  # upper-bounded to <2.4 by puma-hep; 2.3.x has cp314 wheels
