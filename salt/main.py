@@ -1020,7 +1020,7 @@ class SaltCLI(LightningCLI):
         print("(run-directory layout with timestamped names lands in M6 — design §5)")
 
 
-def main(args: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one return per subcommand
+def main(args: Sequence[str] | None = None) -> int:
     """``salt`` console entry point.
 
     ``salt graph``/``schema``/``mup-shapes``/``mup-coord-check`` dispatch to
@@ -1054,18 +1054,15 @@ def main(args: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one retur
         from salt import inference as inference_cli  # noqa: PLC0415 - heavy, eager-only
 
         return inference_cli.main(argv[1:])
-    if argv and argv[0] == _MERGE_CONFIG_COMMAND:
-        # trainer-free like export: merges the fit config stack + renders the
-        # per-stage freeze graphs (plan 10) without touching data/checkpoints.
-        from salt import merge_config as merge_config_cli  # noqa: PLC0415 - heavy, tooling-only
-
-        try:
-            return merge_config_cli.main(argv[1:])
-        except GraphError as err:
-            print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
-            return 1
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
+        if argv and argv[0] == _MERGE_CONFIG_COMMAND:
+            # trainer-free like export: merge the fit config stack + render the
+            # per-stage freeze graphs (plan 10), no data/checkpoints touched. Kept
+            # inside this try so a GraphError reuses the one-block handler below.
+            from salt import merge_config as merge_config_cli  # noqa: PLC0415 - heavy, tooling-only
+
+            return merge_config_cli.main(argv[1:])
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", message=r".*args parameter is intended to run from within Python.*"
