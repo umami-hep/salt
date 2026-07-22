@@ -1,8 +1,8 @@
 """H5OutputSink capability gate for the uproot reader family (plan 56).
 
 The sink keys its structured-H5 path on the reader's advertised CAPABILITY
-(``reader.h5_source``), NOT on reader type or group shape. A uproot/ROOT reader
-(`EasyjetReader`/`FTAG1LiteReader`/`PhysliteReader`) exposes a non-None
+(``reader.h5_source``), NOT on reader type or group shape. The uproot/ROOT reader
+(`UprootReader`) exposes a non-None
 ``.groups`` of a different (non-H5) config shape and a ROOT source, so it must
 NOT be driven into the H5StructuredReader branch (which assumes ``.dataset`` /
 ``.global_object`` / an h5py-openable ``source_path``). It advertises no
@@ -51,7 +51,7 @@ class _H5LikeGroupCfg:
 class _UprootReader:
     """A uproot-family reader as the sink sees it: non-None ``.groups`` of
     `UprootGroupConfig` shape + a ROOT ``.filename``, advertising NO
-    ``h5_source`` (the base-`Reader` default). Mirrors `EasyjetReader`.
+    ``h5_source`` (the base-`Reader` default). Mirrors `UprootReader`.
     """
 
     def __init__(self, filename: Path) -> None:

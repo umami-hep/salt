@@ -31,8 +31,8 @@ class StreamConfig:
     """Per-stream cut -> sort -> truncate -> pad pipeline description.
 
     The shared vocabulary the `Reader` base uses to drive
-    `_cut_sort_truncate_pad`. The per-reader group configs (`GroupConfig`,
-    `EasyjetGroupConfig`, `FTAG1LiteGroupConfig`) map onto it.
+    `_cut_sort_truncate_pad`. The reader group configs (`GroupConfig`,
+    `UprootGroupConfig`) map onto it.
 
     Parameters
     ----------

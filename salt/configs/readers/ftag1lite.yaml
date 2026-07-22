@@ -4,7 +4,7 @@
 # (jsonargparse deep-merges configs left-to-right). Provide the source file(s)
 # via --data.train_file / --data.val_file (or the datamodule's file keys).
 #
-# Schema notes (moved from the deleted FTAG1LiteReader docstring):
+# Schema notes:
 #   - unroll: jets  -> one row per small-R jet; `[event][jet]` is flattened away.
 #   - Jet-level scalars and track constituents both live under the jet
 #     collection's aux store, so both groups share

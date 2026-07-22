@@ -16,7 +16,7 @@ from salt.schema import GroupSchema, Schema
 
 
 # --------------------------------------------------------------------------- #
-# A trivial in-memory STUB Reader (proves reader-agnosticism — NOT EasyjetReader)
+# A trivial in-memory STUB Reader (proves reader-agnosticism — NOT a UprootReader)
 # --------------------------------------------------------------------------- #
 
 
@@ -533,13 +533,13 @@ def test_demand_narrowing_strips_injected_label_field() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Bonus: wrap two EasyjetReaders on the synthetic ROOT fixtures (skips w/o deps)
+# Bonus: wrap two UprootReaders on the synthetic ROOT fixtures (skips w/o deps)
 # --------------------------------------------------------------------------- #
 
 uproot = pytest.importorskip("uproot")
 awkward = pytest.importorskip("awkward")
 
-from salt.data import EasyjetGroupConfig, EasyjetReader  # noqa: E402
+from salt.data import UprootGroupConfig, UprootReader  # noqa: E402
 from salt.tests._fixtures.easyjet_minitree import (  # noqa: E402
     build_fixture_arrays,
     write_minitree,
@@ -554,9 +554,13 @@ _EJ_EVENT_BRANCHES = {"eventNumber": "eventNumber"}
 
 def _ej_groups(truncate: int = 8) -> dict:
     return {
-        "jets": EasyjetGroupConfig(branches=dict(_EJ_JET_BRANCHES), jagged=True, truncate=truncate),
-        "event": EasyjetGroupConfig(branches=dict(_EJ_EVENT_BRANCHES), jagged=False),
+        "jets": UprootGroupConfig(branches=dict(_EJ_JET_BRANCHES), jagged=True, pad_max=truncate),
+        "event": UprootGroupConfig(branches=dict(_EJ_EVENT_BRANCHES), jagged=False),
     }
+
+
+def _ej_reader(**kw):
+    return UprootReader(tree="AnalysisMiniTree", unroll=None, **kw)
 
 
 @pytest.fixture
@@ -570,8 +574,8 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
     two_easyjet_files: tuple[Path, Path],
 ) -> None:
     sig_path, bkg_path = two_easyjet_files
-    sig = EasyjetReader(groups=_ej_groups(truncate=8), filename=sig_path)
-    bkg = EasyjetReader(groups=_ej_groups(truncate=8), filename=bkg_path)
+    sig = _ej_reader(groups=_ej_groups(truncate=8), filename=sig_path)
+    bkg = _ej_reader(groups=_ej_groups(truncate=8), filename=bkg_path)
     reader = MultiSampleReader(
         samples=[
             SampleConfig(name="signal", label=1, reader=sig),
@@ -583,11 +587,11 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
     assert n == len(sig) + len(bkg)
     out = reader.read(slice(0, n), Mode.FIT)
     proc = out["raw.event"]["process"]
-    # label injection on a real EasyjetReader-produced scalar event stream
+    # label injection on a real UprootReader-produced scalar event stream
     np.testing.assert_array_equal(
         proc, [reader.samples[int(s)].label for s in reader._sample_of]
     )
-    # round-trip: combined jets pt matches the per-sample EasyjetReader reads
+    # round-trip: combined jets pt matches the per-sample UprootReader reads
     sig_raw = sig.read(slice(0, len(sig)), Mode.FIT)
     bkg_raw = bkg.read(slice(0, len(bkg)), Mode.FIT)
     truth = {0: bkg_raw, 1: sig_raw}
@@ -613,8 +617,8 @@ def test_multisample_sources_is_union_over_subreaders(
 ) -> None:
     """sources() is the de-duplicated union of every sub-reader's sources (plan 02)."""
     sig_path, bkg_path = two_easyjet_files
-    sig = EasyjetReader(groups=_ej_groups(), filename=sig_path)
-    bkg = EasyjetReader(groups=_ej_groups(), filename=bkg_path)
+    sig = _ej_reader(groups=_ej_groups(), filename=sig_path)
+    bkg = _ej_reader(groups=_ej_groups(), filename=bkg_path)
     reader = MultiSampleReader(
         samples=[
             SampleConfig(name="signal", label=1, reader=sig),
@@ -629,8 +633,8 @@ def test_multisample_restage_delegates_recursively_and_roundtrips(
 ) -> None:
     """restage() restages EACH sub-reader into root; combined read is byte-identical."""
     sig_path, bkg_path = two_easyjet_files
-    sig = EasyjetReader(groups=_ej_groups(truncate=8), filename=sig_path)
-    bkg = EasyjetReader(groups=_ej_groups(truncate=8), filename=bkg_path)
+    sig = _ej_reader(groups=_ej_groups(truncate=8), filename=sig_path)
+    bkg = _ej_reader(groups=_ej_groups(truncate=8), filename=bkg_path)
     orig = MultiSampleReader(
         samples=[
             SampleConfig(name="signal", label=1, reader=sig),
