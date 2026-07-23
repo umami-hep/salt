@@ -18,8 +18,7 @@ from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.readers.reader import GroupConfig, H5StructuredReader
 from salt.data.readers.stream import OffsetIndex, StreamConfig
 from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
-from salt.data.readers.vds import create_vds, default_vds_path, has_wildcard
-from salt.data.readers.vds_module import VDS
+from salt.data.readers.vds import VDS, create_vds, default_vds_path, has_wildcard
 
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",

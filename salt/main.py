@@ -82,7 +82,7 @@ _CLASS_PATH_REMAP: dict[str, str] = {
     "salt.core.data.multisample_reader": "salt.data.readers.multisample_reader",
     "salt.core.data.stream": "salt.data.readers.stream",
     "salt.core.data.cuts": "salt.data.readers.cuts",
-    "salt.core.data.vds_module": "salt.data.readers.vds_module",
+    "salt.core.data.vds_module": "salt.data.readers.vds",
     "salt.core.data.vds": "salt.data.readers.vds",
     # data -> processors
     "salt.core.data.features": "salt.data.processors.features",

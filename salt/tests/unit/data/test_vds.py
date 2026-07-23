@@ -140,7 +140,7 @@ class TestVdsUnit:
             calls.append((Path(pattern), out_fname))
             return sentinel
 
-        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", fake_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds.create_vds", fake_create_vds)
         vds = _wired_vds(vds_capable=True)
         ctx = Bundle()
         pattern = str(data["dir"] / "pp_output_*.h5")
@@ -163,7 +163,7 @@ class TestVdsUnit:
             calls.append((Path(pattern), out_fname))
             return Path(out_fname)
 
-        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", fake_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds.create_vds", fake_create_vds)
         vds = _wired_vds(vds_capable=True, out={"train": out_path})
         ctx = Bundle()
         pattern = str(data["dir"] / "pp_output_*.h5")
@@ -204,7 +204,7 @@ class TestVdsUnit:
             called["n"] += 1
             raise AssertionError("create_vds must NOT run for a non-vds_capable reader")
 
-        monkeypatch.setattr("salt.data.readers.vds_module.create_vds", spy_create_vds)
+        monkeypatch.setattr("salt.data.readers.vds.create_vds", spy_create_vds)
         vds = _wired_vds(vds_capable=False)  # a ROOT reader (easyjet/ftag1lite)
         ctx = Bundle()
         glob_value = "/data/ntuples/*.root"

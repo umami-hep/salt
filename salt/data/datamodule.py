@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 from salt.data.base import Reader, SaltDatasetModule, SetupBundle
 from salt.data.dataset import GraphDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
+from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
-from salt.data.readers.vds_module import VDS
 from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_setup_plan
 from salt.graph.setup_executor import run_setup_plan
