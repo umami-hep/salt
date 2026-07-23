@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from difflib import get_close_matches
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import h5py
 import numpy as np
@@ -26,6 +26,9 @@ from salt.data.readers.vds import create_vds, has_wildcard
 from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema, load_schema
+
+if TYPE_CHECKING:
+    from salt.data.readers.cuts import CutSpec
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
 
@@ -73,8 +76,18 @@ class H5StructuredReader(Reader):
     num : int, optional
         Number of rows to serve; ``-1`` = all.
     selections : Mapping[str, Sequence[str]] | None, optional
-        Per-stream ftag cut lists, applied to the structured array
-        immediately after the read.
+        Per-stream ftag cut lists (constituent-level, NaN-in-place), applied to the
+        structured array immediately after the read. Distinct from `cuts` (below):
+        `selections` filter constituents within a row; `cuts` drop whole rows.
+    cuts : CutSpec | None, optional
+        Sample-axis (per-jet) row eligibility evaluated once in `prepare` over the
+        first group's scalar record; only passing rows enter the index (kept-index +
+        filtered read). Changes `__len__`; the served rows never read the dropped
+        ones. ``None`` (default) is the identity path — byte-identical to a no-cut
+        contiguous read.
+    stage : str | None, optional
+        The bound stage (``"train"``/``"val"``/``"test"``) selecting per-split cuts;
+        threaded by the datamodule via `with_source`.
     transforms : Sequence[Callable] | None, optional
         Read-time augmentations with the protocol
         ``transform(struct_array, stream) -> struct_array``, applied FIT-only.
@@ -112,6 +125,8 @@ class H5StructuredReader(Reader):
         filename: str | Path | None = None,
         num: int = -1,
         selections: Mapping[str, Sequence[str]] | None = None,
+        cuts: CutSpec | None = None,
+        stage: str | None = None,
         transforms: Sequence[Callable] | None = None,
         vds_path: str | Path | None = None,
     ) -> None:
@@ -121,6 +136,8 @@ class H5StructuredReader(Reader):
         self.schema = load_schema(schema) if isinstance(schema, str | Path) else schema
         self.filename = Path(filename) if filename is not None else None
         self.num = num
+        self.cuts = cuts
+        self.stage = stage
         self.vds_path = Path(vds_path) if vds_path is not None else None
         self.groups: dict[str, GroupConfig] = {
             stream: self._parse_group(stream, cfg) for stream, cfg in groups.items()
@@ -152,6 +169,7 @@ class H5StructuredReader(Reader):
         # transient per-process state (never pickled, see __getstate__)
         self._resolved: Path | None = None
         self._num_rows: int | None = None
+        self._kept: np.ndarray | None = None  # sample-axis kept file-rows; None = identity
         self._h5: h5py.File | None = None
         self._pid: int | None = None
         self._dss: dict[str, h5py.Dataset] = {}
@@ -277,15 +295,16 @@ class H5StructuredReader(Reader):
         stage: str | None = None,
     ) -> H5StructuredReader:
         """Clone onto another source file (config-only: schema, group configs, selections,
-        and transforms are shared); `stage` is accepted and ignored (single source).
+        cuts, and transforms are shared); `stage` selects the clone's per-split row cuts.
         """
-        del stage  # single-source reader: the per-stage filename is the data
         clone = H5StructuredReader(
             groups=self.groups,
             schema=self.schema,
             filename=filename,
             num=num,
             selections=self.selections,
+            cuts=self.cuts,
+            stage=stage if stage is not None else self.stage,
             transforms=self.transforms,
             vds_path=vds_path,
         )
@@ -308,7 +327,12 @@ class H5StructuredReader(Reader):
         return IO(produces=unflatten_spec(flat))
 
     def prepare(self) -> None:
-        """Resolve the source file (VDS for wildcards) and probe row counts (idempotent)."""
+        """Resolve the source file (VDS for wildcards), probe row counts, and build the
+        sample-axis kept-index for the (per-stage) `CutSpec` (idempotent).
+
+        With no cuts the kept-index is `None` — the identity sentinel that preserves
+        the byte-identical contiguous read path (Wave-3c gate).
+        """
         if self._resolved is not None:
             return
         if self.filename is None:
@@ -333,14 +357,46 @@ class H5StructuredReader(Reader):
                         f"constituent dimension {node.shape[1:]} (datasets.py:470 semantics)"
                     )
             first = next(iter(self.groups.values()))
-            num_available = len(f[first.dataset])
+            file_rows = len(f[first.dataset])
+            kept = self._build_kept_index(f, first)
+        num_available = file_rows if kept is None else int(kept.size)
         if self.num > num_available:
             raise ValueError(
                 f"Requested {self.num:,} rows, but only {num_available:,} are available "
                 f"in {path.name!r}."
             )
+        self._kept = kept
         self._num_rows = num_available if self.num < 0 else self.num
         self._resolved = path
+
+    def _build_kept_index(self, f: h5py.File, first: GroupConfig) -> np.ndarray | None:
+        """Ascending kept file-row indices from the (per-stage) row `CutSpec`; None = identity.
+
+        Reads the cut fields off the first (sample-axis) group and evaluates the shared
+        `_apply_row_cuts` engine. Returns `None` when no cuts engage — the sentinel that
+        keeps the contiguous read path byte-identical.
+        """
+        if self.cuts is None or not self.cuts.for_split(self.stage):
+            return None
+        ds = f[first.dataset]
+        if ds.ndim != 1:
+            raise ConfigError(
+                f"row cuts require the sample-axis group {self.streams[0]!r} (dataset "
+                f"{first.dataset!r}) to be a 1-D scalar stream, but it has shape {ds.shape} — "
+                "cut fields must be per-row scalars"
+            )
+        file_fields = ds.dtype.names or ()
+        cut_fields = self.cuts.fields(self.stage)
+        missing = [cf for cf in cut_fields if cf not in file_fields]
+        if missing:
+            raise SchemaError(
+                f"row-cut field(s) {missing} not present in the sample-axis h5 group "
+                f"{first.dataset!r} (available: {sorted(file_fields)}); cut variables must be "
+                "row-axis scalar fields read at index-build"
+            )
+        rec = ds.fields(list(cut_fields))[:]  # (file_rows,) structured
+        keep = self._apply_row_cuts(rec, self.stage)
+        return np.flatnonzero(keep).astype(np.int64)
 
     def __len__(self) -> int:
         """Return the number of rows served (resolving the source on first call)."""
@@ -410,19 +466,27 @@ class H5StructuredReader(Reader):
         self._rng = np.random.default_rng(ctx.seed)
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one contiguous batch slab: resize buffer + ``read_direct``, apply
-        selections, truncate, apply transforms (FIT-only, seeded), then derive
-        ``masks.<stream> = ~valid``; ``raw.*`` values may alias the reusable buffers.
+        """Read one batch: contiguous ``read_direct`` slab (no cuts) or a filtered read
+        of the kept file rows (cuts), then apply selections, truncate, transforms
+        (FIT-only, seeded), and derive ``masks.<stream> = ~valid``.
+
+        With no cuts (`_kept is None`) the path is byte-identical to a contiguous read
+        and ``raw.*`` may alias the reusable buffers; with cuts the served rows map
+        through the kept-index and the filtered read returns fresh (non-aliasing) arrays.
         """
         out: dict[str, np.ndarray] = {}
+        file_rows = None if self._kept is None else self._kept[rows]
         for stream, cfg in self.groups.items():
             ds = self._dss[stream]
             buf = self._buffers[stream]
-            shape = (rows.stop - rows.start, *ds.shape[1:])
-            buf.resize(shape, refcheck=False)
-            if buf.dtype.names:
-                ds.read_direct(buf, rows)
-            batch = buf
+            if file_rows is None:
+                shape = (rows.stop - rows.start, *ds.shape[1:])
+                buf.resize(shape, refcheck=False)
+                if buf.dtype.names:
+                    ds.read_direct(buf, rows)
+                batch = buf
+            else:
+                batch = self._read_kept(ds, buf.dtype, file_rows)
             if (selector := self._selectors.get(stream)) is not None:
                 batch = selector(batch)
             # None for scalar/untruncated streams -> no-op
@@ -444,6 +508,20 @@ class H5StructuredReader(Reader):
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
+
+    def _read_kept(
+        self, ds: h5py.Dataset, dtype: np.dtype, file_rows: np.ndarray
+    ) -> np.ndarray:
+        """Fancy-read the ascending kept file rows into a fresh demand-narrowed array.
+
+        The row-cut read path (non-contiguous): reads only the demanded fields for the
+        `file_rows` selection and casts to the buffer dtype (`get_dtype` half-casts).
+        Unlike the identity path's reusable-buffer ``read_direct``, this does not alias.
+        """
+        names = list(dtype.names or ())
+        if not names:
+            return np.empty((len(file_rows), *ds.shape[1:]), dtype=dtype)
+        return ds.fields(names)[file_rows].astype(dtype, copy=False)
 
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable read buffer (the

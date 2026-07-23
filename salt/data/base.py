@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -18,6 +19,9 @@ from salt.graph.planner import PlanStep
 from salt.graph.setup_spec import SetupIO, SetupStage
 from salt.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
 from salt.schema import GroupSchema, Schema
+
+if TYPE_CHECKING:
+    from salt.data.readers.cuts import CutSpec
 
 __all__ = [
     "OffsetIndex",
@@ -198,6 +202,20 @@ class Reader(SaltDatasetModule):
     schema: Schema | None = None
     """The dataset schema artifact, when configured."""
 
+    cuts: CutSpec | None = None
+    """Sample-axis row eligibility (index-build kept-index), when configured.
+
+    The uniform row-cut surface across readers: a `CutSpec` evaluated once in
+    `prepare` over the reader's sample-axis scalar record, selecting which rows
+    enter the index. Changes `__len__`, and the served rows never read the dropped
+    ones. SAMPLE-AXIS ONLY (jets for jet readers, events for event readers) —
+    constituent (per-track) filtering is a separate concern and must NEVER route
+    through this engine. Default `None` (identity: every row eligible).
+    """
+
+    stage: str | None = None
+    """The bound stage (``"train"``/``"val"``/``"test"``) selecting per-split cuts."""
+
     vds_capable: bool = False
     """Whether this reader builds an h5py virtual dataset for wildcard sources.
 
@@ -228,6 +246,30 @@ class Reader(SaltDatasetModule):
     @abstractmethod
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one contiguous batch and return the produced keys (flat dotted dict)."""
+
+    # -- shared row-cut engine (sample-axis, index-build only) ----------------
+
+    @staticmethod
+    def _row_record(row_scalars: Mapping[str, np.ndarray], n_rows: int) -> np.ndarray:
+        """Pack sample-axis scalar columns into a structured ``(n_rows,)`` cut record."""
+        names = list(row_scalars)
+        dtype = np.dtype([(nm, row_scalars[nm].dtype) for nm in names])
+        rec = np.empty(n_rows, dtype=dtype)
+        for nm in names:
+            rec[nm] = row_scalars[nm]
+        return rec
+
+    def _apply_row_cuts(self, rows: np.ndarray, split: str | None) -> np.ndarray:
+        """Sample-axis keep mask over a structured row-scalar record — the shared engine.
+
+        Delegates to `CutSpec.eligible`; all-True when no cuts are configured or the
+        split has none. Called at index-build (`prepare`), NEVER per batch: a dropped
+        row must never be read. SAMPLE-AXIS ONLY — row cuts change `__len__`, so
+        constituent filtering must not route through here.
+        """
+        if self.cuts is None or not self.cuts.for_split(split):
+            return np.ones(len(rows), dtype=bool)
+        return self.cuts.eligible(rows, split)
 
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.

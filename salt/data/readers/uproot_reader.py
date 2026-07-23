@@ -599,12 +599,8 @@ class UprootReader(Reader):
         n_rows_total = int(orig_counts.sum())
         if self.cuts is None or not self.cuts.for_split(self.stage):
             return np.arange(n_rows_total, dtype=np.int64), orig_counts.copy()
-        names = list(row_scalars)
-        dtype = np.dtype([(nm, row_scalars[nm].dtype) for nm in names])
-        rec = np.empty(n_rows_total, dtype=dtype)
-        for nm in names:
-            rec[nm] = row_scalars[nm]
-        keep = self.cuts.eligible(rec, self.stage)  # (n_rows_total,) bool
+        rec = self._row_record(row_scalars, n_rows_total)
+        keep = self._apply_row_cuts(rec, self.stage)  # (n_rows_total,) bool
         kept = np.flatnonzero(keep).astype(np.int64)
         bounds = np.concatenate([[0], np.cumsum(orig_counts)])
         per_row_kept = np.add.reduceat(keep.astype(np.int64), bounds[:-1])
