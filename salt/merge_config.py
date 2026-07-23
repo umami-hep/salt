@@ -75,13 +75,44 @@ def main(args: Sequence[str] | None = None) -> int:
 
     output_path, do_plots, fit_args = _split_merged_args(argv)
 
-    merged_text = _dump_merged_config(fit_args)
+    merged_text = _materialize_schedule(_dump_merged_config(fit_args))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(merged_text)
     print(f"wrote merged config to {output_path}")
 
     _write_stage_plots(output_path, merged_text, do_plots=do_plots)
     return 0
+
+
+# the desugared schedule a config with no `training_schedule` runs under, made
+# explicit in the merged YAML (F1): a single `fit` stage with no fields set —
+# byte-for-byte the block that re-parses to `TrainingSchedule.desugar_legacy`'s
+# `StageConfig(name="fit")` (nothing frozen; optimizer/lrs inherited from the
+# model-level settings). `fit: {}` (empty map), NOT `fit: null` — a null stage
+# is the deep-merge delete idiom and would leave the schedule empty.
+_MATERIALIZED_SCHEDULE_BLOCK = (
+    "# materialized by merge-config: no training_schedule configured;\n"
+    "# 'fit' desugars to this single stage (everything trainable; optimizer/lrs\n"
+    "# inherited from model.init_args) — see TrainingSchedule.desugar_legacy\n"
+    "training_schedule:\n"
+    "  stages:\n"
+    "    fit: {}\n"
+)
+
+
+def _materialize_schedule(text: str) -> str:
+    """Make the effective `training_schedule` explicit in a merged dump (F1).
+
+    A config that declares no schedule dumps without a ``training_schedule:``
+    block, yet it runs under the desugared single-``fit`` stage. This appends
+    that stage (with a marker comment) so the merged YAML shows the schedule the
+    run will actually use. A config that DOES declare a schedule is returned
+    unchanged (byte-identical).
+    """  # noqa: DOC201
+    merged = yaml.safe_load(text)
+    if not isinstance(merged, dict) or merged.get("training_schedule") is not None:
+        return text
+    return text.rstrip("\n") + "\n" + _MATERIALIZED_SCHEDULE_BLOCK
 
 
 def _split_merged_args(argv: list[str]) -> tuple[Path, bool, list[str]]:

@@ -173,7 +173,11 @@ salt merge-config \
 1. **`out/merged.yaml`** — the fully-merged config, produced through the same salt
    config surface as `--print_config` (the same deep-merge, the same `base2.yaml`
    defaults, the same schedule relocation). This is the single source of truth for
-   what will actually run: every default made explicit, every overlay applied.
+   what will actually run: every default made explicit, every overlay applied. When a
+   config declares no `training_schedule:`, the merged YAML makes the effective one
+   explicit — a single `fit` stage (everything trainable) under a
+   `# materialized by merge-config` marker, so plain-training runs read the same way
+   as staged ones.
 2. **One graph per stage** — `out/merged_stage00_head_warmup.png`,
    `out/merged_stage01_full_finetune.png`, … (numbered by execution order). Each is
    the model graph with that stage's **frozen** modules greyed out and badged, and a

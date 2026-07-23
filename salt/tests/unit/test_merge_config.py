@@ -142,13 +142,55 @@ class TestDotSourceAnnotation:
 
 class TestMergedDumpParity:
     def test_merged_yaml_matches_print_config(self, data, tmp_path):
+        # gn2v2-dummy declares no training_schedule, so F1 injects the desugared
+        # single-fit stage — strip it before the fit-parity comparison.
         args = fit_args(data)
         out = tmp_path / "merged.yaml"
         rc = merge_config_main([*args, "--merged.output", str(out), "--merged.plots", "false"])
         assert rc == 0
         merged_obj = yaml.safe_load(out.read_text())
+        injected = merged_obj.pop("training_schedule", None)
+        assert injected == {"stages": {"fit": {}}}  # the materialized desugar block
         printed_obj = yaml.safe_load(print_config_dump(args))
+        printed_obj.pop("training_schedule", None)  # print_config emits none for a legacy config
         assert merged_obj == printed_obj
+
+    def test_scheduled_config_dump_unchanged(self, data, tmp_path):
+        # a config that DOES declare a schedule is dumped byte-identically to
+        # print_config — no materialization, no marker (F1 only touches legacy).
+        sched = write_yaml(tmp_path, "sched.yaml", TWO_STAGE_SCHEDULE_YAML)
+        args = fit_args(data, "--config", sched)
+        out = tmp_path / "merged.yaml"
+        merge_config_main([*args, "--merged.output", str(out), "--merged.plots", "false"])
+        text = out.read_text()
+        assert "materialized by merge-config" not in text
+        assert yaml.safe_load(text) == yaml.safe_load(print_config_dump(args))
+
+    def test_legacy_materializes_desugared_schedule(self, data, tmp_path):
+        # F1: a legacy config's merged YAML gains an explicit training_schedule
+        # matching TrainingSchedule.desugar_legacy semantics exactly.
+        from salt.schedule import TrainingSchedule
+
+        out = tmp_path / "merged.yaml"
+        merge_config_main([*fit_args(data), "--merged.output", str(out), "--merged.plots", "false"])
+        text = out.read_text()
+        assert "materialized by merge-config" in text  # marker comment present
+        merged = yaml.safe_load(text)
+        assert merged["training_schedule"] == {"stages": {"fit": {}}}
+        module_names = list(merged["model"]["init_args"]["modules"])
+        got = TrainingSchedule.from_config(merged["training_schedule"], module_names)
+        legacy = TrainingSchedule.desugar_legacy(module_names)
+        assert [s.name for s in got.stages] == [s.name for s in legacy.stages] == ["fit"]
+        gs, ls = got.stages[0], legacy.stages[0]
+        assert (gs.frozen, gs.trainable, gs.optimizer, gs.lrs, gs.epochs, gs.order) == (
+            ls.frozen,
+            ls.trainable,
+            ls.optimizer,
+            ls.lrs,
+            ls.epochs,
+            ls.order,
+        )
+        assert got.frozen_names(gs) == set()  # everything trainable
 
     def test_merge_only_options_absent_from_dump(self, data, tmp_path):
         out = tmp_path / "merged.yaml"
