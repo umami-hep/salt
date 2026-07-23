@@ -17,16 +17,17 @@ __all__ = ["Cut", "CutSpec"]
 
 @dataclass(frozen=True)
 class Cut:
-    """One scalar comparison on a jet-level (global-object) field.
+    """One scalar comparison on a row-level field.
 
     Parameters
     ----------
     field : str
-        The jet-level field name to cut on. A bare field name (``"pt"``,
-        ``"flavour_label"``) addresses the jets stream's structured field; a
-        dotted name (``"jets.pt"``) is accepted too and the leading ``jets.``
-        (or any ``<stream>.``) prefix is stripped — the cut is evaluated against
-        the jet-level scalar record the reader builds in `prepare`.
+        The row-level field name to cut on — a field on the reader's sample
+        axis (jets for jet readers, events for event readers). A bare field
+        name (``"pt"``, ``"flavour_label"``) addresses the sample-axis stream's
+        structured field; a dotted name (``"jets.pt"``) is accepted too and the
+        leading ``<stream>.`` prefix is stripped — the cut is evaluated against
+        the row-level scalar record the reader builds in `prepare`.
     op : str
         One of ``==  !=  >=  <=  >  <`` (reuses ``processors._OPERATORS``).
     value : float | int
@@ -47,11 +48,10 @@ class Cut:
 
     def __post_init__(self) -> None:
         if not self.field:
-            raise ConfigError("Cut: 'field' must be a non-empty string (plan 19)")
+            raise ConfigError("Cut: 'field' must be a non-empty string")
         if self.op not in _OPERATORS:
             raise ConfigError(
-                f"Cut: unknown op {self.op!r} — expected one of {sorted(_OPERATORS)} "
-                "(reuses v1 datasets.py:29-36 operators) (plan 19)"
+                f"Cut: unknown op {self.op!r} — expected one of {sorted(_OPERATORS)}"
             )
 
     @property
@@ -59,38 +59,38 @@ class Cut:
         """The field name with any leading ``<stream>.`` prefix stripped."""
         return self.field.rsplit(".", 1)[-1]
 
-    def mask(self, jet_scalars: np.ndarray) -> np.ndarray:
-        """Evaluate this cut over a jet-level structured array.
+    def mask(self, rows: np.ndarray) -> np.ndarray:
+        """Evaluate this cut over a row-level structured array.
 
         Parameters
         ----------
-        jet_scalars : np.ndarray
-            A structured ``(N_jets,)`` array carrying the cut field.
+        rows : np.ndarray
+            A structured ``(N_rows,)`` array carrying the cut field.
 
         Returns
         -------
         np.ndarray
-            A ``(N_jets,)`` bool mask: True where the jet PASSES the cut.
+            A ``(N_rows,)`` bool mask: True where the row PASSES the cut.
 
         Raises
         ------
         KeyError
-            If `bare_field` is not a field of ``jet_scalars``.
+            If `bare_field` is not a field of ``rows``.
         """
-        names = jet_scalars.dtype.names or ()
+        names = rows.dtype.names or ()
         fname = self.bare_field
         if fname not in names:
             raise KeyError(
-                f"Cut field {self.field!r} (-> {fname!r}) is not a jet-level scalar field; "
-                f"available: {sorted(names)} (plan 19). Add it to the jets-stream branches so "
+                f"Cut field {self.field!r} (-> {fname!r}) is not a row-level scalar field; "
+                f"available: {sorted(names)}. Add it to the reader's sample-axis stream so "
                 "it is read at index-build."
             )
-        return _OPERATORS[self.op](jet_scalars[fname], self.value)
+        return _OPERATORS[self.op](rows[fname], self.value)
 
 
 @dataclass(frozen=True)
 class CutSpec:
-    """Global + per-split jet eligibility, applied at index-build.
+    """Global + per-split row eligibility, applied at index-build.
 
     Parameters
     ----------
@@ -119,7 +119,7 @@ class CutSpec:
         if unknown:
             raise ConfigError(
                 f"CutSpec.per_split: unknown stage keys {sorted(unknown)} — expected a subset "
-                f"of {list(self._STAGE_KEYS)} (plan 19)"
+                f"of {list(self._STAGE_KEYS)}"
             )
         for stage, cuts in self.per_split.items():
             for c in cuts:
@@ -145,36 +145,36 @@ class CutSpec:
         extra = self.per_split.get(split, ()) if split is not None else ()
         return (*self.global_cuts, *extra)
 
-    def eligible(self, jet_scalars: np.ndarray, split: str | None) -> np.ndarray:
-        """Bool mask over jets: True where all effective cuts pass.
+    def eligible(self, rows: np.ndarray, split: str | None) -> np.ndarray:
+        """Bool mask over rows: True where all effective cuts pass.
 
         Parameters
         ----------
-        jet_scalars : np.ndarray
-            A structured ``(N_jets,)`` array carrying every cut field.
+        rows : np.ndarray
+            A structured ``(N_rows,)`` array carrying every cut field.
         split : str | None
             The stage selecting per-split cuts.
 
         Returns
         -------
         np.ndarray
-            A ``(N_jets,)`` bool mask of eligible (passing) jets. With no cuts,
-            every jet is eligible.
+            A ``(N_rows,)`` bool mask of eligible (passing) rows. With no cuts,
+            every row is eligible.
 
         Raises
         ------
         KeyError
-            On a cut whose field is absent from ``jet_scalars`` (propagated from
+            On a cut whose field is absent from ``rows`` (propagated from
             `Cut.mask`).
         """
-        n = len(jet_scalars)
+        n = len(rows)
         keep = np.ones(n, dtype=bool)
         for c in self.for_split(split):
-            keep &= c.mask(jet_scalars)
+            keep &= c.mask(rows)
         return keep
 
     def fields(self, split: str | None = None) -> tuple[str, ...]:
-        """The bare jet-field names referenced by the effective cuts.
+        """The bare field names referenced by the effective cuts.
 
         Used by the reader to guarantee the cut variables are read at
         index-build even when not otherwise demanded.
