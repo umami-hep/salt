@@ -309,6 +309,10 @@ class SaltModule(lightning.LightningModule):
         self._init_from: str | None = None
         self._init_warm_started = False
         self._init_loaded_modules: set[str] = set()
+        # `--compile` request (None = off); applied at the end of setup, see
+        # enable_compile/_apply_compile.
+        self._compile_kwargs: dict[str, Any] | None = None
+        self._compiled = False
         # programmatic-construction path: compose the outputs: section now (the CLI
         # path passes outputs=None here and composes via instantiate_classes).
         if outputs:
@@ -818,6 +822,11 @@ class SaltModule(lightning.LightningModule):
         # `TrainingScheduleCallback`. Fit-only.
         if stage == "fit":
             self._apply_training_schedule()
+        # --compile LAST: dynamo traces each graph module in its final setup-time
+        # state — after bind/materialise have resolved widths, after any
+        # --init_from warm start has written weights, and after stage 0's freeze
+        # mask is in place.
+        self._apply_compile()
 
     def _apply_training_schedule(self) -> None:
         """Validate the schedule against the attached trainer and apply stage 0's
@@ -1010,6 +1019,51 @@ class SaltModule(lightning.LightningModule):
     def pending_early_advance(self) -> bool:
         """Whether an early-stop trigger is awaiting the next stage transition."""
         return self._pending_early_advance
+
+    # -- torch.compile -------------------------------------------------------------
+
+    def enable_compile(self, **compile_kwargs: Any) -> None:
+        """Request `torch.compile` of the graph modules; applied at the end of `setup`.
+
+        v1 compiled one inner ``model.model`` nn.Module. v2 has no such object —
+        the forward is a `Plan` executed module-by-module by `Executor` — so the
+        equivalent unit is each graph module. Compiling is deferred to the end of
+        `setup` because bind/materialise walk `self._graph_modules` and expect the
+        real `SaltModelModule` instances, not dynamo's `OptimizedModule` wrapper.
+
+        Parameters
+        ----------
+        **compile_kwargs : Any
+            Forwarded to `torch.compile` (e.g. ``mode``, ``dynamic``, ``fullgraph``).
+        """
+        self._compile_kwargs = dict(compile_kwargs)
+
+    def _apply_compile(self) -> None:
+        """Wrap each graph module in `torch.compile` and rebind the executors.
+
+        `self._graph_modules` keeps the uncompiled instances (bind/materialise/
+        validation surface); ``self.net`` takes the compiled wrappers, so a
+        checkpoint saved under ``--compile`` carries ``net.<name>._orig_mod.*``
+        keys — exactly what `on_load_checkpoint` strips on the way back in.
+        Executors are rebuilt against a per-plan runtime mapping so plan steps
+        that are not graph modules (a folded sink node) keep their frozen
+        instance. In-place compile does not work
+        (https://github.com/pytorch/pytorch/issues/101107), hence the rebind.
+        """
+        if self._compile_kwargs is None or self._compiled:
+            return
+        compiled = {
+            name: torch.compile(module, **self._compile_kwargs)
+            for name, module in self._graph_modules.items()
+            if isinstance(module, nn.Module)
+        }
+        for name, module in compiled.items():
+            if name in self.net:
+                self.net[name] = module
+        for mode, plan in self.plans.items():
+            runtime = {step.name: compiled.get(step.name, step.module) for step in plan.steps}
+            self._executors[mode] = Executor(plan, runtime)
+        self._compiled = True
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
         """Static writer-input validation on the TEST path.

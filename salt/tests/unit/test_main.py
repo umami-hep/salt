@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
@@ -396,6 +397,57 @@ class TestFitSmoke:
         assert "ckpt_path" in configs[0].read_text()
         assert main(["graph", "validate", "-c", str(configs[0]), "--mode", "fit"]) == 0
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
+
+
+class TestCompileFlag:
+    """``--compile``: per-graph-module ``torch.compile`` + the ``_orig_mod.`` shim."""
+
+    def test_defaults_off(self, data):
+        assert make_cli(data).config.compile is False
+
+    def test_flag_parses(self, data):
+        assert make_cli(data, extra=["--compile"]).config.compile is True
+
+    def test_fit_compiles_modules_and_checkpoint_round_trips(self, data, tmp_path, monkeypatch):
+        # real dynamo wrapper (so _orig_mod./OptimizedModule are genuine) on the
+        # eager backend (so the unit suite pays no inductor codegen cost)
+        real_compile = torch.compile
+        monkeypatch.setattr(
+            torch, "compile", lambda module, **kw: real_compile(module, backend="eager", **kw)
+        )
+        rc = main([
+            "fit",
+            "--config",
+            str(DUMMY_CFG),
+            *required_overrides(data),
+            "--compile",
+            f"--trainer.default_root_dir={tmp_path}",
+            "--trainer.accelerator=cpu",
+            "--trainer.logger=false",
+            "--trainer.max_epochs=1",
+            "--trainer.limit_train_batches=2",
+            "--trainer.limit_val_batches=2",
+            "--trainer.num_sanity_val_steps=0",
+            "--trainer.log_every_n_steps=1",
+            "--data.num_workers=0",
+            "--callbacks.progress=null",
+        ])
+        assert rc == 0
+
+        ckpts = list(tmp_path.rglob("*.ckpt"))
+        assert ckpts, f"no checkpoint written under {tmp_path}"
+        checkpoint = torch.load(ckpts[0], map_location="cpu", weights_only=False)
+        state_dict = checkpoint["state_dict"]
+        # compiled submodules land under net.<module>._orig_mod.*
+        assert any("_orig_mod." in key for key in state_dict), sorted(state_dict)[:5]
+
+        # ...and an UNcompiled model loads them via the on_load_checkpoint shim
+        model = make_cli(data).model
+        model.on_load_checkpoint(checkpoint)
+        stripped = checkpoint["state_dict"]
+        assert not any("_orig_mod." in key for key in stripped)
+        assert set(stripped) == set(model.state_dict())
+        model.load_state_dict(stripped)
 
 
 class TestBestCheckpointFallback:

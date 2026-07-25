@@ -673,6 +673,15 @@ class SaltCLI(LightningCLI):
             "at export time. Inert during fit/test; round-trips through saved run configs.",
         )
         parser.add_argument(
+            "--compile",
+            action="store_true",
+            help="torch.compile the model to speed up training (fit only). v2 has no single "
+            "inner nn.Module, so each graph module is compiled individually at the end of "
+            "SaltModule.setup; the resulting net.<module>._orig_mod.* checkpoint keys are "
+            "stripped on load. NOT compatible with attn_type: flash-varlen without the "
+            "unpad/repad handling — see docs/training.md.",
+        )
+        parser.add_argument(
             f"--{_CLASS_DICT_ARG}",
             type=str | None,
             default=None,
@@ -729,6 +738,20 @@ class SaltCLI(LightningCLI):
         # the top-level outputs: section is NOT a link_arguments compute
         # (subclass-mode model targets grab the whole namespace) — it is
         # composed onto the instantiated model in `instantiate_classes` below.
+
+    def fit(self, model: Any, **kwargs: Any) -> None:
+        """Run ``trainer.fit``, honouring ``--compile``.
+
+        Lightning's ``_run_subcommand`` prefers a CLI method over the trainer's,
+        so this replaces ``trainer.fit`` for the ``fit`` subcommand. The compile
+        request is recorded on the model and applied at the end of
+        `SaltModule.setup` (which the trainer calls) — see
+        `SaltModule.enable_compile`.
+        """
+        config = self.config[self.subcommand] if self.subcommand else self.config
+        if config.get("compile") and hasattr(model, "enable_compile"):
+            model.enable_compile()
+        self.trainer.fit(model, **kwargs)
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
         """Assemble ``callbacks:`` dict values (YAML order, ``None`` filtered)
