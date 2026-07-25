@@ -124,7 +124,7 @@ class SaltModule(lightning.LightningModule):
         - ``shape_path`` (optional): base-shapes file produced by
           ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
           `MuReadout.width_mult()` resolves against real base widths.
-    training_schedule : Mapping[str, Any], optional
+    training_schedule : dict, optional
         Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
         Its config home is the TOP-LEVEL ``training_schedule:`` key (peer of
         ``trainer:``/``data:``/``model:``, plan 03); the CLI
@@ -159,7 +159,13 @@ class SaltModule(lightning.LightningModule):
         lrs: Mapping[str, float],
         optimizer: str = "AdamW",
         mup: Mapping[str, Any] | None = None,
-        training_schedule: Mapping[str, Any] | None = None,
+        # BARE `dict` (not Mapping[str, Any]): a subscripted mapping value type makes
+        # jsonargparse recurse and EAGERLY instantiate nested {class_path, init_args}
+        # specs (stage `callbacks:`/`lr_scheduler:`), which corrupts them before
+        # `TrainingSchedule.from_config` validates the raw specs (W8.0) and is
+        # impossible for an LR scheduler (no optimizer yet). A bare `dict` has no
+        # `__args__`, so jsonargparse keeps the schedule opaque and the specs raw.
+        training_schedule: dict | None = None,
         name: str = "salt",
         debug: bool = False,
         outputs: dict[str, SaltModelModule | None] | None = None,

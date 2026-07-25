@@ -695,7 +695,16 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             f"--{_TRAINING_SCHEDULE_ARG}",
-            type=dict[str, Any] | None,
+            # BARE `dict` (not dict[str, Any]): jsonargparse recurses into a
+            # subscripted mapping's values and, under the `Any` value type, EAGERLY
+            # instantiates any nested {class_path, init_args} spec (its subclass
+            # shorthand) — which would turn a stage's raw `callbacks:`/`lr_scheduler:`
+            # specs into live objects before salt's own validator sees them (W8.0
+            # bug) and is impossible for an LR scheduler (needs the stage optimizer,
+            # not built yet). A bare `dict` has no `__args__`, so jsonargparse treats
+            # the whole schedule as an opaque mapping and leaves the nested specs raw
+            # for `TrainingSchedule.from_config` to parse.
+            type=dict | None,
             default=None,
             help="TOP-LEVEL staged-training schedule (plan 03, D1/D2): "
             "{stages: {name: {epochs, frozen|trainable, optimizer, lrs, order}}}. A peer of "

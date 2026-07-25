@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 import yaml
+from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
 from salt.callbacks import Checkpoint, ProgressBar
@@ -967,6 +969,37 @@ model:
 """
 
 
+class StageCallbackProbe(Callback):
+    """Test-only stage-scoped callback mirroring the exp-12 `StageLRTracer` spec
+    shape (``init_args: {out_path, stage_name}``) — the CLI-path vector for the
+    W8.0 stage-callbacks bug (jsonargparse used to eager-instantiate this spec
+    before salt saw the raw dict). Referenced by its full class_path from YAML.
+    """
+
+    def __init__(self, out_path: str, stage_name: str) -> None:
+        self.out_path = out_path
+        self.stage_name = stage_name
+
+
+# a single-`fit`-stage schedule whose stage declares a scoped callback — the exact
+# nested {class_path, init_args} spec that crashed the real CLI (W8.0). ``{out}`` is
+# formatted with a tmp path per test.
+STAGE_CALLBACK_YAML = """
+training_schedule:
+  stages:
+    fit:
+      callbacks:
+        - class_path: salt.tests.unit.test_main.StageCallbackProbe
+          init_args:
+            out_path: {out}
+            stage_name: fit
+"""
+
+
+class _StubTrainer:
+    """Minimal stand-in — the coordinator's setup/sync ``del`` the trainer arg."""
+
+
 class TestTopLevelTrainingSchedule:
     def test_top_level_schedule_parses_into_model(self, data, tmp_path):
         # the example-config twin parses on the real CLI surface and builds the
@@ -1091,6 +1124,84 @@ class TestScheduleCallbackAutoInjection:
         cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
         for task in CLS_TASKS:
             assert cli.model.net[task].weight_source == {"from_class_dict": str(wave1_data["cd"])}
+
+
+# W8.0: stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI.
+# The W7.2 feature was only ever gated by direct `SaltModule(...)` construction
+# (test_stage_callbacks.py); the YAML/CLI path crashed because jsonargparse
+# eager-instantiated the nested {class_path, init_args} spec before salt's own
+# validator saw the raw dict. These lock the CLI path: parse, fit-start
+# instantiation from the raw spec, and merge-config round-trip.
+class TestStageCallbacksCLI:
+    def test_stage_callback_reaches_model_as_raw_spec(self, data, tmp_path):
+        # the exact crash repro (W8.0): a stage `callbacks:` entry on the real CLI.
+        # It must now parse and arrive at the model as a RAW spec dict, NOT an
+        # eager-instantiated object.
+        text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
+        override = write_yaml(tmp_path, "sched_cb.yaml", text)
+        cli = make_cli(data, extra=["--config", override])
+        stage = cli.model._schedule.stages[0]  # noqa: SLF001
+        assert stage.callbacks is not None
+        spec = stage.callbacks[0]
+        assert isinstance(spec, Mapping)  # raw spec, not a StageCallbackProbe instance
+        assert not isinstance(spec, StageCallbackProbe)
+        assert spec["class_path"] == "salt.tests.unit.test_main.StageCallbackProbe"
+        assert spec["init_args"]["stage_name"] == "fit"
+
+    def test_stage_callback_instantiates_at_fit_start(self, data, tmp_path):
+        # the coordinator instantiates the CLI-parsed raw spec at fit start (its
+        # setup validates every stage's callbacks; the active stage's delegates are
+        # then built fresh) — proving the spec is usable, not merely well-formed.
+        from salt.callbacks.schedule import StageScopedCallbacks
+
+        text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
+        override = write_yaml(tmp_path, "sched_cb.yaml", text)
+        cli = make_cli(data, extra=["--config", override])
+        coord = StageScopedCallbacks()
+        coord.setup(_StubTrainer(), cli.model, "fit")  # validates all specs (no raise)
+        coord._sync_active_stage(_StubTrainer(), cli.model)  # noqa: SLF001 - build stage-0 delegates
+        delegates = coord._active_delegates  # noqa: SLF001
+        assert len(delegates) == 1
+        assert isinstance(delegates[0], StageCallbackProbe)
+        assert delegates[0].stage_name == "fit"
+
+    def test_stage_callback_bad_class_path_fails_at_fit_start(self, data, tmp_path):
+        # a bad class_path on a stage callback must fail at fit-start setup, not
+        # silently at the boundary (import/instantiation validation).
+        from salt.callbacks.schedule import StageScopedCallbacks
+
+        text = STAGE_CALLBACK_YAML.replace(
+            "salt.tests.unit.test_main.StageCallbackProbe", "salt.nonexistent.NoSuchCallback"
+        ).format(out=tmp_path / "lr.json")
+        override = write_yaml(tmp_path, "sched_bad.yaml", text)
+        cli = make_cli(data, extra=["--config", override])
+        coord = StageScopedCallbacks()
+        with pytest.raises((ImportError, ModuleNotFoundError, AttributeError)):
+            coord.setup(_StubTrainer(), cli.model, "fit")
+
+    def test_stage_callback_merge_config_round_trip(self, data, tmp_path):
+        # `salt merge-config` (the other CLI path that crashed) must dump the stage
+        # callback spec faithfully AND render the per-stage freeze graph without
+        # instantiating the spec.
+        from salt.merge_config import main as merge_config_main
+
+        text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
+        override = write_yaml(tmp_path, "sched_cb.yaml", text)
+        out = tmp_path / "merged.yaml"
+        rc = merge_config_main([
+            "--config", disable_logger_in_config(str(DUMMY_CFG)),
+            *required_overrides(data),
+            "--config", override,
+            "--merged.output", str(out),
+            "--merged.plots", "false",
+        ])
+        assert rc == 0
+        dumped = out.read_text()
+        assert "salt.tests.unit.test_main.StageCallbackProbe" in dumped  # faithful round-trip
+        assert "stage_name: fit" in dumped
+        # the per-stage freeze graph rendered (plots=false → .dot only) — the graph
+        # path built the schedule from the raw spec without instantiating it.
+        assert (tmp_path / "merged_stage00_fit.dot").exists()
 
 
 # norm_dict is the Normaliser module's OWN config (its sole consumer): set on
