@@ -1162,8 +1162,10 @@ class TestStageCallbacksCLI:
         coord._sync_active_stage(_StubTrainer(), cli.model)  # noqa: SLF001 - build stage-0 delegates
         delegates = coord._active_delegates  # noqa: SLF001
         assert len(delegates) == 1
-        assert isinstance(delegates[0], StageCallbackProbe)
-        assert delegates[0].stage_name == "fit"
+        # class-name compare (not isinstance): `_resolve_class_path` imports the test
+        # module fresh, which under pytest can be a distinct module object.
+        assert type(delegates[0]).__name__ == "StageCallbackProbe"
+        assert delegates[0].stage_name == "fit"  # instantiated from the raw init_args
 
     def test_stage_callback_bad_class_path_fails_at_fit_start(self, data, tmp_path):
         # a bad class_path on a stage callback must fail at fit-start setup, not
