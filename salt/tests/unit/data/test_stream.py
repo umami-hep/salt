@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -51,8 +53,9 @@ def test_stream_config_sort_rejects_empty_var() -> None:
 
 
 def test_stream_config_cuts_must_be_cut_instances() -> None:
+    bad: Any = ("not a cut",)
     with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, cuts=ConstituentCuts(cuts=("not a cut",), on_fail="drop"))
+        StreamConfig(pad_max=4, cuts=ConstituentCuts(cuts=bad, on_fail="drop"))
 
 
 def test_stream_config_cuts_must_be_constituent_cuts() -> None:
@@ -251,8 +254,11 @@ def test_missing_cut_or_sort_field_raises() -> None:
     gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
     with pytest.raises(KeyError):
         _cut_sort_truncate_pad(
-            cols, ["pt"], StreamConfig(pad_max=2, cuts=_drop(Cut(field="nope", op=">", value=0))),
-            1, gschema,
+            cols,
+            ["pt"],
+            StreamConfig(pad_max=2, cuts=_drop(Cut(field="nope", op=">", value=0))),
+            1,
+            gschema,
         )
     with pytest.raises(KeyError):
         _cut_sort_truncate_pad(

@@ -198,10 +198,15 @@ def _constant(node: ast.expr) -> float | int | None:
     float | int | None
         The constant's value, or None when the node is not a constant.
     """
-    if isinstance(node, ast.Constant):
+    if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
         return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant):
-        return _UNARYOPS[type(node.op)](node.operand.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int | float)
+    ):
+        value: float | int = _UNARYOPS[type(node.op)](node.operand.value)
+        return value
     return None
 
 

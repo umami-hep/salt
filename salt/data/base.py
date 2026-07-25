@@ -312,13 +312,15 @@ class Reader(SaltDatasetModule):
             if isinstance(cfg, ConstituentCuts):
                 out[stream] = cfg
             elif isinstance(cfg, Mapping):
-                try:
-                    out[stream] = ConstituentCuts(**dict(cfg))
-                except TypeError as exc:
+                unknown = set(cfg) - {"cuts", "on_fail"}
+                if unknown:
                     raise ConfigError(
-                        f"constituent_cuts[{stream!r}]: expected keys cuts/on_fail, got "
-                        f"{sorted(cfg)}"
-                    ) from exc
+                        f"constituent_cuts[{stream!r}]: unknown keys {sorted(unknown)} — "
+                        "expected cuts/on_fail"
+                    )
+                out[stream] = ConstituentCuts(
+                    cuts=cfg.get("cuts", ()), on_fail=cfg.get("on_fail", "")
+                )
             else:
                 raise ConfigError(
                     f"constituent_cuts[{stream!r}] must be a ConstituentCuts or a mapping "

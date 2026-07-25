@@ -333,7 +333,7 @@ class ConstituentCuts:
         On an unset/unknown ``on_fail`` or an entry that is not a cut.
     """
 
-    cuts: Sequence[Cut | str | Mapping[str, Any]] = ()
+    cuts: tuple[Cut, ...] = ()
     on_fail: str = ""
 
     def __post_init__(self) -> None:

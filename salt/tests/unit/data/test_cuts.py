@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
 from salt.data import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
 from salt.graph.errors import ConfigError
+
+
+def _cc(cuts: Any, on_fail: str) -> ConstituentCuts:
+    """Build `ConstituentCuts` off the loose config surface (expression strings).
+
+    Returns
+    -------
+    ConstituentCuts
+        The normalised container.
+    """
+    return ConstituentCuts(cuts=cuts, on_fail=on_fail)
 
 
 def _jets(pt: list[float], label: list[int]) -> np.ndarray:
@@ -152,7 +165,8 @@ def test_cutspec_is_the_global_object_cuts_alias() -> None:
 
 def test_global_object_cuts_accept_expression_strings() -> None:
     jets = _jets(pt=[10.0, 25.0, 30.0], label=[0, 5, 4])
-    spec = GlobalObjectCuts(global_cuts=("pt >= 20", "flavour_label == 5"))
+    specs: Any = ("pt >= 20", "flavour_label == 5")
+    spec = GlobalObjectCuts(global_cuts=specs)
     np.testing.assert_array_equal(spec.eligible(jets, None), [False, True, False])
     assert spec.fields() == ("pt", "flavour_label")
 
@@ -214,7 +228,7 @@ def _tracks(n_rows: int = 2, t_dim: int = 4) -> np.ndarray:
         (n_rows, t_dim),
         dtype=[("d0", "f4"), ("npix", "u1"), ("label", "i4"), ("flag", "?"), ("valid", "?")],
     )
-    rec["d0"] = [[0.5, 9.0, 1.0, 0.0], [4.0, 0.2, 7.0, 0.0]]
+    rec["d0"] = [[0.5, 9.0, 1.0, 0.0], [4.0, 0.25, 7.0, 0.0]]
     rec["npix"] = [[1, 2, 3, 0], [4, 5, 6, 0]]
     rec["label"] = [[10, 11, 12, -1], [13, 14, 15, -1]]
     rec["flag"] = True
@@ -224,20 +238,20 @@ def _tracks(n_rows: int = 2, t_dim: int = 4) -> np.ndarray:
 
 def test_constituent_cuts_requires_explicit_on_fail() -> None:
     with pytest.raises(ConfigError, match="on_fail"):
-        ConstituentCuts(cuts=("d0 < 3.5",))
+        _cc(("d0 < 3.5",), "")
     with pytest.raises(ConfigError, match="on_fail"):
-        ConstituentCuts(cuts=("d0 < 3.5",), on_fail="nan")
+        _cc(("d0 < 3.5",), "nan")
 
 
 def test_constituent_cuts_fields_dedup_union() -> None:
-    cc = ConstituentCuts(cuts=("d0 < 3.5", "d0 + npix < 9"), on_fail="mask")
+    cc = _cc(("d0 < 3.5", "d0 + npix < 9"), "mask")
     assert cc.fields == ("d0", "npix")
 
 
 def test_constituent_cuts_mask_blanks_failing_slots_per_dtype() -> None:
     """Mask keeps the slot: float->NaN, signed int->-1, unsigned->0, bool->False."""
     batch = _tracks()
-    ConstituentCuts(cuts=("d0 < 3.5",), on_fail="mask").apply(batch)
+    _cc(("d0 < 3.5",), "mask").apply(batch)
     # row 0: slot 1 (d0=9) fails; row 1: slot 0 (4.0) and 2 (7.0) fail
     assert np.isnan(batch["d0"][0, 1])
     np.testing.assert_array_equal(np.isnan(batch["d0"]), [[0, 1, 0, 0], [1, 0, 1, 0]])
@@ -250,7 +264,7 @@ def test_constituent_cuts_mask_blanks_failing_slots_per_dtype() -> None:
 def test_constituent_cuts_mask_preserves_positions_and_multiplicity() -> None:
     batch = _tracks()
     before = batch["d0"][0, 2]
-    ConstituentCuts(cuts=("d0 < 3.5",), on_fail="mask").apply(batch)
+    _cc(("d0 < 3.5",), "mask").apply(batch)
     assert batch.shape == (2, 4)
     assert batch["d0"][0, 2] == before  # a passing constituent never moves
 
@@ -258,19 +272,19 @@ def test_constituent_cuts_mask_preserves_positions_and_multiplicity() -> None:
 def test_constituent_cuts_mask_leaves_padding_untouched() -> None:
     """Already-invalid slots are never blanked (they were not 'removed' by the cut)."""
     batch = _tracks()
-    ConstituentCuts(cuts=("d0 < 3.5",), on_fail="mask").apply(batch)
+    _cc(("d0 < 3.5",), "mask").apply(batch)
     assert not np.isnan(batch["d0"][0, 3])  # pad slot keeps its 0.0
     assert batch["label"][0, 3] == -1
 
 
 def test_constituent_cuts_drop_compacts_and_repads() -> None:
     batch = _tracks()
-    out = ConstituentCuts(cuts=("d0 < 3.5",), on_fail="drop").apply(batch)
+    out = _cc(("d0 < 3.5",), "drop").apply(batch)
     # row 0 keeps slots 0, 2 (order preserved); row 1 keeps slot 1
     np.testing.assert_array_equal(out["d0"][0], [0.5, 1.0, 0.0, 0.0])
     np.testing.assert_array_equal(out["label"][0], [10, 12, -1, -1])
     np.testing.assert_array_equal(out["valid"][0], [True, True, False, False])
-    np.testing.assert_array_equal(out["d0"][1], [0.2, 0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(out["d0"][1], [0.25, 0.0, 0.0, 0.0])
     np.testing.assert_array_equal(out["label"][1], [14, -1, -1, -1])
     np.testing.assert_array_equal(out["valid"][1], [True, False, False, False])
     np.testing.assert_array_equal(out["npix"][1], [5, 0, 0, 0])
@@ -278,7 +292,7 @@ def test_constituent_cuts_drop_compacts_and_repads() -> None:
 
 def test_constituent_cuts_drop_never_keeps_a_failing_constituent() -> None:
     batch = _tracks()
-    out = ConstituentCuts(cuts=("d0 < 3.5",), on_fail="drop").apply(batch)
+    out = _cc(("d0 < 3.5",), "drop").apply(batch)
     kept = out["d0"][out["valid"]]
     assert (kept < 3.5).all()
 
@@ -286,7 +300,7 @@ def test_constituent_cuts_drop_never_keeps_a_failing_constituent() -> None:
 def test_constituent_cuts_derived_expression_masks_like_the_oracle() -> None:
     batch = _tracks()
     npix, valid = batch["npix"].copy(), batch["valid"].copy()
-    ConstituentCuts(cuts=("npix + npix / 2 < 3.0",), on_fail="mask").apply(batch)
+    _cc(("npix + npix / 2 < 3.0",), "mask").apply(batch)
     want_removed = valid & ~((npix + npix / 2) < 3.0)
     np.testing.assert_array_equal(batch["valid"], valid & ~want_removed)
     np.testing.assert_array_equal(np.isnan(batch["d0"]), want_removed)
@@ -295,11 +309,11 @@ def test_constituent_cuts_derived_expression_masks_like_the_oracle() -> None:
 def test_constituent_cuts_no_cuts_is_a_noop() -> None:
     batch = _tracks()
     before = batch.copy()
-    out = ConstituentCuts(on_fail="mask").apply(batch)
+    out = _cc((), "mask").apply(batch)
     assert out.tobytes() == before.tobytes()
 
 
 def test_constituent_cuts_need_the_valid_field() -> None:
     rec = np.zeros((1, 2), dtype=[("d0", "f4")])
     with pytest.raises(KeyError):
-        ConstituentCuts(cuts=("d0 < 1",), on_fail="mask").apply(rec)
+        _cc(("d0 < 1",), "mask").apply(rec)
