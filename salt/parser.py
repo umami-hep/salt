@@ -168,6 +168,66 @@ class DeepMergeParser(LightningArgumentParser):
             self.exit(0)
         return cfg
 
+    def dump(self, *args: Any, **kwargs: Any) -> str:
+        """Serialise via the base parser, then normalise key order so every
+        ``class_path``/``init_args`` mapping lists ``class_path`` first.
+
+        A stacked config that overrides only a subclass's ``init_args`` makes
+        jsonargparse emit that mapping ``init_args``-first; this is the single
+        serialization seam shared by ``--print_config``, ``salt merge-config``,
+        and the ``config.yaml`` a fit run saves, so fixing it here fixes all
+        three. Serialization order only — the reparsed object is unchanged.
+        """  # noqa: DOC201
+        text = super().dump(*args, **kwargs)
+        return _class_path_before_init_args(text) if isinstance(text, str) else text
+
+
+# jsonargparse dumps block mappings as ``<indent><key>:`` — a scalar carries its
+# value after the colon, a nested block ends the line. List items (``- ...``) and
+# comment lines never match, so they are skipped by the reorder pass.
+_YAML_KEY = re.compile(r"^(?P<indent> *)(?P<key>[\w-]+):(?:\s|$)")
+
+
+def _class_path_before_init_args(text: str) -> str:
+    """Hoist each block mapping's ``class_path:`` scalar line above its sibling
+    ``init_args:`` line in a dumped YAML — a pure serialization-order fix.
+
+    jsonargparse emits an override that touches only a subclass's ``init_args``
+    with ``init_args`` first; this moves the one-line ``class_path`` scalar above
+    it so every pair reads class-path-first (remaining keys keep their relative
+    order). Idempotent; only block-mapping pairs (the salt module/callback/output/
+    logger form) are touched — list-item subclasses are left as-is.
+    """  # noqa: DOC201
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = _YAML_KEY.match(lines[i])
+        if match is not None and match.group("key") == "class_path":
+            target = _sibling_init_args_before(lines, i, len(match.group("indent")))
+            if target is not None:
+                lines.insert(target, lines.pop(i))
+        i += 1
+    return "\n".join(lines)
+
+
+def _sibling_init_args_before(lines: list[str], idx: int, indent: int) -> int | None:
+    """Index of the same-``indent`` sibling ``init_args:`` line preceding the
+    ``class_path:`` at `idx` in the same parent mapping, or None when
+    ``class_path`` already precedes ``init_args`` (scan stops at the first
+    shallower key — the parent — so an ancestor ``init_args`` is never matched).
+    """  # noqa: DOC201
+    j = idx - 1
+    while j >= 0:
+        match = _YAML_KEY.match(lines[j])
+        if match is not None:
+            here = len(match.group("indent"))
+            if here < indent:
+                return None
+            if here == indent and match.group("key") == "init_args":
+                return j
+        j -= 1
+    return None
+
 
 def _normalise_module_null(arg: str) -> str:
     """Rewrite ``--…modules.X=null`` to the JSON-block form (see

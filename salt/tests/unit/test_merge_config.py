@@ -76,6 +76,26 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
+def child_key_order(text: str, key: str) -> list[str]:
+    """Direct child keys of the ``key:`` mapping in `text`, in dump order."""
+    lines = text.split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"{key}:")
+    base = len(lines[start]) - len(lines[start].lstrip())
+    child_indent: int | None = None
+    order: list[str] = []
+    for ln in lines[start + 1 :]:
+        if not ln.strip():
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        if ind <= base:
+            break
+        if child_indent is None:
+            child_indent = ind
+        if ind == child_indent and not ln.lstrip().startswith("- "):
+            order.append(ln.strip().split(":")[0])
+    return order
+
+
 def print_config_dump(args: list[str]) -> str:
     """The run-free ``--print_config`` dump for `args` (the fit config surface)."""
     buffer = io.StringIO()
@@ -287,3 +307,74 @@ class TestDispatch:
         ])
         assert rc == 0
         assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
+# class_path-before-init_args serialization order (DeepMergeParser.dump)
+# ---------------------------------------------------------------------------
+
+# an overlay that touches only a module's init_args — the exact pattern that made
+# jsonargparse emit that module's `init_args` before its `class_path` (F2 repro).
+OVERRIDE_INIT_ARGS_YAML = """
+model:
+  init_args:
+    modules:
+      track_embed:
+        init_args:
+          out_dim: 16
+"""
+
+_MISORDERED_YAML = """model:
+  init_args:
+    modules:
+      norm:
+        init_args:
+          norm_dict: /x/nd.yaml
+          streams:
+          - jets
+          - tracks
+        class_path: salt.model.modules.Normaliser
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          out_dim: 16
+"""
+
+
+class TestClassPathOrdering:
+    def test_transform_reorders_and_preserves_semantics(self):
+        from salt.parser import _class_path_before_init_args
+
+        out = _class_path_before_init_args(_MISORDERED_YAML)
+        # the misordered `norm` now reads class_path-first...
+        assert child_key_order(out, "norm")[:2] == ["class_path", "init_args"]
+        # ...the already-correct `track_embed` is untouched...
+        assert child_key_order(out, "track_embed")[:2] == ["class_path", "init_args"]
+        # ...and it is a pure serialization change (reparsed object identical).
+        assert yaml.safe_load(out) == yaml.safe_load(_MISORDERED_YAML)
+
+    def test_transform_idempotent_and_noop_when_ordered(self):
+        from salt.parser import _class_path_before_init_args
+
+        once = _class_path_before_init_args(_MISORDERED_YAML)
+        assert _class_path_before_init_args(once) == once  # idempotent
+        assert _class_path_before_init_args(once) == once  # already-ordered no-op
+
+    def test_overlay_override_dumps_class_path_first(self, data, tmp_path):
+        # regression on the exact repro: an overlay that overrides only a module's
+        # init_args must still dump class_path before init_args for that module.
+        overlay = write_yaml(tmp_path, "over.yaml", OVERRIDE_INIT_ARGS_YAML)
+        out = tmp_path / "merged.yaml"
+        merge_config_main([
+            *fit_args(data, "--config", overlay),
+            "--merged.output",
+            str(out),
+            "--merged.plots",
+            "false",
+        ])
+        text = out.read_text()
+        assert child_key_order(text, "track_embed")[:2] == ["class_path", "init_args"]
+        # every class_path/init_args module reads class_path-first
+        for module in ("norm", "track_embed", "encoder", "jets_classification"):
+            order = child_key_order(text, module)
+            assert order.index("class_path") < order.index("init_args")
