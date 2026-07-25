@@ -342,7 +342,9 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     )
 
 
-def _parse_stage_callbacks(stage: str, cfg: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...] | None:
+def _parse_stage_callbacks(
+    stage: str, cfg: Mapping[str, Any]
+) -> tuple[Mapping[str, Any], ...] | None:
     """Parse + structurally validate a stage's optional scoped `callbacks` list
     into a tuple of ``{class_path[, init_args]}`` specs (fail-loud); ``None`` when
     the stage declares none. Each spec must be a mapping with a string

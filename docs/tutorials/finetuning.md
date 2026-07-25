@@ -127,6 +127,75 @@ rejected fail-loud:
   Usually omitted so every stage shares the base `optimizer:`.
 - **`order`** — pins execution position. Omit it and stages run in declaration
   order (the normal case).
+- **`early_stop`** — an optional early-stopping criterion that ends the stage before
+  its `epochs` cap (see below).
+- **`callbacks`** — an optional list of extra Lightning callbacks active only during
+  this stage (see below).
+
+### Per-stage early stopping — `early_stop`
+
+A stage can stop **before** its `epochs` cap when a monitored validation metric
+stops improving. `epochs` stays the hard cap; the stage ends at whichever comes
+first. On a non-final stage the schedule then **advances to the next stage**; on the
+final stage it **ends the fit**.
+
+```yaml
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 10                        # cap — but early_stop may end it sooner
+      trainable: [jets_classification]
+      early_stop:
+        monitor: val/loss               # required — a trainer.callback_metrics key
+        mode: min                       # min (default) or max
+        patience: 3                     # validation checks without improvement (default 3)
+        min_delta: 0.0                  # minimum improvement to reset patience (default 0.0)
+        check_finite: true              # stop on a non-finite monitor value (default true)
+    full_finetune:
+      frozen: []
+```
+
+- The check runs at **validation-epoch end**; `patience` counts validation checks,
+  not raw training epochs. Validation must be enabled (a stage with `early_stop`
+  under a trainer with validation disabled is a fail-loud `ConfigError`), and the
+  `monitor` key must exist in `trainer.callback_metrics` (e.g. `val/loss`,
+  `val/jets_classification_loss`) or it fails loud at the first check.
+- An early-stopped stage simply **truncates its LR envelope** mid-curve; the next
+  stage rebuilds its own OneCycle cleanly. Boundaries become data-dependent, so they
+  are **recorded in the checkpoint** — a resume reconstructs the exact stage position
+  and patience counters (a mid-stage resume continues patience identically).
+- Under multi-GPU DDP the decision is **rank-synchronised** (all ranks transition at
+  the same step), so the freeze flip and optimizer rebuild never desync.
+- A config with no `early_stop` on any stage behaves — and checkpoints —
+  bitwise-identically to before; nothing changes unless you opt in.
+
+### Per-stage callbacks — `callbacks`
+
+A stage can declare extra Lightning callbacks that are active **only** during that
+stage, layered on the always-propagated top-level `callbacks:`:
+
+```yaml
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      callbacks:
+        - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+          init_args: {logging_interval: step}
+    full_finetune:
+      frozen: []
+```
+
+- Top-level (global) `callbacks:` — `ModelCheckpoint`, the logger, progress bar —
+  **persist for the whole fit** and keep their cross-stage state (best-checkpoint
+  tracking, logging). They are never re-instantiated.
+- A stage's own `callbacks:` are **instantiated fresh when the stage begins** (fresh
+  state each time), receive hooks only while their stage is active, and are torn down
+  when the stage ends. The effective set in a stage is *the persistent globals plus
+  that stage's freshly-instantiated callbacks*.
+- Every declared stage callback is import/instantiation-checked at **fit start**, so a
+  bad `class_path` fails before training, not three stages in.
 
 ### Stacking and deleting stages
 

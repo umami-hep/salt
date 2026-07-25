@@ -191,6 +191,7 @@ class StageScopedCallbacks(Callback):
         then discards them; the active stage's live delegates are built lazily at
         the first per-stage hook. No-op off ``fit`` or without stage callbacks.
         """
+        del trainer  # validation only reads the model's schedule
         if stage != "fit":
             return
         schedule = getattr(pl_module, "_schedule", None)

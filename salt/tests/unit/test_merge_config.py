@@ -378,3 +378,34 @@ class TestClassPathOrdering:
         for module in ("norm", "track_embed", "encoder", "jets_classification"):
             order = child_key_order(text, module)
             assert order.index("class_path") < order.index("init_args")
+
+
+class TestStageCaption:
+    """W7 surfacing: the per-stage graph caption reflects early_stop + callbacks."""
+
+    def test_plain_stage_caption(self):
+        from salt.merge_config import _stage_title
+        from salt.schedule import StageConfig
+
+        title = _stage_title(0, 2, "warmup", frozenset({"encoder"}), StageConfig(name="warmup"))
+        assert title == "stage 1/2: warmup — frozen: encoder"
+
+    def test_caption_includes_early_stop(self):
+        from salt.merge_config import _stage_title
+        from salt.schedule import EarlyStopConfig, StageConfig
+
+        stage = StageConfig(
+            name="full",
+            early_stop=EarlyStopConfig(monitor="val/loss", mode="min", patience=5),
+        )
+        title = _stage_title(1, 2, "full", frozenset(), stage)
+        assert "early_stop: val/loss (min, patience 5)" in title
+        assert "frozen: (none)" in title
+
+    def test_caption_includes_stage_callback_count(self):
+        from salt.merge_config import _stage_title
+        from salt.schedule import StageConfig
+
+        stage = StageConfig(name="full", callbacks=({"class_path": "pkg.A"},))
+        title = _stage_title(1, 2, "full", frozenset(), stage)
+        assert "+1 stage callback(s)" in title

@@ -25,7 +25,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan, deadcode
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode
-from salt.schedule import TrainingSchedule
+from salt.schedule import StageConfig, TrainingSchedule
 
 __all__ = ["main"]
 
@@ -230,7 +230,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     n_stages = len(schedule.stages)
     for index, stage in enumerate(schedule.stages):
         frozen = frozenset(schedule.frozen_names(stage))
-        title = _stage_title(index, n_stages, stage.name, frozen)
+        title = _stage_title(index, n_stages, stage.name, frozen, stage)
         dot_text = dot_source(plan, cfg.modules, pruned, widths=widths, frozen=frozen, title=title)
         dot_path = Path(f"{stem}_stage{index:02d}_{stage.name}.dot")
         dot_path.write_text(dot_text)
@@ -260,7 +260,18 @@ def _schedule_from_merged(merged: Any) -> TrainingSchedule:
     return TrainingSchedule.from_config(raw_schedule, module_names)
 
 
-def _stage_title(index: int, total: int, name: str, frozen: frozenset[str]) -> str:
-    """The caption for a stage graph: position, name, and its frozen module set."""  # noqa: DOC201
+def _stage_title(
+    index: int, total: int, name: str, frozen: frozenset[str], stage: StageConfig
+) -> str:
+    """The caption for a stage graph: position, name, its frozen module set, and —
+    when declared — the stage's early-stop criterion and scoped-callback count
+    (plan 12 W7 surfacing).
+    """  # noqa: DOC201
     frozen_str = ", ".join(sorted(frozen)) if frozen else "(none)"
-    return f"stage {index + 1}/{total}: {name} — frozen: {frozen_str}"
+    title = f"stage {index + 1}/{total}: {name} — frozen: {frozen_str}"
+    if stage.early_stop is not None:
+        es = stage.early_stop
+        title += f" — early_stop: {es.monitor} ({es.mode}, patience {es.patience})"
+    if stage.callbacks:
+        title += f" — +{len(stage.callbacks)} stage callback(s)"
+    return title
