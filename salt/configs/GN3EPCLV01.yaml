@@ -18,7 +18,6 @@ data:
           flows: {global_object: false}
           electrons: {global_object: false}
           global: {global_object: true}
-        selections: null
     features:
       class_path: salt.data.Features
       init_args:

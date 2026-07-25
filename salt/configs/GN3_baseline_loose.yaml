@@ -1,4 +1,4 @@
-# Thin overlay on GN3_baseline.yaml: removes its track selections (loose
+# Thin overlay on GN3_baseline.yaml: removes its track constituent cuts (loose
 # tracks) via null-deletion. Stack GN3_baseline.yaml first, then this overlay.
 
 name: GN3_baseline_loose
@@ -8,4 +8,4 @@ data:
     reader:
       class_path: salt.data.H5StructuredReader
       init_args:
-        selections: null # loose tracks: drop GN3_baseline's d0/NSHARED cuts
+        constituent_cuts: null # loose tracks: drop GN3_baseline's d0/shared-hit cuts

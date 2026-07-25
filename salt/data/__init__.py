@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from salt.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
-from salt.data.readers.cuts import Cut, CutSpec
+from salt.data.readers.cuts import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
 from salt.data.datamodule import GraphDataModule
 from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
 from salt.data.processors.features import Features
@@ -23,10 +23,12 @@ from salt.data.readers.vds import VDS, create_vds, default_vds_path, has_wildcar
 __all__ = [
     "MODEL_VISIBLE_NAMESPACES",
     "VDS",
+    "ConstituentCuts",
     "Cut",
     "CutSpec",
     "Features",
     "FtagLabeller",
+    "GlobalObjectCuts",
     "GraphDataModule",
     "GraphDataset",
     "GroupConfig",

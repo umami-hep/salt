@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from salt.data.base import Reader, WorkerCtx, _require_root_deps
-from salt.data.readers.cuts import CutSpec
+from salt.data.readers.cuts import GlobalObjectCuts
 from salt.data.readers.stream import OffsetIndex, StreamConfig
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
@@ -149,9 +149,14 @@ class UprootReader(Reader):
         is consumed by the unroll). Group insertion order is never semantic.
     num : int, optional
         Number of rows to serve (post-cut); ``-1`` = all.
-    cuts : CutSpec | None, optional
+    cuts : GlobalObjectCuts | None, optional
         Row-level eligibility evaluated in `prepare` over the row-axis scalars;
         only passing rows enter the index (available on either axis).
+    constituent_cuts : Mapping[str, Any] | None, optional
+        Per-stream `ConstituentCuts` (or the equivalent mapping
+        ``{cuts: [...], on_fail: drop}``) applied WITHIN each jagged row by the
+        shared drop-then-pad pipeline. Only ``on_fail: drop`` is implemented on
+        this reader — ``mask`` is H5-first (a follow-up on the awkward path).
     stage : str | None, optional
         The bound stage (``"train"``/``"val"``/``"test"``); selects per-split cuts.
 
@@ -159,7 +164,9 @@ class UprootReader(Reader):
     ------
     ConfigError
         On an empty/malformed group config; an ``unroll`` that names no group or
-        names a ``jagged=True`` group; a linked group while ``unroll is None``.
+        names a ``jagged=True`` group; a linked group while ``unroll is None``;
+        constituent cuts on a scalar stream, referencing an unconfigured branch,
+        or requesting ``on_fail: mask``.
     SchemaError
         When a configured branch is missing, or a stream's jaggedness disagrees
         with the config.
@@ -172,7 +179,8 @@ class UprootReader(Reader):
         tree: str = "CollectionTree",
         unroll: str | None = None,
         num: int = -1,
-        cuts: CutSpec | None = None,
+        cuts: GlobalObjectCuts | None = None,
+        constituent_cuts: Mapping[str, Any] | None = None,
         stage: str | None = None,
     ) -> None:
         super().__init__()
@@ -188,6 +196,8 @@ class UprootReader(Reader):
             stream: self._parse_group(stream, cfg) for stream, cfg in groups.items()
         }
         self._validate_unroll()
+        self.constituent_cuts = self._parse_constituent_cuts(constituent_cuts, tuple(self.groups))
+        self._validate_constituent_cuts()
         self.schema: Schema | None = None
         # transient per-process state (never pickled, see base __getstate__)
         self._table: list[_FileEntry] | None = None
@@ -214,6 +224,34 @@ class UprootReader(Reader):
                 f"linked groups {linked} (link_branch/target_prefix) require unroll to name a "
                 "group — ElementLink dereference is per-row-object, no meaning on the entry axis"
             )
+
+    def _validate_constituent_cuts(self) -> None:
+        """Enforce jagged-only, drop-only, configured-branch invariants for constituent cuts.
+
+        Raises
+        ------
+        ConfigError
+            On a scalar stream, ``on_fail: mask``, or an unconfigured cut branch.
+        """
+        for stream, cc in self.constituent_cuts.items():
+            if not self.groups[stream].jagged:
+                raise ConfigError(
+                    f"constituent_cuts on stream {stream!r}, which is declared jagged=False "
+                    "— constituent cuts act within a sequence row; use the reader's "
+                    "row-level cuts: instead"
+                )
+            if cc.on_fail != "drop":
+                raise ConfigError(
+                    f"constituent_cuts[{stream!r}]: UprootReader implements on_fail: drop "
+                    f"only, got {cc.on_fail!r} — in-place masking is H5-first"
+                )
+            branches = self.groups[stream].branches
+            missing = [f for f in cc.fields if f not in branches]
+            if missing:
+                raise ConfigError(
+                    f"constituent_cuts[{stream!r}]: cut field(s) {missing} are not configured "
+                    f"branches of that group (configured: {sorted(branches)})"
+                )
 
     @staticmethod
     def _parse_group(
@@ -403,6 +441,7 @@ class UprootReader(Reader):
             unroll=self.unroll,
             num=num,
             cuts=self.cuts,
+            constituent_cuts=self.constituent_cuts,
             stage=stage,
         )
 
@@ -423,7 +462,7 @@ class UprootReader(Reader):
 
     def prepare(self) -> None:
         """Resolve files, build the entry->row offset index (post-cut) and the schema
-        (idempotent); evaluates the (per-stage) `CutSpec` over row-axis scalars to keep
+        (idempotent); evaluates the (per-stage) `GlobalObjectCuts` over row-axis scalars to keep
         only passing rows, then resolves each jagged stream's served ``pad_max``.
         """
         if self._table is not None:
@@ -573,13 +612,13 @@ class UprootReader(Reader):
                 continue
             if carrier is None:
                 raise SchemaError(
-                    f"CutSpec field {cf!r} cannot resolve — unroll=None with no jagged=False "
+                    f"row-cut field {cf!r} cannot resolve — unroll=None with no jagged=False "
                     "(row-scalar) stream to carry cut variables"
                 )
             branch = self._on_disk(carrier, cf)
             if branch not in avail:
                 raise SchemaError(
-                    f"CutSpec field {cf!r} -> branch {branch!r} not in {path.name!r}; "
+                    f"row-cut field {cf!r} -> branch {branch!r} not in {path.name!r}; "
                     "cut variables must be row-axis scalar branches"
                 )
             arr = t[branch].array(library="ak")
@@ -591,9 +630,9 @@ class UprootReader(Reader):
     def _apply_cuts(
         self, row_scalars: dict[str, np.ndarray], orig_counts: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Evaluate the CutSpec -> kept flat-row indices + per-entry kept-row counts.
+        """Evaluate the row cuts -> kept flat-row indices + per-entry kept-row counts.
 
-        With no cuts every row is kept; otherwise `CutSpec.eligible` gives the keep
+        With no cuts every row is kept; otherwise `GlobalObjectCuts.eligible` gives the keep
         mask over a structured row-scalar record built from the flat columns.
         """
         n_rows_total = int(orig_counts.sum())
@@ -641,6 +680,8 @@ class UprootReader(Reader):
     def bind(self, ctx: WorkerCtx) -> None:
         """Resolve files and record the demand-narrowed read set per stream (demanded
         fields intersected with configured branches; empty demand -> all configured).
+
+        Constituent-cut fields join the demand so a cut variable is always read.
         """
         self.prepare()
         assert self._table is not None
@@ -653,6 +694,9 @@ class UprootReader(Reader):
                         f"field {fieldname!r} demanded by {who!r} not a configured branch in "
                         f"group {stream!r} (configured: {sorted(cfg.branches)})"
                     )
+            if demanded and (cc := self.constituent_cuts.get(stream)) is not None:
+                for fieldname in cc.fields:
+                    demanded.setdefault(fieldname, f"{self.name} (constituent cuts)")
             self._read_fields[stream] = demanded
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
@@ -785,10 +829,14 @@ class UprootReader(Reader):
     # -- assembly -------------------------------------------------------------
 
     def _stream_config(self, stream: str) -> StreamConfig:
-        """The `StreamConfig` for a jagged stream (resolved ``pad_max``; no cuts/sort —
-        constituent selection is not a reader concern).
+        """The `StreamConfig` for a jagged stream: resolved ``pad_max`` + this stream's
+        `ConstituentCuts` (drop-then-pad); no sort.
         """
-        return StreamConfig(pad_max=self._mult[stream], jagged=True)
+        return StreamConfig(
+            pad_max=self._mult[stream],
+            jagged=True,
+            cuts=self.constituent_cuts.get(stream),
+        )
 
     def _assemble_jagged(
         self, stream: str, fields: list[str], cols: dict[str, Any], b: int

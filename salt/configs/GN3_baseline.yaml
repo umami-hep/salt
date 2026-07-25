@@ -14,8 +14,13 @@ data:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false, dataset: tracks_ghost}
-        selections:
-          tracks: ["d0 < 3.5", "NSHARED < 1.1"]
+        constituent_cuts:
+          tracks:
+            on_fail: mask # blank a failing track in place (slot + multiplicity kept)
+            cuts:
+              - d0 < 3.5
+              # the FTAG shared-module count, previously the derived 'NSHARED'
+              - (numberOfPixelSharedHits + numberOfSCTSharedHits / 2) < 1.1
     features:
       class_path: salt.data.Features
       init_args:

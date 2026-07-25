@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import h5py
 import numpy as np
-from ftag import Cuts
-from ftag.track_selector import TrackSelector
 
 from salt.data.base import Reader, WorkerCtx
 from salt.data.dtypes import get_dtype
@@ -28,7 +26,7 @@ from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema, load_schema
 
 if TYPE_CHECKING:
-    from salt.data.readers.cuts import CutSpec
+    from salt.data.readers.cuts import GlobalObjectCuts
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
 
@@ -75,11 +73,13 @@ class H5StructuredReader(Reader):
         omitted at construction and supplied via `with_source`.
     num : int, optional
         Number of rows to serve; ``-1`` = all.
-    selections : Mapping[str, Sequence[str]] | None, optional
-        Per-stream ftag cut lists (constituent-level, NaN-in-place), applied to the
-        structured array immediately after the read. Distinct from `cuts` (below):
-        `selections` filter constituents within a row; `cuts` drop whole rows.
-    cuts : CutSpec | None, optional
+    constituent_cuts : Mapping[str, Any] | None, optional
+        Per-stream `ConstituentCuts` (or the equivalent mapping
+        ``{cuts: [...], on_fail: mask|drop}``), applied to the structured array
+        immediately after the read. Distinct from `cuts` (below): constituent cuts
+        filter constituents WITHIN a row (``mask`` blanks them in place, ``drop``
+        removes and re-pads); `cuts` drop whole rows.
+    cuts : GlobalObjectCuts | None, optional
         Sample-axis (per-jet) row eligibility evaluated once in `prepare` over the
         first group's scalar record; only passing rows enter the index (kept-index +
         filtered read). Changes `__len__`; the served rows never read the dropped
@@ -103,8 +103,9 @@ class H5StructuredReader(Reader):
     Raises
     ------
     ConfigError
-        On malformed group configs, unknown selection/transform streams, or
-        an unset ``global_object`` flag with no schema to infer from.
+        On malformed group configs, unknown constituent-cut/transform streams,
+        constituent cuts on a ``global_object`` stream, or an unset
+        ``global_object`` flag with no schema to infer from.
     SchemaError
         When the schema artifact contradicts the config (missing groups or
         fields, a non-global_object group without ``valid``).
@@ -124,8 +125,8 @@ class H5StructuredReader(Reader):
         schema: Schema | str | Path | None = None,
         filename: str | Path | None = None,
         num: int = -1,
-        selections: Mapping[str, Sequence[str]] | None = None,
-        cuts: CutSpec | None = None,
+        constituent_cuts: Mapping[str, Any] | None = None,
+        cuts: GlobalObjectCuts | None = None,
         stage: str | None = None,
         transforms: Sequence[Callable] | None = None,
         vds_path: str | Path | None = None,
@@ -142,19 +143,11 @@ class H5StructuredReader(Reader):
         self.groups: dict[str, GroupConfig] = {
             stream: self._parse_group(stream, cfg) for stream, cfg in groups.items()
         }
-        self.selections = {k: list(v) for k, v in (selections or {}).items()}
+        self.constituent_cuts = self._parse_constituent_cuts(constituent_cuts, tuple(self.groups))
         self.transforms = list(transforms or [])
-        self._selectors: dict[str, TrackSelector] = {}
-        self._selection_fields: dict[str, list[str]] = {}
-        for stream, cut_list in self.selections.items():
-            if stream not in self.groups:
-                raise ConfigError(
-                    f"selections configured for unknown stream {stream!r} — known streams: "
-                    f"{sorted(self.groups)} (design §6.1)"
-                )
-            cuts = Cuts.from_list(list(cut_list))
-            self._selectors[stream] = TrackSelector(cuts)
-            self._selection_fields[stream] = list(cuts.variables)
+        self._constituent_fields: dict[str, list[str]] = {
+            stream: list(cc.fields) for stream, cc in self.constituent_cuts.items()
+        }
         self._transform_wants_rng = [
             "rng" in inspect.signature(transform).parameters for transform in self.transforms
         ]
@@ -228,10 +221,16 @@ class H5StructuredReader(Reader):
                     "cannot be derived (design §6.1)"
                 )
             resolved[stream] = GroupConfig(cfg.dataset, cfg.truncate, global_object)
-            if gschema is not None:
-                config_fields = self._selection_fields.get(stream, []) + self._transform_fields.get(
-                    stream, []
+            if global_object and stream in self.constituent_cuts:
+                raise ConfigError(
+                    f"constituent_cuts on stream {stream!r}, which is a global_object "
+                    "(scalar) stream — constituent cuts act within a sequence row; use "
+                    "the reader's row-level cuts: instead"
                 )
+            if gschema is not None:
+                config_fields = self._constituent_fields.get(
+                    stream, []
+                ) + self._transform_fields.get(stream, [])
                 for field in config_fields:
                     if field not in gschema.fields:
                         near = get_close_matches(
@@ -239,8 +238,9 @@ class H5StructuredReader(Reader):
                         )
                         hint = f"; nearest: {', '.join(near)}" if near else ""
                         raise SchemaError(
-                            f"selection/transform field {field!r} for stream {stream!r} not "
-                            f"present in schema group {cfg.dataset!r}{hint} (design §6.1)"
+                            f"constituent-cut/transform field {field!r} for stream "
+                            f"{stream!r} not present in schema group {cfg.dataset!r}"
+                            f"{hint} (design §6.1)"
                         )
         self.groups = resolved
 
@@ -279,8 +279,10 @@ class H5StructuredReader(Reader):
         )
 
     def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None —
-        the H5 read path has no per-constituent cuts/sort surface.
+        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None.
+
+        Carries no cuts: the structured H5 slab applies `ConstituentCuts` directly in
+        `read` (both ``mask`` and ``drop``), never through the jagged awkward pipeline.
         """
         cfg = self.groups[stream]
         if cfg.truncate is None:
@@ -294,15 +296,16 @@ class H5StructuredReader(Reader):
         vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> H5StructuredReader:
-        """Clone onto another source file (config-only: schema, group configs, selections,
-        cuts, and transforms are shared); `stage` selects the clone's per-split row cuts.
+        """Clone onto another source file (config-only: schema, group configs, constituent
+        cuts, row cuts, and transforms are shared); `stage` selects the clone's per-split
+        row cuts.
         """
         clone = H5StructuredReader(
             groups=self.groups,
             schema=self.schema,
             filename=filename,
             num=num,
-            selections=self.selections,
+            constituent_cuts=self.constituent_cuts,
             cuts=self.cuts,
             stage=stage if stage is not None else self.stage,
             transforms=self.transforms,
@@ -428,7 +431,7 @@ class H5StructuredReader(Reader):
 
     def bind(self, ctx: WorkerCtx) -> None:
         """Open the handle and allocate demand-narrowed buffers per group (dtype covers
-        demanded + selection/transform fields via `get_dtype`); raises `SchemaError`
+        demanded + constituent-cut/transform fields via `get_dtype`); raises `SchemaError`
         naming the demanding module for a field absent from the live file.
         """
         self.prepare()
@@ -439,8 +442,8 @@ class H5StructuredReader(Reader):
         for stream, cfg in self.groups.items():
             ds = self._h5[cfg.dataset]
             demanded = dict(ctx.read_fields.get(stream, {}))
-            for field in self._selection_fields.get(stream, []):
-                demanded.setdefault(field, f"{self.name} (selections)")
+            for field in self._constituent_fields.get(stream, []):
+                demanded.setdefault(field, f"{self.name} (constituent cuts)")
             for field in self._transform_fields.get(stream, []):
                 demanded.setdefault(field, f"{self.name} (transforms)")
             file_fields = ds.dtype.names or ()
@@ -467,7 +470,7 @@ class H5StructuredReader(Reader):
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one batch: contiguous ``read_direct`` slab (no cuts) or a filtered read
-        of the kept file rows (cuts), then apply selections, truncate, transforms
+        of the kept file rows (cuts), then apply constituent cuts, truncate, transforms
         (FIT-only, seeded), and derive ``masks.<stream> = ~valid``.
 
         With no cuts (`_kept is None`) the path is byte-identical to a contiguous read
@@ -487,8 +490,8 @@ class H5StructuredReader(Reader):
                 batch = buf
             else:
                 batch = self._read_kept(ds, buf.dtype, file_rows)
-            if (selector := self._selectors.get(stream)) is not None:
-                batch = selector(batch)
+            if (cc := self.constituent_cuts.get(stream)) is not None:
+                batch = cc.apply(batch)
             # None for scalar/untruncated streams -> no-op
             stream_cfg = self._stream_config(stream)
             if stream_cfg is not None:

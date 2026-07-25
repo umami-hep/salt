@@ -5,12 +5,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from salt.data import Cut, OffsetIndex, StreamConfig
+from salt.data import ConstituentCuts, Cut, OffsetIndex, StreamConfig
 from salt.data.readers.stream import INT_PAD_SENTINEL, _cut_sort_truncate_pad, pad_fill
 from salt.graph.errors import ConfigError
 from salt.schema import GroupSchema
 
 ak = pytest.importorskip("awkward")
+
+
+def _drop(*cuts: Cut) -> ConstituentCuts:
+    """Drop-then-pad constituent cuts (the jagged assembly path's only mode).
+
+    Returns
+    -------
+    ConstituentCuts
+        The container in ``on_fail: drop`` mode.
+    """
+    return ConstituentCuts(cuts=cuts, on_fail="drop")
 
 
 # --------------------------------------------------------------------------- #
@@ -41,12 +52,26 @@ def test_stream_config_sort_rejects_empty_var() -> None:
 
 def test_stream_config_cuts_must_be_cut_instances() -> None:
     with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, cuts=("not a cut",))  # type: ignore[arg-type]
+        StreamConfig(pad_max=4, cuts=ConstituentCuts(cuts=("not a cut",), on_fail="drop"))
+
+
+def test_stream_config_cuts_must_be_constituent_cuts() -> None:
+    with pytest.raises(ConfigError):
+        StreamConfig(pad_max=4, cuts=(Cut(field="pt", op=">", value=0),))  # type: ignore[arg-type]
+
+
+def test_stream_config_rejects_mask_mode_on_jagged_pipeline() -> None:
+    """on_fail: mask is H5-first — the awkward assembly path implements drop only."""
+    with pytest.raises(ConfigError, match="on_fail: drop"):
+        StreamConfig(
+            pad_max=4,
+            cuts=ConstituentCuts(cuts=(Cut(field="pt", op=">", value=0),), on_fail="mask"),
+        )
 
 
 def test_stream_config_cuts_sort_rejected_on_scalar_stream() -> None:
     with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, jagged=False, cuts=(Cut(field="pt", op=">", value=0),))
+        StreamConfig(pad_max=4, jagged=False, cuts=_drop(Cut(field="pt", op=">", value=0)))
     with pytest.raises(ConfigError):
         StreamConfig(pad_max=4, jagged=False, sort={"var": "pt"})
 
@@ -162,7 +187,7 @@ def test_drop_then_pad_removes_failing_constituent() -> None:
         "label": ak.Array([[10, 11, 12, 13]]),
     }
     gschema = GroupSchema(fields={"pt": "float32", "label": "int32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=4, cuts=(Cut(field="pt", op=">", value=3.0),))
+    cfg = StreamConfig(pad_max=4, cuts=_drop(Cut(field="pt", op=">", value=3.0)))
     raw, valid = _cut_sort_truncate_pad(cols, ["pt", "label"], cfg, 1, gschema)
     # only the 2 passing constituents are kept, padded — NOT masked-in-place
     np.testing.assert_array_equal(raw["pt"][0], [5.0, 9.0, 0.0, 0.0])
@@ -176,7 +201,7 @@ def test_drop_then_pad_does_not_waste_pad_max_slots() -> None:
     # pad_max=2, original 4 constituents, cut keeps 3 leading -> truncate to 2 KEPT
     cols = {"pt": ak.Array([[9.0, 1.0, 8.0, 7.0]])}
     gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=2, cuts=(Cut(field="pt", op=">", value=3.0),))
+    cfg = StreamConfig(pad_max=2, cuts=_drop(Cut(field="pt", op=">", value=3.0)))
     raw, valid = _cut_sort_truncate_pad(cols, ["pt"], cfg, 1, gschema)
     # kept = [9, 8, 7]; truncate to leading 2 -> [9, 8]; NO pad slot is a dropped const
     np.testing.assert_array_equal(raw["pt"][0], [9.0, 8.0])
@@ -214,7 +239,7 @@ def test_cut_then_sort_compose() -> None:
     cols = {"pt": ak.Array([[5.0, 1.0, 3.0, 2.0]])}
     gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
     cfg = StreamConfig(
-        pad_max=4, cuts=(Cut(field="pt", op=">", value=1.0),), sort={"var": "pt"}
+        pad_max=4, cuts=_drop(Cut(field="pt", op=">", value=1.0)), sort={"var": "pt"}
     )
     raw, valid = _cut_sort_truncate_pad(cols, ["pt"], cfg, 1, gschema)
     np.testing.assert_array_equal(raw["pt"][0], [5.0, 3.0, 2.0, 0.0])
@@ -226,7 +251,7 @@ def test_missing_cut_or_sort_field_raises() -> None:
     gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
     with pytest.raises(KeyError):
         _cut_sort_truncate_pad(
-            cols, ["pt"], StreamConfig(pad_max=2, cuts=(Cut(field="nope", op=">", value=0),)),
+            cols, ["pt"], StreamConfig(pad_max=2, cuts=_drop(Cut(field="nope", op=">", value=0))),
             1, gschema,
         )
     with pytest.raises(KeyError):

@@ -13,7 +13,7 @@ import numpy as np
 from salt.graph.errors import ConfigError
 
 if TYPE_CHECKING:
-    from salt.data.readers.cuts import Cut
+    from salt.data.readers.cuts import ConstituentCuts
     from salt.schema import GroupSchema
 
 __all__ = ["INT_PAD_SENTINEL", "OffsetIndex", "StreamConfig", "pad_fill"]
@@ -45,11 +45,12 @@ class StreamConfig:
         ``None`` (default) keeps the file order — the parity-preserving path. The
         permutation is applied to every field of the stream (and any aligned labels)
         so a sort never desynchronises features from labels.
-    cuts : tuple[Cut, ...], optional
-        Per-constituent keep cuts (drop-then-pad). ``()`` (default) keeps every
-        constituent — the parity-preserving path. A constituent failing any cut is
-        removed before padding (never wastes a ``pad_max`` slot). Reuses
-        `salt.data.readers.cuts.Cut`.
+    cuts : ConstituentCuts | None, optional
+        Per-constituent keep cuts. ``None`` (default) keeps every constituent —
+        the parity-preserving path. This jagged (awkward) assembly path implements
+        ``on_fail: drop`` only: a failing constituent is removed before padding and
+        never wastes a ``pad_max`` slot. ``on_fail: mask`` is H5-first (see
+        `ConstituentCuts`) and is rejected here.
     jagged : bool, optional
         Whether this is a variable-length sequence stream (padded to ``pad_max``
         with a ``valid`` field + pad mask). ``False`` is a scalar / global-object
@@ -58,17 +59,20 @@ class StreamConfig:
     Raises
     ------
     ConfigError
-        On ``pad_max < 1``, a malformed ``sort`` spec, a non-`Cut` entry in
-        ``cuts``, or cuts/sort configured on a non-jagged stream.
+        On ``pad_max < 1``, a malformed ``sort`` spec, a ``cuts`` value that is not
+        `ConstituentCuts`, ``on_fail: mask`` (unsupported on this path), or
+        cuts/sort configured on a non-jagged stream.
     """
 
     pad_max: int
     sort: dict[str, str] | None = None
-    cuts: tuple[Cut, ...] = ()
+    cuts: ConstituentCuts | None = None
     jagged: bool = True
 
     def __post_init__(self) -> None:
-        from salt.data.readers.cuts import Cut  # noqa: PLC0415 - lazy: avoid base<-stream<-cuts cycle
+        from salt.data.readers.cuts import (  # noqa: PLC0415 - lazy: avoid base<-stream<-cuts cycle
+            ConstituentCuts,
+        )
 
         if self.pad_max < 1:
             raise ConfigError(f"StreamConfig: pad_max must be >= 1, got {self.pad_max}")
@@ -83,10 +87,15 @@ class StreamConfig:
                 )
             # normalise (frozen dataclass — set via object.__setattr__)
             object.__setattr__(self, "sort", {"var": str(var), "mode": str(mode)})
-        for c in self.cuts:
-            if not isinstance(c, Cut):
-                raise ConfigError(f"StreamConfig.cuts must contain Cut instances, got {c!r}")
-        if not self.jagged and (self.cuts or self.sort is not None):
+        if self.cuts is not None:
+            if not isinstance(self.cuts, ConstituentCuts):
+                raise ConfigError(f"StreamConfig.cuts must be a ConstituentCuts, got {self.cuts!r}")
+            if self.cuts.on_fail != "drop":
+                raise ConfigError(
+                    "StreamConfig.cuts: the jagged assembly path implements on_fail: drop "
+                    f"only, got {self.cuts.on_fail!r} — masking in place is H5-first"
+                )
+        if not self.jagged and (self.cuts is not None or self.sort is not None):
             raise ConfigError(
                 "StreamConfig: cuts/sort are only valid for jagged (sequence) streams"
             )
@@ -94,7 +103,7 @@ class StreamConfig:
     @property
     def engages_pipeline(self) -> bool:
         """Whether cut/sort are configured (``True`` engages the drop-then-pad / sort machinery)."""
-        return bool(self.cuts) or self.sort is not None
+        return (self.cuts is not None and bool(self.cuts.cuts)) or self.sort is not None
 
 
 def pad_fill(dt: np.dtype | None, arr: Any = None) -> Any:
@@ -196,22 +205,10 @@ def _apply_cut_and_sort(
     all_cols = {**work, **aligned}
 
     # --- 1. cut: drop-then-pad (a failing constituent is REMOVED) ---
-    if stream_cfg.cuts:
-        from salt.data.processors.multi_target import _OPERATORS  # noqa: PLC0415
-
-        keep = None
-        for c in stream_cfg.cuts:
-            fname = c.bare_field
-            if fname not in all_cols:
-                raise KeyError(
-                    f"StreamConfig cut field {c.field!r} (-> {fname!r}) is not a constituent "
-                    f"field of this stream; available: {sorted(all_cols)}"
-                )
-            this = _OPERATORS[c.op](all_cols[fname], c.value)
-            keep = this if keep is None else (keep & this)
-        if keep is not None:
-            work = {f: work[f][keep] for f in work}
-            aligned = {f: aligned[f][keep] for f in aligned}
+    if stream_cfg.cuts is not None and stream_cfg.cuts.cuts:
+        keep = stream_cfg.cuts.keep(all_cols)
+        work = {f: work[f][keep] for f in work}
+        aligned = {f: aligned[f][keep] for f in aligned}
 
     # --- 2. sort: argsort by sort.var, permute ALL fields + labels in lockstep ---
     if stream_cfg.sort is not None:
