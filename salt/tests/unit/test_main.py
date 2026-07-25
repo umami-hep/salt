@@ -1159,7 +1159,7 @@ class TestStageCallbacksCLI:
         cli = make_cli(data, extra=["--config", override])
         coord = StageScopedCallbacks()
         coord.setup(_StubTrainer(), cli.model, "fit")  # validates all specs (no raise)
-        coord._sync_active_stage(_StubTrainer(), cli.model)  # noqa: SLF001 - build stage-0 delegates
+        coord._sync_active_stage(_StubTrainer(), cli.model)  # noqa: SLF001 - build delegates
         delegates = coord._active_delegates  # noqa: SLF001
         assert len(delegates) == 1
         # class-name compare (not isinstance): `_resolve_class_path` imports the test

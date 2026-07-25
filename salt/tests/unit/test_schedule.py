@@ -440,7 +440,8 @@ class TestEarlyStopTracker:
         assert t.check(0.6) is True  # no improvement, wait=1 == patience
 
     def test_min_delta_requires_meaningful_improvement(self):
-        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", mode="min", patience=1, min_delta=0.1))
+        cfg = EarlyStopConfig(monitor="val/loss", mode="min", patience=1, min_delta=0.1)
+        t = EarlyStopTracker(cfg)
         t.check(1.0)
         # 0.95 is lower but not by min_delta=0.1 → not an improvement → stop at patience 1
         assert t.check(0.95) is True
@@ -571,9 +572,9 @@ class TestLRSchedulerParse:
         assert not sched.has_lr_scheduler
 
     def test_minimal_defaults(self):
+        spec = {"class_path": _COSINE, "init_args": {"T_max": 5}}
         sched = TrainingSchedule.from_config(
-            {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE, "init_args": {"T_max": 5}}}}},
-            MODULE_NAMES,
+            {"stages": {"fit": {"lr_scheduler": spec}}}, MODULE_NAMES
         )
         cfg = sched.initial_stage.lr_scheduler
         assert isinstance(cfg, LRSchedulerConfig)

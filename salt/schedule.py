@@ -372,7 +372,7 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
             raise ConfigError(
                 f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
                 f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
-                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs' (plan 15 W8)."
+                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs' (W8)."
             )
     return StageConfig(
         name=name,
