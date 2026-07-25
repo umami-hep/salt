@@ -65,17 +65,32 @@ class TestUnpadRepadCompile:
             assert torch.equal(compiled(seq, mask), _roundtrip(seq, mask))
 
     def test_helpers_stay_outside_the_graph(self):
-        """Dynamo must break at the seam rather than trace the unpad/repad.
+        """Dynamo must break at the seam instead of tracing the unpad/repad.
 
-        Behavioural, not attribute-sniffing: if the ``torch.compiler.disable``
-        markers are dropped, dynamo traces the boolean indexing into the graph and
-        the break count goes to zero — which is precisely the state that makes
-        inductor reject ``aten.nonzero`` on CUDA (investigation 01, F9).
+        Behavioural, not attribute-sniffing. The dense work around the seam
+        mirrors the real encoder (projections and MLPs bracketing the packed
+        stack) and gives dynamo something to capture — without it the traced
+        function is *only* disabled calls, dynamo captures no graph at all, and
+        the break count is a meaningless zero.
+
+        If the ``torch.compiler.disable`` markers are dropped, the boolean
+        indexing is traced into the graph instead and the breaks disappear —
+        precisely the state in which inductor rejects ``aten.nonzero`` on CUDA
+        (investigation 01, F9).
         """
+
+        def with_dense_work(seq: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            scaled = seq * 2.0
+            packed, culens, maxlen = undo_padding(scaled, mask)
+            del culens, maxlen
+            return redo_padding(packed + 1.0, mask) * 3.0
+
         seq, mask = _batch(seed=11)
         torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
-        explanation = torch._dynamo.explain(_roundtrip)(seq, mask)  # noqa: SLF001 - dynamo API
+        explanation = torch._dynamo.explain(with_dense_work)(seq, mask)  # noqa: SLF001 - dynamo API
         assert explanation.graph_break_count > 0, (
             "no graph break at the unpad/repad seam — the compiler-disable markers on "
             "undo_padding/redo_padding have been lost"
         )
+        # and the surrounding dense work still compiles
+        assert explanation.graph_count > 0
