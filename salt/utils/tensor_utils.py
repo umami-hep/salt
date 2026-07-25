@@ -98,10 +98,22 @@ def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
     return x
 
 
+@torch.compiler.disable
 def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple[Tensor, Tensor, int]:
     """Remove padded elements; return the packed sequence + flash-varlen metadata.
 
     ``mask == True`` means padded (the mask is flipped internally).
+
+    ``torch.compiler.disable`` keeps this out of the compiled region — it is a
+    no-op unless the model is compiled. Two things here are not compilable:
+    ``.item()`` (a scalar read dynamo cannot trace without
+    ``capture_scalar_outputs``) and the boolean index ``seq[mask]``, whose output
+    shape depends on the data. The latter lowers to ``aten.nonzero``, which
+    **inductor refuses on CUDA** — so capturing it is not an option on the GPUs
+    this runs on, and the cheap fix is to take one deliberate graph break here
+    and let the whole layer stack compile with static shapes around it.
+    ``maybe_mark_dynamic`` then stops the packed length from re-specialising
+    every batch.
 
     Returns
     -------
@@ -113,11 +125,21 @@ def undo_padding(seq: Tensor, mask: BoolTensor) -> tuple[Tensor, Tensor, int]:
     seqlens = mask.sum(dim=-1)
     maxlen = int(seqlens.max().item())
     culens = pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-    return seq[mask], culens, maxlen
+    packed = seq[mask]
+    # the packed token count varies per batch: mark it dynamic so the compiled
+    # region downstream guards on "any length" instead of recompiling per batch
+    torch._dynamo.maybe_mark_dynamic(packed, 0)  # noqa: SLF001 - public-in-practice dynamo API
+    return packed, culens, maxlen
 
 
+@torch.compiler.disable
 def redo_padding(unpadded_seq: Tensor, mask: BoolTensor) -> Tensor:
-    """Re-apply padding to an unpadded sequence (zeros at padded positions)."""
+    """Re-apply padding to an unpadded sequence (zeros at padded positions).
+
+    Disabled for the compiler for the same reason as `undo_padding`: the masked
+    scatter ``out[mask] = ...`` is the same data-dependent ``aten.nonzero`` that
+    inductor rejects on CUDA.
+    """
     mask = ~mask  # convert mask: True -> valid token
     shape = (*mask.shape, unpadded_seq.shape[-1])
     out = torch.zeros(shape, dtype=unpadded_seq.dtype, device=unpadded_seq.device)
