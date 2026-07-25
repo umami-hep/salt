@@ -43,9 +43,11 @@ from salt.model.bind import (
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW
 from salt.schedule import (
+    EarlyStopTracker,
     StageConfig,
     TrainingSchedule,
     apply_stage_freeze,
+    boundary_record,
     clear_frozen_grads,
     reducer_safe_freeze_required,
     trainable_named_params,
@@ -214,6 +216,19 @@ class SaltModule(lightning.LightningModule):
         # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
         # epoch via `train`.
         self._frozen_module_names: set[str] = set()
+        # per-stage early-stop runtime state (plan 12 W7). All inert unless the
+        # schedule declares `early_stop` on some stage (`has_early_stop` master
+        # switch) — the legacy path never touches them, so no new checkpoint state
+        # is written and behaviour is bitwise-identical. `_stage_start_epoch` is the
+        # global epoch the active stage began (for the per-stage epoch-cap count);
+        # `_early_stop_tracker` holds the active stage's live counters;
+        # `_boundary_records` logs completed transitions for resume;
+        # `_pending_early_advance` is set at a validation-end early-stop trigger and
+        # consumed at the next train-epoch-start transition.
+        self._stage_start_epoch = 0
+        self._early_stop_tracker: EarlyStopTracker | None = None
+        self._boundary_records: list[dict[str, Any]] = []
+        self._pending_early_advance = False
         # reducer-safe freeze mode (plan 06/W6): decided at fit `setup` from the
         # attached strategy + schedule. When True, schedule-managed params keep
         # `requires_grad=True` at DDP wrap (so a later unfreeze stays rank-synced);
@@ -768,15 +783,19 @@ class SaltModule(lightning.LightningModule):
     def _apply_training_schedule(self) -> None:
         """Validate the schedule against the attached trainer and apply stage 0's
         freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
+        When any stage declares `early_stop`, also runs the early-stop preflight
+        and seeds stage 0's live counters (plan 12 W7).
 
         Raises
         ------
         ConfigError
-            On an over-allocated epoch budget, or a multi-stage schedule with no
-            finite `trainer.max_epochs` (see `TrainingSchedule.validate_epochs`).
+            On an over-allocated epoch budget, a multi-stage schedule with no
+            finite `trainer.max_epochs` (see `TrainingSchedule.validate_epochs`), or
+            an `early_stop` stage under a trainer with validation disabled.
         """
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
+        self._preflight_early_stop()
         # Decide the freeze mode BEFORE applying the stage-0 mask: under a DDP
         # strategy with a freeze set that changes across stages, keep every managed
         # param requires_grad=True at wrap so the reducer manages them across flips
@@ -786,7 +805,37 @@ class SaltModule(lightning.LightningModule):
             getattr(self._trainer, "strategy", None), self._schedule
         )
         self._current_stage_index = 0
+        self._stage_start_epoch = 0
+        self._boundary_records = []
+        self._pending_early_advance = False
+        self._early_stop_tracker = self._make_early_stop_tracker(self._schedule.stages[0])
         self._apply_stage_freeze(self._schedule.stages[0])
+
+    def _preflight_early_stop(self) -> None:
+        """Fail fast at fit setup if the schedule declares `early_stop` but the
+        trainer cannot ever evaluate it (validation disabled) — an early-stop that
+        can never fire would silently wait for the epoch cap. Inert unless the
+        schedule declares an `early_stop` (the `has_early_stop` master switch).
+
+        Raises
+        ------
+        ConfigError
+            A stage declares `early_stop` but ``trainer.limit_val_batches == 0``.
+        """
+        if not self._schedule.has_early_stop:
+            return
+        if getattr(self._trainer, "limit_val_batches", 1) == 0:
+            raise ConfigError(
+                "training_schedule declares an 'early_stop' stage but the trainer has validation "
+                "disabled (limit_val_batches=0) — early stopping is evaluated on validation-epoch "
+                "end and could never fire. Enable validation or remove early_stop (plan 12 W7)."
+            )
+
+    def _make_early_stop_tracker(self, stage: StageConfig) -> EarlyStopTracker | None:
+        """A fresh `EarlyStopTracker` for `stage` (reset counters), or ``None`` when
+        the stage declares no `early_stop`.
+        """  # noqa: DOC201
+        return EarlyStopTracker(stage.early_stop) if stage.early_stop is not None else None
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
         """Apply `stage`'s freeze mask as a DELTA against the currently-frozen set
@@ -812,6 +861,88 @@ class SaltModule(lightning.LightningModule):
             reducer_safe=self._reducer_safe_freeze,
         )
         self._frozen_module_names = frozen
+
+    # -- stage transitions (driven by TrainingScheduleCallback) -------------------
+
+    def advance_to_stage(self, new_index: int, global_step: int, epoch: int, reason: str) -> None:
+        """Enter stage `new_index`: set the active index + apply its freeze mask
+        (the delta off the previous stage). Under the `early_stop` master switch,
+        also records the boundary, resets the stage's live counters, and marks the
+        new stage's start epoch (so the per-stage epoch-cap count is measured from
+        here). The optimizer/LR rebuild is done by the caller
+        (`TrainingScheduleCallback`) via ``strategy.setup_optimizers`` right after.
+        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under W7).
+        """
+        self._current_stage_index = new_index
+        stage = self._schedule.stages[new_index]
+        self._apply_stage_freeze(stage)
+        if self._schedule.has_early_stop:
+            self._stage_start_epoch = epoch
+            self._pending_early_advance = False
+            self._boundary_records.append(
+                boundary_record(stage.name, new_index, global_step, epoch, reason)
+            )
+            self._early_stop_tracker = self._make_early_stop_tracker(stage)
+
+    def next_stage_index_early_stop(self, current_epoch: int) -> int:
+        """The stage index to run at `current_epoch` under the `early_stop` switch:
+        advance by exactly one when the active stage's early-stop fired (a pending
+        advance) OR it reached its epoch cap (``current_epoch - stage_start >=
+        epochs``); the final stage never advances by cap (its early-stop ends the
+        fit instead). Data-dependent boundaries make this replace the pure
+        epoch-arithmetic `stage_index_for_epoch` whenever any stage can early-stop.
+        """  # noqa: DOC201
+        idx = self._current_stage_index
+        if idx >= len(self._schedule.stages) - 1:
+            return idx
+        stage = self._schedule.stages[idx]
+        cap_reached = stage.epochs is not None and (current_epoch - self._stage_start_epoch) >= (
+            stage.epochs
+        )
+        return idx + 1 if (self._pending_early_advance or cap_reached) else idx
+
+    def evaluate_early_stop(self, monitored: float | None) -> bool:
+        """Fold the active stage's monitored validation value into its early-stop
+        tracker and return the LOCAL early-stop decision (this rank). Called by the
+        callback at validation-epoch end with the RANK-REDUCED monitor value (or
+        ``None`` when the metric is absent — a fail-fast misconfiguration). The
+        caller rank-syncs the returned boolean before acting on it; this method only
+        advances the stage-local counters. Returns ``False`` (no stop) when the
+        active stage declares no `early_stop`.
+
+        Returns
+        -------
+        bool
+            This rank's decision that the active stage should now early-stop.
+
+        Raises
+        ------
+        ConfigError
+            The active stage declares `early_stop` but its `monitor` metric is
+            absent from ``trainer.callback_metrics``.
+        """
+        stage = self._schedule.stages[self._current_stage_index]
+        if stage.early_stop is None:
+            return False
+        if monitored is None:
+            raise ConfigError(
+                f"training_schedule stage {stage.name!r} early_stop monitors "
+                f"{stage.early_stop.monitor!r} but it is absent from trainer.callback_metrics — "
+                "check the metric name (e.g. 'val/loss') or that validation logs it (plan 12 W7)."
+            )
+        assert self._early_stop_tracker is not None
+        return self._early_stop_tracker.check(monitored)
+
+    def mark_pending_early_advance(self) -> None:
+        """Flag that the active (non-final) stage's early-stop has fired — consumed
+        at the next train-epoch-start transition (`next_stage_index_early_stop`).
+        """
+        self._pending_early_advance = True
+
+    @property
+    def pending_early_advance(self) -> bool:
+        """Whether an early-stop trigger is awaiting the next stage transition."""
+        return self._pending_early_advance
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
         """Static writer-input validation on the TEST path.
@@ -1081,12 +1212,39 @@ class SaltModule(lightning.LightningModule):
         schedule uses the whole-run `estimated_stepping_batches` exactly (parity);
         a multi-stage schedule uses this stage's proportional per-stage allocation
         of that estimate (Gotcha #1 — never the whole-run figure for a sub-stage).
+        Under the `early_stop` switch the envelope is sized from the stage's epoch
+        cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
+        so a stage that starts early — because an earlier stage early-stopped — never
+        over-steps its OneCycle.
         """  # noqa: DOC201
         total = self.trainer.estimated_stepping_batches
         if not self._schedule.is_multi_stage:
             return total
+        if self._schedule.has_early_stop:
+            return self._early_stop_stage_total_steps(total)
         allocations = self._schedule.stage_step_allocations(total, self.trainer.max_epochs)
         return allocations[self._current_stage_index]
+
+    def _early_stop_stage_total_steps(self, total: int) -> int:
+        """OneCycle `total_steps` for the active stage under the `early_stop` switch:
+        a per-epoch step estimate (``total / max_epochs``) times the stage's epoch
+        budget — its `epochs` cap for a non-final stage, or ``max_epochs -
+        stage_start_epoch`` for the final stage (whose real length depends on when
+        earlier stages ended). Sized ``>=`` the steps a stage can actually take, so
+        OneCycle never over-steps; equals the arithmetic split when no stage stops
+        early. Truncated early, the stage simply under-runs its envelope (D-ES).
+        """  # noqa: DOC201
+        max_epochs = self.trainer.max_epochs
+        steps_per_epoch = max(1, round(total / max_epochs))
+        index = self._current_stage_index
+        is_final = index == len(self._schedule.stages) - 1
+        stage = self._schedule.stages[index]
+        if is_final:
+            budget_epochs = max_epochs - self._stage_start_epoch
+        else:
+            assert stage.epochs is not None  # non-final stages require epochs (D-ES)
+            budget_epochs = stage.epochs
+        return max(1, steps_per_epoch * budget_epochs)
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
         """Build the active stage's optimizer (over TRAINABLE params only — frozen
@@ -1156,11 +1314,27 @@ class SaltModule(lightning.LightningModule):
                 "fields": {key: list(val) for key, val in self.schema.fields.items()},
             },
             "plan_hashes": {mode.name: plan.plan_hash for mode, plan in self.plans.items()},
-            "schedule": {
-                "stage_index": self._current_stage_index,
-                "stage_name": self._schedule.stages[self._current_stage_index].name,
-            },
+            "schedule": self._schedule_checkpoint_state(),
         }
+
+    def _schedule_checkpoint_state(self) -> dict[str, Any]:
+        """The `schedule` sub-payload for the checkpoint. Legacy/no-early-stop
+        configs get exactly ``{stage_index, stage_name}`` (byte-identical to the
+        pre-W7 tip — the G7a parity guard). Under the `early_stop` master switch it
+        additionally carries the active stage's start epoch, the completed-boundary
+        records, and the live early-stop counters, so a data-dependent resume
+        reconstructs the exact stage position + patience state (plan 12 W7).
+        """  # noqa: DOC201
+        state: dict[str, Any] = {
+            "stage_index": self._current_stage_index,
+            "stage_name": self._schedule.stages[self._current_stage_index].name,
+        }
+        if self._schedule.has_early_stop:
+            state["stage_start_epoch"] = self._stage_start_epoch
+            state["boundaries"] = list(self._boundary_records)
+            if self._early_stop_tracker is not None:
+                state["early_stop_state"] = self._early_stop_tracker.state_dict()
+        return state
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Runs before the state-dict load on both restore paths: verifies plan
@@ -1210,15 +1384,18 @@ class SaltModule(lightning.LightningModule):
         self._restore_schedule_stage(payload.get("schedule"))
 
     def _restore_schedule_stage(self, schedule_state: Mapping[str, Any] | None) -> None:
-        """On a multi-stage fit resume, set `_current_stage_index` + apply the
-        saved stage's freeze mask (the delta off the stage-0 mask `setup` applied).
+        """On a fit resume, set `_current_stage_index` + apply the saved stage's
+        freeze mask (multi-stage only), then restore the W7 early-stop counters
+        (any-stage, when declared).
 
-        No-op unless the schedule is multi-stage AND the trainer is fitting: the
-        desugared/legacy single-stage path is left bitwise-untouched (parity
-        guard), and `salt test --ckpt_path` never mutates the freeze set. A
-        checkpoint whose saved stage is out of range for, or names a different
-        stage than, the current schedule is a hard `ConfigError` (the schedule
-        config changed since the checkpoint — resume is not defined).
+        No-op unless the trainer is fitting: `salt test --ckpt_path` never mutates
+        the freeze/early-stop state. For a multi-stage schedule the saved stage
+        index + freeze mask are restored (the desugared/legacy single-stage path is
+        left bitwise-untouched — parity guard); the early-stop tracker is restored
+        for single- and multi-stage alike (mid-stage patience resume). A checkpoint
+        whose saved stage is out of range for, or names a different stage than, the
+        current schedule is a hard `ConfigError` (schedule config changed — resume
+        is not defined).
 
         Raises
         ------
@@ -1226,30 +1403,68 @@ class SaltModule(lightning.LightningModule):
             The saved stage index is out of range, or its recorded name no longer
             matches the schedule stage at that index.
         """
-        if schedule_state is None or not self._schedule.is_multi_stage:
+        if schedule_state is None:
             return
         from lightning.pytorch.trainer.states import TrainerFn  # noqa: PLC0415
 
         fn = getattr(getattr(self._trainer, "state", None), "fn", None)
         if fn is not None and fn != TrainerFn.FITTING:
             return
-        index = schedule_state["stage_index"]
-        if not 0 <= index < len(self._schedule.stages):
+        if self._schedule.is_multi_stage:
+            index = schedule_state["stage_index"]
+            if not 0 <= index < len(self._schedule.stages):
+                raise ConfigError(
+                    f"checkpoint records training_schedule stage index {index}, out of range for "
+                    f"the current {len(self._schedule.stages)}-stage schedule — the schedule "
+                    "changed since the checkpoint was written; resume is not defined (plan 02 W4)."
+                )
+            saved_name = schedule_state.get("stage_name")
+            current_name = self._schedule.stages[index].name
+            if saved_name is not None and saved_name != current_name:
+                raise ConfigError(
+                    f"checkpoint records training_schedule stage {index} as {saved_name!r} but the "
+                    f"current schedule names it {current_name!r} — the schedule changed since the "
+                    "checkpoint was written; resume is not defined (plan 02 W4)."
+                )
+            self._current_stage_index = index
+            self._apply_stage_freeze(self._schedule.stages[index])
+        else:
+            index = 0
+        if self._schedule.has_early_stop:
+            self._restore_early_stop_state(index, schedule_state)
+
+    def _restore_early_stop_state(self, index: int, schedule_state: Mapping[str, Any]) -> None:
+        """Restore the W7 early-stop resume state: the active stage's start epoch,
+        the completed-boundary records, and the live counters (so a mid-stage resume
+        continues patience exactly). A checkpoint that predates W7 (no
+        `early_stop_state`) resets the counters fresh for the restored stage. When
+        the persisted criterion fingerprint no longer matches the current stage's
+        `early_stop`, resume is undefined and raises (same policy as the stage-name
+        guard).
+
+        Raises
+        ------
+        ConfigError
+            The checkpoint's early-stop criterion fingerprint differs from the
+            current stage's `early_stop` config.
+        """
+        self._stage_start_epoch = schedule_state.get("stage_start_epoch", 0)
+        self._boundary_records = list(schedule_state.get("boundaries", []))
+        self._pending_early_advance = False
+        stage = self._schedule.stages[index]
+        es_state = schedule_state.get("early_stop_state")
+        if es_state is None or stage.early_stop is None:
+            self._early_stop_tracker = self._make_early_stop_tracker(stage)
+            return
+        saved_fp = es_state.get("fingerprint")
+        current_fp = stage.early_stop.fingerprint()
+        if saved_fp is not None and saved_fp != current_fp:
             raise ConfigError(
-                f"checkpoint records training_schedule stage index {index}, out of range for the "
-                f"current {len(self._schedule.stages)}-stage schedule — the schedule changed since "
-                "the checkpoint was written; resume is not defined (plan 02 W4)."
+                f"checkpoint records an early_stop criterion {saved_fp} for stage "
+                f"{stage.name!r} but the current config declares {current_fp} — the criterion "
+                "changed since the checkpoint; patience resume is not defined (plan 12 W7)."
             )
-        saved_name = schedule_state.get("stage_name")
-        current_name = self._schedule.stages[index].name
-        if saved_name is not None and saved_name != current_name:
-            raise ConfigError(
-                f"checkpoint records training_schedule stage {index} as {saved_name!r} but the "
-                f"current schedule names it {current_name!r} — the schedule changed since the "
-                "checkpoint was written; resume is not defined (plan 02 W4)."
-            )
-        self._current_stage_index = index
-        self._apply_stage_freeze(self._schedule.stages[index])
+        self._early_stop_tracker = EarlyStopTracker.from_state_dict(stage.early_stop, es_state)
 
     def _verify_ckpt_hash(self, mode: Mode, plan: Plan) -> None:
         """Compare a compiled plan's hash with the checkpoint's stored hash;

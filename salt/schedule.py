@@ -17,16 +17,57 @@ from typing import Any
 from salt.graph.errors import ConfigError
 
 __all__ = [
+    "EarlyStopConfig",
+    "EarlyStopTracker",
     "StageConfig",
     "TrainingSchedule",
     "apply_stage_freeze",
+    "boundary_record",
     "clear_frozen_grads",
     "reducer_safe_freeze_required",
     "trainable_named_params",
 ]
 
 # recognised per-stage keys — anything else is a config typo, rejected fail-loud.
-_STAGE_FIELDS = frozenset({"epochs", "frozen", "trainable", "optimizer", "lrs", "order"})
+_STAGE_FIELDS = frozenset(
+    {"epochs", "frozen", "trainable", "optimizer", "lrs", "order", "early_stop"}
+)
+# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
+_EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
+
+
+@dataclass(frozen=True)
+class EarlyStopConfig:
+    """A stage's early-stopping criterion (plan 12 W7 / D-ES). Mirrors Lightning
+    `EarlyStopping` vocabulary: end the stage — advance to the next, or end the fit
+    on the final stage — when `monitor` fails to improve by at least `min_delta`
+    for `patience` consecutive validation checks. The stage's `epochs` remains the
+    hard cap (a stage ends at whichever comes first). An early-stopped stage simply
+    truncates its OneCycle envelope mid-curve; the next stage rebuilds cleanly.
+    """
+
+    monitor: str
+    mode: str = "min"
+    patience: int = 3
+    min_delta: float = 0.0
+    check_finite: bool = True
+
+    def fingerprint(self) -> dict[str, Any]:
+        """The criterion identity persisted alongside the live counters, so a
+        mid-stage resume can reject a checkpoint whose `early_stop` config has since
+        changed (patience resume is undefined across a criterion change).
+
+        Returns
+        -------
+        dict[str, Any]
+            The monitor/mode/min_delta/patience fingerprint.
+        """
+        return {
+            "monitor": self.monitor,
+            "mode": self.mode,
+            "min_delta": self.min_delta,
+            "patience": self.patience,
+        }
 
 
 @dataclass(frozen=True)
@@ -35,7 +76,8 @@ class StageConfig:
     optimizer/LR overrides. Exactly one of `frozen`/`trainable` may be set
     (default `frozen=()` — everything trainable). `epochs=None` means "take the
     remaining epochs" (only the final stage may omit it). `order` pins execution
-    position; otherwise declaration order is used.
+    position; otherwise declaration order is used. `early_stop` optionally ends the
+    stage before its epoch cap when a monitored metric stops improving (plan 12 W7).
     """
 
     name: str
@@ -45,6 +87,7 @@ class StageConfig:
     optimizer: str | None = None
     lrs: Mapping[str, float] | None = None
     order: int | None = None
+    early_stop: EarlyStopConfig | None = None
 
 
 class TrainingSchedule:
@@ -78,6 +121,15 @@ class TrainingSchedule:
     def has_freezing(self) -> bool:
         """Whether any stage freezes at least one module."""
         return any(self.frozen_names(stage) for stage in self.stages)
+
+    @property
+    def has_early_stop(self) -> bool:
+        """Whether any stage declares an `early_stop` criterion — the master switch
+        that gates every W7 early-stop code path. When ``False``, boundaries are
+        pure epoch arithmetic and no early-stop checkpoint state is written, so
+        behaviour is bitwise-identical to the pre-W7 tip (the G7a parity guard).
+        """
+        return any(stage.early_stop is not None for stage in self.stages)
 
     def changes_freeze_across_stages(self) -> bool:
         """Whether the frozen set differs between any two consecutive stages —
@@ -276,6 +328,65 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
         optimizer=cfg.get("optimizer"),
         lrs=lrs,
         order=order,
+        early_stop=_parse_early_stop(name, cfg),
+    )
+
+
+def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | None:
+    """Parse + validate a stage's optional `early_stop` block into an
+    `EarlyStopConfig` (fail-loud); ``None`` when the stage declares none. `monitor`
+    is required and non-empty; `mode` is `min`/`max`; `patience` a positive int;
+    `min_delta` a non-negative number; `check_finite` a bool.
+    """  # noqa: DOC201, DOC501
+    raw = cfg.get("early_stop")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop' must be a mapping "
+            f"(got {type(raw).__name__})."
+        )
+    if unknown := set(raw) - _EARLY_STOP_FIELDS:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop' has unknown key(s) {sorted(unknown)} "
+            f"— valid keys are {sorted(_EARLY_STOP_FIELDS)} (plan 12 W7)."
+        )
+    monitor = raw.get("monitor")
+    if not isinstance(monitor, str) or not monitor.strip():
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop.monitor' is required and must be a "
+            "non-empty string (a trainer.callback_metrics key, e.g. 'val/loss')."
+        )
+    mode = raw.get("mode", "min")
+    if mode not in {"min", "max"}:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop.mode' must be 'min' or 'max' "
+            f"(got {mode!r})."
+        )
+    patience = raw.get("patience", 3)
+    if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop.patience' must be a positive integer "
+            f"(got {patience!r})."
+        )
+    min_delta = raw.get("min_delta", 0.0)
+    if isinstance(min_delta, bool) or not isinstance(min_delta, (int, float)) or min_delta < 0:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop.min_delta' must be a non-negative "
+            f"number (got {min_delta!r})."
+        )
+    check_finite = raw.get("check_finite", True)
+    if not isinstance(check_finite, bool):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'early_stop.check_finite' must be a boolean "
+            f"(got {check_finite!r})."
+        )
+    return EarlyStopConfig(
+        monitor=monitor,
+        mode=mode,
+        patience=patience,
+        min_delta=float(min_delta),
+        check_finite=check_finite,
     )
 
 
@@ -450,3 +561,124 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
     for name in frozen:
         for param in net[name].parameters():
             param.grad = None
+
+
+# ---------------------------------------------------------------------------
+# Per-stage early stopping (plan 12 / W7).
+#
+# The tracker below owns the monitor/patience/min_delta arithmetic for the ACTIVE
+# stage so it is unit-testable in isolation and the `TrainingScheduleCallback`
+# stays stateless (all schedule state lives on the `SaltModule`). Boundaries become
+# data-dependent once a stage can early-stop, so `boundary_record` captures each
+# completed transition for the checkpoint — resume reconstructs the stage position
+# from records + the persisted tracker instead of epoch arithmetic.
+# ---------------------------------------------------------------------------
+
+
+class EarlyStopTracker:
+    """Live early-stop counters for the ACTIVE stage (plan 12 W7). Mutable runtime
+    state, checkpointed for exact mid-stage resume and reset at each stage entry.
+    Held on the `SaltModule`; the callback drives it but stays stateless.
+    """
+
+    def __init__(
+        self,
+        config: EarlyStopConfig,
+        *,
+        best_score: float | None = None,
+        wait_count: int = 0,
+        check_count: int = 0,
+    ) -> None:
+        self.config = config
+        self.best_score = best_score
+        self.wait_count = wait_count
+        self.check_count = check_count
+
+    def check(self, value: float) -> bool:
+        """Fold one validation-check `value` into the counters and report whether
+        the stage should now early-stop: patience exhausted (no improvement of at
+        least `min_delta` for `patience` consecutive checks), or a non-finite value
+        under `check_finite`. The first check seeds `best_score` and never stops.
+
+        Returns
+        -------
+        bool
+            ``True`` iff the stage's early-stop criterion is now met.
+        """
+        import math  # noqa: PLC0415
+
+        self.check_count += 1
+        if self.config.check_finite and not math.isfinite(value):
+            return True
+        if self.best_score is None or self._improved(value):
+            self.best_score = value
+            self.wait_count = 0
+            return False
+        self.wait_count += 1
+        return self.wait_count >= self.config.patience
+
+    def _improved(self, value: float) -> bool:
+        """Whether `value` improves on `best_score` by at least `min_delta` under
+        the configured `mode` (`min`: lower is better; `max`: higher is better).
+        """  # noqa: DOC201
+        assert self.best_score is not None
+        if self.config.mode == "min":
+            return value < self.best_score - self.config.min_delta
+        return value > self.best_score + self.config.min_delta
+
+    def state_dict(self) -> dict[str, Any]:
+        """The checkpoint payload for mid-stage resume: the counters plus the
+        criterion fingerprint (which `_restore_schedule_stage` matches against the
+        current config to reject a changed `early_stop`).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{best_score, wait_count, check_count, fingerprint}``.
+        """
+        return {
+            "best_score": self.best_score,
+            "wait_count": self.wait_count,
+            "check_count": self.check_count,
+            "fingerprint": self.config.fingerprint(),
+        }
+
+    @classmethod
+    def from_state_dict(
+        cls, config: EarlyStopConfig, state: Mapping[str, Any]
+    ) -> EarlyStopTracker:
+        """Rebuild a tracker from a checkpointed `state_dict` under `config`.
+
+        Returns
+        -------
+        EarlyStopTracker
+            A tracker with the restored counters.
+        """
+        return cls(
+            config,
+            best_score=state["best_score"],
+            wait_count=state["wait_count"],
+            check_count=state["check_count"],
+        )
+
+
+def boundary_record(
+    stage_name: str, stage_index: int, global_step: int, epoch: int, reason: str
+) -> dict[str, Any]:
+    """A completed stage-transition record appended to the checkpoint at each
+    boundary (plan 12 W7). `reason` is ``"epochs"`` (the stage hit its epoch cap)
+    or ``"early_stop"`` (its criterion triggered); the records let a resume
+    reconstruct the data-dependent stage position rather than epoch arithmetic.
+
+    Returns
+    -------
+    dict[str, Any]
+        The serialisable boundary record.
+    """
+    return {
+        "stage_name": stage_name,
+        "stage_index": stage_index,
+        "global_step": global_step,
+        "epoch": epoch,
+        "reason": reason,
+    }

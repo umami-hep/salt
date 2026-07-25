@@ -12,7 +12,13 @@ import pytest
 
 from salt.graph.errors import ConfigError
 from salt.model.saltmodule import SaltModule
-from salt.schedule import StageConfig, TrainingSchedule
+from salt.schedule import (
+    EarlyStopConfig,
+    EarlyStopTracker,
+    StageConfig,
+    TrainingSchedule,
+    boundary_record,
+)
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
 
 LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
@@ -304,3 +310,179 @@ def test_stageconfig_is_frozen_dataclass():
     stage = StageConfig(name="fit")
     with pytest.raises(Exception):  # noqa: B017 - frozen dataclass rejects any mutation
         stage.epochs = 3  # type: ignore[misc]
+
+
+# --- W7: per-stage early stopping -------------------------------------------
+
+
+class TestEarlyStopParse:
+    def test_absent_by_default(self):
+        sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
+        assert sched.initial_stage.early_stop is None
+        assert not sched.has_early_stop
+
+    def test_minimal_defaults(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"fit": {"early_stop": {"monitor": "val/loss"}}}}, MODULE_NAMES
+        )
+        es = sched.initial_stage.early_stop
+        assert es == EarlyStopConfig(monitor="val/loss", mode="min", patience=3, min_delta=0.0)
+        assert es.check_finite is True
+        assert sched.has_early_stop
+
+    def test_all_fields(self):
+        sched = TrainingSchedule.from_config(
+            {
+                "stages": {
+                    "fit": {
+                        "early_stop": {
+                            "monitor": "val/acc", "mode": "max", "patience": 5,
+                            "min_delta": 0.01, "check_finite": False,
+                        }
+                    }
+                }
+            },
+            MODULE_NAMES,
+        )
+        es = sched.initial_stage.early_stop
+        assert (es.monitor, es.mode, es.patience, es.min_delta, es.check_finite) == (
+            "val/acc", "max", 5, 0.01, False
+        )
+
+    def test_has_early_stop_true_if_any_stage(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 1}, "b": {"early_stop": {"monitor": "val/loss"}}}},
+            MODULE_NAMES,
+        )
+        assert sched.has_early_stop
+
+    def test_missing_monitor_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.monitor' is required"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"patience": 2}}}}, MODULE_NAMES
+            )
+
+    def test_empty_monitor_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.monitor' is required"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "  "}}}}, MODULE_NAMES
+            )
+
+    def test_bad_mode_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.mode' must be 'min' or 'max'"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "val/loss", "mode": "lower"}}}},
+                MODULE_NAMES,
+            )
+
+    def test_non_positive_patience_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.patience' must be a positive integer"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "val/loss", "patience": 0}}}},
+                MODULE_NAMES,
+            )
+
+    def test_bool_patience_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.patience' must be a positive integer"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "val/loss", "patience": True}}}},
+                MODULE_NAMES,
+            )
+
+    def test_negative_min_delta_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop.min_delta' must be a non-negative"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "val/loss", "min_delta": -0.1}}}},
+                MODULE_NAMES,
+            )
+
+    def test_unknown_early_stop_key_rejected(self):
+        with pytest.raises(ConfigError, match="early_stop' has unknown key"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": {"monitor": "val/loss", "paticence": 3}}}},
+                MODULE_NAMES,
+            )
+
+    def test_early_stop_not_a_mapping_rejected(self):
+        with pytest.raises(ConfigError, match="'early_stop' must be a mapping"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"early_stop": ["val/loss"]}}}, MODULE_NAMES
+            )
+
+
+class TestEarlyStopTracker:
+    def test_first_check_seeds_best_never_stops(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", patience=2))
+        assert t.check(1.0) is False
+        assert t.best_score == 1.0
+        assert t.wait_count == 0
+        assert t.check_count == 1
+
+    def test_patience_exhausted_min_mode(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", mode="min", patience=2))
+        assert t.check(1.0) is False  # best=1.0
+        assert t.check(1.0) is False  # no improvement, wait=1
+        assert t.check(1.0) is True  # wait=2 == patience → stop
+
+    def test_improvement_resets_wait(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", mode="min", patience=2))
+        t.check(1.0)
+        t.check(1.0)  # wait=1
+        assert t.check(0.5) is False  # improvement → wait reset
+        assert t.wait_count == 0
+        assert t.best_score == 0.5
+
+    def test_max_mode(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/acc", mode="max", patience=1))
+        assert t.check(0.5) is False
+        assert t.check(0.6) is False  # improvement
+        assert t.check(0.6) is True  # no improvement, wait=1 == patience
+
+    def test_min_delta_requires_meaningful_improvement(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", mode="min", patience=1, min_delta=0.1))
+        t.check(1.0)
+        # 0.95 is lower but not by min_delta=0.1 → not an improvement → stop at patience 1
+        assert t.check(0.95) is True
+
+    def test_check_finite_stops_on_nan(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", patience=99, check_finite=True))
+        t.check(1.0)
+        assert t.check(float("nan")) is True
+
+    def test_check_finite_disabled_ignores_nan(self):
+        t = EarlyStopTracker(EarlyStopConfig(monitor="val/loss", patience=1, check_finite=False))
+        t.check(1.0)
+        # nan is not < best - 0 → no improvement → wait=1 == patience → stop (but not via finite)
+        assert t.check(float("nan")) is True
+
+    def test_state_dict_round_trip(self):
+        cfg = EarlyStopConfig(monitor="val/loss", mode="min", patience=3, min_delta=0.02)
+        t = EarlyStopTracker(cfg)
+        t.check(1.0)
+        t.check(0.9)
+        t.check(0.9)  # wait=1
+        state = t.state_dict()
+        assert state["best_score"] == 0.9
+        assert state["wait_count"] == 1
+        assert state["check_count"] == 3
+        assert state["fingerprint"] == cfg.fingerprint()
+        restored = EarlyStopTracker.from_state_dict(cfg, state)
+        assert (restored.best_score, restored.wait_count, restored.check_count) == (0.9, 1, 3)
+        # continuing from the restored counters matches an uninterrupted run
+        assert restored.check(0.9) is False  # wait=2
+        assert restored.check(0.9) is True  # wait=3 == patience
+
+    def test_fingerprint_captures_criterion(self):
+        cfg = EarlyStopConfig(monitor="val/loss", mode="max", patience=7, min_delta=0.5)
+        assert cfg.fingerprint() == {
+            "monitor": "val/loss", "mode": "max", "min_delta": 0.5, "patience": 7
+        }
+
+
+class TestBoundaryRecord:
+    def test_encodes_all_fields(self):
+        rec = boundary_record("full", 1, 250, 5, "early_stop")
+        assert rec == {
+            "stage_name": "full", "stage_index": 1, "global_step": 250,
+            "epoch": 5, "reason": "early_stop",
+        }
