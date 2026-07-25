@@ -76,7 +76,8 @@ The fix is to **rename** the module: under a new name it has no checkpoint
 counterpart, so the old weights simply **drop** and the renamed module is **new**
 (fresh init) — a clean swap through the same three buckets. The rule:
 *warm-starting is per-module all-or-nothing*. Changing a module's shape is a swap;
-declare it as one by renaming.
+declare it as one by renaming. (The [Changing the inputs](#changing-the-inputs)
+section puts this rule to work.)
 
 ## The `training_schedule:` schema
 
@@ -128,74 +129,32 @@ rejected fail-loud:
 - **`order`** — pins execution position. Omit it and stages run in declaration
   order (the normal case).
 - **`early_stop`** — an optional early-stopping criterion that ends the stage before
-  its `epochs` cap (see below).
+  its `epochs` cap (see [below](#per-stage-early-stopping-early_stop)).
 - **`callbacks`** — an optional list of extra Lightning callbacks active only during
-  this stage (see below).
+  this stage (see [below](#per-stage-callbacks-callbacks)).
 
-### Per-stage early stopping — `early_stop`
+### How the pieces layer
 
-A stage can stop **before** its `epochs` cap when a monitored validation metric
-stops improving. `epochs` stays the hard cap; the stage ends at whichever comes
-first. On a non-final stage the schedule then **advances to the next stage**; on the
-final stage it **ends the fit**.
+Everything that **shapes the schedule** — `frozen`/`trainable`, `epochs`,
+`optimizer`, `lrs`, `early_stop` — is a **stage key**, not a callback, and that is
+deliberate. Those concerns need first-class integration with the stage machinery:
+they drive the optimizer rebuild at each boundary, the per-stage LR envelope, the
+checkpoint boundary records that make a resume stage-correct, and the
+DDP freeze flip. A Lightning callback cannot reach into any of that.
 
-```yaml
-training_schedule:
-  stages:
-    head_warmup:
-      epochs: 10                        # cap — but early_stop may end it sooner
-      trainable: [jets_classification]
-      early_stop:
-        monitor: val/loss               # required — a trainer.callback_metrics key
-        mode: min                       # min (default) or max
-        patience: 3                     # validation checks without improvement (default 3)
-        min_delta: 0.0                  # minimum improvement to reset patience (default 0.0)
-        check_finite: true              # stop on a non-finite monitor value (default true)
-    full_finetune:
-      frozen: []
-```
+`early_stop` is the sharpest example. It is **not** a Lightning `EarlyStopping`
+callback, because that callback can only do one thing: kill the whole fit. A
+per-stage criterion has to be able to end *this stage* and hand off to the next —
+so it is a stage key the schedule owns, wired into the boundary logic.
 
-- The check runs at **validation-epoch end**; `patience` counts validation checks,
-  not raw training epochs. Validation must be enabled (a stage with `early_stop`
-  under a trainer with validation disabled is a fail-loud `ConfigError`), and the
-  `monitor` key must exist in `trainer.callback_metrics` (e.g. `val/loss`,
-  `val/jets_classification_loss`) or it fails loud at the first check.
-- An early-stopped stage simply **truncates its LR envelope** mid-curve; the next
-  stage rebuilds its own OneCycle cleanly. Boundaries become data-dependent, so they
-  are **recorded in the checkpoint** — a resume reconstructs the exact stage position
-  and patience counters (a mid-stage resume continues patience identically).
-- Under multi-GPU DDP the decision is **rank-synchronised** (all ranks transition at
-  the same step), so the freeze flip and optimizer rebuild never desync.
-- A config with no `early_stop` on any stage behaves — and checkpoints —
-  bitwise-identically to before; nothing changes unless you opt in.
+A stage's own **`callbacks:`** are for the opposite kind of thing:
+stage-scoped *instrumentation and side-effects* — a monitor, a diagnostic, a
+per-stage checkpoint policy — that observe a stage without steering it.
 
-### Per-stage callbacks — `callbacks`
-
-A stage can declare extra Lightning callbacks that are active **only** during that
-stage, layered on the always-propagated top-level `callbacks:`:
-
-```yaml
-training_schedule:
-  stages:
-    head_warmup:
-      epochs: 5
-      trainable: [jets_classification]
-      callbacks:
-        - class_path: lightning.pytorch.callbacks.LearningRateMonitor
-          init_args: {logging_interval: step}
-    full_finetune:
-      frozen: []
-```
-
-- Top-level (global) `callbacks:` — `ModelCheckpoint`, the logger, progress bar —
-  **persist for the whole fit** and keep their cross-stage state (best-checkpoint
-  tracking, logging). They are never re-instantiated.
-- A stage's own `callbacks:` are **instantiated fresh when the stage begins** (fresh
-  state each time), receive hooks only while their stage is active, and are torn down
-  when the stage ends. The effective set in a stage is *the persistent globals plus
-  that stage's freshly-instantiated callbacks*.
-- Every declared stage callback is import/instantiation-checked at **fit start**, so a
-  bad `class_path` fails before training, not three stages in.
+One thing is fixed, not per-stage: the LR **scheduler type**. Every stage runs a
+`OneCycleLR` envelope; `lrs:` tunes its parameters (`max`, `initial`, `end`,
+`pct_start`) per stage, but you cannot swap OneCycle for a different scheduler
+class per stage.
 
 ### Stacking and deleting stages
 
@@ -223,40 +182,6 @@ never perturbs a plain run.
     training) is a `ConfigError` — staged training must know how many epochs it is
     dividing up.
 
-## Preview the merge before you train — `salt merge-config`
-
-A fine-tune stacks a base `config.yaml`, an overlay, and CLI overrides. Before you
-spend GPU time, it is worth *seeing* exactly what those layers merged into — and
-which modules each stage freezes. `salt merge-config` takes **the same arguments as
-`salt fit`** and writes two things without instantiating a trainer, reading data,
-or loading a checkpoint:
-
-```bash
-salt merge-config \
-  --config base_config.yaml \
-  --config finetune_gn3large.yaml \
-  --init_from /path/to/pretrained.ckpt \
-  --merged.output out/merged.yaml
-```
-
-1. **`out/merged.yaml`** — the fully-merged config, produced through the same salt
-   config surface as `--print_config` (the same deep-merge, the same `base2.yaml`
-   defaults, the same schedule relocation). This is the single source of truth for
-   what will actually run: every default made explicit, every overlay applied. When a
-   config declares no `training_schedule:`, the merged YAML makes the effective one
-   explicit — a single `fit` stage (everything trainable) under a
-   `# materialized by merge-config` marker, so plain-training runs read the same way
-   as staged ones.
-2. **One graph per stage** — `out/merged_stage00_head_warmup.png`,
-   `out/merged_stage01_full_finetune.png`, … (numbered by execution order). Each is
-   the model graph with that stage's **frozen** modules greyed out and badged, and a
-   caption naming the stage and its frozen set. This is the fastest way to confirm a
-   `trainable:`/`frozen:` spec froze what you intended.
-
-Pass `--merged.plots false` to write only the merged YAML and the `.dot` graph
-sources (skips rasterisation, so no Graphviz `dot` binary is needed). The graphs
-render the FIT-mode plan; only the freeze overlay differs between stages.
-
 ## Worked example A — same-heads fine-tune of GN3Large
 
 The goal: take the converted GN3Large tagger and adapt it to a new dataset while
@@ -269,24 +194,25 @@ pT regression). The strategy is two-stage:
 2. **`full_finetune`** (remaining 10 epochs) — unfreeze everything and fine-tune
    the whole network at a much gentler LR.
 
-The overlay config (`finetune_gn3large.yaml`):
+The overlay is shipped as **`salt/configs/finetune_gn3large.yaml`** — a template
+you stack on the saved run config (paths and any data block are yours to fill in):
 
 ```yaml
 training_schedule:
   stages:
     head_warmup:
       epochs: 5
-      trainable: [jets_classification]   # complement (everything else) is frozen + eval()
+      trainable: [jets_classification]  # complement (backbone + other heads) frozen + eval()
       lrs:
-        max: 1.0e-4                       # per-stage lrs deep-merges over the base config's lrs
+        max: 1.0e-4                      # per-stage lrs deep-merges over the base config's lrs
     full_finetune:
-      frozen: []                          # unfreeze everything; epochs omitted = remaining epochs
+      frozen: []                         # unfreeze everything; epochs omitted = remaining epochs
       lrs:
         initial: 1.0e-7
         max: 1.0e-5
 
 trainer:
-  max_epochs: 15                          # 5 warm-up + 10 full fine-tune
+  max_epochs: 15                         # 5 warm-up + 10 full fine-tune
 ```
 
 Point `data:` at the sample you are adapting to. The simplest way is to override
@@ -309,7 +235,7 @@ warm-start checkpoint:
 ```bash
 salt fit \
   --config <gn3large_config_v2.yaml> \
-  --config finetune_gn3large.yaml \
+  --config salt/configs/finetune_gn3large.yaml \
   --init_from <gn3large_converted.ckpt>
 ```
 
@@ -319,13 +245,50 @@ jets, one A100):
 ```bash
 salt fit \
   --config /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/experiments/23_gn3large_v1_to_v2_conversion/outputs/converted/config_v2.yaml \
-  --config finetune_gn3large.yaml \
-  --init_from /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/experiments/23_gn3large_v1_to_v2_conversion/outputs/converted/converted.ckpt
+  --config salt/configs/finetune_gn3large.yaml \
+  --init_from /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/experiments/23_gn3large_v1_to_v2_conversion/outputs/converted/converted.ckpt \
+  --data.train_file <new_campaign/train.h5> \
+  --data.val_file   <new_campaign/val.h5>
 ```
 
 At startup, the warm-start accounting confirms the load. For this checkpoint all
 11 parameter-bearing modules line up with the config, so the log reads
 **11 loaded, 0 new, 0 dropped** — a clean same-architecture warm start.
+
+## Preview the merge before you train — `salt merge-config`
+
+A fine-tune stacks a base `config.yaml`, an overlay, and CLI overrides. Before you
+spend GPU time on the run above, it is worth *seeing* exactly what those layers
+merged into — and which modules each stage freezes. `salt merge-config` takes **the
+same arguments as `salt fit`** and writes two things without instantiating a
+trainer, reading data, or loading a checkpoint:
+
+```bash
+salt merge-config \
+  --config <gn3large_config_v2.yaml> \
+  --config salt/configs/finetune_gn3large.yaml \
+  --init_from <gn3large_converted.ckpt> \
+  --merged.output out/merged.yaml
+```
+
+1. **`out/merged.yaml`** — the fully-merged config, produced through the same salt
+   config surface as `--print_config` (the same deep-merge, the same `base2.yaml`
+   defaults, the same schedule relocation). This is the single source of truth for
+   what will actually run: every default made explicit, every overlay applied. When a
+   config declares no `training_schedule:`, the merged YAML makes the effective one
+   explicit — a single `fit` stage (everything trainable) under a
+   `# materialized by merge-config` marker, so plain-training runs read the same way
+   as staged ones.
+2. **One graph per stage** — `out/merged_stage00_head_warmup.png`,
+   `out/merged_stage01_full_finetune.png`, … (numbered by execution order). Each is
+   the model graph with that stage's **frozen** modules greyed out and badged, and a
+   caption naming the stage, its frozen set, and its early-stop criterion and
+   stage-callback count. This is the fastest way to confirm a
+   `trainable:`/`frozen:` spec froze what you intended.
+
+Pass `--merged.plots false` to write only the merged YAML and the `.dot` graph
+sources (skips rasterisation, so no Graphviz `dot` binary is needed). The graphs
+render the FIT-mode plan; only the freeze overlay differs between stages.
 
 ## Reading the evidence: LR envelopes, the stage boundary, the param jump
 
@@ -395,12 +358,89 @@ This is the point of including the run, not a blemish to hide. Two lessons follo
   and `mode: min` so the ones you keep are the good ones.
 - **Size the schedule to the data.** 10 full-finetune epochs was far too many for
   60 k jets. For a small target set, prefer fewer full-finetune epochs, a longer
-  frozen warm-up, a gentler `max` LR, or add an early-stopping callback that halts
-  when `val/loss` stops improving. The warm-up phase alone (backbone frozen) is
-  much harder to overfit and is often most of the benefit.
+  frozen warm-up, a gentler `max` LR, or — the cleanest fix — add a per-stage
+  **`early_stop`** so the stage halts on its own when `val/loss` stops improving.
+  The warm-up phase alone (backbone frozen) is much harder to overfit and is
+  often most of the benefit.
 
 The staged schedule did its job perfectly — the *sizing* was wrong, and the
-evidence (best at epoch 6, monotonic climb after) tells you exactly that.
+evidence (best at epoch 6, monotonic climb after) tells you exactly that. The next
+two sections extend this same example to fix it.
+
+### Per-stage early stopping — `early_stop`
+
+The overfit above is exactly what `early_stop` prevents. Give the `full_finetune`
+stage a criterion and it stops **before** its 10-epoch cap once `val/loss` stops
+improving — the run ends near epoch 6 instead of grinding on to 14:
+
+```yaml
+# extend finetune_gn3large.yaml — stop full_finetune when val/loss stalls
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      lrs: {max: 1.0e-4}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-7, max: 1.0e-5}
+      early_stop:
+        monitor: val/loss               # required — a trainer.callback_metrics key
+        mode: min                       # min (default) or max
+        patience: 3                     # validation checks without improvement (default 3)
+        min_delta: 0.0                  # minimum improvement to reset patience (default 0.0)
+        check_finite: true              # stop on a non-finite monitor value (default true)
+```
+
+`epochs` stays the hard cap; the stage ends at whichever comes first. **On the
+final stage** (as here) early-stopping **ends the fit**; on a **non-final stage**
+the schedule instead **advances to the next stage**.
+
+- The check runs at **validation-epoch end**; `patience` counts validation checks,
+  not raw training epochs. Validation must be enabled (a stage with `early_stop`
+  under a trainer with validation disabled is a fail-loud `ConfigError`), and the
+  `monitor` key must exist in `trainer.callback_metrics` (e.g. `val/loss`,
+  `val/jets_classification_loss`) or it fails loud at the first check.
+- An early-stopped stage simply **truncates its LR envelope** mid-curve; the next
+  stage rebuilds its own OneCycle cleanly. Boundaries become data-dependent, so they
+  are **recorded in the checkpoint** — a resume reconstructs the exact stage position
+  and patience counters (a mid-stage resume continues patience identically).
+- Under multi-GPU DDP the decision is **rank-synchronised** (all ranks transition at
+  the same step), so the freeze flip and optimizer rebuild never desync.
+- A config with no `early_stop` on any stage behaves — and checkpoints —
+  bitwise-identically to before; nothing changes unless you opt in.
+
+### Per-stage callbacks — `callbacks`
+
+A stage can also declare extra Lightning callbacks that are active **only** during
+that stage — stage-scoped instrumentation layered on the always-propagated
+top-level `callbacks:`. Here we watch the warm-up's learning rate specifically:
+
+```yaml
+# extend finetune_gn3large.yaml — a warm-up-only LR monitor
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      lrs: {max: 1.0e-4}
+      callbacks:
+        - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+          init_args: {logging_interval: step}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-7, max: 1.0e-5}
+```
+
+- Top-level (global) `callbacks:` — `ModelCheckpoint`, the logger, progress bar —
+  **persist for the whole fit** and keep their cross-stage state (best-checkpoint
+  tracking, logging). They are **never re-instantiated** at a stage boundary.
+- A stage's own `callbacks:` are **instantiated fresh when the stage begins** (fresh
+  state each time), receive hooks only while their stage is active, and are torn down
+  when the stage ends. The effective set in a stage is *the persistent globals plus
+  that stage's freshly-instantiated callbacks*.
+- Every declared stage callback is import/instantiation-checked at **fit start**, so a
+  bad `class_path` fails before training, not three stages in.
 
 ## Worked example B — module surgery: add a new head
 
@@ -412,8 +452,9 @@ This is where `--init_from`'s per-module accounting earns its keep. You add the
 new module to the config; the warm start finds no checkpoint weights for it and
 reports it as **new** (fresh init), while every inherited module loads normally.
 
-The overlay does two things. First, **module surgery** — deep-merge a new head
-into the model's `modules:` dict (the other modules are inherited untouched):
+The overlay is shipped as **`salt/configs/finetune_gn3large_new_head.yaml`**. It
+does two things. First, **module surgery** — deep-merge a new head into the model's
+`modules:` dict (the other modules are inherited untouched):
 
 ```yaml
 # 1. Add the new head (deep-merged into GN3Large's modules).
@@ -425,17 +466,14 @@ model:
         init_args:
           stream: jets
           input: pooled.global          # reuse the same pooled jet embedding the flavour head uses
-          dense:
-            hidden_layers: [128, 64, 32]
-            activation: SiLU
-          label: large_r_flavour_label   # the new label your target dataset must provide
+          label: large_r_flavour_label  # the new label your target dataset must provide
           class_names: [hbb, hcc, top, qcd]
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
           weight_source: null
 ```
 
 Second, **a schedule that references the new head by name** — train only it while
-the backbone and all original heads stay frozen, then optionally a gentle full
-pass:
+the backbone and all original heads stay frozen, then a gentle full pass:
 
 ```yaml
 # 2. Warm-start the new head with the backbone frozen.
@@ -443,11 +481,11 @@ training_schedule:
   stages:
     head_warmup:
       epochs: 5
-      trainable: [large_r_jet_classification]   # backbone + 5 original heads frozen + eval()
+      trainable: [large_r_jet_classification]  # backbone + original heads frozen + eval()
       lrs:
         max: 1.0e-4
     full_finetune:
-      frozen: []                                 # unfreeze everything; remaining epochs
+      frozen: []                               # unfreeze everything; remaining epochs
       lrs:
         initial: 1.0e-7
         max: 1.0e-5
@@ -461,7 +499,7 @@ Same command shape as example A:
 ```bash
 salt fit \
   --config <gn3large_config_v2.yaml> \
-  --config finetune_gn3large_new_head.yaml \
+  --config salt/configs/finetune_gn3large_new_head.yaml \
   --init_from <gn3large_converted.ckpt>
 ```
 
@@ -476,8 +514,130 @@ fresh.
     `label: large_r_flavour_label` is a demand on the dataset: the `Labels`
     module must be able to serve it. Point `data:` at a sample that carries that
     truth field (and, if you class-weight the head, set
-    `weight_source: {from_class_dict: <path>}`). The names above are
-    placeholders — swap in your real label handle and categories.
+    `weight_source: {from_class_dict: <path>}`). The names in the shipped config
+    are placeholders — swap in your real label handle and categories.
+
+## Changing the inputs
+
+Surgery is not limited to task heads. Fine-tuning can also change what the model
+*reads* — add or drop an input stream. The same per-module accounting makes it
+safe: a new stream's embedding is **new**, a removed stream's is **dropped**, and
+the shared encoder — which works on tokens, not streams — stays **loaded**.
+
+The running example is a GN3-family two-stream body (`tracks` + `flows`) whose
+model wiring names each stream in three places: one `StreamEmbed` per stream, the
+`Concat` that fuses their tokens, and the `Normaliser` that scales each stream's
+raw inputs. (See `salt/configs/GN3V00.yaml` for the full config.)
+
+### Adding an input stream
+
+Say you want to add an `electrons` stream. Four coordinated edits:
+
+1. **A new `StreamEmbed` module** (model side), embedding the stream to the shared
+   token width:
+
+    ```yaml
+    model:
+      init_args:
+        modules:
+          electron_embed:
+            class_path: salt.model.modules.StreamEmbed
+            init_args:
+              stream: electrons
+              context: [normed.jets]
+              out_dim: 512     # MUST equal the other streams' embed width — a Concat constraint
+              dense: {hidden_layers: [512], activation: SiLU}
+    ```
+
+2. **Add the stream to the token concatenation** — `concat.init_args.streams`:
+
+    ```yaml
+    concat:
+      init_args: {streams: [tracks, flows, electrons]}
+    ```
+
+    `Concat` is **parameter-free**, so this rewiring loads nothing and drops
+    nothing on the warm start.
+
+3. **Add the stream to the input normaliser** — `norm.init_args.streams`. This
+   grows the `Normaliser`'s per-stream buffer set, which trips the partial-coverage
+   rule and so needs a **rename** (see [below](#the-partial-coverage-rule)).
+
+4. **Data side** — the stream must actually arrive. Add its group to the `reader`
+   (`groups: {electrons: {...}}`), its variable list to `features`
+   (`variables: {electrons: [...]}`), and its per-variable `{mean, std}` to the
+   `norm_dict.yaml` you pass at fit time.
+
+The pretrained **encoder loads untouched**: it operates on the concatenated token
+sequence with weights shared across tokens, so a longer sequence needs no new
+parameters — its `net.encoder.*` keys match the checkpoint exactly and it is
+reported **loaded**. Pair the surgery with a `training_schedule` stage that trains
+only the new embed against a frozen backbone, then optionally unfreezes:
+
+```yaml
+training_schedule:
+  stages:
+    embed_warmup:
+      epochs: 5
+      trainable: [electron_embed]   # everything else — the loaded backbone — frozen
+      lrs: {max: 1.0e-4}
+    full_finetune:
+      frozen: []
+```
+
+### Removing an input stream
+
+To drop a stream, delete its embed module and rewire the two stream lists:
+
+```yaml
+# overlay: drop the flows stream
+model:
+  init_args:
+    modules:
+      flow_embed: null                        # delete the module (deep-merge deletion)
+      concat:
+        init_args: {streams: [tracks]}        # remove flows from the token concat
+      norm:
+        init_args: {streams: [jets, tracks]}  # remove flows from the normaliser
+```
+
+(equivalently `--model.modules.flow_embed=null` on the CLI). On the warm start
+`flow_embed` is in the checkpoint but not the config → **dropped** (its weights
+skipped and logged). The graph recompiles; the FIT plan-hash changes, which is
+**logged for information, not enforced**, on a warm start. As with adding a
+stream, editing `norm.init_args.streams` trips the partial-coverage rule — rename
+the norm module.
+
+### The partial-coverage rule
+
+Add and drop are *clean* only for a module that appears on **one** side
+(config-only → new, checkpoint-only → dropped). The trap is a **retained** module
+— present on both sides under the **same name** — whose internal shape changed.
+That is a hard `ConfigError`, never a silent partial load (the rule from
+[What `--init_from` accounts for](#what-init_from-accounts-for)). Input surgery
+hits it in two ways, both fixed the same way — **rename the module** so it drops
+the old weights and fresh-inits:
+
+- **A changed stream's variable list.** Edit a kept stream's variables and its
+  `StreamEmbed`'s input width changes — and the `Normaliser`'s buffers for that
+  stream change width too. Rename the affected module.
+- **A changed `Normaliser` stream set.** Adding *or* removing a stream from
+  `norm.init_args.streams` changes the `Normaliser`'s `means_<stream>` /
+  `stds_<stream>` buffer keys — a coverage mismatch. **Rename the norm module**
+  (e.g. `norm` → `norm_ft`) and update any `frozen`/`trainable` spec that names it.
+  The module produces its `normed.<stream>` keys regardless of its own name, so
+  nothing downstream needs rewiring.
+
+The `Normaliser` rename is **painless**: its buffers are not learned — they are
+loaded from `norm_dict.yaml` at materialise time. Renamed, it is **new**, so it
+simply rebuilds from the norm dict; nothing trained is lost. (A *learned* module
+renamed the same way genuinely fresh-inits and must be retrained — that is the
+intended "rename-to-swap" for a real architecture change.)
+
+Preview either surgery with [`salt merge-config`](#preview-the-merge-before-you-train-salt-merge-config):
+the merged YAML plus the per-stage freeze graphs are the fastest way to confirm
+the new embed is present, the old one is gone, and each stage freezes the modules
+you expect.
 
 ## Multi-GPU fine-tuning
 
@@ -512,7 +672,9 @@ detail: **resume is stage-correct**. Because the stage that owns any given epoch
 a pure function of the epoch counter and the schedule, restoring the epoch restores
 the stage. If a job dies at epoch 7 (inside `full_finetune`), resuming from an
 epoch-7 checkpoint continues in `full_finetune` with the whole network trainable —
-it does *not* restart the warm-up.
+it does *not* restart the warm-up. (When a stage boundary moved because
+`early_stop` fired, the boundary is read back from the checkpoint's records, so the
+resumed stage position is exact.)
 
 ```bash
 salt fit \
@@ -535,10 +697,13 @@ run, warm-start begins one.)
   warm up, unfreeze, at per-stage learning rates.
 - **The evidence is legible.** The trainable-tensor jump (8 → 155), the bitwise-frozen
   backbone, and the two per-stage LR envelopes each confirm a specific piece of the
-  schedule actually happened.
-- **Adding a head is just config.** Deep-merge a module into `modules:`, name it in
-  a stage's `trainable:`, and `--init_from` reports it as *new* — no code.
+  schedule actually happened — and `salt merge-config` shows all of it before you train.
+- **Surgery is just config.** Deep-merge a module into `modules:` (a new head, a new
+  input stream), name it in a stage's `trainable:`, and `--init_from` reports it as
+  *new* — no code. Drop one and it reports *dropped*; change a retained module's
+  shape and rename it to make the swap explicit.
 - **The last checkpoint is not the best checkpoint.** The demo's `val/loss` bottomed
   at epoch 6 and climbed to a worse-than-start value by epoch 14. Selecting on
-  validation loss — and sizing the schedule to the data — is the difference between
-  a fine-tune that helps and one that quietly overfits.
+  validation loss — sizing the schedule to the data, or letting a per-stage
+  `early_stop` halt it — is the difference between a fine-tune that helps and one
+  that quietly overfits.
