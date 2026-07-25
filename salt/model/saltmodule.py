@@ -1028,8 +1028,8 @@ class SaltModule(lightning.LightningModule):
         v1 compiled one inner ``model.model`` nn.Module. v2 has no such object —
         the forward is a `Plan` executed module-by-module by `Executor` — so the
         equivalent unit is each graph module. Compiling is deferred to the end of
-        `setup` because bind/materialise walk `self._graph_modules` and expect the
-        real `SaltModelModule` instances, not dynamo's `OptimizedModule` wrapper.
+        `setup` so it happens after bind/materialise have resolved widths and
+        written buffers: dynamo then traces the module in its final shape.
 
         Parameters
         ----------
@@ -1039,30 +1039,25 @@ class SaltModule(lightning.LightningModule):
         self._compile_kwargs = dict(compile_kwargs)
 
     def _apply_compile(self) -> None:
-        """Wrap each graph module in `torch.compile` and rebind the executors.
+        """Compile each graph module's forward, in place.
 
-        `self._graph_modules` keeps the uncompiled instances (bind/materialise/
-        validation surface); ``self.net`` takes the compiled wrappers, so a
-        checkpoint saved under ``--compile`` carries ``net.<name>._orig_mod.*``
-        keys — exactly what `on_load_checkpoint` strips on the way back in.
-        Executors are rebuilt against a per-plan runtime mapping so plan steps
-        that are not graph modules (a folded sink node) keep their frozen
-        instance. In-place compile does not work
-        (https://github.com/pytorch/pytorch/issues/101107), hence the rebind.
+        ``nn.Module.compile()`` routes ``__call__`` through a compiled
+        ``_call_impl`` instead of replacing the module with dynamo's
+        ``OptimizedModule``. That matters here: the frozen `Plan` steps and the
+        `Executor` hold the module INSTANCES, and an ``OptimizedModule`` wrapper
+        fails the executor's `GraphModule` protocol check. In-place compilation
+        keeps every instance (and therefore every plan step, executor binding
+        and ``state_dict`` key) untouched — a checkpoint written under
+        ``--compile`` is byte-compatible with an uncompiled load, no
+        ``_orig_mod.`` rewriting needed. The `on_load_checkpoint` shim stays for
+        v1-era checkpoints, which were written with the whole-model
+        ``torch.compile(model.model)`` form.
         """
         if self._compile_kwargs is None or self._compiled:
             return
-        compiled = {
-            name: torch.compile(module, **self._compile_kwargs)
-            for name, module in self._graph_modules.items()
-            if isinstance(module, nn.Module)
-        }
-        for name, module in compiled.items():
-            if name in self.net:
-                self.net[name] = module
-        for mode, plan in self.plans.items():
-            runtime = {step.name: compiled.get(step.name, step.module) for step in plan.steps}
-            self._executors[mode] = Executor(plan, runtime)
+        for module in self._graph_modules.values():
+            if isinstance(module, nn.Module):
+                module.compile(**self._compile_kwargs)
         self._compiled = True
 
     def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
