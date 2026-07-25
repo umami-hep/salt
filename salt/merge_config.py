@@ -264,14 +264,16 @@ def _stage_title(
     index: int, total: int, name: str, frozen: frozenset[str], stage: StageConfig
 ) -> str:
     """The caption for a stage graph: position, name, its frozen module set, and —
-    when declared — the stage's early-stop criterion and scoped-callback count
-    (plan 12 W7 surfacing).
+    when declared — the stage's early-stop criterion, scoped-callback count (plan 12
+    W7), and LR-scheduler class override (plan 15 W8).
     """  # noqa: DOC201
     frozen_str = ", ".join(sorted(frozen)) if frozen else "(none)"
     title = f"stage {index + 1}/{total}: {name} — frozen: {frozen_str}"
     if stage.early_stop is not None:
         es = stage.early_stop
         title += f" — early_stop: {es.monitor} ({es.mode}, patience {es.patience})"
+    if stage.lr_scheduler is not None:
+        title += f" — lr_scheduler: {stage.lr_scheduler.class_path.rsplit('.', 1)[-1]}"
     if stage.callbacks:
         title += f" — +{len(stage.callbacks)} stage callback(s)"
     return title

@@ -44,6 +44,7 @@ from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW
 from salt.schedule import (
     EarlyStopTracker,
+    LRSchedulerConfig,
     StageConfig,
     TrainingSchedule,
     apply_stage_freeze,
@@ -97,6 +98,38 @@ def _is_test_persistence_sink(callback: Any) -> bool:
     """
     is_test_sink = getattr(callback, "is_test_sink", None)
     return True if not callable(is_test_sink) else bool(is_test_sink())
+
+
+def _resolve_lr_scheduler_class(class_path: str) -> type:
+    """Import a stage `lr_scheduler.class_path` to its class (plan 15 W8). Reuses the
+    CLI's `salt.core.*`-aware resolver (local import avoids a load-time cycle).
+
+    Raises
+    ------
+    ConfigError
+        The dotted path is not importable / not a class.
+    """  # noqa: DOC201
+    from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
+
+    try:
+        cls = _resolve_class_path(class_path)
+    except (ImportError, AttributeError, ValueError) as exc:
+        raise ConfigError(
+            f"training_schedule lr_scheduler.class_path {class_path!r} is not importable: {exc}"
+        ) from exc
+    if not isinstance(cls, type):
+        raise ConfigError(
+            f"training_schedule lr_scheduler.class_path {class_path!r} does not name a class."
+        )
+    return cls
+
+
+def _is_metric_driven_scheduler(cls: type) -> bool:
+    """Whether `cls` is a metric-driven LR scheduler — i.e. a `ReduceLROnPlateau`
+    (sub)class whose ``step(metrics)`` needs a monitored value (design §3). This is
+    the deterministic detection rule for the `monitor`-required check.
+    """  # noqa: DOC201
+    return issubclass(cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
 
 
 class SaltModule(lightning.LightningModule):
@@ -802,6 +835,7 @@ class SaltModule(lightning.LightningModule):
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
         self._preflight_early_stop()
+        self._preflight_lr_scheduler()
         # Decide the freeze mode BEFORE applying the stage-0 mask: under a DDP
         # strategy with a freeze set that changes across stages, keep every managed
         # param requires_grad=True at wrap so the reducer manages them across flips
@@ -836,6 +870,33 @@ class SaltModule(lightning.LightningModule):
                 "disabled (limit_val_batches=0) — early stopping is evaluated on validation-epoch "
                 "end and could never fire. Enable validation or remove early_stop (plan 12 W7)."
             )
+
+    def _preflight_lr_scheduler(self) -> None:
+        """Fail fast at fit setup for every stage's `lr_scheduler` (plan 15 W8):
+        import its `class_path` (unimportable → ConfigError) and enforce the
+        metric-driven-⇒-`monitor` rule (a `ReduceLROnPlateau`-family scheduler needs
+        a monitored metric). Inert unless the schedule declares an `lr_scheduler`
+        (the `has_lr_scheduler` master switch).
+
+        Raises
+        ------
+        ConfigError
+            An `lr_scheduler.class_path` is unimportable, or a metric-driven
+            scheduler omits `monitor`.
+        """
+        if not self._schedule.has_lr_scheduler:
+            return
+        for stage in self._schedule.stages:
+            cfg = stage.lr_scheduler
+            if cfg is None:
+                continue
+            cls = _resolve_lr_scheduler_class(cfg.class_path)  # fail-fast on bad path
+            if _is_metric_driven_scheduler(cls) and not cfg.monitor:
+                raise ConfigError(
+                    f"training_schedule stage {stage.name!r} lr_scheduler {cfg.class_path} is "
+                    "metric-driven (a ReduceLROnPlateau subclass) and requires a 'monitor' "
+                    "(a trainer.callback_metrics key, e.g. 'val/loss') — plan 15 W8."
+                )
 
     def _make_early_stop_tracker(self, stage: StageConfig) -> EarlyStopTracker | None:
         """A fresh `EarlyStopTracker` for `stage` (reset counters), or ``None`` when
@@ -1254,10 +1315,12 @@ class SaltModule(lightning.LightningModule):
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
         """Build the active stage's optimizer (over TRAINABLE params only — frozen
-        modules are excluded entirely, plan D1) + a step-interval OneCycleLR
-        scheduler over that stage's step allocation. Re-invoked by the
+        modules are excluded entirely, plan D1) + its LR scheduler. Re-invoked by the
         `TrainingScheduleCallback` at each stage boundary via
-        ``trainer.strategy.setup_optimizers``.
+        ``trainer.strategy.setup_optimizers``. The scheduler is the default
+        step-interval OneCycleLR over the stage's step allocation, unless the stage
+        declares an `lr_scheduler` (plan 15 W8) — then that class is instantiated over
+        the freshly-built optimizer instead.
         """
         lrs, optimizer_name = self._active_optim_config()
         optimizer_class = self._get_optimizer_class(optimizer_name)
@@ -1277,6 +1340,9 @@ class SaltModule(lightning.LightningModule):
         else:
             params = [p for _, p in named_trainable]
         opt = optimizer_class(params, **optimizer_kwargs)
+        stage = self._schedule.stages[self._current_stage_index]
+        if stage.lr_scheduler is not None:
+            return [opt], [self._build_stage_lr_scheduler(opt, stage.lr_scheduler)]
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=lrs["max"],
@@ -1288,6 +1354,29 @@ class SaltModule(lightning.LightningModule):
             cycle_momentum=optimizer_class is not HybridMuonAdamW,
         )
         return [opt], [{"scheduler": scheduler, "interval": "step"}]
+
+    def _build_stage_lr_scheduler(self, opt: Optimizer, cfg: LRSchedulerConfig) -> dict[str, Any]:
+        """Instantiate the stage's chosen LR-scheduler class over the freshly-rebuilt
+        `opt` (plan 15 W8) and wrap it in the Lightning scheduler-config dict. The
+        optimizer is injected as the first positional argument; a user-supplied
+        `init_args.optimizer` was already rejected at parse. A metric-driven scheduler
+        (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
+        (`reduce_on_plateau`/`monitor`); its rank-consistency rides on the synced
+        monitor (design §7).
+        """  # noqa: DOC201
+        cls = _resolve_lr_scheduler_class(cfg.class_path)
+        scheduler = cls(opt, **(dict(cfg.init_args) if cfg.init_args else {}))
+        entry: dict[str, Any] = {
+            "scheduler": scheduler,
+            "interval": cfg.interval,
+            "frequency": cfg.frequency,
+        }
+        if _is_metric_driven_scheduler(cls):
+            entry["reduce_on_plateau"] = True
+            entry["monitor"] = cfg.monitor
+        elif cfg.monitor is not None:
+            entry["monitor"] = cfg.monitor
+        return entry
 
     # -- checkpoints: schema + plan hashes, never Plan objects --------------------
 

@@ -1206,6 +1206,71 @@ class TestStageCallbacksCLI:
         assert (tmp_path / "merged_stage00_fit.dot").exists()
 
 
+# a two-stage schedule whose stages choose DIFFERENT scheduler classes — the same
+# nested {class_path, init_args} spec shape the W8.0 fix protects (a scheduler can
+# never be eager-instantiated: it needs the stage optimizer, built at the boundary).
+LR_SCHEDULER_YAML = """
+training_schedule:
+  stages:
+    warmup:
+      epochs: 2
+      lr_scheduler:
+        class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+        init_args: {T_max: 2}
+    full:
+      lr_scheduler:
+        class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+        init_args: {mode: min, factor: 0.5}
+        monitor: val/loss
+"""
+
+
+# W8.1: per-stage `lr_scheduler:` through the REAL CLI (G8b mandate). The scheduler
+# spec has the same nested-class-spec shape that escaped W7's CLI coverage; CLI
+# gating is mandatory.
+class TestLRSchedulerCLI:
+    def test_lr_scheduler_specs_reach_model_unparsed(self, data, tmp_path):
+        from salt.schedule import LRSchedulerConfig
+
+        override = write_yaml(tmp_path, "sched_lr.yaml", LR_SCHEDULER_YAML)
+        cli = make_cli(data, extra=["--config", override])
+        stages = cli.model._schedule.stages  # noqa: SLF001
+        assert cli.model._schedule.has_lr_scheduler  # noqa: SLF001
+        # each stage carries a parsed LRSchedulerConfig — jsonargparse did NOT
+        # eager-instantiate the nested scheduler class (which would be impossible
+        # without an optimizer). The class_path survives as a string.
+        assert isinstance(stages[0].lr_scheduler, LRSchedulerConfig)
+        assert stages[0].lr_scheduler.class_path == "torch.optim.lr_scheduler.CosineAnnealingLR"
+        assert stages[1].lr_scheduler.class_path == "torch.optim.lr_scheduler.ReduceLROnPlateau"
+        assert stages[1].lr_scheduler.monitor == "val/loss"
+
+    def test_lr_scheduler_merge_config_round_trip(self, data, tmp_path):
+        from salt.merge_config import main as merge_config_main
+
+        override = write_yaml(tmp_path, "sched_lr.yaml", LR_SCHEDULER_YAML)
+        out = tmp_path / "merged.yaml"
+        rc = merge_config_main([
+            "--config", disable_logger_in_config(str(DUMMY_CFG)),
+            *required_overrides(data),
+            "--config", override,
+            "--merged.output", str(out),
+            "--merged.plots", "false",
+        ])
+        assert rc == 0
+        dumped = out.read_text()
+        assert "torch.optim.lr_scheduler.CosineAnnealingLR" in dumped
+        assert "torch.optim.lr_scheduler.ReduceLROnPlateau" in dumped
+        # a freeze graph per stage rendered without instantiating the scheduler spec
+        assert (tmp_path / "merged_stage00_warmup.dot").exists()
+        assert (tmp_path / "merged_stage01_full.dot").exists()
+
+    def test_init_args_optimizer_rejected_via_cli(self, data, tmp_path):
+        bad = LR_SCHEDULER_YAML.replace("init_args: {T_max: 2}", "init_args: {optimizer: foo}")
+        override = write_yaml(tmp_path, "sched_bad.yaml", bad)
+        with pytest.raises(ConfigError, match="must not set 'optimizer'"):
+            make_cli(data, extra=["--config", override])
+
+
 # norm_dict is the Normaliser module's OWN config (its sole consumer): set on
 # model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag. These
 # replace the retired --norm_dict fan-out tests.

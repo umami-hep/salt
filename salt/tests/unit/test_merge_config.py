@@ -409,3 +409,14 @@ class TestStageCaption:
         stage = StageConfig(name="full", callbacks=({"class_path": "pkg.A"},))
         title = _stage_title(1, 2, "full", frozenset(), stage)
         assert "+1 stage callback(s)" in title
+
+    def test_caption_includes_lr_scheduler_class(self):
+        from salt.merge_config import _stage_title
+        from salt.schedule import LRSchedulerConfig, StageConfig
+
+        stage = StageConfig(
+            name="full",
+            lr_scheduler=LRSchedulerConfig(class_path="torch.optim.lr_scheduler.ReduceLROnPlateau"),
+        )
+        title = _stage_title(1, 2, "full", frozenset(), stage)
+        assert "lr_scheduler: ReduceLROnPlateau" in title

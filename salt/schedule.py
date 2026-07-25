@@ -19,6 +19,7 @@ from salt.graph.errors import ConfigError
 __all__ = [
     "EarlyStopConfig",
     "EarlyStopTracker",
+    "LRSchedulerConfig",
     "StageConfig",
     "TrainingSchedule",
     "apply_stage_freeze",
@@ -29,11 +30,19 @@ __all__ = [
 ]
 
 # recognised per-stage keys — anything else is a config typo, rejected fail-loud.
-_STAGE_FIELDS = frozenset(
-    {"epochs", "frozen", "trainable", "optimizer", "lrs", "order", "early_stop", "callbacks"}
-)
+_STAGE_FIELDS = frozenset({
+    "epochs", "frozen", "trainable", "optimizer", "lrs", "order",
+    "early_stop", "callbacks", "lr_scheduler",
+})
 # recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
 _EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
+# recognised `lr_scheduler` sub-keys (plan 15 W8): a class spec + Lightning
+# scheduler-config keys.
+_LR_SCHEDULER_FIELDS = frozenset({"class_path", "init_args", "interval", "frequency", "monitor"})
+# OneCycle-only `lrs:` keys — meaningless (and rejected in a stage's OWN override)
+# when the stage swaps in a custom `lr_scheduler`; `initial`/`weight_decay` remain
+# the optimizer's base LR / weight decay and stay valid.
+_ONECYCLE_ONLY_LRS = frozenset({"max", "end", "pct_start", "last_epoch"})
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,24 @@ class EarlyStopConfig:
 
 
 @dataclass(frozen=True)
+class LRSchedulerConfig:
+    """A stage's LR-scheduler class choice (plan 15 W8). `class_path`/`init_args`
+    name a `torch.optim.lr_scheduler` class instantiated at the stage boundary over
+    the freshly-rebuilt stage optimizer (never a user-supplied `optimizer`). The
+    remaining fields are Lightning scheduler-config keys: `interval` (epoch|step),
+    `frequency`, and `monitor` (REQUIRED for a metric-driven scheduler, e.g.
+    `ReduceLROnPlateau`). Absent on a stage → the default per-stage OneCycleLR
+    (byte-parity with the pre-W8 behaviour).
+    """
+
+    class_path: str
+    init_args: Mapping[str, Any] | None = None
+    interval: str = "epoch"
+    frequency: int = 1
+    monitor: str | None = None
+
+
+@dataclass(frozen=True)
 class StageConfig:
     """One training stage: its epoch budget, freeze spec, and optional
     optimizer/LR overrides. Exactly one of `frozen`/`trainable` may be set
@@ -89,6 +116,7 @@ class StageConfig:
     order: int | None = None
     early_stop: EarlyStopConfig | None = None
     callbacks: tuple[Mapping[str, Any], ...] | None = None
+    lr_scheduler: LRSchedulerConfig | None = None
 
 
 class TrainingSchedule:
@@ -139,6 +167,14 @@ class TrainingSchedule:
         coordinator is added and callback handling is unchanged from the pre-W7 tip.
         """
         return any(stage.callbacks is not None for stage in self.stages)
+
+    @property
+    def has_lr_scheduler(self) -> bool:
+        """Whether any stage overrides the LR-scheduler class (plan 15 W8) — the
+        master switch for the per-stage `lr_scheduler`. When ``False`` every stage
+        uses the default per-stage OneCycleLR, bitwise-identical to the pre-W8 tip.
+        """
+        return any(stage.lr_scheduler is not None for stage in self.stages)
 
     def changes_freeze_across_stages(self) -> bool:
         """Whether the frozen set differs between any two consecutive stages —
@@ -329,6 +365,15 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     lrs = cfg.get("lrs")
     if lrs is not None and not isinstance(lrs, Mapping):
         raise ConfigError(f"training_schedule stage {name!r} 'lrs' must be a mapping.")
+    lr_scheduler = _parse_lr_scheduler(name, cfg)
+    if lr_scheduler is not None and isinstance(lrs, Mapping):
+        clash = _ONECYCLE_ONLY_LRS & set(lrs)
+        if clash:
+            raise ConfigError(
+                f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
+                f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
+                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs' (plan 15 W8)."
+            )
     return StageConfig(
         name=name,
         epochs=epochs,
@@ -339,6 +384,71 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
         order=order,
         early_stop=_parse_early_stop(name, cfg),
         callbacks=_parse_stage_callbacks(name, cfg),
+        lr_scheduler=lr_scheduler,
+    )
+
+
+def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig | None:
+    """Parse + structurally validate a stage's optional `lr_scheduler` block into an
+    `LRSchedulerConfig` (fail-loud, import-free); ``None`` when the stage declares
+    none. `class_path` is a required non-empty string; `init_args` (if present) a
+    mapping that must NOT set `optimizer` (injected at the boundary); `interval` is
+    ``epoch``/``step``; `frequency` a positive int; `monitor` a non-empty string.
+    Import + the metric-driven-⇒-monitor rule are enforced at fit start.
+    """  # noqa: DOC201, DOC501
+    raw = cfg.get("lr_scheduler")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler' must be a mapping "
+            f"(got {type(raw).__name__})."
+        )
+    if unknown := set(raw) - _LR_SCHEDULER_FIELDS:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler' has unknown key(s) "
+            f"{sorted(unknown)} — valid keys are {sorted(_LR_SCHEDULER_FIELDS)} (plan 15 W8)."
+        )
+    class_path = raw.get("class_path")
+    if not isinstance(class_path, str) or not class_path.strip():
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.class_path' is required and must "
+            "be a non-empty string (a dotted torch.optim.lr_scheduler class)."
+        )
+    init_args = raw.get("init_args")
+    if init_args is not None and not isinstance(init_args, Mapping):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.init_args' must be a mapping "
+            f"(got {type(init_args).__name__})."
+        )
+    if isinstance(init_args, Mapping) and "optimizer" in init_args:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.init_args' must not set 'optimizer' "
+            "— the freshly-rebuilt stage optimizer is injected automatically (plan 15 W8)."
+        )
+    interval = raw.get("interval", "epoch")
+    if interval not in {"epoch", "step"}:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.interval' must be 'epoch' or 'step' "
+            f"(got {interval!r})."
+        )
+    frequency = raw.get("frequency", 1)
+    if isinstance(frequency, bool) or not isinstance(frequency, int) or frequency < 1:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.frequency' must be a positive "
+            f"integer (got {frequency!r})."
+        )
+    monitor = raw.get("monitor")
+    if monitor is not None and (not isinstance(monitor, str) or not monitor.strip()):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'lr_scheduler.monitor' must be a non-empty string."
+        )
+    return LRSchedulerConfig(
+        class_path=class_path,
+        init_args=dict(init_args) if isinstance(init_args, Mapping) else None,
+        interval=interval,
+        frequency=frequency,
+        monitor=monitor,
     )
 
 

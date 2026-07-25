@@ -15,6 +15,7 @@ from salt.model.saltmodule import SaltModule
 from salt.schedule import (
     EarlyStopConfig,
     EarlyStopTracker,
+    LRSchedulerConfig,
     StageConfig,
     TrainingSchedule,
     boundary_record,
@@ -555,3 +556,114 @@ class TestStageCallbacksParse:
                 {"stages": {"fit": {"callbacks": [{"class_path": "pkg.A", "init_args": [1]}]}}},
                 MODULE_NAMES,
             )
+
+
+# --- W8: per-stage lr_scheduler (schema) ------------------------------------
+
+_COSINE = "torch.optim.lr_scheduler.CosineAnnealingLR"
+_PLATEAU = "torch.optim.lr_scheduler.ReduceLROnPlateau"
+
+
+class TestLRSchedulerParse:
+    def test_absent_by_default(self):
+        sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
+        assert sched.initial_stage.lr_scheduler is None
+        assert not sched.has_lr_scheduler
+
+    def test_minimal_defaults(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE, "init_args": {"T_max": 5}}}}},
+            MODULE_NAMES,
+        )
+        cfg = sched.initial_stage.lr_scheduler
+        assert isinstance(cfg, LRSchedulerConfig)
+        assert cfg.class_path == _COSINE
+        assert cfg.init_args == {"T_max": 5}
+        assert cfg.interval == "epoch"  # default
+        assert cfg.frequency == 1
+        assert cfg.monitor is None
+        assert sched.has_lr_scheduler
+
+    def test_all_fields(self):
+        sched = TrainingSchedule.from_config(
+            {
+                "stages": {
+                    "fit": {
+                        "lr_scheduler": {
+                            "class_path": _PLATEAU,
+                            "init_args": {"mode": "min", "patience": 2},
+                            "interval": "epoch",
+                            "frequency": 2,
+                            "monitor": "val/loss",
+                        }
+                    }
+                }
+            },
+            MODULE_NAMES,
+        )
+        cfg = sched.initial_stage.lr_scheduler
+        assert (cfg.interval, cfg.frequency, cfg.monitor) == ("epoch", 2, "val/loss")
+
+    def test_has_lr_scheduler_true_if_any_stage(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 1}, "b": {"lr_scheduler": {"class_path": _COSINE}}}},
+            MODULE_NAMES,
+        )
+        assert sched.has_lr_scheduler
+
+    def test_missing_class_path_rejected(self):
+        with pytest.raises(ConfigError, match="lr_scheduler.class_path' is required"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"init_args": {"T_max": 5}}}}}, MODULE_NAMES
+            )
+
+    def test_init_args_optimizer_rejected(self):
+        with pytest.raises(ConfigError, match="must not set 'optimizer'"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE,
+                 "init_args": {"optimizer": "x"}}}}}, MODULE_NAMES,
+            )
+
+    def test_bad_interval_rejected(self):
+        with pytest.raises(ConfigError, match="lr_scheduler.interval' must be 'epoch' or 'step'"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE, "interval": "batch"}}}},
+                MODULE_NAMES,
+            )
+
+    def test_non_positive_frequency_rejected(self):
+        with pytest.raises(ConfigError, match="lr_scheduler.frequency' must be a positive integer"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE, "frequency": 0}}}},
+                MODULE_NAMES,
+            )
+
+    def test_unknown_key_rejected(self):
+        with pytest.raises(ConfigError, match="lr_scheduler' has unknown key"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE, "gamma": 0.1}}}},
+                MODULE_NAMES,
+            )
+
+    def test_not_a_mapping_rejected(self):
+        with pytest.raises(ConfigError, match="'lr_scheduler' must be a mapping"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": [_COSINE]}}}, MODULE_NAMES
+            )
+
+    def test_onecycle_lrs_key_clash_rejected(self):
+        # a stage's OWN lrs override may not set OneCycle-only keys alongside a
+        # custom lr_scheduler (contradiction) — initial/weight_decay stay allowed.
+        with pytest.raises(ConfigError, match="OneCycle-only 'lrs' key"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE},
+                 "lrs": {"max": 1e-3}}}}, MODULE_NAMES,
+            )
+
+    def test_initial_lrs_key_allowed_with_scheduler(self):
+        # `initial` (optimizer base LR) stays meaningful with a custom scheduler
+        sched = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE},
+             "lrs": {"initial": 1e-4, "weight_decay": 1e-5}}}}, MODULE_NAMES,
+        )
+        assert sched.initial_stage.lr_scheduler.class_path == _COSINE
