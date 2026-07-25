@@ -364,10 +364,21 @@ like to transform (this can currently be either `input`, which applies the trans
 
 #### Compiled Models
 
-Pytorch 2.0 introduced compiled models via `torch.compile()` which improves execution times.
-In tests, compilation can increase the execution speed of the model by up to 1.5x.
-You can enable compilation by passing the `--compile` flag to the CLI.
-You may see some warnings printed at the start of training, and the first step will take a while as the model is JIT compiled.
+`torch.compile()` traces the model into a graph and hands it to a backend compiler
+(inductor), which can fuse kernels and cut Python overhead. Enable it with the `--compile`
+flag on `salt fit`. The first step will take a while — that is the compilation — and you may
+see warnings.
+
+Salt compiles **each graph module in place** (`nn.Module.compile()`), not the whole
+`SaltModule`, because in salt there is no single `nn.Module` spanning the forward: the graph
+is a `Plan` executed module-by-module. Compiling in place keeps every module instance, plan
+step and `state_dict` key unchanged, so a checkpoint written under `--compile` loads into an
+uncompiled model with no repair step.
+
+!!! warning "Measure before you enable it — compilation is not free, and not always a win"
+
+    On the configuration measured below, `--compile` was **slower than eager on every
+    attention backend except `torch-math`**. It is worth trying, not worth assuming.
 
 ??? failure "If you see `g++` compile errors, you may need to update your compiler"
 
@@ -379,20 +390,51 @@ You may see some warnings printed at the start of training, and the first step w
     conda install -c conda-forge cxx-compiler
     ```
 
-??? abstract "`torch.compile()` results"
+#### `--compile` and the attention backend
 
-    The following results were obtained on a single A100 GPU
-    with a batch size of 5,000 and 40 workers.
+Compilation interacts strongly with `attn_type` (see [Attention backends](#attention-backends)),
+so the two must be chosen together.
 
-    | Model      | Eager    | `torch.compile()` | Speedup |
-    | ---------- | -------- | ----------------- | ------- |
-    | GN3 No Aux | 8.9 it/s | 15.4 it/s         | 1.73x   |
-    | GN3        | 6.4 it/s | 9.0  it/s         | 1.41x   |
+??? abstract "Measured: `--compile` x attention backend, GN2v2 on one A100 80GB"
 
-    Memory usage should be unaffected by compiling the model.
-    Please report any issues you may have
+    GN2v2 open-data (256/128, 4 layers, 8 heads), batch 1000, `16-mixed`, seed 42,
+    220 training steps per cell, torch 2.12.1+cu126. Rates exclude a 20-step warmup;
+    "first step" is the one-off compilation cost.
 
-!!! warning "`torch.compile()` has not been tested with mutli GPU training"
+    | backend        | eager      | `--compile` | speedup | peak memory (eager) |
+    | -------------- | ---------- | ----------- | ------- | ------------------- |
+    | `torch-math`   | 19.1 it/s  | 23.1 it/s   | 1.21x   | 2.57 GB             |
+    | `torch-flash`  | 18.9 it/s  | —           | —       | 2.57 GB             |
+    | `torch-meff`   | 27.97 it/s | 25.2 it/s   | 0.90x   | 2.15 GB             |
+    | `flash-varlen` | 27.96 it/s | 26.3 it/s   | 0.94x   | **1.36 GB**         |
+
+    Read this carefully before enabling `--compile`:
+
+    - **The fastest configuration is eager**, on either `torch-meff` or `flash-varlen`
+      (~28 it/s). No compiled cell beats it.
+    - Compilation only pays off on `torch-math`, and even then the result (23.1 it/s)
+      is still slower than plain eager `flash-varlen`.
+    - It also costs 35–65 s of compilation per run before the first step.
+    - `torch-flash` measures identically to `torch-math` because PyTorch's flash SDPA
+      kernel rejects padding masks and silently falls back to math — see the warning
+      under [Attention backends](#attention-backends).
+    - Peak memory is *not* unaffected by compiling (an older version of this page
+      claimed it was): it moved by −6% to +3% depending on backend.
+
+    The `flash-varlen` figure requires the unpad/repad seam to be excluded from the
+    compiled region (`torch.compiler.disable` in `salt/utils/tensor_utils.py`).
+    Without that, the same cell runs at 20.4 it/s (0.73x) — the boolean-mask index
+    lowers to `aten.nonzero`, which inductor cannot lower on CUDA, and the resulting
+    graph breaks and recompiles cost ~29% of throughput.
+
+!!! note "Most remaining recompiles are not about attention"
+
+    In the measured runs, ~72% of dynamo graph breaks in a compiled model came from the
+    task heads and from `grad_mode` flipping between training and validation, not from
+    the attention path — so they are paid on *every* backend. If you are chasing compile
+    performance, that is where the headroom is.
+
+!!! warning "`--compile` has not been tested with multi-GPU training"
 
 
 ### Hyperparameter Optimisation

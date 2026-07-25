@@ -35,15 +35,17 @@ If you don't specify a config path using `--config`, the script will look for on
 You can also optionally specify a different scale dict to the one in the training config, and a model name (by default this is `salt`).
 The model name is used to construct the output probability variable names in Athena.
 
-??? tip "Exporting a model trained with `torch.compile()`."
+??? tip "Exporting a model trained with `--compile`."
 
-    If you trained your model with `torch.compile()`, you need to repair your checkpoint before exporting.
-    You can do this by running the [`repair_ckpt.py`]({{repo_url}}-/blob/main/salt/utils/repair_ckpt.py) 
-    script:
+    Nothing special is needed. Salt compiles each graph module **in place**
+    (`nn.Module.compile()`), so the module tree is unchanged and a checkpoint written
+    under `--compile` has exactly the same `state_dict` keys as one written without it.
+    Export it directly.
 
-    ```bash
-    repair_ckpt <path_to_checkpoint>
-    ```
+    (In salt v1 compilation replaced the model with a wrapper, which prefixed every
+    key with `_orig_mod.` and needed a `repair_ckpt` pass first. That script is gone;
+    `SaltModule.on_load_checkpoint` still strips the prefix so v1-era compiled
+    checkpoints keep loading.)
 
 ### Combining outputs
 For compatability, or just ease, it might be required to combine outputs. This can be done via the 'combine_outputs' argument, which takes the form
