@@ -132,6 +132,8 @@ rejected fail-loud:
   its `epochs` cap (see [below](#per-stage-early-stopping-early_stop)).
 - **`callbacks`** — an optional list of extra Lightning callbacks active only during
   this stage (see [below](#per-stage-callbacks-callbacks)).
+- **`lr_scheduler`** — an optional LR-scheduler *class* for this stage, replacing the
+  default OneCycleLR (see [below](#per-stage-lr-scheduler-lr_scheduler)).
 
 ### How the pieces layer
 
@@ -151,10 +153,11 @@ A stage's own **`callbacks:`** are for the opposite kind of thing:
 stage-scoped *instrumentation and side-effects* — a monitor, a diagnostic, a
 per-stage checkpoint policy — that observe a stage without steering it.
 
-One thing is fixed, not per-stage: the LR **scheduler type**. Every stage runs a
-`OneCycleLR` envelope; `lrs:` tunes its parameters (`max`, `initial`, `end`,
-`pct_start`) per stage, but you cannot swap OneCycle for a different scheduler
-class per stage.
+By default every stage runs a `OneCycleLR` envelope; `lrs:` tunes its parameters
+(`max`, `initial`, `end`, `pct_start`) per stage. A stage that needs a *different*
+scheduler class entirely — a cosine warm-up, a plateau-driven finetune — declares
+[`lr_scheduler:`](#per-stage-lr-scheduler-lr_scheduler); the chosen class is built
+over that stage's optimizer at the boundary, in place of OneCycle.
 
 ### Stacking and deleting stages
 
@@ -441,6 +444,50 @@ training_schedule:
   that stage's freshly-instantiated callbacks*.
 - Every declared stage callback is import/instantiation-checked at **fit start**, so a
   bad `class_path` fails before training, not three stages in.
+
+### Per-stage LR scheduler — `lr_scheduler`
+
+By default each stage runs a `OneCycleLR` envelope. A stage can instead choose a
+different scheduler **class** — the classic fine-tuning shape is a cosine warm-up
+followed by a plateau-driven finetune that drops the LR whenever `val/loss` stalls:
+
+```yaml
+# extend finetune_gn3large.yaml — cosine warm-up, plateau finetune
+training_schedule:
+  stages:
+    head_warmup:
+      epochs: 5
+      trainable: [jets_classification]
+      lrs: {initial: 1.0e-4}          # 'initial' = the optimizer's base LR
+      lr_scheduler:
+        class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+        init_args: {T_max: 5}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-5}
+      lr_scheduler:
+        class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+        init_args: {mode: min, factor: 0.5, patience: 2}
+        monitor: val/loss             # REQUIRED for a metric-driven scheduler
+```
+
+- The class is instantiated over the stage's **freshly-rebuilt optimizer** at the
+  boundary — you never pass an `optimizer` in `init_args` (it is injected for you; a
+  user-supplied one is a `ConfigError`).
+- Optional Lightning scheduler-config keys: **`interval`** (`epoch` — the default for
+  a custom scheduler — or `step`), **`frequency`**, and **`monitor`**. A *metric-driven*
+  scheduler (`ReduceLROnPlateau`) **requires `monitor`** — a fail-fast error at fit
+  start otherwise. Its LR reductions ride on the same rank-synced monitor as
+  `early_stop`, so they are consistent under multi-GPU DDP.
+- With `lr_scheduler:` the OneCycle-only `lrs:` keys (`max`/`end`/`pct_start`) no
+  longer apply; keep only `initial` (base LR) and `weight_decay` in that stage's
+  `lrs:` override. Setting a OneCycle-only key alongside `lr_scheduler:` is a
+  `ConfigError`.
+- A stage may declare **both** `lr_scheduler` (e.g. plateau) and `early_stop` on the
+  same monitor: the scheduler lowers the LR when the metric plateaus while
+  `early_stop` independently advances the stage once its patience is exhausted.
+- A config with **no** `lr_scheduler:` anywhere is bitwise-identical to before (every
+  stage keeps its OneCycleLR).
 
 ## Worked example B — module surgery: add a new head
 

@@ -1265,9 +1265,14 @@ class TestLRSchedulerCLI:
         assert (tmp_path / "merged_stage01_full.dot").exists()
 
     def test_init_args_optimizer_rejected_via_cli(self, data, tmp_path):
+        # a user-supplied init_args.optimizer is rejected on the CLI. The salt
+        # ConfigError is raised in SaltModule.__init__ (schedule parse) and
+        # jsonargparse wraps a model-instantiation failure as its Union-validation
+        # ValueError — either way the bad config does not parse. (The exact
+        # ConfigError message is asserted directly in test_schedule.py.)
         bad = LR_SCHEDULER_YAML.replace("init_args: {T_max: 2}", "init_args: {optimizer: foo}")
         override = write_yaml(tmp_path, "sched_bad.yaml", bad)
-        with pytest.raises(ConfigError, match="must not set 'optimizer'"):
+        with pytest.raises((ConfigError, ValueError)):
             make_cli(data, extra=["--config", override])
 
 
