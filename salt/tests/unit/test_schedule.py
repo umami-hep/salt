@@ -486,3 +486,72 @@ class TestBoundaryRecord:
             "stage_name": "full", "stage_index": 1, "global_step": 250,
             "epoch": 5, "reason": "early_stop",
         }
+
+
+# --- W7: per-stage scoped callbacks (schema) --------------------------------
+
+
+class TestStageCallbacksParse:
+    def test_absent_by_default(self):
+        sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
+        assert sched.initial_stage.callbacks is None
+        assert not sched.has_stage_callbacks
+
+    def test_parsed_specs(self):
+        sched = TrainingSchedule.from_config(
+            {
+                "stages": {
+                    "fit": {
+                        "callbacks": [
+                            {"class_path": "pkg.A"},
+                            {"class_path": "pkg.B", "init_args": {"x": 1}},
+                        ]
+                    }
+                }
+            },
+            MODULE_NAMES,
+        )
+        assert sched.has_stage_callbacks
+        specs = sched.initial_stage.callbacks
+        assert len(specs) == 2
+        assert specs[0]["class_path"] == "pkg.A"
+        assert specs[1]["init_args"] == {"x": 1}
+
+    def test_has_stage_callbacks_true_if_any_stage(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"a": {"epochs": 1}, "b": {"callbacks": [{"class_path": "pkg.A"}]}}},
+            MODULE_NAMES,
+        )
+        assert sched.has_stage_callbacks
+
+    def test_not_a_list_rejected(self):
+        with pytest.raises(ConfigError, match="'callbacks' must be a list"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"callbacks": {"class_path": "pkg.A"}}}}, MODULE_NAMES
+            )
+
+    def test_item_not_a_mapping_rejected(self):
+        with pytest.raises(ConfigError, match=r"callbacks\[0\] must be a mapping"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"callbacks": ["pkg.A"]}}}, MODULE_NAMES
+            )
+
+    def test_missing_class_path_rejected(self):
+        with pytest.raises(ConfigError, match="needs a non-empty string 'class_path'"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"callbacks": [{"init_args": {"x": 1}}]}}}, MODULE_NAMES
+            )
+
+    def test_unknown_spec_key_rejected(self):
+        with pytest.raises(ConfigError, match=r"callbacks\[0\] has unknown key"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"callbacks": [{"class_path": "pkg.A", "args": {}}]}}},
+                MODULE_NAMES,
+            )
+
+    def test_init_args_not_a_mapping_rejected(self):
+        with pytest.raises(ConfigError, match="'init_args' must be a mapping"):
+            TrainingSchedule.from_config(
+                {"stages": {"fit": {"callbacks": [{"class_path": "pkg.A", "init_args": [1]}]}}},
+                MODULE_NAMES,
+            )

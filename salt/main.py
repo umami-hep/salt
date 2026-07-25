@@ -741,25 +741,37 @@ class SaltCLI(LightningCLI):
         return super().instantiate_trainer(**kwargs)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
-        """Auto-inject the `TrainingScheduleCallback` on ``fit`` when the model's
-        `training_schedule` is multi-stage, freezes anything, or declares
-        `early_stop` (a single-stage early-stop still needs the driver to end the
-        fit) — the user never registers the stage-transition driver manually (plan
-        01 W3 / plan 12 W7). A no-op for a plain (desugared single-`fit`, no-freeze,
-        no-early-stop) schedule, off ``fit``, or when one is already present.
+        """Auto-inject the schedule driver callbacks on ``fit`` (plan 01 W3 / plan
+        12 W7); the user never registers them manually. The `TrainingScheduleCallback`
+        (stage-transition driver) is added when the schedule is multi-stage, freezes
+        anything, or declares `early_stop` (a single-stage early-stop still needs it
+        to end the fit); the `StageScopedCallbacks` coordinator is added when any
+        stage declares scoped `callbacks`, always AFTER the transition driver so it
+        observes the advanced stage index. A no-op for a plain (desugared, no-freeze,
+        no-early-stop, no-stage-callbacks) schedule, off ``fit``, or when a given
+        driver is already present.
         """  # noqa: DOC201
-        from salt.callbacks.schedule import TrainingScheduleCallback  # noqa: PLC0415
+        from salt.callbacks.schedule import (  # noqa: PLC0415
+            StageScopedCallbacks,
+            TrainingScheduleCallback,
+        )
 
         if getattr(self.config, "subcommand", None) != "fit":
             return assembled
         schedule = getattr(getattr(self, "model", None), "_schedule", None)
-        if schedule is None or not (
-            schedule.is_multi_stage or schedule.has_freezing or schedule.has_early_stop
+        if schedule is None:
+            return assembled
+        result = list(assembled)
+        needs_driver = schedule.is_multi_stage or schedule.has_freezing or schedule.has_early_stop
+        if needs_driver and not any(
+            isinstance(cb, TrainingScheduleCallback) for cb in (*result, *stock)
         ):
-            return assembled
-        if any(isinstance(cb, TrainingScheduleCallback) for cb in (*assembled, *stock)):
-            return assembled
-        return [*assembled, TrainingScheduleCallback()]
+            result.append(TrainingScheduleCallback())
+        if schedule.has_stage_callbacks and not any(
+            isinstance(cb, StageScopedCallbacks) for cb in (*result, *stock)
+        ):
+            result.append(StageScopedCallbacks())
+        return result
 
     def instantiate_classes(self) -> None:
         """Instantiate, then compose the top-level ``outputs:`` section onto the

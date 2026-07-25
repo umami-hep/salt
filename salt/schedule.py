@@ -30,7 +30,7 @@ __all__ = [
 
 # recognised per-stage keys — anything else is a config typo, rejected fail-loud.
 _STAGE_FIELDS = frozenset(
-    {"epochs", "frozen", "trainable", "optimizer", "lrs", "order", "early_stop"}
+    {"epochs", "frozen", "trainable", "optimizer", "lrs", "order", "early_stop", "callbacks"}
 )
 # recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
 _EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
@@ -88,6 +88,7 @@ class StageConfig:
     lrs: Mapping[str, float] | None = None
     order: int | None = None
     early_stop: EarlyStopConfig | None = None
+    callbacks: tuple[Mapping[str, Any], ...] | None = None
 
 
 class TrainingSchedule:
@@ -130,6 +131,14 @@ class TrainingSchedule:
         behaviour is bitwise-identical to the pre-W7 tip (the G7a parity guard).
         """
         return any(stage.early_stop is not None for stage in self.stages)
+
+    @property
+    def has_stage_callbacks(self) -> bool:
+        """Whether any stage declares scoped `callbacks` — the switch that injects
+        the `StageScopedCallbacks` coordinator (plan 12 W7). When ``False`` no
+        coordinator is added and callback handling is unchanged from the pre-W7 tip.
+        """
+        return any(stage.callbacks is not None for stage in self.stages)
 
     def changes_freeze_across_stages(self) -> bool:
         """Whether the frozen set differs between any two consecutive stages —
@@ -329,7 +338,52 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
         lrs=lrs,
         order=order,
         early_stop=_parse_early_stop(name, cfg),
+        callbacks=_parse_stage_callbacks(name, cfg),
     )
+
+
+def _parse_stage_callbacks(stage: str, cfg: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...] | None:
+    """Parse + structurally validate a stage's optional scoped `callbacks` list
+    into a tuple of ``{class_path[, init_args]}`` specs (fail-loud); ``None`` when
+    the stage declares none. Each spec must be a mapping with a string
+    ``class_path`` and, if present, a mapping ``init_args``. Import/instantiation
+    validation of the class is deferred to fit start (`StageScopedCallbacks.setup`),
+    so a bad path fails before training rather than at the stage boundary.
+    """  # noqa: DOC201, DOC501
+    raw = cfg.get("callbacks")
+    if raw is None:
+        return None
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, Sequence):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} 'callbacks' must be a list of "
+            f"class_path/init_args specs (got {type(raw).__name__})."
+        )
+    specs: list[Mapping[str, Any]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise ConfigError(
+                f"training_schedule stage {stage!r} callbacks[{i}] must be a mapping with a "
+                f"'class_path' (got {type(item).__name__})."
+            )
+        class_path = item.get("class_path")
+        if not isinstance(class_path, str) or not class_path.strip():
+            raise ConfigError(
+                f"training_schedule stage {stage!r} callbacks[{i}] needs a non-empty string "
+                "'class_path' (a dotted module.Class)."
+            )
+        if unknown := set(item) - {"class_path", "init_args"}:
+            raise ConfigError(
+                f"training_schedule stage {stage!r} callbacks[{i}] has unknown key(s) "
+                f"{sorted(unknown)} — only 'class_path' and 'init_args' are allowed."
+            )
+        init_args = item.get("init_args")
+        if init_args is not None and not isinstance(init_args, Mapping):
+            raise ConfigError(
+                f"training_schedule stage {stage!r} callbacks[{i}] 'init_args' must be a mapping "
+                f"(got {type(init_args).__name__})."
+            )
+        specs.append(dict(item))
+    return tuple(specs)
 
 
 def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | None:

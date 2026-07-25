@@ -15,7 +15,8 @@ multi-stage or freezes anything — the user never registers it.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from lightning.pytorch.callbacks import Callback
 
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-__all__ = ["TrainingScheduleCallback"]
+__all__ = ["StageScopedCallbacks", "TrainingScheduleCallback"]
 
 
 class TrainingScheduleCallback(Callback):
@@ -140,3 +141,129 @@ def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
     if value is None:
         return None
     return float(value.item() if hasattr(value, "item") else value)
+
+
+# Lightning callback hooks the coordinator forwards to the active stage's scoped
+# delegates. setup/teardown are handled explicitly (validation + build + teardown);
+# on_fit_start/end + on_train_start/end are fit-level (not per-stage) and are NOT
+# forwarded — a stage-scoped callback's lifecycle is its stage, bracketed by the
+# manual setup()/teardown() the coordinator calls when it (re)builds the delegates.
+_STAGE_SCOPED_HOOKS = (
+    "on_train_epoch_start",
+    "on_train_epoch_end",
+    "on_validation_epoch_start",
+    "on_validation_epoch_end",
+    "on_train_batch_start",
+    "on_train_batch_end",
+    "on_validation_batch_start",
+    "on_validation_batch_end",
+    "on_before_backward",
+    "on_after_backward",
+    "on_before_optimizer_step",
+    "on_before_zero_grad",
+    "on_validation_start",
+    "on_validation_end",
+)
+
+
+class StageScopedCallbacks(Callback):
+    """Coordinator for per-stage scoped `callbacks` (plan 12 W7, D-CB). Registered
+    ONCE by `SaltCLI` when the schedule declares any stage `callbacks` — Lightning
+    fixes ``trainer.callbacks`` at fit start, so the always-propagated top-level
+    (global) callbacks persist for the whole fit while THIS coordinator hosts the
+    stage-scoped ones: at each stage entry it instantiates the entering stage's
+    callbacks FRESH (fresh state — D-CB), forwards Lightning's per-stage hooks to
+    them ONLY while their stage is active, and tears them down at stage exit. The
+    user's "combined set" per stage is therefore the persistent globals plus these
+    freshly-instantiated stage-scoped delegates.
+
+    Stateless at construction (empty delegate list) so it is picklable for DDP
+    spawn; delegates are built lazily in the (spawned) worker at the first hook.
+    """
+
+    def __init__(self) -> None:
+        self._active_delegates: list[Callback] = []
+        self._active_stage_index: int | None = None
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """At fit setup, import+instantiate EVERY declared stage callback once so a
+        bad ``class_path``/``init_args`` fails before training (not at a boundary),
+        then discards them; the active stage's live delegates are built lazily at
+        the first per-stage hook. No-op off ``fit`` or without stage callbacks.
+        """
+        if stage != "fit":
+            return
+        schedule = getattr(pl_module, "_schedule", None)
+        if schedule is None or not schedule.has_stage_callbacks:
+            return
+        for stage_cfg in schedule.stages:
+            for spec in stage_cfg.callbacks or ():
+                _instantiate_stage_callback(spec)  # validation only — discarded
+
+    def teardown(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """At fit teardown, tear down the active stage's delegates and forget them."""
+        if stage != "fit":
+            return
+        for delegate in self._active_delegates:
+            delegate.teardown(trainer, pl_module, "fit")
+        self._active_delegates = []
+        self._active_stage_index = None
+
+    def _sync_active_stage(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Rebuild the scoped delegates when the active stage changed since the last
+        hook: tear down the leaving stage's delegates, instantiate the entering
+        stage's fresh, and call their `setup` (Lightning already ran its own setup
+        phase before this stage existed). Cheap no-op while the stage is unchanged.
+        """
+        schedule = getattr(pl_module, "_schedule", None)
+        if schedule is None:
+            return
+        index = pl_module._current_stage_index  # noqa: SLF001 - same-package schedule state
+        if index == self._active_stage_index:
+            return
+        for delegate in self._active_delegates:
+            delegate.teardown(trainer, pl_module, "fit")
+        specs = schedule.stages[index].callbacks or ()
+        self._active_delegates = [_instantiate_stage_callback(spec) for spec in specs]
+        self._active_stage_index = index
+        for delegate in self._active_delegates:
+            delegate.setup(trainer, pl_module, "fit")
+
+
+def _instantiate_stage_callback(spec: Mapping[str, Any]) -> Callback:
+    """Instantiate one stage-scoped callback from a ``{class_path[, init_args]}``
+    spec (`init_args` passed as keyword arguments verbatim).
+
+    Returns
+    -------
+    Callback
+        The instantiated callback.
+    """
+    from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
+
+    cls = _resolve_class_path(spec["class_path"])
+    init_args = spec.get("init_args") or {}
+    return cls(**init_args)
+
+
+def _make_stage_hook_forwarder(hook_name: str):  # noqa: ANN202 - dynamic hook forwarder
+    """Build the coordinator method for `hook_name`: sync the active stage, then
+    forward the hook to each live stage-scoped delegate.
+    """  # noqa: DOC201
+
+    def _forward(
+        self: StageScopedCallbacks, trainer: Trainer, pl_module: LightningModule,
+        *args: Any, **kwargs: Any,
+    ) -> None:
+        self._sync_active_stage(trainer, pl_module)  # noqa: SLF001 - own private method
+        for delegate in self._active_delegates:  # noqa: SLF001 - own private state
+            getattr(delegate, hook_name)(trainer, pl_module, *args, **kwargs)
+
+    _forward.__name__ = hook_name
+    _forward.__qualname__ = f"StageScopedCallbacks.{hook_name}"
+    return _forward
+
+
+for _hook in _STAGE_SCOPED_HOOKS:
+    setattr(StageScopedCallbacks, _hook, _make_stage_hook_forwarder(_hook))
+del _hook
