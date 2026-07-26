@@ -663,20 +663,37 @@ def _print_model_report(
         totals.get(key, 0.0)
         for key in ("forward_steps_device", "autograd_engine_device", "optimizer_device")
     )
+    # A CPU-only run records no device time at all, and printing a table of
+    # zeroes is worse than printing nothing. Fall back to the wall time of the
+    # same scopes and SAY which one is on screen.
+    on_device = denominator > 0
+    axis = "device" if on_device else "CPU wall"
+    step_key, bucket_suffix = ("device_us", "device") if on_device else ("cpu_us", "cpu")
+    if not on_device:
+        denominator = sum(entry.get("cpu_us", 0.0) for entry in steps.values())
 
-    print(f"=== {tag}: per-plan-step device time (ms/step over {active} steps) ===")
-    ranked = sorted(steps.items(), key=lambda item: item[1].get("device_us", 0.0), reverse=True)
-    print(f"{'module':<32}{'ms/step':>12}{'% of step':>12}")
+    print(f"=== {tag}: per-plan-step {axis} time (ms/step over {active} steps) ===")
+    ranked = sorted(steps.items(), key=lambda item: item[1].get(step_key, 0.0), reverse=True)
+    print(f"{'module':<32}{'ms/step':>12}{'% of fwd':>12}")
     for name, entry in ranked[:row_limit]:
-        per_step = entry.get("device_us", 0.0) / active / 1e3
-        share = 100.0 * entry.get("device_us", 0.0) / denominator if denominator else 0.0
-        print(f"{name:<32}{per_step:>12.3f}{share:>11.1f}%")
+        value = entry.get(step_key, 0.0)
+        share = 100.0 * value / denominator if denominator else 0.0
+        print(f"{name:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+
+    if not on_device:
+        print(
+            "\nno device time was recorded (CPU-only run) — the rows above are CPU wall time "
+            "and are INCLUSIVE, so they do not partition the step. Run on a GPU for the "
+            "forward/backward/optimizer split."
+        )
+        print(f"\nartifacts: {out_dir}/{tag}_*")
+        return
 
     print(f"\n=== {tag}: step buckets (ms/step) ===")
     buckets = (
-        ("forward (sum of plan steps)", "forward_steps_device"),
-        ("backward (autograd engine)", "autograd_engine_device"),
-        ("optimizer", "optimizer_device"),
+        ("forward (sum of plan steps)", f"forward_steps_{bucket_suffix}"),
+        ("backward (autograd engine)", f"autograd_engine_{bucket_suffix}"),
+        ("optimizer", f"optimizer_{bucket_suffix}"),
     )
     for label, key in buckets:
         value = totals.get(key, 0.0)
