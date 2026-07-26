@@ -375,10 +375,11 @@ is a `Plan` executed module-by-module. Compiling in place keeps every module ins
 step and `state_dict` key unchanged, so a checkpoint written under `--compile` loads into an
 uncompiled model with no repair step.
 
-!!! warning "Measure before you enable it — compilation is not free, and not always a win"
+!!! warning "Measure before you enable it — compilation is not free, and the answer depends on the model"
 
-    On the configuration measured below, `--compile` was **slower than eager on every
-    attention backend except `torch-math`**. It is worth trying, not worth assuming.
+    On a GN2-sized model `--compile` was **slower than eager on every attention backend
+    except `torch-math`**. On a GN3-sized one it is a win on every backend measured.
+    Both matrices are below. It is worth trying, not worth assuming.
 
 ??? failure "If you see `g++` compile errors, you may need to update your compiler"
 
@@ -427,12 +428,61 @@ so the two must be chosen together.
     lowers to `aten.nonzero`, which inductor cannot lower on CUDA, and the resulting
     graph breaks and recompiles cost ~29% of throughput.
 
-!!! note "Most remaining recompiles are not about attention"
+??? abstract "Measured: `--compile` x attention backend, GN3V00 on one A100 80GB"
 
-    In the measured runs, ~72% of dynamo graph breaks in a compiled model came from the
-    task heads and from `grad_mode` flipping between training and validation, not from
-    the attention path — so they are paid on *every* backend. If you are chasing compile
-    performance, that is where the headroom is.
+    The GN2 verdict above does **not** carry over. GN3V00 (512/256, 4 layers, 8 heads,
+    8 registers, two padded streams of 50 slots each, five task heads), batch 1000,
+    `16-mixed`, seed 42, 220 training steps per cell, torch 2.12.1+cu126.
+
+    | backend        | eager      | `--compile` | speedup | first step (compile) | peak memory (eager -> compile) |
+    | -------------- | ---------- | ----------- | ------- | -------------------- | ------------------------------ |
+    | `torch-math`   | 4.95 it/s  | 6.99 it/s   | 1.41x   | 88 s                 | 15.6 -> 13.4 GB                |
+    | `torch-meff`   | 7.46 it/s  | 8.82 it/s   | 1.18x   | 35 s                 | 13.1 -> 12.1 GB                |
+    | `flash-varlen` | 10.34 it/s | 10.87 it/s  | 1.05x   | 69 s                 | 8.6 -> 8.2 GB                  |
+
+    - **The fastest configuration is `flash-varlen`**, compiled or not; compiled is
+      fastest overall. Unlike GN2, `flash-varlen` here is a large *speed* win over the
+      SDPA backends (1.4x over `torch-meff`, 2.1x over `torch-math`) as well as a memory
+      win — because 64.8% of the padded slot budget is padding at this configuration, and
+      that is exactly the work `flash-varlen` skips.
+    - The `flash-varlen` speedup is small (+5%). It was measured against an in-job
+      control — the same eager cell re-run last in the same allocation — which came out
+      within 0.9% of the first, so the +5% is real but modest. Do not read a compile
+      claim of this size from two separate jobs: run-to-run scatter across jobs on this
+      benchmark is ~5-7%.
+    - Compilation costs 35-90 s before the first step. On a fixed-work benchmark that is
+      most of the gain; on a real multi-epoch training run it is noise.
+    - Loss parity held everywhere (worst drift 0.02% against a 2% tolerance).
+
+#### Graph breaks
+
+A compiled salt model is not one graph. Dynamo splits the trace wherever it meets
+something it cannot capture, and each split costs the fusion across it. Two splits are
+deliberate and permanent:
+
+| Seam | Where | Why it cannot be captured |
+| ---- | ----- | ------------------------- |
+| flash-varlen unpad/repad | `salt/utils/tensor_utils.py` | boolean-mask index -> `aten.nonzero`, which inductor refuses to lower on CUDA |
+| vertexing head | `VertexingTaskModule.head_forward` | compresses a `[B, N, N]` adjacency to one row per valid edge: both the allocation size and the indices are data-dependent |
+
+Everything else is expected to capture. `salt/tests/integration/test_compile_regression.py`
+is the gate: it replays a compiled plan module-by-module under `torch._dynamo.explain`
+and fails on any graph break at a site that is not on its checked-in allowlist, on any
+module that captures no graph at all, and on an encoder that will not compile with
+`fullgraph=True`. It runs on CPU in CI. If you add a `.item()`, a boolean mask, or a
+branch on a tensor value to a module's `forward`, that test tells you.
+
+It is worth the gate. A GN3V00 `--compile` + `flash-varlen` run previously took **14
+distinct break sites and 49 break events**, plus one hard fallback where dynamo skipped
+the whole loss frame and ran it eagerly. The breaks were four cheap habits — a generator
+inside a reduction, a bool read off a buffer, a NaN check on a tensor value, and boolean
+stream selection where a slice would do — and one head that genuinely cannot be traced.
+Removing them left **3 sites, 8 events, no fallback** (the two seams above) and cut
+recompiles from 44 to 18.
+
+If you are chasing the remainder: the dominant recompile guard is
+`GLOBAL_STATE changed: grad_mode`, which fires when the trainer flips between training
+and validation. It settles once both variants are cached; it is not a per-batch cost.
 
 !!! warning "`--compile` has not been tested with multi-GPU training"
 
