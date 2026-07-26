@@ -75,6 +75,12 @@ class Normaliser(SaltModelModule):
         self.global_object = global_object
         self._fields: dict[str, tuple[str, ...]] = {}
         self._bound = False
+        # python mirror of the `materialised` buffer, read by forward. Reading
+        # the buffer there costs a `.item()`, which is a graph break under
+        # torch.compile on a module that runs once per step; a plain bool is a
+        # dynamo guard instead. Kept in step in `bind`, `materialise` and
+        # `_load_from_state_dict` — the only three places the buffer changes.
+        self._materialised_flag = False
 
     def _spec(self, stream: str) -> TensorSpec:
         """Shared spec for ``inputs``/``normed``: global ``(B, F)`` or sequence ``(B, T, F)``."""
@@ -103,7 +109,15 @@ class Normaliser(SaltModelModule):
             self.register_buffer(f"means_{stream}", torch.zeros(width))
             self.register_buffer(f"stds_{stream}", torch.ones(width))
         self.register_buffer("materialised", torch.tensor(False))
+        self._materialised_flag = False
         self._bound = True
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        """Re-sync the python `materialised` mirror after the buffers are loaded."""
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        flag = getattr(self, "materialised", None)
+        if flag is not None:
+            self._materialised_flag = bool(flag)
 
     def preflight(self) -> None:
         """Fail-fast, data-free norm-dict validation.
@@ -222,6 +236,7 @@ class Normaliser(SaltModelModule):
                 getattr(self, f"means_{stream}").copy_(means)
                 getattr(self, f"stds_{stream}").copy_(stds)
         self.materialised.fill_(True)
+        self._materialised_flag = True
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """``normed.<stream> = (inputs.<stream> - means) / stds``; raises if never materialised."""
@@ -229,8 +244,9 @@ class Normaliser(SaltModelModule):
         # skip under tracing: the tensor->bool read would emit a spurious
         # TracerWarning on every export. Tracing is still guarded —
         # OnnxAdapter rejects unmaterialised modules at construction, before
-        # any trace (the eager path keeps this check).
-        if not torch.jit.is_tracing() and not bool(self.materialised):
+        # any trace (the eager path keeps this check). The python mirror rather
+        # than the buffer, so torch.compile does not break here on `.item()`.
+        if not torch.jit.is_tracing() and not self._materialised_flag:
             raise RuntimeError(
                 f"Normaliser {self.name!r}: forward before materialise() — on a fresh fit "
                 "call materialise(); on checkpoint load the state_dict provides the values "

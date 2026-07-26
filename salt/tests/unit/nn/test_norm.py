@@ -90,6 +90,28 @@ class TestNormaliser:
         expected = (before - modules["norm"].means_tracks) / modules["norm"].stds_tracks
         assert torch.equal(out["normed.tracks"], expected)
 
+    def test_materialised_mirror_tracks_the_buffer(self, gn2v2, norm_paths):
+        """The python mirror forward reads must agree with the buffer, always."""
+        modules, _, _ = gn2v2
+        norm = modules["norm"]
+        assert norm._materialised_flag is bool(norm.materialised)  # noqa: SLF001
+
+        fresh = build_gn2v2_modules(norm_paths[0])
+        bind_all(fresh, resolve_bind_schema(compile_gn2v2(fresh, Mode.FIT)))
+        assert fresh["norm"]._materialised_flag is bool(fresh["norm"].materialised)  # noqa: SLF001
+        assert not fresh["norm"]._materialised_flag  # noqa: SLF001
+
+    def test_materialised_mirror_restored_by_state_dict_load(self, gn2v2, norm_paths):
+        """A checkpoint load must flip the mirror, not just the buffer."""
+        modules, _, _ = gn2v2
+        fresh = build_gn2v2_modules(norm_paths[0])
+        bind_all(fresh, resolve_bind_schema(compile_gn2v2(fresh, Mode.FIT)))
+        fresh["norm"].load_state_dict(modules["norm"].state_dict())
+        assert bool(fresh["norm"].materialised)
+        assert fresh["norm"]._materialised_flag  # noqa: SLF001
+        # and forward no longer raises
+        fresh["norm"](fit_bundle(), Mode.FIT)
+
     def test_materialise_missing_variable_raises(self, tmp_path, norm_paths):
         import yaml
 
