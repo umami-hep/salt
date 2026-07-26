@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -57,6 +59,21 @@ class TestLossSum:
         out = loss(b, Mode.FIT)
         assert out["loss.total"].item() == pytest.approx(7.0)
 
+    @pytest.mark.parametrize("n", [1, 3, 5])
+    def test_weighted_sum_bitwise_equals_generator_sum(self, n):
+        """Summing a list must equal summing a generator bit-for-bit (the compile fix)."""
+        keys = [f"k{i}" for i in range(n)]
+        weights = {key: 0.5 + i for i, key in enumerate(keys)}
+        loss = LossSum(losses=keys, weights=weights)
+        loss.name = "loss"
+        generator = torch.Generator().manual_seed(99)
+        values = {key: torch.rand((), generator=generator) for key in keys}
+        b = Bundle()
+        for key, value in values.items():
+            b.set(f"losses.{key}", value)
+        reference = sum(weights[key] * values[key] for key in keys)
+        assert torch.equal(loss(b, Mode.FIT)["loss.total"], reference)
+
     def test_collect_loss_keys(self, gn2v2):
         modules, _, _ = gn2v2
         assert LossSum.collect_loss_keys(modules) == (
@@ -101,6 +118,20 @@ class TestLossGLS:
         total = loss(b, Mode.FIT)["loss.total"]
         assert total.item() == pytest.approx(4.0)  # sqrt(16), NOT the sum 10
         assert total.item() != pytest.approx(10.0)
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 5])
+    def test_product_bitwise_equals_math_prod(self, n):
+        """The explicit loop must equal `math.prod` bit-for-bit (the compile fix)."""
+        keys = [f"k{i}" for i in range(n)]
+        loss = LossGLS(losses=keys)
+        loss.name = "loss"
+        generator = torch.Generator().manual_seed(4242)
+        values = [torch.rand((), generator=generator) * 9 + 0.5 for _ in keys]
+        b = Bundle()
+        for key, value in zip(keys, values, strict=True):
+            b.set(f"losses.{key}", value)
+        reference = torch.pow(math.prod(values), 1.0 / n)
+        assert torch.equal(loss(b, Mode.FIT)["loss.total"], reference)
 
     def test_inherits_losssum_skeleton(self):
         # declare_io is the LossSum skeleton: losses.* -> loss.total (TRAINING),

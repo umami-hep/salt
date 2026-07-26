@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable, Mapping, Sequence
 
 import torch
@@ -130,7 +129,10 @@ class LossSum(SaltModelModule):
         """Sum the (optionally weighted) loss leaves -> ``{"loss.total": scalar}``."""
         del mode
         assert self._loss_keys is not None, "forward before declare_io narrowing"
-        total = sum(self.weights.get(key, 1.0) * b.get(key) for key in self._loss_keys)
+        # list, not generator: dynamo refuses to reconstruct a generator whose
+        # closure mutates and drops the frame to eager. Summation order is
+        # unchanged, so this stays bit-for-bit identical.
+        total = sum([self.weights.get(key, 1.0) * b.get(key) for key in self._loss_keys])  # noqa: C419
         return {"loss.total": total}
 
 
@@ -213,7 +215,13 @@ class LossGLS(LossSum):
         """Combine the loss leaves by their geometric mean: ``(∏ losses)^(1/n)``."""
         del mode
         assert self._loss_keys is not None, "forward before declare_io narrowing"
-        product = math.prod(b.get(key) for key in self._loss_keys)
+        # an explicit left-to-right loop, NOT `math.prod(<generator>)`: dynamo
+        # cannot reconstruct a generator that mutates its closure, and fails the
+        # whole frame back to eager rather than taking a graph break. The
+        # multiplication order is identical, so the result is bit-for-bit the same.
+        product = b.get(self._loss_keys[0])
+        for key in self._loss_keys[1:]:
+            product = product * b.get(key)
         return {"loss.total": torch.pow(product, 1.0 / len(self._loss_keys))}
 
 
