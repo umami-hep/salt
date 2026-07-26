@@ -337,8 +337,7 @@ class RegressionTaskModule(_TaskModuleBase):
         """
         if self.gaussian:
             if pad_masks is not None:
-                input_name_mask = self.input_name_mask(pad_masks)
-                preds = self.net(x[:, input_name_mask], context)
+                preds = self.net(x[:, self.input_name_slice(pad_masks)], context)
                 pad_mask = pad_masks[self.input_name]
             else:
                 preds = self.net(x, context)
@@ -360,8 +359,7 @@ class RegressionTaskModule(_TaskModuleBase):
             return preds, loss
 
         if pad_masks is not None and self.input_name != "objects":
-            input_name_mask = self.input_name_mask(pad_masks)
-            preds = self.net(x[:, input_name_mask], context)
+            preds = self.net(x[:, self.input_name_slice(pad_masks)], context)
             pad_mask = pad_masks[self.input_name]
         else:
             preds = self.net(x, context)

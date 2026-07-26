@@ -282,9 +282,8 @@ class VertexingTaskModule(_TaskModuleBase):
             Predicted edge logits ``[E, 1]`` and the scalar loss.
         """
         if pad_masks is not None:
-            input_name_mask = self.input_name_mask(pad_masks)
             mask = pad_masks[self.input_name]
-            x = x[:, input_name_mask]
+            x = x[:, self.input_name_slice(pad_masks)]
         else:
             mask = None
         b, n, d = x.shape

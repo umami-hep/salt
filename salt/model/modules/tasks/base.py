@@ -8,8 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import torch
-from torch import Tensor, nn
+from torch import nn
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
@@ -67,20 +66,28 @@ class _TaskModuleBase(SaltModelModule):
         self.net: Dense | None = None
         self.loss: nn.Module | None = None
 
-    def input_name_mask(self, pad_masks: Mapping) -> Tensor:
-        """Boolean mask selecting tokens from ``self.input_name``.
+    def input_name_slice(self, pad_masks: Mapping) -> slice:
+        """Token span of ``self.input_name`` within the concatenated sequence.
+
+        The streams are concatenated in `pad_masks` order, so each stream owns
+        one contiguous block — a slice, not a boolean mask. Boolean indexing
+        would be equivalent but lowers to ``aten.nonzero``, whose output shape
+        is data-dependent: dynamo graph-breaks on it and inductor refuses to
+        lower it on CUDA at all. An empty slice when the stream is absent
+        mirrors the all-False mask this replaced.
 
         Returns
         -------
-        Tensor
-            Boolean mask of shape ``[L]``, True for positions in ``self.input_name``.
+        slice
+            Half-open ``[start, stop)`` span along the token axis.
         """
-        return torch.cat(
-            [
-                torch.ones(m.shape[1], device=m.device) * (1 if (t == self.input_name) else 0)
-                for t, m in pad_masks.items()
-            ],
-        ).bool()
+        start = 0
+        for stream, mask in pad_masks.items():
+            width = mask.shape[1]
+            if stream == self.input_name:
+                return slice(start, start + width)
+            start += width
+        return slice(0, 0)
 
     def _pred_spec(self, spec: TensorSpec) -> TensorSpec:
         """Re-stamp `spec` to the configured ``expose`` modes (kind/shape/dtype kept)."""

@@ -270,3 +270,74 @@ class TestNoIOGuard:
         monkeypatch.undo()
         with pytest.raises(FileNotFoundError):
             materialise_all(modules)
+
+
+def _boolean_stream_mask(input_name: str, pad_masks: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Reference implementation of the stream selection the slice replaced.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean ``[L]`` mask, True at positions belonging to `input_name`.
+    """
+    return torch.cat(
+        [
+            torch.ones(m.shape[1], device=m.device) * (1 if (t == input_name) else 0)
+            for t, m in pad_masks.items()
+        ],
+    ).bool()
+
+
+class TestInputNameSlice:
+    """`input_name_slice` must select exactly what the boolean mask used to."""
+
+    @staticmethod
+    def _pad_masks(widths: dict[str, int]) -> dict[str, torch.Tensor]:
+        return {name: torch.zeros(B, width, dtype=torch.bool) for name, width in widths.items()}
+
+    @pytest.mark.parametrize(
+        "widths",
+        [
+            {"tracks": T},
+            {"tracks": T, "flows": 7},
+            {"flows": 7, "tracks": T},
+            {"flows": 7, "tracks": T, "electrons": 3},
+            {"tracks": 1, "flows": 1},
+        ],
+    )
+    @pytest.mark.parametrize("stream", ["tracks", "flows"])
+    def test_slice_selects_the_same_tokens_as_the_boolean_mask(self, widths, stream):
+        if stream not in widths:
+            pytest.skip("stream not in this layout")
+        task = ClassificationTaskModule(stream=stream, label="x", class_names=["a", "b"])
+        task.name = "cls"
+        pad_masks = self._pad_masks(widths)
+        total = sum(widths.values())
+        x = torch.randn(B, total, 5, generator=torch.Generator().manual_seed(17))
+        expected = x[:, _boolean_stream_mask(stream, pad_masks)]
+        assert torch.equal(x[:, task.input_name_slice(pad_masks)], expected)
+
+    def test_absent_stream_selects_nothing(self):
+        """An unknown stream yields an empty span, as the all-False mask did."""
+        task = ClassificationTaskModule(stream="ghosts", label="x", class_names=["a", "b"])
+        task.name = "cls"
+        pad_masks = self._pad_masks({"tracks": T, "flows": 4})
+        x = torch.randn(B, T + 4, 5)
+        assert x[:, task.input_name_slice(pad_masks)].shape[1] == 0
+        assert torch.equal(
+            x[:, task.input_name_slice(pad_masks)], x[:, _boolean_stream_mask("ghosts", pad_masks)]
+        )
+
+    def test_slice_takes_no_graph_break(self):
+        """The selection must now be traceable — that was the whole point."""
+        task = ClassificationTaskModule(stream="tracks", label="x", class_names=["a", "b"])
+        task.name = "cls"
+        pad_masks = self._pad_masks({"tracks": T, "flows": 4})
+
+        def select(x):
+            span = task.input_name_slice(pad_masks)
+            return x[:, span] * 2.0
+
+        torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
+        explanation = torch._dynamo.explain(select)(torch.randn(B, T + 4, 5))  # noqa: SLF001
+        assert explanation.graph_break_count == 0
