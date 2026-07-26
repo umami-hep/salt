@@ -267,6 +267,7 @@ class VertexingTaskModule(_TaskModuleBase):
             **self.dense_cfg,
         )
 
+    @torch.compiler.disable
     def head_forward(
         self,
         x: Tensor,
@@ -275,6 +276,16 @@ class VertexingTaskModule(_TaskModuleBase):
         context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         """Compute pair classification for vertexing and its loss.
+
+        ``torch.compiler.disable`` cuts one deliberate seam here (a no-op unless
+        compiled), the same trade as the flash-varlen unpad/repad. This head is
+        structurally uncapturable: it compresses a ``[B, N, N]`` adjacency into
+        one row per valid edge, so both the allocation size (``adjmat.sum()``,
+        a ``.item()``) and every ``[adjmat]`` compression are data-dependent.
+        The compressions lower to ``aten.nonzero``, which inductor will not
+        lower on CUDA — capturing them is not an option on the GPUs this runs
+        on. Left un-seamed the head cost eight scattered breaks, which fragment
+        the graph AROUND it as well; one break is strictly better.
 
         Returns
         -------

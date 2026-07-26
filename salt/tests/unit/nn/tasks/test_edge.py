@@ -202,3 +202,87 @@ class TestOriginWeightingConfig:
                 origin_label="o",
                 origin_weighting={"heavy": [3.5], "fake": [1]},
             )
+
+
+class TestEdgeHeadCompileSeam:
+    """The vertexing head is `torch.compiler.disable`d — a seam, not a rewrite."""
+
+    @staticmethod
+    def _head() -> VertexingTaskModule:
+        """A bound vertexing head with the default origin weighting.
+
+        Returns
+        -------
+        VertexingTaskModule
+            The bound head.
+        """
+        task = VertexingTaskModule(
+            stream="tracks", label="ftagTruthVertexIndex", origin_label="ftagTruthOriginLabel"
+        )
+        task.name = "track_vertexing"
+        task.bind(ResolvedSchema(widths={"encoded.tracks": 8}))
+        return task
+
+    @staticmethod
+    def _inputs(seed: int = 0) -> tuple[torch.Tensor, dict, dict]:
+        """A batch, its pad-mask dict and a vertex/origin label dict.
+
+        Returns
+        -------
+        tuple[torch.Tensor, dict, dict]
+            Encoded tracks, pad masks, labels.
+        """
+        generator = torch.Generator().manual_seed(seed)
+        b, n = 3, 6
+        x = torch.randn(b, n, 8, generator=generator)
+        pad_masks = {"tracks": torch.arange(n)[None, :] >= torch.tensor([[6], [4], [2]])}
+        # explicit, not random: every jet must carry at least one matched pair
+        # or the loss normalisation divides by zero and NaN breaks the
+        # bitwise comparisons below
+        labels = {
+            "tracks": {
+                "ftagTruthVertexIndex": torch.tensor(
+                    [[0, 0, 1, 1, -1, 2], [1, 1, 0, 0, -1, -1], [2, 2, 0, 1, 1, 0]]
+                ),
+                "ftagTruthOriginLabel": torch.tensor(
+                    [[3, 3, 4, 1, 0, 5], [1, 1, 3, 3, 0, 2], [5, 5, 1, 4, 4, 0]]
+                ),
+            }
+        }
+        return x, pad_masks, labels
+
+    def test_eager_is_unchanged_by_the_disable_marker(self):
+        """`torch.compiler.disable` is a no-op outside a compiled region."""
+        head = self._head()
+        x, pad_masks, labels = self._inputs()
+        preds, loss = head.head_forward(x, labels, pad_masks)
+        assert preds.shape[-1] == 1
+        assert loss.ndim == 0
+        again, _ = head.head_forward(x, labels, pad_masks)
+        assert torch.equal(preds, again)
+
+    def test_compiled_matches_eager_bitwise(self):
+        head = self._head()
+        x, pad_masks, labels = self._inputs(seed=2)
+        expected, expected_loss = head.head_forward(x, labels, pad_masks)
+        torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
+        compiled = torch.compile(head.head_forward, backend="eager")
+        got, got_loss = compiled(x, labels, pad_masks)
+        assert torch.equal(got, expected)
+        assert torch.equal(got_loss, expected_loss)
+
+    def test_the_seam_is_a_single_break_not_eight(self):
+        """Dynamo must bounce off the head, not trace into its compressions."""
+        head = self._head()
+        x, pad_masks, labels = self._inputs(seed=3)
+
+        def step(x):
+            preds, loss = head.head_forward(x, labels, pad_masks)
+            return preds.sum() + loss
+
+        torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
+        explanation = torch._dynamo.explain(step)(x)  # noqa: SLF001 - dynamo API
+        assert explanation.graph_break_count == 1, (
+            "the vertexing head should cost exactly one graph break — got "
+            f"{explanation.graph_break_count}; has the torch.compiler.disable marker moved?"
+        )
