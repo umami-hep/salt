@@ -272,12 +272,19 @@ class TestEdgeHeadCompileSeam:
         assert torch.equal(got_loss, expected_loss)
 
     def test_the_seam_is_a_single_break_not_eight(self):
-        """Dynamo must bounce off the head, not trace into its compressions."""
+        """Dynamo must bounce off the head, not trace into its compressions.
+
+        The dense work on both sides of the call is deliberate: dynamo counts
+        breaks as ``graphs - 1``, so a traced function that is ONLY a disabled
+        call captures no graph and reports a meaningless zero (the same trap
+        `test_tensor_utils_compile` documents for the flash seam).
+        """
         head = self._head()
         x, pad_masks, labels = self._inputs(seed=3)
 
         def step(x):
-            preds, loss = head.head_forward(x, labels, pad_masks)
+            scaled = x * 2.0
+            preds, loss = head.head_forward(scaled, labels, pad_masks)
             return preds.sum() + loss
 
         torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
@@ -286,3 +293,4 @@ class TestEdgeHeadCompileSeam:
             "the vertexing head should cost exactly one graph break — got "
             f"{explanation.graph_break_count}; has the torch.compiler.disable marker moved?"
         )
+        assert explanation.graph_count == 2  # captured before AND after the seam
