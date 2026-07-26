@@ -41,7 +41,7 @@ from salt.model.bind import (
     resolve_bind_schema,
 )
 from salt.model.modules.losses import LossGLS, LossSum
-from salt.optim import HybridMuonAdamW
+from salt.optim import HybridMuonAdamW, Lion
 from salt.schedule import (
     EarlyStopTracker,
     LRSchedulerConfig,
@@ -55,7 +55,7 @@ from salt.schedule import (
 )
 
 try:
-    from lion_pytorch import Lion
+    from lion_pytorch import Lion as ReferenceLion
 
     _lion_available = True
 except ImportError:
@@ -82,7 +82,7 @@ CKPT_KEY = "salt_core"
 _LOG = logging.getLogger(__name__)
 
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
-_OPTIMIZERS = ("AdamW", "lion", "HybridMuonAdamW")
+_OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")
 _MUP_KEYS = frozenset({"apply_to", "shape_path"})
 # dataset-boundary demand is declared for the three runtime modes; ONNX
 # export feeds the model directly and has no dataset plan.
@@ -145,9 +145,14 @@ class SaltModule(lightning.LightningModule):
         ``end``, ``pct_start``; optional ``weight_decay`` (default 1e-5) and
         ``last_epoch`` (default -1).
     optimizer : str, optional
-        One of ``"AdamW"`` (default), ``"lion"``, ``"HybridMuonAdamW"``. When
-        `mup` is configured the optimizer is swapped to ``mup.optim.MuAdamW``
-        regardless of this name.
+        One of ``"AdamW"`` (default), ``"lion"``, ``"lion-pytorch"``,
+        ``"HybridMuonAdamW"``. ``"lion"`` is `salt.optim.Lion` — the
+        ``_foreach_``-batched form, which produces bit-identical parameters and
+        state to ``"lion-pytorch"`` (the per-parameter reference from the
+        ``lion-pytorch`` package) at a fraction of the kernel launches. Prefer
+        ``"lion"``; ``"lion-pytorch"`` exists to gate that equivalence and to
+        A/B the launch overhead. When `mup` is configured the optimizer is
+        swapped to ``mup.optim.MuAdamW`` regardless of this name.
     mup : Mapping[str, Any], optional
         The muP routing config. ``None`` (default) = no muP. Keys:
 
@@ -1293,7 +1298,8 @@ class SaltModule(lightning.LightningModule):
         is configured the optimizer is always ``mup.optim.MuAdamW`` (coupled to
         the base shapes set at bind via `_apply_mup_shapes`). `optimizer` defaults
         to ``self.optimizer`` (a stage may override it). Raises `ImportError` for
-        lion without lion-pytorch, `ConfigError` for an unsupported name.
+        lion-pytorch without lion-pytorch installed, `ConfigError` for an
+        unsupported name.
         """
         optimizer = optimizer or self.optimizer
         if self.mup_cfg is not None:
@@ -1301,12 +1307,14 @@ class SaltModule(lightning.LightningModule):
 
             return MuAdamW
         if optimizer == "lion":
+            return Lion
+        if optimizer == "lion-pytorch":
             if not _lion_available:
                 raise ImportError(
-                    "Lion optimizer requested but not available. "
-                    "Check installation of lion-pytorch."
+                    "optimizer: lion-pytorch requested but lion-pytorch is not installed. "
+                    "Use optimizer: lion for salt's own (bitwise-identical, foreach) Lion."
                 )
-            return Lion
+            return ReferenceLion
         if optimizer == "AdamW":
             return AdamW
         if optimizer == "HybridMuonAdamW":

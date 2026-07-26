@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from salt.optim import HybridMuonAdamW, MuonParamPolicy
+from salt.optim import HybridMuonAdamW, Lion, MuonParamPolicy
 
 
 class TinyModel(nn.Module):
@@ -243,3 +243,207 @@ def test_hybrid_state_dict_roundtrip() -> None:
     assert opt2.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
     assert opt2.muon.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
     assert opt2.adamw.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
+
+
+# --------------------------------------------------------------------------- #
+# salt.optim.Lion — bitwise equivalence with the lion-pytorch reference
+# --------------------------------------------------------------------------- #
+
+reference_lion = pytest.importorskip(
+    "lion_pytorch", reason="lion-pytorch is the oracle for the foreach Lion parity gate"
+).Lion
+
+
+class LionNet(nn.Module):
+    """Parameters of assorted shapes/sizes — the foreach path groups them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = nn.Linear(7, 5)
+        self.b = nn.Linear(5, 3, bias=False)
+        self.norm = nn.LayerNorm(3)
+        self.scalar = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Tiny forward used only to produce gradients.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``[N, 7]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``[N, 3]``.
+        """
+        return self.norm(self.b(torch.relu(self.a(x)))) * self.scalar
+
+
+def _paired_nets() -> tuple[LionNet, LionNet]:
+    """Two nets with byte-identical initial parameters."""
+    torch.manual_seed(1234)
+    reference = LionNet()
+    candidate = LionNet()
+    with torch.no_grad():
+        for tgt, src in zip(candidate.parameters(), reference.parameters(), strict=True):
+            tgt.copy_(src)
+    return reference, candidate
+
+
+def _assert_bitwise(reference: LionNet, candidate: LionNet, ref_opt: Any, cand_opt: Any) -> None:
+    """Every parameter AND every ``exp_avg`` state tensor must match exactly."""
+    for (name, ref_p), (_, cand_p) in zip(
+        reference.named_parameters(), candidate.named_parameters(), strict=True
+    ):
+        assert torch.equal(ref_p, cand_p), f"parameter {name} diverged"
+        ref_state = ref_opt.state[ref_p]
+        cand_state = cand_opt.state[cand_p]
+        assert set(ref_state) == set(cand_state) == {"exp_avg"}
+        assert torch.equal(ref_state["exp_avg"], cand_state["exp_avg"]), (
+            f"exp_avg for {name} diverged"
+        )
+
+
+def _run_paired(
+    steps: int = 12,
+    weight_decay: float = 1e-5,
+    decoupled: bool = False,
+    schedule: bool = False,
+) -> None:
+    """Drive both optimizers with byte-identical gradients and compare each step."""
+    reference, candidate = _paired_nets()
+    kwargs: dict[str, Any] = {
+        "lr": 1e-3,
+        "betas": (0.9, 0.99),
+        "weight_decay": weight_decay,
+        "decoupled_weight_decay": decoupled,
+    }
+    ref_opt = reference_lion(reference.parameters(), **kwargs)
+    cand_opt = Lion(candidate.parameters(), **kwargs)
+
+    generator = torch.Generator().manual_seed(99)
+    for step in range(steps):
+        if schedule:
+            # OneCycleLR mutates param_groups["lr"] every step — the decoupled
+            # branch divides by the INITIAL lr, so a moving lr must not desync
+            lr = 1e-3 * (1.0 + step)
+            ref_opt.param_groups[0]["lr"] = lr
+            cand_opt.param_groups[0]["lr"] = lr
+        for ref_p, cand_p in zip(reference.parameters(), candidate.parameters(), strict=True):
+            grad = torch.randn(ref_p.shape, generator=generator)
+            ref_p.grad = grad.clone()
+            cand_p.grad = grad.clone()
+        ref_opt.step()
+        cand_opt.step()
+        _assert_bitwise(reference, candidate, ref_opt, cand_opt)
+
+
+def test_lion_bitwise_parity_with_weight_decay() -> None:
+    """The shipped GN3 setting: nonzero weight decay, 12 seeded steps."""
+    _run_paired(weight_decay=1e-5)
+
+
+def test_lion_bitwise_parity_zero_weight_decay() -> None:
+    """Zero weight decay must take the same path (the factor is exactly 1.0)."""
+    _run_paired(weight_decay=0.0)
+
+
+def test_lion_bitwise_parity_decoupled_weight_decay() -> None:
+    """``decoupled_weight_decay`` divides wd by the initial lr on both sides."""
+    _run_paired(weight_decay=1e-2, decoupled=True)
+
+
+def test_lion_bitwise_parity_under_moving_lr() -> None:
+    """A OneCycleLR-style moving lr must not desync the two implementations."""
+    _run_paired(weight_decay=1e-5, schedule=True)
+    _run_paired(weight_decay=1e-2, decoupled=True, schedule=True)
+
+
+def test_lion_bitwise_parity_through_autograd() -> None:
+    """End-to-end: identical forward/backward, not hand-set gradients."""
+    reference, candidate = _paired_nets()
+    ref_opt = reference_lion(reference.parameters(), lr=1e-3, weight_decay=1e-5)
+    cand_opt = Lion(candidate.parameters(), lr=1e-3, weight_decay=1e-5)
+    generator = torch.Generator().manual_seed(7)
+    for _ in range(8):
+        batch = torch.randn(6, 7, generator=generator)
+        for net, opt in ((reference, ref_opt), (candidate, cand_opt)):
+            opt.zero_grad()
+            net(batch).square().mean().backward()
+            opt.step()
+        _assert_bitwise(reference, candidate, ref_opt, cand_opt)
+
+
+def test_lion_skips_params_without_grad() -> None:
+    """A parameter with no gradient is left untouched and gets no state."""
+    net = LionNet()
+    opt = Lion(net.parameters(), lr=1e-3, weight_decay=1e-5)
+    frozen = net.scalar.detach().clone()
+    for param in net.parameters():
+        if param is not net.scalar:
+            param.grad = torch.ones_like(param)
+    opt.step()
+    assert torch.equal(net.scalar, frozen)
+    assert net.scalar not in opt.state or not opt.state[net.scalar]
+
+
+def test_lion_multiple_param_groups_use_their_own_hyperparameters() -> None:
+    """Per-group lr/betas/weight_decay, matched against the reference."""
+    reference, candidate = _paired_nets()
+    groups = lambda net: [  # noqa: E731 - one-liner used twice
+        {"params": list(net.a.parameters()), "lr": 1e-3, "weight_decay": 1e-4},
+        {"params": [*net.b.parameters(), *net.norm.parameters(), net.scalar], "lr": 5e-4},
+    ]
+    ref_opt = reference_lion(groups(reference), lr=1e-3, betas=(0.9, 0.99), weight_decay=1e-5)
+    cand_opt = Lion(groups(candidate), lr=1e-3, betas=(0.9, 0.99), weight_decay=1e-5)
+    generator = torch.Generator().manual_seed(3)
+    for _ in range(6):
+        for ref_p, cand_p in zip(reference.parameters(), candidate.parameters(), strict=True):
+            grad = torch.randn(ref_p.shape, generator=generator)
+            ref_p.grad = grad.clone()
+            cand_p.grad = grad.clone()
+        ref_opt.step()
+        cand_opt.step()
+        _assert_bitwise(reference, candidate, ref_opt, cand_opt)
+
+
+def test_lion_state_dict_round_trip_matches_the_reference_layout() -> None:
+    """``exp_avg`` is the only state key, so checkpoints interchange."""
+    net = LionNet()
+    opt = Lion(net.parameters(), lr=1e-3, weight_decay=1e-5)
+    for param in net.parameters():
+        param.grad = torch.ones_like(param)
+    opt.step()
+    state = opt.state_dict()
+    assert all(set(entry) == {"exp_avg"} for entry in state["state"].values())
+
+    restored = Lion(net.parameters(), lr=1e-3, weight_decay=1e-5)
+    restored.load_state_dict(state)
+    for param in net.parameters():
+        assert torch.equal(restored.state[param]["exp_avg"], opt.state[param]["exp_avg"])
+
+
+def test_lion_closure_returns_loss() -> None:
+    """The closure contract is the stock optimizer one."""
+    net = LionNet()
+    opt = Lion(net.parameters(), lr=1e-3)
+    for param in net.parameters():
+        param.grad = torch.ones_like(param)
+    assert opt.step(lambda: torch.tensor(1.25)).item() == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"lr": 0.0}, "lr > 0"),
+        ({"lr": -1.0}, "lr > 0"),
+        ({"betas": (0.9, 1.5)}, "betas in"),
+        ({"betas": (-0.1, 0.99)}, "betas in"),
+    ],
+)
+def test_lion_rejects_invalid_hyperparameters(kwargs: dict[str, Any], match: str) -> None:
+    """Bad hyperparameters fail at construction, not at the first step."""
+    net = LionNet()
+    with pytest.raises(ValueError, match=match):
+        Lion(net.parameters(), **kwargs)

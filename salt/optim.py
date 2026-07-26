@@ -355,6 +355,140 @@ class HybridMuonAdamW(Optimizer):
         return list(self._adamw_names)
 
 
+class Lion(Optimizer):
+    """Lion (EvoLved Sign Momentum), batched over parameters with ``torch._foreach_*``.
+
+    Same update as the reference ``lion-pytorch`` implementation, op for op —
+    this class only changes how many kernels it takes to get there. The
+    reference walks ``group["params"]`` in Python and issues five ops per
+    parameter; on GN3V00 that is 595 launches per step for 1.33 ms of actual
+    kernel work (``docs/profiling.md``). The ``_foreach_`` form issues seven
+    launches per parameter *group* instead, whatever the parameter count.
+
+    The update, for each parameter ``p`` with gradient ``g`` and state
+    ``exp_avg``::
+
+        p        <- p * (1 - lr * wd)
+        update   <- sign(exp_avg * beta1 + g * (1 - beta1))
+        p        <- p - lr * update
+        exp_avg  <- exp_avg * beta2 + g * (1 - beta2)
+
+    Note the ordering that makes Lion Lion: the *momentum* used for the update
+    is the pre-update ``exp_avg`` interpolated towards ``g`` with ``beta1``,
+    while the state carried forward uses ``beta2``. The ops are spelled as
+    ``mul`` + ``add(alpha=...)`` and NOT as ``lerp`` — algebraically identical,
+    but a different rounding, and this class exists to be a drop-in for weights
+    already trained with the reference. ``salt/tests/unit/test_optim.py``
+    gates that bit-for-bit against ``lion_pytorch.Lion``.
+
+    Parameters
+    ----------
+    params : Iterable
+        Parameters or parameter groups, as any `torch.optim.Optimizer`.
+    lr : float, optional
+        Learning rate, by default 1e-4. Must be positive.
+    betas : tuple[float, float], optional
+        ``(beta1, beta2)`` — interpolation for the update direction and for the
+        momentum state respectively, by default ``(0.9, 0.99)``. Both in [0, 1].
+    weight_decay : float, optional
+        Decoupled step-weight decay applied as ``p *= 1 - lr * wd``, by default 0.
+    decoupled_weight_decay : bool, optional
+        When True, ``wd`` is divided by the initial learning rate so the decay
+        per step is independent of the schedule, by default False (matches the
+        reference default).
+
+    Raises
+    ------
+    ValueError
+        Non-positive `lr`, a beta outside [0, 1], or a torch build without the
+        ``_foreach_`` ops this implementation is built on.
+    """
+
+    _FOREACH_OPS = ("_foreach_mul", "_foreach_mul_", "_foreach_add_", "_foreach_sign_")
+
+    def __init__(
+        self,
+        params: Iterable[Any],
+        lr: float = 1e-4,
+        betas: tuple[float, float] = (0.9, 0.99),
+        weight_decay: float = 0.0,
+        decoupled_weight_decay: bool = False,
+    ) -> None:
+        if lr <= 0.0:
+            raise ValueError(f"Lion needs lr > 0, got {lr}")
+        if not all(0.0 <= beta <= 1.0 for beta in betas):
+            raise ValueError(f"Lion needs both betas in [0, 1], got {betas}")
+        missing = [name for name in self._FOREACH_OPS if not hasattr(torch, name)]
+        if missing:
+            raise ValueError(
+                f"this torch build ({torch.__version__}) lacks {', '.join(missing)} — "
+                "use optimizer: lion-pytorch for the per-parameter reference implementation"
+            )
+        self._init_lr = lr
+        self.decoupled_wd = decoupled_weight_decay
+        super().__init__(params, {"lr": lr, "betas": betas, "weight_decay": weight_decay})
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], Any] | None = None) -> Any:
+        """One Lion step over every parameter group.
+
+        Parameters
+        ----------
+        closure : Callable[[], Any] | None, optional
+            Re-evaluates the model and returns the loss, by default None.
+
+        Returns
+        -------
+        Any
+            The closure's return value, or None when no closure was given.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            beta1, beta2 = group["betas"]
+            # the reference divides by the lr the optimizer was BUILT with, not
+            # the scheduled one — so the decay per step stops tracking the cycle
+            if self.decoupled_wd:
+                weight_decay = weight_decay / self._init_lr
+
+            params: list[torch.Tensor] = []
+            grads: list[torch.Tensor] = []
+            exp_avgs: list[torch.Tensor] = []
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                state = self.state[param]
+                if len(state) == 0:
+                    state["exp_avg"] = torch.zeros_like(param)
+                params.append(param)
+                grads.append(param.grad)
+                exp_avgs.append(state["exp_avg"])
+            if not params:
+                continue
+
+            # p *= 1 - lr * wd   (unconditional, as the reference: at wd == 0 the
+            # factor is exactly 1.0 and the multiply is a no-op on every finite value)
+            torch._foreach_mul_(params, 1.0 - lr * weight_decay)
+
+            # the update direction: the sign of the beta1-interpolated momentum,
+            # applied to the parameters scaled by the learning rate
+            updates = torch._foreach_mul(exp_avgs, beta1)  # noqa: SLF001 - torch's foreach API
+            torch._foreach_add_(updates, grads, alpha=1.0 - beta1)
+            torch._foreach_sign_(updates)
+            torch._foreach_add_(params, updates, alpha=-lr)
+
+            # the momentum carried forward, interpolated with beta2 instead
+            torch._foreach_mul_(exp_avgs, beta2)
+            torch._foreach_add_(exp_avgs, grads, alpha=1.0 - beta2)
+
+        return loss
+
+
 def _looks_like_named_params(items: Sequence[Any]) -> bool:
     """Heuristically determine whether an iterable looks like named parameters."""
     first = items[0]
