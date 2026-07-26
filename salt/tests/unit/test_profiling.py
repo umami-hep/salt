@@ -7,12 +7,15 @@ import pytest
 
 from salt.profiling import (
     DEFAULT_DATASET_FUNCTIONS,
+    DEFAULT_STEPS,
     TorchProfilerCallback,
     _dataset_summary,
+    _model_overlay,
     _resolve_target,
     _split,
     _structure,
     main,
+    resolve_schedule,
 )
 
 
@@ -115,11 +118,91 @@ class TestCli:
 
     def test_help_exits_zero(self, capsys):
         assert main(["--help"]) == 0
-        assert "salt profile dataset" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "dataset" in out
+        assert "model" in out
+        assert "--steps" in out
 
     def test_no_args_exits_nonzero(self):
         assert main([]) == 1
 
     def test_unknown_subcommand_exits_nonzero(self, capsys):
-        assert main(["model"]) == 1
+        assert main(["notasubcommand"]) == 1
         assert "unknown subcommand" in capsys.readouterr().err
+
+    def test_both_subcommands_default_to_the_same_steps(self):
+        from salt.profiling import _dataset_parser, _model_parser
+
+        assert _model_parser().parse_args(["--config", "x.yaml"]).steps == DEFAULT_STEPS
+        # the dataset parser defaults to None so --batches can still win; the
+        # dispatcher is what applies DEFAULT_STEPS
+        assert _dataset_parser().parse_args(["--config", "x.yaml"]).steps is None
+
+    def test_dataset_rejects_steps_and_batches_together(self, capsys):
+        rc = main(["dataset", "--config", "x.yaml", "--steps", "5", "--batches", "5"])
+        assert rc == 1
+        assert "not both" in capsys.readouterr().err
+
+    def test_model_reports_a_schedule_that_cannot_fit(self, capsys):
+        rc = main(["model", "--config", "x.yaml", "--steps", "4", "--active", "10"])
+        assert rc == 1
+        assert "does not fit" in capsys.readouterr().err
+
+    def test_model_rejects_a_malformed_set_override(self, capsys):
+        rc = main(["model", "--config", "x.yaml", "--set", "nokey"])
+        assert rc == 1
+        assert "KEY=VALUE" in capsys.readouterr().err
+
+
+class TestResolveSchedule:
+    def test_default_steps_capture_the_tail(self):
+        assert resolve_schedule(DEFAULT_STEPS) == {"wait": 75, "warmup": 5, "active": 20}
+
+    @pytest.mark.parametrize("steps", [3, 4, 7, 10, 25, 30, 100, 1000])
+    def test_the_window_always_fits_and_is_never_empty(self, steps):
+        schedule = resolve_schedule(steps)
+        assert sum(schedule.values()) <= steps
+        assert all(value >= 1 for value in schedule.values())
+
+    def test_the_whole_budget_is_used(self):
+        # nothing is left running unprofiled after the window closes
+        for steps in (3, 12, 40, 100):
+            assert sum(resolve_schedule(steps).values()) == steps
+
+    def test_explicit_phases_are_honoured(self):
+        assert resolve_schedule(50, wait=1, warmup=2, active=3) == {
+            "wait": 1,
+            "warmup": 2,
+            "active": 3,
+        }
+
+    def test_a_partially_explicit_schedule_fills_the_rest(self):
+        schedule = resolve_schedule(40, active=10)
+        assert schedule["active"] == 10
+        assert sum(schedule.values()) == 40
+
+    def test_too_few_steps_raises(self):
+        with pytest.raises(ValueError, match="at least 3"):
+            resolve_schedule(2)
+
+    def test_an_oversized_explicit_schedule_raises(self):
+        with pytest.raises(ValueError, match="does not fit"):
+            resolve_schedule(10, wait=5, warmup=5, active=5)
+
+    def test_a_non_positive_phase_raises(self):
+        with pytest.raises(ValueError, match="must each be >= 1"):
+            resolve_schedule(50, active=0)
+
+
+class TestModelOverlay:
+    def test_caps_the_fit_and_strips_the_training_furniture(self):
+        import yaml
+
+        overlay = yaml.safe_load(open(_model_overlay(37)))
+        assert overlay["trainer"]["limit_train_batches"] == 37
+        assert overlay["trainer"]["max_epochs"] == 1
+        assert overlay["trainer"]["limit_val_batches"] == 0
+        assert overlay["trainer"]["logger"] is False
+        assert overlay["trainer"]["enable_checkpointing"] is False
+        # deleting these dict entries is how a salt config drops a callback
+        assert overlay["callbacks"] == {"checkpoint": None, "lr_monitor": None, "artifacts": None}

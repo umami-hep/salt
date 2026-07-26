@@ -8,7 +8,11 @@ Training has two halves and they need different tools.
 - The **model** side is asynchronous CUDA. Per-line Python timing *lies* — a line
   that enqueues a kernel costs nothing, and whichever line next synchronises
   inherits the blame. Use `torch.profiler`, which timestamps the kernels
-  themselves: `salt.profiling.TorchProfilerCallback`.
+  themselves: `salt profile model`, or its callback
+  `salt.profiling.TorchProfilerCallback` attached to a run you were doing anyway.
+
+Both subcommands take the same `--config` stack, the same `--set K=V` overrides
+and the same `--steps` (default **100**).
 
 Start with the cheap answer (`--trainer.profiler`), and only reach for the
 other two when you need to know *which* module or *which* line.
@@ -62,7 +66,7 @@ pip install 'salt-ml[profile]'      # line_profiler is an optional dependency
 
 salt profile dataset \
     --config configs/GN3V00.yaml \
-    --batches 50 \
+    --steps 100 \
     --out profile/
 ```
 
@@ -76,8 +80,10 @@ The harness:
    keys/shapes/dtypes with the first profiled batch — if they differ the run
    fails rather than silently reporting a partial pipeline,
 4. wraps the read path in a `LineProfiler` (patching the class attribute — no
-   `@profile` decorators in the source), iterates `--batches` batches, and
+   `@profile` decorators in the source), iterates `--steps` batches, and
    restores the originals.
+
+(`--batches` still works as a deprecated alias for `--steps`.)
 
 Outputs land in `--out`: `dataset_profile.txt` (the classic annotated listing),
 `dataset_profile.lprof` (for `python -m line_profiler`), and
@@ -109,7 +115,36 @@ Note that salt has **no collate step**: `batch_size=None` plus
 numpy→torch conversion in `GraphDataset._to_torch` is what a conventional
 pipeline would call collation.
 
-## 3. Model side — `TorchProfilerCallback`
+## 3. Model side — `salt profile model`
+
+```bash
+salt profile model \
+    --config configs/GN3V00.yaml \
+    --steps 100 \
+    --out profile/
+```
+
+The subcommand runs a **short, capped, throwaway fit** — one epoch of `--steps`
+train batches, no logger, no checkpoints, no graph artifacts, no validation —
+with `TorchProfilerCallback` attached, and then prints the per-op table, the
+per-plan-step split and the forward/backward/optimizer buckets. `--set K=V`
+overrides work exactly as they do for `salt profile dataset`, and `--compile`
+profiles the compiled model.
+
+The `--steps` budget is spent getting to steady state: the capture is its
+**tail**. At the default 100 steps that is `wait 75, warmup 5, active 20` — the
+last twenty batches. Pin any phase explicitly with `--wait` / `--warmup` /
+`--active`; a schedule that would not fit inside `--steps` is rejected up front
+rather than silently recording nothing.
+
+Unlike the callback's own defaults, the subcommand runs with `with_stack` and
+`profile_memory` **off** (see the warning below); `--with-stack`,
+`--profile-memory` and `--record-shapes` turn them on.
+
+### The callback directly
+
+Use the callback when you want the profile of a run you were going to do
+anyway, rather than a throwaway one:
 
 ```bash
 salt fit --config configs/GN3V00.yaml \

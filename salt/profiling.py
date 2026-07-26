@@ -1,10 +1,11 @@
 """Profiling harnesses: a dataset-side ``line_profiler`` CLI and a model-side
-`torch.profiler` callback.
+`torch.profiler` callback, each with a ``salt profile`` subcommand.
 
 ``salt profile dataset`` runs the dataset plan in-process and prints the classic
-annotated per-line report; `TorchProfilerCallback` captures a steady-state
-window of training steps and writes per-op tables, source stacks and a Chrome
-trace. See ``docs/profiling.md``.
+annotated per-line report; ``salt profile model`` runs a short capped fit with
+`TorchProfilerCallback` attached, which records a steady-state window of
+training steps and writes per-op tables, source stacks and a Chrome trace. Both
+subcommands take ``--steps``. See ``docs/profiling.md``.
 """
 
 from __future__ import annotations
@@ -15,24 +16,39 @@ import gzip
 import json
 import shutil
 import sys
+import tempfile
 import time
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 from lightning.pytorch.callbacks import Callback
 
 from salt.graph.executor import STEP_SCOPE_PREFIX, record_steps
 
 __all__ = [
     "DEFAULT_DATASET_FUNCTIONS",
+    "DEFAULT_STEPS",
     "PlanStepScopes",
     "TorchProfilerCallback",
     "main",
     "profile_dataset",
+    "profile_model",
+    "resolve_schedule",
 ]
+
+DEFAULT_STEPS = 100
+"""Train batches both ``salt profile`` subcommands consume unless ``--steps`` says otherwise."""
+
+# The capture window `resolve_schedule` aims for; everything left over becomes
+# `wait`, so the recorded steps are the LAST ones of the run — the most
+# steady-state part of the budget the caller paid for.
+_DEFAULT_ACTIVE = 20
+_DEFAULT_WARMUP = 5
 
 DEFAULT_DATASET_FUNCTIONS: tuple[str, ...] = (
     "salt.data.dataset.GraphDataset.__getitem__",
@@ -421,6 +437,260 @@ class TorchProfilerCallback(Callback):
         }
 
 
+def resolve_schedule(
+    steps: int,
+    wait: int | None = None,
+    warmup: int | None = None,
+    active: int | None = None,
+) -> dict[str, int]:
+    """Fit a ``wait``/``warmup``/``active`` capture window inside `steps` batches.
+
+    A schedule whose phases outlast the run records nothing at all — the window
+    never closes, ``on_trace_ready`` never fires, and the command exits having
+    written no artifacts. So the schedule is derived from `steps` rather than
+    defaulted independently of it, and an explicit schedule that does not fit is
+    a hard error instead of an empty trace.
+
+    Derivation: `active` takes up to `_DEFAULT_ACTIVE` steps, `warmup` up to
+    `_DEFAULT_WARMUP` of what remains, and **everything left over becomes**
+    ``wait`` — so the capture is the tail of the run, which is the most
+    steady-state part of it. Any of the three may be pinned explicitly; the
+    others still fill in around it.
+
+    Parameters
+    ----------
+    steps : int
+        Train batches the run will do. Must be >= 3 (one step per phase).
+    wait, warmup, active : int | None, optional
+        Explicit phase lengths. ``None`` (default) derives them.
+
+    Returns
+    -------
+    dict[str, int]
+        ``{"wait": ..., "warmup": ..., "active": ...}``, summing to <= `steps`.
+
+    Raises
+    ------
+    ValueError
+        `steps` below 3, a negative/zero phase, or an explicit schedule whose
+        total exceeds `steps`.
+    """
+    if steps < 3:
+        raise ValueError(
+            f"--steps must be at least 3 (one wait + one warmup + one active batch), got {steps}"
+        )
+    if any(value is not None and value < 1 for value in (wait, warmup, active)):
+        raise ValueError(
+            f"wait/warmup/active must each be >= 1 when given, got "
+            f"wait={wait}, warmup={warmup}, active={active}"
+        )
+    given = [value for value in (wait, warmup, active) if value is not None]
+    unset = 3 - len(given)
+    if sum(given) > steps - unset:
+        raise ValueError(
+            f"the profiler schedule wait={wait}, warmup={warmup}, active={active} does not fit "
+            f"in --steps {steps} — the capture window would never close and no trace would be "
+            f"written. Raise --steps to at least {sum(given) + unset}, or shorten the schedule."
+        )
+
+    # active first (it is the payload), then warmup, then wait absorbs the rest,
+    # always leaving at least one batch for each phase still unassigned
+    remaining = steps - sum(given)
+    if active is None:
+        active = max(1, min(_DEFAULT_ACTIVE, remaining - (wait is None) - (warmup is None)))
+        remaining -= active
+    if warmup is None:
+        warmup = max(1, min(_DEFAULT_WARMUP, remaining - (wait is None)))
+        remaining -= warmup
+    if wait is None:
+        wait = max(1, remaining)
+    return {"wait": wait, "warmup": warmup, "active": active}
+
+
+def _model_overlay(steps: int) -> str:
+    """Write the fit-shaping overlay config (capped, logger-less, artifact-free).
+
+    Stacked LAST of the salt configs so it wins the deep merge, but BEFORE the
+    caller's ``--set`` overrides so they still win over it. Profiling a model is
+    not training it: no checkpoints, no graph artifacts, no LR logging, no
+    validation, exactly `steps` train batches.
+    """
+    overlay = {
+        "trainer": {
+            "max_epochs": 1,
+            "limit_train_batches": steps,
+            "limit_val_batches": 0,
+            "num_sanity_val_steps": 0,
+            "enable_checkpointing": False,
+            "logger": False,
+        },
+        "callbacks": {"checkpoint": None, "lr_monitor": None, "artifacts": None},
+    }
+    handle = tempfile.NamedTemporaryFile("w", suffix="_salt_profile_model.yaml", delete=False)
+    with handle:
+        yaml.dump(overlay, handle, sort_keys=False)
+    return handle.name
+
+
+def profile_model(
+    configs: Sequence[Path],
+    out_dir: Path,
+    steps: int = DEFAULT_STEPS,
+    overrides: Sequence[str] = (),
+    tag: str = "model",
+    wait: int | None = None,
+    warmup: int | None = None,
+    active: int | None = None,
+    row_limit: int = 30,
+    with_stack: bool = False,
+    profile_memory: bool = False,
+    record_shapes: bool = False,
+    compile_model: bool = False,
+) -> dict[str, Any]:
+    """Run a short capped fit under `TorchProfilerCallback` and report the split.
+
+    The symmetric counterpart of `profile_dataset`: same ``--config`` stacking,
+    same ``--set`` overrides, same ``--steps``. This is plumbing over the
+    callback, not a second capture implementation — attaching the callback to a
+    real `salt fit` is still the supported route for profiling a training run
+    you were going to do anyway.
+
+    Parameters
+    ----------
+    configs : Sequence[Path]
+        Config stack, deep-merged left-to-right exactly as ``salt fit`` does.
+    out_dir : Path
+        Output directory (created if missing).
+    steps : int, optional
+        Train batches to run, by default `DEFAULT_STEPS`. The capture window is
+        the tail of these — see `resolve_schedule`.
+    overrides : Sequence[str], optional
+        ``KEY=VALUE`` config overrides, by default none.
+    tag : str, optional
+        Artifact filename prefix, by default ``"model"``.
+    wait, warmup, active : int | None, optional
+        Explicit profiler schedule; derived from `steps` when unset.
+    row_limit : int, optional
+        Rows in the printed/written per-op tables, by default 30.
+    with_stack, profile_memory, record_shapes : bool, optional
+        Passed to the callback. All default to **False** here (the callback's
+        own defaults are tuned for a hand-configured capture): stacks are empty
+        on several torch builds and both stacks and allocator events cost host
+        RAM, which is what kills long windows at large batch.
+    compile_model : bool, optional
+        Pass ``--compile`` to the fit, by default False.
+
+    Returns
+    -------
+    dict[str, Any]
+        The summary the callback wrote to ``<tag>_summary.json``.
+
+    Raises
+    ------
+    ValueError
+        A malformed ``--set`` entry, or a schedule that will not fit `steps`.
+    RuntimeError
+        The fit finished without the capture window closing (no summary).
+    """
+    from salt.config_utils import disable_logger_in_config
+    from salt.main import SaltCLI
+
+    # everything that can be rejected without touching the filesystem, first —
+    # a bad flag should not cost a config parse (or a confusing FileNotFoundError)
+    schedule = resolve_schedule(steps, wait=wait, warmup=warmup, active=active)
+    for entry in overrides:
+        if "=" not in entry:
+            raise ValueError(f"--set entries must be KEY=VALUE, got {entry!r}")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    args: list[str] = ["fit"]
+    for path in configs:
+        args.extend(["--config", disable_logger_in_config(str(path))])
+    args.extend(["--config", _model_overlay(steps)])
+    args.extend(f"--{entry}" for entry in overrides)
+    if compile_model:
+        args.append("--compile")
+    args.extend([
+        "--trainer.callbacks+=salt.profiling.TorchProfilerCallback",
+        f"--trainer.callbacks.dirpath={out_dir}",
+        f"--trainer.callbacks.tag={tag}",
+        f"--trainer.callbacks.wait={schedule['wait']}",
+        f"--trainer.callbacks.warmup={schedule['warmup']}",
+        f"--trainer.callbacks.active={schedule['active']}",
+        f"--trainer.callbacks.row_limit={row_limit}",
+        f"--trainer.callbacks.with_stack={str(with_stack).lower()}",
+        f"--trainer.callbacks.profile_memory={str(profile_memory).lower()}",
+        f"--trainer.callbacks.record_shapes={str(record_shapes).lower()}",
+    ])
+
+    print(
+        f"[profile model] {steps} train batches, capture = last "
+        f"{schedule['active']} (wait {schedule['wait']}, warmup {schedule['warmup']})"
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=r".*args parameter is intended to run from within Python.*"
+        )
+        SaltCLI(args=args)
+
+    summary_path = out_dir / f"{tag}_summary.json"
+    if not summary_path.exists():
+        raise RuntimeError(
+            f"the fit finished without the profiler window closing — no {summary_path.name} "
+            f"was written. The run did fewer than {sum(schedule.values())} train batches "
+            "(a dataset smaller than --steps, or an override capping limit_train_batches)."
+        )
+    summary = json.loads(summary_path.read_text())
+    _print_model_report(summary, out_dir, tag, row_limit)
+    return summary
+
+
+def _print_model_report(
+    summary: Mapping[str, Any], out_dir: Path, tag: str, row_limit: int
+) -> None:
+    """Print the per-op table plus the per-module / bucket split for the window."""
+    table = out_dir / f"{tag}_key_averages.txt"
+    if table.exists():
+        print(f"\n=== {tag}: torch.profiler key_averages ===")
+        print(table.read_text())
+
+    totals = dict(summary.get("totals_us") or {})
+    steps = dict(summary.get("forward_steps_us") or {})
+    active = int((summary.get("schedule") or {}).get("active") or 0) or 1
+    denominator = sum(
+        totals.get(key, 0.0)
+        for key in ("forward_steps_device", "autograd_engine_device", "optimizer_device")
+    )
+
+    print(f"=== {tag}: per-plan-step device time (ms/step over {active} steps) ===")
+    ranked = sorted(steps.items(), key=lambda item: item[1].get("device_us", 0.0), reverse=True)
+    print(f"{'module':<32}{'ms/step':>12}{'% of step':>12}")
+    for name, entry in ranked[:row_limit]:
+        per_step = entry.get("device_us", 0.0) / active / 1e3
+        share = 100.0 * entry.get("device_us", 0.0) / denominator if denominator else 0.0
+        print(f"{name:<32}{per_step:>12.3f}{share:>11.1f}%")
+
+    print(f"\n=== {tag}: step buckets (ms/step) ===")
+    buckets = (
+        ("forward (sum of plan steps)", "forward_steps_device"),
+        ("backward (autograd engine)", "autograd_engine_device"),
+        ("optimizer", "optimizer_device"),
+    )
+    for label, key in buckets:
+        value = totals.get(key, 0.0)
+        share = 100.0 * value / denominator if denominator else 0.0
+        print(f"{label:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+    profiled = summary.get("profiled_it_s")
+    if profiled:
+        print(
+            f"\nprofiled rate {profiled:.3f} it/s — ATTRIBUTION ONLY. Divide an unprofiled "
+            "run's rate by this to get the profiler overhead; never quote it as throughput."
+        )
+    print(f"\nartifacts: {out_dir}/{tag}_*")
+
+
 # --------------------------------------------------------------------------- #
 # dataset side
 # --------------------------------------------------------------------------- #
@@ -474,7 +744,7 @@ def _build_datamodule(configs: Sequence[Path], overrides: Sequence[str]) -> tupl
     overrides, so an explicit ``--set trainer.accelerator=gpu`` still wins. No
     trainer is ever run.
     """
-    from salt.cli import _parse_trainer_cli  # noqa: PLC0415, PLC2701 - same-package adapter
+    from salt.cli import _parse_trainer_cli
 
     forced = ["trainer.accelerator=cpu", "trainer.devices=1", "trainer.precision=32-true"]
     cli = _parse_trainer_cli(list(configs), [*forced, *overrides])
@@ -493,12 +763,12 @@ def _build_datamodule(configs: Sequence[Path], overrides: Sequence[str]) -> tupl
 def profile_dataset(
     configs: Sequence[Path],
     out_dir: Path,
-    batches: int = 50,
+    steps: int = DEFAULT_STEPS,
     overrides: Sequence[str] = (),
     functions: Sequence[str] = DEFAULT_DATASET_FUNCTIONS,
     tag: str = "dataset",
 ) -> dict[str, Any]:
-    """Line-profile the dataset read path over `batches` in-process batches.
+    """Line-profile the dataset read path over `steps` in-process batches.
 
     Builds the datamodule from the config stack (run-free, ``num_workers=0``),
     wraps `functions` in a ``line_profiler.LineProfiler`` by patching the
@@ -515,8 +785,8 @@ def profile_dataset(
         Config stack, deep-merged left-to-right exactly as ``salt fit`` does.
     out_dir : Path
         Output directory (created if missing).
-    batches : int, optional
-        Batches to iterate under the profiler, by default 50.
+    steps : int, optional
+        Batches to iterate under the profiler, by default `DEFAULT_STEPS`.
     overrides : Sequence[str], optional
         ``KEY=VALUE`` config overrides, by default none.
     functions : Sequence[str], optional
@@ -538,7 +808,7 @@ def profile_dataset(
         When the profiled batch structure differs from the unprofiled one.
     """
     try:
-        from line_profiler import LineProfiler  # noqa: PLC0415 - optional dependency
+        from line_profiler import LineProfiler
     except ImportError as err:  # pragma: no cover - exercised by the CLI path
         raise ImportError(_LINE_PROFILER_HINT) from err
 
@@ -573,10 +843,10 @@ def profile_dataset(
     try:
         loader = datamodule.train_dataloader()
         profiler.enable_by_count()
-        # A file smaller than `batches` batches is re-iterated rather than
+        # A file smaller than `steps` batches is re-iterated rather than
         # silently short-changing the sample; `passes` records how often, so a
         # page-cache-warm result is visible in the summary rather than implied.
-        while seen < batches:
+        while seen < steps:
             passes += 1
             drawn = 0
             for batch in loader:
@@ -584,7 +854,7 @@ def profile_dataset(
                     first_profiled = _structure(batch)
                 drawn += 1
                 seen += 1
-                if seen >= batches:
+                if seen >= steps:
                     break
             if drawn == 0:
                 break
@@ -686,7 +956,18 @@ def _dataset_parser() -> argparse.ArgumentParser:
         help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
     )
     parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
-    parser.add_argument("--batches", type=int, default=50, help="batches to profile")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help=f"batches to profile (default {DEFAULT_STEPS})",
+    )
+    parser.add_argument(
+        "--batches",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,  # deprecated alias for --steps
+    )
     parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
     parser.add_argument("--tag", default="dataset", help="output filename prefix")
     parser.add_argument(
@@ -702,9 +983,121 @@ def _dataset_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _model_parser() -> argparse.ArgumentParser:
+    """Build the ``salt profile model`` argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="salt profile model",
+        description=(
+            "torch.profiler over the model: runs a short capped fit (no logger, no "
+            "checkpoints, no validation) with TorchProfilerCallback attached, then prints "
+            "the per-op table and the per-plan-step / backward / optimizer split."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        action="append",
+        type=Path,
+        required=True,
+        help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
+    )
+    parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=DEFAULT_STEPS,
+        help=f"train batches to run (default {DEFAULT_STEPS}); the capture is their tail",
+    )
+    parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
+    parser.add_argument("--tag", default="model", help="output filename prefix")
+    parser.add_argument("--wait", type=int, default=None, help="steps skipped (default: derived)")
+    parser.add_argument(
+        "--warmup", type=int, default=None, help="steps traced then discarded (default: derived)"
+    )
+    parser.add_argument(
+        "--active", type=int, default=None, help="steps recorded (default: derived, <= 20)"
+    )
+    parser.add_argument("--row-limit", type=int, default=30, help="rows per printed table")
+    parser.add_argument(
+        "--with-stack", action="store_true", help="record source stacks (costly, often empty)"
+    )
+    parser.add_argument(
+        "--profile-memory", action="store_true", help="record allocator events (costs host RAM)"
+    )
+    parser.add_argument("--record-shapes", action="store_true", help="record operator input shapes")
+    parser.add_argument("--compile", action="store_true", help="pass --compile to the fit")
+    return parser
+
+
 def _split(value: str | None) -> tuple[str, ...]:
     """Comma-separated CLI list -> tuple of stripped, non-empty entries."""
     return tuple(entry.strip() for entry in (value or "").split(",") if entry.strip())
+
+
+_USAGE = (
+    "usage: salt profile {dataset,model} --config <yaml> [--config <yaml>] "
+    "[--steps N] [--out DIR]\n\n"
+    "  dataset   line_profiler over the read path (needs salt-ml[profile])\n"
+    "  model     torch.profiler over a short capped fit\n\n"
+    "Both default to --steps 100. `salt profile <subcommand> --help` for the full "
+    "flag list; see docs/profiling.md. To profile a training run you were going to do "
+    "anyway, attach the callback directly instead:\n"
+    "  salt fit ... --trainer.callbacks+=salt.profiling.TorchProfilerCallback \\\n"
+    "               --trainer.callbacks.dirpath <dir>"
+)
+
+
+def _run_dataset(args: Sequence[str]) -> int:
+    """``salt profile dataset``."""
+    parsed = _dataset_parser().parse_args(args)
+    if parsed.batches is not None and parsed.steps is not None:
+        print("salt profile dataset: pass --steps or --batches, not both", file=sys.stderr)
+        return 1
+    steps = parsed.steps
+    if steps is None and parsed.batches is not None:
+        print("salt profile dataset: --batches is a deprecated alias for --steps", file=sys.stderr)
+        steps = parsed.batches
+    if steps is None:
+        steps = DEFAULT_STEPS
+    functions: Iterable[str] = _split(parsed.functions) or DEFAULT_DATASET_FUNCTIONS
+    functions = (*functions, *_split(parsed.extra_functions))
+    try:
+        profile_dataset(
+            configs=parsed.config,
+            out_dir=parsed.out,
+            steps=steps,
+            overrides=parsed.set,
+            functions=tuple(functions),
+            tag=parsed.tag,
+        )
+    except ImportError as err:
+        print(f"salt profile dataset: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_model(args: Sequence[str]) -> int:
+    """``salt profile model``."""
+    parsed = _model_parser().parse_args(args)
+    try:
+        profile_model(
+            configs=parsed.config,
+            out_dir=parsed.out,
+            steps=parsed.steps,
+            overrides=parsed.set,
+            tag=parsed.tag,
+            wait=parsed.wait,
+            warmup=parsed.warmup,
+            active=parsed.active,
+            row_limit=parsed.row_limit,
+            with_stack=parsed.with_stack,
+            profile_memory=parsed.profile_memory,
+            record_shapes=parsed.record_shapes,
+            compile_model=parsed.compile,
+        )
+    except (ValueError, RuntimeError) as err:
+        print(f"salt profile model: {err}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -722,32 +1115,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = list(sys.argv[2:] if argv is None else argv)
     if not args or args[0] in {"-h", "--help"}:
-        print(
-            "usage: salt profile dataset --config <yaml> [--config <yaml>] [--batches N] "
-            "[--out DIR]\n\n"
-            "The model side is a callback, not a subcommand — add\n"
-            "  --trainer.callbacks+=salt.profiling.TorchProfilerCallback \\\n"
-            "  --trainer.callbacks.dirpath <dir>\n"
-            "to `salt fit`, or use `--trainer.profiler simple|advanced`. "
-            "See docs/profiling.md."
-        )
+        print(_USAGE)
         return 0 if args else 1
-    if args[0] != "dataset":
-        print(f"salt profile: unknown subcommand {args[0]!r} (expected 'dataset')", file=sys.stderr)
-        return 1
-    parsed = _dataset_parser().parse_args(args[1:])
-    functions: Iterable[str] = _split(parsed.functions) or DEFAULT_DATASET_FUNCTIONS
-    functions = (*functions, *_split(parsed.extra_functions))
-    try:
-        profile_dataset(
-            configs=parsed.config,
-            out_dir=parsed.out,
-            batches=parsed.batches,
-            overrides=parsed.set,
-            functions=tuple(functions),
-            tag=parsed.tag,
-        )
-    except ImportError as err:
-        print(f"salt profile dataset: {err}", file=sys.stderr)
-        return 1
-    return 0
+    if args[0] == "dataset":
+        return _run_dataset(args[1:])
+    if args[0] == "model":
+        return _run_model(args[1:])
+    print(
+        f"salt profile: unknown subcommand {args[0]!r} (expected 'dataset' or 'model')",
+        file=sys.stderr,
+    )
+    return 1

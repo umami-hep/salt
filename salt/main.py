@@ -1075,9 +1075,9 @@ def main(args: Sequence[str] | None = None) -> int:
     the static graph + muP tooling (`salt.cli.main`), ``salt export``
     to the ONNX exporter, ``salt inference`` to the eager export-set
     runner, ``salt merge-config`` to the config-merge + per-stage
-    freeze-graph tooling (`salt.merge_config.main`), and ``salt profile`` to
-    the dataset line-profiler harness (`salt.profiling.main`); everything else
-    goes to `SaltCLI` (``salt fit``/``test``).
+    freeze-graph tooling (`salt.merge_config.main`), and ``salt profile
+    dataset``/``model`` to the profiling harnesses (`salt.profiling.main`);
+    everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
     instead of a Python traceback.
 
@@ -1104,8 +1104,8 @@ def main(args: Sequence[str] | None = None) -> int:
 
         return inference_cli.main(argv[1:])
     if argv and argv[0] == _PROFILE_COMMAND:
-        # trainer-free: the dataset harness iterates the datamodule in-process
-        # under line_profiler (the model side is a callback on `salt fit`)
+        # its own dispatch: `dataset` iterates the datamodule in-process under
+        # line_profiler, `model` drives a short capped fit through SaltCLI
         from salt import profiling as profiling_cli  # noqa: PLC0415 - optional dependency
 
         return profiling_cli.main(argv[1:])
@@ -1134,8 +1134,9 @@ def main(args: Sequence[str] | None = None) -> int:
                 "'salt inference --help' (label-free eager inference: the export output "
                 "set written to H5, plan 50), 'salt merge-config --help' (emit the merged "
                 "config + one per-stage freeze graph for a fit config stack, plan 10), "
-                "'salt profile --help' (line_profiler over the dataset read path; the "
-                "model side is a torch.profiler callback, docs/profiling.md)"
+                "'salt profile --help' ('dataset': line_profiler over the read path, "
+                "'model': torch.profiler over a short capped fit — both take --steps, "
+                "docs/profiling.md)"
             )
         raise
     except GraphError as err:
