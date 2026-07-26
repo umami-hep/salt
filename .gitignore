@@ -45,6 +45,10 @@ graph_*.dot
 graph_*.svg
 plan_*.txt
 resolved_io.yaml
+# Lightning's SaveConfigCallback dumps the resolved config into the trainer's
+# log dir, which is the CWD when a test runs `salt fit` without a
+# default_root_dir — repo root only, so salt/configs/*.yaml is untouched.
+/config.yaml
 
 /site/
 /temp_mup/
