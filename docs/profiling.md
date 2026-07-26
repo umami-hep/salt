@@ -38,6 +38,15 @@ salt fit --config configs/GN3V00.yaml --trainer.profiler advanced
 `[_TrainingEpochLoop].train_dataloader_next` — with mean and total wall time
 each. It is the fastest way to see whether you are dataloader-bound.
 
+!!! warning "`optimizer_step` in that table is not the optimizer"
+
+    Lightning calls `optimizer.step(closure)`, and the closure runs the forward
+    and the backward. `[LightningModule]SaltModule.optimizer_step` therefore
+    reports ~99 % of the batch — it *contains* `training_step` and `backward`
+    rather than sitting beside them. Read the table as a nesting, not a
+    partition. For an actual partition of GPU time, use the torch.profiler
+    callback below.
+
 `advanced` adds a cProfile report per action. It is heavy — use
 `--trainer.limit_train_batches 20` with it.
 
@@ -139,6 +148,19 @@ Four artifacts per capture:
 | `<tag>_stacks.txt`, `<tag>_stacks.flame` | which source lines launched them (`with_stack`) |
 | `<tag>_trace.json.gz` | the timeline — load in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev) |
 | `<tag>_summary.json` | forward time **per plan step**, backward, optimizer, top ops, profiled it/s |
+
+!!! warning "`with_stack` is expensive, and some builds record nothing"
+
+    `with_stack=True` is a request, not a guarantee. If torch returns events with
+    empty stacks, `<tag>_stacks.txt` says so explicitly and
+    `summary.json` sets `stacks_available: false` — the per-module
+    `salt.step/*` rows are the attribution in that case.
+
+    It also costs **host RAM**, not GPU memory: assembling the kineto result
+    for a long window can allocate many GB and has been seen to die with
+    `MemoryError: std::bad_alloc` inside `_disable_profiler()` at large batch
+    sizes. If that happens, drop `with_stack`, shorten `active`, or ask the
+    batch system for more RAM.
 
 ### Per-module attribution
 

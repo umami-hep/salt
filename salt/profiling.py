@@ -311,25 +311,48 @@ class TorchProfilerCallback(Callback):
         if sort_key is not None:
             table_kwargs["sort_by"] = sort_key
         (self.dirpath / f"{self.tag}_key_averages.txt").write_text(events.table(**table_kwargs))
-        if self.with_stack:
-            self._write_stacks(prof, sort_key)
+        stacks = self._write_stacks(prof, events, sort_key) if self.with_stack else False
         self._write_trace(prof)
         summary = self._summarise(events, sort_key)
+        summary["stacks_available"] = stacks
         (self.dirpath / f"{self.tag}_summary.json").write_text(json.dumps(summary, indent=2))
         print(f"[TorchProfilerCallback] wrote {self.tag}_* artifacts to {self.dirpath}")
 
-    def _write_stacks(self, prof: Any, sort_key: str | None) -> None:
-        """Write the stack-grouped table and the flamegraph-format stack file."""
+    def _write_stacks(self, prof: Any, events: Any, sort_key: str | None) -> bool:
+        """Write the stack-grouped table and flamegraph file; False when the build
+        recorded no stacks.
+
+        ``with_stack=True`` is a request, not a guarantee — some torch builds
+        return events with empty ``stack`` lists, in which case
+        ``group_by_stack_n`` degenerates to the plain per-op table and
+        ``export_stacks`` writes an empty file. Say so in a note rather than
+        leaving a duplicate table and a 0-byte flamegraph to be misread as
+        source attribution.
+        """
+        if not any(getattr(event, "stack", None) for event in events):
+            (self.dirpath / f"{self.tag}_stacks.txt").write_text(
+                "torch recorded no python stacks for this run despite with_stack=True — "
+                "this build does not populate FunctionEvent.stack, so there is no source "
+                "attribution to report. The salt.step/<module> rows in "
+                f"{self.tag}_key_averages.txt carry the per-module attribution instead.\n"
+            )
+            return False
         with contextlib.suppress(Exception):
             grouped = prof.key_averages(group_by_stack_n=self.stack_depth)
             kwargs: dict[str, Any] = {"row_limit": self.row_limit}
             if sort_key is not None:
                 kwargs["sort_by"] = sort_key
             (self.dirpath / f"{self.tag}_stacks.txt").write_text(grouped.table(**kwargs))
-        for metric in ("self_cuda_time_total", "self_cpu_time_total"):
+        # torch renamed the CUDA metrics to device_*; try the modern spelling
+        # first and keep going until one writes something (an accepted-but-empty
+        # metric name silently produces a 0-byte file).
+        flame = self.dirpath / f"{self.tag}_stacks.flame"
+        for metric in ("self_device_time_total", "self_cuda_time_total", "self_cpu_time_total"):
             with contextlib.suppress(Exception):
-                prof.export_stacks(str(self.dirpath / f"{self.tag}_stacks.flame"), metric)
-                return
+                prof.export_stacks(str(flame), metric)
+                if flame.stat().st_size > 0:
+                    break
+        return True
 
     def _write_trace(self, prof: Any) -> None:
         """Export the Chrome trace, gzipped (traces with stacks are large)."""
