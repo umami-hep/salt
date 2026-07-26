@@ -191,3 +191,49 @@ and does nothing else.
 `profiled_it_s` in the summary is the rate measured *inside* the active window.
 Run the same cell once without the callback and divide: that ratio is the
 profiler overhead, and it is the only honest way to report it.
+
+On GN3V00 / one A100 / `flash-varlen` the measured overhead was **1.5–1.7x at
+batch 1000** and **1.07–1.11x at batch 4500–5000** — it is a per-step cost, so
+it shrinks as the step grows.
+
+## 4. Worked example: what this found on GN3V00
+
+A single baseline pass over GN3V00 on one A100 80GB (`flash-varlen`, `16-mixed`,
+eager and `--compile`, batch 1000 and each mode's guarded maximum) produced the
+following. It is a useful calibration for what the harness can tell you.
+
+??? abstract "Measured: where a GN3V00 step goes"
+
+    Device time per step, split by the `salt.step/*` scopes plus the autograd
+    engine and torch's optimizer scope. The split closes to **99–102 %** of the
+    step time the *unprofiled* run actually took, so it accounts for the whole
+    step.
+
+    | cell | batch | forward | backward | optimizer |
+    | --- | --- | --- | --- | --- |
+    | eager | 1000 | 32.0 % (31.0 ms) | 46.8 % (45.3 ms) | **21.3 % (20.6 ms)** |
+    | `--compile` | 1000 | 36.2 % (33.8 ms) | 41.4 % (38.7 ms) | **22.4 % (21.0 ms)** |
+    | eager | 5000 | 31.9 % (109.6 ms) | 63.1 % (216.4 ms) | 5.0 % (17.2 ms) |
+    | `--compile` | 4500 | 30.0 % (80.9 ms) | 63.3 % (170.6 ms) | 6.7 % (18.1 ms) |
+
+    Two of the twelve configured modules are 73–88 % of the forward — the
+    encoder and the vertexing head. Normalisation is 0.25 ms/step (0.3 %), and
+    the four other task heads are under 2 ms/step each.
+
+    Cross-checking against the Chrome trace (span on the GPU timeline vs the
+    summed duration of the kernels actually launched) sharpens it further:
+
+    | scope | span | kernel work | busy | kernels/step |
+    | --- | --- | --- | --- | --- |
+    | `Optimizer.step#Lion.step` | 20.6 ms | 1.33 ms | **6 %** | **595** |
+    | `salt.step/encoder` | 13.0 ms | 11.7 ms | 90 % | 115 |
+    | `salt.step/track_vertexing` | 9.0 ms | 6.8 ms | 75 % | 104 |
+
+    The optimizer is **launch-bound**, not compute-bound: 595 tiny kernels whose
+    work totals 1.3 ms occupy 20.6 ms of the step. That is a `foreach`-shaped
+    problem, and it is batch-size independent — which is a large part of why a
+    bigger batch helps so much.
+
+The lesson generalises: the per-module split tells you *where*, and the
+span-vs-kernel-work ratio tells you *which kind of fix* — fuse the launches when
+the scope is idle-dominated, change the algorithm when it is busy.
