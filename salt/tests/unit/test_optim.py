@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from salt.model.saltmodule import safe_pct_start
 from salt.optim import HybridMuonAdamW, Lion, MuonParamPolicy
 
 
@@ -447,3 +448,56 @@ def test_lion_rejects_invalid_hyperparameters(kwargs: dict[str, Any], match: str
     net = LionNet()
     with pytest.raises(ValueError, match=match):
         Lion(net.parameters(), **kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# safe_pct_start — OneCycleLR must survive a short run
+# --------------------------------------------------------------------------- #
+
+
+class TestSafePctStart:
+    """The clamp that keeps both OneCycleLR phases non-empty."""
+
+    @staticmethod
+    def _build(pct_start: float, total_steps: int) -> Any:
+        """Build the scheduler exactly as `SaltModule.configure_optimizers` does."""
+        net = LionNet()
+        opt = Lion(net.parameters(), lr=1e-4)
+        return torch.optim.lr_scheduler.OneCycleLR(
+            opt,
+            max_lr=1e-3,
+            total_steps=total_steps,
+            div_factor=10.0,
+            final_div_factor=10.0,
+            pct_start=safe_pct_start(pct_start, total_steps),
+        )
+
+    def test_the_shipped_gn3_setting_at_100_steps_no_longer_divides_by_zero(self) -> None:
+        """The exact case `salt profile model --steps 100` hits on GN3V00."""
+        scheduler = self._build(0.01, 100)
+        for _ in range(100):
+            scheduler.step()
+
+    @pytest.mark.parametrize("total_steps", [1, 2, 3, 4, 10, 100, 101, 1000])
+    @pytest.mark.parametrize("pct_start", [0.001, 0.01, 0.1, 0.3, 0.99])
+    def test_no_schedule_length_raises(self, total_steps: int, pct_start: float) -> None:
+        """Every (pct_start, total_steps) pair builds and steps to completion."""
+        scheduler = self._build(pct_start, total_steps)
+        for _ in range(total_steps):
+            scheduler.step()
+
+    def test_a_real_training_run_is_untouched(self) -> None:
+        """A run long enough for the configured warm-up keeps its own pct_start."""
+        # GN3V00 ships pct_start 0.01; 1.5M jets at batch 1000 is 1500 steps
+        assert safe_pct_start(0.01, 1500) == pytest.approx(0.01)
+        assert safe_pct_start(0.3, 10_000) == pytest.approx(0.3)
+
+    def test_only_short_runs_are_clamped(self) -> None:
+        """The clamp bites exactly when the warm-up would span fewer than two steps."""
+        assert safe_pct_start(0.01, 100) == pytest.approx(0.02)
+        assert safe_pct_start(0.01, 70) == pytest.approx(2 / 70)
+        assert safe_pct_start(0.01, 201) == pytest.approx(0.01)
+
+    def test_an_over_long_warmup_is_clamped_too(self) -> None:
+        """pct_start == 1 would collapse the ANNEAL phase instead."""
+        assert safe_pct_start(1.0, 100) == pytest.approx(0.99)

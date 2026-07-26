@@ -68,6 +68,7 @@ __all__ = [
     "module_mup_enabled",
     "module_supports_mup",
     "resolve_origin_weighting",
+    "safe_pct_start",
     "validate_edge_port",
     "validate_mup_routing",
 ]
@@ -87,6 +88,42 @@ _MUP_KEYS = frozenset({"apply_to", "shape_path"})
 # dataset-boundary demand is declared for the three runtime modes; ONNX
 # export feeds the model directly and has no dataset plan.
 _DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
+
+
+def safe_pct_start(pct_start: float, total_steps: int) -> float:
+    """`pct_start` clamped so neither OneCycleLR phase is empty on a short run.
+
+    torch puts the warm-up/anneal boundary at ``pct_start * total_steps - 1``
+    and, in ``get_lr``, divides by each phase's length. On a full training run
+    that is unremarkable, but on a SHORT one — a smoke, a
+    ``--trainer.limit_train_batches`` cap, ``salt profile model`` — a small
+    ``pct_start`` collapses the warm-up phase to zero length and the scheduler
+    dies with ``ZeroDivisionError`` raised from inside its own constructor. The
+    shipped GN3 configs use ``pct_start: 0.01``, which does exactly that at
+    exactly 100 steps.
+
+    The clamp keeps the boundary strictly inside ``(0, total_steps - 1)``. It is
+    a no-op for any run long enough for the configured warm-up to span two
+    steps, so real training is untouched; a run short enough to be clamped has
+    no meaningful LR schedule anyway.
+
+    Parameters
+    ----------
+    pct_start : float
+        The configured warm-up fraction.
+    total_steps : int
+        ``trainer.estimated_stepping_batches`` for this run.
+
+    Returns
+    -------
+    float
+        A ``pct_start`` OneCycleLR can build a non-degenerate schedule from.
+    """
+    low = 2.0 / total_steps if total_steps > 0 else 1.0
+    high = 1.0 - 1.0 / total_steps if total_steps > 0 else 0.0
+    if low > high:  # fewer than 3 steps: no schedule is meaningful, just be legal
+        return 0.75
+    return min(max(pct_start, low), high)
 
 
 def _is_test_persistence_sink(callback: Any) -> bool:
@@ -1400,13 +1437,18 @@ class SaltModule(lightning.LightningModule):
         stage = self._schedule.stages[self._current_stage_index]
         if stage.lr_scheduler is not None:
             return [opt], [self._build_stage_lr_scheduler(opt, stage.lr_scheduler)]
+        # `safe_pct_start` is clamped against THIS STAGE's step allocation, not the
+        # whole-run estimate: a sub-stage of a multi-stage schedule gets a fraction
+        # of the run's steps, so it reaches the degenerate-warm-up boundary on runs
+        # far longer than a single-stage fit would need to.
+        total_steps = int(self._stage_total_steps())
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=lrs["max"],
-            total_steps=self._stage_total_steps(),
+            total_steps=total_steps,
             div_factor=lrs["max"] / lrs["initial"],
             final_div_factor=lrs["initial"] / lrs["end"],
-            pct_start=float(lrs["pct_start"]),
+            pct_start=safe_pct_start(float(lrs["pct_start"]), total_steps),
             last_epoch=int(lrs.get("last_epoch", -1)),
             cycle_momentum=optimizer_class is not HybridMuonAdamW,
         )
