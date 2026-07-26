@@ -545,15 +545,25 @@ def profile_dataset(
 
     started = time.perf_counter()
     seen = 0
+    passes = 0
     first_profiled: Any = None
     try:
         loader = datamodule.train_dataloader()
         profiler.enable_by_count()
-        for batch in loader:
-            if first_profiled is None:
-                first_profiled = _structure(batch)
-            seen += 1
-            if seen >= batches:
+        # A file smaller than `batches` batches is re-iterated rather than
+        # silently short-changing the sample; `passes` records how often, so a
+        # page-cache-warm result is visible in the summary rather than implied.
+        while seen < batches:
+            passes += 1
+            drawn = 0
+            for batch in loader:
+                if first_profiled is None:
+                    first_profiled = _structure(batch)
+                drawn += 1
+                seen += 1
+                if seen >= batches:
+                    break
+            if drawn == 0:
                 break
         profiler.disable_by_count()
     finally:
@@ -576,8 +586,13 @@ def profile_dataset(
 
     summary = _dataset_summary(profiler.get_stats(), wrapped, skipped, seen, elapsed)
     summary["reference_structure_matches"] = True
+    summary["dataloader_passes"] = passes
+    summary["batches_per_pass"] = len(loader)
     (out_dir / f"{tag}_summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"[profile dataset] {seen} batches in {elapsed:.2f}s -> {report}")
+    note = ""
+    if passes > 1:
+        note = f" ({passes} passes over {len(loader)} batches — page cache is warm)"
+    print(f"[profile dataset] {seen} batches in {elapsed:.2f}s{note} -> {report}")
     return summary
 
 
