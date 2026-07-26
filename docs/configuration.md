@@ -454,6 +454,46 @@ so the two must be chosen together.
       most of the gain; on a real multi-epoch training run it is noise.
     - Loss parity held everywhere (worst drift 0.02% against a 2% tolerance).
 
+??? abstract "Measured: what actually goes fastest, GN3V00 on one A100 80GB"
+
+    The table above holds batch size fixed at 1000 to isolate the backend. That is not
+    how you would train. `flash-varlen` uses less than a quarter of the memory, so it
+    also fits a much larger batch — and the batch is where most of the throughput is.
+    Same model, same data, same job; rate measured over a fixed 250,000-jet budget per
+    cell so jets/s is comparable across batch sizes.
+
+    | configuration                             | batch | jets/s | 1.5M-jet epoch | peak memory | first step |
+    | ----------------------------------------- | ----- | ------ | -------------- | ----------- | ---------- |
+    | `torch-math`, eager (the shipped default) | 1000  | 5,191  | 4.82 min       | 15.6 GB     | 10 s       |
+    | `flash-varlen`, eager                     | 1000  | 11,375 | 2.20 min       | 8.6 GB      | 11 s       |
+    | `flash-varlen`, eager                     | 5000  | 14,835 | 1.69 min       | 40.6 GB     | 12 s       |
+    | `flash-varlen`, `--compile`               | 5000  | 17,223 | **1.45 min**   | 38.6 GB     | 70 s       |
+
+    **3.3x** end to end, and two thirds of it is free: switching the attention backend
+    and raising the batch costs nothing but a config edit. The last step —
+    `--compile` — buys a further 1.16x for a 70 s charge before the first batch, so it
+    is worth it from roughly the seventh epoch onwards and clearly worth it over
+    GN3V00's shipped 40.
+
+    Note the memory column: the compiled cell is not just as fast as it can be, it also
+    holds batch 5000 in **less** memory than the eager cell does.
+
+    Practical recipe, in the order the wins arrive:
+
+    1. `attn_type: flash-varlen` — 2.2x, and it frees the memory that funds step 2.
+    2. Raise the batch until it stops helping — a further 1.3x here.
+    3. `--compile` if you are training for more than ~7 epochs — a further 1.16x.
+    4. `optimizer: lion` rather than `lion-pytorch` (this is the default) — see below.
+
+    The optimizer is worth calling out because it is invisible in a backend table.
+    Profiling put `lion-pytorch`'s per-parameter Python loop at 20.6 ms of a 96 ms step
+    for 1.33 ms of actual kernel work — 595 launches at 6% GPU-busy. `salt.optim.Lion`
+    issues the identical arithmetic through `torch._foreach_*`; the profiled optimizer
+    span drops from **20.6 ms to 2.9 ms**, worth 1.11x at batch 1000 and 1.02-1.03x at
+    batch 5000 (the saving is roughly constant in absolute terms, so it matters most
+    when the step is short). Parameters and `exp_avg` are **bit-identical** between the
+    two, gated on both CPU and A100 in fp32, bf16 and fp16.
+
 #### Graph breaks
 
 A compiled salt model is not one graph. Dynamo splits the trace wherever it meets

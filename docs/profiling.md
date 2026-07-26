@@ -269,6 +269,29 @@ following. It is a useful calibration for what the harness can tell you.
     problem, and it is batch-size independent — which is a large part of why a
     bigger batch helps so much.
 
+??? success "…and what happened when that finding was acted on"
+
+    The optimizer row above is the reason `salt.optim.Lion` exists. It issues the
+    same arithmetic as the `lion-pytorch` reference — bit-identically, gated in
+    `salt/tests/unit/test_optim.py` — through `torch._foreach_*`, so the launch
+    count is per parameter *group* rather than per parameter.
+
+    Re-running the same capture on the same GPU afterwards (`salt profile model
+    --config configs/GN3V00.yaml --steps 100`, `flash-varlen`, batch 1000):
+
+    | bucket | before | after |
+    | --- | --- | --- |
+    | forward (sum of `salt.step/*`) | 31.0 ms | 30.2 ms |
+    | backward (autograd engine) | 45.3 ms | 45.6 ms |
+    | **optimizer** | **20.6 ms (21 %)** | **2.9 ms (3.7 %)** |
+
+    Forward and backward are unchanged to within a percent, which is the check
+    that the fix went where the profile said it would. End-to-end that is 1.11x
+    at batch 1000; at batch 5000 the same ~6-9 ms saving is 1.02x, because the
+    saving is roughly constant and the step is four times longer.
+
 The lesson generalises: the per-module split tells you *where*, and the
 span-vs-kernel-work ratio tells you *which kind of fix* — fuse the launches when
-the scope is idle-dominated, change the algorithm when it is busy.
+the scope is idle-dominated, change the algorithm when it is busy. And the
+follow-up capture is not optional: it is what distinguishes "the fix worked" from
+"something else moved at the same time".

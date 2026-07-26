@@ -230,6 +230,12 @@ Before changing anything, measure: [Profiling](profiling.md) covers the built-in
 the read path, and the `torch.profiler` callback that splits GPU time across
 encoder, task heads and optimizer.
 
+For a GN3-shaped model the three changes that matter most, in order, are the
+attention backend, the batch size, and `--compile` — together **3.3x** on a
+measured A100 benchmark, most of it from the first two. See
+[what actually goes fastest](configuration.md#compiled-models) for the numbers
+and the recipe.
+
 This section contains some suggestions for speeding up trainings.
 Some external advice can be found [here](https://lightning.ai/docs/pytorch/stable/advanced/speed.html) and [here](https://lightning.ai/docs/pytorch/stable/levels/intermediate_level_13.html).
 
