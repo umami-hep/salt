@@ -240,7 +240,9 @@ class RegressionTaskModule(_TaskModuleBase):
         Raises
         ------
         ValueError
-            If the resulting loss becomes NaN.
+            If the resulting loss becomes NaN. Eager only: the check reads a
+            tensor value, which is data-dependent control flow and would force a
+            graph break, so it is skipped inside a compiled region.
         """
         invalid = torch.isnan(targets)
         preds = torch.where(invalid, torch.zeros_like(preds), preds)
@@ -252,7 +254,7 @@ class RegressionTaskModule(_TaskModuleBase):
         loss = self.loss(preds, targets, **kwargs)
 
         if len(loss.shape) == 0:
-            if torch.isnan(loss):
+            if not torch.compiler.is_compiling() and torch.isnan(loss):
                 raise ValueError(
                     "Regression loss is NaN. This may be due to NaN targets,"
                     " check configs/nan_regression.yaml for options to deal with this."
@@ -268,7 +270,7 @@ class RegressionTaskModule(_TaskModuleBase):
             loss = loss * weights
 
         nanmean = torch.nanmean(loss)
-        if torch.isnan(nanmean):
+        if not torch.compiler.is_compiling() and torch.isnan(nanmean):
             raise ValueError("NanRegression is NaN. This means all model predictions are NaN")
         return nanmean
 

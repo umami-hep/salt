@@ -429,6 +429,58 @@ class TestRegressionTaskModule:
         # the stddev column IS sqrt(softplus(var)) * std (v1 task.py:762-764)
         assert (fields[1].value > 0).all()
 
+    # -- the eager-only NaN guards in nan_loss ---------------------------------
+
+    def _nan_loss_task(self, reduction: str) -> RegressionTaskModule:
+        """A bound single-target head whose loss uses `reduction`.
+
+        Returns
+        -------
+        RegressionTaskModule
+            The bound head.
+        """
+        task = RegressionTaskModule(
+            stream="jets",
+            targets="x",
+            input="pooled.global",
+            loss={"class_path": "torch.nn.MSELoss", "init_args": {"reduction": reduction}},
+        )
+        task.name = "regression"
+        _bind_reg_module(task, {"pooled.global": 4})
+        return task
+
+    @pytest.mark.parametrize(
+        ("reduction", "match"), [("mean", "Regression loss is NaN"), ("none", "NanRegression")]
+    )
+    def test_nan_loss_still_raises_in_eager(self, reduction, match):
+        """Both NaN guards must keep firing outside a compiled region."""
+        task = self._nan_loss_task(reduction)
+        preds = torch.full((B, 1), float("nan"))
+        targets = torch.zeros(B, 1)
+        with pytest.raises(ValueError, match=match):
+            task.nan_loss(preds, targets, {})
+
+    @pytest.mark.parametrize("reduction", ["mean", "none"])
+    def test_nan_loss_guards_are_skipped_under_compile(self, reduction):
+        """Compiled, the guards short-circuit and a NaN loss is returned instead."""
+        task = self._nan_loss_task(reduction)
+        preds = torch.full((B, 1), float("nan"))
+        targets = torch.zeros(B, 1)
+        torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
+        compiled = torch.compile(task.nan_loss, backend="eager")
+        assert torch.isnan(compiled(preds, targets, {}))
+
+    def test_nan_loss_finite_path_is_unchanged_by_the_guards(self):
+        """The ordinary (finite) result must be bit-identical eager vs compiled."""
+        task = self._nan_loss_task("none")
+        generator = torch.Generator().manual_seed(5)
+        preds = torch.randn(B, 1, generator=generator)
+        targets = torch.randn(B, 1, generator=generator)
+        expected = task.nan_loss(preds, targets, {})
+        torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
+        compiled = torch.compile(task.nan_loss, backend="eager")
+        assert torch.equal(compiled(preds, targets, {}), expected)
+
     # -- sample_weight + NaN masking (inside composed v1 nan_loss) — A3 ---------
 
     def test_sample_weight_requires_reduction_none(self):
