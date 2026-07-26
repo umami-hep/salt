@@ -442,10 +442,19 @@ def _structure(value: Any) -> Any:
 
 
 def _build_datamodule(configs: Sequence[Path], overrides: Sequence[str]) -> tuple[Any, Any]:
-    """Parse the config stack run-free and return ``(datamodule, model)`` with workers off."""
+    """Parse the config stack run-free and return ``(datamodule, model)`` with workers off.
+
+    The run-free parse still constructs a `Trainer`, so a GPU training config
+    would refuse to instantiate on a machine with no CUDA — and profiling the
+    read path is exactly the thing you want to do on a login node. The
+    accelerator is therefore forced to CPU FIRST, before the caller's
+    overrides, so an explicit ``--set trainer.accelerator=gpu`` still wins. No
+    trainer is ever run.
+    """
     from salt.cli import _parse_trainer_cli  # noqa: PLC0415, PLC2701 - same-package adapter
 
-    cli = _parse_trainer_cli(list(configs), list(overrides))
+    forced = ["trainer.accelerator=cpu", "trainer.devices=1", "trainer.precision=32-true"]
+    cli = _parse_trainer_cli(list(configs), [*forced, *overrides])
     datamodule = cli.datamodule
     model = cli.model
     demand = getattr(model, "sink_demand", None)
