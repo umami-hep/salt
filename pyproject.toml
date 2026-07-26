@@ -69,6 +69,11 @@ flash = [
   "packaging",
   "wheel",
 ]
+# `salt profile dataset` only — torch.profiler (the model side) needs nothing
+# extra. The harness degrades with an install hint when this is absent.
+profile = [
+  "line-profiler>=4.2.0",
+]
 
 [dependency-groups]
 dev = [

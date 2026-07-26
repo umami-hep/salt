@@ -225,6 +225,11 @@ If you need more help you can post on [mattermost](https://mattermost.web.cern.c
 
 ### Slow Training
 
+Before changing anything, measure: [Profiling](profiling.md) covers the built-in
+`--trainer.profiler simple|advanced`, the `salt profile dataset` line profiler for
+the read path, and the `torch.profiler` callback that splits GPU time across
+encoder, task heads and optimizer.
+
 This section contains some suggestions for speeding up trainings.
 Some external advice can be found [here](https://lightning.ai/docs/pytorch/stable/advanced/speed.html) and [here](https://lightning.ai/docs/pytorch/stable/levels/intermediate_level_13.html).
 

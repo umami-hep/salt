@@ -12,7 +12,12 @@ from salt.graph.errors import (
     MutationError,
     UndeclaredAccessError,
 )
-from salt.graph.executor import Executor
+from salt.graph.executor import (
+    STEP_SCOPE_PREFIX,
+    Executor,
+    _StepRecording,
+    record_steps,
+)
 from salt.graph.planner import compile_plan
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
@@ -456,3 +461,42 @@ class TestExecutorConstruction:
         plan = compile_plan({"a": Inert()}, Mode.FIT, SRC_X)
         with pytest.raises(ConfigError, match="'a'.*not callable"):
             Executor(plan)
+
+
+class TestRecordSteps:
+    """The profiler step scopes (plan 05: per-module attribution)."""
+
+    @staticmethod
+    def _run_under_profiler(enabled):
+        modules = mods(*diamond_modules())
+        plan = compile_plan(modules, Mode.FIT, SRC_X, sinks=SINKS_BY_MODE)
+        executor = Executor(plan, modules)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            if enabled:
+                with record_steps():
+                    executor.run(input_bundle())
+            else:
+                executor.run(input_bundle())
+        return {str(evt.key) for evt in prof.key_averages()}
+
+    def test_scopes_absent_by_default(self):
+        keys = self._run_under_profiler(enabled=False)
+        assert not any(key.startswith(STEP_SCOPE_PREFIX) for key in keys)
+
+    def test_scopes_named_after_plan_steps(self):
+        keys = self._run_under_profiler(enabled=True)
+        recorded = {
+            key[len(STEP_SCOPE_PREFIX) :]
+            for key in keys
+            if key.startswith(STEP_SCOPE_PREFIX)
+        }
+        assert {"head", "loss_sum"} <= recorded
+
+    def test_toggle_restores_previous_state(self):
+        with record_steps():
+            with record_steps():
+                pass
+            assert _StepRecording.enabled
+        assert not _StepRecording.enabled

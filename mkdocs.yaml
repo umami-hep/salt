@@ -33,6 +33,7 @@ nav:
   - Setup: setup.md
   - Preprocessing: preprocessing.md
   - Training: training.md
+  - Profiling: profiling.md
   - Configuration: configuration.md
   - Architecture: architecture.md
   - Evaluation: evaluation.md

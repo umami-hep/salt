@@ -6,7 +6,8 @@ merges returns under write-once + declaration checks.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import contextlib
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, NoReturn, cast
 
 import torch
@@ -21,7 +22,46 @@ from salt.graph.errors import (
 from salt.graph.planner import Plan, PlanStep
 from salt.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec, split_key
 
-__all__ = ["Executor", "canonical_produced"]
+__all__ = ["STEP_SCOPE_PREFIX", "Executor", "canonical_produced", "record_steps"]
+
+STEP_SCOPE_PREFIX = "salt.step/"
+"""Prefix of the profiler scope name wrapping each plan step (`record_steps`)."""
+
+
+class _StepRecording:
+    """Process-global toggle for the per-step profiler scopes (off by default)."""
+
+    enabled = False
+
+
+@contextlib.contextmanager
+def record_steps() -> Iterator[None]:
+    """Wrap every plan step's module call in a ``torch.profiler.record_function``.
+
+    Names each scope ``salt.step/<step name>``, so a `torch.profiler` capture
+    attributes CPU and device time to the configured module instances
+    (``encoder``, ``track_origin``, ``norm``, ...) instead of only to aten ops.
+
+    The scope sits OUTSIDE the module call, so it is unaffected by
+    ``--compile`` (salt compiles each graph module in place): no graph break
+    is introduced and the compiled region is identical to an unprofiled run.
+    Backward work is not covered — it runs outside the forward scopes and is
+    read off the autograd-engine events instead.
+
+    Re-entrant and restores the previous state on exit; the check is a single
+    class-attribute read per step when off.
+
+    Yields
+    ------
+    None
+        For the duration of the ``with`` block.
+    """
+    previous = _StepRecording.enabled
+    _StepRecording.enabled = True
+    try:
+        yield
+    finally:
+        _StepRecording.enabled = previous
 
 
 def _is_sink(module: GraphModule) -> bool:
@@ -125,7 +165,11 @@ class Executor:
                 else bundle
             )
             versions = _tensor_versions(bundle) if debug else None
-            produced = module(view, self.plan.mode)
+            if _StepRecording.enabled:
+                with torch.profiler.record_function(f"{STEP_SCOPE_PREFIX}{step.name}"):
+                    produced = module(view, self.plan.mode)
+            else:
+                produced = module(view, self.plan.mode)
             if not isinstance(produced, dict):
                 raise DeclarationError(
                     f"module {step.name!r} returned {type(produced).__name__} — modules return "
