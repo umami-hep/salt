@@ -51,6 +51,7 @@ modular-integration-cpu-gates:
     - JUNIT_FILE=reports/modular-int-onnx-fold-classification.xml run_test salt/tests/integration/test_onnx_fold_classification.py
     - JUNIT_FILE=reports/modular-int-onnx-fold-objects.xml run_test salt/tests/integration/test_onnx_fold_objects.py
     - JUNIT_FILE=reports/modular-int-inference-e2e.xml run_test salt/tests/integration/test_inference_e2e.py
+    - JUNIT_FILE=reports/modular-int-compile-regression.xml run_test salt/tests/integration/test_compile_regression.py
 
 # --------------------- GPU RUNNER (k8s-gpu) SMOKE ---------------------
 # Proves the GPU path end-to-end on CERN's k8s-gpu fleet: GPU visible, our salt
