@@ -442,18 +442,20 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
     `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """
-    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import is_test_persistence_sink  # noqa: PLC0415 - heavy/circular
 
     trainer = getattr(cli, "trainer", None)
     callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-    # OnnxExportSink also exposes writer_demand, but it is an ONNX-only sink —
-    # never the TEST persistence sink; skip it here so a config wiring both
-    # finds the H5 sink for TEST (handled separately by `_static_onnx_export_sink`).
+    # the SAME selector the runtime uses (`SaltModule._attached_writer`), so the
+    # static render and the real run resolve the same sink: an ONNX-only sink
+    # (`OnnxExportSink`, empty TEST requires — handled by
+    # `_static_onnx_export_sink`) and an auxiliary sink that opts out
+    # (`JSONLOutputSink`) are both skipped.
     return next(
         (
             cb
             for cb in callbacks or []
-            if callable(getattr(cb, "writer_demand", None)) and not isinstance(cb, OnnxExportSink)
+            if callable(getattr(cb, "writer_demand", None)) and is_test_persistence_sink(cb)
         ),
         None,
     )

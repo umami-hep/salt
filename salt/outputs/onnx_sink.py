@@ -12,8 +12,8 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.outputs.h5_sink import _SinkCallback
 from salt.outputs.output_schema import _OUTPUTS_NAMESPACE
+from salt.outputs.sink import OutputSink
 
 
 @dataclass(frozen=True)
@@ -130,7 +130,7 @@ class OnnxExportLeaf:
         return self.dyn_axis or f"n_{self.stream}"
 
 
-class OnnxExportSink(_SinkCallback):
+class OnnxExportSink(OutputSink):
     """The ONNX sink: a declare-only terminal node naming the conversion leaves.
 
     A pure terminal `SinkModule` for ``Mode.ONNX``: its ONNX-mode

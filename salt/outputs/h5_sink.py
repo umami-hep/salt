@@ -1,4 +1,4 @@
-"""The H5 sink — `H5OutputSink` (+ the shared `_SinkCallback` Lightning bridge).
+"""The H5 sink — `H5OutputSink`, the eval-H5 serialiser.
 
 Keeps the deprecated one-window `H5OutputWriter` legacy alias export.
 """
@@ -13,7 +13,7 @@ from typing import Any
 import h5py
 import numpy as np
 from ftag.hdf5 import H5Writer
-from lightning import Callback, LightningModule, Trainer
+from lightning import Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.graph.bundle import Bundle
@@ -28,7 +28,11 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
+from salt.outputs.sink import OutputSink
 from salt.utils.array_utils import join_structured_arrays
+
+_SinkCallback = OutputSink
+"""Deprecated private alias for `OutputSink` (the sink base was made public)."""
 
 DEFAULT_OUTPUT = "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
 """The v1-compatible output template."""
@@ -47,103 +51,7 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-class _SinkCallback(Callback):
-    """Thin Lightning bridge for a terminal sink node ("the node IS the callback").
-
-    ``declare_io`` drives both ``writer_demand`` (generated from
-    ``declare_io(Mode.TEST).requires``) and the lifecycle (hooks below forward
-    to the node's named methods). `SaltModule._attached_writer` discovers it
-    via ``callable(getattr(cb, "writer_demand", None))``; the node registers
-    in the TEST plan as a `PlanStep` and is excluded from the per-batch
-    forward loop via `is_sink()`. A subclass provides: ``name``,
-    ``declare_io(mode)``, ``open_schema(trainer)``, ``consume(bundle)``,
-    ``flush()``, ``close_if_open()``.
-    """
-
-    name: str
-
-    def is_sink(self) -> bool:
-        """Mark this module a terminal sink, excluded from the executor forward loop."""
-        return True
-
-    def is_test_sink(self) -> bool:
-        """Whether this sink is the TEST persistence sink.
-
-        Discriminator among ``writer_demand``-exposing callbacks: True when
-        ``declare_io(Mode.TEST).requires`` is non-empty (e.g. `H5OutputSink`);
-        an ONNX-only sink (`OnnxExportSink`) returns False regardless of
-        ``callbacks:`` list order.
-        """
-        return bool(flatten_spec(self.declare_io(Mode.TEST).requires))
-
-    def declare_io(self, mode: Mode) -> IO:  # pragma: no cover - overridden by subclasses
-        """Declare the sink's requires/produces for `mode` (subclass override)."""
-        del mode
-        return IO(requires={}, produces={})
-
-    def open_schema(self, trainer: Trainer) -> None:  # pragma: no cover - overridden
-        """Open the sink's output schema before the first batch."""
-
-    def consume(self, bundle: Bundle) -> None:  # pragma: no cover - overridden
-        """Consume one executed bundle."""
-
-    def flush(self) -> None:  # pragma: no cover - overridden
-        """Finalise the sink."""
-
-    def close_if_open(self) -> None:  # pragma: no cover - overridden
-        """Idempotently close any open handle (failure-cleanup)."""
-
-    def writer_demand(
-        self, model_modules: Mapping[str, Any], reader: Any
-    ) -> dict[str, str]:  # pragma: no cover - overridden
-        """The TEST demand this sink anchors, GENERATED from `declare_io` (subclass override)."""
-        del model_modules, reader
-        return {}
-
-    # -- lightning hooks: forward to the node's named methods (the bridge) -------
-
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Enforce single-device TEST; raises `ConfigError` otherwise (multi-device
-        out of scope).
-        """
-        del pl_module
-        if stage == "test" and trainer.world_size != 1:
-            raise ConfigError(
-                f"{type(self).__name__} requires a single device, got "
-                f"world_size={trainer.world_size} — multi-device test writing is out of scope "
-                "(design §5.3, v1 contract)"
-            )
-
-    def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Open the sink schema before the first batch."""
-        del pl_module
-        self.open_schema(trainer)
-
-    def on_test_batch_end(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        outputs: Bundle,
-        batch: Any,
-        batch_idx: int,
-        dataloader_idx: int = 0,
-    ) -> None:
-        """Consume one batch's executed bundle (Lightning threads the ``test_step`` return)."""
-        del trainer, pl_module, batch, batch_idx, dataloader_idx
-        self.consume(outputs)
-
-    def on_test_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Finalise the sink at test end."""
-        del trainer, pl_module
-        self.flush()
-
-    def teardown(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Idempotent cleanup: close any leaked handle on an interrupted test."""
-        del trainer, pl_module, stage
-        self.close_if_open()
-
-
-class H5OutputSink(_SinkCallback):
+class H5OutputSink(OutputSink):
     """The H5 sink: a terminal graph node serialising ``outputs.*`` to the eval H5.
 
     A `GraphModule` terminal node whose ``declare_io`` requires the demanded

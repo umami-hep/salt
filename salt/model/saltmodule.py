@@ -42,6 +42,7 @@ from salt.model.bind import (
 )
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW, Lion
+from salt.outputs.sink import is_test_persistence_sink
 from salt.schedule import (
     EarlyStopTracker,
     LRSchedulerConfig,
@@ -126,15 +127,8 @@ def safe_pct_start(pct_start: float, total_steps: int) -> float:
     return min(max(pct_start, low), high)
 
 
-def _is_test_persistence_sink(callback: Any) -> bool:
-    """Whether a ``writer_demand``-exposing callback is the TEST persistence sink.
-
-    Discriminates a real persistence sink (e.g. `H5OutputSink`) from an
-    ONNX-only sink (`OnnxExportSink`), which must never be chosen as the TEST
-    sink since its TEST-mode declare_io is empty.
-    """
-    is_test_sink = getattr(callback, "is_test_sink", None)
-    return True if not callable(is_test_sink) else bool(is_test_sink())
+_is_test_persistence_sink = is_test_persistence_sink
+"""Local alias for the shared selector (`salt.outputs.is_test_persistence_sink`)."""
 
 
 def _resolve_lr_scheduler_class(class_path: str) -> type:
