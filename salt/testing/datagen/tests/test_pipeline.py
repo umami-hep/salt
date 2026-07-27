@@ -36,10 +36,15 @@ _JET_FIELDS = [
 _TRACK_FIELDS = [{"name": "d0", "type": "distribution", "dtype": "f4"}]
 _HADRON_FIELDS = [
     {"name": "pt", "type": "distribution", "dtype": "f4"},
-    {"name": "barcode", "type": "id", "dtype": "i4", "range": [0, 10000],
-     "scope": "jet", "unique": True},
-    {"name": "flavour", "type": "label", "dtype": "i4",
-     "classes": [-1, 4, 5], "invalid_fill": -1},
+    {
+        "name": "barcode",
+        "type": "id",
+        "dtype": "i4",
+        "range": [0, 10000],
+        "scope": "jet",
+        "unique": True,
+    },
+    {"name": "flavour", "type": "label", "dtype": "i4", "classes": [-1, 4, 5], "invalid_fill": -1},
 ]
 
 
@@ -166,22 +171,22 @@ def test_run_threads_dict_and_injects_n_samples(tmp_path):
 def test_run_is_deterministic():
     def _data():
         pipe = Pipeline(
-            [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS),
-             H5Writer(path="/dev/null")],
-            seed=5, n_samples=20,
+            [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS), H5Writer(path="/dev/null")],
+            seed=5,
+            n_samples=20,
         )
         return pipe.run()
 
     # H5Writer to /dev/null would fail; instead drop the writer for determinism
     pipe_a = Pipeline(
-        [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS),
-         NormWriter(path="/dev/null")],
-        seed=5, n_samples=20,
+        [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS), NormWriter(path="/dev/null")],
+        seed=5,
+        n_samples=20,
     )
     pipe_b = Pipeline(
-        [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS),
-         NormWriter(path="/dev/null")],
-        seed=5, n_samples=20,
+        [Jets(fields=_JET_FIELDS), Tracks(fields=_TRACK_FIELDS), NormWriter(path="/dev/null")],
+        seed=5,
+        n_samples=20,
     )
     # only compare the producer outputs (don't run the writer's IO)
     rng_a = np.random.default_rng(5)

@@ -512,9 +512,7 @@ class H5StructuredReader(Reader):
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
 
-    def _read_kept(
-        self, ds: h5py.Dataset, dtype: np.dtype, file_rows: np.ndarray
-    ) -> np.ndarray:
+    def _read_kept(self, ds: h5py.Dataset, dtype: np.dtype, file_rows: np.ndarray) -> np.ndarray:
         """Fancy-read the ascending kept file rows into a fresh demand-narrowed array.
 
         The row-cut read path (non-contiguous): reads only the demanded fields for the

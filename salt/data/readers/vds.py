@@ -294,12 +294,12 @@ class VDS(SaltDatasetModule):
         produces ``source.<reader>.<stage>.vds_path``; active for every stage.
         """
         reader = self._reader_name()
-        requires = unflatten_source_spec(
-            {f"source.{reader}.{stage}.pattern": SourceSpec(kind="path", stages=(stage,))}
-        )
-        produces = unflatten_source_spec(
-            {f"source.{reader}.{stage}.vds_path": SourceSpec(kind="path", stages=(stage,))}
-        )
+        requires = unflatten_source_spec({
+            f"source.{reader}.{stage}.pattern": SourceSpec(kind="path", stages=(stage,))
+        })
+        produces = unflatten_source_spec({
+            f"source.{reader}.{stage}.vds_path": SourceSpec(kind="path", stages=(stage,))
+        })
         return SetupIO(requires=requires, produces=produces)
 
     def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:

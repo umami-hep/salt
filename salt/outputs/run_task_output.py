@@ -261,8 +261,7 @@ class RunTaskOutput(OutputSectionWriter):
         out: list[tuple[str, OutputField]] = []
         for task in self._resolved_tasks().values():
             out.extend(
-                (self.field_leaf_key(task, field), field)
-                for field in _task_manifest(task, mode)
+                (self.field_leaf_key(task, field), field) for field in _task_manifest(task, mode)
             )
         return out
 

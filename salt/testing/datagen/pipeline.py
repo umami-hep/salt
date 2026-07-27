@@ -64,8 +64,10 @@ class Pipeline:
             # module require a specific field and have it fail if absent.
             for key in requires:
                 is_field_key = "." in key
-                satisfied = key in available if is_field_key else (
-                    key in available or _group_of(key) in available
+                satisfied = (
+                    key in available
+                    if is_field_key
+                    else (key in available or _group_of(key) in available)
                 )
                 if not satisfied:
                     raise RecipeError(
@@ -82,9 +84,7 @@ class Pipeline:
             # Rule 2: duplicate producers.
             for key in produces:
                 if key in producer_of:
-                    raise RecipeError(
-                        f"{key!r} produced by both {producer_of[key]!r} and {cls!r}"
-                    )
+                    raise RecipeError(f"{key!r} produced by both {producer_of[key]!r} and {cls!r}")
                 producer_of[key] = cls
                 available.add(key)
 

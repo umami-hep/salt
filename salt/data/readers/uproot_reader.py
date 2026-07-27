@@ -210,8 +210,7 @@ class UprootReader(Reader):
         if self.unroll is not None:
             if self.unroll not in self.groups:
                 raise ConfigError(
-                    f"unroll={self.unroll!r} names no configured group (have "
-                    f"{sorted(self.groups)})"
+                    f"unroll={self.unroll!r} names no configured group (have {sorted(self.groups)})"
                 )
             if self.groups[self.unroll].jagged:
                 raise ConfigError(
@@ -870,15 +869,13 @@ class UprootReader(Reader):
     def __getstate__(self) -> dict[str, Any]:
         """Drop transient probe state so the reader pickles under spawn contexts."""
         state = self.__dict__.copy()
-        state.update(
-            {
-                "_table": None,
-                "_num_rows": None,
-                "_mult": {},
-                "_read_fields": {},
-                "schema": None,
-            }
-        )
+        state.update({
+            "_table": None,
+            "_num_rows": None,
+            "_mult": {},
+            "_read_fields": {},
+            "schema": None,
+        })
         return state
 
 

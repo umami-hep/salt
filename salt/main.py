@@ -153,7 +153,7 @@ def _remap_class_path(name: str) -> str:
         return name
     for old in _CLASS_PATH_REMAP_KEYS:
         if name == old or name.startswith(old + "."):
-            return _CLASS_PATH_REMAP[old] + name[len(old):]
+            return _CLASS_PATH_REMAP[old] + name[len(old) :]
     return name
 
 
@@ -181,8 +181,10 @@ def _patch_jsonargparse_class_path_remap() -> None:
 
     _remapped_import_object._salt_decore_remap = True  # type: ignore[attr-defined]
     for _mod in list(sys.modules.values()):
-        if getattr(_mod, "__name__", "").startswith("jsonargparse") and \
-                getattr(_mod, "import_object", None) is orig:
+        if (
+            getattr(_mod, "__name__", "").startswith("jsonargparse")
+            and getattr(_mod, "import_object", None) is orig
+        ):
             _mod.import_object = _remapped_import_object  # noqa: SLF001 - the patch site
 
 
@@ -862,7 +864,7 @@ class SaltCLI(LightningCLI):
             # BEFORE model setup and resolves the sink's writer_demand, which
             # needs the section already bound.
             trainer = getattr(self, "trainer", None)
-            for cb in (trainer.callbacks if trainer is not None else []):
+            for cb in trainer.callbacks if trainer is not None else []:
                 if callable(getattr(cb, "bind_output_section", None)):
                     cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
 
@@ -908,11 +910,7 @@ class SaltCLI(LightningCLI):
             callbacks.append(h5)
         # ONNX sink: only the run-free parses assemble the ONNX tuple, and only
         # when a RunTaskOutput opts into export (a test-only section mints none).
-        if (
-            subcommand is None
-            and _section_produces_onnx(section)
-            and not _present(OnnxExportSink)
-        ):
+        if subcommand is None and _section_produces_onnx(section) and not _present(OnnxExportSink):
             onnx = OnnxExportSink()
             onnx.name = "onnx_export"
             callbacks.append(onnx)

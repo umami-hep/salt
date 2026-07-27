@@ -334,9 +334,7 @@ def deadcode(
             "*",
             f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}",
             severity=(
-                "info"
-                if (mode == Mode.ONNX or _is_conversion_producer(name))
-                else "warning"
+                "info" if (mode == Mode.ONNX or _is_conversion_producer(name)) else "warning"
             ),
         )
         for name in sorted(res.pruned)

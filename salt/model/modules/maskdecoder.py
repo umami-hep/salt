@@ -154,8 +154,7 @@ class MaskDecoder(SaltModelModule):
 
         # every layer shares the ONE mask_net instance, not a per-layer copy
         self.layers = nn.ModuleList([
-            MaskDecoderLayer(embed_dim, mask_net=self.mask_net, **md_cfg)
-            for _ in range(num_layers)
+            MaskDecoderLayer(embed_dim, mask_net=self.mask_net, **md_cfg) for _ in range(num_layers)
         ])
 
     def _input_stream(self) -> str:

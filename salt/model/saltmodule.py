@@ -352,9 +352,7 @@ class SaltModule(lightning.LightningModule):
         # programmatic-construction path: compose the outputs: section now (the CLI
         # path passes outputs=None here and composes via instantiate_classes).
         if outputs:
-            self.compose_output_section(
-                {key: w for key, w in outputs.items() if w is not None}
-            )
+            self.compose_output_section({key: w for key, w in outputs.items() if w is not None})
 
     def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
@@ -1751,7 +1749,9 @@ class SaltModule(lightning.LightningModule):
                     _LOG.info(
                         "--init_from: %s plan hash differs (checkpoint %s…, current %s…) — "
                         "not enforced on a weights-only warm start.",
-                        mode.name, stored[:16], plan.plan_hash[:16],
+                        mode.name,
+                        stored[:16],
+                        plan.plan_hash[:16],
                     )
 
         loaded, new, dropped = self._apply_warm_start(ckpt_state, path)
@@ -1760,7 +1760,10 @@ class SaltModule(lightning.LightningModule):
         _LOG.info(
             "--init_from %s: %d module(s) loaded, %d new (fresh init + materialise), "
             "%d dropped.\n%s",
-            path, len(loaded), len(new), len(dropped),
+            path,
+            len(loaded),
+            len(new),
+            len(dropped),
             _warm_start_summary(loaded, new, dropped),
         )
 
@@ -1805,9 +1808,7 @@ class SaltModule(lightning.LightningModule):
                 "Offenders:\n" + "\n".join(partial)
             )
         dropped = sorted(
-            name
-            for name in ckpt_by_mod
-            if name is not None and name not in self._graph_modules
+            name for name in ckpt_by_mod if name is not None and name not in self._graph_modules
         )
         # only compatible retained-module tensors are handed to load_state_dict;
         # strict=False tolerates the missing new-module keys (never shape errors,
@@ -1829,9 +1830,7 @@ def _partition_by_module(state: Mapping[str, Tensor]) -> dict[str | None, dict[s
     return grouped
 
 
-def _coverage_mismatch(
-    current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]
-) -> str | None:
+def _coverage_mismatch(current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]) -> str | None:
     """Return a one-line description of why `ckpt` does not fully cover
     `current` (missing/unexpected keys, or a shape/dtype mismatch on a shared
     key), or ``None`` when coverage is exact. Runs BEFORE `load_state_dict`

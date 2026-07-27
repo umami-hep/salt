@@ -350,9 +350,7 @@ class MaskedInputNormaliser(SaltModelModule):
             width = schema.width(f"inputs.{stream}")
             self.register_buffer(f"running_mean_{stream}", torch.zeros(width))
             self.register_buffer(f"running_var_{stream}", torch.ones(width))
-            self.register_buffer(
-                f"num_batches_tracked_{stream}", torch.zeros((), dtype=torch.long)
-            )
+            self.register_buffer(f"num_batches_tracked_{stream}", torch.zeros((), dtype=torch.long))
             # total VALID-object count seen (cumulative-averaging path only)
             self.register_buffer(f"num_objects_seen_{stream}", torch.zeros((), dtype=torch.long))
         self._bound = True

@@ -45,13 +45,11 @@ class Constituents(GenModule):
         self._group_spec = None
 
     def _schema(self, data):
-        sch = parse_schema(
-            {
-                "n_samples": infer_n(data, self.n_samples),
-                "groups": [self._group_dict],
-                **self._fill,
-            }
-        )
+        sch = parse_schema({
+            "n_samples": infer_n(data, self.n_samples),
+            "groups": [self._group_dict],
+            **self._fill,
+        })
         self._group_spec = sch.group(self.name)
         return sch
 
@@ -153,6 +151,4 @@ class TruthHadrons(Tracks):
         min_valid: int = 1,
         **kw,
     ):
-        super().__init__(
-            fields=fields, name=name, max_items=max_items, min_valid=min_valid, **kw
-        )
+        super().__init__(fields=fields, name=name, max_items=max_items, min_valid=min_valid, **kw)

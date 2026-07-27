@@ -429,9 +429,7 @@ class H5OutputSink(OutputSink):
                 # outputs.<stream>.mask; the sink DEMANDS that leaf (keeping
                 # PadMaskWriter alive in the plan) and reads the bool mask from
                 # it — the section feeds the sink through the graph.
-                req[f"outputs.{stream}.mask"] = TensorSpec(
-                    shape=None, dtype=None, kind="data"
-                )
+                req[f"outputs.{stream}.mask"] = TensorSpec(shape=None, dtype=None, kind="data")
             else:
                 req[f"masks.{stream}"] = TensorSpec(
                     shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
@@ -456,9 +454,7 @@ class H5OutputSink(OutputSink):
         out: dict[str, TensorSpec] = {}
         for group in self._object_groups:
             for field in group.fields:
-                out.setdefault(
-                    field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind)
-                )
+                out.setdefault(field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind))
         return out
 
     # -- static demand (consumed by SaltModule) ----------------------
@@ -578,9 +574,7 @@ class H5OutputSink(OutputSink):
         self._object_shapes = self._resolve_object_shapes(streams)
         if source_path is not None:  # the no-source branch reaches here only with copying off
             self._open_copies(source_path, group_datasets, streams)
-        dtypes, shapes = self._merge_columns(
-            streams, sequence_streams, group_datasets, total
-        )
+        dtypes, shapes = self._merge_columns(streams, sequence_streams, group_datasets, total)
         self.output_path = self._output_path(trainer, dm, reader)
         self._h5 = H5Writer(
             dst=self.output_path,
@@ -714,9 +708,7 @@ class H5OutputSink(OutputSink):
             # in dumb-section mode read the PadMaskWriter's outputs.<stream>.mask
             # leaf (fed through the graph); otherwise the bundle's masks.<stream>
             # directly (the producer path).
-            mask_key = (
-                f"outputs.{stream}.mask" if self._is_dumb_section() else f"masks.{stream}"
-            )
+            mask_key = f"outputs.{stream}.mask" if self._is_dumb_section() else f"masks.{stream}"
             mask = bundle.get(mask_key).detach().cpu().numpy()
             arr = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
             out[stream] = _pad_to(arr, self._seq_lengths[stream])

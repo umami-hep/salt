@@ -144,9 +144,7 @@ def _split_merged_args(argv: list[str]) -> tuple[Path, bool, list[str]]:
     return Path(output), plots, fit_args
 
 
-def _consume_value(
-    argv: list[str], i: int, inline: str | None, flag: str
-) -> tuple[str, int]:
+def _consume_value(argv: list[str], i: int, inline: str | None, flag: str) -> tuple[str, int]:
     """Resolve `flag`'s value from the inline ``=value`` or the next token,
     returning ``(value, next_index)``.
     """  # noqa: DOC201, DOC501

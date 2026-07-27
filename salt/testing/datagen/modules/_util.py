@@ -57,13 +57,11 @@ def field_dicts_from_array(arr: np.ndarray) -> list[dict]:
     for fname in arr.dtype.names:
         if fname == "valid":
             continue
-        specs.append(
-            {
-                "name": fname,
-                "type": "distribution",
-                "dtype": np.dtype(arr.dtype[fname]).str,
-            }
-        )
+        specs.append({
+            "name": fname,
+            "type": "distribution",
+            "dtype": np.dtype(arr.dtype[fname]).str,
+        })
     return specs
 
 

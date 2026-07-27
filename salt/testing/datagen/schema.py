@@ -361,9 +361,7 @@ def _validate_nan_where(g: GroupSpec, f: DistributionField, field_names: set[str
         )
     ref_field, _ = parsed
     if ref_field not in field_names:
-        raise SchemaError(
-            f"{g.name}.{f.name}: nan_where references unknown field {ref_field!r}"
-        )
+        raise SchemaError(f"{g.name}.{f.name}: nan_where references unknown field {ref_field!r}")
 
 
 def _validate_link(
@@ -375,9 +373,7 @@ def _validate_link(
     if ref_group not in id_fields:
         raise SchemaError(f"{g.name}.{f.name}: references unknown group {ref_group!r}")
     if ref_field not in id_fields[ref_group]:
-        raise SchemaError(
-            f"{g.name}.{f.name}: references {f.references!r} is not an 'id' field"
-        )
+        raise SchemaError(f"{g.name}.{f.name}: references {f.references!r} is not an 'id' field")
     if f.required_match:
         ref = schema.group(ref_group)
         if ref.kind == "global":

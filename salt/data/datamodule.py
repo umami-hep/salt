@@ -474,9 +474,7 @@ class GraphDataModule(lightning.LightningDataModule):
             test_file, num_test = self._resolve_source(Mode.TEST)
             if test_file is None:
                 raise ConfigError("No test file specified, see --data.test_file")
-            self.test_dset = self._make_dataset(
-                Mode.TEST, test_file, num_test, self.test_vds_path
-            )
+            self.test_dset = self._make_dataset(Mode.TEST, test_file, num_test, self.test_vds_path)
             print(f"Created test dataset with {len(self.test_dset):,} entries")
 
     @staticmethod

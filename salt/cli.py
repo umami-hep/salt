@@ -193,8 +193,7 @@ def load_config(
         return _load_fit_config(paths, set_overrides)
     if set_overrides:
         raise ConfigError(
-            "--set overrides apply to salt trainer configs only "
-            f"({path} is an M1 toy graph config)"
+            f"--set overrides apply to salt trainer configs only ({path} is an M1 toy graph config)"
         )
     modules_raw = raw.get("modules")
     if not isinstance(modules_raw, dict) or not modules_raw:
@@ -1096,6 +1095,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 # ---------------------------------------------------------------------------
 # graph resolve [--annotate]
 # ---------------------------------------------------------------------------
+
 
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """``salt graph resolve``: the writer-derived output manifest, eval + ONNX.

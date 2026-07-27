@@ -74,9 +74,7 @@ def _draw_label(
     return out.astype(_np_dtype(fspec.dtype))
 
 
-def _draw_id(
-    rng: np.random.Generator, fspec: IdField, shape: tuple[int, ...]
-) -> np.ndarray:
+def _draw_id(rng: np.random.Generator, fspec: IdField, shape: tuple[int, ...]) -> np.ndarray:
     lo, hi = fspec.range
     if fspec.scope == "global":
         n = int(np.prod(shape))
@@ -171,9 +169,7 @@ def _build_group_array(
     return arr, valid
 
 
-def _apply_invalid_fill(
-    arr: np.ndarray, valid: np.ndarray, schema: Schema, g: GroupSpec
-) -> None:
+def _apply_invalid_fill(arr: np.ndarray, valid: np.ndarray, schema: Schema, g: GroupSpec) -> None:
     """Apply per-field invalid-fill sentinels to invalid constituent slots.
 
     Link fields are skipped here -- they are filled by the resolver in phase 2.

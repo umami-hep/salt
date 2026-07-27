@@ -148,9 +148,7 @@ class MaskFormerObjects(SaltModelModule):
         """TEST: require the RAW masks + constituent pad mask; produce ``object_index`` [B, T]."""
         requires = {
             self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
-            self.pad_key: TensorSpec(
-                shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST
-            ),
+            self.pad_key: TensorSpec(shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST),
         }
         produces = {
             self.index_key: TensorSpec(shape=None, dtype="int64", kind="data", modes=Mode.TEST),
@@ -171,9 +169,7 @@ class MaskFormerObjects(SaltModelModule):
             self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
         }
         produces = {
-            self.leading_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
-            ),
+            self.leading_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
             self.index_key: TensorSpec(shape=None, dtype="int8", kind="data", modes=Mode.ONNX),
             # the exposed reordered per-vertex outputs the MFLeadVertexDecorator reads
             # (a node->node edge — the decorator's demand keeps this node alive)
@@ -368,8 +364,8 @@ class MFLeadVertexDecorator(SaltModelModule):
         self.pt_index = self._checked_index(pt_index, "pt_index")
         self.pv_class_index = self._checked_index(pv_class_index, "pv_class_index")
         self.pnull_threshold = float(pnull_threshold)
-        self.null_index = null_index if null_index is None else self._checked_index(
-            null_index, "null_index"
+        self.null_index = (
+            null_index if null_index is None else self._checked_index(null_index, "null_index")
         )
         # preserve declaration order (jsonargparse builds an ordered dict)
         self.outputs_map: tuple[tuple[str, int], ...] = tuple(
@@ -436,7 +432,7 @@ class MFLeadVertexDecorator(SaltModelModule):
         any_qualify = qualify.any(dim=-1)  # [B] does this jet have ANY lead vertex?
         out: dict[str, Tensor] = {}
         lead_exp = lead.unsqueeze(-1)  # [B, 1] for gather along the object axis
-        for (key, (_name, reg_index)) in zip(self.output_keys, self.outputs_map, strict=True):
+        for key, (_name, reg_index) in zip(self.output_keys, self.outputs_map, strict=True):
             col = regression[..., reg_index]  # [B, M]
             value = torch.gather(col, 1, lead_exp).squeeze(1)  # [B] lead-vertex value
             # deterministic NaN fill where no vertex qualifies (empty/all-null/all-PV)

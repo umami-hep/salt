@@ -31,8 +31,15 @@ __all__ = [
 
 # recognised per-stage keys — anything else is a config typo, rejected fail-loud.
 _STAGE_FIELDS = frozenset({
-    "epochs", "frozen", "trainable", "optimizer", "lrs", "order",
-    "early_stop", "callbacks", "lr_scheduler",
+    "epochs",
+    "frozen",
+    "trainable",
+    "optimizer",
+    "lrs",
+    "order",
+    "early_stop",
+    "callbacks",
+    "lr_scheduler",
 })
 # recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
 _EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
@@ -282,9 +289,7 @@ class TrainingSchedule:
             )
 
     @classmethod
-    def from_config(
-        cls, raw: Mapping[str, Any], module_names: Sequence[str]
-    ) -> TrainingSchedule:
+    def from_config(cls, raw: Mapping[str, Any], module_names: Sequence[str]) -> TrainingSchedule:
         """Parse + validate a ``training_schedule`` config block (fail-loud).
 
         Expects ``{"stages": {name: {epochs, frozen|trainable, optimizer, lrs,
@@ -810,9 +815,7 @@ class EarlyStopTracker:
         }
 
     @classmethod
-    def from_state_dict(
-        cls, config: EarlyStopConfig, state: Mapping[str, Any]
-    ) -> EarlyStopTracker:
+    def from_state_dict(cls, config: EarlyStopConfig, state: Mapping[str, Any]) -> EarlyStopTracker:
         """Rebuild a tracker from a checkpointed `state_dict` under `config`.
 
         Returns

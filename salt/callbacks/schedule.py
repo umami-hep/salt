@@ -253,8 +253,11 @@ def _make_stage_hook_forwarder(hook_name: str):  # noqa: ANN202 - dynamic hook f
     """  # noqa: DOC201
 
     def _forward(
-        self: StageScopedCallbacks, trainer: Trainer, pl_module: LightningModule,
-        *args: Any, **kwargs: Any,
+        self: StageScopedCallbacks,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         self._sync_active_stage(trainer, pl_module)  # noqa: SLF001 - own private method
         for delegate in self._active_delegates:  # noqa: SLF001 - own private state
