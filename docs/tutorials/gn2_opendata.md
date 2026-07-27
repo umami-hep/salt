@@ -443,8 +443,13 @@ outputs:
 
 !!! warning "Skip edit 3 and it will not run"
 
-    `RunTaskOutput` still naming a deleted task fails at config assembly. The
-    opposite mistake — dropping the tasks from `outputs:` while leaving the
+    `RunTaskOutput` still naming a deleted task fails at config assembly:
+
+    ```
+    RunTaskOutput 'run_tasks': task 'track_origin' is not a model module
+    ```
+
+    The opposite mistake — dropping the tasks from `outputs:` while leaving the
     heads in the model — fails too, with
 
     ```
@@ -457,10 +462,13 @@ outputs:
     it. See [Outputs](../outputs.md#choosing-what-gets-written).
 
 Then retrain and evaluate exactly as in steps 3–4, keeping every other setting
-identical — an ablation is only meaningful if one thing changed:
+identical — an ablation is only meaningful if exactly one thing changed, so use
+the same data, the same number of epochs, and the same seed. Send the second
+run to its own directory so it does not overwrite the first:
 
 ```bash
-salt fit  --config gn2v2-opendata.yaml --config gn2v2-opendata-noaux.yaml
+salt fit  --config gn2v2-opendata.yaml --config gn2v2-opendata-noaux.yaml \
+  --trainer.default_root_dir run-noaux
 salt test --config run-noaux/config.yaml --ckpt_path run-noaux/ckpts/epoch=039*.ckpt
 ```
 
@@ -516,8 +524,9 @@ for label, r in results.items():
                 signal_class="bjets", label=label),
             reference=(label == REFERENCE),
         )
-plot.set_ratio_class(1, "ujets")
-plot.set_ratio_class(2, "cjets")
+# rej_class_label is required here for the same puma-hep 0.5.3 reason as step 5
+plot.set_ratio_class(1, "ujets", rej_class_label="ujets")
+plot.set_ratio_class(2, "cjets", rej_class_label="cjets")
 plot.draw()
 plot.savefig("roc_ablation.png", transparent=False)
 ```
@@ -574,7 +583,8 @@ overrides `export.model_name` in the config.
 
     `salt export` sweeps sequence lengths 0–39, draws random inputs at each,
     and compares the eager model against onnxruntime. Float outputs must agree
-    to `1e-4` (both rtol and atol, tunable with `--float-atol`) and contain no
+    to `1e-4` (the single `--float-atol N` flag sets rtol AND atol together)
+    and contain no
     NaNs or exact zeros; int8 outputs such as track-origin indices must match
     **exactly**. Disable it with `--no-check` — but an inconsistent model is
     deliberately left on disk when the check fails, so you can debug it rather

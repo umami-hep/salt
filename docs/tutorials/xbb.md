@@ -39,6 +39,11 @@ mkdir xbb-tutorial && cd xbb-tutorial
 export PYTHONPATH=$PWD
 ```
 
+Everything below assumes you stay in `xbb-tutorial/` — the config and the
+plotting script both use paths relative to it. `PYTHONPATH=$PWD` lets salt
+import any custom module you write here by `class_path`; this tutorial does not
+need one, but the later exercises and [part 2](mnist_cnn.md) do.
+
 ## 1. Get the data
 
 The sample is a public CERNBox share — no CERN account, no authentication:
@@ -301,6 +306,14 @@ behind a choice you did not make. See the exercises.
 **`truncate: 40`** on tracks — the files store up to 100 tracks per jet; 40 is
 the usual working point and keeps the attention cost down.
 
+**The training knobs** are sized for a laptop, not tuned: `batch_size: 500` and
+`max_epochs: 20` get 100k jets to converge in minutes on CPU;
+`num_workers: 0` loads data in the training process, which is fastest at this
+scale and avoids worker-pool memory on a shared machine (raise it for a real
+dataset); `precision: 32-true` keeps full float32 because there is no GPU
+speed-up to buy here. All four are worth revisiting before you take this
+config anywhere near a real training set.
+
 **`inputs_copy`** carries `R10TruthLabel_R22v1` and `flavour_label` through to
 the eval file so the plotting script can select classes without reopening the
 input.
@@ -315,7 +328,8 @@ tutorial small — adding them is an exercise below.
 salt fit --config xbb.yaml
 ```
 
-Check the wiring first if you like — this runs in seconds on CPU:
+Recommended before the real run — this checks the whole pipeline in seconds on
+CPU, and catches a bad path or a mistyped variable name before you wait:
 
 ```bash
 salt fit --config xbb.yaml \
@@ -323,22 +337,55 @@ salt fit --config xbb.yaml \
   --trainer.limit_train_batches 4 --trainer.limit_val_batches 2
 ```
 
-Output lands in `logs/XbbTutorial_<timestamp>/`, with checkpoints in `ckpts/`
-and the merged config saved as `config.yaml`.
+### Finding your run
+
+Each run creates its own directory, stamped with the start time:
+
+```bash
+ls logs/
+```
+
+```text
+XbbTutorial_20260727-T140233/
+```
+
+Inside it are `config.yaml` (the fully merged config — this is what you pass to
+`salt test`, not `xbb.yaml`) and `ckpts/`, which holds one checkpoint per
+epoch, named with the epoch number and the validation loss:
+
+```bash
+ls logs/XbbTutorial_*/ckpts/
+```
+
+```text
+epoch=017-loss=0.71032.ckpt  epoch=018-loss=0.70915.ckpt  epoch=019-loss=0.71284.ckpt
+```
+
+The **best** checkpoint is the one with the lowest loss in its filename. Rather
+than typing that number, glob for the epoch — that is what every command below
+does:
+
+```bash
+ls logs/XbbTutorial_*/ckpts/epoch=018*.ckpt
+```
 
 ## 5. Evaluate
 
 ```bash
-salt test --config logs/XbbTutorial_<timestamp>/config.yaml \
-  --ckpt_path logs/XbbTutorial_<timestamp>/ckpts/<best>.ckpt
+salt test --config logs/XbbTutorial_*/config.yaml \
+  --ckpt_path logs/XbbTutorial_*/ckpts/epoch=018*.ckpt
 ```
 
+Substitute your own best epoch number. If you have more than one run in
+`logs/`, spell out the timestamp instead of globbing it — `salt test` takes
+exactly one config.
+
 This writes one HDF5 file next to the checkpoint, named after it:
-`<best>__test_pp_output_test-full_0_100k.h5`. Its `jets` group contains the six
-probability columns named above, the copied input variables, and
-`target_jets_classification` (the truth label the model was scored against).
-See [Outputs](../outputs.md) if you want to know exactly where those names come
-from or how to change them.
+`epoch=018-loss=0.70915__test_pp_output_test-full_0_100k.h5`. Its `jets` group
+contains the six probability columns named above, the copied input variables,
+and `target_jets_classification` (the truth label the model was scored
+against). See [Outputs](../outputs.md) if you want to know exactly where those
+names come from or how to change them.
 
 ## 6. Performance plots
 
@@ -363,14 +410,19 @@ fixed, which is fine for a first look and suboptimal for a real measurement.
 
 Save this as `make_plots.py`:
 
+It globs for the eval file rather than hardcoding the run timestamp, so it runs
+unedited from the tutorial directory:
+
 ```python
+import glob
+
 import h5py
 import numpy as np
 from puma import Histogram, HistogramPlot, Roc, RocPlot
 from puma.metrics import calc_rej
 
-EVAL = "logs/XbbTutorial_<timestamp>/ckpts/<best>__test_pp_output_test-full_0_100k.h5"
-MODEL = "XbbTutorial"
+EVAL = glob.glob("logs/XbbTutorial_*/ckpts/*__test_*.h5")[0]
+MODEL = "XbbTutorial"  # must match `name:` in xbb.yaml — it prefixes every column
 NUM_JETS = 100_000
 
 # flavour_label, verified against R10TruthLabel_R22v1 (see section 2)
@@ -509,7 +561,8 @@ Four figures: `disc_Hbb.png`, `disc_Hcc.png`, `roc_Hbb.png`, `roc_Hcc.png`.
     ??? success "Hint"
 
         Copy the `track_origin` and `track_vertexing` module blocks from
-        `salt/configs/gn2v2-opendata.yaml`, and add the task names to the
+        `salt/configs/gn2v2-opendata.yaml` (in the salt clone you made in the
+        prerequisites), and add the task names to the
         `RunTaskOutput`'s `tasks:` list — otherwise the planner will refuse to
         run with a dead-predictions error, since the new heads would produce
         predictions no sink consumes.
