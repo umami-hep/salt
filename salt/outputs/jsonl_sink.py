@@ -90,12 +90,12 @@ class JSONLOutputSink(OutputSink):
     name : str
         The graph-node instance name (overridable by the ``callbacks:`` dict key).
 
-    Raises
-    ------
-    ConfigError
-        At run setup: when no ``outputs:`` section is bound, when `columns`
-        names a column the section does not mint, when ``trainer.ckpt_path``
-        is unset, or when the target exists and `overwrite` is False.
+    Notes
+    -----
+    Nothing is validated in the constructor. `ConfigError` is raised later, at
+    run setup, when no ``outputs:`` section is bound, when `columns` names a
+    column the section does not mint, when ``trainer.ckpt_path`` is unset, or
+    when the target exists and `overwrite` is False.
 
     Examples
     --------
@@ -109,7 +109,7 @@ class JSONLOutputSink(OutputSink):
               columns: [GN2_pb, GN2_pc, GN2_pu]
     """
 
-    name = "jsonl_output"
+    name: str = "jsonl_output"
     """The graph-node instance name (overridable by the ``callbacks:`` dict key)."""
 
     def __init__(
