@@ -82,16 +82,13 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
     config-fixed, so unifying across modes is sound; the planner has already
     rejected genuinely conflicting declarations on connected edges.
 
+    A `BindError` propagates from the unifier if two observations bind the same
+    symbolic dim (or the same key's last dim) to different concrete sizes.
+
     Parameters
     ----------
     plans : Plan | Iterable[Plan]
         Compiled plans, e.g. the FIT and TEST plans of one model.
-
-    Raises
-    ------
-    BindError
-        If two observations bind the same symbolic dim (or the same key's
-        last dim) to different concrete sizes.
     """
     if isinstance(plans, Plan):
         plans = (plans,)

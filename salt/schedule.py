@@ -10,6 +10,7 @@ stage-boundary lookup the `TrainingScheduleCallback` drives.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -189,7 +190,7 @@ class TrainingSchedule:
         (freeze/unfreeze flips break the reducer's fixed bucketing otherwise).
         """
         masks = [frozenset(self.frozen_names(stage)) for stage in self.stages]
-        return any(a != b for a, b in zip(masks, masks[1:], strict=False))
+        return any(a != b for a, b in itertools.pairwise(masks))
 
     def frozen_names(self, stage: StageConfig) -> set[str]:
         """Resolve `stage`'s freeze spec to the set of frozen module names:
@@ -200,7 +201,7 @@ class TrainingSchedule:
             return set(self._module_names) - set(stage.trainable)
         return set(stage.frozen or ())
 
-    def _non_final_epoch_bounds(self, max_epochs: int) -> list[int]:
+    def _non_final_epoch_bounds(self) -> list[int]:
         """Cumulative epoch index at which each *non-final* stage ends (its
         explicit `epochs` summed left-to-right). The final stage owns everything
         from the last bound to `max_epochs`, so it is not represented here.
@@ -217,7 +218,11 @@ class TrainingSchedule:
         own ``[bound_{i-1}, bound_i)``; the final stage owns everything from the
         last bound onward (so any epochs past the explicit budgets run there).
         """
-        for index, bound in enumerate(self._non_final_epoch_bounds(max_epochs)):
+        # `max_epochs` is accepted for symmetry with `stage_step_allocations`,
+        # which the same caller invokes with the same value; the final stage
+        # owning everything past the last bound makes it unnecessary here.
+        del max_epochs
+        for index, bound in enumerate(self._non_final_epoch_bounds()):
             if epoch < bound:
                 return index
         return len(self.stages) - 1
@@ -233,7 +238,7 @@ class TrainingSchedule:
         if not self.is_multi_stage:
             return [total_steps]
         allocations, prev = [], 0
-        for bound in self._non_final_epoch_bounds(max_epochs):
+        for bound in self._non_final_epoch_bounds():
             boundary_step = round(total_steps * bound / max_epochs)
             allocations.append(boundary_step - prev)
             prev = boundary_step
@@ -776,7 +781,7 @@ class EarlyStopTracker:
         bool
             ``True`` iff the stage's early-stop criterion is now met.
         """
-        import math  # noqa: PLC0415
+        import math
 
         self.check_count += 1
         if self.config.check_finite and not math.isfinite(value):

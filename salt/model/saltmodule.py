@@ -140,7 +140,7 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
     ConfigError
         The dotted path is not importable / not a class.
     """
-    from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
+    from salt.main import _resolve_class_path
 
     try:
         cls = _resolve_class_path(class_path)
@@ -868,12 +868,10 @@ class SaltModule(lightning.LightningModule):
         When any stage declares `early_stop`, also runs the early-stop preflight
         and seeds stage 0's live counters (plan 12 W7).
 
-        Raises
-        ------
-        ConfigError
-            On an over-allocated epoch budget, a multi-stage schedule with no
-            finite `trainer.max_epochs` (see `TrainingSchedule.validate_epochs`), or
-            an `early_stop` stage under a trainer with validation disabled.
+        A `ConfigError` propagates from the validators on an over-allocated epoch
+        budget, a multi-stage schedule with no finite `trainer.max_epochs` (see
+        `TrainingSchedule.validate_epochs`), or an `early_stop` stage under a
+        trainer with validation disabled.
         """
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
@@ -1197,9 +1195,9 @@ class SaltModule(lightning.LightningModule):
         """
         if self.mup_cfg is None or not self.mup_cfg.get("shape_path"):
             return
-        from pathlib import Path as _Path  # noqa: PLC0415 - local, muP-only path
+        from pathlib import Path as _Path
 
-        from mup import set_base_shapes  # noqa: PLC0415 - mup is optional, muP-only path
+        from mup import set_base_shapes
 
         shape_path = _Path(self.mup_cfg["shape_path"])
         if not shape_path.is_file():
@@ -1332,7 +1330,7 @@ class SaltModule(lightning.LightningModule):
         """
         optimizer = optimizer or self.optimizer
         if self.mup_cfg is not None:
-            from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional, muP-only path
+            from mup.optim import MuAdamW
 
             return MuAdamW
         if optimizer == "lion":
@@ -1591,7 +1589,7 @@ class SaltModule(lightning.LightningModule):
         """
         if schedule_state is None:
             return
-        from lightning.pytorch.trainer.states import TrainerFn  # noqa: PLC0415
+        from lightning.pytorch.trainer.states import TrainerFn
 
         fn = getattr(getattr(self._trainer, "state", None), "fn", None)
         if fn is not None and fn != TrainerFn.FITTING:

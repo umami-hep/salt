@@ -79,7 +79,7 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
     copy/mask columns only when their ``modes:`` include ``export``.
     Raises `ConfigError` on an empty/missing section (no WHAT to write).
     """
-    from salt.outputs import H5OutputSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import H5OutputSink
 
     if not section:
         raise ConfigError(
@@ -251,8 +251,8 @@ def run_inference(
         On a missing export block / export-mode selection, an explicit-leaf
         (MaskFormer escape hatch) config, or any sink schema error.
     """
-    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
-    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink
+    from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)

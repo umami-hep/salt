@@ -16,7 +16,7 @@ def add_field(arr: np.ndarray, name: str, dtype) -> np.ndarray:
     the new column is appended at the end. ``arr`` may be 1-D (global) or 2-D
     (constituent). ``dtype`` is the new column's element dtype.
     """
-    new_dtype = np.dtype(arr.dtype.descr + [(name, np.dtype(dtype).str)])
+    new_dtype = np.dtype([*arr.dtype.descr, (name, np.dtype(dtype).str)])
     out = np.zeros(arr.shape, dtype=new_dtype)
     for fname in arr.dtype.names:
         out[fname] = arr[fname]

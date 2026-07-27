@@ -183,7 +183,9 @@ class MaskFormerObjects(SaltModelModule):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Width-resolve the leaves: index collapses to 1, leading + vertex regression follow n_reg."""
+        """Width-resolve the leaves: index collapses to 1, leading + vertex regression
+        follow n_reg.
+        """
         del widths
         return {
             self.index_key: 1,

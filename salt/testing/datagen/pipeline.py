@@ -4,7 +4,6 @@ mirroring the planner's connectivity/duplicate/cycle/terminal checks.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +20,8 @@ def _group_of(key: str) -> str:
 
 
 class Pipeline:
+    """Run generator modules in order under one seeded RNG, then the writers."""
+
     def __init__(
         self,
         modules: list[GenModule],
@@ -136,7 +137,7 @@ class Pipeline:
         output_dir = Path(output_dir)
         for m in self.modules:
             if getattr(m, "path", None) is not None:
-                m.path = str(output_dir / os.path.basename(m.path))
+                m.path = str(output_dir / Path(m.path).name)
 
 
 def load_pipeline(path: str) -> Pipeline:

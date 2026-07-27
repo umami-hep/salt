@@ -133,6 +133,21 @@ lint.ignore = [
   "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
   "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",
   "PLR0917", "A005", "ANN401", "PLR0915", "RUF015", "PLR6104", "TD003",
+  "PLR0911",  # "too many return statements" — joins the PLR0912/0913/0914/0915/
+              # 0917 family already ignored above; the one hit is main.py's
+              # command dispatch, where a return per subcommand is the clearest form
+  "PLC0415",  # "import should be at top-level" — function-level imports are a
+              # deliberate, repo-wide pattern, not debt: they keep the optional
+              # extras optional (`salt[root]` behind _require_root_deps,
+              # `salt[profile]` behind the line-profiler hint, `salt[muP]`), and
+              # main.py imports inside functions at its jsonargparse patch sites
+              # to avoid an import cycle with the module it is patching
+  "UP040",    # "use the `type` keyword instead of TypeAlias" — NOT a safe rewrite
+              # here. Kind, SetupStage and SourceKind are fed to typing.get_args()
+              # at runtime to build the KINDS / SETUP_STAGES / SOURCE_KINDS
+              # validation tuples; a PEP 695 `type` alias is a TypeAliasType, so
+              # get_args() would return () and the validation would silently
+              # accept everything
 
   # ---------------------------------------------------------------------
   # Docstring rules: what this repo gates, and why.
@@ -192,8 +207,15 @@ mark-parentheses = false
 ]
 # datagen is written to stay extractable as a standalone package, so its
 # intra-package imports are relative on purpose (preserved deliberately through
-# the plan-61 migration). TID252 bans exactly that.
-"salt/testing/datagen/**" = ["TID252"]
+# the plan-61 migration). TID252 bans exactly that. SLF001 covers the two places
+# where one datagen module reaches for a sibling's private helper
+# (engine._resolve_link from the inserter; Pipeline setting a writer's
+# _group_specs) -- both are inside the package's own seam.
+"salt/testing/datagen/**" = ["TID252", "SLF001"]
+# The profiler enters context managers in one Lightning hook (on_fit_start,
+# on_train_batch_start, on_before_backward) and exits them in another, so the
+# __enter__ calls cannot be written as `with` blocks.
+"salt/profiling.py" = ["PLC2801"]
 
 [tool.mypy]
 exclude = '^salt/tests/.*\.py$'

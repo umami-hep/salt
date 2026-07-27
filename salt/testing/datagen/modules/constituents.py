@@ -12,6 +12,8 @@ from .base import GenModule
 
 
 class Constituents(GenModule):
+    """Generate a variable-length constituent group with a per-item ``valid`` mask."""
+
     def __init__(
         self,
         name: str,
@@ -71,6 +73,8 @@ class Constituents(GenModule):
 # constructor params are fully type-annotated so jsonargparse can resolve them
 # from a recipe's class_path/init_args block (no untyped **kwargs).
 class Tracks(Constituents):
+    """Constituent group named ``tracks`` (40 items by default)."""
+
     def __init__(
         self,
         fields: list[dict] | str,
@@ -95,31 +99,43 @@ class Tracks(Constituents):
 
 
 class TracksLoose(Tracks):
+    """Constituent group named ``tracks_loose``."""
+
     def __init__(self, fields: list[dict] | str, name: str = "tracks_loose", **kw):
         super().__init__(fields=fields, name=name, **kw)
 
 
 class Flows(Tracks):
+    """Constituent group named ``flows``."""
+
     def __init__(self, fields: list[dict] | str, name: str = "flows", **kw):
         super().__init__(fields=fields, name=name, **kw)
 
 
 class Charged(Tracks):
+    """Constituent group named ``charged``."""
+
     def __init__(self, fields: list[dict] | str, name: str = "charged", **kw):
         super().__init__(fields=fields, name=name, **kw)
 
 
 class Neutral(Tracks):
+    """Constituent group named ``neutral``."""
+
     def __init__(self, fields: list[dict] | str, name: str = "neutral", **kw):
         super().__init__(fields=fields, name=name, **kw)
 
 
 class Objects(Tracks):
+    """Constituent group named ``objects`` (20 items by default)."""
+
     def __init__(self, fields: list[dict] | str, name: str = "objects", max_items: int = 20, **kw):
         super().__init__(fields=fields, name=name, max_items=max_items, **kw)
 
 
 class Electrons(Tracks):
+    """Constituent group named ``electrons``."""
+
     def __init__(
         self,
         fields: list[dict] | str,

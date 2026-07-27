@@ -193,6 +193,7 @@ def _resolve_link(
     flags: dict[str, bool],
 ) -> None:
     """Resolve one ``link`` field against its referenced ``id`` field."""
+    del flags  # uniform resolver signature; link resolution is flag-independent
     n = schema.n_samples
     src = data[g.name]
     src_valid = src["valid"] if "valid" in src.dtype.names else np.ones(src.shape, bool)
@@ -209,7 +210,6 @@ def _resolve_link(
     invalid_fill = f.invalid_fill if f.invalid_fill is not None else schema.fill_int
 
     out = src[f.name].copy()
-    m = out.shape[1]
 
     for i in range(n):
         # valid referenced ids in sample i

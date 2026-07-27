@@ -31,6 +31,8 @@ class _Writer(GenModule):
 
 
 class H5Writer(_Writer):
+    """Write the generated groups to an HDF5 file, with optional file attributes."""
+
     def __init__(
         self,
         path: str,
@@ -43,6 +45,7 @@ class H5Writer(_Writer):
         self.flags = flags
 
     def __call__(self, data, rng):
+        del rng  # contract signature; these writers are deterministic
         out = data if self.groups is None else {g: data[g] for g in self.groups}
         attrs = dict(self.attrs or {})
         if self.flags:
@@ -52,7 +55,10 @@ class H5Writer(_Writer):
 
 
 class NormWriter(_Writer):
+    """Write a norm_dict YAML computed from the generated data."""
+
     def __call__(self, data, rng):
+        del rng  # contract signature; these writers are deterministic
         out = data if self.groups is None else {g: data[g] for g in self.groups}
         nd = compute_norm_dict(out, schema=self._schema(out))
         with open(self.path, "w") as fh:
@@ -61,6 +67,8 @@ class NormWriter(_Writer):
 
 
 class ClassDictWriter(_Writer):
+    """Write a class_dict YAML computed from the generated data."""
+
     def __init__(
         self,
         path: str,
@@ -71,6 +79,7 @@ class ClassDictWriter(_Writer):
         self.flags = flags
 
     def __call__(self, data, rng):
+        del rng  # contract signature; these writers are deterministic
         out = data if self.groups is None else {g: data[g] for g in self.groups}
         cd = compute_class_dict(out, schema=self._schema(out), flags=self.flags or {})
         with open(self.path, "w") as fh:

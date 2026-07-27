@@ -110,7 +110,7 @@ def write_metadata(onnx_path: str | Path, gnn_config: Mapping[str, Any], model_n
     payload under the single ``gnn_config`` metadata key, sets
     ``doc_string = model_name``, and saves in place.
     """
-    import onnx  # noqa: PLC0415 - heavy import, export-path only (keeps salt startup lean)
+    import onnx
 
     onnx_model = onnx.load(str(onnx_path))
     onnx.checker.check_model(onnx_model)
@@ -146,7 +146,7 @@ def _export_hash() -> str | None:
     git state is unavailable.
     """
     try:
-        from ftag.git_check import get_git_hash  # noqa: PLC0415 - optional, env-dependent
+        from ftag.git_check import get_git_hash
 
         return get_git_hash(Path(__file__).parent)
     except Exception as err:  # noqa: BLE001 - any git/env failure degrades to None

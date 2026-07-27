@@ -132,7 +132,7 @@ class DeepMergeParser(LightningArgumentParser):
         # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
-        from salt.main import (  # noqa: PLC0415
+        from salt.main import (
             _fan_out_artifacts,
             _relocate_training_schedule,
         )

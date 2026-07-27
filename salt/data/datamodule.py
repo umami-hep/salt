@@ -531,7 +531,7 @@ class GraphDataModule(lightning.LightningDataModule):
             return
         if self.trainer is not None and not self.trainer.is_global_zero:
             return
-        import shutil  # noqa: PLC0415 - opt-in staging path only
+        import shutil
 
         print("-" * 100)
         print(f"Removing staged files under {root}")

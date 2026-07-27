@@ -5,6 +5,8 @@ declare ``requires``/``produces``/``mutates`` contract keys and implement
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import numpy as np
 
 
@@ -21,9 +23,9 @@ class GenModule:
     """
 
     # Contract -- populated by __init__. Defaults empty.
-    requires: list[str] = []
-    produces: list[str] = []
-    mutates: list[str] = []
+    requires: ClassVar[list[str]] = []
+    produces: ClassVar[list[str]] = []
+    mutates: ClassVar[list[str]] = []
 
     # Pipeline-injected; None means "use the pipeline value".
     n_samples: int | None = None

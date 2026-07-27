@@ -12,6 +12,8 @@ from .base import GenModule
 
 
 class GlobalObject(GenModule):
+    """Generate a one-per-sample group (jets, events) with no item axis."""
+
     def __init__(
         self,
         name: str,

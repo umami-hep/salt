@@ -309,7 +309,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         # breaks jsonargparse's hasattr(value, "__args__") protocol walk over
         # this module's globals if imported at module level — the whole
         # model.modules config would fail to parse.
-        from ftag import Flavours  # noqa: PLC0415
+        from ftag import Flavours
 
         return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
 

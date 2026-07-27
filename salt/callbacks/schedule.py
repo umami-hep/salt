@@ -240,7 +240,7 @@ def _instantiate_stage_callback(spec: Mapping[str, Any]) -> Callback:
     Callback
         The instantiated callback.
     """
-    from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
+    from salt.main import _resolve_class_path
 
     cls = _resolve_class_path(spec["class_path"])
     init_args = spec.get("init_args") or {}

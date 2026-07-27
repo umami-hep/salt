@@ -46,6 +46,8 @@ class FieldSpec:
 
 @dataclass
 class DistributionField(FieldSpec):
+    """Field drawn from a named distribution, optionally NaN-ed where a condition holds."""
+
     dist: str = "uniform"
     params: dict[str, float] = field(default_factory=dict)
     nan_where: str | None = None  # pinned grammar: "<field> == <int>"
@@ -53,6 +55,8 @@ class DistributionField(FieldSpec):
 
 @dataclass
 class LabelField(FieldSpec):
+    """Integer class label, optionally weighted and named in the class_dict."""
+
     classes: list[int] = field(default_factory=list)
     sample_classes: list[int] | None = None
     class_names: list[str] | None = None
@@ -103,6 +107,8 @@ class LabelField(FieldSpec):
 
 @dataclass
 class IdField(FieldSpec):
+    """Integer identifier, unique within its scope, that link fields can reference."""
+
     range: tuple[int, int] = (0, 10000)
     scope: str = "jet"
     unique: bool = True
@@ -110,6 +116,8 @@ class IdField(FieldSpec):
 
 @dataclass
 class LinkField(FieldSpec):
+    """Index into another group's id field, with a configurable unmatched fraction."""
+
     references: str = ""  # "<group>.<idfield>"
     scope: str = "jet"
     unmatched_fraction: float = 0.0
@@ -131,6 +139,8 @@ class LinkField(FieldSpec):
 # --------------------------------------------------------------------------- #
 @dataclass
 class GroupSpec:
+    """One generated group: its kind, fields, and item-axis / validity settings."""
+
     name: str
     kind: str  # "global" | "constituent"
     fields: list[FieldSpec] = field(default_factory=list)
@@ -149,6 +159,8 @@ class GroupSpec:
 
 @dataclass
 class Schema:
+    """The whole generated file: groups, sample count, seed and fill sentinels."""
+
     n_samples: int
     groups: list[GroupSpec]
     seed: int = 42
@@ -192,7 +204,7 @@ def _parse_field(raw: dict[str, Any]) -> FieldSpec:
     common = {
         "name": raw["name"],
         "type": ftype,
-        "dtype": raw.get("dtype", "i4" if ftype in ("label", "id", "link") else "f4"),
+        "dtype": raw.get("dtype", "i4" if ftype in {"label", "id", "link"} else "f4"),
         "invalid_fill": raw.get("invalid_fill"),
     }
     if ftype == "distribution":
@@ -246,7 +258,7 @@ def _parse_field(raw: dict[str, Any]) -> FieldSpec:
 def _parse_group(raw: dict[str, Any]) -> GroupSpec:
     if "name" not in raw or "kind" not in raw:
         raise SchemaError(f"Group missing 'name' or 'kind': {raw}")
-    if raw["kind"] not in ("global", "constituent"):
+    if raw["kind"] not in {"global", "constituent"}:
         raise SchemaError(f"Group {raw['name']!r}: unknown kind {raw['kind']!r}")
     fields = [_parse_field(f) for f in raw.get("fields", [])]
     return GroupSpec(
@@ -393,7 +405,7 @@ def _check_no_cycles(schema: Schema) -> None:
                 edges[f.ref_group].add(g.name)
     # Kahn's algorithm
     indeg = dict.fromkeys(edges, 0)
-    for src, dsts in edges.items():
+    for dsts in edges.values():
         for d in dsts:
             indeg[d] += 1
     queue = [n for n, d in indeg.items() if d == 0]
@@ -421,7 +433,7 @@ def topo_sort_link_groups(schema: Schema) -> list[str]:
             if isinstance(f, LinkField):
                 edges[f.ref_group].add(g.name)
     indeg = dict.fromkeys(edges, 0)
-    for src, dsts in edges.items():
+    for dsts in edges.values():
         for d in dsts:
             indeg[d] += 1
     # stable order: preserve schema order among zero-indegree nodes
@@ -473,10 +485,7 @@ def load_schema(path: str | Path | dict[str, Any] | Schema) -> Schema:
         return parse_schema(path)
     p = Path(path)
     text = p.read_text()
-    if p.suffix.lower() == ".json":
-        doc = json.loads(text)
-    else:
-        doc = yaml.safe_load(text)
+    doc = json.loads(text) if p.suffix.lower() == ".json" else yaml.safe_load(text)
     return parse_schema(doc)
 
 

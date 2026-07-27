@@ -170,9 +170,9 @@ def _dump_merged_config(fit_args: list[str]) -> str:
     `fit_args`, produced through the real `SaltCLI` parser (run-free, trainer- and
     data-free: ``--print_config`` dumps and exits before any instantiation).
     """
-    import warnings  # noqa: PLC0415
+    import warnings
 
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
+    from salt.main import SaltCLI
 
     buffer = io.StringIO()
     try:
@@ -204,7 +204,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     with the stage's frozen mask. A ``.dot`` is always written; each is
     rasterised to ``.png``/``.pdf`` only when `do_plots` is set.
     """
-    from salt.cli import _resolve_widths, load_config  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _resolve_widths, load_config
 
     merged = yaml.safe_load(merged_text)
     schedule = _schedule_from_merged(merged)
@@ -234,7 +234,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
         dot_path.write_text(dot_text)
         print(f"wrote DOT to {dot_path}")
         if do_plots:
-            from salt.cli import _render_with_dot  # noqa: PLC0415 - heavy/circular
+            from salt.cli import _render_with_dot
 
             _render_with_dot(dot_path, dot_path.with_suffix(".png"))
 

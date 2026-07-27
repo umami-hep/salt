@@ -16,6 +16,8 @@ from .base import GenModule
 
 
 class TruthHadronInserter(GenModule):
+    """Add a truth-hadron group and the constituent link field that points into it."""
+
     def __init__(
         self,
         hadron_fields: list[dict] | str,
