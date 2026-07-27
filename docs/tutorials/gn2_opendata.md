@@ -2,13 +2,18 @@
 
 This tutorial trains a v2 GN2 tagger — tracks + jet features, multi-task
 (flavour classification + two auxiliary track tasks), the production-scale
-architecture — on the same public dataset as the [v1 Open Data
-tutorial](../tutorial.md). **It replaces that tutorial's workflow** for
-salt's modular (v2) stack: same data, same physics, the `salt fit`/`salt
-test` commands and the config anatomy are different because the model is
-built from composable modules instead of a monolithic config block. If you
-are starting fresh on v2, this is the tutorial to follow; `tutorial.md` stays
-as the historical v1 reference until v1 is removed from the repository.
+architecture — on the public ATLAS open dataset.
+
+It supersedes the v1-era open-data tutorial that salt shipped until 2025 (the
+one given as a workshop at
+[FTAG 2023](https://indico.cern.ch/event/1311519/) and repeated in later
+software tutorials). Same data, same physics; the `salt fit` / `salt test`
+commands and the config anatomy differ because a v2 model is built from
+composable modules instead of one monolithic config block. That page has been
+removed rather than left to rot — it taught retired config surfaces
+(`train_file`, `scale_dict`, `--data.move_files_temp`) that now fail on
+contact. Its two genuinely useful exercises, the auxiliary-task ablation and
+the ONNX walkthrough, live on as steps 6 and 7 below; `git log` has the rest.
 
 Unlike parts [1](mnist.md)–[3](event_classifier.md), this dataset is real
 (14 GB download, 13.5M training jets) and the full recipe is a genuine GPU
@@ -33,8 +38,7 @@ export PYTHONPATH=$PWD
 
 ## 1. Get the data
 
-Identical to the [v1 tutorial's Step 2](../tutorial.md#step-2-obtaining-the-training-dataset):
-the "Top quark pair events for heavy flavour tagging and vertexing at the
+The "Top quark pair events for heavy flavour tagging and vertexing at the
 LHC" dataset (Delphes-simulated ATLAS-like detector response, mean pileup
 50), from [Zenodo record 10371998](https://zenodo.org/records/10371998).
 Unpacked size 28 GB; compressed download 14 GB.
@@ -51,9 +55,8 @@ cd -
 
 You get `pp_output_train.h5` (13.5M jets), `pp_output_val.h5` (1.35M jets),
 `pp_output_test_ttbar.h5` (1.35M jets, no kinematic resampling), plus
-`norm_dict.yaml` and `class_dict.yaml`. See the v1 tutorial for the full
-per-file description — the files themselves are identical; only how salt
-consumes them changes below.
+`norm_dict.yaml` and `class_dict.yaml`. The Zenodo record documents each
+file; how salt consumes them is what changes below.
 
 !!! info "Reference-only in this doc's own validation"
 
@@ -198,9 +201,7 @@ cp $(python -c "import salt, pathlib; print(pathlib.Path(salt.__file__).parent /
 ```
 
 Edit `config.yaml`, replacing the `${DATA_*}` placeholders with **literal**
-paths into your download directory — same idea as the [v1 tutorial's Step
-3](../tutorial.md#step-3-running-the-software), just in different places.
-YAML does NOT expand shell variables, so write the actual path (e.g.
+paths into your download directory. YAML does NOT expand shell variables, so write the actual path (e.g.
 `/home/you/tutorial-data/pp_output_train.h5`), not the literal string
 `$TUTORIAL_DATA/...`:
 
@@ -240,8 +241,7 @@ salt fit --config config.yaml
 ```
 
 That is the full-scale command (40 epochs, batch 1000, `num_workers: 8` as
-shipped) — expect a GPU and a real training budget, same as the [v1
-tutorial](../tutorial.md#step-3-running-the-software).
+shipped) — expect a GPU and a real training budget.
 
 !!! tip "Quick-check variant (CPU, seconds, laptop-safe)"
 
@@ -282,8 +282,8 @@ tutorial](../tutorial.md#step-3-running-the-software).
 
 ## 4. Evaluate
 
-The v1 tutorial points `salt test` at `pp_output_test_ttbar.h5` (no kinematic
-resampling — the honest evaluation set). Because the `test:` path was already
+Evaluate on `pp_output_test_ttbar.h5` (no kinematic resampling — the honest
+evaluation set). Because the `test:` path was already
 set in `config.yaml`'s `input_samples` block, no extra flag is needed —
 `salt test` needs only the saved config and a checkpoint, exactly as in
 [part 1](mnist.md#7-evaluate):
@@ -309,17 +309,17 @@ Wrote eval file run/ckpts/epoch=039-loss=<value>__test_pp_output_test_ttbar.h5
 150,000 jets at batch 1000 (the shipped default) takes several minutes on
 CPU — the smoke-scale quick-check from Step 3 does not shrink the test set
 (there is no `--data.num_test` equivalent used here; the full test file is
-always read at evaluation time, matching the v1 tutorial's own convention of
-running the real test set only once, after selecting a checkpoint).
+always read at evaluation time). Run the real test set once, after you have
+selected a checkpoint.
 
 ## 5. Performance plots with puma
 
 The eval H5 columns follow the same `{run_name}_p{class}` / `target_{task}`
 convention as [part 1](mnist.md#7-evaluate) — here
 `GN2v2_opendata_pb`/`_pc`/`_pu`/`_ptau` and `target_jets_classification` (plus
-`flavour_label`, copied straight from the input by `InputCopyWriter`). The v1
-tutorial's own [ROC plotting script](../tutorial.md#step-3-running-the-software)
-works with two small updates: `puma-hep` (pinned `0.5.3`) no longer ships
+`flavour_label`, copied straight from the input by `InputCopyWriter`). The
+ROC plotting script below needs two things worth flagging:
+`puma-hep` (pinned `0.5.3`) no longer ships
 `puma.metrics.calc_rej` (replaced below with a five-line equivalent), and the
 column names change per the table above.
 
@@ -372,7 +372,7 @@ sig_eff = np.linspace(0.49, 1, 20)
 # `flavour_label` on THIS dataset is already class_names INDEX order
 # (0=b, 1=c, 2=u, 3=tau — verified via np.unique(flavour, return_counts=True):
 # 35000/35000/70000/10000), NOT the general ATLAS 0/4/5/15 hadron-ID
-# convention the v1 tutorial's script assumed for its dataset. Confirm this
+# convention used for most ATLAS samples. Confirm this
 # on any new dataset with `np.unique` before reusing either mapping — the
 # wrong one either crashes (empty class, as here) or silently produces a
 # plausible-but-wrong curve.
@@ -403,27 +403,217 @@ plot_roc.savefig("roc.png", transparent=False)
 ```
 
 `roc.png` now has the b-vs-light and b-vs-c rejection curves with ratio
-panels, matching the v1 tutorial's `roc.png` layout. On the smoke-scale
+panels. On the smoke-scale
 recipe above (1 epoch, 5 train batches — wiring only, not a trained tagger)
 this validation measured ujets rejection ≈2.3 and cjets rejection ≈1.9 at
 77% b-efficiency; the full 40-epoch recipe on the full 13.5M-jet training
-set is what produces GN2-competitive numbers (see the v1 tutorial's
-discussion of expected rejections).
+set is what produces GN2-competitive numbers.
 
-## 6. Export to ONNX
+## 6. Exercise: does the auxiliary supervision help?
 
-Identical to v1 — read the [ONNX export docs](../export.md) for the full
-`to_onnx`/`get_onnx_metadata`/`compare_models` workflow (unchanged by the v1
-→ v2 migration; the export CLI operates on the trained checkpoint, not the
-training config format).
+The config you just trained has three heads: the flavour classifier plus two
+auxiliary track tasks (`track_origin` and `track_vertexing`). Neither auxiliary
+head produces a tagger output — they exist because supervising the track
+representation is believed to make the *jet* classifier better. That is a claim
+you can test, and doing so is the standard way to justify an auxiliary task.
+This is an **ablation study**: remove a component, retrain under identical
+conditions, and compare.
 
-## What changed from the v1 tutorial
+### Remove the auxiliary tasks
 
-| | v1 (`tutorial.md`) | v2 (this doc) |
+Copy your config and delete the two auxiliary heads. Three edits, and all three
+are needed:
+
+```yaml
+# gn2v2-opendata-noaux.yaml
+name: GN2v2_opendata_noaux        # 1. distinct run name, so eval columns do not collide
+
+model:
+  init_args:
+    modules:
+      track_origin: null          # 2. delete both auxiliary heads
+      track_vertexing: null
+
+outputs:
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
+    init_args:
+      tasks: [jets_classification]   # 3. and drop them from the outputs section
+```
+
+!!! warning "Skip edit 3 and it will not run"
+
+    `RunTaskOutput` still naming a deleted task fails at config assembly. The
+    opposite mistake — dropping the tasks from `outputs:` while leaving the
+    heads in the model — fails too, with
+
+    ```
+    [mode=TEST] key 'preds.tracks.track_origin' is produced but consumed by no sink
+    ```
+
+    That is deliberate: salt refuses to train a head whose predictions nothing
+    writes, rather than silently dropping columns. If you want to keep a head
+    trained but unwritten, set `expose: [fit, val]` on it instead of deleting
+    it. See [Outputs](../outputs.md#choosing-what-gets-written).
+
+Then retrain and evaluate exactly as in steps 3–4, keeping every other setting
+identical — an ablation is only meaningful if one thing changed:
+
+```bash
+salt fit  --config gn2v2-opendata.yaml --config gn2v2-opendata-noaux.yaml
+salt test --config run-noaux/config.yaml --ckpt_path run-noaux/ckpts/epoch=039*.ckpt
+```
+
+### Compare the two
+
+```python
+# plot_roc_ablation.py
+import glob
+
+import h5py
+import numpy as np
+from puma import Roc, RocPlot
+from puma.metrics import calc_rej
+
+RUNS = {
+    "GN2 (with aux tasks)": ("run/ckpts", "GN2v2_opendata"),
+    "GN2 (no aux tasks)": ("run-noaux/ckpts", "GN2v2_opendata_noaux"),
+}
+REFERENCE = "GN2 (with aux tasks)"
+NUM_JETS = 150_000
+F_C = 0.018
+# flavour_label on THIS dataset is class_names INDEX order (0=b, 1=c, 2=u,
+# 3=tau) -- see the warning in step 5 before reusing this on another sample.
+B, C, U = 0, 1, 2
+
+sig_eff = np.linspace(0.49, 1, 20)
+results = {}
+for label, (ckpt_dir, run_name) in RUNS.items():
+    with h5py.File(glob.glob(f"{ckpt_dir}/*__test_*.h5")[0]) as f:
+        jets = f["jets"][:NUM_JETS]
+    pb, pc, pu = (jets[f"{run_name}_p{x}"] for x in ("b", "c", "u"))
+    disc = np.log(pb / (F_C * pc + (1 - F_C) * pu))
+    flav = jets["flavour_label"]
+    results[label] = {
+        "ujets": calc_rej(disc[flav == B], disc[flav == U], sig_eff),
+        "cjets": calc_rej(disc[flav == B], disc[flav == C], sig_eff),
+        "n_u": int((flav == U).sum()),
+        "n_c": int((flav == C).sum()),
+    }
+
+plot = RocPlot(
+    n_ratio_panels=2,
+    ylabel="Background rejection",
+    xlabel="$b$-jet efficiency",
+    atlas_second_tag=r"$\sqrt{s}=13$ TeV, $t\bar{t}$ jets" "\n" r"tutorial sample, $f_{c}=0.018$",
+    figsize=(6.5, 6),
+    y_scale=1.4,
+)
+for label, r in results.items():
+    for rej_class, n in (("ujets", r["n_u"]), ("cjets", r["n_c"])):
+        plot.add_roc(
+            Roc(sig_eff, r[rej_class], n_test=n, rej_class=rej_class,
+                signal_class="bjets", label=label),
+            reference=(label == REFERENCE),
+        )
+plot.set_ratio_class(1, "ujets")
+plot.set_ratio_class(2, "cjets")
+plot.draw()
+plot.savefig("roc_ablation.png", transparent=False)
+```
+
+Both models are evaluated on the same test file in the same order, so the
+truth selection from either file is valid for both.
+
+??? success "What to expect"
+
+    The auxiliary tasks should help, but modestly — a few percent in light-jet
+    rejection at fixed b-efficiency, more at the high-efficiency end where the
+    track information matters most. If you run this at smoke scale (a handful
+    of batches) the two curves will be indistinguishable noise: an ablation
+    needs both legs trained to convergence to say anything.
+
+## 7. Export to ONNX
+
+To run your tagger in Athena it has to be exported to
+[ONNX](https://onnxruntime.ai/). The export set is not a separate
+configuration — it comes from the `export:` block plus the `outputs:` section
+you already have, so the eval columns and the Athena outputs cannot drift
+apart.
+
+Preview the output names before exporting anything. This needs only the config,
+not a checkpoint:
+
+```bash
+salt export --manifest -c run/config.yaml
+```
+
+```text
+ONNX output manifest (folded conversion nodes, model_name=GN2v2opendata):
+  GN2v2opendata_pb           float32  folded conversion node (outputs.* leaf)
+  GN2v2opendata_pc           float32  folded conversion node (outputs.* leaf)
+  ...
+```
+
+Then export:
+
+```bash
+salt export --ckpt_path run/ckpts/epoch=039*.ckpt --name GN2vXX
+```
+
+The config is inferred from the checkpoint's grandparent directory if you do
+not pass `-c`. The model is written to `network.onnx` next to the run config
+(override with `--output`, and pass `-o`/`--overwrite` to replace an existing
+file), alongside `plan_onnx.txt` — the rendered ONNX plan and output manifest.
+
+`--name` sets the prefix on every ONNX output (Athena forbids `_` and `-` in
+it), so `--name GN2vXX` gives `GN2vXX_pb`, `GN2vXX_pc`, `GN2vXX_pu`. It
+overrides `export.model_name` in the config.
+
+!!! info "The torch-vs-ONNX check runs automatically"
+
+    `salt export` sweeps sequence lengths 0–39, draws random inputs at each,
+    and compares the eager model against onnxruntime. Float outputs must agree
+    to `1e-4` (both rtol and atol, tunable with `--float-atol`) and contain no
+    NaNs or exact zeros; int8 outputs such as track-origin indices must match
+    **exactly**. Disable it with `--no-check` — but an inconsistent model is
+    deliberately left on disk when the check fails, so you can debug it rather
+    than having to re-export.
+
+To inspect the metadata stored in the exported file:
+
+```python
+import json
+
+import onnx
+
+model = onnx.load("run/network.onnx")
+meta = {p.key: p.value for p in model.metadata_props}
+print(json.dumps(json.loads(meta["gnn_config"]), indent=2))
+```
+
+That payload holds the input variables and their normalisation constants, the
+output names, the model name, and the plan hash.
+
+!!! warning "v1 helper scripts are gone"
+
+    Salt v1 shipped `to_onnx`, `get_onnx_metadata`, `compare_models` and
+    `repair_ckpt` as separate console scripts. In v2 the only entry points are
+    `salt` and `setup_mup`: `to_onnx` became `salt export`, metadata inspection
+    is the snippet above (or Athena's own `get-onnx-metadata` binary), and
+    there is **no v2 replacement for `compare_models`** — comparing salt scores
+    against Athena-produced scores is a manual diff of the two H5 files.
+
+Finally, validate the exported model inside Athena itself: see
+[Athena Validation](../export.md#athena-validation).
+
+## What changed since the v1 tutorial
+
+| | v1 (the retired open-data tutorial) | v2 (this doc) |
 |---|---|---|
 | Config | one monolithic YAML with `class_path` model list | composable `modules:` — embed, encode, pool, task heads each a stock module |
 | Data paths | edited directly into the config file | still edited directly into a copy of the shipped config (`input_samples.init_args.files.*`) — CLI dotted overrides of this dict-typed field are rejected by jsonargparse, see the warning box in Step 3 |
 | Quick check | `--trainer.fast_dev_run 2` | same flag, plus `num_workers`/`batch_size` overrides (v2 configs ship cluster-sized worker counts by default) |
 | Eval columns | `GN2_pu`/`GN2_pc`/`GN2_pb` | `GN2v2_opendata_pu`/`_pc`/`_pb` (`{run_name}_p{class}`, same convention as [part 1](mnist.md)) |
 | Class weighting | `class_dict` wired into the config | opt-in `--class_dict` CLI flag, fans out to every classification task (this config leaves it unset) |
-| ONNX export | `to_onnx` | unchanged |
+| ONNX export | `to_onnx` script | `salt export` (see [step 7](#7-export-to-onnx)); `get_onnx_metadata` / `compare_models` / `repair_ckpt` removed |
