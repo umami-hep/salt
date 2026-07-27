@@ -212,13 +212,102 @@ mark-parentheses = false
 # (engine._resolve_link from the inserter; Pipeline setting a writer's
 # _group_specs) -- both are inside the package's own seam.
 "salt/testing/datagen/**" = ["TID252", "SLF001"]
+# GenModule's requires/produces/mutates are per-INSTANCE contract lists that
+# every subclass assigns in its own __init__; the class-level empty lists are
+# only a safety default and are never mutated. RUF012 wants them annotated
+# ClassVar, which is the one annotation that makes mypy reject the instance
+# assignment the design depends on ("Cannot assign to class variable via
+# instance", x15). The two rules cannot both be satisfied here.
+"salt/testing/datagen/modules/base.py" = ["RUF012"]
 # The profiler enters context managers in one Lightning hook (on_fit_start,
 # on_train_batch_start, on_before_backward) and exits them in another, so the
 # __enter__ calls cannot be written as `with` blocks.
 "salt/profiling.py" = ["PLC2801"]
 
 [tool.mypy]
+# Kept for direct `mypy salt/` runs. Under pre-commit it does nothing, because
+# mypy applies `exclude` only when it crawls directories and not to files given
+# on the command line -- the pre-commit hook carries its own `exclude:` for that.
 exclude = '^salt/tests/.*\.py$'
+
+# ---------------------------------------------------------------------------
+# Per-module baseline.
+#
+# Read this as a RATCHET, not an amnesty. Every module in salt/ is type-checked
+# by default; the entries below are the only exceptions, each one narrowed to
+# the module AND to the exact error codes it currently produces. A new error of
+# any other code in these modules still fails, and any error at all in the other
+# ~100 modules still fails. Deleting an entry when its module is clean is the
+# intended direction of travel.
+#
+# Why these are deferred rather than fixed here: with one exception the
+# remaining errors are not local mistakes, they are three structural patterns,
+# and every fix for them means editing type ANNOTATIONS on classes that
+# jsonargparse introspects to build the config schema. In this codebase an
+# annotation is not cosmetic -- it is the config surface -- so retyping these
+# belongs in typed follow-up work with its own config-parity gate, not in a
+# lint-debt pass whose whole promise is behaviour neutrality.
+#
+# The three patterns:
+#   (A) jsonargparse null-deletion. Module dicts are `dict[str, Module | None]`
+#       because a config may set an entry to null to delete it; the Nones are
+#       filtered before use, which mypy cannot see. -> arg-type.
+#   (B) config-dict splatting, `TensorSpec(**spec)` / `Dense(**cfg)`, where the
+#       dict is `dict[str, object]`. Typing it needs TypedDicts for the config
+#       schema. -> arg-type.
+#   (C) attributes that are `X | None` until a bind/setup step fills them, and
+#       are guarded at their use sites by a runtime check mypy does not follow.
+#       -> misc ("None not callable"), union-attr, attr-defined, assignment,
+#       index, type-var.
+# ---------------------------------------------------------------------------
+
+[[tool.mypy.overrides]]
+# (A) module dicts carrying jsonargparse's null-deletion sentinel.
+module = ["salt.data.datamodule", "salt.data.dataset", "salt.cli"]
+disable_error_code = ["arg-type", "misc"]
+
+[[tool.mypy.overrides]]
+# (B) TensorSpec / Dense / task-head construction by splatting a config dict,
+# plus (C) heads whose scaler and loss are bound after __init__.
+module = [
+  "salt.data.processors.multi_target",
+  "salt.model.modules.tasks.classification",
+  "salt.model.modules.tasks.edge",
+  "salt.model.modules.tasks.regression",
+]
+disable_error_code = ["arg-type", "misc", "union-attr"]
+
+[[tool.mypy.overrides]]
+# (C) post-bind state: reader/sink/schema attributes that are None until setup
+# resolves them, and stage strings that are `str` here but `Literal` downstream.
+module = [
+  "salt.data.readers.reader",
+  "salt.outputs.h5_sink",
+  "salt.outputs.output_schema",
+  "salt.model.modules.tasks.base",
+  "salt.model.modules.pooling",
+  "salt.model.modules.losses",
+  "salt.graph.render",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "index", "misc", "type-var", "union-attr"]
+
+[[tool.mypy.overrides]]
+# (C) the planner and SaltModule reach across the duck-typed GraphModule /
+# SinkModule protocols, whose optional members are checked with hasattr.
+module = ["salt.graph.planner", "salt.model.saltmodule"]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "misc", "union-attr"]
+
+[[tool.mypy.overrides]]
+# main.py patches jsonargparse at runtime, so the attributes it sets and reads
+# are not on the stub-visible module surface.
+module = ["salt.main"]
+disable_error_code = ["attr-defined", "union-attr"]
+
+[[tool.mypy.overrides]]
+# datagen modules declare their contract attributes per instance; the pipeline
+# reads them off the base-class type.
+module = ["salt.testing.datagen.engine", "salt.testing.datagen.pipeline"]
+disable_error_code = ["arg-type", "attr-defined", "misc"]
 
 [tool.pytest.ini_options]
 log_cli = true
