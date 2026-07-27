@@ -524,6 +524,17 @@ def _norm_dict(tmp_path: Any) -> Any:
     return nd
 
 
+def _salt_module(norm_dict: Any, **kwargs: Any) -> SaltModule:
+    """A `SaltModule` over the CPU-safe gn2v2 fixture modules.
+
+    The fixture builder is annotated ``dict[str, GraphModule]`` against a
+    ``dict[str, SaltModelModule | None]`` parameter; the widening lives here once
+    rather than at every construction site.
+    """
+    modules: Any = build_gn2v2_modules(norm_dict)
+    return SaltModule(modules, **kwargs)
+
+
 class TestSafePctStartGuardsThePerStageAllocation:
     """`safe_pct_start` must clamp against the STAGE's step allocation.
 
@@ -541,8 +552,8 @@ class TestSafePctStartGuardsThePerStageAllocation:
 
     @staticmethod
     def _model(norm_dict: Any) -> SaltModule:
-        return SaltModule(
-            build_gn2v2_modules(norm_dict),
+        return _salt_module(
+            norm_dict,
             lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
             training_schedule={
                 "stages": {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
@@ -551,7 +562,7 @@ class TestSafePctStartGuardsThePerStageAllocation:
 
     def _stage_steps(self, norm_dict: Any, stage_index: int) -> int:
         """The `total_steps` `configure_optimizers` hands OneCycleLR for a stage."""
-        model = self._model(norm_dict)
+        model: Any = self._model(norm_dict)
         model._trainer = SimpleNamespace(  # noqa: SLF001 - stub: the two fields read below
             max_epochs=self.MAX_EPOCHS, estimated_stepping_batches=self.WHOLE_RUN
         )
@@ -606,7 +617,7 @@ class TestLionResolvesThroughThePerStageRebuild:
     """
 
     @staticmethod
-    def _resolve(model: SaltModule, stage_index: int) -> type:
+    def _resolve(model: Any, stage_index: int) -> type:
         """Exactly what `configure_optimizers` does to pick the optimizer class."""
         model._current_stage_index = stage_index  # noqa: SLF001
         _lrs, optimizer_name = model._active_optim_config()  # noqa: SLF001
@@ -614,8 +625,8 @@ class TestLionResolvesThroughThePerStageRebuild:
 
     def test_a_stage_overriding_the_optimizer_to_lion_resolves(self, _norm_dict: Any) -> None:
         """A per-stage `optimizer: lion` over an AdamW top level resolves to Lion."""
-        model = SaltModule(
-            build_gn2v2_modules(_norm_dict),
+        model = _salt_module(
+            _norm_dict,
             lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
             optimizer="AdamW",
             training_schedule={
@@ -627,8 +638,8 @@ class TestLionResolvesThroughThePerStageRebuild:
 
     def test_a_top_level_lion_survives_the_rebuild_on_every_stage(self, _norm_dict: Any) -> None:
         """A top-level `optimizer: lion` is inherited by stages that do not override."""
-        model = SaltModule(
-            build_gn2v2_modules(_norm_dict),
+        model = _salt_module(
+            _norm_dict,
             lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
             optimizer="lion",
             training_schedule={
@@ -642,8 +653,8 @@ class TestLionResolvesThroughThePerStageRebuild:
         self, _norm_dict: Any
     ) -> None:
         """`lion` is salt's batched Lion; the reference package is `lion-pytorch`."""
-        model = SaltModule(
-            build_gn2v2_modules(_norm_dict),
+        model = _salt_module(
+            _norm_dict,
             lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
             training_schedule={"stages": {"fit": {"optimizer": "lion"}}},
         )
