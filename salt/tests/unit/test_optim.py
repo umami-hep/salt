@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 from torch import nn
 
-from salt.model.saltmodule import safe_pct_start
+from salt.model.saltmodule import SaltModule, safe_pct_start
 from salt.optim import HybridMuonAdamW, Lion, MuonParamPolicy
+from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
 
 
 class TinyModel(nn.Module):
@@ -501,3 +503,149 @@ class TestSafePctStart:
     def test_an_over_long_warmup_is_clamped_too(self) -> None:
         """pct_start == 1 would collapse the ANNEAL phase instead."""
         assert safe_pct_start(1.0, 100) == pytest.approx(0.99)
+
+
+# --------------------------------------------------------------------------- #
+# The post-W8 per-stage optimizer/scheduler rebuild
+#
+# `configure_optimizers` was rewritten by the fine-tuning work to rebuild BOTH
+# the optimizer and the scheduler at every stage boundary, off the ACTIVE
+# stage's merged `lrs`/`optimizer` and its own step allocation. Both of the
+# guarantees below were established against the pre-rebuild single-shot form, so
+# they need gating against the rebuild path they now live on.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def _norm_dict(tmp_path: Any) -> Any:
+    """A parity norm-dict for the CPU-safe gn2v2 module fixture (no DataLoader)."""
+    nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+    write_parity_norm_dict(nd, cd)
+    return nd
+
+
+class TestSafePctStartGuardsThePerStageAllocation:
+    """`safe_pct_start` must clamp against the STAGE's step allocation.
+
+    A sub-stage of a multi-stage schedule gets a fraction of the run's steps, so
+    it reaches OneCycleLR's degenerate-warm-up boundary on runs far longer than a
+    single-stage fit ever would. Clamping against the whole-run estimate — the
+    figure the pre-rebuild code had — leaves that stage unguarded.
+    """
+
+    # 100 epochs, 10k whole-run steps, a 1-epoch warm-up stage -> 100 stage steps,
+    # which is exactly where the shipped GN3 pct_start of 0.01 divides by zero.
+    WHOLE_RUN = 10_000
+    MAX_EPOCHS = 100
+    SHIPPED_PCT_START = 0.01
+
+    @staticmethod
+    def _model(norm_dict: Any) -> SaltModule:
+        return SaltModule(
+            build_gn2v2_modules(norm_dict),
+            lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
+            training_schedule={
+                "stages": {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
+            },
+        )
+
+    def _stage_steps(self, norm_dict: Any, stage_index: int) -> int:
+        """The `total_steps` `configure_optimizers` hands OneCycleLR for a stage."""
+        model = self._model(norm_dict)
+        model._trainer = SimpleNamespace(  # noqa: SLF001 - stub: the two fields read below
+            max_epochs=self.MAX_EPOCHS, estimated_stepping_batches=self.WHOLE_RUN
+        )
+        model._current_stage_index = stage_index  # noqa: SLF001
+        return int(model._stage_total_steps())  # noqa: SLF001
+
+    def test_the_warmup_stage_gets_a_small_slice_of_the_run(self, _norm_dict: Any) -> None:
+        """The stage allocation, not the whole-run estimate, is what reaches OneCycle."""
+        assert self._stage_steps(_norm_dict, 0) == 100
+        assert self._stage_steps(_norm_dict, 1) == self.WHOLE_RUN - 100
+
+    def test_the_whole_run_figure_would_not_have_caught_it(self, _norm_dict: Any) -> None:
+        """The silent-failure proof: guarding the OLD figure leaves the stage unguarded.
+
+        Over 10k steps a pct_start of 0.01 is a perfectly healthy 100-step warm-up,
+        so a guard fed the whole-run estimate is a no-op — and the stage that only
+        gets 100 of those steps still divides by zero.
+        """
+        assert safe_pct_start(self.SHIPPED_PCT_START, self.WHOLE_RUN) == pytest.approx(
+            self.SHIPPED_PCT_START
+        )
+        with pytest.raises(ZeroDivisionError):
+            self._build_unguarded(self.SHIPPED_PCT_START, self._stage_steps(_norm_dict, 0))
+
+    def test_guarding_the_stage_allocation_fixes_it(self, _norm_dict: Any) -> None:
+        """Clamped against the stage's own allocation, the schedule builds and runs."""
+        stage_steps = self._stage_steps(_norm_dict, 0)
+        scheduler = TestSafePctStart._build(self.SHIPPED_PCT_START, stage_steps)
+        for _ in range(stage_steps):
+            scheduler.step()
+
+    @staticmethod
+    def _build_unguarded(pct_start: float, total_steps: int) -> Any:
+        """OneCycleLR with the pct_start UNGUARDED — the pre-port behaviour."""
+        net = LionNet()
+        return torch.optim.lr_scheduler.OneCycleLR(
+            torch.optim.AdamW(net.parameters(), lr=1e-4),
+            max_lr=1e-3,
+            total_steps=total_steps,
+            div_factor=10.0,
+            final_div_factor=10.0,
+            pct_start=pct_start,
+        )
+
+
+class TestLionResolvesThroughThePerStageRebuild:
+    """`optimizer: lion` must reach `salt.optim.Lion` on the per-stage path.
+
+    The rebuild resolves the optimizer from `_active_optim_config()` — the
+    ACTIVE stage's `optimizer` falling back to the top-level one — so the
+    resolution has to key off that value, not off `self.optimizer`.
+    """
+
+    @staticmethod
+    def _resolve(model: SaltModule, stage_index: int) -> type:
+        """Exactly what `configure_optimizers` does to pick the optimizer class."""
+        model._current_stage_index = stage_index  # noqa: SLF001
+        _lrs, optimizer_name = model._active_optim_config()  # noqa: SLF001
+        return model._get_optimizer_class(optimizer_name)  # noqa: SLF001
+
+    def test_a_stage_overriding_the_optimizer_to_lion_resolves(self, _norm_dict: Any) -> None:
+        """A per-stage `optimizer: lion` over an AdamW top level resolves to Lion."""
+        model = SaltModule(
+            build_gn2v2_modules(_norm_dict),
+            lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
+            optimizer="AdamW",
+            training_schedule={
+                "stages": {"warmup": {"epochs": 1, "optimizer": "lion"}, "full": {}}
+            },
+        )
+        assert self._resolve(model, 0) is Lion  # the stage override wins
+        assert self._resolve(model, 1) is not Lion  # the un-overriding stage falls back
+
+    def test_a_top_level_lion_survives_the_rebuild_on_every_stage(self, _norm_dict: Any) -> None:
+        """A top-level `optimizer: lion` is inherited by stages that do not override."""
+        model = SaltModule(
+            build_gn2v2_modules(_norm_dict),
+            lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
+            optimizer="lion",
+            training_schedule={
+                "stages": {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
+            },
+        )
+        assert self._resolve(model, 0) is Lion
+        assert self._resolve(model, 1) is Lion
+
+    def test_lion_is_salts_own_foreach_implementation_not_the_reference(
+        self, _norm_dict: Any
+    ) -> None:
+        """`lion` is salt's batched Lion; the reference package is `lion-pytorch`."""
+        model = SaltModule(
+            build_gn2v2_modules(_norm_dict),
+            lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
+            training_schedule={"stages": {"fit": {"optimizer": "lion"}}},
+        )
+        assert self._resolve(model, 0) is Lion
+        assert Lion.__module__ == "salt.optim"
