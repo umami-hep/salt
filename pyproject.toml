@@ -133,6 +133,41 @@ lint.ignore = [
   "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
   "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",
   "PLR0917", "A005", "ANN401", "PLR0915", "RUF015", "PLR6104", "TD003",
+
+  # ---------------------------------------------------------------------
+  # Docstring rules: what this repo gates, and why.
+  #
+  # The docstring policy in CLAUDE.md is deliberate about WHERE full numpy
+  # sections belong:
+  #   * base classes and protocols carry the contract once;
+  #   * concrete implementations restate nothing, or give one line saying
+  #     only what differs;
+  #   * private helpers keep the semantics and drop the ceremony -- no
+  #     Parameters/Returns blocks, because "the signature + type hints carry
+  #     that";
+  #   * properties, getters and setters get one line maximum;
+  #   * full Parameters/Returns sections are for the PUBLIC API -- classes
+  #     named as YAML class_path targets, names exported via __all__, and CLI
+  #     entry points -- because that is what renders on the docs site.
+  #
+  # No linter can decide "is this the public API", so the line drawn here is:
+  # we gate that written documentation is CORRECT, not that it is COMPLETE.
+  # Completeness stays a review judgement.
+  #
+  # Ignored -- each demands a section the policy does not require:
+  "DOC201",  # missing `Returns` section: 577 hits, overwhelmingly private
+             # helpers and concrete overrides that policy says must NOT carry
+             # a Returns block
+  "DOC402",  # missing `Yields` section: same argument, generator flavour
+  "DOC501",  # missing `Raises` section: 169 hits, same shape -- e.g.
+             # salt/data/base.py::_require_root_deps, a private helper whose
+             # docstring is exactly what policy §4 prescribes
+  # NOT ignored, and honoured in code -- these check that what IS written is
+  # true, which is cheap and catches stale docs:
+  #   DOC202 documents a return that never happens
+  #   DOC403 documents yields that never happen
+  #   DOC502 documents a raise that never happens
+  # ---------------------------------------------------------------------
 ]
 exclude = [
   "salt/tests/*",
@@ -147,6 +182,18 @@ mark-parentheses = false
 
 [tool.ruff.lint.per-file-ignores]
 "salt/tests/**" = ["D100", "D101", "D102", "D103", "D104", "D105", "PT019"]
+# datagen ships its own test suite. It fell outside the salt/tests/** exemptions
+# above purely because the plan-61 de-core rename moved datagen under
+# salt/testing/ -- the files are tests and get the same treatment. PLC0415 and
+# PT018 are added on top: these tests import inside test bodies precisely to
+# exercise import-time behaviour, and assert on tuples.
+"salt/testing/datagen/tests/**" = [
+  "D100", "D101", "D102", "D103", "D104", "D105", "PT019", "PLC0415", "PT018",
+]
+# datagen is written to stay extractable as a standalone package, so its
+# intra-package imports are relative on purpose (preserved deliberately through
+# the plan-61 migration). TID252 bans exactly that.
+"salt/testing/datagen/**" = ["TID252"]
 
 [tool.mypy]
 exclude = '^salt/tests/.*\.py$'
