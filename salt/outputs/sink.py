@@ -88,6 +88,12 @@ class OutputSink(Callback):
       alongside the primary H5 sink must override it to return False — see
       `JSONLOutputSink`.
 
+    Attributes
+    ----------
+    name : str
+        The graph-node instance name, unique across the graph. A ``callbacks:``
+        dict key overrides it.
+
     Notes
     -----
     Multi-device TEST is out of scope: `setup` raises `ConfigError` when

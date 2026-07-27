@@ -85,6 +85,11 @@ class JSONLOutputSink(OutputSink):
         to clobber (raises `ConfigError`), which is the safer setting when the
         template is not checkpoint-unique.
 
+    Attributes
+    ----------
+    name : str
+        The graph-node instance name (overridable by the ``callbacks:`` dict key).
+
     Raises
     ------
     ConfigError
