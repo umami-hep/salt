@@ -361,9 +361,15 @@ ls logs/XbbTutorial_*/ckpts/
 epoch=017-loss=0.71032.ckpt  epoch=018-loss=0.70915.ckpt  epoch=019-loss=0.71284.ckpt
 ```
 
-The **best** checkpoint is the one with the lowest loss in its filename. Rather
-than typing that number, glob for the epoch — that is what every command below
-does:
+The **best** checkpoint is the one with the lowest loss in its filename. Pick
+it out rather than eyeballing:
+
+```bash
+ls logs/XbbTutorial_*/ckpts/epoch=*.ckpt | sort -t= -k3 -g | head -1
+```
+
+Then glob for that epoch number rather than typing the loss value, which is
+what every command below does:
 
 ```bash
 ls logs/XbbTutorial_*/ckpts/epoch=018*.ckpt
@@ -410,8 +416,16 @@ fixed, which is fine for a first look and suboptimal for a real measurement.
 
 Save this as `make_plots.py`:
 
-It globs for the eval file rather than hardcoding the run timestamp, so it runs
-unedited from the tutorial directory:
+It needs [puma](https://github.com/umami-hep/puma), the FTAG plotting package.
+It is a salt dependency (`puma-hep==0.5.3`), so `pip install -e .` in the
+prerequisites already gave it to you; install it directly if you are plotting
+from a different environment.
+
+Run this **after** `salt test` has finished — it globs for the eval file rather
+than hardcoding the run timestamp, so it runs unedited from the tutorial
+directory. An `IndexError` on the first line means either no eval file exists
+yet or you are not in `xbb-tutorial/`; more than one run in `logs/` and it
+picks an arbitrary one, so spell the path out if that happens:
 
 ```python
 import glob
@@ -500,10 +514,24 @@ Four figures: `disc_Hbb.png`, `disc_Hcc.png`, `roc_Hbb.png`, `roc_Hcc.png`.
 
     ??? success "Hint"
 
-        `ClassificationTaskModule` takes a `weight_source`. Setting it to
-        `{from_class_dict: <path>}` reads weights from a class dict; you can
-        also pass an explicit loss with a `weight` tensor. Weights inversely
-        proportional to class frequency are the usual starting point.
+        `ClassificationTaskModule` takes a `weight_source`. The quickest route
+        is an explicit loss with a per-class `weight` list, in `class_names`
+        order:
+
+        ```yaml
+        jets_classification:
+          init_args:
+            loss:
+              class_path: torch.nn.CrossEntropyLoss
+              init_args:
+                weight: [1.0, 1.1, 3.7, 1.2, 0.13, 7.7]
+        ```
+
+        Those are the inverse class frequencies from the table in section 2,
+        normalised to a mean of 1. The alternative,
+        `weight_source: {from_class_dict: <path>}`, reads the same numbers from
+        a class-dict YAML — see [Configuration](../configuration.md) for that
+        file's schema.
 
     ??? success "What to expect"
 
