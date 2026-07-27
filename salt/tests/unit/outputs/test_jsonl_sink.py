@@ -19,18 +19,24 @@ from salt.outputs import (
     OutputSink,
     is_test_persistence_sink,
 )
-from salt.outputs.h5_sink import _SinkCallback
+from salt.outputs.h5_sink import _SinkCallback  # noqa: PLC2701 - the alias under test
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures
+    build_gn2v2_modules,
+    write_parity_norm_dict,
+)
 
 pytestmark = pytest.mark.cpu_always
 
 _RUN_NAME = "GN2v2"
+# tasks default to write_targets: true, so the section also mints this label
+# column. It is NOT run-name prefixed (labels are model-independent).
+_TARGET = "target_jets_classification"
 
 
 def _bound_run_task(tmp_path: Path, tasks: list[str]) -> RunTaskOutput:
-    """A `RunTaskOutput` bound to the GN2v2 fixture module dict."""
+    """A `RunTaskOutput` bound to the GN2v2 fixture module dict."""  # noqa: DOC201 - test helper
     tmp_path.mkdir(parents=True, exist_ok=True)
     nd = tmp_path / "norm_dict.yaml"
     cd = tmp_path / "class_dict.yaml"
@@ -42,7 +48,7 @@ def _bound_run_task(tmp_path: Path, tasks: list[str]) -> RunTaskOutput:
 
 
 def _section(tmp_path: Path, tasks: list[str] | None = None) -> dict:
-    """A minimal outputs: section (one RunTaskOutput + one InputCopyWriter)."""
+    """A minimal outputs: section (one RunTaskOutput + one InputCopyWriter)."""  # noqa: DOC201 - test helper
     icw = InputCopyWriter(streams=["jets"])
     icw.name = "inputs_copy"
     return {
@@ -52,23 +58,24 @@ def _section(tmp_path: Path, tasks: list[str] | None = None) -> dict:
 
 
 def _trainer(tmp_path: Path, src: str = "pp_output_test_ttbar.h5") -> SimpleNamespace:
-    """A stand-in trainer carrying the three things a sink reads at open_schema."""
+    """A stand-in trainer carrying the three things a sink reads at open_schema."""  # noqa: DOC201 - test helper
     ckpts = tmp_path / "ckpts"
     ckpts.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
         ckpt_path=str(ckpts / "epoch=009-val_loss=0.64.ckpt"),
         lightning_module=SimpleNamespace(name=_RUN_NAME),
-        datamodule=SimpleNamespace(
-            test_dset=SimpleNamespace(reader=SimpleNamespace(filename=src))
-        ),
+        datamodule=SimpleNamespace(test_dset=SimpleNamespace(reader=SimpleNamespace(filename=src))),
     )
 
 
 def _bundle(probs: torch.Tensor, start: int = 0) -> Bundle:
-    """A bundle carrying one jets-classification leaf per class + meta.rows."""
-    leaves = {
-        f"p{name}": probs[:, idx] for idx, name in enumerate(("b", "c", "u"))
-    }
+    """A bundle carrying every leaf the section mints for jets_classification.
+
+    That is one leaf per class PLUS the ``target_{task}`` label leaf (tasks
+    ship ``write_targets: true`` by default), and the ``meta.rows`` anchor.
+    """  # noqa: DOC201 - test helper
+    leaves = {f"p{name}": probs[:, idx] for idx, name in enumerate(("b", "c", "u"))}
+    leaves[_TARGET] = torch.zeros(probs.shape[0], dtype=torch.int64)
     return Bundle({
         "outputs": {"jets": {"jets_classification": leaves}},
         "meta": {"rows": torch.tensor([start, start + probs.shape[0]])},
@@ -76,7 +83,7 @@ def _bundle(probs: torch.Tensor, start: int = 0) -> Bundle:
 
 
 def _read(path: Path) -> list[dict]:
-    """Parse a JSONL file back into a list of records (strict JSON per line)."""
+    """Parse a JSONL file back into a list of records (strict JSON per line)."""  # noqa: DOC201 - test helper
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
@@ -106,7 +113,7 @@ class TestOutputSinkPromotion:
         assert is_test_persistence_sink(OnnxExportSink()) is False
         assert is_test_persistence_sink(JSONLOutputSink()) is False
         # a duck-typed sink WITHOUT is_test_sink still counts as the primary
-        assert is_test_persistence_sink(SimpleNamespace(writer_demand=lambda *a, **k: {})) is True
+        assert is_test_persistence_sink(SimpleNamespace(writer_demand=lambda *_a, **_k: {})) is True
 
 
 # (2) schema resolution — the JSONL sink reads the SAME section as the H5 sink --
@@ -123,7 +130,9 @@ class TestJSONLSectionSchema:
         jsonl._run_name = _RUN_NAME  # noqa: SLF001 - direct schema check
         h5_names = [n for c in h5._resolve_columns(_RUN_NAME) for n in c.column_names(_RUN_NAME)]  # noqa: SLF001
         jsonl_names = [
-            n for c in jsonl._ensure_columns() for n in c.column_names(_RUN_NAME)  # noqa: SLF001
+            n
+            for c in jsonl._ensure_columns()  # noqa: SLF001 - direct schema check
+            for n in c.column_names(_RUN_NAME)
         ]
         assert jsonl_names == h5_names
         assert f"{_RUN_NAME}_pb" in jsonl_names
@@ -196,7 +205,12 @@ class TestJSONLRoundTrip:
         sink.flush()
         records = _read(sink.output_path)
         assert len(records) == 2
-        assert set(records[0]) == {f"{_RUN_NAME}_pb", f"{_RUN_NAME}_pc", f"{_RUN_NAME}_pu"}
+        assert set(records[0]) == {
+            f"{_RUN_NAME}_pb",
+            f"{_RUN_NAME}_pc",
+            f"{_RUN_NAME}_pu",
+            _TARGET,  # un-prefixed: the label column is model-independent
+        }
         assert records[0][f"{_RUN_NAME}_pb"] == pytest.approx(0.7, abs=1e-6)
         assert records[1][f"{_RUN_NAME}_pu"] == pytest.approx(0.6, abs=1e-6)
 
@@ -259,7 +273,7 @@ class TestJSONLRoundTrip:
         sink.bind_output_section(_section(tmp_path))
         trainer = _trainer(tmp_path)
         trainer.ckpt_path = None
-        with pytest.raises(ConfigError, match="needs trainer.ckpt_path"):
+        with pytest.raises(ConfigError, match=r"needs trainer\.ckpt_path"):
             sink.open_schema(trainer)
 
     def test_close_if_open_is_idempotent(self, tmp_path):

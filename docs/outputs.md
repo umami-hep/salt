@@ -65,8 +65,13 @@ logs/GN2_20250101/ckpts/epoch=009-val_loss=0.64__test_ttbar.h5
 
 `{sample}` comes from the test file's stem (the fourth `_`-separated field if
 there are exactly four, else the whole stem), plus `--data.test_suff` if you
-set one. The graph artifacts for the test plan are written into the same
-directory.
+set one.
+
+A few graph artifacts land in the same directory, describing the plan that was
+executed rather than the predictions: `plan_test.txt` (the executed TEST plan,
+with the sink's demand table), `resolved_io.yaml` (every module's resolved
+requires/produces), and `graph_test.*` / `graph_test_dataset.*` renders. They
+are diagnostics — nothing downstream reads them.
 
 The file's **groups** mirror your reader's streams — a `jets` group, a `tracks`
 group, and so on, each a structured array with one row per jet (or event). Each
@@ -207,9 +212,36 @@ There are three levers, in increasing severity:
    if the task still runs, you must also gate it out of the eval graph.
 2. **`expose: [fit, val]` on the task** — the task stays trained (the loss is a
    FIT/VAL concern anyway) but its `preds.*` port is gated out of the TEST and
-   ONNX plans. This is the right lever for a training-only auxiliary task.
+   ONNX plans, so the planner prunes it and no dead-predictions error fires.
+   This is the right lever for a training-only auxiliary task.
 3. **`--model.modules.<task>=null`** — delete the task entirely, weights and
    all.
+
+`expose:` is an **`init_args` key on the task module**, not a top-level key:
+
+```yaml
+model:
+  modules:
+    track_origin:
+      class_path: salt.model.modules.tasks.ClassificationTaskModule
+      init_args:
+        stream: tracks
+        label: ftagTruthOriginLabel
+        expose: [fit, val]     # <- trained, but never written or exported
+```
+
+Stacked as an overlay config you only need the keys you are changing:
+
+```yaml
+# no_track_outputs.yaml — stack as a second --config
+model:
+  modules:
+    track_origin:
+      init_args: {expose: [fit, val]}
+```
+
+To *un*-defer a task an earlier config deferred, set `expose: null` (the
+default, meaning all modes).
 
 ### Turn off the target-label columns
 
@@ -308,6 +340,7 @@ hook yourself.
 |---|---|---|
 | `name` | — | the graph-node instance name (a `callbacks:` dict key overrides it) |
 | `declare_io(mode)` | at compile | declares which `outputs.*` leaves the sink needs; produces nothing |
+| `writer_demand(model_modules, reader)` | at compile | the same keys as a `{key: who-wants-it}` map, for error messages |
 | `open_schema(trainer)` | once, before the first batch | open the file, resolve the schema |
 | `consume(bundle)` | once per test batch | read each required leaf with `bundle.get(key)` and append |
 | `flush()` | once, after the last batch | close and report |
@@ -315,13 +348,42 @@ hook yourself.
 
 `declare_io` is the important one. It is the *single* declaration that drives
 both the planner (demand-gating keeps exactly the producers you require alive)
-and `writer_demand` (the boundary demand). The two can therefore never
-disagree.
+and `writer_demand`. Always **generate** `writer_demand` from `declare_io`
+rather than writing the key list twice — that is what the one-line
+`flatten_spec(self.declare_io(Mode.TEST).requires)` in the examples below is
+doing. `flatten_spec` turns the nested `{"outputs": {"jets": {...}}}` shape
+into flat dotted keys; `unflatten_spec` is its inverse, used to build an `IO`
+from a flat dict. The strings `writer_demand` maps to are only ever shown to a
+human in a planner error, so any description naming your sink will do.
+
+`consume(bundle)` receives the executed `Bundle`. `bundle.get(key)` returns a
+**torch tensor** — always torch, never numpy — so converting is your job
+(`.detach().cpu().numpy()`). `bundle.get("meta.rows")` is a length-2 int64
+tensor, the `[start, stop)` row range of the batch.
+
+The `TensorSpec` **kind** you require must match what the producer declares, or
+the planner's kind-unify raises. For a sink there are only four you will ever
+need:
+
+| Key you require | `TensorSpec` |
+|---|---|
+| `outputs.<stream>.<task>.<col>` — a prediction column | `TensorSpec(shape=None, dtype=None, kind="data")` |
+| `meta.rows` — the batch's `[start, stop)` row range | `TensorSpec(shape=None, dtype="int64", kind="meta")` |
+| `masks.<stream>` — the bool pad mask | `TensorSpec(shape=None, dtype="bool", kind="pad_mask")` |
+| `labels.<stream>.<name>` — a truth label | `TensorSpec(shape=None, dtype=None, kind="label")` |
+
+Leave `shape` and `dtype` as `None` on the prediction columns: the sink
+consumes whatever the producer emits and casts at write time, and constraining
+the dtype here would conflict with the producer's own declaration.
 
 Two predicates decide how the machinery treats your sink:
 
-- `is_sink()` — `True` on the base, rarely overridden. Marks the node terminal,
-  so the executor skips it in the per-batch forward loop.
+- `is_sink()` — `True` on the base; leave it alone. It tells the planner this
+  node is terminal (it consumes and produces nothing), so the executor skips it
+  in the per-batch forward loop and calls your `consume` instead of a `forward`,
+  and the graph render gives it its own sink card. You would only override it to
+  `False` if your class were really a producer, in which case it should subclass
+  `OutputSectionWriter` rather than `OutputSink`.
 - `is_test_sink()` — whether this is *the* TEST persistence sink. **Exactly one
   attached callback holds that role**; it anchors the TEST boundary demand. The
   base answers `True` whenever `declare_io(Mode.TEST).requires` is non-empty,
@@ -406,12 +468,142 @@ get right, and the reasons they are not optional:
 - **NumPy conversion is the sink's job.** Producers emit torch tensors, always;
   the sink calls `.detach().cpu().numpy()` and converts. Do not expect numpy
   from the graph.
-- **NaN handling is explicit.** JSON has no `NaN` literal, and `json.dumps`
-  would happily emit a non-standard `NaN` token that most parsers reject.
-  Every non-finite float is mapped to `null`, and the dump then runs with
-  `allow_nan=False` so a leak is a loud error rather than a corrupt file.
+- **NaN handling is explicit.** Padded and invalid positions are `NaN`, and
+  your format may not have a `NaN` literal. In JSON's case `json.dumps` would
+  emit a non-standard `NaN` token that most parsers reject, so the sink maps
+  every non-finite float to `null` and then calls `json.dumps(...,
+  allow_nan=False)` so anything that slipped through raises instead of silently
+  writing a corrupt file. Whatever your format is, decide this explicitly.
 - **Cleanup is idempotent.** `close_if_open()` runs from `teardown` on every
   exit path, including an exception mid-test, and is safe to call twice.
+
+### Reading the section schema
+
+Most sinks want the same columns as the eval H5. Three pieces give you that:
+
+- **`bind_output_section(section)`** — implement this and the machinery calls it
+  on your sink, before any `declare_io` resolution, with the ordered dict of
+  `outputs:` section writers. Store it.
+- **`writer.is_run_task_output()`** — True on the section writers that carry a
+  column manifest (`RunTaskOutput` and anything else declaring itself one).
+  Skip the writers where it is absent or False.
+- **`writer.manifest_fields(Mode.TEST)`** — the value-free schema: a list of
+  `(leaf_key, OutputField)` pairs in column order. `leaf_key` is the
+  `outputs.<stream>.<task>.<col>` key you pass to `bundle.get()`; the
+  `OutputField` carries `h5_name` (the bare suffix, `None` for an ONNX-only
+  field), `dtype`, `axis` and `prefix` (False for label columns, which are not
+  run-name prefixed).
+
+The flat column name is then `f"{run_name}_{field.h5_name}"` when
+`field.prefix` else `field.h5_name`, with `run_name` read from
+`trainer.lightning_module.name` at `open_schema`.
+
+### A second worked example: a CSV sink
+
+Putting those together — a complete sink writing one CSV row per jet, with a
+header derived from the section:
+
+```python
+# csv_sink.py
+import csv
+from pathlib import Path
+
+import numpy as np
+from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.outputs import OutputSink
+
+
+class CSVOutputSink(OutputSink):
+    name = "csv_output"
+
+    def __init__(self, output: str = "{ckpt_dir}/{ckpt_stem}__test_{sample}.csv"):
+        super().__init__()
+        self.output = output
+        self._section = None
+        self._fields = []          # [(leaf_key, OutputField)]
+        self._handle = None
+        self._writer = None
+        self._run_name = "salt"
+
+    # -- schema, from the bound outputs: section ---------------------------
+
+    def bind_output_section(self, section):
+        self._section = section
+        self._fields = [
+            pair
+            for w in section.values()
+            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
+            for pair in w.manifest_fields(Mode.TEST)
+            if pair[1].h5_name is not None
+        ]
+
+    def _column_name(self, field):
+        return f"{self._run_name}_{field.h5_name}" if field.prefix else field.h5_name
+
+    # -- graph node --------------------------------------------------------
+
+    def declare_io(self, mode: Mode) -> IO:
+        if not (mode & Mode.TEST):
+            return IO(requires={}, produces={})
+        req = {key: TensorSpec(shape=None, dtype=None, kind="data") for key, _ in self._fields}
+        req["meta.rows"] = TensorSpec(shape=None, dtype="int64", kind="meta")
+        return IO(requires=unflatten_spec(req), produces={})
+
+    def is_test_sink(self) -> bool:
+        return False  # auxiliary: H5OutputSink stays the demand anchor
+
+    def writer_demand(self, model_modules, reader) -> dict[str, str]:
+        keys = flatten_spec(self.declare_io(Mode.TEST).requires)
+        return {key: f"sink 'CSVOutputSink' demanding {key}" for key in keys}
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def open_schema(self, trainer) -> None:
+        self._run_name = getattr(trainer.lightning_module, "name", "salt")
+        ckpt = Path(trainer.ckpt_path)
+        reader = trainer.datamodule.test_dset.reader
+        stem = Path(getattr(reader, "filename", None) or ckpt.stem).stem
+        path = Path(self.output.format(
+            ckpt_dir=str(ckpt.parent),
+            ckpt_stem=ckpt.stem,
+            sample=split[3] if len(split := stem.split("_")) == 4 else stem,
+        ))
+        self._handle = path.open("w", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._handle)
+        self._writer.writerow([self._column_name(f) for _, f in self._fields])
+
+    def consume(self, bundle) -> None:
+        rows = bundle.get("meta.rows")
+        n = int(rows[1]) - int(rows[0])
+        # one flat scalar column per field; a per-token field is averaged over
+        # its valid positions so every column stays one CSV cell.
+        cols = []
+        for key, _field in self._fields:
+            v = bundle.get(key).detach().cpu().numpy()
+            cols.append(v if v.ndim == 1 else v.reshape(n, -1).mean(axis=1))
+        for row in range(n):
+            self._writer.writerow(["" if not np.isfinite(c[row]) else c[row] for c in cols])
+
+    def flush(self) -> None:
+        self.close_if_open()
+
+    def close_if_open(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+```
+
+```yaml
+# csv.yaml — stack as a second --config on salt test (pass --ckpt_path too)
+callbacks:
+  csv:
+    class_path: csv_sink.CSVOutputSink
+```
+
+Note the two shape decisions this example has to make and states explicitly:
+a per-token leaf is `[B, L]` / `[B, L, C]` and CSV has no nesting, so it is
+reduced to one cell; and a non-finite float becomes the empty field rather than
+the string `nan`. Your format will face the same two questions.
 
 ### A minimal sink from scratch
 
@@ -449,10 +641,6 @@ class RowCountSink(OutputSink):
 
 Notes for sink authors:
 
-- **Require kinds must match the producer.** `outputs.*` leaves take an
-  unconstrained `TensorSpec(shape=None, dtype=None, kind="data")`;
-  `meta.rows` is `kind="meta"`, `masks.<stream>` is `kind="pad_mask"`,
-  `labels.*` is `kind="label"`. A mismatch fails the planner's kind-unify.
 - **`meta.rows`** is the `[start, stop)` absolute row range of the batch. Use
   it if you need to align with the source file or detect a broken loop.
 - **Per-token leaves are `[B, L]` / `[B, L, C]`** at the model's (possibly
