@@ -37,6 +37,7 @@ nav:
   - Configuration: configuration.md
   - Architecture: architecture.md
   - Evaluation: evaluation.md
+  - Outputs: outputs.md
   - ONNX Export: export.md
   - Contributing: contributing.md
   - Tutorials:
