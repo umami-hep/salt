@@ -28,10 +28,10 @@ from lightning.pytorch.trainer import Trainer
 from salt import cli as graph_cli
 from salt.data.datamodule import GraphDataModule
 from salt.graph.errors import ConfigError, GraphError
+from salt.model.saltmodule import SaltModule
 from salt.onnx.config import ExportConfig
 from salt.outputs.run_task_output import OutputSectionWriter
 from salt.parser import DeepMergeParser
-from salt.model.saltmodule import SaltModule
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
 
@@ -168,7 +168,9 @@ def _patch_jsonargparse_class_path_remap() -> None:
     """
     import sys  # noqa: PLC0415
 
-    from jsonargparse import _typehints as _th  # noqa: F401, PLC0415, PLC2701 - force-load the binder
+    from jsonargparse import (
+        _typehints as _th,  # noqa: F401, PLC2701 - force-load the binder
+    )
     from jsonargparse import _util as _ju  # noqa: PLC0415, PLC2701 - patch site
 
     orig = getattr(_ju, "import_object", None)
@@ -185,7 +187,7 @@ def _patch_jsonargparse_class_path_remap() -> None:
             getattr(_mod, "__name__", "").startswith("jsonargparse")
             and getattr(_mod, "import_object", None) is orig
         ):
-            _mod.import_object = _remapped_import_object  # noqa: SLF001 - the patch site
+            _mod.import_object = _remapped_import_object
 
 
 _patch_jsonargparse_class_path_remap()
@@ -389,7 +391,9 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     left alone. Mutates `cfg` in place before validation/``--print_config``, so
     resolved values land in the saved run-dir config. No-op when unset.
     """
-    from salt.model.modules.tasks import _checked_weight_source  # noqa: PLC0415 - torch-heavy, CLI-time
+    from salt.model.modules.tasks import (
+        _checked_weight_source,
+    )
 
     for scope, model in _iter_model_blocks(cfg):
         class_dict = scope.get(_CLASS_DICT_ARG)
@@ -520,7 +524,7 @@ def _section_runs_mode(section: Mapping[str, Any], mode: Any) -> bool:
 
     Drives the implicit H5-sink wiring — a section with at least one
     TEST-mode writer needs the H5 persistence sink.
-    """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+    """
     return any(
         callable(getattr(writer, "runs_in_mode", None)) and writer.runs_in_mode(mode)
         for writer in section.values()
@@ -534,7 +538,7 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     leaves (the manifest-only writers — input copies, pad masks — do not), so a
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple (matching a config that historically wired no OnnxExportSink).
-    """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+    """
     from salt.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
 
     for writer in section.values():
@@ -785,7 +789,7 @@ class SaltCLI(LightningCLI):
         observes the advanced stage index. A no-op for a plain (desugared, no-freeze,
         no-early-stop, no-stage-callbacks) schedule, off ``fit``, or when a given
         driver is already present.
-        """  # noqa: DOC201
+        """
         from salt.callbacks.schedule import (  # noqa: PLC0415
             StageScopedCallbacks,
             TrainingScheduleCallback,

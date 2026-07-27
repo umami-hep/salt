@@ -329,7 +329,7 @@ class H5OutputSink(OutputSink):
         selection (``Mode.ONNX``) keeps fields with a resolved ONNX name — the
         EXACT selection rule the `OnnxExportSink` tuple uses, so the inference
         H5 columns are 1:1 with the ONNX tuple by construction.
-        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        """
         if self._section_mode is Mode.TEST:
             return field.h5_name
         return field.resolved_onnx_name

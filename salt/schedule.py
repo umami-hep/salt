@@ -187,7 +187,7 @@ class TrainingSchedule:
         """Whether the frozen set differs between any two consecutive stages —
         the condition under which DDP needs ``find_unused_parameters=True``
         (freeze/unfreeze flips break the reducer's fixed bucketing otherwise).
-        """  # noqa: DOC201
+        """
         masks = [frozenset(self.frozen_names(stage)) for stage in self.stages]
         return any(a != b for a, b in zip(masks, masks[1:], strict=False))
 
@@ -195,7 +195,7 @@ class TrainingSchedule:
         """Resolve `stage`'s freeze spec to the set of frozen module names:
         `frozen` freezes those modules; `trainable` freezes their complement over
         `model.modules`; neither freezes nothing.
-        """  # noqa: DOC201
+        """
         if stage.trainable is not None:
             return set(self._module_names) - set(stage.trainable)
         return set(stage.frozen or ())
@@ -216,7 +216,7 @@ class TrainingSchedule:
         """The index of the stage that owns `epoch` (0-based). Non-final stages
         own ``[bound_{i-1}, bound_i)``; the final stage owns everything from the
         last bound onward (so any epochs past the explicit budgets run there).
-        """  # noqa: DOC201
+        """
         for index, bound in enumerate(self._non_final_epoch_bounds(max_epochs)):
             if epoch < bound:
                 return index
@@ -229,7 +229,7 @@ class TrainingSchedule:
         rounded at each non-final stage end and the final stage takes the exact
         remainder, so the allocations always sum to `total_steps`. A single-stage
         schedule returns ``[total_steps]`` unchanged (bitwise parity path).
-        """  # noqa: DOC201
+        """
         if not self.is_multi_stage:
             return [total_steps]
         allocations, prev = [], 0
@@ -341,12 +341,12 @@ class TrainingSchedule:
         desugars to (plan D2): one stage, no freeze, no per-stage optimizer/LR
         override — so `configure_optimizers` falls back to the top-level
         ``lrs:``/``optimizer:`` and training is bitwise-identical to legacy code.
-        """  # noqa: DOC201
+        """
         return cls([StageConfig(name="fit")], module_names)
 
 
 def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
-    """Parse + validate a single stage config into a `StageConfig`."""  # noqa: DOC201, DOC501
+    """Parse + validate a single stage config into a `StageConfig`."""
     if not isinstance(cfg, Mapping):
         raise ConfigError(
             f"training_schedule stage {name!r} must be a mapping of stage fields "
@@ -400,7 +400,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     mapping that must NOT set `optimizer` (injected at the boundary); `interval` is
     ``epoch``/``step``; `frequency` a positive int; `monitor` a non-empty string.
     Import + the metric-driven-⇒-monitor rule are enforced at fit start.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("lr_scheduler")
     if raw is None:
         return None
@@ -466,7 +466,7 @@ def _parse_stage_callbacks(
     ``class_path`` and, if present, a mapping ``init_args``. Import/instantiation
     validation of the class is deferred to fit start (`StageScopedCallbacks.setup`),
     so a bad path fails before training rather than at the stage boundary.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("callbacks")
     if raw is None:
         return None
@@ -508,7 +508,7 @@ def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | N
     `EarlyStopConfig` (fail-loud); ``None`` when the stage declares none. `monitor`
     is required and non-empty; `mode` is `min`/`max`; `patience` a positive int;
     `min_delta` a non-negative number; `check_finite` a bool.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("early_stop")
     if raw is None:
         return None
@@ -566,7 +566,7 @@ def _validate_names(
 ) -> tuple[str, ...] | None:
     """Coerce a freeze name list to a tuple, rejecting non-list values and names
     that are not `model.modules` keys.
-    """  # noqa: DOC201, DOC501
+    """
     if value is None:
         return None
     if isinstance(value, str) or not isinstance(value, Sequence):
@@ -584,7 +584,7 @@ def _validate_names(
 
 
 def _as_positive_int(stage: str, field: str, value: Any) -> int | None:
-    """Validate an optional positive-integer field."""  # noqa: DOC201, DOC501
+    """Validate an optional positive-integer field."""
     result = _as_int(stage, field, value)
     if result is not None and result < 1:
         raise ConfigError(
@@ -595,7 +595,7 @@ def _as_positive_int(stage: str, field: str, value: Any) -> int | None:
 
 
 def _as_int(stage: str, field: str, value: Any) -> int | None:
-    """Validate an optional integer field (rejects bool and non-int)."""  # noqa: DOC201, DOC501
+    """Validate an optional integer field (rejects bool and non-int)."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -606,7 +606,7 @@ def _as_int(stage: str, field: str, value: Any) -> int | None:
 
 
 def _check_orders(stages: list[StageConfig]) -> None:
-    """Reject duplicate explicit `order` values."""  # noqa: DOC501
+    """Reject duplicate explicit `order` values."""
     explicit = [s.order for s in stages if s.order is not None]
     if len(set(explicit)) != len(explicit):
         raise ConfigError(
@@ -618,7 +618,7 @@ def _check_orders(stages: list[StageConfig]) -> None:
 def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
     """Order stages by explicit `order`, falling back to declaration index; the
     stable sort keeps declaration order among unpinned stages.
-    """  # noqa: DOC201
+    """
     keyed = sorted(
         enumerate(stages),
         key=lambda item: item[1].order if item[1].order is not None else item[0],
@@ -791,7 +791,7 @@ class EarlyStopTracker:
     def _improved(self, value: float) -> bool:
         """Whether `value` improves on `best_score` by at least `min_delta` under
         the configured `mode` (`min`: lower is better; `max`: higher is better).
-        """  # noqa: DOC201
+        """
         assert self.best_score is not None
         if self.config.mode == "min":
             return value < self.best_score - self.config.min_delta

@@ -124,7 +124,7 @@ _FROZEN_FILL = "#bdbdbd"
 
 
 def _graph_label(text: str) -> str:
-    """A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""  # noqa: DOC201
+    """A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 

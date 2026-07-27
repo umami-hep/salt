@@ -4,8 +4,6 @@ dict-form spec via ``schema.parse_schema``; never hand-builds specs).
 
 from __future__ import annotations
 
-import numpy as np
-
 from ..engine import _build_group_array
 from ..schema import parse_schema
 from ._fields import resolve_fields

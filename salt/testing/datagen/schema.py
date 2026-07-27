@@ -215,7 +215,7 @@ def _parse_field(raw: dict[str, Any]) -> FieldSpec:
             class_names=(list(raw["class_names"]) if "class_names" in raw else None),
             class_names_append_if=raw.get("class_names_append_if"),
             weights=(list(raw["weights"]) if "weights" in raw else None),
-            sorted=bool(raw.get("sorted", False)),
+            sorted=bool(raw.get("sorted")),
             classes_by_flag=raw.get("classes_by_flag"),
             class_names_by_flag=raw.get("class_names_by_flag"),
         )
@@ -238,7 +238,7 @@ def _parse_field(raw: dict[str, Any]) -> FieldSpec:
         scope=raw.get("scope", "jet"),
         unmatched_fraction=float(raw.get("unmatched_fraction", 0.0)),
         unmatched_value=raw.get("unmatched_value"),
-        required_match=bool(raw.get("required_match", False)),
+        required_match=bool(raw.get("required_match")),
         select_over=raw.get("select_over", "valid_ids"),
     )
 
@@ -392,7 +392,7 @@ def _check_no_cycles(schema: Schema) -> None:
                 # referenced -> referencing
                 edges[f.ref_group].add(g.name)
     # Kahn's algorithm
-    indeg = {n: 0 for n in edges}
+    indeg = dict.fromkeys(edges, 0)
     for src, dsts in edges.items():
         for d in dsts:
             indeg[d] += 1
@@ -411,7 +411,8 @@ def _check_no_cycles(schema: Schema) -> None:
 
 def topo_sort_link_groups(schema: Schema) -> list[str]:
     """Return non-alias group names in dependency (topological) order over
-    ``references`` edges (referenced group before referencing group)."""
+    ``references`` edges (referenced group before referencing group).
+    """
     edges: dict[str, set[str]] = {g.name: set() for g in schema.groups if g.alias_of is None}
     for g in schema.groups:
         if g.alias_of is not None:
@@ -419,7 +420,7 @@ def topo_sort_link_groups(schema: Schema) -> list[str]:
         for f in g.fields:
             if isinstance(f, LinkField):
                 edges[f.ref_group].add(g.name)
-    indeg = {n: 0 for n in edges}
+    indeg = dict.fromkeys(edges, 0)
     for src, dsts in edges.items():
         for d in dsts:
             indeg[d] += 1

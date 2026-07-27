@@ -136,7 +136,7 @@ def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
     when absent (a fail-fast misconfiguration surfaced by `evaluate_early_stop`).
     The value is already rank-reduced when logged with ``sync_dist`` — the synced
     monitor half of the W7 rank-consistency contract.
-    """  # noqa: DOC201
+    """
     value = trainer.callback_metrics.get(monitor)
     if value is None:
         return None
@@ -247,10 +247,10 @@ def _instantiate_stage_callback(spec: Mapping[str, Any]) -> Callback:
     return cls(**init_args)
 
 
-def _make_stage_hook_forwarder(hook_name: str):  # noqa: ANN202 - dynamic hook forwarder
+def _make_stage_hook_forwarder(hook_name: str):
     """Build the coordinator method for `hook_name`: sync the active stage, then
     forward the hook to each live stage-scoped delegate.
-    """  # noqa: DOC201
+    """
 
     def _forward(
         self: StageScopedCallbacks,
@@ -259,8 +259,8 @@ def _make_stage_hook_forwarder(hook_name: str):  # noqa: ANN202 - dynamic hook f
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        self._sync_active_stage(trainer, pl_module)  # noqa: SLF001 - own private method
-        for delegate in self._active_delegates:  # noqa: SLF001 - own private state
+        self._sync_active_stage(trainer, pl_module)
+        for delegate in self._active_delegates:
             getattr(delegate, hook_name)(trainer, pl_module, *args, **kwargs)
 
     _forward.__name__ = hook_name

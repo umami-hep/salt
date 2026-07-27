@@ -10,7 +10,6 @@ import pytest
 
 from salt.testing.datagen import RecipeError
 from salt.testing.datagen.modules import (
-    ClassDictWriter,
     Constituents,
     H5Writer,
     Jets,
@@ -245,7 +244,8 @@ def test_load_pipeline_modules_are_an_ordered_list():
 
 def test_maskformer_link_corruption_free(tmp_path):
     """Every valid track's ftagTruthParentBarcode is in the SAME jet's valid
-    hadron barcodes (or -1), with zero cross-jet leakage."""
+    hadron barcodes (or -1), with zero cross-jet leakage.
+    """
     pipe = load_pipeline(str(_RECIPES_DIR / "maskformer_truth_hadron.yaml"))
     pipe.set_output_dir(tmp_path)
     data = pipe.run()

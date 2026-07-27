@@ -120,7 +120,7 @@ class _TaskModuleBase(SaltModelModule):
     def _emit_targets(self, mode: Mode) -> bool:
         """Whether `mode` gets target-label fields: TEST only, ``write_targets`` on
         (never ONNX — export/inference stays label-free).
-        """  # noqa: DOC201 - private one-line predicate
+        """
         return self.write_targets and bool(mode & Mode.TEST)
 
     # -- output rendering: the get_output surface --------------------------------

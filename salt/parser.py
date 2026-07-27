@@ -45,7 +45,7 @@ def _extract_schedule_cli_overrides(
     <json>``) do NOT start with the ``--training_schedule.`` prefix and pass
     through untouched. Returns the remaining args plus ``(dotted_path, raw_value)``
     pairs.
-    """  # noqa: DOC201
+    """
     prefix = f"--{_TRAINING_SCHEDULE_KEY}."
     kept: list[Any] = []
     overrides: list[tuple[str, Any]] = []
@@ -177,7 +177,7 @@ class DeepMergeParser(LightningArgumentParser):
         serialization seam shared by ``--print_config``, ``salt merge-config``,
         and the ``config.yaml`` a fit run saves, so fixing it here fixes all
         three. Serialization order only — the reparsed object is unchanged.
-        """  # noqa: DOC201
+        """
         text = super().dump(*args, **kwargs)
         return _class_path_before_init_args(text) if isinstance(text, str) else text
 
@@ -197,7 +197,7 @@ def _class_path_before_init_args(text: str) -> str:
     it so every pair reads class-path-first (remaining keys keep their relative
     order). Idempotent; only block-mapping pairs (the salt module/callback/output/
     logger form) are touched — list-item subclasses are left as-is.
-    """  # noqa: DOC201
+    """
     lines = text.split("\n")
     i = 0
     while i < len(lines):
@@ -215,7 +215,7 @@ def _sibling_init_args_before(lines: list[str], idx: int, indent: int) -> int | 
     ``class_path:`` at `idx` in the same parent mapping, or None when
     ``class_path`` already precedes ``init_args`` (scan stops at the first
     shallower key — the parent — so an ancestor ``init_args`` is never matched).
-    """  # noqa: DOC201
+    """
     j = idx - 1
     while j >= 0:
         match = _YAML_KEY.match(lines[j])

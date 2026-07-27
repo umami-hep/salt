@@ -23,7 +23,7 @@ def parse_output_modes(modes: Any, who: str) -> Mode:
     ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the pre-plan-50
     default). A non-empty list of ``test``/``export`` names ORs into the flag.
     Raises `ConfigError` on an empty list or an unknown mode name (naming the key).
-    """  # noqa: DOC201, DOC501 - internal helper, no Returns/Raises blocks per docstring policy
+    """
     if modes is None:
         return Mode.TEST | Mode.ONNX
     names = [modes] if isinstance(modes, str) else list(modes)
@@ -68,11 +68,11 @@ class OutputSectionWriter(SaltModelModule):
         self._section_modes = parse_output_modes(modes, type(self).__name__)
 
     def section_modes(self) -> Mode:
-        """The Mode flag this writer runs in."""  # noqa: DOC201 - getter, one-line
+        """The Mode flag this writer runs in."""
         return self._section_modes
 
     def runs_in_mode(self, mode: Mode) -> bool:
-        """Whether this writer runs in `mode`."""  # noqa: DOC201 - getter, one-line
+        """Whether this writer runs in `mode`."""
         return bool(mode & self._section_modes)
 
 

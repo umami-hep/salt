@@ -139,7 +139,7 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
     ------
     ConfigError
         The dotted path is not importable / not a class.
-    """  # noqa: DOC201
+    """
     from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
 
     try:
@@ -159,7 +159,7 @@ def _is_metric_driven_scheduler(cls: type) -> bool:
     """Whether `cls` is a metric-driven LR scheduler — i.e. a `ReduceLROnPlateau`
     (sub)class whose ``step(metrics)`` needs a monitored value (design §3). This is
     the deterministic detection rule for the `monitor`-required check.
-    """  # noqa: DOC201
+    """
     return issubclass(cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
 
 
@@ -944,7 +944,7 @@ class SaltModule(lightning.LightningModule):
     def _make_early_stop_tracker(self, stage: StageConfig) -> EarlyStopTracker | None:
         """A fresh `EarlyStopTracker` for `stage` (reset counters), or ``None`` when
         the stage declares no `early_stop`.
-        """  # noqa: DOC201
+        """
         return EarlyStopTracker(stage.early_stop) if stage.early_stop is not None else None
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
@@ -1001,7 +1001,7 @@ class SaltModule(lightning.LightningModule):
         epochs``); the final stage never advances by cap (its early-stop ends the
         fit instead). Data-dependent boundaries make this replace the pure
         epoch-arithmetic `stage_index_for_epoch` whenever any stage can early-stop.
-        """  # noqa: DOC201
+        """
         idx = self._current_stage_index
         if idx >= len(self._schedule.stages) - 1:
             return idx
@@ -1244,7 +1244,7 @@ class SaltModule(lightning.LightningModule):
         which would otherwise un-eval a frozen module (re-enabling dropout /
         running-stat updates); this override keeps frozen modules in eval across
         epoch boundaries. No-op when nothing is frozen.
-        """  # noqa: DOC201
+        """
         super().train(mode)
         if mode and self._frozen_module_names:
             for name in self._frozen_module_names:
@@ -1355,7 +1355,7 @@ class SaltModule(lightning.LightningModule):
         desugared single `fit` stage overrides neither, so this returns the
         top-level pair unchanged (the bitwise-parity path). A stage's `lrs`
         deep-overrides the top-level keys; its `optimizer` replaces the name.
-        """  # noqa: DOC201
+        """
         stage = self._schedule.stages[self._current_stage_index]
         lrs = {**self.lrs, **stage.lrs} if stage.lrs is not None else self.lrs
         return lrs, stage.optimizer or self.optimizer
@@ -1369,7 +1369,7 @@ class SaltModule(lightning.LightningModule):
         cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
         so a stage that starts early — because an earlier stage early-stopped — never
         over-steps its OneCycle.
-        """  # noqa: DOC201
+        """
         total = self.trainer.estimated_stepping_batches
         if not self._schedule.is_multi_stage:
             return total
@@ -1386,7 +1386,7 @@ class SaltModule(lightning.LightningModule):
         earlier stages ended). Sized ``>=`` the steps a stage can actually take, so
         OneCycle never over-steps; equals the arithmetic split when no stage stops
         early. Truncated early, the stage simply under-runs its envelope (D-ES).
-        """  # noqa: DOC201
+        """
         max_epochs = self.trainer.max_epochs
         steps_per_epoch = max(1, round(total / max_epochs))
         index = self._current_stage_index
@@ -1454,7 +1454,7 @@ class SaltModule(lightning.LightningModule):
         (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
         (`reduce_on_plateau`/`monitor`); its rank-consistency rides on the synced
         monitor (design §7).
-        """  # noqa: DOC201
+        """
         cls = _resolve_lr_scheduler_class(cfg.class_path)
         scheduler = cls(opt, **(dict(cfg.init_args) if cfg.init_args else {}))
         entry: dict[str, Any] = {
@@ -1510,7 +1510,7 @@ class SaltModule(lightning.LightningModule):
         additionally carries the active stage's start epoch, the completed-boundary
         records, and the live early-stop counters, so a data-dependent resume
         reconstructs the exact stage position + patience state (plan 12 W7).
-        """  # noqa: DOC201
+        """
         state: dict[str, Any] = {
             "stage_index": self._current_stage_index,
             "stage_name": self._schedule.stages[self._current_stage_index].name,
@@ -1679,7 +1679,7 @@ class SaltModule(lightning.LightningModule):
         Returns the input unchanged when no ``_orig_mod.`` prefix is present
         (so callers can detect a no-op by identity); raises `ConfigError` on a
         v1 layout.
-        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        """
         if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
             raise ConfigError(
                 "this checkpoint has the v1 (ModelWrapper) state-dict layout "
@@ -1773,7 +1773,7 @@ class SaltModule(lightning.LightningModule):
         """Classify + load `ckpt_state` by module; returns ``(loaded, new,
         dropped)`` module-name lists. Raises `ConfigError` on partial coverage
         of a retained module (see `_warm_start_from_checkpoint`).
-        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        """
         current_state = self.state_dict()
         current_by_mod = _partition_by_module(current_state)
         ckpt_by_mod = _partition_by_module(ckpt_state)
@@ -1821,7 +1821,7 @@ def _partition_by_module(state: Mapping[str, Tensor]) -> dict[str | None, dict[s
     """Group a ``net.<name>.*`` state dict by module name. Keys outside the
     ``net.<name>.`` layout land under the ``None`` bucket (never a model
     module — informational only).
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     grouped: dict[str | None, dict[str, Tensor]] = {}
     for key, value in state.items():
         parts = key.split(".", 2)
@@ -1835,7 +1835,7 @@ def _coverage_mismatch(current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]
     `current` (missing/unexpected keys, or a shape/dtype mismatch on a shared
     key), or ``None`` when coverage is exact. Runs BEFORE `load_state_dict`
     because PyTorch raises on a shape mismatch even under ``strict=False``.
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     cur_keys, ckpt_keys = set(current), set(ckpt)
     if missing := cur_keys - ckpt_keys:
         return f"{len(missing)} key(s) missing from checkpoint (e.g. {min(missing)})"
@@ -1851,7 +1851,7 @@ def _coverage_mismatch(current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]
 
 
 def _warm_start_summary(loaded: list[str], new: list[str], dropped: list[str]) -> str:
-    """A per-module warm-start summary table (loaded / new / dropped)."""  # noqa: DOC201
+    """A per-module warm-start summary table (loaded / new / dropped)."""
     rows = [
         *(f"  loaded   {name}" for name in loaded),
         *(f"  new      {name}  (fresh init + materialise)" for name in new),

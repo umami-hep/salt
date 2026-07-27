@@ -14,9 +14,9 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
+from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import OutputField
 from salt.utils.array_utils import listify
 from salt.utils.scalers import RegressionTargetScaler
@@ -731,7 +731,7 @@ class RegressionTaskModule(_TaskModuleBase):
         """One value-free target-label field per target: the UNSCALED physical target
         as an unprefixed ``target_{task}_{target}`` f4 column (one per `targets`
         entry — R, not 2R, for a gaussian head).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         axis = "per_token" if self.sequence else "global"
         return [
             OutputField(

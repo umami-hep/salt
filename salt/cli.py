@@ -26,6 +26,7 @@ import yaml
 
 from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
 from salt.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
+from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
@@ -41,7 +42,6 @@ from salt.graph.spec import (
 )
 from salt.model.bind import resolve_bind_schema
 from salt.onnx.config import resolve_export_config
-from salt.graph.render import dot_source, plan_table
 from salt.schema import dump_schema, load_schema, save_schema
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]

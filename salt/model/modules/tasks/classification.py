@@ -13,13 +13,13 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import (
     _checked_weight_source,
     _loss_class,
     _TaskModuleBase,
 )
+from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 
@@ -393,7 +393,7 @@ class ClassificationTaskModule(_TaskModuleBase):
     def _target_field(self, value: Tensor | None = None) -> OutputField:
         """The target-label field: the consumed class label as an unprefixed
         ``target_{task}`` i4 column (labels are model-independent).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         return OutputField(
             h5_name=f"target_{self.name}",
             onnx_name=None,
@@ -408,7 +408,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         """The class label exactly as the loss consumes it: post ``label_map``
         remap; for a padded seq head, padded and invalid (``-2``) positions
         read ``-1`` (mirrors `head_forward`).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         labels = b.get(self.label_key)
         if self.label_map is not None:
             mapped = torch.clone(labels)

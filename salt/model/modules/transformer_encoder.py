@@ -20,8 +20,8 @@ from salt.graph.spec import (
 )
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.featurewise import FeaturewiseTransformation
 from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.featurewise import FeaturewiseTransformation
 from salt.model.nn.transformer import Transformer
 
 _SEQ_LEN = sym_dim("S", "seq")

@@ -16,11 +16,11 @@ from torch import Tensor, nn
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.model.nn.attention import Attention
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import GLU, Dense
 from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.attention import Attention
+from salt.model.nn.dense import GLU, Dense
 
 __all__ = ["MaskDecoder", "MaskDecoderLayer"]
 

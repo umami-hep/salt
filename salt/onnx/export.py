@@ -421,8 +421,8 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     data touched). Raises `ConfigError` when the parse fails (with the
     ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
     from salt.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
+    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
 
     args: list[str] = []
     for path in config_paths:

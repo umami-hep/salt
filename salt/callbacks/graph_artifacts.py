@@ -15,8 +15,8 @@ from lightning import Callback, LightningModule, Trainer
 from salt.data.dataset import GraphDataset
 from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
-from salt.graph.spec import Mode, TensorSpec
 from salt.graph.render import dot_source, plan_table
+from salt.graph.spec import Mode, TensorSpec
 
 
 class GraphArtifacts(Callback):
