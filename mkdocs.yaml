@@ -45,8 +45,7 @@ nav:
       - MNIST part 2 — your own CNN module: tutorials/mnist_cnn.md
       - Event-level tagging with easyjet: tutorials/event_classifier.md
       - GN2 jet tagging on open data: tutorials/gn2_opendata.md
-      - Tutorial (public): tutorial.md
-      - Tutorial (internal): tutorial-Xbb.md
+      - Boosted Xbb tagging: tutorials/xbb.md
       - Fine-tuning a pretrained tagger: tutorials/finetuning.md
 
 plugins:

@@ -242,17 +242,47 @@ salt fit \
   --init_from <gn3large_converted.ckpt>
 ```
 
-The concrete instance behind the numbers below (the study's demo, 60 k training
-jets, one A100):
+The concrete instance behind the numbers below (60 k training jets, one A100)
+differs only in that the placeholders are filled in:
 
 ```bash
+export GN3LARGE=<directory holding converted.ckpt and config_v2.yaml>
+
 salt fit \
-  --config /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/experiments/23_gn3large_v1_to_v2_conversion/outputs/converted/config_v2.yaml \
+  --config $GN3LARGE/config_v2.yaml \
   --config salt/configs/finetune_gn3large.yaml \
-  --init_from /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/experiments/23_gn3large_v1_to_v2_conversion/outputs/converted/converted.ckpt \
+  --init_from $GN3LARGE/converted.ckpt \
   --data.train_file <new_campaign/train.h5> \
   --data.val_file   <new_campaign/val.h5>
 ```
+
+??? info "Where to get a converted GN3Large checkpoint"
+
+    `converted.ckpt` is a v1 GN3Large checkpoint migrated to the v2
+    `state_dict` layout, together with the matching `config_v2.yaml` and
+    `norm_dict_v2.yaml`. If you trained the model yourself under v2 you already
+    have all three and need no conversion.
+
+    Inside CERN the bundle is staged on EOS:
+
+    ```
+    /eos/user/n/npond/salt-data/gn3large_converted/
+    ```
+
+    From a batch node or inside a container, copy it out with xrootd rather
+    than using the POSIX path:
+
+    ```bash
+    xrdcp root://eosuser.cern.ch//eos/user/n/npond/salt-data/gn3large_converted/converted.ckpt .
+    ```
+
+    That directory is not world-readable — ask for access rather than assuming
+    it.
+
+    For a target dataset to fine-tune *onto*, the boosted-Xbb sample used by
+    the [Xbb tutorial](xbb.md) is public and needs no CERN account
+    ([CERNBox share](https://cernbox.cern.ch/s/t1WnJ8UMUgEycjp), 690 MB); it is
+    also the sample behind worked example B below.
 
 At startup, the warm-start accounting confirms the load. For this checkpoint all
 11 parameter-bearing modules line up with the config, so the log reads
