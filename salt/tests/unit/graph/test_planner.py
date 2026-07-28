@@ -1,4 +1,4 @@
-"""Tests for salt.graph.planner (design §3.1, §2.2, §4.1, §4.2, principle 10)."""
+"""Tests for salt.graph.planner."""
 
 import pytest
 
@@ -38,7 +38,7 @@ class Toy:
 
 
 class WildToy(Toy):
-    """Framework-shipped wildcard producer (design §2.2)."""
+    """Framework-shipped wildcard producer."""
 
     allow_wildcards = True
 
@@ -613,7 +613,7 @@ class TestHashSensitivity:
         assert hash1 != hash2
 
     def test_structurally_identical_plans_share_hash_across_modes(self):
-        # design §11 risk 5: the hash is purely structural, so the FIT/VAL
+        # the hash is purely structural, so the FIT/VAL
         # plan-identity assertion is a cheap hash comparison (Plan.mode still
         # distinguishes the plans)
         a, b = chain_ab()
@@ -726,7 +726,7 @@ class TestDeadcode:
         assert report == []
 
     def test_unconsumed_preds_in_test_is_error_severity(self):
-        # design §4.2: an unconsumed preds.* port in TEST is an error by default
+        # an unconsumed preds.* port in TEST is an error by default
         a, b = chain_ab()
         report = deadcode(mods(a, b), Mode.TEST, SRC_X)
         finding = next(d for d in report if d.key == "preds.x")
@@ -734,8 +734,7 @@ class TestDeadcode:
         assert "never persisted" in finding.reason
 
     def test_unconsumed_preds_outside_test_is_info_severity(self):
-        # design §3.3 (M3-review fix): the normal no-metric-callback case is
-        # INFO, never promoted by --strict — was 'warning' in M1/M2
+        # the normal no-metric-callback case is INFO, never promoted by --strict
         a, b = chain_ab()
         report = deadcode(mods(a, b), Mode.FIT, SRC_X)
         finding = next(d for d in report if d.key == "preds.x")
@@ -772,7 +771,7 @@ class TestDeadcode:
         assert fit_finding.severity == "warning"
 
 
-# plan immutability (frozen plan, design §3.1)
+# plan immutability (frozen plan)
 
 
 class TestPlanImmutability:

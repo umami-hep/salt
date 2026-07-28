@@ -1,4 +1,4 @@
-"""Tests for salt.graph.spec (design §2.2)."""
+"""Tests for salt.graph.spec."""
 
 import dataclasses
 

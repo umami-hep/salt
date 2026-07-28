@@ -189,7 +189,7 @@ class TestExportSelectionSink:
         test_sink = H5OutputSink()
         test_sink.bind_output_section(section)
         suffixes = [s for c in test_sink._resolve_columns("run") for s in c.suffixes]  # noqa: SLF001
-        assert "target_jets_classification" in suffixes  # Phase C label column
+        assert "target_jets_classification" in suffixes  # label column
         assert "pPileup" in suffixes  # per-token per-class prob (TEST-only)
         assert "TrackOrigin" not in suffixes  # the argmax leaf is export-only
 

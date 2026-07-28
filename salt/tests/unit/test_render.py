@@ -132,7 +132,7 @@ class TestPlotCli:
 
 
 class TestShapeStrWidthSubstitution:
-    """`_shape_str` substitutes the SYMBOLIC FEATURE dim, keeps data dims (design §4.3)."""
+    """`_shape_str` substitutes the SYMBOLIC FEATURE dim, keeps data dims."""
 
     def test_symbolic_feature_dim_becomes_concrete(self):
         # E:enc is a feature family — the resolved width replaces it as the LAST

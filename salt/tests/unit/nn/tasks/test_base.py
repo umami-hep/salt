@@ -62,7 +62,7 @@ class TestGn2V2Execution:
         assert not torch.allclose(logits.sum(-1), torch.ones(B))  # not softmaxed
 
     def test_test_plan_classification_preds_are_raw_logits(self, gn2v2):
-        """TEST classification + vertexing preds are RAW since the flips (design §2)."""
+        """TEST classification + vertexing preds are RAW since the flips."""
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.TEST)
         assert "loss" not in plan.module_names  # LossSum inactive outside TRAINING
@@ -83,7 +83,7 @@ class TestGn2V2Execution:
         assert not torch.allclose(
             track_logits[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-3
         )
-        # vertexing (W34.3 flipped) TEST output: RAW [E, 1] edge scores (the
+        # vertexing TEST output: RAW [E, 1] edge scores (the
         # union-find moved off forward to get_output), NOT the [B, T, 1]
         # per-node assignments the forward used to publish.
         vtx = b.get("preds.tracks.track_vertexing")
@@ -105,14 +105,14 @@ class TestGn2V2Execution:
         assert scores.shape[1] == 1  # [E, 1] raw edge scores
 
     def test_all_modules_are_nn_modules(self, gn2v2):
-        """The module dict must be nn.ModuleDict-compatible (SaltModule, design §3.4)."""
+        """The module dict must be nn.ModuleDict-compatible (SaltModule)."""
         modules, _, _ = gn2v2
         assert all(isinstance(m, nn.Module) for m in modules.values())
         nn.ModuleDict(modules)  # must not raise
 
 
 class TestExposeOptOut:
-    """Per-task ``expose: [fit, val]`` opt-out (design §4.2, M5 sub-wave D)."""
+    """Per-task ``expose: [fit, val]`` opt-out."""
 
     def test_parse_default_is_all_modes(self):
         task = ClassificationTaskModule(

@@ -381,7 +381,7 @@ class TestClassPathOrdering:
 
 
 class TestStageCaption:
-    """W7 surfacing: the per-stage graph caption reflects early_stop + callbacks."""
+    """The per-stage graph caption reflects early_stop + callbacks."""
 
     def test_plain_stage_caption(self):
         from salt.merge_config import _stage_title

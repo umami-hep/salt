@@ -1,4 +1,4 @@
-"""Render gate for the folded ONNX export path (design §7 render payoff)."""
+"""Render gate for the folded ONNX export path."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _compile(cfg, mode):
 
 
 def test_onnx_render_has_named_export_sink_card(fold_cfg):
-    """The ONNX DOT renders the OnnxExportSink as its OWN named card (design §7)."""
+    """The ONNX DOT renders the OnnxExportSink as its OWN named card."""
     onnx = _compile(fold_cfg, Mode.ONNX)
     dot = dot_source(onnx, fold_cfg.modules)
 

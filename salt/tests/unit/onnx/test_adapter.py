@@ -57,7 +57,7 @@ VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
 
 
 def gn2_export_cfg(**overrides) -> ExportConfig:
-    # export-only half (W4) — the outputs come from the folded OnnxExportSink
+    # export-only half — the outputs come from the folded OnnxExportSink
     cfg = ExportConfig(
         model_name="GN2v2",
         inputs=[
@@ -78,7 +78,7 @@ def _named(node, name):
 
 
 def gn2_folded_modules(tmp_path):
-    """The GN2 module dict + the folded conversion nodes + OnnxExportSink (W4 path)."""
+    """The GN2 module dict + the folded conversion nodes + OnnxExportSink."""
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     modules.update({
         "jet_probs": _named(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
@@ -104,7 +104,7 @@ def gn2_resolved(run_name: str = "GN2_v2", **overrides) -> ExportConfig:
     return resolve_export_config(gn2_export_cfg(**overrides), run_name)
 
 
-# config resolution + validation (design §7 "Naming", §5.1)
+# config resolution + validation
 
 
 class TestModelName:
@@ -209,10 +209,10 @@ class TestResolveInputs:
 
 
 class TestExportSinkOutputs:
-    # plan-29 W4: the ONNX output manifest is declared by the OnnxExportSink, whose
-    # OnnxExportLeaf carries the per-output naming/dtype/per-token rules the M4.5
-    # ExportOutput + attach_manifest used to validate (the conversion math itself is
-    # proven bitwise in test_onnx_fold_classification/objects). These assert the migrated surface.
+    # the ONNX output manifest is declared by the OnnxExportSink, whose
+    # OnnxExportLeaf carries the per-output naming/dtype/per-token rules (the
+    # conversion math itself is proven bitwise in
+    # test_onnx_fold_classification/objects). These assert that surface.
 
     def test_name_and_names_exclusive(self):
         with pytest.raises(ConfigError, match="BOTH"):
@@ -257,13 +257,13 @@ class TestExportSinkOutputs:
             ])
 
     def test_empty_sink_defers_to_section(self):
-        """W34.4d: an omitted/empty `outputs` defers to a bound `outputs:` section."""
+        """An omitted/empty `outputs` defers to a bound `outputs:` section."""
         sink = OnnxExportSink(outputs=[], model_name="M")
         with pytest.raises(ConfigError, match="has no export leaves"):
             sink.output_names()
 
 
-# plan-29 W4: the SHIPPED reduces are RETIRED — folded into conversion nodes.
+# the SHIPPED reduces are RETIRED — folded into conversion nodes.
 # The argmax/maskformer math is now proven BITWISE in
 # test_onnx_fold_classification.py (SeqClassIndex/Combination) and test_onnx_fold_objects.py
 # (MaskFormerObjects) against the same v1 chains these reduces composed; the union-find
@@ -273,7 +273,7 @@ class TestExportSinkOutputs:
 
 class TestRetiredReduces:
     def test_no_shipped_reduces_registered(self):
-        # the five shipped reduce REGISTRATIONS are gone at W4 (the conversion
+        # the five shipped reduce REGISTRATIONS are gone (the conversion
         # nodes own the math); registered_reduces() carries no shipped name
         from salt.onnx.reduces import registered_reduces  # noqa: PLC0415
 
@@ -325,10 +325,10 @@ def fresh_reduce_name():
 
 
 class TestRegisterReduce:
-    """The public `register_reduce` live-registry surface (SURVIVES W4 — R7)."""
+    """The public `register_reduce` live-registry surface."""
 
     def test_no_shipped_reduces_registered_at_import(self):
-        # the registry starts EMPTY of the retired shipped reduces (W4)
+        # the registry starts EMPTY of the retired shipped reduces
         assert {
             "split_scalars",
             "argmax",
@@ -347,8 +347,8 @@ class TestRegisterReduce:
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
 
     def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
-        # (re-anchored at plan 50 Phase E: the retired `_resolve_output` manifest
-        # resolver is gone; the registry spec is the dtype/arity authority now.)
+        # (the retired `_resolve_output` manifest resolver is gone; the registry
+        # spec is the dtype/arity authority now.)
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
         # live everywhere: registry, config view, dtype lookup
         assert fresh_reduce_name in registered_reduces()
@@ -396,7 +396,7 @@ class TestRegisterReduce:
             bind_reduce(out, ctx)
 
 
-# the ONNX plan: purity + sources (design §7, §7.1)
+# the ONNX plan: purity + sources
 
 
 @pytest.fixture(scope="module")
@@ -434,7 +434,7 @@ class TestOnnxPlan:
 
     def test_missing_output_producer_is_a_named_error(self, tmp_path):
         # a sink leaf naming a conversion leaf no node produces is a connectivity
-        # error (the folded sink anchors the demand — W4)
+        # error (the folded sink anchors the demand)
         write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
         modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
         bad_sink = OnnxExportSink(outputs=[
@@ -446,7 +446,7 @@ class TestOnnxPlan:
             compile_onnx_plan(modules, gn2_resolved(), VARIABLES)
 
     def test_sinkless_config_cannot_compile(self, tmp_path):
-        # W4: without a folded OnnxExportSink there is no ONNX-output demand source
+        # without a folded OnnxExportSink there is no ONNX-output demand source
         write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
         modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
         with pytest.raises(ConfigError, match="OnnxExportSink"):
@@ -476,7 +476,7 @@ class TestOnnxPlan:
         assert "'sequence: true'" in message
 
 
-# the adapter (design §7)
+# the adapter
 
 
 @pytest.fixture(scope="module")

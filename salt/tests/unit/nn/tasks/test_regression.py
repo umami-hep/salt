@@ -178,7 +178,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_test_descale_uses_label_denominator(self, norm_paths):
-        """TEST forward = RAW scaled preds (W34.3 flip); get_output de-scales via LABEL denom."""
+        """TEST forward = RAW scaled preds; get_output de-scales via LABEL denom."""
         targets, denoms = ("HadronConeExclTruthLabelPt",), ("pt_btagJes",)
         task = RegressionTaskModule(
             stream="jets",
@@ -207,10 +207,10 @@ class TestRegressionTaskModule:
         pooled = b.get("pooled.global")
         with torch.no_grad():
             raw, _ = task.head_forward(pooled, {}, None, context=None)
-        # W34.3: the TEST forward publishes the RAW scaled preds (NO de-scale)
+        # the TEST forward publishes the RAW scaled preds (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
         # get_output owns the de-scale (label-sourced denominator; the retired
-        # get_h5 pack is re-anchored onto the get_output field, plan 50 Phase E)
+        # get_h5 pack is re-anchored onto the get_output field)
         field = task.get_output(b, Mode.TEST, "reg")[0]  # [0]: prediction field (then targets)
         assert field.h5_name == "pt"  # custom_output_names
         with torch.no_grad():
@@ -253,7 +253,7 @@ class TestRegressionTaskModule:
         b_test = _run(test, with_labels=True)
         v2_onnx = b_onnx.get("preds.jets.regression")
         v2_test = b_test.get("preds.jets.regression")
-        # W34.3: BOTH forwards publish the RAW scaled preds (no de-scale in forward),
+        # BOTH forwards publish the RAW scaled preds (no de-scale in forward),
         # so the raw TEST and ONNX preds are IDENTICAL (same weights, same inputs).
         assert torch.allclose(v2_onnx, v2_test, atol=1e-6)
         # the de-scaling now lives in get_output (mode-split denominator source):
@@ -307,7 +307,7 @@ class TestRegressionTaskModule:
             test_out = task.forward(bt, Mode.TEST)
         pred = test_out["preds.tracks.regression"]
         assert pred.shape == (B, T, 2)
-        # W34.3: the TEST forward emits the RAW scaled preds (no de-scale, no nan-pad)
+        # the TEST forward emits the RAW scaled preds (no de-scale, no nan-pad)
         with torch.no_grad():
             raw, _ = task.head_forward(x, {}, {"tracks": mask}, context=None)
         assert torch.equal(pred, raw)
@@ -391,7 +391,7 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_gaussian_test_descale_one_array_means_then_stddev(self, norm_paths):
-        """TEST forward = RAW [B, 2R] (W34.3); get_output publishes means ‖ stddevs."""
+        """TEST forward = RAW [B, 2R]; get_output publishes means ‖ stddevs."""
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -418,7 +418,7 @@ class TestRegressionTaskModule:
         pooled = b.get("pooled.global")
         with torch.no_grad():
             raw, _ = task.head_forward(pooled, {}, None, context=None)
-        # W34.3: the gaussian TEST forward publishes the RAW [B, 2R] (NO de-scale)
+        # the gaussian TEST forward publishes the RAW [B, 2R] (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
         # get_output owns the de-scale + the means‖stds one-array re-concat
         with torch.no_grad():

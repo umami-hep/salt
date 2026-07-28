@@ -78,7 +78,7 @@ def test_maskformer_object_rejects_bad_n_reg():
 
 
 def test_maskformer_object_forward_matches_inlined_reduces():
-    """ONE forward reproduces BOTH legacy reduces' tensors (folds the two calls, design §6.2)."""
+    """ONE forward reproduces BOTH legacy reduces' tensors (folds the two calls)."""
     n_reg, n_obj, n_tracks, n_classes = 3, 5, 7, 3
     gen = torch.Generator().manual_seed(13)
     class_probs = torch.randn(1, n_obj, n_classes, generator=gen).softmax(-1)
@@ -432,8 +432,8 @@ def test_lead_vertex_decorator_rejects_bad_config():
 def test_lead_vertex_decorator_leaf_packs_into_h5_output_column():
     """The decorator's jet-level scalar is a NORMAL outputs.* leaf the H5OutputSink serialises."""
     sink = H5OutputSink()
-    # OutputColumn is the sink's internal value object (plan 50 Phase B — the
-    # explicit-table config surface is retired); seed it directly for this
+    # OutputColumn is the sink's internal value object (the explicit-table
+    # config surface is retired); seed it directly for this
     # white-box packing test.
     sink._columns = (  # noqa: SLF001
         OutputColumn(key="outputs.jets.lead_vertex_pt", suffixes=["lead_vertex_pt"]),

@@ -1,4 +1,4 @@
-"""Shared helpers for the producer test mirrors (split from test_producers.py, W45.2c)."""
+"""Shared helpers for the producer test mirrors."""
 
 from __future__ import annotations
 

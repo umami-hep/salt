@@ -32,7 +32,7 @@ class TestNormaliser:
     """Default fixed-norm-dict Normaliser: loads means/stds, preserves v1 parity."""
 
     def test_init_does_no_file_io(self, tmp_path):
-        """__init__ records the path only — the file need not exist (design §2.3)."""
+        """__init__ records the path only — the file need not exist."""
         norm = Normaliser(norm_dict=tmp_path / "absent.yaml", streams=["tracks"])
         io = norm.declare_io(Mode.FIT)
         assert set(flatten_spec(io.requires)) == {"inputs.tracks"}

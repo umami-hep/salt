@@ -1,4 +1,4 @@
-"""Tests for salt.schema (design §2.6, §11 risk 12)."""
+"""Tests for salt.schema."""
 
 import h5py
 import numpy as np
@@ -122,7 +122,7 @@ class TestRoundTrip:
         assert "tracks.ftagTruthOriginLabel" in schema.keys()
 
 
-# load tolerance (design §11 risk 12: tolerant of additive change)
+# load tolerance (tolerant of additive change)
 
 
 class TestLoadTolerance:

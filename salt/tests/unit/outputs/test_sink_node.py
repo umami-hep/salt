@@ -1,4 +1,4 @@
-"""Regression gates for the sink-node surface (design §4, §5, §7)."""
+"""Regression gates for the sink-node surface."""
 
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ _OVERRIDES = [
     "trainer.logger=false",
 ]
 
-# plan 50 Phase B: the H5 sink is IMPLICIT (wired by the command over the outputs:
+# the H5 sink is IMPLICIT (wired by the command over the outputs:
 # section); the section RunTaskOutput writers (jets_out/origin_out) feed it.
 _TRK_OUT = "outputs.tracks.track_origin"
 
 
 @pytest.fixture(scope="module")
 def cutover_cfg():
-    """The live cutover config — the implicit H5OutputSink folded as a node (design §4.3)."""
+    """The live cutover config — the implicit H5OutputSink folded as a node."""
     return load_config([_DUMMY, _CUTOVER], _OVERRIDES)
 
 
@@ -193,7 +193,7 @@ def test_fit_val_plan_hash_byte_identical_with_vs_without_sink(cutover_cfg, mode
 
 
 def test_cutover_test_render_has_named_h5_sink_card(cutover_cfg):
-    """The cutover TEST DOT renders the H5 sink as its OWN named card (design §7 exp-15)."""
+    """The cutover TEST DOT renders the H5 sink as its OWN named card."""
     test = _compile(cutover_cfg, Mode.TEST)
     dot = dot_source(test, cutover_cfg.modules)
 

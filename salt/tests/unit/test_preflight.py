@@ -1,4 +1,4 @@
-"""Tests for the data-free norm-dict preflight (M3 leftover, design §2.3)."""
+"""Tests for the data-free norm-dict preflight."""
 
 from __future__ import annotations
 

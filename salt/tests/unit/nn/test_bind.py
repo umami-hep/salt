@@ -29,7 +29,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
 
 class TestResolvedSchema:
     def test_widths_resolve_through_the_graph(self, gn2v2):
-        """Symbolic widths bind from source/config declarations (design §2.3)."""
+        """Symbolic widths bind from source/config declarations."""
         _, _, schema = gn2v2
         assert schema.width("inputs.jets") == len(JET_VARIABLES)
         assert schema.width("inputs.tracks") == len(TRACK_VARIABLES)

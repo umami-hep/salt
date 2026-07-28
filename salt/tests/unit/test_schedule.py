@@ -176,7 +176,7 @@ class TestEpochAllocation:
         sched.validate_epochs(None)
 
     def test_infinite_training_multi_stage_rejected(self):
-        # W3: epoch-delimited multi-stage training needs a finite max_epochs to
+        # epoch-delimited multi-stage training needs a finite max_epochs to
         # allocate per-stage epochs/steps — infinite is a hard error.
         sched = TrainingSchedule.from_config(
             {"stages": {"a": {"epochs": 99}, "b": {}}}, MODULE_NAMES
@@ -287,7 +287,7 @@ class TestSaltModuleInstantiation:
         assert not model._schedule.is_multi_stage  # noqa: SLF001
 
     def test_multi_stage_accepted_at_init(self, norm_dict):
-        # multi-stage passes instantiation validation (rejection is at fit, W3)
+        # multi-stage passes instantiation validation (rejection is at fit)
         model = SaltModule(
             build_gn2v2_modules(norm_dict), lrs=LRS,
             training_schedule={
@@ -313,7 +313,7 @@ def test_stageconfig_is_frozen_dataclass():
         stage.epochs = 3  # type: ignore[misc]
 
 
-# --- W7: per-stage early stopping -------------------------------------------
+# --- per-stage early stopping -----------------------------------------------
 
 
 class TestEarlyStopParse:
@@ -490,7 +490,7 @@ class TestBoundaryRecord:
         }
 
 
-# --- W7: per-stage scoped callbacks (schema) --------------------------------
+# --- per-stage scoped callbacks (schema) ------------------------------------
 
 
 class TestStageCallbacksParse:
@@ -559,7 +559,7 @@ class TestStageCallbacksParse:
             )
 
 
-# --- W8: per-stage lr_scheduler (schema) ------------------------------------
+# --- per-stage lr_scheduler (schema) ----------------------------------------
 
 _COSINE = "torch.optim.lr_scheduler.CosineAnnealingLR"
 _PLATEAU = "torch.optim.lr_scheduler.ReduceLROnPlateau"

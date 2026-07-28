@@ -1,4 +1,4 @@
-"""Tests for the ``salt`` config surface / ``salt.main`` (design §5, §5.3)."""
+"""Tests for the ``salt`` config surface / ``salt.main``."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # plan 50 Phase B: gn2v2-dummy.yaml declares its eval outputs as an outputs:
+    # gn2v2-dummy.yaml declares its eval outputs as an outputs:
     # section (composed onto model.net). The graph-folded section writers appear
     # in model.net (inputs_copy is manifest-only, not folded); the standalone
     # conversion producers (jet_probs/track_origin_probs/...) are retired.
@@ -77,7 +77,7 @@ model:
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
     # tmp dummy H5 + parity norm dict + schema artifact (NO machine paths in
-    # the committed YAML — the documented required overrides, design §5)
+    # the committed YAML — the documented required overrides)
     base = tmp_path_factory.mktemp("salt_cli")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
@@ -122,13 +122,13 @@ class TestParseAndInstantiate:
         assert isinstance(cli.model, SaltModule)
         assert isinstance(cli.datamodule, GraphDataModule)
         assert set(cli.model.net.keys()) == GN2V2_MODULES
-        # instance names were assigned from the config dict keys (design §2.2)
+        # instance names were assigned from the config dict keys
         assert cli.model.net["encoder"].name == "encoder"
         # data modules in YAML order: reader -> features -> labels
         assert str(cli.datamodule.train_file) == str(data["h5"])
 
     def test_name_linked_into_model(self, data):
-        # the single surviving link of the v1 CLI glue (design §5)
+        # the single surviving link of the v1 CLI glue
         cli = make_cli(data)
         assert cli.config.name == "GN2v2_dummy"
         assert cli.model.name == "GN2v2_dummy"
@@ -148,7 +148,7 @@ class TestParseAndInstantiate:
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
         assert list(jets_task.class_names) == ["bjets", "cjets", "ujets", "taujets"]
-        # the plan-34 outputs: section is composed onto the model (W34.4b)
+        # the outputs: section is composed onto the model
         section = cli.model._output_section  # noqa: SLF001
         assert set(section) == {"inputs_copy", "run_tasks", "pad_mask"}
         assert section["run_tasks"].is_run_task_output()
@@ -177,7 +177,7 @@ class TestPrintConfig:
         assert cli_again.config.callbacks == cli_orig.config.callbacks
 
 
-# deep-merge across config files (design §5.3, DeepMergeParser)
+# deep-merge across config files (DeepMergeParser)
 
 
 class TestDeepMerge:
@@ -210,7 +210,7 @@ class TestDeepMerge:
         assert set(cli.model.net.keys()) == GN2V2_MODULES  # siblings survive
 
 
-# null-deletion (design §5.3: parse-to-None + assembly-time filtering)
+# null-deletion (parse-to-None + assembly-time filtering)
 
 
 class TestNullDeletion:
@@ -226,12 +226,11 @@ class TestNullDeletion:
         assert set(cli.model.net.keys()) == GN2V2_MODULES - {"track_vertexing"}
 
     def test_data_module_null_deletes(self, data):
-        # labels can be dropped in TEST-style configs (design §5.3 symmetry);
+        # labels can be dropped in TEST-style configs;
         # parse-level check only — a labels-less FIT would fail at compile.
         # The deprecated --data.train_file alias synthesises an implicit
-        # InputSamples (plan-25 W3.A / O-ALIAS-WINDOW), so it joins _modules;
-        # a VDS is then auto-injected alongside it (plan-25 W3.B), so it too
-        # joins _modules.
+        # InputSamples, so it joins _modules; a VDS is then auto-injected
+        # alongside it, so it too joins _modules.
         cli = make_cli(data, extra=["--data.modules.labels=null"])
         dm_modules = cli.datamodule._modules  # noqa: SLF001 - assembly result
         assert set(dm_modules) == {"reader", "features", "input_samples", "vds"}
@@ -258,7 +257,7 @@ class TestDottedOverrides:
         assert cli.datamodule._reader_proto.num == 200  # noqa: SLF001 - prototype config
 
 
-# callbacks: dict mechanics + assembly into trainer.callbacks (design §5.3)
+# callbacks: dict mechanics + assembly into trainer.callbacks
 
 
 class TestCallbacksDict:
@@ -292,10 +291,10 @@ class TestCallbacksDict:
 
 
 
-# FIT/VAL callback-declared sinks via the STATIC graph tooling (M5 D-prereq;
-# design §3.1 454-456, §3.4 667-671) — the runtime path is covered in
-# test_saltmodule.py::TestCallbackSinks; here the static `salt graph` path
-# (load_config / `salt graph validate`) must see the SAME FIT/VAL sinks.
+# FIT/VAL callback-declared sinks via the STATIC graph tooling — the runtime
+# path is covered in test_saltmodule.py::TestCallbackSinks; here the static
+# `salt graph` path (load_config / `salt graph validate`) must see the SAME
+# FIT/VAL sinks.
 
 CONFMAT_CALLBACK_YAML = """
 callbacks:
@@ -368,7 +367,7 @@ class TestFitSmoke:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
-            # base2 ships a default-ON CometLogger (plan-24 Wave 0); turn it off so
+            # base2 ships a default-ON CometLogger; turn it off so
             # the smoke run emits no offline Comet archive (and lr_monitor drops)
             "--trainer.logger=false",
             "--trainer.max_epochs=1",
@@ -388,7 +387,7 @@ class TestFitSmoke:
         assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
         # the D2 Checkpoint forces the v1 'ckpts/' run-dir layout
         assert any(ckpt.parent.name == "ckpts" for ckpt in ckpts), [str(c) for c in ckpts]
-        # the resolved config was persisted (SaveConfigCallback, design §5)
+        # the resolved config was persisted (SaveConfigCallback)
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
         assert "class_path: salt.model.SaltModule" in configs[0].read_text()
@@ -564,7 +563,7 @@ class TestFitRetryLoop:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
-            "--trainer.logger=false",  # opt out of the default CometLogger (plan-24 W0)
+            "--trainer.logger=false",  # opt out of the default CometLogger
             "--trainer.max_epochs=1",
             "--trainer.limit_train_batches=2",
             "--trainer.limit_val_batches=2",
@@ -714,7 +713,7 @@ class TestGraphFitConfigAdapter:
         assert "OnnxExportSink" in err  # the migration error names the live mechanism
 
     def test_validate_writers_block_raises_clean_migration_error(self, tmp_path, capsys):
-        # W6c removal: a config carrying a live top-level writers: block (a real
+        # a config carrying a live top-level writers: block (a real
         # writers.modules entry, NOT a null override) must fail with the CLEAN
         # migration ConfigError — NOT a cryptic jsonargparse class_path resolution
         # failure ("module has no attribute 'modules'").
@@ -889,7 +888,7 @@ def wave1_base_overrides(wave1_data) -> list[str]:
         # norm_dict is the Normaliser module's own config (its sole consumer):
         # always set it the module way, NOT via a top-level fan-out flag
         f"--model.modules.{NORM_MODULE}.init_args.norm_dict={wave1_data['nd']}",
-        "--trainer.logger=false",  # opt out of the default-ON CometLogger (plan-24 W0)
+        "--trainer.logger=false",  # opt out of the default-ON CometLogger
     ]
 
 
@@ -1016,8 +1015,8 @@ class TestFanOutInstantiated:
 # injects the resolved top-level value into the SaltModule constructor arg before
 # instantiation (mirroring the --class_dict fan-out / --init_from hand-off), and
 # rejects the retired nested home fail-loud. DeepMergeParser deep-merges the
-# schedule per-stage-by-name across stacked configs (plan D1). SaltModule
-# internals, W4 checkpoint payloads, desugaring and the callback are unchanged.
+# schedule per-stage-by-name across stacked configs. SaltModule internals,
+# checkpoint payloads, desugaring and the callback are unchanged.
 # ===========================================================================
 
 
@@ -1064,9 +1063,9 @@ model:
 
 
 class StageCallbackProbe(Callback):
-    """Test-only stage-scoped callback mirroring the exp-12 `StageLRTracer` spec
+    """Test-only stage-scoped callback mirroring a real `StageLRTracer` spec
     shape (``init_args: {out_path, stage_name}``) — the CLI-path vector for the
-    W8.0 stage-callbacks bug (jsonargparse used to eager-instantiate this spec
+    stage-callbacks bug (jsonargparse used to eager-instantiate this spec
     before salt saw the raw dict). Referenced by its full class_path from YAML.
     """
 
@@ -1076,7 +1075,7 @@ class StageCallbackProbe(Callback):
 
 
 # a single-`fit`-stage schedule whose stage declares a scoped callback — the exact
-# nested {class_path, init_args} spec that crashed the real CLI (W8.0). ``{out}`` is
+# nested {class_path, init_args} spec that crashed the real CLI. ``{out}`` is
 # formatted with a tmp path per test.
 STAGE_CALLBACK_YAML = """
 training_schedule:
@@ -1156,7 +1155,7 @@ class TestTopLevelTrainingSchedule:
         # --print_config dumps the top-level schedule AND the injected nested copy;
         # re-parsing that dump must NOT re-reject (round-trip: top-level present =>
         # the nested slot is ours) and must rebuild the same schedule. This is the
-        # saved-run-config path W4 resume relies on (config home is location-
+        # saved-run-config path that resume relies on (config home is location-
         # agnostic to the checkpoint's schedule.{stage_index,stage_name} payload).
         override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         with pytest.raises(SystemExit) as excinfo:
@@ -1220,15 +1219,15 @@ class TestScheduleCallbackAutoInjection:
             assert cli.model.net[task].weight_source == {"from_class_dict": str(wave1_data["cd"])}
 
 
-# W8.0: stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI.
-# The W7.2 feature was only ever gated by direct `SaltModule(...)` construction
+# stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI.
+# The feature was only ever gated by direct `SaltModule(...)` construction
 # (test_stage_callbacks.py); the YAML/CLI path crashed because jsonargparse
 # eager-instantiated the nested {class_path, init_args} spec before salt's own
 # validator saw the raw dict. These lock the CLI path: parse, fit-start
 # instantiation from the raw spec, and merge-config round-trip.
 class TestStageCallbacksCLI:
     def test_stage_callback_reaches_model_as_raw_spec(self, data, tmp_path):
-        # the exact crash repro (W8.0): a stage `callbacks:` entry on the real CLI.
+        # the exact crash repro: a stage `callbacks:` entry on the real CLI.
         # It must now parse and arrive at the model as a RAW spec dict, NOT an
         # eager-instantiated object.
         text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
@@ -1301,7 +1300,7 @@ class TestStageCallbacksCLI:
 
 
 # a two-stage schedule whose stages choose DIFFERENT scheduler classes — the same
-# nested {class_path, init_args} spec shape the W8.0 fix protects (a scheduler can
+# nested {class_path, init_args} spec shape the fix protects (a scheduler can
 # never be eager-instantiated: it needs the stage optimizer, built at the boundary).
 LR_SCHEDULER_YAML = """
 training_schedule:
@@ -1319,9 +1318,9 @@ training_schedule:
 """
 
 
-# W8.1: per-stage `lr_scheduler:` through the REAL CLI (G8b mandate). The scheduler
-# spec has the same nested-class-spec shape that escaped W7's CLI coverage; CLI
-# gating is mandatory.
+# per-stage `lr_scheduler:` through the REAL CLI. The scheduler spec has the
+# same nested-class-spec shape that escaped CLI coverage; CLI gating is
+# mandatory.
 class TestLRSchedulerCLI:
     def test_lr_scheduler_specs_reach_model_unparsed(self, data, tmp_path):
         from salt.schedule import LRSchedulerConfig
@@ -1401,7 +1400,7 @@ class TestNormDictOnModule:
 
 
 class TestInitFromCLI:
-    """W1: the --init_from warm-start flag (plan 01, design D4)."""
+    """The --init_from warm-start flag."""
 
     def _fit_args(self, data, extra: list[str]) -> list[str]:
         cfg = disable_logger_in_config(str(DUMMY_CFG))
@@ -1422,7 +1421,7 @@ class TestInitFromCLI:
 
     def test_init_from_flag_is_registered(self, data, tmp_path):
         # the flag is accepted + parsed by the real CLI surface (registered like
-        # --class_dict); the full model plumbing is covered by the W1 integration
+        # --class_dict); the full model plumbing is covered by the integration
         # gates (test_init_from.py).
         fake = tmp_path / "fake.ckpt"
         cli = make_cli(data, extra=[f"--init_from={fake}"])

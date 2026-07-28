@@ -90,7 +90,6 @@ def test_seq_class_probs_subclass_forwards_like_op():
 
 
 # demand-gating / width resolution carries over for the conversion ops
-# (design §4 risk 6) — the gate (b) of P0, re-asserted per op
 
 
 def _stub_source(pred_key, width, *, modes=Mode.ALL):
@@ -111,7 +110,7 @@ def _stub_source(pred_key, width, *, modes=Mode.ALL):
 
 
 def test_class_probs_width_resolves_in_test_only_bind():
-    """``ClassProbs`` preserves the class width in a TEST-only bind (design §4 risk 6)."""
+    """``ClassProbs`` preserves the class width in a TEST-only bind."""
     pred_key = f"preds.{_STREAM_J}.t"
     out_key = f"outputs.{_STREAM_J}.out"
     src = _stub_source(pred_key, 3)

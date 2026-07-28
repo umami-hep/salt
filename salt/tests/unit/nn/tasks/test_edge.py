@@ -67,13 +67,13 @@ class TestVertexingTaskModule:
 
 
 def _origin_schema_reader(origin_label: str = "ftagTruthOriginLabel") -> SimpleNamespace:
-    """A duck-typed reader exposing the tracks origin class names (design §2.6)."""
+    """A duck-typed reader exposing the tracks origin class names."""
     schema = Schema(groups={"tracks": GroupSchema(fields={}, attrs={origin_label: ORIGIN_CLASSES})})
     return SimpleNamespace(schema_group=schema.groups.get)
 
 
 class TestOriginWeightingConfig:
-    """Name-based origin_weighting (design §5.1, M5 sub-wave D): names resolve to ids."""
+    """Name-based origin_weighting: names resolve to ids."""
 
     def _name_based(self) -> VertexingTaskModule:
         task = VertexingTaskModule(
